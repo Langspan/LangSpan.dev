@@ -21,7 +21,7 @@ such numbers to be measured.
 | Row | Capability | Decision | Reason |
 | --- | --- | --- | --- |
 | H2 | Status line: agents here, catches today | Built (amended below) | First not now: the launch is about coordination between agents; `status` and the local page cover the owner |
-| H3 | Desktop pings and a sound | Not now | Needs OS integration outside the state directory |
+| H3 | Desktop pings and a sound | Built 25 November 2026 ([issue #77](https://github.com/Langspan/LangSpan.dev/issues/77)): `langspan notify on\|off\|status [--sound on\|off]`; see "Desktop notices (H3)" below. Not yet run on a macOS or Linux desktop | First not now: needs OS integration outside the state directory |
 | H4 | A daily summary | Built 25 November 2026 ([issue #78](https://github.com/Langspan/LangSpan.dev/issues/78)): `langspan today` and MCP `langspan_today`; see "Daily summary (H4)" below. Not yet run on a host over a working day | |
 | C10 | A "since you left" briefing | Not now | Can be derived from events later; briefings already carry current peer work |
 | H5 | Monthly catch counter | Not now | A count of refusals is not evidence of rework avoided |
@@ -41,6 +41,61 @@ PostToolBatch in launch track L3
 end of a turn, which releases that reply's open admissions as Stop does, and
 only its `error` type is kept. Detecting quota or usage from it is J11 and
 stays Not now.
+
+**Desktop notices (H3), built 25 November 2026.** The daemon shows a
+desktop notice for facts it already records, so no host integration is
+needed and every host is covered:
+
+- *Kinds.* `refusal` (each `write_refused` event, H2), `check_failed` (an
+  automatic check's `check_reported` with a failed result, ADR 0030; a check
+  recorded by hand has no report and raises none) and `handoff_waiting` (a
+  handoff no session has acknowledged for `notify_handoff_after_ms`, 10
+  minutes by default, told once). The store keeps the committed events of
+  the first two kinds for the daemon's owner thread, which turns them into
+  notices after they are durable; a request answered from its receipt
+  commits nothing and raises nothing, and history replayed at start raises
+  nothing. Handoffs carry no time of their own, so the daemon times each
+  from when this run first saw it waiting: one waiting when the daemon
+  starts is told 10 minutes after the start.
+- *Text.* Title `LangSpan`; the body names the workspace's directory, the
+  session (host and the first eight characters of its ID), the peer where
+  the refusal names one and at most three paths (each cut to its last 48
+  bytes) with a count of the rest. Control characters are replaced, and the
+  body is cut to 200 bytes at a character boundary. It never holds a
+  prompt, a message's text, a check's output or file content.
+- *Delivery.* `osascript` on macOS, `notify-send` elsewhere, the first
+  regular executable of that name in an absolute directory of the daemon's
+  `PATH`, found at each notice. Title and body are arguments, never spliced
+  into a script (`on run argv` for AppleScript; `--` before them for
+  `notify-send`), and the title comes first so a body starting with `-` is
+  not an option. A sound is an argument of the same call (`sound name` or a
+  `sound-name` hint); no other command is run for it. Each runs in its own
+  process group with null stdio on a dedicated thread fed by a queue of 16;
+  the group is killed at 2 seconds. A full queue drops the notice.
+- *Limits.* At most one notice of a kind per `notify_kind_interval_ms`
+  (5 minutes) and `notify_hourly_limit` (10) in any hour; a dropped notice
+  does not restart the interval. The daemon's log records each notice as
+  `notice_sent` or `notice_dropped` with kind and reason; a notifier that is
+  missing, fails or times out is logged once per daemon run for each of
+  the three. No event is added.
+- *Configuration.* `notify` and `notify_sound` in the owner-only
+  `config.json`, both off by default. `langspan notify on|off` rewrites the
+  file whole (a temporary owner-only file, then a rename), keeping other
+  keys, and refuses a file others can read. The notifier thread reads the
+  file again at each notice, so switching needs no restart; an unreadable
+  file counts as off and is logged once per change. A daemon of an older
+  build refuses to start with these keys in its configuration, as for any
+  key it does not know.
+
+Tests: `src/notify.rs` (limits on an injected clock, body length, path
+and session shortening, notifier arguments) and `tests/notify.rs` (a real
+daemon and hook executables with a stand-in notifier first on the daemon's
+`PATH` that records its arguments: none started with notices off, exactly
+one per refusal and the second dropped, a sound only when switched on, a
+hung notifier killed while the daemon answers, a failed automatic check
+and a waiting handoff, `notify status` with and without a notifier). A
+notice shown on a real macOS or Linux desktop after a Claude Code refusal is
+still to be retained.
 
 **Daily summary (H4), built 25 November 2026.** `langspan today [WORKSPACE]
 [--since RFC3339] [--json]` and the read-only MCP tool `langspan_today`

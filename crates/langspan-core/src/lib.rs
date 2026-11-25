@@ -2994,10 +2994,8 @@ impl<'de> Deserialize<'de> for Command {
     }
 }
 
-/// `Status` carries the whole status view of `State`, so it is the largest
-/// variant by design. An outcome is built once per request and moved to its
-/// reply, never held in bulk, so the size difference costs nothing worth a
-/// box at every one of its match sites.
+// One reply per request, built and sent once: its size does not matter, and
+// boxing `Status`'s state would only add an allocation to every status read.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]

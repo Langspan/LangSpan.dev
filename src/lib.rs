@@ -14,6 +14,7 @@ mod lines;
 mod local;
 pub mod local_day;
 pub mod mcp;
+pub mod notify;
 pub mod protocol;
 pub mod recent;
 mod reformat;

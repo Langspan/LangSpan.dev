@@ -139,7 +139,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## H. The person's view
 
-- [H3: Desktop notices for refusals and handoffs](https://github.com/Langspan/LangSpan.dev/issues/77): refusals and waiting handoffs go unnoticed when the person is not watching that agent.
 - [H5: A monthly refusal count](https://github.com/Langspan/LangSpan.dev/issues/79): a person deciding whether to keep LangSpan has no count of how often it intervened.
 - [H6: A daily "work saved" line, once measured](https://github.com/Langspan/LangSpan.dev/issues/80): people want a savings figure, which needs measurement rather than assumptions.
 - [H8: A coordination report per session and host](https://github.com/Langspan/LangSpan.dev/issues/81): a person cannot tell whether a new host version or model still follows coordination well.
