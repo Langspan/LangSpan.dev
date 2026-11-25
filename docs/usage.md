@@ -811,7 +811,12 @@ Timeout values accept 100–5000 ms; client count accepts 1–128;
 `auto_check_debounce_ms` accepts 50–60000. IPC and MCP frames
 are limited to 64 KiB. The MCP SDK discards oversized input lines without replying
 to that line. File admission accepts up to 64 distinct normalized keys, 512 bytes
-per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit.
+per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit
+and prompt summaries a 512-byte one. Summaries are redacted on receipt, and
+redaction never makes one longer than its limit: a summary that would outgrow
+it keeps its longest redacted prefix that fits, cut at a character boundary
+and ending in `[redacted]`, so a summary within its limit is never refused
+because it held a secret.
 Canonical path checks reject escapes, special files, and observed hard links.
 
 Events and receipts do not yet have a retention policy. History is read in

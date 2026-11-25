@@ -742,6 +742,10 @@ pub const MAX_AUTO_CHECK_TIMEOUT_S: u32 = 3600;
 pub const MAX_CHECK_TAIL_BYTES: usize = 2048;
 /// Bytes in a check record's one-line command.
 pub const MAX_CHECK_COMMAND_BYTES: usize = 512;
+/// Bytes in a session's prompt summary.
+pub const MAX_PROMPT_SUMMARY_BYTES: usize = 512;
+/// Bytes in an intent's summary.
+pub const MAX_INTENT_SUMMARY_BYTES: usize = 2048;
 pub const MAX_CHECK_REPORT_SESSIONS: usize = 16;
 /// Undelivered results kept per session.
 pub const MAX_CHECK_NOTICES: usize = 4;
@@ -5665,10 +5669,15 @@ fn validate_check_report(
 }
 
 fn validate_prompt_summary(summary: &str) -> Result<(), CoreError> {
-    if summary.is_empty() || summary.len() > 512 || summary.chars().any(char::is_control) {
+    if summary.is_empty()
+        || summary.len() > MAX_PROMPT_SUMMARY_BYTES
+        || summary.chars().any(char::is_control)
+    {
         return Err(error(
             "invalid_summary",
-            "A prompt summary is one line of 1 to 512 UTF-8 bytes without control characters",
+            &format!(
+                "A prompt summary is one line of 1 to {MAX_PROMPT_SUMMARY_BYTES} UTF-8 bytes without control characters"
+            ),
         ));
     }
     Ok(())
@@ -7288,10 +7297,12 @@ fn validate_canonical_paths(paths: &[String]) -> Result<(), CoreError> {
 }
 
 fn validate_summary(summary: &str) -> Result<(), CoreError> {
-    if summary.len() > 2048 {
+    if summary.len() > MAX_INTENT_SUMMARY_BYTES {
         return Err(error(
             "invalid_summary",
-            "Intent summary exceeds 2048 UTF-8 bytes; shorten the summary",
+            &format!(
+                "Intent summary exceeds {MAX_INTENT_SUMMARY_BYTES} UTF-8 bytes; shorten the summary"
+            ),
         ));
     }
     Ok(())
