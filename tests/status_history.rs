@@ -7,7 +7,10 @@ use langspan::{
     protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response},
     store::Store,
 };
-use langspan_core::{Command, Event, Lease, LeaseStatus, Outcome, State, StatusRecord};
+use langspan_core::{
+    Command, Event, FileKind, FileState, Landing, Lease, LeaseStatus, ObservedFile, Outcome,
+    SourceOrigin, State, StatusRecord,
+};
 use rusqlite::{Connection, params};
 use std::{
     fs,
@@ -289,7 +292,7 @@ fn status_answers_within_a_frame_after_ten_thousand_admissions_and_all_pages_thr
         };
         assert!(!records.is_empty() || next.is_none());
         for record in records {
-            record.apply(&mut whole);
+            record.apply(&mut whole).unwrap();
         }
         pages += 1;
         assert!(pages < 1000, "paging does not end");
@@ -335,6 +338,317 @@ fn status_answers_within_a_frame_after_ten_thousand_admissions_and_all_pages_thr
         }
     }
     assert_eq!(leases, SESSIONS * PER_SESSION + 2);
+}
+
+/// The largest automatic check the coordinator accepts: 64 arguments of
+/// 1,024 bytes, each full of characters JSON escapes, so that its record is
+/// about twice a frame before it is escaped again inside a page.
+fn largest_auto_check() -> Vec<String> {
+    (0..64)
+        .map(|index| format!("{index:02}{}", "\"\\".repeat(511)))
+        .collect()
+}
+
+impl Fixture {
+    /// One workspace, one session and two state entries that are each larger
+    /// than a frame: an automatic check at its limits, and the session's 128
+    /// known file versions with paths near their 512-byte limit.
+    fn fill_large(&self) {
+        let path = self.state_dir().join("state.sqlite3");
+        let generation = {
+            let mut store = Store::open(&path).unwrap();
+            for (id, command) in [
+                (
+                    "workspace",
+                    Command::WorkspaceRegister {
+                        workspace_id: "w".into(),
+                        root: self.workspace(),
+                    },
+                ),
+                (
+                    "register",
+                    Command::SessionRegister {
+                        session_id: "big".into(),
+                        workspace_id: "w".into(),
+                        parent: None,
+                        headless: false,
+                    },
+                ),
+                (
+                    "auto-check",
+                    Command::AutoCheckEnable {
+                        workspace_id: "w".into(),
+                        name: "unit".into(),
+                        argv: largest_auto_check(),
+                        timeout_s: 60,
+                    },
+                ),
+            ] {
+                let outcome = store.execute(id, &command, &command, 1).unwrap().outcome;
+                assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+            }
+            store.state().generation
+        };
+        let mut connection = Connection::open(&path).unwrap();
+        let transaction = connection.transaction().unwrap();
+        for batch in 0..2 {
+            let mut files: Vec<ObservedFile> = (0..64)
+                .map(|index| ObservedFile {
+                    path: format!("{}{batch}{index:02}.rs", "abcdefghi/".repeat(49)),
+                    state: FileState::Present {
+                        digest: format!("{:064}", batch * 64 + index),
+                        kind: FileKind::Regular,
+                    },
+                })
+                .collect();
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            let observed = Event::SourceObserved {
+                session_id: "big".into(),
+                files,
+                origin: SourceOrigin::Read,
+                at_ms: 2,
+                generation,
+            };
+            transaction
+                .execute(
+                    "INSERT INTO events (event_json) VALUES (?1)",
+                    params![serde_json::to_string(&observed).unwrap()],
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        drop(connection);
+        for entry in fs::read_dir(self.state_dir()).unwrap() {
+            fs::set_permissions(entry.unwrap().path(), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    /// So many sessions registered in this generation that the bounded view
+    /// leaves out every history it can, `landings` and `workspace_git`
+    /// included, before it leaves out idle sessions.
+    fn crowd(&self) {
+        for session in 0..800 {
+            let id = format!("crowd-{session:04}");
+            let outcome = self
+                .call(
+                    &format!("register-{id}"),
+                    Command::SessionRegister {
+                        session_id: id,
+                        workspace_id: "w".into(),
+                        parent: None,
+                        headless: false,
+                    },
+                )
+                .outcome;
+            assert!(matches!(outcome, Outcome::Session { .. }), "{outcome:?}");
+        }
+    }
+}
+
+#[test]
+fn a_state_entry_larger_than_a_frame_is_read_whole_in_parts() {
+    let mut f = Fixture::new();
+    f.fill_large();
+    f.start();
+
+    // Every page of the records stays within a frame, however large one
+    // entry is.
+    let mut after = None;
+    let mut pages = 0;
+    loop {
+        let page = f.call(
+            "read",
+            Command::StatusRecords {
+                after: after.clone(),
+            },
+        );
+        assert!(frame_bytes(&page) < MAX_FRAME_BYTES);
+        let Outcome::StatusRecords { next, .. } = page.outcome else {
+            panic!("status page failed: {:?}", page.outcome);
+        };
+        pages += 1;
+        assert!(pages < 100, "paging does not end");
+        match next {
+            Some(cursor) => after = Some(cursor),
+            None => break,
+        }
+    }
+
+    // And the pages put back exactly what the coordinator holds.
+    let whole = client::full_state(&f.state_dir()).unwrap();
+    assert_eq!(whole.auto_checks["w"].argv, largest_auto_check());
+    let known = &whole.activity["big"].known;
+    assert_eq!(known.len(), 128);
+    assert!(known.iter().all(|version| version.path.len() > 490));
+
+    // The bounded view fits a frame too, and says what it left out.
+    let response = f.call("read", Command::Status);
+    assert!(frame_bytes(&response) < MAX_FRAME_BYTES);
+    let Outcome::Status { summary, .. } = &response.outcome else {
+        panic!("status failed: {:?}", response.outcome);
+    };
+    let omitted = &summary.as_ref().unwrap().omitted;
+    assert!(
+        omitted.iter().any(|name| name == "auto_checks"),
+        "{omitted:?}"
+    );
+}
+
+#[test]
+fn a_record_that_changes_while_its_parts_are_read_is_read_again_whole() {
+    let f = Fixture::new();
+    f.fill_large();
+    let mut store = Store::open(&f.state_dir().join("state.sqlite3")).unwrap();
+    let mut changed = largest_auto_check();
+    changed[0] = "changed".into();
+    let mut pages = 0;
+    let whole = client::read_all(|command| {
+        pages += 1;
+        // After the first part of the automatic check, the owner changes it.
+        if pages == 3 {
+            let change = Command::AutoCheckEnable {
+                workspace_id: "w".into(),
+                name: "unit".into(),
+                argv: changed.clone(),
+                timeout_s: 60,
+            };
+            store.execute("change", &change, &change, 3).unwrap();
+        }
+        let page = store
+            .execute("read", &command, &command, 3)
+            .unwrap()
+            .outcome;
+        if let Outcome::StatusRecords { records, .. } = &page {
+            let size = serde_json::to_vec(records).unwrap().len();
+            assert!(size < MAX_FRAME_BYTES, "a page of {size} bytes");
+        }
+        Ok(page)
+    })
+    .unwrap();
+    assert!(pages > 3, "the check was read in one page");
+    assert_eq!(whole.auto_checks["w"].argv, changed);
+    assert_eq!(whole.activity["big"].known.len(), 128);
+}
+
+#[test]
+fn a_retried_landing_is_recognised_when_status_leaves_landings_out() {
+    let mut f = Fixture::new();
+    f.fill();
+    // The landing this request already made, recorded as the coordinator
+    // records one.
+    let path = f.state_dir().join("state.sqlite3");
+    let landed = Event::Landed {
+        landing: Landing {
+            landing_id: "land-done".into(),
+            workspace_id: "w".into(),
+            onto: "main".into(),
+            commit_oid: "a".repeat(40),
+            tree_oid: "b".repeat(40),
+            inputs: vec!["c".repeat(40)],
+            check_id: "check-done".into(),
+        },
+    };
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "INSERT INTO events (event_json) VALUES (?1)",
+            params![serde_json::to_string(&landed).unwrap()],
+        )
+        .unwrap();
+    f.start();
+    f.crowd();
+    let Outcome::Status { summary, .. } = f.call("read", Command::Status).outcome else {
+        panic!("status failed");
+    };
+    assert!(
+        summary
+            .unwrap()
+            .omitted
+            .iter()
+            .any(|name| name == "landings"),
+        "the fixture must make status leave landings out"
+    );
+
+    // The workspace is not a Git repository: running the landing again
+    // would fail at its first fetch. A retry reports the landing it made.
+    let (code, json) = f.cli(&[
+        "land",
+        "w",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "feature",
+        "--apply",
+        "--request-id",
+        "land-done",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{json}");
+    let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["replayed"], true, "{report}");
+    assert_eq!(report["landing"]["landing_id"], "land-done", "{report}");
+}
+
+#[test]
+fn doctor_reports_a_scanned_workspace_when_status_leaves_its_git_out() {
+    let mut f = Fixture::new();
+    let workspace = f.workspace();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "start",
+        ],
+    ] {
+        let status = Process::new("git")
+            .args(args)
+            .current_dir(&workspace)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    f.fill();
+    f.start();
+    // The coordinator's own scan finds the repository and branch.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let Outcome::Status { state, .. } = f.call("read", Command::Status).outcome else {
+            panic!("status failed");
+        };
+        if state.workspace_git.contains_key("w") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no scan completed: {state:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    f.crowd();
+    let Outcome::Status { summary, .. } = f.call("read", Command::Status).outcome else {
+        panic!("status failed");
+    };
+    assert!(
+        summary
+            .unwrap()
+            .omitted
+            .iter()
+            .any(|name| name == "workspace_git"),
+        "the fixture must make status leave workspace_git out"
+    );
+    let home = f.root.join("home");
+    fs::create_dir(&home).unwrap();
+    let (_, text) = f.cli(&["doctor", "--home", home.to_str().unwrap()]);
+    assert!(
+        text.contains("Workspace w: scanned; repository and branch known"),
+        "{text}"
+    );
+    assert!(!text.contains("no scan has completed yet"), "{text}");
 }
 
 #[test]

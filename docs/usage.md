@@ -469,8 +469,12 @@ hour, are seen alive or have just registered, and the admissions still open.
 Completed, expired and invalidated admissions are counted per session in the
 `summary` (`closed_admissions`), not listed. If the current state is still too
 large for one 64 KiB answer, the summary names what it left out (`omitted`,
-`omitted_sessions`); workspaces, links, turns, automatic checks and open
-admissions stay. To read every record, history included, page through it:
+`omitted_sessions`); workspaces, links, turns and open admissions stay, and an
+automatic check is left out only when its command alone is near a frame.
+LangSpan's own commands that decide from one of these parts (`land` recognising
+a retried landing, `doctor` judging a workspace's scan, `auto-check`) read it
+complete when the view left it out. To read every record, history included,
+page through it:
 
 ```sh
 ./target/release/langspan status --all --json
@@ -479,9 +483,13 @@ admissions stay. To read every record, history included, page through it:
 ```
 
 Each record is `{"kind": ..., "key": ..., ...}` with the record's state-map key.
-The cursor is opaque: pass back only a `next` value. A record changed between
-pages is read as it is when its page is answered. MCP's `langspan_status` takes
-the same `all` and `after` arguments.
+One record larger than a page (an entry at its limits, such as a session's 128
+known file versions with long paths) comes as `{"kind": "part", "text": ...,
+"offset": ..., "last": ...}` records instead: the `text` of its parts, joined in
+order, is that record's JSON. A part at offset 0 starts the record again,
+because it changed while it was being read. The cursor is opaque: pass back only
+a `next` value. A record changed between pages is read as it is when its page
+is answered. MCP's `langspan_status` takes the same `all` and `after` arguments.
 
 `changes` reads persisted file and local-branch observations, with scan freshness
 information. A disk change is unattributed; related operation IDs are a

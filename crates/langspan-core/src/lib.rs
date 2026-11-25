@@ -16,7 +16,8 @@ pub use dashboard::{
     WorkspaceRow, dashboard_denials,
 };
 pub use status::{
-    STATUS_RECENT_MS, StatusRecord, StatusSummary, shrink_status, status_records, status_view,
+    STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
+    shrink_status, status_records, status_view,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

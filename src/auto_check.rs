@@ -336,14 +336,15 @@ pub fn worker(
 }
 
 /// Whether the owner's current setting is still `check`, asked of the state
-/// owner just before a run starts. Unreachable counts as not enabled.
+/// owner just before a run starts. Unreachable counts as not enabled. A
+/// check at its size limits can be left out of the bounded view, so it is
+/// read complete then.
 fn still_enabled(record: &impl Fn(String, Command) -> Option<Outcome>, check: &AutoCheck) -> bool {
-    match record("read".into(), Command::Status) {
-        Some(Outcome::Status { state, .. }) => {
-            state.auto_checks.get(&check.workspace_id) == Some(check)
-        }
-        _ => false,
-    }
+    let ask = |command| {
+        record("read".into(), command).ok_or_else(|| crate::Error::from("the state owner is gone"))
+    };
+    crate::client::status_with(ask, &["auto_checks"])
+        .is_ok_and(|(state, _)| state.auto_checks.get(&check.workspace_id) == Some(check))
 }
 
 impl Workspace {

@@ -146,51 +146,108 @@ fn keep<V: Clone>(
         .collect()
 }
 
-type Trim = fn(&mut State) -> bool;
+/// One part of the view that may be left out: `trim` empties it in a view
+/// and says whether anything was there; `restore` puts it back into a view
+/// from the complete state.
+struct Trim {
+    name: &'static str,
+    trim: fn(&mut State) -> bool,
+    restore: fn(&mut State, &State),
+}
+
+/// A whole field of the state.
+macro_rules! field {
+    ($name:literal, $field:ident) => {
+        Trim {
+            name: $name,
+            trim: |state| take(&mut state.$field),
+            restore: |view, full| view.$field = full.$field.clone(),
+        }
+    };
+}
+
+/// One list of every session's activity: only the sessions in the view are
+/// given theirs back.
+macro_rules! activity {
+    ($name:literal, $field:ident) => {
+        Trim {
+            name: $name,
+            trim: |state| {
+                state
+                    .activity
+                    .values_mut()
+                    .fold(false, |any, activity| any | take(&mut activity.$field))
+            },
+            restore: |view, full| {
+                for (id, activity) in &mut view.activity {
+                    if let Some(complete) = full.activity.get(id) {
+                        activity.$field = complete.$field.clone();
+                    }
+                }
+            },
+        }
+    };
+}
 
 /// Parts of the view left out, in this order, while it does not fit: the
-/// bulkiest histories first, current coordination last.
-const TRIMS: [(&str, Trim); 12] = [
-    ("activity.known", |state| {
-        state
-            .activity
-            .values_mut()
-            .fold(false, |any, activity| any | take(&mut activity.known))
-    }),
-    ("checks", |state| take(&mut state.checks)),
-    ("landings", |state| take(&mut state.landings)),
-    ("interface_notices", |state| {
-        take(&mut state.interface_notices)
-    }),
-    ("checkouts", |state| take(&mut state.checkouts)),
-    ("notes", |state| take(&mut state.notes)),
-    ("remote_peers", |state| take(&mut state.remote_peers)),
-    ("activity.touched", |state| {
-        state
-            .activity
-            .values_mut()
-            .fold(false, |any, activity| any | take(&mut activity.touched))
-    }),
-    ("activity.alerted", |state| {
-        state
-            .activity
-            .values_mut()
-            .fold(false, |any, activity| any | take(&mut activity.alerted))
-    }),
-    ("check_notices", |state| take(&mut state.check_notices)),
-    ("messages", |state| take(&mut state.messages)),
-    ("workspace_git", |state| take(&mut state.workspace_git)),
+/// bulkiest histories first, current coordination last. Each name is the one
+/// `StatusSummary::omitted` gives.
+const TRIMS: [Trim; 13] = [
+    activity!("activity.known", known),
+    field!("checks", checks),
+    field!("landings", landings),
+    field!("interface_notices", interface_notices),
+    field!("checkouts", checkouts),
+    field!("notes", notes),
+    field!("remote_peers", remote_peers),
+    activity!("activity.touched", touched),
+    activity!("activity.alerted", alerted),
+    // Only the shown sessions' notices are in the view.
+    Trim {
+        name: "check_notices",
+        trim: |state| take(&mut state.check_notices),
+        restore: |view, full| {
+            view.check_notices = full
+                .check_notices
+                .iter()
+                .filter(|(id, _)| view.sessions.contains_key(*id))
+                .map(|(id, notices)| (id.clone(), notices.clone()))
+                .collect();
+        },
+    },
+    field!("messages", messages),
+    field!("workspace_git", workspace_git),
+    // Only one at the limits of its command is larger than a frame.
+    field!("auto_checks", auto_checks),
 ];
 
 fn take<T: Default + PartialEq>(value: &mut T) -> bool {
     mem::take(value) != T::default()
 }
 
+/// Put back into `view` each part named in `needed` that the bounded view
+/// left out, from `full`, the complete state read with `status --all`, and
+/// take its name off `summary.omitted`. A caller that decides from one of
+/// these parts reads it complete this way, and only when it was left out.
+pub fn restore_status(
+    view: &mut State,
+    summary: &mut StatusSummary,
+    full: &State,
+    needed: &[&str],
+) {
+    for part in &TRIMS {
+        if needed.contains(&part.name) && summary.omitted.iter().any(|name| name == part.name) {
+            (part.restore)(view, full);
+            summary.omitted.retain(|name| name != part.name);
+        }
+    }
+}
+
 /// Leave parts of the view out until `fits` accepts it, each counted or named
 /// in the summary: the histories in `TRIMS`, then sessions with nothing open,
 /// least recently active first, then per-session counts, and open admissions
-/// only if they alone are larger than a frame. Workspaces, links, turns,
-/// automatic checks and scan health are never left out.
+/// only if they alone are larger than a frame. Workspaces, links, turns and
+/// scan health are never left out.
 pub fn shrink_status(
     view: &mut State,
     summary: &mut StatusSummary,
@@ -199,9 +256,9 @@ pub fn shrink_status(
     if fits(view, summary) {
         return;
     }
-    for (name, trim) in TRIMS {
-        if trim(view) {
-            summary.omitted.push(name.into());
+    for part in &TRIMS {
+        if (part.trim)(view) {
+            summary.omitted.push(part.name.into());
             if fits(view, summary) {
                 return;
             }
@@ -343,6 +400,15 @@ pub enum StatusRecord {
         key: String,
         notice: CheckNotice,
     },
+    /// Part of one record too large for a page: `text` is its JSON from
+    /// byte `offset`. The parts of a record come in order, the last with
+    /// `last`, and joined they are that record's JSON. A part at offset 0
+    /// starts the record again: it changed while it was being read.
+    Part {
+        text: String,
+        offset: u64,
+        last: bool,
+    },
 }
 
 /// Record kinds in page order. The cursor names one of these.
@@ -372,9 +438,16 @@ const KINDS: [&str; 21] = [
 
 impl StatusRecord {
     /// Place this record in `state`, as it was in the state it was read from.
-    /// Applying every page in order rebuilds the state's maps and lists.
-    pub fn apply(self, state: &mut State) {
+    /// Applying every page in order rebuilds the state's maps and lists. A
+    /// part is refused: its record is applied once its parts are joined.
+    pub fn apply(self, state: &mut State) -> Result<(), CoreError> {
         match self {
+            Self::Part { .. } => {
+                return Err(error(
+                    "status_part",
+                    "a record part is applied only as the whole record its parts make",
+                ));
+            }
             Self::Workspace { key, workspace } => drop(state.workspaces.insert(key, workspace)),
             Self::Session { key, session } => drop(state.sessions.insert(key, session)),
             Self::Intent { key, intent } => drop(state.intents.insert(key, intent)),
@@ -405,21 +478,53 @@ impl StatusRecord {
                 state.check_notices.entry(key).or_default().push(notice)
             }
         }
+        Ok(())
     }
 }
 
-/// Where a page ended: a record kind, the key within it and, for a list, the
-/// position within that key's list.
-struct Cursor {
+/// Where one record is in the page order: its kind, its key and, for a
+/// list, its position in that key's list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusPosition {
     kind: usize,
     index: usize,
     key: String,
 }
 
-/// The cursor text is `KIND:INDEX:KEY`. It is opaque to readers, and only
-/// meaningful to the coordinator that gave it.
-fn cursor(kind: usize, index: usize, key: &str) -> String {
-    format!("{}:{index}:{key}", KINDS[kind])
+impl StatusPosition {
+    /// The cursor that resumes after this record: `KIND:INDEX:KEY`. Cursors
+    /// are opaque to readers, and only meaningful to the coordinator that
+    /// gave them.
+    pub fn after(&self) -> String {
+        format!("{}:{}:{}", KINDS[self.kind], self.index, self.key)
+    }
+
+    /// The cursor that resumes inside this record, at byte `offset` of its
+    /// JSON, if the record's JSON still has the `digest` it had:
+    /// `KIND:INDEX+OFFSET+DIGEST:KEY`.
+    pub fn within(&self, offset: usize, digest: u64) -> String {
+        format!(
+            "{}:{}+{offset}+{digest}:{}",
+            KINDS[self.kind], self.index, self.key
+        )
+    }
+}
+
+/// Where a page that ended inside a record resumes: at `offset` bytes into
+/// its JSON, if that JSON still has `digest`; otherwise at its start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusResume {
+    pub offset: usize,
+    pub digest: u64,
+}
+
+/// A parsed cursor: the position it names, and whether the page resumes
+/// inside that record rather than after it.
+struct Cursor {
+    position: StatusPosition,
+    within: Option<StatusResume>,
+    /// The first list position to give for the cursor's key.
+    first: usize,
 }
 
 fn parse_cursor(text: &str) -> Result<Cursor, CoreError> {
@@ -433,17 +538,38 @@ fn parse_cursor(text: &str) -> Result<Cursor, CoreError> {
     let (Some(kind), Some(index), Some(key)) = (parts.next(), parts.next(), parts.next()) else {
         return Err(invalid());
     };
+    let number = |text: &str| text.parse::<usize>().map_err(|_| invalid());
+    let (index, within) = match index.split('+').collect::<Vec<_>>()[..] {
+        [index] => (number(index)?, None),
+        [index, offset, digest] => (
+            number(index)?,
+            Some(StatusResume {
+                offset: number(offset)?,
+                digest: digest.parse().map_err(|_| invalid())?,
+            }),
+        ),
+        _ => return Err(invalid()),
+    };
+    let first = match within {
+        Some(_) => index,
+        // A position after the last one there can be is not one we gave.
+        None => index.checked_add(1).ok_or_else(invalid)?,
+    };
     Ok(Cursor {
-        kind: KINDS
-            .iter()
-            .position(|name| *name == kind)
-            .ok_or_else(invalid)?,
-        index: index.parse().map_err(|_| invalid())?,
-        key: key.into(),
+        position: StatusPosition {
+            kind: KINDS
+                .iter()
+                .position(|name| *name == kind)
+                .ok_or_else(invalid)?,
+            index,
+            key: key.into(),
+        },
+        within,
+        first,
     })
 }
 
-type Page<'a> = Box<dyn Iterator<Item = (String, StatusRecord)> + 'a>;
+type Page<'a> = Box<dyn Iterator<Item = (StatusPosition, StatusRecord)> + 'a>;
 
 fn entries<'a, V: Clone + 'a>(
     kind: usize,
@@ -452,15 +578,28 @@ fn entries<'a, V: Clone + 'a>(
     record: fn(String, V) -> StatusRecord,
 ) -> Page<'a> {
     let range = match after {
-        Some(after) if after.kind > kind => return Box::new(iter::empty()),
-        Some(after) if after.kind == kind => {
-            map.range::<str, _>((Bound::Excluded(after.key.as_str()), Bound::Unbounded))
+        Some(after) if after.position.kind > kind => return Box::new(iter::empty()),
+        Some(after) if after.position.kind == kind => {
+            let key = after.position.key.as_str();
+            // Resuming inside a record gives that record again.
+            let from = match after.within {
+                Some(_) => Bound::Included(key),
+                None => Bound::Excluded(key),
+            };
+            map.range::<str, _>((from, Bound::Unbounded))
         }
         _ => map.range::<str, _>(..),
     };
-    Box::new(
-        range.map(move |(key, value)| (cursor(kind, 0, key), record(key.clone(), value.clone()))),
-    )
+    Box::new(range.map(move |(key, value)| {
+        (
+            StatusPosition {
+                kind,
+                index: 0,
+                key: key.clone(),
+            },
+            record(key.clone(), value.clone()),
+        )
+    }))
 }
 
 fn lists<'a, V: Clone + 'a>(
@@ -470,16 +609,19 @@ fn lists<'a, V: Clone + 'a>(
     record: fn(String, V) -> StatusRecord,
 ) -> Page<'a> {
     let (range, skip) = match after {
-        Some(after) if after.kind > kind => return Box::new(iter::empty()),
-        Some(after) if after.kind == kind => (
-            map.range::<str, _>((Bound::Included(after.key.as_str()), Bound::Unbounded)),
-            Some((after.key.clone(), after.index)),
+        Some(after) if after.position.kind > kind => return Box::new(iter::empty()),
+        Some(after) if after.position.kind == kind => (
+            map.range::<str, _>((
+                Bound::Included(after.position.key.as_str()),
+                Bound::Unbounded,
+            )),
+            Some((after.position.key.clone(), after.first)),
         ),
         _ => (map.range::<str, _>(..), None),
     };
     Box::new(range.flat_map(move |(key, values)| {
         let first = match &skip {
-            Some((after, index)) if after == key => index + 1,
+            Some((after, first)) if after == key => *first,
             _ => 0,
         };
         values
@@ -487,20 +629,39 @@ fn lists<'a, V: Clone + 'a>(
             .enumerate()
             .skip(first)
             .map(move |(index, value)| {
-                (cursor(kind, index, key), record(key.clone(), value.clone()))
+                (
+                    StatusPosition {
+                        kind,
+                        index,
+                        key: key.clone(),
+                    },
+                    record(key.clone(), value.clone()),
+                )
             })
     }))
 }
 
-/// Every record of `state` after the cursor `after` (from the start when
-/// `None`), each with the cursor that resumes after it. The order is fixed by
-/// kind and key, so a page resumes where the last one ended even when the
-/// state changed in between; a record changed meanwhile is read as it is now.
+/// Records of `state` from the cursor `after` (from the start when `None`),
+/// each with its position. The order is fixed by kind and key, so a page
+/// resumes where the last one ended even when the state changed in between;
+/// a record changed meanwhile is read as it is now. When the cursor resumes
+/// inside a record, that record's position and the resume point are
+/// returned, and the first record given is that one if it is still there.
+#[allow(clippy::type_complexity)]
 pub fn status_records<'a>(
     state: &'a State,
     after: Option<&str>,
-) -> Result<impl Iterator<Item = (String, StatusRecord)> + 'a, CoreError> {
+) -> Result<
+    (
+        Option<(StatusPosition, StatusResume)>,
+        impl Iterator<Item = (StatusPosition, StatusRecord)> + 'a,
+    ),
+    CoreError,
+> {
     let after = after.map(parse_cursor).transpose()?;
+    let resume = after
+        .as_ref()
+        .and_then(|after| Some((after.position.clone(), after.within?)));
     let after = after.as_ref();
     let pages: [Page<'a>; 21] = [
         entries(0, &state.workspaces, after, |key, workspace| {
@@ -571,5 +732,5 @@ pub fn status_records<'a>(
             StatusRecord::CheckNotice { key, notice }
         }),
     ];
-    Ok(pages.into_iter().flatten())
+    Ok((resume, pages.into_iter().flatten()))
 }

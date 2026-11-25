@@ -6,8 +6,8 @@
 
 use langspan_core::{
     Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event, LeaseStatus, Outcome,
-    RecordedEvent, SentPublication, State, apply, dashboard_denials, decide, expiry_events,
-    shrink_status, status_records,
+    RecordedEvent, SentPublication, State, StatusRecord, apply, dashboard_denials, decide,
+    expiry_events, shrink_status, status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
@@ -16,6 +16,50 @@ use std::time::Duration;
 /// A read answer's body stops before this many bytes, leaving the rest of
 /// the 64 KiB frame for the envelope and JSON escaping of the envelope.
 pub const PAGE_BUDGET_BYTES: usize = 48 * 1024;
+
+/// Bytes a status part adds around its text: the record's fields with the
+/// largest offset, and the separator.
+const PART_OVERHEAD_BYTES: usize = 96;
+
+/// Bytes `text` takes as a JSON string's contents, at most: a quote or
+/// backslash is escaped in two, and a control character in at most six.
+fn escaped_len(text: &str) -> usize {
+    text.chars().map(escaped_char_len).sum()
+}
+
+fn escaped_char_len(c: char) -> usize {
+    match c {
+        '"' | '\\' => 2,
+        c if u32::from(c) < 0x20 => 6,
+        c => c.len_utf8(),
+    }
+}
+
+/// Where a part of `text` that starts at `start` ends, on a character
+/// boundary, so that the part fits in `room` bytes of a page.
+fn part_end(text: &str, start: usize, room: usize) -> usize {
+    let mut left = room.saturating_sub(PART_OVERHEAD_BYTES);
+    let mut end = start;
+    for c in text[start..].chars() {
+        let size = escaped_char_len(c);
+        if size > left {
+            break;
+        }
+        left -= size;
+        end += c.len_utf8();
+    }
+    end
+}
+
+/// Identifies one record's JSON across pages, so that a page resumes inside
+/// a record only if the record has not changed. Not a security control: a
+/// mismatch (or a different build) starts the record again from its start.
+fn digest(text: &str) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
 
 pub type StoreResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -627,12 +671,14 @@ impl Store {
         ))
     }
 
-    /// One page of state records after `after`, stopping before
-    /// `PAGE_BUDGET_BYTES`. Each record is bounded by the core's own limits,
-    /// so one always fits; a page holds at least one when any remain.
+    /// One page of state records from `after`, within `PAGE_BUDGET_BYTES`.
+    /// A record that fits a page is never split; one that does not (an
+    /// entry at its limits can be larger than a frame) is given as parts of
+    /// its JSON, so that every valid state can be read. A page holds at
+    /// least one record or part when any remain.
     fn status_records(&self, after: Option<&str>) -> Outcome {
-        let mut records = match status_records(&self.state, after) {
-            Ok(records) => records.peekable(),
+        let (mut resume, records) = match status_records(&self.state, after) {
+            Ok(read) => read,
             Err(error) => {
                 return Outcome::Error {
                     code: error.code,
@@ -643,20 +689,66 @@ impl Store {
         let mut page = Vec::new();
         let mut bytes = 0;
         let mut next = None;
-        while let Some((cursor, record)) = records.next() {
-            // A record that cannot be measured is still counted at a size
-            // that ends the page, rather than overrunning the frame.
-            let size = serde_json::to_vec(&record).map_or(PAGE_BUDGET_BYTES, |json| json.len() + 1);
-            if !page.is_empty() && bytes + size > PAGE_BUDGET_BYTES {
-                break;
+        for (position, record) in records {
+            let text = match serde_json::to_string(&record) {
+                Ok(text) => text,
+                Err(error) => {
+                    return Outcome::Error {
+                        code: "internal".into(),
+                        message: format!("a state record could not be encoded: {error}"),
+                    };
+                }
+            };
+            let digest = digest(&text);
+            // The rest of a record the last page began, if it is unchanged.
+            let start = match resume.take() {
+                Some((at, point))
+                    if at == position
+                        && point.digest == digest
+                        && point.offset < text.len()
+                        && text.is_char_boundary(point.offset) =>
+                {
+                    point.offset
+                }
+                _ => 0,
+            };
+            if start == 0 && text.len() < PAGE_BUDGET_BYTES {
+                if bytes + text.len() + 1 > PAGE_BUDGET_BYTES {
+                    return Outcome::StatusRecords {
+                        records: page,
+                        next,
+                    };
+                }
+                bytes += text.len() + 1;
+                page.push(record);
+                next = Some(position.after());
+                continue;
             }
-            bytes += size;
-            page.push(record);
-            next = records.peek().is_some().then_some(cursor);
+            let end = part_end(&text, start, PAGE_BUDGET_BYTES.saturating_sub(bytes));
+            if end == start {
+                return Outcome::StatusRecords {
+                    records: page,
+                    next,
+                };
+            }
+            let last = end == text.len();
+            page.push(StatusRecord::Part {
+                text: text[start..end].into(),
+                offset: start as u64,
+                last,
+            });
+            if !last {
+                return Outcome::StatusRecords {
+                    records: page,
+                    next: Some(position.within(end, digest)),
+                };
+            }
+            bytes += PART_OVERHEAD_BYTES + escaped_len(&text[start..end]);
+            next = Some(position.after());
         }
         Outcome::StatusRecords {
             records: page,
-            next,
+            next: None,
         }
     }
 

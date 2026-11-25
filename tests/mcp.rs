@@ -621,7 +621,7 @@ async fn stdio_operations_share_daemon_state_and_preserve_retry_and_conflict_res
     assert_eq!(next, None, "a small state fits one page");
     let mut whole = langspan_core::State::default();
     for record in records {
-        record.apply(&mut whole);
+        record.apply(&mut whole).unwrap();
     }
     assert_eq!(whole.leases["admit-a"].status, LeaseStatus::Completed);
     assert_eq!(whole.leases["admit-b-fresh"].status, LeaseStatus::Active);

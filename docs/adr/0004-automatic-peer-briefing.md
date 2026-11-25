@@ -199,7 +199,10 @@ core does with an eight-hour gap.
   admissions, live or recent sessions and their activity, with closed
   admissions counted per session. When even that exceeds the frame, activity
   and other histories are left out first and named in its summary. The whole
-  state, history included, is paged with `status --all`.
+  state, history included, is paged with `status --all`; a record larger
+  than a page is given in ordered parts of its JSON. A caller that decides
+  from a part the view may leave out (a retry's landing, a workspace's scan,
+  an automatic check) reads that part complete when the summary names it.
 - A session whose working directory moves into another worktree keeps its
   first workspace binding; events from the second are not coordinated.
 - A peer's task line and file paths are another session's text. They are

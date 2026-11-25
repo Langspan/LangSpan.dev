@@ -1036,9 +1036,7 @@ fn auto_check(
             },
         )?
     } else if command.is_empty() && options.is_empty() {
-        let Outcome::Status { state, .. } = ask(state_dir, "read".into(), Command::Status)? else {
-            return Err("unexpected reply to status".into());
-        };
+        let (state, _) = langspan::client::status_from(state_dir, &["auto_checks"])?;
         if !state.workspaces.contains_key(workspace) {
             return Err(format!("workspace {workspace:?} is not registered").into());
         }
@@ -1636,7 +1634,9 @@ fn doctor(
 ) -> Result<u8, langspan::Error> {
     let mut findings: Vec<(bool, String)> = Vec::new();
     let mut note = |ok: bool, text: String| findings.push((ok, text));
-    match ask(state_dir, "read".into(), Command::Status) {
+    // What doctor judges a workspace by must be complete, even when the
+    // bounded view leaves it out to fit a frame.
+    match langspan::client::status_from(state_dir, &["workspace_git", "remote_peers"]) {
         Err(error) => note(
             false,
             format!(
@@ -1644,7 +1644,7 @@ fn doctor(
                 state_dir.display()
             ),
         ),
-        Ok(Outcome::Status { state, .. }) => {
+        Ok((state, _)) => {
             note(
                 true,
                 format!(
@@ -1775,10 +1775,6 @@ fn doctor(
                 }
             }
         }
-        Ok(_) => note(
-            false,
-            "The coordinator answered with something other than its state.".into(),
-        ),
     }
     if let Some(root) = root {
         use langspan::install::{self, Vendor};

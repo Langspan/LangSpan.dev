@@ -290,39 +290,140 @@ pub fn call_until(
 /// history, so that a cursor that never ends cannot hold a caller forever.
 const MAX_STATUS_PAGES: usize = 100_000;
 
+/// Bytes of one record's JSON that `read_all` joins from its parts: far
+/// more than any record within the core's limits.
+const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
+
 /// Every record of the coordinator's state, history included, read page by
-/// page as `status --all` reads it and placed back into one `State`. A record
-/// that changes between pages is read as it was when its page was. The
-/// generation is the one the last page was answered in.
-pub fn full_state(state_dir: &std::path::Path) -> Result<langspan_core::State, crate::Error> {
-    use langspan_core::{Command, Outcome};
+/// page through `ask` as `status --all` reads it and placed back into one
+/// `State`. A record given in parts is joined and then applied. A record
+/// that changes between pages is read as it was when its page was; one that
+/// changes while its parts are read is read again from its start. `ask`
+/// answers one command; the daemon's own threads and clients share this.
+pub fn read_all(
+    mut ask: impl FnMut(langspan_core::Command) -> Result<langspan_core::Outcome, crate::Error>,
+) -> Result<langspan_core::State, crate::Error> {
+    use langspan_core::{Command, Outcome, StatusRecord};
     let mut state = langspan_core::State::default();
+    let mut part = String::new();
     let mut after = None;
     for _ in 0..MAX_STATUS_PAGES {
-        let response = call(
-            state_dir,
-            &crate::protocol::Request {
-                version: crate::protocol::PROTOCOL_VERSION,
-                request_id: "read".into(),
-                command: Command::StatusRecords { after },
-            },
-        )?;
-        state.generation = response.generation;
-        match response.outcome {
-            Outcome::StatusRecords { records, next } => {
-                for record in records {
-                    record.apply(&mut state);
-                }
-                match next {
-                    Some(cursor) => after = Some(cursor),
-                    None => return Ok(state),
-                }
-            }
+        let (records, next) = match ask(Command::StatusRecords { after })? {
+            Outcome::StatusRecords { records, next } => (records, next),
             Outcome::Error { code, message } => return Err(format!("{code}: {message}").into()),
             other => return Err(format!("unexpected reply to a status page: {other:?}").into()),
+        };
+        for record in records {
+            let record = match record {
+                StatusRecord::Part { text, offset, last } => {
+                    if offset == 0 {
+                        part.clear();
+                    } else if u64::try_from(part.len()).ok() != Some(offset) {
+                        return Err(format!(
+                            "a status record part starts at byte {offset}, but {} byte(s) of it were read; read the state again",
+                            part.len()
+                        )
+                        .into());
+                    }
+                    if part.len() + text.len() > MAX_RECORD_BYTES {
+                        return Err(format!(
+                            "a status record is larger than {MAX_RECORD_BYTES} bytes"
+                        )
+                        .into());
+                    }
+                    part.push_str(&text);
+                    if !last {
+                        continue;
+                    }
+                    let record: StatusRecord = serde_json::from_str(&std::mem::take(&mut part))
+                        .map_err(|error| format!("a status record's parts do not join: {error}"))?;
+                    if matches!(record, StatusRecord::Part { .. }) {
+                        return Err("a status record part holds another part".into());
+                    }
+                    record
+                }
+                // A record begun on the last page that is now given whole
+                // changed meanwhile; the whole one is current.
+                record => {
+                    part.clear();
+                    record
+                }
+            };
+            record
+                .apply(&mut state)
+                .map_err(|error| format!("{}: {}", error.code, error.message))?;
+        }
+        match next {
+            Some(cursor) => after = Some(cursor),
+            None => return Ok(state),
         }
     }
     Err(format!("status records did not end within {MAX_STATUS_PAGES} pages").into())
+}
+
+/// One read-only request to the coordinator at `state_dir`, as `ask` gives
+/// it to `read_all` and `status_with`. The generation it was answered in is
+/// kept in `generation`.
+fn read(
+    state_dir: &std::path::Path,
+    generation: &mut u64,
+    command: langspan_core::Command,
+) -> Result<langspan_core::Outcome, crate::Error> {
+    let response = call(
+        state_dir,
+        &crate::protocol::Request {
+            version: crate::protocol::PROTOCOL_VERSION,
+            request_id: "read".into(),
+            command,
+        },
+    )?;
+    *generation = response.generation;
+    Ok(response.outcome)
+}
+
+/// Every record of the state, as `read_all` reads it from the coordinator
+/// at `state_dir`. The generation is the one the last page was answered in.
+pub fn full_state(state_dir: &std::path::Path) -> Result<langspan_core::State, crate::Error> {
+    let mut generation = 0;
+    let mut state = read_all(|command| read(state_dir, &mut generation, command))?;
+    state.generation = generation;
+    Ok(state)
+}
+
+/// The bounded status view, with each part named in `needed` complete: if
+/// the view left one out to fit a frame, it is read back from every record
+/// (`read_all`). A caller that decides from one of these parts (a retry's
+/// earlier landing, a workspace's scan) names it here rather than trusting
+/// a view that may have left it out. Names are those of
+/// `StatusSummary::omitted`.
+pub fn status_with(
+    mut ask: impl FnMut(langspan_core::Command) -> Result<langspan_core::Outcome, crate::Error>,
+    needed: &[&str],
+) -> Result<(langspan_core::State, langspan_core::StatusSummary), crate::Error> {
+    use langspan_core::{Command, Outcome};
+    let (mut view, mut summary) = match ask(Command::Status)? {
+        Outcome::Status { state, summary } => (state, summary.unwrap_or_default()),
+        Outcome::Error { code, message } => return Err(format!("{code}: {message}").into()),
+        other => return Err(format!("unexpected reply to status: {other:?}").into()),
+    };
+    if summary
+        .omitted
+        .iter()
+        .any(|name| needed.contains(&name.as_str()))
+    {
+        let full = read_all(&mut ask)?;
+        langspan_core::restore_status(&mut view, &mut summary, &full, needed);
+    }
+    Ok((view, summary))
+}
+
+/// `status_with` from the coordinator at `state_dir`.
+pub fn status_from(
+    state_dir: &std::path::Path,
+    needed: &[&str],
+) -> Result<(langspan_core::State, langspan_core::StatusSummary), crate::Error> {
+    let mut generation = 0;
+    status_with(|command| read(state_dir, &mut generation, command), needed)
 }
 
 #[cfg(not(unix))]

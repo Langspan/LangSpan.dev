@@ -205,11 +205,16 @@ fn a_page_resumes_after_its_cursor_at_every_split_without_loss_or_repeat() {
                 .collect(),
         );
     }
-    let all: Vec<(String, StatusRecord)> = status_records(&state, None).unwrap().collect();
+    let all: Vec<(String, StatusRecord)> = status_records(&state, None)
+        .unwrap()
+        .1
+        .map(|(position, record)| (position.after(), record))
+        .collect();
     assert_eq!(all.len(), 1 + 5 + 5 + 5 + 9);
     for split in 0..all.len() {
         let rest: Vec<StatusRecord> = status_records(&state, Some(&all[split].0))
             .unwrap()
+            .1
             .map(|(_, record)| record)
             .collect();
         let expected: Vec<StatusRecord> = all[split + 1..]
@@ -223,9 +228,31 @@ fn a_page_resumes_after_its_cursor_at_every_split_without_loss_or_repeat() {
         ..State::default()
     };
     for (_, record) in all {
-        record.apply(&mut rebuilt);
+        record.apply(&mut rebuilt).unwrap();
     }
     assert_eq!(rebuilt, state);
+}
+
+#[test]
+fn a_cursor_position_at_the_integer_limit_is_refused_not_overflowed() {
+    let mut state = base();
+    state.notes.insert(
+        "w".into(),
+        vec![Note {
+            note_id: "n".into(),
+            workspace_id: "w".into(),
+            author: None,
+            text: "note".into(),
+            paths: Vec::new(),
+        }],
+    );
+    // The position after this one does not exist: before the fix, adding one
+    // to it panicked in a debug build and wrapped to the first in release.
+    let cursor = format!("note:{}:w", usize::MAX);
+    match status_records(&state, Some(&cursor)) {
+        Err(error) => assert_eq!(error.code, "invalid_cursor"),
+        Ok((_, records)) => panic!("accepted, giving {} record(s)", records.count()),
+    }
 }
 
 #[test]

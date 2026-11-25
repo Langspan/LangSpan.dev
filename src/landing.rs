@@ -406,11 +406,11 @@ pub fn ask(
     Ok(response)
 }
 
+/// The status view with every landing in it: a retry is recognised by the
+/// landing it already made, so a view that left landings out to fit a
+/// frame would run the same landing again.
 fn read_state(state_dir: &Path) -> Result<State, crate::Error> {
-    match ask(state_dir, "read".into(), Command::Status)?.outcome {
-        Outcome::Status { state, .. } => Ok(state),
-        _ => Err("the daemon did not return its state".into()),
-    }
+    client::status_from(state_dir, &["landings"]).map(|(state, _)| state)
 }
 
 /// The registered root of `workspace`.

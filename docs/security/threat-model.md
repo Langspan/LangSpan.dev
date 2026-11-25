@@ -537,8 +537,13 @@ use a new ID for a new operation. A transport error remains unknown/unavailable.
 admissions and live or recent sessions, counts closed admissions per session,
 and names anything else it left out to fit. `status --all` pages through every
 record after an opaque cursor, each page within the same byte budget as event
-reads; a cursor the coordinator did not give is refused, never guessed at.
-Records read across pages are each as they were when their page was answered.
+reads; a cursor the coordinator did not give is refused, never guessed at,
+including a position at the integer limit. Records read across pages are each
+as they were when their page was answered. A record larger than a page is sent
+in parts that the reader joins, up to 8 MiB, and resumes inside a record only
+if its JSON is unchanged; otherwise it starts that record again. Decisions that
+need a part the bounded view may leave out (landing retries, doctor, automatic
+checks) read it complete instead of treating it as absent.
 Coverage aggregation and retention are unfinished. macOS path,
 transport, sleep/resume and signing behavior, and Windows transport, need their
 own validation. Remote publication requires a separate concrete owner-approved
