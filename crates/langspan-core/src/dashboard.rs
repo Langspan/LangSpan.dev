@@ -385,7 +385,7 @@ fn bounded<T>(
 
 /// `host` and the first characters of the host's session ID, the way a
 /// publication names a session.
-fn host_and_prefix(session_id: &str) -> (String, String) {
+pub(crate) fn host_and_prefix(session_id: &str) -> (String, String) {
     let (host, id) = session_id.split_once('.').unwrap_or(("agent", session_id));
     (
         host.chars().take(32).collect(),

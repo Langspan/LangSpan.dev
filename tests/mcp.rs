@@ -193,6 +193,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
             "langspan_session_register",
             "langspan_status",
             "langspan_symbol",
+            "langspan_today",
             "langspan_workspace_register",
         ])
     );
@@ -222,6 +223,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_impact"
                 | "langspan_blind_spots"
                 | "langspan_recap"
+                | "langspan_today"
                 | "langspan_land_queue"
         ) {
             assert!(

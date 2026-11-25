@@ -10,6 +10,7 @@ mod dashboard;
 mod lines;
 mod status;
 mod status_line;
+mod today;
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
@@ -23,6 +24,11 @@ pub use status::{
 pub use status_line::{
     ClockAnchor, MAX_REFUSALS, REFUSAL_PATHS, REFUSAL_RETENTION_MS, RecentRefusal, RefusalKind,
     StatusLine, status_line,
+};
+pub use today::{
+    OpenAdmission, OpenCheck, OpenIntent, OpenMessage, TODAY_EVENTS, TODAY_FILES, TODAY_OPEN,
+    TODAY_SESSIONS, Today, TodayChecks, TodayLandings, TodayOpen, TodayQuery, TodaySession,
+    TodayWindow, today,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1524,7 +1530,7 @@ pub enum Event {
         generation: u64,
     },
     /// The daemon's clock read with the wall clock as a generation started,
-    /// so its times can be placed on a day.
+    /// so its times can be placed on a day (the status line, `langspan today`).
     ClockAnchored {
         anchor: ClockAnchor,
     },
@@ -2068,6 +2074,14 @@ pub enum Command {
     Recap {
         workspace_id: String,
     },
+    /// Read-only, answered from the event log: what happened since
+    /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
+    /// every workspace when none is named, and what is still open.
+    Today {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        from_ms: u64,
+    },
     /// Read-only: the person's status line for the directory `root`, with
     /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
     StatusLine {
@@ -2501,6 +2515,14 @@ enum CommandWire {
     Recap {
         workspace_id: String,
     },
+    /// Read-only, answered from the event log: what happened since
+    /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
+    /// every workspace when none is named, and what is still open.
+    Today {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        from_ms: u64,
+    },
     /// Read-only: the person's status line for the directory `root`, with
     /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
     StatusLine {
@@ -2896,6 +2918,9 @@ pub enum Outcome {
     },
     Recap {
         recap: Recap,
+    },
+    Today {
+        today: Today,
     },
     StatusLine {
         line: StatusLine,
@@ -4637,6 +4662,7 @@ fn decide_checked(
             })
         }
         Command::Events { .. }
+        | Command::Today { .. }
         | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
