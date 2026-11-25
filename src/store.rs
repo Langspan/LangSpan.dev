@@ -421,6 +421,7 @@ impl Store {
                 | Command::Changes { .. }
                 | Command::RemoteOutbox { .. }
                 | Command::RemoteSent { .. }
+                | Command::ShowMessage { .. }
                 | Command::CheckStatus { .. }
                 | Command::LandingReadiness { .. }
                 | Command::TurnQueue { .. }
@@ -538,6 +539,10 @@ impl Store {
                 workspace_id,
                 limit,
             } => self.sent(workspace_id, *limit)?,
+            Command::ShowMessage {
+                workspace_id,
+                message_id,
+            } => self.show_message(workspace_id, message_id)?,
             Command::Changes {
                 workspace_id,
                 after,
@@ -841,6 +846,57 @@ impl Store {
             sent.push(record);
         }
         Ok(Outcome::RemoteSent { sent, more })
+    }
+
+    /// One message as it was sent, read from its `message_sent` event, so
+    /// it is there after every recipient has acknowledged it and the
+    /// projection has dropped it. Read-only and never recorded. Messages
+    /// are rare, so the scan reads few rows past the cheap prefix test; a
+    /// sent message is at most 400 bytes of text and 8 paths, so the answer
+    /// fits a frame.
+    fn show_message(&self, workspace_id: &str, message_id: &str) -> StoreResult<Outcome> {
+        if !self.state.workspaces.contains_key(workspace_id) {
+            return Ok(Outcome::Error {
+                code: "unknown_workspace".into(),
+                message: format!(
+                    "no workspace {workspace_id:?} is registered; `langspan status` lists them"
+                ),
+            });
+        }
+        if let Err(error) = langspan_core::validate_request_id(message_id) {
+            return Ok(Outcome::Error {
+                code: error.code,
+                message: error.message,
+            });
+        }
+        let stored: Option<String> = self
+            .connection
+            .query_row(
+                r#"SELECT event_json FROM events
+                 WHERE event_json LIKE '{"type":"message_sent",%'
+                   AND json_valid(event_json)
+                   AND json_extract(event_json, '$.type') = 'message_sent'
+                   AND json_extract(event_json, '$.message.workspace_id') = ?1
+                   AND json_extract(event_json, '$.message.message_id') = ?2
+                 ORDER BY seq DESC LIMIT 1"#,
+                params![workspace_id, message_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(stored) = stored else {
+            return Ok(Outcome::Error {
+                code: "unknown_message".into(),
+                message: format!(
+                    "no message {message_id:?} was sent in workspace {workspace_id:?}; `langspan recap {workspace_id}` lists the messages still pending"
+                ),
+            });
+        };
+        let Event::MessageSent { message } = serde_json::from_str(&stored)? else {
+            return Err("a message_sent row holds another event".into());
+        };
+        Ok(Outcome::MessageShown {
+            message: message.into(),
+        })
     }
 
     fn changes(&self, workspace_id: &str, after: u64, limit: u32) -> StoreResult<Outcome> {

@@ -61,7 +61,9 @@ Over MCP the same operations are the tools `langspan_status`,
 `langspan_my_changes`, `langspan_commit_mine`, `langspan_integrate_check`, `langspan_land` and
 `langspan_land_queue`. `langspan_brief` shows the peer work you would be told
 about, `langspan_recap` gives a bounded account of the workspace, and
-`langspan_send_message` sends one line to another session.
+`langspan_send_message` sends one line to another session. A message line
+that ends with `(cut; langspan messages show WORKSPACE ID)` was shortened;
+`langspan_show_message` returns it in full.
 
 ## What never to do
 

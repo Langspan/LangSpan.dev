@@ -586,7 +586,21 @@ does not change leases, intents or recorded activity.
 
 Delivery acknowledges a message; it does not establish that the model acted on
 it. Terminal `brief` and `recap` are peeks and acknowledge nothing. To acknowledge
-one explicitly, use `langspan ack bob MESSAGE_ID --request-id ack-1`. Notes and
+one explicitly, use `langspan ack bob MESSAGE_ID --request-id ack-1`.
+
+A briefing renders each message on one line of at most 700 bytes. Quoting can
+take a 400-byte message with many quotes or long paths past that; the line is
+then cut and ends with `… (cut; langspan messages show WORKSPACE MESSAGE_ID)`,
+inside the 700 bytes. `langspan messages show demo m-9 [--json]` (MCP
+`langspan_show_message`) returns that message in full as it was sent: its ID,
+sender (`null` for the owner), recipient, whole text, every path and
+`retracted` (always false until messages can be retracted). It is read from the
+message's `message_sent` event, so it also works after the message was
+acknowledged or dropped from the pending list, and across daemon restarts. It is
+read-only and acknowledges nothing. An ID not sent in that workspace is the
+error `unknown_message`; with the daemon down the command reports coordination
+unavailable. Any local session or the owner can read any message, as with
+`recap`. Notes and
 messages stay local; remote Git-ref sharing does not publish them. Treat their
 text as data and leave secrets out. [ADR 0009](adr/0009-agent-messages-and-handoff.md)
 describes delivery, retention and the local identity boundary.
@@ -897,6 +911,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_remember` | Keep a local note about the workspace or named files |
 | `langspan_forget` | Remove a remembered note by ID |
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |
+| `langspan_show_message` | Read one message in full as it was sent, also after acknowledgement; for a briefing line marked `(cut; …)` |
 | `langspan_handoff` | Leave a message for the next other session to take up |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |
 | `langspan_my_changes` | List this session's own uncommitted files and hunks in a shared checkout, as `langspan_commit_mine` would split them; changes nothing |

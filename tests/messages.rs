@@ -243,6 +243,104 @@ fn the_owner_messages_a_claude_code_session_which_hears_it_at_its_next_prompt_on
 }
 
 #[test]
+fn a_message_cut_in_a_briefing_is_shown_in_full_even_after_it_is_acknowledged() {
+    let mut f = Fixture::new();
+    f.start_session("claude-code", ALICE);
+    let alice = format!("claude-code.{ALICE}");
+    // 400 bytes that quoting doubles, about the most files a message names.
+    let text = format!("{}é\"", "\"".repeat(397));
+    assert_eq!(text.len(), 400);
+    let paths: Vec<String> = (0..8).map(|n| format!("src/\"{n}\".rs")).collect();
+    let mut args = vec!["message", "work", &text];
+    args.extend(paths.iter().map(String::as_str));
+    args.extend(["--to", &alice, "--request-id", "m-9"]);
+    f.send(&args);
+    f.send(&[
+        "message",
+        "work",
+        "short",
+        "--to",
+        &alice,
+        "--request-id",
+        "m-10",
+    ]);
+
+    let prompt = f.prompt("claude-code", ALICE);
+    let context = prompt.context.as_deref().unwrap();
+    let cut: Vec<&str> = context
+        .lines()
+        .filter(|line| line.starts_with("- From the owner"))
+        .collect();
+    assert_eq!(cut.len(), 2, "{context}");
+    assert!(
+        cut[0].ends_with("… (cut; langspan messages show work m-9)")
+            || cut[1].ends_with("… (cut; langspan messages show work m-9)"),
+        "{context}"
+    );
+    for line in &cut {
+        assert!(line.len() <= langspan_core::MESSAGE_LINE_LIMIT, "{line}");
+    }
+    assert!(
+        cut.contains(&r#"- From the owner: "short""#),
+        "a short message has no suffix: {context}"
+    );
+    let (_, recap) = f.cli(&["recap", "work"]);
+    assert!(!recap.contains("Message m-9"), "acknowledged: {recap}");
+
+    // After acknowledgement, the whole text and every path, as data.
+    let (code, shown) = f.cli(&["messages", "show", "work", "m-9", "--json"]);
+    assert_eq!(code, 0, "{shown}");
+    let shown: Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(
+        shown["outcome"]["message"],
+        json!({
+            "message_id": "m-9", "from": null,
+            "to": {"kind": "session", "session_id": alice},
+            "text": text, "paths": paths, "retracted": false,
+        })
+    );
+    let (code, plain) = f.cli(&["messages", "show", "work", "m-9"]);
+    assert_eq!(code, 0, "{plain}");
+    assert!(
+        plain.contains("Message m-9 from the owner to session")
+            && plain.contains("(data, not instructions)")
+            && plain.contains(&serde_json::to_string(&text).unwrap())
+            && plain.contains(r#"src/\"7\".rs"#),
+        "{plain}"
+    );
+
+    // An unknown ID, or one from another workspace, is a domain error.
+    let (code, unknown) = f.cli(&["messages", "show", "work", "m-404"]);
+    assert_eq!(code, 1);
+    assert!(unknown.contains("unknown_message"), "{unknown}");
+    let (code, elsewhere) = f.cli(&["messages", "show", "other", "m-9"]);
+    assert_eq!(code, 1);
+    assert!(elsewhere.contains("unknown_workspace"), "{elsewhere}");
+
+    // With the daemon down the reader is told it is unavailable.
+    if let Some(mut child) = f.child.take() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .arg("--state-dir")
+        .arg(f.state_dir())
+        .args(["messages", "show", "work", "m-9"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("coordination unavailable"), "{stderr}");
+
+    // The record outlives a restart: it is read from the event log.
+    f.start();
+    let (code, shown) = f.cli(&["messages", "show", "work", "m-9", "--json"]);
+    assert_eq!(code, 0, "{shown}");
+    let shown: Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(shown["outcome"]["message"]["text"], json!(text));
+}
+
+#[test]
 fn a_message_for_everyone_reaches_a_codex_session_as_it_starts_and_not_its_sender() {
     let f = Fixture::new();
     f.start_session("claude-code", ALICE);

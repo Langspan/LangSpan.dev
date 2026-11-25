@@ -364,6 +364,32 @@ fn v3_briefing_with_messages_matches_the_committed_golden_vector() {
 }
 
 #[test]
+fn v3_show_message_request_and_response_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/show-message-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::ShowMessage { workspace_id, message_id }
+            if workspace_id == "app" && message_id == "msg-1"
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+    let unknown = String::from_utf8_lossy(wire).replace(
+        r#""message_id":"msg-1""#,
+        r#""message_id":"msg-1","session_id":"x""#,
+    );
+    assert!(serde_json::from_str::<Request>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/show-message-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::MessageShown { message } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(message.paths, ["src/api.rs"]);
+    assert!(!message.retracted);
+    assert_eq!(encode(&response).unwrap(), wire);
+}
+
+#[test]
 fn v3_region_admission_matches_the_committed_golden_vector() {
     let wire = include_bytes!("../fixtures/admit-regions-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();

@@ -125,7 +125,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [E9: Messages to sessions on other machines](https://github.com/Langspan/LangSpan.dev/issues/65): agents on two machines cannot message each other, so their owners relay by hand.
 - [E11: Withdraw a sent message](https://github.com/Langspan/LangSpan.dev/issues/66): a message that no longer holds keeps reaching sessions and steering them.
 - [E12: Ask who received a message](https://github.com/Langspan/LangSpan.dev/issues/67): a sender cannot tell whether its message has reached the other session yet.
-- [E13: Show a shortened message in full](https://github.com/Langspan/LangSpan.dev/issues/68): a message cut short in a briefing cannot be read in full.
 
 ## F. Checks and landing
 

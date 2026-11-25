@@ -42,6 +42,21 @@ it, and leaves state once no session of the workspace registered in the current
 daemon generation is still owed it; a session that registers while it is still
 held receives it too. The event log keeps the whole history.
 
+**A cut line names how to read the rest** (25 November 2026, roadmap E13). An
+adapter renders a message on one line of at most `MESSAGE_LINE_LIMIT` (700)
+bytes. Quoting can take a 400-byte message with many quotes or long paths
+past it; the cut line then ends with `… (cut; langspan messages show
+WORKSPACE ID)`, inside the limit, so the core's per-briefing bound is
+unchanged. `ShowMessage` (`langspan messages show`, MCP
+`langspan_show_message`) is a read the store answers from the newest
+`message_sent` event with that ID in that workspace, so it works after
+acknowledgement, after the cap drops the message from state, and across
+restarts; it is never recorded and acknowledges nothing. It returns the ID,
+sender, recipient, text, paths and `retracted`, always false until a message
+can be retracted (roadmap E11). An unknown ID is `unknown_message`. It reads
+what `recap` and `events` already expose to any local session, so it adds no
+trust boundary.
+
 **Handoffs wait for a start or a prompt.** The `Brief` command gained an
 optional `mid_turn` field, false when absent. The Claude Code hook sets it on
 the briefing it returns after a completed tool call; that briefing carries
