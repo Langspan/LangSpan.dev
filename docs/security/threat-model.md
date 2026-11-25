@@ -33,6 +33,7 @@ repository instructions.
 | Persisted JSON → replay and read views | Versioned schema, validated replay, preserved historical records, one owner and atomic event/receipt or event/snapshot commits. An event that does not parse stops the store opening; a receipt that does not parse is skipped and its request refused on retry ([ADR 0015](../adr/0015-version-tolerance.md)). |
 | Hook settings → disk | Dry run first, explicit apply, recognized owned entries only, preservation of unrelated settings and refusal of settings-file symlinks. |
 | Daemon → automatic check | Off by default; the owner's own command, set through the CLI only, run without a shell in its own process group within its time limit, outside any agent host's sandbox. Its output's redacted, bounded end reaches the event log and the triggering sessions' context as labelled data ([ADR 0030](../adr/0030-automatic-checks-after-write-batches.md)). |
+| Daemon → desktop notifier | Off by default; `osascript` or `notify-send` from the daemon's `PATH`, with a title and a body of at most 200 bytes (workspace, session, paths) as arguments, in its own process group, killed at 2 seconds, on a thread of its own ([Desktop notices](#desktop-notices)). |
 | Browser → dashboard (TCP) | Loopback by default, a per-run 256-bit token, a `Host` check against the arrival address, `GET` only, bounded heads and deadlines, read-only through the socket client ([ADR 0013](../adr/0013-dashboard.md)). |
 
 Intent text, filenames, branch names and another participant's identity are data.
@@ -163,6 +164,22 @@ one reported event (`record_refusal`, a held commit).
 | **Information disclosure**: the line shows another session's work | The line and `--json` carry counts and the workspace ID only, never a path, a session's task or a peer ID. Nothing is printed to the model: Claude Code shows the status line to the person only. Other stdin fields (transcript path, model, cost) are not read. | Anyone who can run the command as the owner sees the counts of every registered workspace by naming its directory, as `status` already shows. |
 | **Denial of service**: the line slows the host | One socket call; the whole command is bounded by its deadline (200 ms, 100 to 5000), and each `date` child is killed at it. On any failure it prints the unavailable line and exits 0. It never starts the coordinator or uses the network. The daemon answers from memory, keeping at most 1024 refusals from the last 48 hours. | Claude Code runs the command after each message; a few short process starts and one call each time. |
 | **Elevation of privilege** | The command writes nothing to the state directory and records nothing; it grants no admission and changes no permission. | Installing the status line is the owner's grant of a command run after each message; it is shown before it is written. |
+
+## Desktop notices
+
+`langspan notify` (roadmap H3, [ADR 0019](../adr/0019-person-facing-surfaces-and-usage-accounting.md))
+adds one boundary: the daemon starts the platform's notifier (`osascript` or
+`notify-send`, found on its `PATH`) as a child process, with text built from
+recorded events. It is off by default.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: another program answers to the notifier's name | Only an absolute directory of the daemon's own `PATH` is searched, for a regular executable file; relative entries are skipped. | Whoever controls the owner's `PATH` can already run any program as the owner. A same-user socket client can cause notices by fabricating refusals or handoffs, as it can fabricate other cooperative records; the limits bound how many are shown. |
+| **Tampering**: a path, workspace name or session ID changes what runs | Title and body are passed as arguments, never interpolated into AppleScript (`on run argv`) or a shell; `--` precedes them for `notify-send`, and the title comes first. Control characters are replaced. | `notify-send` servers may render simple markup in a body, so a file name holding tags can change how a notice looks, not what runs. |
+| **Repudiation** | Each notice sent or dropped is a log line with its kind and reason. No event is recorded. | The log is stderr and is kept only as long as whoever started the daemon keeps it. |
+| **Information disclosure**: a notice shows work on screen | Off unless the owner switches it on. The body names a directory name, short session IDs and at most three paths in 200 bytes; never a prompt, a message's or handoff's text, check output or file content. Nothing reaches the model and nothing leaves the machine. | Paths appear on the desktop and, depending on the system, in its notification history, where anyone at the screen can read them. |
+| **Denial of service**: notices slow coordination | Notices are raised after commit and handed to a dedicated thread through a queue of 16 with `try_send`; nothing waits for a notifier, which is killed with its process group at 2 seconds. At most one notice of a kind per 5 minutes and 10 an hour. | A notifier that always hangs holds the thread 2 seconds per notice, within the limits; dropped notices are logged. |
+| **Elevation of privilege** | The notifier runs as the owner with null stdio and the daemon's environment; it grants no admission and changes no state. `notify on|off` writes only `config.json`, owner-only, through a rename, refusing a file others can read. | Switching notices on is the owner's grant to run the notifier the daemon finds. |
 
 ## The LangSpan skill
 
