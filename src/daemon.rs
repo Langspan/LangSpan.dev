@@ -44,6 +44,9 @@ mod unix {
         /// How long a workspace's sessions must stop writing before its
         /// automatic check starts, so one burst of batches runs one check.
         auto_check_debounce_ms: u64,
+        /// A failing automatic check that took at most this long is run once
+        /// more on the same tree, to learn which tests flip; 0 turns it off.
+        flaky_rerun_max_s: u64,
         /// Desktop notices (roadmap H3): off unless switched on.
         notify: bool,
         /// A sound with each notice: off unless switched on.
@@ -66,6 +69,7 @@ mod unix {
                 max_clients: 32,
                 remote_pass_ms: 5000,
                 auto_check_debounce_ms: 2000,
+                flaky_rerun_max_s: 30,
                 notify: false,
                 notify_sound: false,
                 notify_kind_interval_ms: 300_000,
@@ -101,13 +105,14 @@ mod unix {
                 || !(1..=128).contains(&result.max_clients)
                 || !(200..=600_000).contains(&result.remote_pass_ms)
                 || !(50..=60_000).contains(&result.auto_check_debounce_ms)
+                || result.flaky_rerun_max_s > 3600
                 || !(1000..=86_400_000).contains(&result.notify_kind_interval_ms)
                 || !(1..=60).contains(&result.notify_hourly_limit)
                 || !(1000..=86_400_000).contains(&result.notify_handoff_after_ms)
                 || !(100..=86_400_000).contains(&result.host_check_ms)
             {
                 return Err(
-                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000"
+                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000"
                         .into(),
                 );
             }
@@ -700,16 +705,25 @@ mod unix {
                 .spawn(move || index_worker(index_receiver, sender, graph_path))?;
         }
         let (check_sender, check_receiver) = mpsc::sync_channel::<auto_check::Message>(256);
+        let write_counts = auto_check::WriteCounts::default();
         {
             let sender = sender.clone();
             let check_sender = check_sender.clone();
-            let debounce = Duration::from_millis(config.auto_check_debounce_ms);
+            let write_counts = write_counts.clone();
+            let timing = auto_check::Timing {
+                debounce: Duration::from_millis(config.auto_check_debounce_ms),
+                rerun_max: Duration::from_secs(config.flaky_rerun_max_s),
+            };
             std::thread::Builder::new()
                 .name("langspan-auto-checks".into())
                 .spawn(move || {
-                    auto_check::worker(check_sender, check_receiver, debounce, |id, command| {
-                        ask(&sender, id, command)
-                    })
+                    auto_check::worker(
+                        check_sender,
+                        check_receiver,
+                        timing,
+                        write_counts,
+                        |id, command| ask(&sender, id, command),
+                    )
                 })?;
         }
         let (notice_sender, notice_receiver) = mpsc::sync_channel::<notify::Notice>(notify::QUEUE);
@@ -870,6 +884,14 @@ mod unix {
                             }
                         }
                         next_scan = Instant::now() + Duration::from_secs(2);
+                    }
+                    // What the automatic-check worker marks a run with. Only
+                    // ever behind the state, so a stale mark refuses a
+                    // comparison and never allows one.
+                    let counts = &store.state().writes;
+                    let mut published = write_counts.lock().unwrap_or_else(|e| e.into_inner());
+                    if *published != *counts {
+                        published.clone_from(counts);
                     }
                 }
             })?;

@@ -461,6 +461,10 @@ fn a_failed_automatic_check_and_a_waiting_handoff_each_get_a_notice() {
                         tail: "assertion failed".into(),
                         timed_out_s: None,
                     }),
+                    tests: None,
+                    rerun: None,
+                    writes_before: None,
+                    command_id: None,
                 },
             },
         )
