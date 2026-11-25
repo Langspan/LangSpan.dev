@@ -66,17 +66,50 @@ pub const MAX_LOOKED_WORDS: usize = 16;
 /// The words of a command that name what it reads, for presence (roadmap
 /// A13): every operand of a program that only reads or lists the files it
 /// is given (`cat`, `head`, `ls`, ...), and the operands after the pattern
-/// of a search (`grep`, `rg`) whose options are all known flags without a
-/// value, so the pattern is never among them. Options are not operands.
-/// Anything the parser does not take, or any other program, gives nothing.
-/// The words are as written; the caller keeps only those that name an
-/// existing path in the checkout.
+/// of a search (`grep`, `rg`) whose options are all flags that program is
+/// known to take without a value, so the pattern is never among them. A
+/// search with any other option gives nothing. Options are not operands.
+/// After a command that can change the shell's directory (`cd`, `pushd`,
+/// `popd`, `source`, `.`, `eval`), only absolute operands are taken, since
+/// a relative one would be resolved against the wrong directory. Anything
+/// the parser does not take, or any other program, gives nothing. The
+/// words are as written; the caller keeps only those that name an existing
+/// path in the checkout.
 pub fn looked_at(command: &str) -> Vec<String> {
     const READERS: [&str; 13] = [
         "cat", "head", "tail", "less", "more", "wc", "nl", "ls", "stat", "file", "diff", "tree",
         "du",
     ];
-    const SEARCHERS: [&str; 4] = ["grep", "egrep", "fgrep", "rg"];
+    // Each search program's flags that take no value. A flag of one may
+    // take a value in another (`rg -E ENCODING`, `rg -r REPLACEMENT`).
+    const GREP: (&str, &[&str]) = (
+        "nrRilLcHhsFEwvoxqI",
+        &[
+            "--line-number",
+            "--ignore-case",
+            "--recursive",
+            "--files-with-matches",
+            "--count",
+            "--fixed-strings",
+            "--word-regexp",
+            "--invert-match",
+        ],
+    );
+    const RG: (&str, &[&str]) = (
+        "nilcHIFwvoxqusSLN",
+        &[
+            "--line-number",
+            "--ignore-case",
+            "--files-with-matches",
+            "--count",
+            "--fixed-strings",
+            "--word-regexp",
+            "--invert-match",
+            "--hidden",
+            "--no-heading",
+        ],
+    );
+    const DIRECTORY: [&str; 5] = ["cd", "pushd", "popd", "source", "eval"];
     if command.len() > MAX_COMMAND_BYTES {
         return Vec::new();
     }
@@ -84,6 +117,8 @@ pub fn looked_at(command: &str) -> Vec<String> {
         return Vec::new();
     };
     let mut looked = Vec::new();
+    // Set once a command may have changed the shell's directory.
+    let mut moved = false;
     for part in tokens.split(|token| *token == Token::Separator) {
         let mut words = Vec::new();
         let mut tokens = part.iter();
@@ -101,28 +136,18 @@ pub fn looked_at(command: &str) -> Vec<String> {
             continue;
         };
         let name = program.rsplit('/').next().unwrap_or(program);
+        let search = match name {
+            "grep" | "egrep" | "fgrep" => Some(GREP),
+            "rg" => Some(RG),
+            _ => None,
+        };
         let operands: Vec<&str> = if READERS.contains(&name) {
             args.iter()
                 .copied()
                 .filter(|arg| !arg.starts_with('-'))
                 .collect()
-        } else if SEARCHERS.contains(&name) {
-            match operands(
-                args,
-                "nrRilLcHhsFEwvoxqIuS",
-                &[
-                    "--line-number",
-                    "--ignore-case",
-                    "--recursive",
-                    "--files-with-matches",
-                    "--count",
-                    "--fixed-strings",
-                    "--word-regexp",
-                    "--invert-match",
-                    "--hidden",
-                    "--no-heading",
-                ],
-            ) {
+        } else if let Some((flags, long)) = search {
+            match operands(args, flags, long) {
                 // The first operand is the pattern.
                 Ok(operands) => operands.into_iter().skip(1).collect(),
                 Err(_) => Vec::new(),
@@ -130,7 +155,13 @@ pub fn looked_at(command: &str) -> Vec<String> {
         } else {
             Vec::new()
         };
-        for operand in operands {
+        let relative_ok = !moved;
+        // `command cd`, `builtin cd` or `X=1 cd` move the shell as well.
+        moved |= program == "." || words.iter().any(|word| DIRECTORY.contains(word));
+        for operand in operands
+            .into_iter()
+            .filter(|operand| relative_ok || operand.starts_with('/'))
+        {
             let operand = operand.trim_start_matches("./");
             if !operand.is_empty() && !looked.iter().any(|seen| seen == operand) {
                 looked.push(operand.to_owned());
@@ -1665,6 +1696,45 @@ mod parser {
         let many: String = (0..40).map(|i| format!("f{i} ")).collect();
         assert_eq!(words(&format!("cat {many}")).len(), MAX_LOOKED_WORDS);
         assert!(words(&format!("cat {}", "a".repeat(MAX_COMMAND_BYTES))).is_empty());
+    }
+
+    #[test]
+    fn a_search_option_that_takes_a_value_for_one_program_records_nothing() {
+        // `rg -E` names an encoding and `rg -r` a replacement: the word after
+        // either is a value, so the pattern would otherwise be taken as a path.
+        for command in [
+            "rg -E utf-8 src/auth.rs src",
+            "rg -r x src/auth.rs src",
+            "rg -nE utf-8 src/auth.rs src",
+            "rg --recursive src/auth.rs src",
+            "grep --hidden src/auth.rs src",
+            "rg -e src/auth.rs src",
+        ] {
+            assert!(looked_at(command).is_empty(), "{command}");
+        }
+        // Each program keeps its own flags without a value.
+        assert_eq!(looked_at("grep -rE 'a|b' src"), ["src"]);
+        assert_eq!(looked_at("rg -uS foo src"), ["src"]);
+    }
+
+    #[test]
+    fn a_change_of_directory_stops_relative_operands_after_it() {
+        for command in [
+            "cd src && cat auth.rs",
+            "pushd src && cat auth.rs",
+            "command cd src; ls auth.rs",
+            "source env.sh; cat auth.rs",
+            ". env.sh; cat auth.rs",
+            "eval cd src; cat auth.rs",
+        ] {
+            assert!(looked_at(command).is_empty(), "{command}");
+        }
+        assert_eq!(
+            looked_at("cat a.rs && cd src && cat b.rs /abs/c.rs"),
+            ["a.rs", "/abs/c.rs"],
+            "operands before the change and absolute ones after it remain"
+        );
+        assert_eq!(looked_at("ls . && cat a.rs"), [".", "a.rs"]);
     }
 
     #[test]
