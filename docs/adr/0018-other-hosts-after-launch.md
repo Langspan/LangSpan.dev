@@ -19,7 +19,7 @@ an edit, and nothing tells LangSpan whether the agent followed it.
 | A6 | Rules files for Windsurf, Cline, Copilot and `.cursor/rules` | Not now; after launch | Without hooks there is no admission and no briefing, only advice |
 | A7 | Detecting agent tools installed after setup | Not now | Install is an explicit owner step ([ADR 0010](0010-user-level-install.md)); running `langspan install` again covers a new host |
 | I7 | An AGENTS.md block and rules-file text | Not now | Comes with the rules-file hosts; it changes files in the owner's repository |
-| I8 | Agent skills that teach the tool's use | Not now | Briefings and MCP tool descriptions carry the guidance for hooked hosts |
+| I8 | Agent skills that teach the tool's use | Superseded: planned, part 1 built ([ADR 0034](0034-langspan-skill.md)) | The maintainers asked for it, and running LangSpan on its own development showed every agent needed the same instructions by hand |
 | I11 | MCP menu trimming: tools hidden from read-only members, and bookkeeping tools hidden once hooks report (added by the second review) | Not now | All 23 tools are always listed. Hiding tools once hooks run needs to know, per host, that they do, and the cost of the 23 descriptions has not been measured |
 
 The Gemini CLI part of row A6 is launch track L10, not this ADR.
@@ -35,4 +35,4 @@ The Gemini CLI part of row A6 is launch track L10, not this ADR.
 
 These rows are on the public roadmap. They are worked on in the open after the first
 release of `Langspan/LangSpan.dev`, by many agent sessions developing LangSpan with
-LangSpan itself; the release does not wait for them. What would change it: a host that gains hooks moves into the adapter work; rules-file hosts start once the four hooked hosts are released and their advice-only limit is written down; A7 and I8 follow a user report that re-running `langspan install` or the tool descriptions were not enough.
+LangSpan itself; the release does not wait for them. What would change it: a host that gains hooks moves into the adapter work; rules-file hosts start once the four hooked hosts are released and their advice-only limit is written down; A7 follows a user report that re-running `langspan install` was not enough. I8 is no longer decided here: [ADR 0034](0034-langspan-skill.md) records its first part.

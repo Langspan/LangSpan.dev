@@ -894,3 +894,355 @@ fn a_homebrew_install_names_the_stable_opt_path_and_survives_an_upgrade() {
         "{text}"
     );
 }
+
+const OWNER_AGENTS: &str = "# My Codex notes\n\nPrefer small commits.\n";
+const OWNER_GEMINI: &str = "# My Gemini notes\n\nAnswer briefly.\n";
+const SKILL_HOSTS: &str = "claude-code,codex,gemini-cli";
+
+impl Home {
+    fn skill_files(&self) -> Vec<(PathBuf, Option<String>)> {
+        [
+            ".claude/skills/langspan/SKILL.md",
+            ".codex/AGENTS.md",
+            ".gemini/GEMINI.md",
+            ".claude/settings.json",
+            ".claude.json",
+            ".codex/hooks.json",
+            ".codex/config.toml",
+            ".gemini/settings.json",
+        ]
+        .iter()
+        .map(|relative| {
+            let path = self.home().join(relative);
+            (path.clone(), fs::read_to_string(&path).ok())
+        })
+        .collect()
+    }
+    fn doctor_lines(&self) -> String {
+        String::from_utf8(self.langspan(&["doctor"]).stdout).unwrap()
+    }
+}
+
+#[test]
+fn the_skill_is_written_only_when_asked_reported_by_doctor_and_removed_exactly() {
+    use langspan::{install::Vendor, skill};
+    let home = Home::new();
+    home.claude_and_codex();
+    home.write(".codex/AGENTS.md", OWNER_AGENTS);
+    home.write(".gemini/GEMINI.md", OWNER_GEMINI);
+    let skill_md = home.home().join(".claude/skills/langspan/SKILL.md");
+
+    // Off by default: an install without --skill neither shows nor writes it.
+    home.ok(&["install", "--hosts", SKILL_HOSTS, "--apply"]);
+    assert!(!skill_md.exists());
+    assert_eq!(
+        fs::read_to_string(home.home().join(".codex/AGENTS.md")).unwrap(),
+        OWNER_AGENTS
+    );
+    let text = home.doctor_lines();
+    for host in ["claude-code", "codex", "gemini-cli"] {
+        assert!(
+            text.contains(&format!("ok {host}: the LangSpan skill is not installed")),
+            "{text}"
+        );
+    }
+    let before = home.skill_files();
+
+    // A dry run shows each host's form and its size, and writes nothing.
+    let dry = home.ok(&["install", "--skill", "--hosts", SKILL_HOSTS]);
+    for vendor in [Vendor::ClaudeCode, Vendor::Codex, Vendor::Gemini] {
+        let path = skill::path(
+            vendor,
+            &home.home().join(match vendor {
+                Vendor::ClaudeCode => ".claude",
+                Vendor::Codex => ".codex",
+                _ => ".gemini",
+            }),
+        );
+        assert!(
+            dry.contains(&format!("{} would become (", path.display())),
+            "{dry}"
+        );
+    }
+    assert!(dry.contains(skill::SOURCE.lines().next().unwrap()), "{dry}");
+    assert!(dry.contains("Dry run; nothing was written"), "{dry}");
+    assert_eq!(home.skill_files(), before);
+
+    home.ok(&["install", "--skill", "--hosts", SKILL_HOSTS, "--apply"]);
+    assert_eq!(
+        fs::read_to_string(&skill_md).unwrap(),
+        skill::render(Vendor::ClaudeCode)
+    );
+    assert_eq!(
+        fs::metadata(&skill_md).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    for (relative, owner, vendor) in [
+        (".codex/AGENTS.md", OWNER_AGENTS, Vendor::Codex),
+        (".gemini/GEMINI.md", OWNER_GEMINI, Vendor::Gemini),
+    ] {
+        let text = fs::read_to_string(home.home().join(relative)).unwrap();
+        assert!(text.starts_with(owner), "{text}");
+        assert!(text.ends_with(&skill::render(vendor)), "{text}");
+    }
+    let text = home.doctor_lines();
+    for host in ["claude-code", "codex", "gemini-cli"] {
+        assert!(
+            text.contains(&format!(
+                "ok {host}: the LangSpan skill is installed and up to date"
+            )),
+            "{text}"
+        );
+    }
+    let again = home.ok(&["install", "--skill", "--hosts", SKILL_HOSTS, "--apply"]);
+    assert_eq!(again.matches("already matches").count(), 8, "{again}");
+
+    // A copy that differs from this version's is named, and replaced.
+    let installed = fs::read_to_string(&skill_md).unwrap();
+    fs::write(&skill_md, installed.replace("Never edit", "Do not edit")).unwrap();
+    let text = home.doctor_lines();
+    assert!(
+        text.contains("FIX claude-code: the LangSpan skill in")
+            && text.contains("differs from this version's"),
+        "{text}"
+    );
+    home.ok(&["install", "--skill", "--hosts", "claude-code", "--apply"]);
+    assert_eq!(fs::read_to_string(&skill_md).unwrap(), installed);
+
+    // Uninstall shows, then removes, exactly what was written: the owner's
+    // own text in AGENTS.md and GEMINI.md stays byte for byte.
+    let dry = home.ok(&["uninstall", "--hosts", SKILL_HOSTS]);
+    assert!(
+        dry.contains(&format!("{} would be removed.", skill_md.display())),
+        "{dry}"
+    );
+    home.ok(&["uninstall", "--hosts", SKILL_HOSTS, "--apply"]);
+    assert!(!skill_md.exists());
+    assert!(
+        !skill_md.parent().unwrap().exists(),
+        "its own folder goes too"
+    );
+    assert_eq!(
+        fs::read_to_string(home.home().join(".codex/AGENTS.md")).unwrap(),
+        OWNER_AGENTS
+    );
+    assert_eq!(
+        fs::read_to_string(home.home().join(".gemini/GEMINI.md")).unwrap(),
+        OWNER_GEMINI
+    );
+    // Removing what install wrote leaves nothing to remove.
+    let nothing = home.ok(&["uninstall", "--hosts", SKILL_HOSTS, "--apply"]);
+    assert!(!nothing.contains("SKILL.md"), "{nothing}");
+
+    // `--skill` is for install only.
+    assert!(!home.langspan(&["uninstall", "--skill"]).status.success());
+}
+
+#[test]
+fn a_skill_file_langspan_did_not_write_stops_the_install_and_is_kept() {
+    let home = Home::new();
+    home.claude_and_codex();
+    let mine = home.write(
+        ".claude/skills/langspan/SKILL.md",
+        "---\nname: langspan\n---\nMine.\n",
+    );
+    let before = home.skill_files();
+    let output = home.langspan(&["install", "--skill", "--apply"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not written by LangSpan"),
+        "{output:?}"
+    );
+    // Nothing at all was written, hooks included.
+    assert_eq!(home.skill_files(), before);
+    let text = home.doctor_lines();
+    assert!(
+        text.contains("FIX") && text.contains("not written by LangSpan"),
+        "{text}"
+    );
+    home.ok(&["install", "--apply"]);
+    home.ok(&["uninstall", "--apply"]);
+    assert_eq!(
+        fs::read_to_string(&mine).unwrap(),
+        "---\nname: langspan\n---\nMine.\n"
+    );
+    // Without a skill to write, the install of every other host goes ahead.
+    assert!(!home.home().join(".codex/AGENTS.md").exists());
+}
+
+#[test]
+fn guidance_files_that_are_symlinks_do_not_stop_uninstall_and_are_left_alone() {
+    let home = Home::new();
+    home.claude_and_codex();
+    // The owner keeps both guidance files in their dotfiles, linked in.
+    let dotfiles = home.base.join("dotfiles");
+    fs::create_dir_all(&dotfiles).unwrap();
+    for (relative, owner, name) in [
+        (".codex/AGENTS.md", OWNER_AGENTS, "AGENTS.md"),
+        (".gemini/GEMINI.md", OWNER_GEMINI, "GEMINI.md"),
+    ] {
+        let target = dotfiles.join(name);
+        fs::write(&target, owner).unwrap();
+        let link = home.home().join(relative);
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+    }
+    home.ok(&["install", "--hosts", SKILL_HOSTS, "--apply"]);
+    let text = home.doctor_lines();
+    for host in ["codex", "gemini-cli"] {
+        assert!(
+            text.contains(&format!("ok {host}: ")) && text.contains("is a symlink"),
+            "{text}"
+        );
+        assert!(!text.contains(&format!("FIX {host}: ")), "{text}");
+    }
+
+    let removed = home.ok(&["uninstall", "--hosts", SKILL_HOSTS, "--apply"]);
+    assert!(!removed.contains("AGENTS.md"), "{removed}");
+    assert!(
+        !home.home().join(".codex/hooks.json").exists()
+            || !fs::read_to_string(home.home().join(".codex/hooks.json"))
+                .unwrap()
+                .contains("langspan"),
+        "the hooks were removed"
+    );
+    for (relative, owner, name) in [
+        (".codex/AGENTS.md", OWNER_AGENTS, "AGENTS.md"),
+        (".gemini/GEMINI.md", OWNER_GEMINI, "GEMINI.md"),
+    ] {
+        let link = home.home().join(relative);
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(fs::read_to_string(dotfiles.join(name)).unwrap(), owner);
+    }
+
+    // Writing the skill through a symlink is still refused.
+    let output = home.langspan(&["install", "--skill", "--hosts", "codex", "--apply"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("symlink"),
+        "{output:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(dotfiles.join("AGENTS.md")).unwrap(),
+        OWNER_AGENTS
+    );
+}
+
+#[test]
+fn doctor_warns_when_codex_would_not_read_the_whole_section() {
+    use langspan::{install::Vendor, skill};
+    let home = Home::new();
+    home.claude_and_codex();
+    // The owner's own text before the section nearly fills Codex's budget.
+    let long = format!("# Notes\n\n{}\n", "x".repeat(30 * 1024));
+    home.write(".codex/AGENTS.md", &long);
+    home.ok(&["install", "--skill", "--hosts", "codex", "--apply"]);
+    let text = home.doctor_lines();
+    assert!(
+        text.contains("FIX codex: ") && text.contains("32 KiB"),
+        "{text}"
+    );
+
+    // Within the budget, nothing is said about it.
+    home.write(
+        ".codex/AGENTS.md",
+        &format!("{OWNER_AGENTS}\n{}", skill::render(Vendor::Codex)),
+    );
+    let text = home.doctor_lines();
+    assert!(!text.contains("32 KiB"), "{text}");
+    assert!(!text.contains("FIX codex"), "{text}");
+
+    // AGENTS.override.md is read instead of AGENTS.md.
+    home.write(".codex/AGENTS.override.md", "# Override\n");
+    let text = home.doctor_lines();
+    assert!(
+        text.contains("FIX codex: ") && text.contains("AGENTS.override.md"),
+        "{text}"
+    );
+}
+
+#[test]
+fn cursor_gets_the_skill_as_a_project_rule_that_hooks_remove_takes_away() {
+    use langspan::{install::Vendor, skill};
+    let home = Home::new();
+    let root = home.repo("project");
+    let hooks = |args: &[&str]| {
+        Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .args(args)
+            .arg("--root")
+            .arg(&root)
+            .arg("--state-dir")
+            .arg(home.state_dir())
+            .output()
+            .unwrap()
+    };
+    let rule = root.join(".cursor/rules/langspan.mdc");
+    let dry = hooks(&[
+        "hooks",
+        "install",
+        "cursor",
+        "--workspace",
+        "demo",
+        "--skill",
+    ]);
+    assert!(dry.status.success(), "{dry:?}");
+    let dry = String::from_utf8(dry.stdout).unwrap();
+    assert!(
+        dry.contains(&format!("{} would become (", rule.display())),
+        "{dry}"
+    );
+    assert!(!rule.exists());
+
+    let applied = hooks(&[
+        "hooks",
+        "install",
+        "cursor",
+        "--workspace",
+        "demo",
+        "--skill",
+        "--apply",
+    ]);
+    assert!(applied.status.success(), "{applied:?}");
+    assert_eq!(
+        fs::read_to_string(&rule).unwrap(),
+        skill::render(Vendor::Cursor)
+    );
+    let doctor = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .args(["doctor", "--root"])
+        .arg(&root)
+        .arg("--home")
+        .arg(home.home())
+        .arg("--state-dir")
+        .arg(home.state_dir())
+        .output()
+        .unwrap();
+    let text = String::from_utf8(doctor.stdout).unwrap();
+    assert!(
+        text.contains("ok cursor: the LangSpan skill is installed and up to date"),
+        "{text}"
+    );
+
+    // Only Cursor takes the rule from `hooks install`.
+    let refused = hooks(&[
+        "hooks",
+        "install",
+        "claude-code",
+        "--workspace",
+        "demo",
+        "--skill",
+    ]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("langspan install --skill"));
+
+    let removed = hooks(&["hooks", "remove", "cursor", "--apply"]);
+    assert!(removed.status.success(), "{removed:?}");
+    assert!(!rule.exists());
+    assert!(
+        !root.join(".cursor/hooks.json").exists() || {
+            let settings: Value =
+                serde_json::from_str(&fs::read_to_string(root.join(".cursor/hooks.json")).unwrap())
+                    .unwrap();
+            settings.get("hooks").is_none()
+        }
+    );
+}
