@@ -705,8 +705,9 @@ pub struct Record {
     /// as a running command does.
     #[serde(default)]
     pub background: bool,
-    /// The command runs `langspan commit --mine`: while it runs, that
-    /// command may take its session from this record (ADR 0026).
+    /// The command runs `langspan commit --mine` or `langspan status
+    /// --mine`: while it runs, that command may take its session from this
+    /// record (ADR 0026).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub commit_mine: bool,
     /// Once finished: of `changed`, the paths another session's hooked edit
@@ -735,13 +736,17 @@ impl Record {
     }
 }
 
-/// Whether a shell command runs `langspan commit --mine`.
+/// Whether a shell command runs `langspan commit --mine` or `langspan status
+/// --mine`, which take their session from the running call.
 pub fn runs_commit_mine(command: &str) -> bool {
-    command.contains("langspan") && command.contains("commit") && command.contains("--mine")
+    command.contains("langspan")
+        && (command.contains("commit") || command.contains("status"))
+        && command.contains("--mine")
 }
 
-/// The sessions with a `langspan commit --mine` command running now in the
-/// physical workspace `workspace`, from their run records. A session's open
+/// The sessions with a `langspan commit --mine` (or `status --mine`)
+/// command running now in the physical workspace `workspace`, from their
+/// run records. A session's open
 /// records are closed when its reply or the session ends (`close_session`),
 /// so an ended session is not among them.
 pub fn committing_sessions(state_dir: &Path, workspace: &Path) -> BTreeSet<String> {

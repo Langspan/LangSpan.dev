@@ -185,6 +185,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
             "langspan_land_cancel",
             "langspan_land_queue",
             "langspan_intent_set",
+            "langspan_my_changes",
             "langspan_recap",
             "langspan_references",
             "langspan_remember",

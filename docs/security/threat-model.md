@@ -246,7 +246,11 @@ session's edit for its own (issue #1).
 journal under `STATE/journal/`; the `Bash` pre-tool hook reads the index and
 working tree through Git before a staging or commit command and can deny it;
 `langspan commit --mine` and `langspan_commit_mine` write a commit and the
-shared index.
+shared index. `langspan status --mine` and `langspan_my_changes` (issue #40)
+run the same reads and attribution and write nothing: no private index, no
+commit, Git with `--no-optional-locks`. They add no boundary; their output,
+like the deny reason, names other sessions' IDs, paths and line numbers, never
+line content, and is labelled as data in the MCP tool's description.
 
 | Concern | Behavior and remaining boundary |
 | --- | --- |

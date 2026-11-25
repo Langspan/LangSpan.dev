@@ -186,7 +186,10 @@ impl Fixture {
     fn write(&self, session: &str, call: &str, file: &str, content: &str) {
         let pre = self.write_event(session, "PreToolUse", call, file, content);
         assert_eq!(pre.coverage, "admitted", "{pre:?}");
-        fs::write(self.work().join(file), content).unwrap();
+        // The host makes a new file's directories, as Claude Code's does.
+        let path = self.work().join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
         let post = self.write_event(session, "PostToolUse", call, file, content);
         assert_eq!(post.coverage, "observed", "{post:?}");
     }
@@ -306,6 +309,30 @@ impl Fixture {
             .unwrap();
         assert!(status.success(), "{command}");
         self.bash(session, "PostToolUse", call, command)
+    }
+
+    /// A whole Claude Code `Edit` of `file`, returning its pre hook's run.
+    /// The edit is made, and its post hook sent, only when it was admitted.
+    fn edit(&self, session: &str, call: &str, file: &str, old: &str, new: &str) -> Run {
+        let path = self.work().join(file);
+        let input = json!({"file_path": path, "old_string": old, "new_string": new});
+        let pre = self.hook(json!({
+            "session_id": session, "cwd": self.work(), "hook_event_name": "PreToolUse",
+            "tool_name": "Edit", "tool_use_id": call, "tool_input": input,
+        }));
+        if pre.coverage != "admitted" {
+            return pre;
+        }
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains(old), "{file} lacks {old:?}");
+        fs::write(&path, content.replacen(old, new, 1)).unwrap();
+        let post = self.hook(json!({
+            "session_id": session, "cwd": self.work(), "hook_event_name": "PostToolUse",
+            "tool_name": "Edit", "tool_use_id": call, "tool_input": input,
+            "tool_response": {"filePath": path},
+        }));
+        assert_eq!(post.coverage, "observed", "{post:?}");
+        pre
     }
 
     fn head_files(&self) -> String {
@@ -726,4 +753,141 @@ fn a_full_edit_mark_directory_stays_bounded_and_credits_the_command_nothing() {
     assert_eq!(post.coverage, "contested", "{post:?}");
     assert!(f.credited(ALICE, "Bash").is_empty());
     assert_eq!(f.credited(BOB, "Write"), ["b.txt"]);
+}
+
+/// Issue #101: a file a session creates with a whole-file write is that
+/// session's version of it. With another session editing in the same
+/// checkout, a later edit of it from that version is admitted, not refused
+/// as changed outside any reported edit, and `commit --mine` commits the new
+/// file as the session's own.
+#[test]
+fn a_file_a_session_creates_is_its_own_to_edit_again_and_commit() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "tests/created.rs", "fn alice() {}\n");
+    f.write(BOB, "bob-1", "b.txt", "b line\nBob's line\n");
+
+    let edit = f.edit(
+        ALICE,
+        "alice-2",
+        "tests/created.rs",
+        "fn alice() {}",
+        "fn alice() { 1 }",
+    );
+    assert_eq!(edit.coverage, "admitted", "{edit:?}");
+    // Compared with the version the session wrote, not admitted as unknown.
+    assert!(edit.detail.contains("source version current"), "{edit:?}");
+
+    let ran = f.commit_mine(ALICE, "alice-3", "Alice: created");
+    assert!(
+        ran.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let head = f.head_files();
+    assert!(head.starts_with("Alice: created\n"), "{head}");
+    assert!(
+        head.contains("tests/created.rs") && !head.contains("b.txt"),
+        "{head}"
+    );
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:tests/created.rs"]),
+        "fn alice() { 1 }\n"
+    );
+    assert_eq!(f.status(), " M b.txt\n");
+}
+
+/// Issue #101, with a formatter: the session creates a file, reformats it
+/// from its shell with a command that also rewrites the other session's
+/// file, edits it again and commits it with `commit --mine`. The created
+/// file stays the session's throughout; the other session's file is left.
+#[test]
+fn a_file_a_session_creates_and_reformats_is_its_own_to_edit_again_and_commit() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "tests/created.rs", "fn alice(x,y) {}\n");
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+
+    let post = f.run_shell(
+        ALICE,
+        "alice-2",
+        &f.formatter(&["tests/created.rs", "b.txt"]),
+    );
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert_eq!(f.credited(ALICE, "Bash"), ["tests/created.rs"]);
+
+    let edit = f.edit(
+        ALICE,
+        "alice-3",
+        "tests/created.rs",
+        "fn alice(x, y) {}",
+        "fn alice(x, y) { x }",
+    );
+    assert_eq!(edit.coverage, "admitted", "{edit:?}");
+    // Compared with the version the session wrote, not admitted as unknown.
+    assert!(edit.detail.contains("source version current"), "{edit:?}");
+
+    let ran = f.commit_mine(ALICE, "alice-4", "Alice: created");
+    assert!(
+        ran.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let head = f.head_files();
+    assert!(
+        head.contains("tests/created.rs") && !head.contains("b.txt"),
+        "{head}"
+    );
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:tests/created.rs"]),
+        "fn alice(x, y) { x }\n"
+    );
+    assert_eq!(f.status(), " M b.txt\n");
+}
+
+/// Issue #101, with the other session editing while the formatter runs: its
+/// file is contested, and the file this session created stays its own.
+#[test]
+fn a_file_a_session_creates_stays_its_own_when_its_formatter_overlaps_another_edit() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "tests/created.rs", "fn alice(x,y) {}\n");
+    let (held, command) = f.start_held(
+        ALICE,
+        "alice-2",
+        &f.formatter(&["tests/created.rs", "b.txt"]),
+    );
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+    held.release();
+    let post = f.bash(ALICE, "PostToolUse", "alice-2", &command);
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert_eq!(f.credited(ALICE, "Bash"), ["tests/created.rs"]);
+
+    let edit = f.edit(
+        ALICE,
+        "alice-3",
+        "tests/created.rs",
+        "fn alice(x, y) {}",
+        "fn alice(x, y) { x }",
+    );
+    assert_eq!(edit.coverage, "admitted", "{edit:?}");
+    // Compared with the version the session wrote, not admitted as unknown.
+    assert!(edit.detail.contains("source version current"), "{edit:?}");
+
+    let ran = f.commit_mine(ALICE, "alice-4", "Alice: created");
+    assert!(
+        ran.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let head = f.head_files();
+    assert!(
+        head.contains("tests/created.rs") && !head.contains("b.txt"),
+        "{head}"
+    );
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:tests/created.rs"]),
+        "fn alice(x, y) { x }\n"
+    );
+    assert_eq!(f.status(), " M b.txt\n");
 }
