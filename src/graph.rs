@@ -186,19 +186,50 @@ impl Index {
         let changes: Vec<InterfaceChange> = langspan_graph::diff(&before, after)
             .into_iter()
             .filter_map(|change| {
-                let (label, before, after) = match change.change {
-                    Change::Removed => ("removed", None, None),
+                let (label, before, after, number) = match change.change {
+                    Change::Removed => ("removed", None, None, None),
                     Change::SignatureChanged { before, after } => {
-                        ("signature_changed", Some(before), Some(after))
+                        ("signature_changed", Some(before), Some(after), None)
                     }
+                    // Only how many definitions share the name changed: no
+                    // parameter counts, so no break alert (ADR 0029).
+                    Change::DefinitionsAdded {
+                        signatures,
+                        before,
+                        after,
+                    } => (
+                        "definition_added",
+                        None,
+                        Some(signatures),
+                        Some((before, after)),
+                    ),
+                    Change::DefinitionsRemoved {
+                        signatures,
+                        before,
+                        after,
+                    } => (
+                        "definition_removed",
+                        Some(signatures),
+                        None,
+                        Some((before, after)),
+                    ),
                     Change::Added => return None,
+                };
+                let arity = |signature| {
+                    if number.is_some() {
+                        None
+                    } else {
+                        counts(signature)
+                    }
                 };
                 Some(InterfaceChange {
                     name: change.name,
                     kind: change.kind.name().into(),
                     change: label.into(),
-                    before_arity: counts(&before),
-                    after_arity: counts(&after),
+                    before_arity: arity(&before),
+                    after_arity: arity(&after),
+                    before_count: number.map(|(before, _)| before),
+                    after_count: number.map(|(_, after)| after),
                     before,
                     after,
                 })
