@@ -249,7 +249,7 @@ pub enum Owner {
 
 /// This session or one of its subagents (a subagent's ID is its parent's
 /// followed by `.` and the agent's own).
-fn is_own(me: &str, session: &str) -> bool {
+pub(crate) fn is_own(me: &str, session: &str) -> bool {
     session == me
         || session
             .strip_prefix(me)

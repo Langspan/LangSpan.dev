@@ -2914,6 +2914,16 @@ impl Session<'_> {
                             );
                             run.edited_elsewhere = theirs;
                             run.contested.extend(unknown);
+                            // A rewrite of another session's uncommitted
+                            // lines (a formatter's, say) is both sessions'.
+                            run.contested.extend(crate::journal::rewrites_others(
+                                state_dir,
+                                self.root,
+                                &ids.session_id,
+                                &run.attributed(&changed),
+                                before,
+                                self.deadline,
+                            ));
                             // Past a shell call's supported lifetime, what
                             // other sessions did may no longer be known; nor
                             // when an edit may have gone unmarked at the cap.
@@ -3072,7 +3082,7 @@ impl Session<'_> {
             Reply::none(
                 "contested",
                 format!(
-                    "{} changed file(s) attributed to this session{elsewhere}; {} attributed to no session, because another session's shell run or edit overlapped and could have written them{relation}",
+                    "{} changed file(s) attributed to this session{elsewhere}; {} attributed to no session, because another session's shell run or edit overlapped and could have written them, or the command rewrote another session's uncommitted lines{relation}",
                     attributed.len(),
                     run.contested.len()
                 ),

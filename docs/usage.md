@@ -701,6 +701,13 @@ it finds no running session, the error names the directory it looked in and,
 if a LangSpan hook installed in the checkout names another one, that one.
 The MCP tool `langspan_commit_mine` does the same.
 
+A formatter or other workspace-wide command (`cargo fmt --all`) run by one
+session keeps that session's own reformatted lines its own, so `commit --mine`
+still takes them. A file in which the command rewrote another session's
+uncommitted lines is credited to neither session and left for its owner,
+as is a file another session edited or a shell run of another session may
+have written while the command ran ([ADR 0011](adr/0011-shell-writes.md)).
+
 When a Git step fails, the error names the step, its exit status and what Git
 said (its last lines, at most 1 KiB, redacted as other relayed text is). The
 commit is built in the Git directory, so it needs to write there: inside an
