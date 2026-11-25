@@ -642,7 +642,9 @@ answer would pass 28 KiB. The JSON answer is
 does not change any briefing. Forgotten notes are not found. The MCP tool
 `langspan_recall` takes `workspace_id`, `query` and optional `path` and
 `limit`, and puts a label before the notes saying their text is data, not
-instructions.
+instructions. Its result carries the answer twice, once as escaped JSON
+text, so it can return fewer notes than the CLI (with `truncated: true`) to
+keep the whole reply within one 64 KiB frame.
 
 `message` addresses a registered session in the same workspace. Without `--to`,
 it addresses every other session; without `--from`, its sender label is the

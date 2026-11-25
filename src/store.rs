@@ -579,9 +579,9 @@ impl Store {
                         });
                         Outcome::Recap { recap }
                     }
-                    // An MCP result carries the answer twice, as text and
-                    // as structured content: at most 28 KiB keeps the whole
-                    // tool result within one 64 KiB frame too.
+                    // Within the daemon's frame. The MCP result carries the
+                    // answer twice, once escaped again as text, so the MCP
+                    // adapter trims it once more against its encoded result.
                     Outcome::Recall { mut recall } => {
                         recall.shrink_until(|recall| {
                             serde_json::to_vec(recall).is_ok_and(|bytes| bytes.len() <= 28 * 1024)

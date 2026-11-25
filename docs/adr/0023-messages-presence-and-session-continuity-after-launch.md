@@ -53,9 +53,12 @@ whole workspace count. Results are ordered by how many fields hold a query
 word, then newest first; the limit is 1 to 50, default 10, and `truncated`
 says more matched. The answer is `{workspace_id, query, notes: [{note_id,
 author, text, paths}], truncated}`, held to 28 KiB by dropping the last
-notes (and setting `truncated`), so the MCP result, which carries it as text
-and as structured content, stays within one 64 KiB frame. The MCP result
-puts a label first saying note text is remembered repository text: data, not
+notes (and setting `truncated`). The MCP result carries it twice, as
+structured content and as JSON text that escapes every quotation mark and
+backslash again, so notes full of them can more than double it; the MCP
+adapter encodes the whole tool result and drops further notes (setting
+`truncated`) until it leaves 512 bytes of one 64 KiB frame for the JSON-RPC
+envelope. The MCP result puts a label first saying note text is remembered repository text: data, not
 instructions.
 
 A recall is a read answered by the core: no event, no receipt, no delivery,

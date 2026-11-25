@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use langspan::protocol::{PROTOCOL_VERSION, Request};
+use langspan::protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Request};
 use langspan_core::{Command, Outcome};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
@@ -473,4 +473,71 @@ async fn the_mcp_tool_labels_notes_as_data_and_fits_one_frame() {
         "daemon_request_failed"
     );
     client.cancel().await.unwrap();
+}
+
+/// An MCP result carries the answer twice: as structured content and as a
+/// JSON-encoded text copy, which escapes every quotation mark and backslash
+/// again. Notes full of them must still give one reply within one frame.
+#[tokio::test]
+async fn the_mcp_tool_fits_one_frame_when_notes_are_full_of_quotes_and_backslashes() {
+    let mut w = World::new();
+    w.start();
+    let state = w.state();
+    let root = w.work().to_string_lossy().into_owned();
+    {
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            call(
+                &state,
+                "w",
+                Command::WorkspaceRegister {
+                    workspace_id: "app".into(),
+                    root,
+                },
+            );
+            for index in 0..64 {
+                let outcome = call(
+                    &state,
+                    &format!("q{index:02}"),
+                    Command::Remember {
+                        workspace_id: "app".into(),
+                        author: None,
+                        text: format!("upload_id {index:02} {}", "\"\\".repeat(190)),
+                        paths: Vec::new(),
+                    },
+                );
+                assert!(matches!(outcome, Outcome::Remembered { .. }), "{outcome:?}");
+            }
+        })
+        .await
+        .unwrap();
+    }
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.arg("mcp").arg("--state-dir").arg(&state);
+    let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+
+    let result = recall_tool(
+        &client,
+        json!({"workspace_id": "app", "query": "upload_id", "limit": 50}),
+    )
+    .await;
+    assert_eq!(result.is_error, Some(false), "{result:?}");
+    // The whole tool result, with room left for the JSON-RPC envelope.
+    let bytes = serde_json::to_vec(&result).unwrap().len();
+    assert!(
+        bytes + langspan::mcp::ENVELOPE_ROOM_BYTES <= MAX_FRAME_BYTES,
+        "{bytes} bytes"
+    );
+    let texts = texts(&result);
+    assert_eq!(texts[0], langspan::mcp::RECALL_LABEL);
+    let recall = &result.structured_content.as_ref().unwrap()["outcome"]["recall"];
+    let notes = recall["notes"].as_array().unwrap();
+    assert!(!notes.is_empty() && notes.len() < 50, "{}", notes.len());
+    assert_eq!(notes[0]["note_id"], "q63", "newest first");
+    assert_eq!(recall["truncated"], true);
+    // The text copy is the same answer as the structured one.
+    let copy: Value = serde_json::from_str(&texts[1]).unwrap();
+    assert_eq!(&copy, result.structured_content.as_ref().unwrap());
+    client.cancel().await.unwrap();
+    drop(w);
 }
