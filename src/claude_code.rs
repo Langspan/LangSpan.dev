@@ -275,6 +275,7 @@ fn shell(
             .unwrap_or(false),
         &config.root,
         true,
+        true,
     );
     let reply = crate::hook::execute(operation, &config, deadline);
     Reply {

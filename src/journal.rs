@@ -455,6 +455,8 @@ pub enum Origin<'a> {
     Shell {
         snapshot: &'a crate::shell::Snapshot,
         deadline: Instant,
+        /// When the command started (wall-clock ms on this machine).
+        started_ms: u64,
     },
 }
 
@@ -483,6 +485,12 @@ pub fn record(
     if paths.len() > MAX_PATHS_PER_WRITE {
         return Ok(0);
     }
+    // Another session's overlapping run may have credited this change
+    // already (`reformat_authors`), after this command started.
+    let kept = match origin {
+        Origin::Shell { started_ms, .. } => since(entries_for(state_dir, root, paths), started_ms),
+        Origin::Edit { .. } => Vec::new(),
+    };
     let mut recorded = 0;
     for path in paths {
         if let Origin::Shell { deadline, .. } = &origin
@@ -514,9 +522,9 @@ pub fn record(
                 Some(Some(FileState::Present { digest, .. })) => blob(state_dir, digest),
                 _ => None,
             },
-            Origin::Shell { snapshot, deadline } => {
-                shell_before(state_dir, root, snapshot, path, *deadline)
-            }
+            Origin::Shell {
+                snapshot, deadline, ..
+            } => shell_before(state_dir, root, snapshot, path, *deadline),
         };
         if let Some(bytes) = &after {
             let _ = keep_blob(state_dir, bytes);
@@ -530,11 +538,38 @@ pub fn record(
             lines: start.and_then(|start| diff_lines(&start, after_bytes)),
             partial: false,
         };
+        if entry.lines.is_some() && already_credited(&kept, &entry) {
+            continue;
+        }
         write_entry(&directory, &operation, &entry)?;
         recorded += 1;
     }
     prune(state_dir, &directory);
     Ok(recorded)
+}
+
+/// Of `entries`, those written at or after `started_ms`: where a credit of
+/// a shell command's change by another, overlapping run can be (it ended
+/// after this command started). An earlier entry with the same lines is an
+/// earlier write, which a revert may have undone since.
+fn since(entries: Vec<Entry>, started_ms: u64) -> Vec<Entry> {
+    entries
+        .into_iter()
+        .filter(|entry| entry.at_ms >= started_ms)
+        .collect()
+}
+
+/// Whether `entries` hold a write of `entry`'s session that left its file
+/// as `entry` does with the same lines: the same shell change, credited by
+/// each of two overlapping runs that both saw it (issue #141). Counted
+/// twice, its lines would look like two copies.
+fn already_credited(entries: &[Entry], entry: &Entry) -> bool {
+    entries.iter().any(|kept| {
+        kept.session_id == entry.session_id
+            && kept.path == entry.path
+            && kept.after == entry.after
+            && kept.lines == entry.lines
+    })
 }
 
 /// A file's content before a shell command, from its snapshot: the version
@@ -621,42 +656,54 @@ pub fn rewrites_others(
         .collect()
 }
 
-/// Of the files a shell command changed, what only reformats its own
-/// session's lines (issue #124): files whose whole change does, and the
-/// credited lines of files where only part of it does.
+/// Of the files a shell command changed, who keeps the lines it only
+/// reformatted (issues #124 and #141): files whose whole change is the
+/// command's session's, and the credited lines of the rest, by session.
 #[derive(Debug, Default)]
 pub struct Reformats {
     pub whole: Vec<String>,
-    pub partial: Vec<(String, Lines)>,
+    /// Path, session, and the lines credited to that session.
+    pub partial: Vec<(String, String, Lines)>,
 }
 
-/// Of `paths`, files `session_id`'s shell command changed while another
-/// session's overlapping command could also have written them, the part of
-/// each change that only reformats this session's own uncommitted lines
-/// (`crate::reformat`). A line may be credited once per copy the file
-/// gained since `HEAD` that this session's journaled writes added and no
-/// other session's did. A file with a write whose lines are not known, or
-/// whose content before the command, now or in `HEAD` is not known, has
-/// none.
-pub fn own_reformats(
+/// One file a shell command changed that it is not simply credited with.
+pub struct Candidate {
+    pub path: String,
+    /// Another session's command could also have written it.
+    pub overlapped: bool,
+}
+
+/// Of `candidates`, files `session_id`'s shell command changed that are not
+/// simply its own (another session's overlapping command could also have
+/// written them, or the command rewrote another session's uncommitted
+/// lines), who is credited with each part of the change
+/// (`crate::reformat::authors`). A line of the file before the command is a
+/// session's when every copy of it the file holds was gained since `HEAD`
+/// and journaled writes of that session alone added it (a subagent's count
+/// as its parent's, the command's session); it is committed when no copy
+/// was. A file with a write whose lines are not known, or whose content
+/// before the command, now or in `HEAD` is not known, has none.
+pub fn reformat_authors(
     state_dir: &Path,
     root: &Path,
     session_id: &str,
-    paths: &[String],
+    candidates: &[Candidate],
     snapshot: &crate::shell::Snapshot,
     deadline: Instant,
 ) -> Reformats {
     let mut found = Reformats::default();
     // A write of more files is not journaled, nor credited (`record`).
-    if paths.len() > MAX_PATHS_PER_WRITE {
+    if candidates.len() > MAX_PATHS_PER_WRITE {
         return found;
     }
-    let entries = entries_for(state_dir, root, paths);
+    let paths: Vec<String> = candidates.iter().map(|c| c.path.clone()).collect();
+    let entries = entries_for(state_dir, root, &paths);
     let files = by_file(&entries);
-    for path in paths {
+    for candidate in candidates {
         if Instant::now() >= deadline {
             break;
         }
+        let path = &candidate.path;
         let Some(file) = files.get(path.as_str()) else {
             continue;
         };
@@ -667,56 +714,94 @@ pub fn own_reformats(
             let before = shell_before(state_dir, root, snapshot, path, deadline)?;
             let now = read_file(root, path)??;
             let head = head_content(root, path, snapshot.head.as_deref(), deadline)?;
-            let mut own: BTreeMap<String, usize> = BTreeMap::new();
-            for key in diff_lines(&head, &before)?.added {
-                let only_own = file.added.get(key.as_str()).is_some_and(|sessions| {
-                    sessions
-                        .iter()
-                        .all(|session| crate::commit::is_own(session_id, session))
-                });
-                if only_own {
-                    *own.entry(key).or_default() += 1;
-                }
+            let mut counts: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+            for key in line_keys(&before) {
+                counts.entry(key).or_default().0 += 1;
             }
-            crate::reformat::own_reformat(&before, &now, &own)
+            for key in diff_lines(&head, &before)?.added {
+                counts.entry(key).or_default().1 += 1;
+            }
+            let change = crate::reformat::Change {
+                before: &before,
+                after: &now,
+                language: crate::reformat::language(path),
+                command: session_id,
+                overlapped: candidate.overlapped,
+            };
+            crate::reformat::authors(&change, |key| {
+                use crate::reformat::Author;
+                let (copies, uncommitted) = counts.get(key).copied().unwrap_or_default();
+                if uncommitted == 0 {
+                    return Author::Committed;
+                }
+                if uncommitted < copies {
+                    return Author::Unknown;
+                }
+                let writers: BTreeSet<&str> = file
+                    .added
+                    .get(key)
+                    .into_iter()
+                    .flatten()
+                    .map(|session| {
+                        if crate::commit::is_own(session_id, session) {
+                            session_id
+                        } else {
+                            session
+                        }
+                    })
+                    .collect();
+                match writers.into_iter().collect::<Vec<_>>()[..] {
+                    [writer] => Author::Session(writer.to_owned()),
+                    _ => Author::Unknown,
+                }
+            })
         };
         match credited() {
             Some(credited) if credited.whole => found.whole.push(path.clone()),
-            Some(credited)
-                if !credited.lines.added.is_empty() || !credited.lines.removed.is_empty() =>
-            {
-                found.partial.push((path.clone(), credited.lines));
-            }
-            _ => {}
+            Some(credited) => found.partial.extend(
+                credited
+                    .sessions
+                    .into_iter()
+                    .map(|(session, lines)| (path.clone(), session, lines)),
+            ),
+            None => {}
         }
     }
     found
 }
 
-/// Record the credited part of `session_id`'s shell write of each file, as
-/// `own_reformats` found it: a partial entry with those lines.
+/// Record each credited part of a shell write of the command started at
+/// `started_ms`, as `reformat_authors` found it: a partial entry for that
+/// session with those lines, unless an overlapping run credited it already.
 pub fn record_partial(
     state_dir: &Path,
     root: &Path,
-    session_id: &str,
-    parts: &[(String, Lines)],
+    parts: &[(String, String, Lines)],
+    started_ms: u64,
 ) -> Result<usize, String> {
     let directory = workspace_dir(state_dir, root);
-    for (path, lines) in parts {
+    let paths: Vec<String> = parts.iter().map(|(path, _, _)| path.clone()).collect();
+    let kept = since(entries_for(state_dir, root, &paths), started_ms);
+    let mut recorded = 0;
+    for (path, session_id, lines) in parts {
         let Some(after) = crate::hook::file_state(root, path) else {
             continue;
         };
         let entry = Entry {
-            session_id: session_id.into(),
+            session_id: session_id.clone(),
             path: path.clone(),
             at_ms: now_ms(),
             after,
             lines: Some(lines.clone()),
             partial: true,
         };
+        if already_credited(&kept, &entry) {
+            continue;
+        }
         write_entry(&directory, "", &entry)?;
+        recorded += 1;
     }
-    Ok(parts.len())
+    Ok(recorded)
 }
 
 /// A file's content in `head` (any commit), empty when it does not have it,
@@ -728,6 +813,21 @@ pub(crate) fn head_content(
     deadline: Instant,
 ) -> Option<Vec<u8>> {
     head_blob(root, path, head, deadline).map(Option::unwrap_or_default)
+}
+
+/// The lines a workspace file on disk adds to and removes from its version
+/// in `head`: its uncommitted change. `None` when either version cannot be
+/// read in time and within the bound, or they differ by more than the
+/// journal keeps.
+pub(crate) fn uncommitted_lines(
+    root: &Path,
+    path: &str,
+    head: Option<&str>,
+    deadline: Instant,
+) -> Option<Lines> {
+    let before = head_content(root, path, head, deadline)?;
+    let after = read_file(root, path)?.unwrap_or_default();
+    diff_lines(&before, &after)
 }
 
 /// A file's version in `HEAD` (missing when `HEAD` does not have it), `None`
@@ -1113,6 +1213,31 @@ mod tests {
         let moved = path_dir(&workspace_dir(&dirs.state, &dirs.root), "src/a.rs").join("e1");
         assert_eq!(fs::metadata(moved).unwrap().modified().unwrap(), a_day_ago);
         assert_eq!(entries(&dirs.state, &dirs.root).len(), 3);
+    }
+
+    #[test]
+    fn a_change_is_taken_as_credited_already_only_from_since_its_command_started() {
+        let written = |session: &str, at_ms| Entry {
+            at_ms,
+            ..entry_of(session, "f", at_ms)
+        };
+        let change = written("a", 2_000);
+        // An overlapping run credited the same change after the command
+        // started: not again.
+        let kept = since(vec![written("a", 1_500)], 1_000);
+        assert!(already_credited(&kept, &change));
+        // The same lines written before it started are an earlier write.
+        let kept = since(vec![written("a", 900)], 1_000);
+        assert!(!already_credited(&kept, &change));
+        // Another session's, other lines, or another version: not the same.
+        let kept = since(vec![written("b", 1_500)], 1_000);
+        assert!(!already_credited(&kept, &change));
+        let mut other = written("a", 1_500);
+        other.lines = diff_lines(b"", b"y\n");
+        assert!(!already_credited(&[other], &change));
+        let mut other = written("a", 1_500);
+        other.after = state_of(Some(b"z\n"));
+        assert!(!already_credited(&[other], &change));
     }
 
     #[test]

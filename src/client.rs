@@ -308,7 +308,10 @@ pub fn read_all(
     let mut part = String::new();
     let mut after = None;
     for _ in 0..MAX_STATUS_PAGES {
-        let (records, next) = match ask(Command::StatusRecords { after })? {
+        let (records, next) = match ask(Command::StatusRecords {
+            after,
+            page_bytes: None,
+        })? {
             Outcome::StatusRecords { records, next } => (records, next),
             Outcome::Error { code, message } => return Err(format!("{code}: {message}").into()),
             other => return Err(format!("unexpected reply to a status page: {other:?}").into()),

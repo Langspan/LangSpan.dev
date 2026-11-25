@@ -226,10 +226,21 @@ mod unix {
         if !(1..=crate::graph::MAX_RESULTS).contains(&limit) {
             return Err("limit must be between 1 and 200".into());
         }
+        let depth = match command {
+            Command::GraphImpact { depth, .. } => *depth,
+            _ => 1,
+        };
+        if !(1..=langspan_core::MAX_IMPACT_DEPTH).contains(&depth) {
+            return Err(format!(
+                "depth must be between 1 and {}",
+                langspan_core::MAX_IMPACT_DEPTH
+            ));
+        }
         let graph = graph.ok_or("the index is not available yet; try again shortly")?;
         let failed = |error: Box<dyn std::error::Error + Send + Sync>| error.to_string();
         let detail = matches!(command, Command::GraphSymbol { detail: true, .. });
-        let ((mut symbols, mut references), coverage) = graph
+        let started = Instant::now();
+        let ((mut symbols, mut references, levels), coverage) = graph
             .with_coverage(workspace_id, |graph| match command {
                 Command::GraphSymbol { name, .. } => {
                     let mut symbols = graph.symbol(workspace_id, name, limit)?;
@@ -238,13 +249,22 @@ mod unix {
                             graph.add_detail(workspace_id, symbol)?;
                         }
                     }
-                    Ok((symbols, Vec::new()))
+                    Ok((symbols, Vec::new(), None))
                 }
                 Command::GraphReferences { name, .. } => Ok((
                     Vec::new(),
                     graph.references(workspace_id, name, None, limit)?,
+                    None,
                 )),
-                Command::GraphImpact { path, .. } => graph.impact(workspace_id, path, limit),
+                Command::GraphImpact { path, .. } => {
+                    let (symbols, references) = graph.impact(workspace_id, path, limit)?;
+                    let levels = (depth > 1)
+                        .then(|| {
+                            graph.impact_levels(workspace_id, path, depth, started + IMPACT_BUDGET)
+                        })
+                        .transpose()?;
+                    Ok((symbols, references, levels))
+                }
                 _ => unreachable!("matched above"),
             })
             .map_err(failed)?;
@@ -255,13 +275,60 @@ mod unix {
             add_notes_and_checks(state, workspace_id, &mut symbols);
             truncated |= fit_frame(&mut symbols, &coverage);
         }
+        let levels = levels.map(|mut levels| {
+            fit_levels(&mut levels, &(&symbols, &references, &coverage));
+            truncated |= levels.iter().any(|level| level.truncated);
+            levels
+        });
         Ok(Outcome::Graph {
             symbols,
             references,
-            resolution: detail.then(|| "name".into()),
+            resolution: (detail || levels.is_some()).then(|| "name".into()),
             coverage,
             truncated,
+            levels,
         })
+    }
+
+    /// How long `graph impact` may spend on its levels: well inside the
+    /// client's 5 s call timeout, and short because requests behind it
+    /// (hooks among them) wait. At most 150 indexed lookups usually take
+    /// far less. Past it the levels so far are returned, marked truncated.
+    const IMPACT_BUDGET: Duration = Duration::from_millis(500);
+
+    /// Keep the leading impact files whose answer fits one response frame
+    /// beside `rest` (the outcome's other lists); a level losing files and
+    /// every level after it are marked `truncated`.
+    fn fit_levels(levels: &mut [langspan_core::ImpactLevel], rest: &impl serde::Serialize) {
+        // The envelope, the request ID and the outcome's scalar fields.
+        const ROOM: usize = 1024;
+        // A level's own fields, beside its files.
+        const LEVEL: usize = 64;
+        fn size(value: &impl serde::Serialize) -> usize {
+            serde_json::to_vec(value).map_or(usize::MAX / 2, |bytes| bytes.len())
+        }
+        let mut used = ROOM.saturating_add(size(rest));
+        let mut cut = false;
+        for level in levels {
+            used = used.saturating_add(LEVEL);
+            let keep = if cut {
+                0
+            } else {
+                level
+                    .files
+                    .iter()
+                    .take_while(|file| {
+                        used = used.saturating_add(size(file) + 1);
+                        used < MAX_FRAME_BYTES
+                    })
+                    .count()
+            };
+            if keep < level.files.len() {
+                level.files.truncate(keep);
+                level.truncated = true;
+                cut = true;
+            }
+        }
     }
 
     /// What the coordinator, not the index, knows about each definition's
@@ -2143,6 +2210,46 @@ mod unix {
                     resolution: Some("name".into()),
                     coverage,
                     truncated: true,
+                    levels: None,
+                },
+            };
+            protocol::encode(&response).expect("fits one frame");
+        }
+
+        #[test]
+        fn impact_levels_with_long_paths_are_cut_to_one_frame_and_say_so() {
+            use langspan_core::{ImpactFile, ImpactLevel};
+            let file = |level: u32, n: u32| ImpactFile {
+                path: format!("src/{level}/{n:03}/{}.rs", "x".repeat(200)),
+                via: "name".into(),
+                from: format!("src/{}.rs", "y".repeat(200)),
+            };
+            let mut levels: Vec<ImpactLevel> = (1..=3)
+                .map(|level| ImpactLevel {
+                    level,
+                    files: (0..100).map(|n| file(level, n)).collect(),
+                    truncated: false,
+                })
+                .collect();
+            let coverage = GraphCoverage::default();
+            fit_levels(&mut levels, &(&coverage,));
+            assert!(!levels[0].truncated, "the first level fits whole");
+            assert!(levels[1].truncated && levels[2].truncated);
+            assert!(levels[1].files.len() < 100);
+            assert_eq!(levels[2].files, []);
+            let response = Response {
+                version: PROTOCOL_VERSION,
+                request_id: "r".repeat(128),
+                replayed: false,
+                generation: u64::MAX,
+                lease_valid: None,
+                outcome: Outcome::Graph {
+                    symbols: Vec::new(),
+                    references: Vec::new(),
+                    resolution: Some("name".into()),
+                    coverage,
+                    truncated: true,
+                    levels: Some(levels),
                 },
             };
             protocol::encode(&response).expect("fits one frame");
