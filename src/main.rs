@@ -1082,6 +1082,17 @@ fn auto_check(
     Ok(0)
 }
 
+/// An inconclusive check's reason and next step, as the MCP result has them.
+fn print_inconclusive(name: &str, reason: &Option<langspan::landing::Inconclusive>) {
+    match reason {
+        Some(reason) => {
+            println!("{}", reason.message);
+            println!("Next: {}", reason.next);
+        }
+        None => println!("{name} is inconclusive; nothing is known about the combined tree."),
+    }
+}
+
 /// `integrate check` and `land`: the shared operations in
 /// `langspan::landing`, with their results printed for a person.
 fn integrate(
@@ -1150,15 +1161,10 @@ fn integrate(
                 target_oid,
                 combined,
                 check,
-                held,
+                inconclusive,
                 ..
             } => {
                 print_combined(&target, target_oid, combined);
-                if !held {
-                    println!(
-                        "{name} is inconclusive: the checkout did not hold exactly the combined tree while it ran (the command changed files, or checkout filters rewrote them). Its result is not evidence about that tree."
-                    );
-                }
                 match check.result {
                     CheckResult::Passed {} => {
                         println!("{name} passed on the combined tree {}.", combined.tree)
@@ -1167,9 +1173,7 @@ fn integrate(
                         "{name} failed (exit {exit_code}) on the combined tree {}.",
                         combined.tree
                     ),
-                    CheckResult::Inconclusive {} => {
-                        println!("{name} did not finish; nothing is known about the combined tree.")
-                    }
+                    CheckResult::Inconclusive {} => print_inconclusive(&name, inconclusive),
                 }
             }
         }
@@ -1285,6 +1289,7 @@ fn integrate(
         Landed::CheckFailed {
             combined,
             check,
+            inconclusive,
             attempts: tried,
         } => {
             attempts(tried);
@@ -1296,6 +1301,9 @@ fn integrate(
                 },
                 combined.tree
             );
+            if check.result == (CheckResult::Inconclusive {}) {
+                print_inconclusive(&name, inconclusive);
+            }
         }
         Landed::Ready {
             target_oid,
