@@ -71,6 +71,16 @@ real daemon stopped and started between the write and its report
 (`a_post_tool_event_lost_while_the_daemon_is_down_costs_at_most_one_refusal_naming_no_peer`
 in `tests/stale_source.rs`); the behaviour needed no change.
 
+**A peer's shell command (issue #107).** A formatter another session ran
+can rewrite a file's lines without being credited with the file (ADR 0011,
+issue #98), so the daemon names no peer for it. The hook then names the shell
+command from its change note, when the note's version is the one on disk:
+"changed by a shell command of claude-code session `<id>`: cargo fmt --all",
+or "of this session" for the session's own command. "Changed outside any
+reported edit" is kept for a version no hook reported. Tested in
+`tests/shell_concurrent_edits.rs`
+(`a_refusal_after_another_sessions_formatter_names_its_session_and_command`).
+
 **One file, one key (backlog item 12).** A file key is the path below the
 root as the filesystem resolves it (`fs::canonicalize`, which is `realpath`).
 On macOS that returns the name as stored, so on a case-insensitive APFS
