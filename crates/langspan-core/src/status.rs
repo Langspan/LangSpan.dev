@@ -207,7 +207,7 @@ macro_rules! activity {
 /// Parts of the view left out, in this order, while it does not fit: the
 /// bulkiest histories first, current coordination last. Each name is the one
 /// `StatusSummary::omitted` gives.
-const TRIMS: [Trim; 15] = [
+const TRIMS: [Trim; 16] = [
     activity!("activity.known", known),
     // `check flaky` reads it through its own command.
     field!("test_learning", test_learning),
