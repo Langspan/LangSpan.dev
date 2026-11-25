@@ -97,6 +97,12 @@ impl Index {
             )?;
             transaction.commit()?;
         }
+        // The root each workspace was last indexed at (roadmap G6). Added
+        // without a schema change: an index without it is kept, not rebuilt.
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS roots (
+                workspace_id TEXT NOT NULL PRIMARY KEY, root TEXT NOT NULL) WITHOUT ROWID;",
+        )?;
         Ok(Self { connection })
     }
 
@@ -237,6 +243,51 @@ impl Index {
             .collect())
     }
 
+    /// A workspace now at another root than it was indexed at (`workspace
+    /// move`) is another checkout: what was indexed for the old one is
+    /// forgotten, so differences between the two checkouts are not reported
+    /// as interface changes. A workspace indexed before roots were kept is
+    /// taken to be at its current root.
+    fn start_again_at(&mut self, workspace_id: &str, root: &Path) -> Result<(), Failure> {
+        let root = root.to_string_lossy();
+        let indexed: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT root FROM roots WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if indexed.as_deref() == Some(root.as_ref()) {
+            return Ok(());
+        }
+        let transaction = self.connection.transaction()?;
+        if indexed.is_some() {
+            for table in [
+                "files",
+                "unread",
+                "scan_summary",
+                "symbols",
+                "refs",
+                "imports",
+                "baselines",
+                "calls",
+            ] {
+                transaction.execute(
+                    &format!("DELETE FROM {table} WHERE workspace_id = ?1"),
+                    [workspace_id],
+                )?;
+            }
+        }
+        transaction.execute(
+            "INSERT INTO roots(workspace_id, root) VALUES (?1, ?2)
+             ON CONFLICT(workspace_id) DO UPDATE SET root = excluded.root",
+            params![workspace_id, root],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Bring one workspace's index up to `scan.files`, the indexable paths
     /// of its latest complete scan with their content digests. A path in
     /// `scan.unobserved` was listed but not versioned by that scan (a
@@ -253,6 +304,7 @@ impl Index {
         now_ms: u64,
         deadline: Instant,
     ) -> Result<Vec<Notice>, Failure> {
+        self.start_again_at(workspace_id, root)?;
         let (files, unobserved) = (&scan.files, &scan.unobserved);
         // Each path's indexed digest, and the scanned digest at which it was
         // found too large to parse: that version is not tried again.
@@ -1100,6 +1152,25 @@ mod review_regressions {
     }
 
     const BROKEN: (&str, &str) = ("src/broken.rs", "pub fn half( {{{\n");
+
+    #[test]
+    fn a_workspace_indexed_at_another_root_starts_again_without_notices() {
+        // Roadmap G6: `workspace move --switch` binds the ID to another
+        // checkout. Its files differ from the old one's without anyone
+        // changing an interface, so the index starts that root afresh.
+        let (dir, mut index) = setup("moved-root");
+        let api = ("src/api.rs", "pub fn upload() {}\n");
+        assert!(pass(&dir, &mut index, &[api, CALLER]).is_empty());
+        let other = setup("moved-root-other").0;
+        let changed = ("src/api.rs", "pub fn upload(x: u8) {}\n");
+        let notices = pass(&other, &mut index, &[changed, CALLER]);
+        assert!(notices.is_empty(), "{notices:?}");
+        let found = index.symbol("w", "upload", 10).unwrap();
+        assert_eq!(found[0].signature, "pub fn upload(x: u8)");
+        // At the same root, a changed signature is still a notice.
+        let again = ("src/api.rs", "pub fn upload(x: u16) {}\n");
+        assert_eq!(pass(&other, &mut index, &[again, CALLER]).len(), 1);
+    }
 
     #[test]
     fn blind_spots_name_partial_never_clean_and_waiting_files() {

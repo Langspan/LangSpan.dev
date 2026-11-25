@@ -981,6 +981,58 @@ goes to that process's standard error. `langspan_land` with `apply` pushes as
 you, and `langspan_commit_mine` commits as you, running your Git hooks. Deny
 any of them in your host's permission settings if agents should not do this.
 
+## Move, switch and remove a workspace
+
+These are owner commands of the CLI only; no MCP tool moves or removes a
+workspace ([ADR 0025](adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md)).
+
+```sh
+langspan workspace list
+mv /path/to/src/app /path/to/work/app
+langspan workspace move app /path/to/work/app --request-id ws-move-1
+```
+
+```text
+Workspace app now at /path/to/work/app. Kept: 6 notes, 2 pending messages, 14 check records, 3 landings.
+Project hooks name the old root; rerun:
+  langspan hooks install claude-code --workspace 'app' --root '/path/to/work/app' --state-dir '…' --apply
+```
+
+`workspace list [--json]` shows every workspace with its root and whether it
+exists, its current sessions, notes, pending messages, check records, and
+whether its automatic check and remote sharing are on.
+
+`workspace move ID NEW_ROOT` is for a checkout you moved: the old root must be
+gone and NEW_ROOT must be the top of a Git checkout. With `--switch`, the old
+root still exists and NEW_ROOT is another checkout of the same repository
+(its object database holds the old root's `HEAD` commit), for example a fresh
+clone that replaces a broken one; the old root then stops being coordinated
+under the ID. The ID, notes, pending messages, check records, landings, the
+automatic check and the remote setting are kept. File versions sessions read
+under the old root are dropped, so a session's next edit of an existing file
+has an unknown base until it reads it again; the next scan and the source
+index start again from NEW_ROOT. A refused move changes nothing and says
+which check failed: `not_checkout_top`, `old_root_exists`,
+`old_root_missing`, `different_repository` or `workspace_conflict` (NEW_ROOT
+is registered already or overlaps another workspace).
+
+User-level hooks need nothing: an event from NEW_ROOT joins the moved ID.
+Project-level hooks name their root in the host's configuration, which the
+command does not edit; it prints the `hooks install` commands to rerun for the
+hosts whose project hooks name this workspace.
+
+`workspace remove ID` is a dry run that lists what would end: sessions,
+intents, notes, pending messages and the automatic check. `workspace remove ID
+--apply --request-id ID` takes the workspace out of `status`, `recap`,
+`workspace list`, briefings and the dashboard; `langspan events` keeps its
+history. A hook event from that root later registers it again, empty.
+
+Moving and removing are refused while a session holds an admission there or a
+landing holds or waits for its push turn (`workspace_busy`), and while remote
+sharing is on (`remote_sharing_on`): run `langspan remote disable ID` first,
+so the published ref is removed. A removal also waits until that ref is gone.
+A refusal is recorded under its request ID; retry with a new one.
+
 ## Retries and recovery
 
 Local coordination mutations and remote enable/disable require `--request-id`.

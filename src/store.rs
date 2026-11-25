@@ -448,6 +448,8 @@ impl Store {
                 | Command::Recap { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
+                | Command::WorkspaceList
+                | Command::WorkspaceRemove { apply: false, .. }
         ) {
             return Ok(None);
         }
@@ -537,6 +539,8 @@ impl Store {
             | Command::LandingReadiness { .. }
             | Command::TurnQueue { .. }
             | Command::StatusLine { .. }
+            | Command::WorkspaceList
+            | Command::WorkspaceRemove { apply: false, .. }
             | Command::Recap { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
                     // A recap must fit one frame with room for the envelope.
@@ -947,6 +951,20 @@ impl Store {
                 "INSERT INTO events(event_json) VALUES (?1)",
                 [serde_json::to_string(event)?],
             )?;
+            // The last scan was of the old checkout: the next scan of the
+            // new root starts a fresh baseline, so files that differ between
+            // the two checkouts are not reported as changes.
+            if let Event::WorkspaceMoved {
+                workspace: langspan_core::Workspace { workspace_id, .. },
+                ..
+            }
+            | Event::WorkspaceRemoved { workspace_id } = event
+            {
+                transaction.execute(
+                    "DELETE FROM git_snapshots WHERE workspace_id = ?1",
+                    [workspace_id],
+                )?;
+            }
         }
         if let Some((request_id, command, outcome)) = receipt {
             transaction.execute(

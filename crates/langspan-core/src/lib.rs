@@ -10,6 +10,7 @@ mod dashboard;
 mod lines;
 mod status;
 mod status_line;
+mod workspaces;
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
@@ -24,6 +25,7 @@ pub use status_line::{
     ClockAnchor, MAX_REFUSALS, REFUSAL_PATHS, REFUSAL_RETENTION_MS, RecentRefusal, RefusalKind,
     StatusLine, status_line,
 };
+pub use workspaces::{MAX_ENDING_SESSIONS, WorkspaceEnding, WorkspaceKept, WorkspaceSummary};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1545,6 +1547,19 @@ pub enum Event {
     WorkspaceRegistered {
         workspace: Workspace,
     },
+    /// The owner rebound the workspace to another checkout root (roadmap
+    /// G6). Everything kept under its ID stays; file versions recorded
+    /// under `from_root` are dropped. Local only.
+    WorkspaceMoved {
+        workspace: Workspace,
+        from_root: String,
+    },
+    /// The owner took the workspace out of coordination (roadmap G6): it,
+    /// its sessions and everything derived for them leave the state. The
+    /// events before this one stay in the log. Local only.
+    WorkspaceRemoved {
+        workspace_id: String,
+    },
     SessionRegistered {
         session: Session,
     },
@@ -1824,6 +1839,33 @@ pub enum Command {
         workspace_id: String,
         root: String,
         verified_overlaps: Vec<String>,
+    },
+    /// Read-only: every registered workspace with what it holds.
+    WorkspaceList,
+    /// Rebind the workspace to `root`: a checkout the owner moved (the old
+    /// root is gone), or with `switch` another checkout of the same
+    /// repository. The daemon checks the filesystem and Git before the core
+    /// decides; an owner command only, never an MCP tool.
+    WorkspaceMove {
+        workspace_id: String,
+        root: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        switch: bool,
+    },
+    /// Prepared adapter input only, as `WorkspaceRegisterVerified`: the
+    /// receipt stores the original `WorkspaceMove`.
+    #[serde(skip_serializing)]
+    WorkspaceMoveVerified {
+        workspace_id: String,
+        root: String,
+        verified_overlaps: Vec<String>,
+    },
+    /// Take the workspace out of coordination. Without `apply`, a read that
+    /// says what would end and changes nothing.
+    WorkspaceRemove {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        apply: bool,
     },
     SessionRegister {
         session_id: String,
@@ -2260,6 +2302,18 @@ enum CommandWire {
         workspace_id: String,
         root: String,
     },
+    WorkspaceList {},
+    WorkspaceMove {
+        workspace_id: String,
+        root: String,
+        #[serde(default)]
+        switch: bool,
+    },
+    WorkspaceRemove {
+        workspace_id: String,
+        #[serde(default)]
+        apply: bool,
+    },
     SessionRegister {
         session_id: String,
         workspace_id: String,
@@ -2684,6 +2738,20 @@ pub enum Outcome {
     Workspace {
         workspace: Workspace,
     },
+    Workspaces {
+        workspaces: Vec<WorkspaceSummary>,
+    },
+    WorkspaceMoved {
+        workspace: Workspace,
+        from_root: String,
+        kept: WorkspaceKept,
+    },
+    /// `applied` is false for a dry run: nothing ended.
+    WorkspaceRemoval {
+        workspace_id: String,
+        applied: bool,
+        ending: WorkspaceEnding,
+    },
     Session {
         session: Session,
     },
@@ -3020,6 +3088,24 @@ fn decide_checked(
                 outcome: Outcome::Workspace { workspace },
             })
         }
+        Command::WorkspaceList => Ok(Decision {
+            events: Vec::new(),
+            outcome: Outcome::Workspaces {
+                workspaces: workspaces::list(state),
+            },
+        }),
+        Command::WorkspaceMove {
+            workspace_id, root, ..
+        } => workspaces::decide_move(state, workspace_id, root, &[], now_ms),
+        Command::WorkspaceMoveVerified {
+            workspace_id,
+            root,
+            verified_overlaps,
+        } => workspaces::decide_move(state, workspace_id, root, verified_overlaps, now_ms),
+        Command::WorkspaceRemove {
+            workspace_id,
+            apply,
+        } => workspaces::decide_remove(state, workspace_id, *apply, now_ms),
         Command::SessionRegister {
             session_id,
             workspace_id,
@@ -6547,6 +6633,13 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             state
                 .workspaces
                 .insert(workspace.workspace_id.clone(), workspace.clone());
+        }
+        Event::WorkspaceMoved {
+            workspace,
+            from_root,
+        } => workspaces::apply_moved(state, workspace, from_root)?,
+        Event::WorkspaceRemoved { workspace_id } => {
+            workspaces::apply_removed(state, workspace_id)?;
         }
         Event::SessionRegistered { session } => {
             validate_session_registration(state, session)?;

@@ -1235,7 +1235,8 @@ mod unix {
     /// acting: a registration, an edit, a prompt.
     fn touched_workspace(state: &State, command: &Command) -> Option<String> {
         match command {
-            Command::WorkspaceRegister { workspace_id, .. } => Some(workspace_id.clone()),
+            Command::WorkspaceRegister { workspace_id, .. }
+            | Command::WorkspaceMove { workspace_id, .. } => Some(workspace_id.clone()),
             Command::AdmitTool { session_id, .. }
             | Command::ObserveTool { session_id, .. }
             | Command::SessionPrompt { session_id, .. } => state
@@ -1539,21 +1540,41 @@ mod unix {
                 );
             }
         }
-        let prepared = match prepare(store.state(), &command) {
-            Ok(command) => command,
-            Err(e) => {
-                return error(
-                    request_id,
-                    store.state().generation,
-                    "invalid_path",
-                    e.to_string(),
-                );
+        let prepared = if let Command::WorkspaceMove {
+            workspace_id,
+            root,
+            switch,
+        } = &command
+        {
+            match prepare_move(store.state(), workspace_id, root, *switch) {
+                Ok(command) => command,
+                Err((code, message)) => {
+                    return error(request_id, store.state().generation, code, message);
+                }
+            }
+        } else {
+            match prepare(store.state(), &command) {
+                Ok(command) => command,
+                Err(e) => {
+                    return error(
+                        request_id,
+                        store.state().generation,
+                        "invalid_path",
+                        e.to_string(),
+                    );
+                }
             }
         };
         match store.execute(&request_id, &command, &prepared, now_ms()) {
             Ok(mut execution) => {
                 if let Outcome::Dashboard { dashboard } = &mut execution.outcome {
                     complete_dashboard(dashboard, graph);
+                }
+                // Only the daemon looks at the filesystem.
+                if let Outcome::Workspaces { workspaces } = &mut execution.outcome {
+                    for workspace in workspaces {
+                        workspace.root_exists = Path::new(&workspace.root).is_dir();
+                    }
                 }
                 current_response(store, request_id, execution)
             }
@@ -1656,6 +1677,184 @@ mod unix {
         }
     }
 
+    /// The other workspaces whose roots overlap `canonical` as distinct
+    /// linked worktrees of one repository. Any other overlap is refused.
+    fn verified_overlaps(
+        state: &State,
+        workspace_id: &str,
+        canonical: &Path,
+        deadline: Instant,
+    ) -> Result<Vec<String>, String> {
+        let mut verified = Vec::new();
+        for old in state.workspaces.values() {
+            let other = Path::new(&old.root);
+            if old.workspace_id != workspace_id
+                && (canonical.starts_with(other) || other.starts_with(canonical))
+            {
+                let linked = crate::git::identity(canonical, deadline)
+                    .and_then(|a| crate::git::identity(other, deadline).map(|b| (a, b)))
+                    .is_ok_and(|(a, b)| {
+                        a.root == canonical
+                            && b.root == other
+                            && a.root != b.root
+                            && a.common_dir == b.common_dir
+                    });
+                if !linked {
+                    return Err(
+                        "workspace root overlaps an existing physical workspace; reuse its ID"
+                            .into(),
+                    );
+                }
+                verified.push(old.workspace_id.clone());
+            }
+        }
+        Ok(verified)
+    }
+
+    /// The checks `workspace move` makes before the core decides (roadmap
+    /// G6), each refusing with what failed and changing nothing: NEW_ROOT is
+    /// the top of a Git checkout; without `switch` the old root is gone;
+    /// with it the old root is still there and its `HEAD` commit is in
+    /// NEW_ROOT's object database, so both are checkouts of one repository.
+    /// Read-only Git, bounded by one deadline.
+    fn prepare_move(
+        state: &State,
+        workspace_id: &str,
+        root: &str,
+        switch: bool,
+    ) -> Result<Command, (&'static str, String)> {
+        let Some(registered) = state.workspaces.get(workspace_id) else {
+            // The core refuses an unknown ID in its own words.
+            return Ok(Command::WorkspaceMoveVerified {
+                workspace_id: workspace_id.into(),
+                root: root.into(),
+                verified_overlaps: Vec::new(),
+            });
+        };
+        let invalid = |message: String| ("invalid_root", message);
+        if root.len() > 4096 {
+            return Err(invalid("NEW_ROOT exceeds 4096 bytes".into()));
+        }
+        let canonical = fs::canonicalize(root)
+            .map_err(|e| invalid(format!("cannot resolve NEW_ROOT {root}: {e}")))?;
+        if !canonical.is_dir() {
+            return Err(invalid(format!(
+                "NEW_ROOT {} is not a directory",
+                canonical.display()
+            )));
+        }
+        let text = canonical
+            .to_str()
+            .ok_or_else(|| invalid("NEW_ROOT must be UTF-8".into()))?
+            .to_owned();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let not_top = |detail: String| {
+            (
+                "not_checkout_top",
+                format!("{detail}; give the top directory of the checkout. Nothing changed"),
+            )
+        };
+        let identity = crate::git::identity(&canonical, deadline).map_err(|_| {
+            not_top(format!(
+                "NEW_ROOT {} is not inside a Git checkout",
+                canonical.display()
+            ))
+        })?;
+        if identity.root != canonical {
+            return Err(not_top(format!(
+                "NEW_ROOT {} is inside the Git checkout at {}, not its top",
+                canonical.display(),
+                identity.root.display()
+            )));
+        }
+        let old = Path::new(&registered.root);
+        let old_exists = match fs::symlink_metadata(old) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(invalid(format!(
+                    "cannot tell whether the old root {} still exists: {error}",
+                    old.display()
+                )));
+            }
+        };
+        match (switch, old_exists) {
+            (false, true) => {
+                return Err((
+                    "old_root_exists",
+                    format!(
+                        "The old root {} still exists. To coordinate the checkout at NEW_ROOT under {workspace_id} instead, add --switch; to coordinate both, register NEW_ROOT with `langspan workspace add`. Nothing changed",
+                        old.display()
+                    ),
+                ));
+            }
+            (true, false) => {
+                return Err((
+                    "old_root_missing",
+                    format!(
+                        "The old root {} no longer exists; for a checkout that was moved, run without --switch. Nothing changed",
+                        old.display()
+                    ),
+                ));
+            }
+            (true, true) => same_repository(old, &canonical, deadline)?,
+            (false, false) => {}
+        }
+        let verified_overlaps = verified_overlaps(state, workspace_id, &canonical, deadline)
+            .map_err(|message| ("workspace_conflict", message))?;
+        Ok(Command::WorkspaceMoveVerified {
+            workspace_id: workspace_id.into(),
+            root: text,
+            verified_overlaps,
+        })
+    }
+
+    /// `old`'s `HEAD` commit is in `new`'s object database.
+    fn same_repository(
+        old: &Path,
+        new: &Path,
+        deadline: Instant,
+    ) -> Result<(), (&'static str, String)> {
+        let refused =
+            |detail: String| ("different_repository", format!("{detail}. Nothing changed"));
+        // As the observer runs Git: no fsmonitor program, no replace refs.
+        const SAFE: [&str; 3] = ["--no-replace-objects", "-c", "core.fsmonitor=false"];
+        let head = crate::git::output(
+            old,
+            &[
+                &SAFE[..],
+                &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+            ]
+            .concat(),
+            deadline,
+            256,
+        )
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map(|text| text.trim().to_owned())
+        .filter(|oid| matches!(oid.len(), 40 | 64) && oid.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| {
+            refused(format!(
+                "The old root {} has no commit to compare with NEW_ROOT; --switch needs one",
+                old.display()
+            ))
+        })?;
+        let object = format!("{head}^{{commit}}");
+        let arguments = [&SAFE[..], &["cat-file", "-e", &object]].concat();
+        let found = crate::git::run_with_env(new, &arguments, &[], deadline, 256)
+            .map_err(|error| refused(format!("cannot read NEW_ROOT's objects: {error}")))?
+            .0
+            .success();
+        if found {
+            Ok(())
+        } else {
+            Err(refused(format!(
+                "NEW_ROOT {} does not hold the old root's HEAD commit {head}, so it is not a checkout of the same repository",
+                new.display()
+            )))
+        }
+    }
+
     fn prepare(state: &State, command: &Command) -> Result<Command, crate::Error> {
         match command {
             Command::WorkspaceRegister { workspace_id, root } => {
@@ -1668,26 +1867,8 @@ mod unix {
                     return Err("workspace root must be a directory".into());
                 }
                 let deadline = Instant::now() + Duration::from_millis(250);
-                let mut verified_overlaps = Vec::new();
-                for old in state.workspaces.values() {
-                    let other = Path::new(&old.root);
-                    if old.workspace_id != *workspace_id
-                        && (canonical.starts_with(other) || other.starts_with(&canonical))
-                    {
-                        let linked = crate::git::identity(&canonical, deadline)
-                            .and_then(|a| crate::git::identity(other, deadline).map(|b| (a, b)))
-                            .is_ok_and(|(a, b)| {
-                                a.root == canonical
-                                    && b.root == other
-                                    && a.root != b.root
-                                    && a.common_dir == b.common_dir
-                            });
-                        if !linked {
-                            return Err("workspace root overlaps an existing physical workspace; reuse its ID".into());
-                        }
-                        verified_overlaps.push(old.workspace_id.clone());
-                    }
-                }
+                let verified_overlaps =
+                    verified_overlaps(state, workspace_id, &canonical, deadline)?;
                 Ok(Command::WorkspaceRegisterVerified {
                     workspace_id: workspace_id.clone(),
                     root: canonical
