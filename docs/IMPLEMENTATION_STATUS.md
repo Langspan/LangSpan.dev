@@ -54,9 +54,11 @@ asserted in `tests/mcp.rs`). The repository has an Apache-2.0 `LICENSE`.
 
 **Roadmap and the launch bar.** A source-level capability review on
 25 November 2026 listed 121 coordination capabilities, and a second review
-the same day, at `ab28b80`, added 12 more. The [roadmap](roadmap.md) lists
-every capability that is not yet complete as work to build, each under the
-ADR that decides it (0011 for the heredoc rewrite, 0016 to 0025, 0029, 0030).
+the same day, at `ab28b80`, added 12 more. Every capability that is not yet complete is a
+[roadmap issue](https://github.com/Langspan/LangSpan.dev/issues?q=label%3Aroadmap)
+holding its specification, each under the ADR that decides it (0011 for the
+heredoc rewrite, 0016 to 0025, 0029, 0030); the [roadmap](roadmap.md) indexes
+them by area.
 A capability counted as built exists in the code; that does not mean a host
 has been seen using it.
 
