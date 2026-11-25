@@ -216,16 +216,27 @@ the command started is not written again. An earlier entry with the same
 lines is an earlier write (one a revert may have undone since), so it does
 not count.
 
-Tokens depend on the file's extension. Rust, TypeScript and JavaScript
-(`.rs`, `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`): words
-and single punctuation bytes, with a comma just before a closing `)`, `]`
-or `}` dropped, since `rustfmt` and Prettier add or remove it when they wrap
-a list (so `(x,)` and `(x)` compare equal). Markdown (`.md`, `.markdown`,
-`.mdx`): words and punctuation, commas kept, so a re-wrapped paragraph keeps
-its author. Any other file: its text with all whitespace removed, so words
-that come to touch, or a change of indentation that matters (YAML, Python),
-are taken as formatting. Whitespace inside a string literal is taken as
-formatting in every language.
+Tokens depend on the file's name or extension (`language` in
+[`src/reformat.rs`](../../src/reformat.rs); widened 25 November 2026, issue
+#158). A word is a run of letters, digits, `_` and non-ASCII bytes; any
+other byte that is not whitespace is a token of its own.
+
+| Files | Comparison |
+| --- | --- |
+| Rust (`.rs`); TypeScript and JavaScript (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`) | Words and punctuation. A string or character literal is one token, whitespace and all: Rust strings, byte and C strings, raw strings with any number of `#`, and character and byte literals (a lifetime's `'` opens none); TypeScript and JavaScript `'` and `"` strings (ending at their line if unterminated) and template literals with their `${...}` substitutions. A literal spanning lines is one token per line, its line break and the next line's leading whitespace included, so re-indenting the inside of a multi-line string changes it. No literal opens inside `//` or `/* */` comments (nested in Rust). A comma just before a closing `)`, `]` or `}` is dropped, since `rustfmt` and Prettier add or remove it when they wrap a list (so `(x,)` and `(x)` compare equal). |
+| Markdown (`.md`, `.markdown`, `.mdx`) | Words and punctuation, commas kept, so a re-wrapped paragraph keeps its author. |
+| Python (`.py`, `.pyi`, `.pyw`) | Words, punctuation and string literals (`'`, `"`, and triple-quoted strings across lines; none inside a `#` comment). A line that starts a logical line, outside brackets and strings, begins with its indentation as a token (empty for none). A call re-wrapped inside its parentheses keeps its author; a block re-indented, a statement moved into or out of an `if`, or two statements joined is a change of tokens. A line continued with `\` keeps its indentation token, so re-wrapping one is a change of tokens. |
+| Other indentation-sensitive files: `Makefile`, `makefile`, `GNUmakefile`, `.mk`, `.mak`, YAML (`.yaml`, `.yml`), `.haml`, `.pug`, `.jade`, `.slim`, `.sass`, `.styl`, `.coffee`, Nim (`.nim`, `.nims`, `.nimble`), F# (`.fs`, `.fsi`, `.fsx`) | Words and punctuation, and every line with a token begins with its indentation as one, so a YAML list moved under another key, or a recipe line's tab, is a change of tokens. String literals are not read: spacing inside a quoted YAML value is taken as formatting. |
+| Any other file | Its text with all whitespace removed, so words that come to touch are taken as formatting. |
+
+In every language, trailing whitespace, blank lines and spacing between
+tokens on one line are formatting. An indentation token is the line's
+leading spaces, tabs and form feeds, compared exactly: a tab replaced by
+spaces is a change of tokens. Python brackets are counted outside strings
+and comments; an unclosed bracket (a file mid-edit) leaves every later
+line's indentation uncounted, so a re-indent after it is taken as
+formatting. A JavaScript regular expression literal is not recognized: a
+quote inside one opens a string that ends with the line.
 
 Cost and bound: the comparison runs only for the files above, each at most
 512 KiB (the journal's version bound), at most 64 per command, within the
@@ -249,7 +260,15 @@ session):
 `a_token_change_during_another_sessions_command_is_credited_to_no_session`
 in `tests/shell_concurrent_edits.rs`, and the unit tests of
 `src/reformat.rs` (Rust, Markdown and other files; trailing commas; several
-sessions' lines in one group; the work bound).
+sessions' lines in one group; the work bound). For #158 (a real `sed`
+rewrite of another session's file, with and without that session's command
+running, then that session's `commit --mine`, which refuses):
+`reindenting_another_sessions_python_block_is_not_credited_to_its_writer`,
+`reindenting_another_sessions_yaml_list_is_not_credited_to_its_writer`,
+`respacing_a_string_in_another_sessions_rust_is_not_credited_to_its_writer`,
+and `rewrapping_a_call_in_another_sessions_python_keeps_its_writer`, whose
+writer's `commit --mine` commits the re-wrapped call; and the unit tests of
+string literals, Python and YAML indentation, and lexer edge cases.
 
 **A reformat of the session's own lines during another session's command**
 (added 25 November 2026, issue #124; widened by #141 above). A formatter keeps every token of the
@@ -276,8 +295,11 @@ or removes, since the journal matches lines by content. Nothing is credited
 when the file has a write whose lines are not known, is not UTF-8, or its
 content before the command, now or in `HEAD` is not known; nor on the paths
 that contest every file (past a call's lifetime, an edit mark overflow).
-A change that keeps tokens but changes whitespace inside a string literal is
-taken as a reformat; another session's command that only did that to the
+Since #158, a change of whitespace inside a Rust, TypeScript, JavaScript or
+Python string literal, or of a line's indentation in Python and the other
+indentation-sensitive files listed above, is a change of tokens. Elsewhere
+(a quoted YAML value, any other file) a change of whitespace alone is taken
+as a reformat; another session's command that only did that to the
 session's own line is indistinguishable from the formatter. Tests:
 `a_formatter_reformatting_only_its_sessions_lines_during_another_sessions_command_is_credited`,
 `a_line_the_other_sessions_command_also_changed_is_credited_to_no_session` and
