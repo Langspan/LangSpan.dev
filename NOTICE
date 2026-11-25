@@ -8,6 +8,13 @@ Third-party material
 
 This repository holds no code copied from other projects.
 
+docs/writing-style.md restates and adapts rules from the Google developer
+documentation style guide (https://developers.google.com/style), created by
+Google LLC and licensed under the Creative Commons Attribution 4.0
+International License (https://creativecommons.org/licenses/by/4.0/).
+The rules were selected, reworded and changed for this project; no passage is
+copied. Google does not sponsor or endorse this project.
+
 Release binaries statically link Rust crates, and C code built by some of
 them (SQLite, Tree-sitter), under their own licences. Each release archive
 carries their notices in THIRD-PARTY-LICENSES.html.
