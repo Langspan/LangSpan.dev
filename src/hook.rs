@@ -2854,6 +2854,7 @@ impl Session<'_> {
             background,
             commit_mine: call.is_some_and(|call| crate::shell::runs_commit_mine(&call.command)),
             edited_elsewhere: Vec::new(),
+            reformatted: Vec::new(),
             command: call.map(|call| crate::shell::kept_command(&call.command)),
         };
         if let Ok(before) = &record.before {
@@ -2979,13 +2980,21 @@ impl Session<'_> {
                                 |path| file_state(self.root, path),
                             );
                             run.edited_elsewhere = theirs;
+                            // Contested only because another session's shell
+                            // run overlapped, so far.
+                            let overlapped: Vec<String> = run
+                                .contested
+                                .iter()
+                                .filter(|path| !unknown.contains(path))
+                                .cloned()
+                                .collect();
                             run.contested.extend(unknown);
                             // A rewrite of another session's uncommitted
                             // lines (a formatter's, say) is both sessions'.
                             // That file was still changed by this command,
                             // so it is noted as this command's change below.
                             let mut noted = run.attributed(&changed);
-                            let rewrote = crate::journal::rewrites_others(
+                            let rewritten = crate::journal::rewrites_others(
                                 state_dir,
                                 self.root,
                                 &ids.session_id,
@@ -2993,7 +3002,8 @@ impl Session<'_> {
                                 before,
                                 self.deadline,
                             );
-                            run.contested.extend(rewrote);
+                            run.contested.extend(rewritten.iter().cloned());
+                            let mut partial = Vec::new();
                             // Past a shell call's supported lifetime, what
                             // other sessions did may no longer be known; nor
                             // when an edit may have gone unmarked at the cap.
@@ -3001,10 +3011,46 @@ impl Session<'_> {
                             {
                                 run.contested.extend(changed.iter().cloned());
                                 noted.clear();
+                            } else {
+                                // What only reformats this session's own
+                                // lines is its own, whatever ran alongside
+                                // (issue #124).
+                                let candidates: Vec<String> = overlapped
+                                    .into_iter()
+                                    .filter(|path| {
+                                        !rewritten.contains(path)
+                                            && !run.edited_elsewhere.contains(path)
+                                    })
+                                    .collect();
+                                let reformats = crate::journal::own_reformats(
+                                    state_dir,
+                                    self.root,
+                                    &ids.session_id,
+                                    &candidates,
+                                    before,
+                                    self.deadline,
+                                );
+                                run.contested.retain(|path| !reformats.whole.contains(path));
+                                // Now this session's, so this command's change.
+                                noted.extend(reformats.whole.iter().cloned());
+                                partial = reformats.partial;
                             }
                             run.contested.sort();
                             run.contested.dedup();
                             self.note_shell_changes(&run, &noted);
+                            run.reformatted =
+                                partial.iter().map(|(path, _)| path.clone()).collect();
+                            if let Err(error) = crate::journal::record_partial(
+                                state_dir,
+                                self.root,
+                                &ids.session_id,
+                                &partial,
+                            ) {
+                                eprintln!(
+                                    "{}",
+                                    json!({"event":"journal_unavailable","detail":error})
+                                );
+                            }
                             let attributed = run.attributed(&changed);
                             if let Err(error) = crate::journal::record(
                                 state_dir,
@@ -3167,6 +3213,12 @@ impl Session<'_> {
                 "; {theirs} to another session's edit made while the command ran, recorded by that session's hooks"
             ),
         };
+        let partly = match run.reformatted.len() {
+            0 => String::new(),
+            partly => format!(
+                " ({partly} of them partly this session's: the lines its command only reformatted)"
+            ),
+        };
         Ok(if run.contested.is_empty() {
             Reply::none(
                 "shell_observed",
@@ -3179,7 +3231,7 @@ impl Session<'_> {
             Reply::none(
                 "contested",
                 format!(
-                    "{} changed file(s) attributed to this session{elsewhere}; {} attributed to no session, because another session's shell run or edit overlapped and could have written them, or the command rewrote another session's uncommitted lines{relation}",
+                    "{} changed file(s) attributed to this session{elsewhere}; {} attributed to no session{partly}, because another session's shell run or edit overlapped and could have written them, or the command rewrote another session's uncommitted lines{relation}",
                     attributed.len(),
                     run.contested.len()
                 ),
