@@ -12,7 +12,7 @@ Before any change, read and follow [docs/engineering.md](docs/engineering.md). I
 
 ## What to work on
 
-[docs/roadmap.md](docs/roadmap.md) lists every capability still to build, each under the ADR that decides it. Take work from there: pick a row whose ADR says it is planned or whose condition for revisiting has been met, read that ADR, and propose any change of decision as an ADR change in the same pull request. A capability that is finished, or a decision that changes, updates the roadmap row in the same pull request.
+Every capability still to build is a GitHub issue labelled `roadmap` ([the list](https://github.com/Langspan/LangSpan.dev/issues?q=label%3Aroadmap)); the issue is the item's full specification and names the ADR that decides it. [docs/roadmap.md](docs/roadmap.md) is a short index of those issues by area. Take work from there: pick an issue whose ADR says it is planned or whose condition for revisiting has been met, read the issue and that ADR, and propose any change of decision as an ADR change in the same pull request. A pull request that finishes a capability says "Fixes #N" for its issue and removes its line from the index; a decision that changes updates the issue and the ADR.
 
 ## Current state
 
@@ -36,7 +36,7 @@ The broader product proof is two developers' existing agents coordinating across
 - [README.md](README.md): product overview and repository entry point.
 - [docs/usage.md](docs/usage.md): setup, native hooks, CLI, MCP and configuration.
 - [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md): what is built, retained evidence and pending acceptance.
-- [docs/roadmap.md](docs/roadmap.md): the launch bar and the decisions for everything outside it.
+- [docs/roadmap.md](docs/roadmap.md): the launch bar and an index of the [roadmap issues](https://github.com/Langspan/LangSpan.dev/issues?q=label%3Aroadmap), which hold each item's specification.
 - [docs/adr/](docs/adr/0001-local-coordination.md): architecture decisions, starting with ADR 0001.
 - [docs/security/threat-model.md](docs/security/threat-model.md): trust boundaries and threats.
 - [benchmarks/coordination/README.md](benchmarks/coordination/README.md): the coordination benchmark harness.
