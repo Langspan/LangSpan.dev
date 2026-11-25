@@ -6,6 +6,7 @@ pub mod claude_code;
 pub mod client;
 pub mod clock;
 pub mod commit;
+pub mod count;
 pub mod daemon;
 pub mod dashboard;
 pub mod install;

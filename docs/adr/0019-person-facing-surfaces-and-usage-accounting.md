@@ -24,7 +24,7 @@ such numbers to be measured.
 | H3 | Desktop pings and a sound | Not now | Needs OS integration outside the state directory |
 | H4 | A daily summary | Built 25 November 2026 ([issue #78](https://github.com/Langspan/LangSpan.dev/issues/78)): `langspan today` and MCP `langspan_today`; see "Daily summary (H4)" below. Not yet run on a host over a working day | |
 | C10 | A "since you left" briefing | Not now | Can be derived from events later; briefings already carry current peer work |
-| H5 | Monthly catch counter | Not now | A count of refusals is not evidence of rework avoided |
+| H5 | Monthly refusal count | Built 25 November 2026 ([issue #79](https://github.com/Langspan/LangSpan.dev/issues/79)): `langspan count`, a line in `langspan today` and on the local page; see "Monthly refusal count (H5)" below. Not yet run on a host | First not now: a count of refusals is not evidence of rework avoided. Built as a count of what LangSpan did, which claims no outcome |
 | H6 | Daily "tokens saved" line | Not now | No such number is shown until it is measured |
 | E3 | Recap with tokens, model and cost | Not now | Depends on J10 |
 | J10 | Token and cost accounting from host transcripts | Not now | New trust boundary over private transcripts; would need a STRIDE review. Subscription sessions would store no dollars |
@@ -90,6 +90,59 @@ store holding them stops at the first, as for any event kind it does not know
 (injected clocks across a simulated midnight, a restart without an anchor and
 a reboot), `tests/today.rs` (real daemon, Git, hooks and MCP adapter).
 
+**Monthly refusal count (H5), built 25 November 2026.** `langspan count
+[--month YYYY-MM] [--json]` counts the `write_refused` events (H2) of one
+local month, at query time, from the event log; nothing is stored for it and
+no event or receipt is written. It is shown also as one line in the text of
+`langspan today` and on the local page, whose `/api/state` view carries it as
+`refusals_this_month` ([ADR 0013](0013-dashboard.md)). Nothing of it reaches a
+model: the MCP answer of `langspan_today` leaves the line out, and there is no
+MCP tool. The decision's reason stands: every text says "refusals", never
+"collisions prevented" or "saved", and carries the line "A refusal is not
+proof of avoided rework." until H9's outcomes and a measurement exist. A test
+holds the text against a list of words that would claim an outcome. Choices:
+
+- *Counting once.* A refusal is counted once per session, workspace, kind and
+  path set (the event's at most 8 sorted paths) per local day; the others are
+  `repeats`. `by_kind` always names the four kinds, so they add up to
+  `refusals`. This is a different unit from `today` and the status line,
+  which count each `write_refused` event.
+- *Local days without a time zone in the core.* The CLI turns the month into
+  its local days' starts and the next month's first (2 to 33 instants,
+  strictly increasing, checked by the daemon), each from `local_day` with
+  the zone's offsets for that date, so a day the clocks change is 23 or 25
+  hours long. Finding them asks `date` about a hundred times within one 2 s
+  deadline; the local page asks once per month per run and keeps them. The
+  core places each refusal in wall time by its generation's anchor and on a
+  day by those instants; a refusal of a generation without an anchor is
+  `undated`, in no month.
+- *Retried through.* A refusal is `retried_through` when its session was
+  later admitted on the same paths (the admission's sorted paths, cut at 8
+  as the refusal's are), in the same workspace, among the session's next 16
+  admissions after the last repeat. A held commit is followed by no
+  admission and is never counted there. This says a retry went through, not
+  whether it was right to.
+- *Bounds.* One count reads at most the newest 20,000 `write_refused` rows
+  and every clock anchor, through partial indexes created when a store
+  opens (`events_write_refused`; `events_grant_session` over admissions by
+  session for the retry lookup; the generation markers as before), so its
+  cost does not grow with the rest of the log. It says `truncated` when older
+  refusal rows exist and the oldest read is not before the month. The index
+  changes no stored format; building it is one pass over the log at the
+  first open. Its latency has not been measured.
+- *Failure mode.* With the daemon down `count` exits 1 and shows no figure;
+  `today` shows that the count could not be read; the local page says so in
+  place of the line.
+
+Tests: `crates/langspan-core/tests/count.rs` (injected days and anchors,
+a New York day across a UTC midnight, the month's edges to the millisecond),
+`src/count.rs` (a month with a clock change, the word list), and
+`tests/count.rs` (a real daemon, Git and Claude Code hook events; the first
+run's anchor is moved so its refusals fall at 02:30 UTC on 1 April 2027,
+counted in April in UTC and in March in New York; the local page's total).
+A real-host run with Claude Code and Codex producing each kind they support
+is still to be retained.
+
 **Status line (row H2), amended 25 November 2026.** H2 is built
 ([issue #76](https://github.com/Langspan/LangSpan.dev/issues/76)), for Claude
 Code only, the one launch host with a status-line command:
@@ -137,7 +190,8 @@ the tests is constructed from Claude Code's documentation
 
 - At launch the owner sees coordination through `status`, `recap`, `doctor`
   and `langspan dashboard`, and no usage or savings figure. Claude Code users
-  can add the status line (H2), which counts refusals but claims no saving.
+  can add the status line (H2), which counts refusals but claims no saving;
+  `langspan count` (H5) counts a month's refusals, also without a saving.
 - Adding transcript reading later needs its own ADR and an update to the
   [threat model](../security/threat-model.md).
 
@@ -145,4 +199,4 @@ the tests is constructed from Claude Code's documentation
 
 These rows are on the public roadmap. They are worked on in the open after the first
 release of `Langspan/LangSpan.dev`, by many agent sessions developing LangSpan with
-LangSpan itself; the release does not wait for them. What would change it: users asking for a notice or summary that `status`, `recap` and the local page do not give; for J10, J11 and E3, an accepted STRIDE review of reading transcripts; for H5 and H6, a measurement that ties the count to avoided rework.
+LangSpan itself; the release does not wait for them. What would change it: users asking for a notice or summary that `status`, `recap` and the local page do not give; for J10, J11 and E3, an accepted STRIDE review of reading transcripts; for H6, a measurement that ties a figure to avoided rework (H5 is built as a count that claims no outcome).

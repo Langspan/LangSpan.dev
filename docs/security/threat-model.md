@@ -456,6 +456,23 @@ are the status line's.
 | Denial of service | One answer reads at most the newest 50,000 events and parses each, then one backward search for the generation's anchor; the cost is bounded by that count, not by history, and the answer says `truncated` when the window reaches past it. `date` runs at most five times for each midnight found, all within one 2 s deadline, and is killed at it. The answer fits one 48 KiB frame: listed files, then sessions, are dropped and counted. |
 | Elevation of privilege | It grants nothing and decides nothing; a failure is an error answer. |
 
+## Monthly refusal count
+
+`langspan count` and the month's line in `langspan today` and on the local
+page (roadmap H5,
+[ADR 0019](../adr/0019-person-facing-surfaces-and-usage-accounting.md)) add no
+boundary: they read the same `write_refused` and `clock_anchored` events over
+the owner-only socket and start `date` through `local_day` as `today` does.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | The day starts come from the client; the daemon checks only that they increase and number 2 to 33. A same-user client could ask for any window, which it could already read through `events`. |
+| Tampering (prompt injection) | Nothing reaches a model: there is no MCP tool, and `langspan_today` leaves the line out. The text holds counts, kind names and workspace IDs. |
+| Repudiation | Reading records no event or receipt. |
+| Information disclosure | Nothing is stored or sent; the local page's view gains counts and workspace IDs it already showed. |
+| Denial of service | One count reads at most the newest 20,000 refusal rows and the clock anchors, through partial indexes, and at most 16 later admissions per refusal counted, through an index by session. `date` runs about a hundred times per month within one 2 s deadline; the local page does that once per month per run. |
+| Elevation of privilege | It grants nothing and decides nothing; a failure is an error answer (exit 1). |
+
 ## Region admission
 
 [ADR 0012](../adr/0012-region-admission.md): the hook reads and parses the file
