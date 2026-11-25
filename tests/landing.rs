@@ -473,6 +473,9 @@ fn a_combined_check_that_changes_its_own_tree_is_not_evidence_for_it() {
         text.contains("did not hold exactly the combined tree"),
         "{text}"
     );
+    // It names the file that changed, and what to do about it.
+    assert!(text.contains("a.txt (modified)"), "{text}");
+    assert!(text.contains("run the check again"), "{text}");
     let (code, text) = w.cli(&[
         "land",
         "app",
@@ -1506,6 +1509,92 @@ async fn an_mcp_landing_whose_record_fails_reports_the_push_and_commit() {
             .ends_with("ls-remote origin refs/heads/main"),
         "{landed}"
     );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_mcp_check_whose_command_creates_an_untracked_file_says_so_and_what_to_do() {
+    use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+    let w = World::new();
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command
+        .arg("mcp")
+        .arg("--state-dir")
+        .arg(w.base.join("state"));
+    let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+    let call = |arguments: serde_json::Value| {
+        let request = CallToolRequestParams::new("langspan_integrate_check")
+            .with_arguments(arguments.as_object().unwrap().clone());
+        let client = &client;
+        async move {
+            let result = tokio::time::timeout(Duration::from_secs(60), client.call_tool(request))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.is_error, Some(false), "{result:?}");
+            result.structured_content.unwrap()
+        }
+    };
+    // As a build tool that writes a lock file the branch does not track.
+    let check = serde_json::json!({
+        "request_id": "agent-check-gen", "workspace_id": "app", "onto": "main",
+        "name": "unit", "branches": ["feature-a"],
+        "command": ["sh", "-c", "echo generated > Generated.lock"], "timeout_s": 60,
+    });
+    let first = call(check.clone()).await;
+    assert_eq!(
+        (
+            &first["result"],
+            &first["exit_code"],
+            &first["check"]["result"]["type"]
+        ),
+        (&"checked".into(), &5.into(), &"inconclusive".into()),
+        "{first}"
+    );
+    let reason = &first["inconclusive"];
+    assert_eq!(reason["cause"], "changed_during_run", "{first}");
+    assert_eq!(
+        reason["changed"],
+        serde_json::json!([{"path": "Generated.lock", "change": "added", "untracked": true}]),
+        "{first}"
+    );
+    assert_eq!(reason["changed_total"], 1, "{first}");
+    let message = reason["message"].as_str().unwrap();
+    assert!(
+        message.contains("did not hold exactly the combined tree"),
+        "the same reason the CLI prints: {message}"
+    );
+    let next = reason["next"].as_str().unwrap();
+    assert!(next.contains("Generated.lock"), "{next}");
+    assert!(next.contains(".gitignore"), "{next}");
+    assert!(next.contains("new request_id"), "{next}");
+    assert!(
+        reason["data"].as_str().unwrap().contains("data"),
+        "the paths are labelled as data: {first}"
+    );
+    // A retry replays the record, and says why there is no fresh reason.
+    let retry = call(check).await;
+    assert_eq!(retry["replayed"], true, "{retry}");
+    assert_eq!(retry["inconclusive"]["cause"], "replayed", "{retry}");
+    assert!(
+        retry["inconclusive"]["next"]
+            .as_str()
+            .unwrap()
+            .contains("new request_id"),
+        "{retry}"
+    );
+    // A path is repository text: redacted like other check output.
+    let token = format!("ghp_{}", "aB3".repeat(12));
+    let secret = call(serde_json::json!({
+        "request_id": "agent-check-secret", "workspace_id": "app", "onto": "main",
+        "name": "unit", "branches": ["feature-a"],
+        "command": ["sh", "-c", format!("echo x > {token}")], "timeout_s": 60,
+    }))
+    .await;
+    let reason = &secret["inconclusive"];
+    assert_eq!(reason["changed"][0]["path"], "[redacted]", "{secret}");
+    assert_eq!(reason["changed"][0]["untracked"], true, "{secret}");
+    assert!(!reason.to_string().contains(&token), "{secret}");
     client.cancel().await.unwrap();
 }
 

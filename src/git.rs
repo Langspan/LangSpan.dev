@@ -120,7 +120,24 @@ pub fn run_with_env(
     deadline: Instant,
     limit: usize,
 ) -> Result<(std::process::ExitStatus, Vec<u8>), String> {
-    run(cwd, args, env, deadline, limit, false).map(|(status, bytes, _)| (status, bytes))
+    let (status, bytes, errors) = run_with_errors(cwd, args, env, deadline, limit)?;
+    if status.success() && !errors.is_empty() {
+        return Err("read-only Git operation emitted a warning; observation is incomplete, check repository state".into());
+    }
+    Ok((status, bytes))
+}
+
+/// As `run_with_env`, also returning the end of Git's standard error, for a
+/// caller that relays it on failure through `said`. A warning on success is
+/// returned, not an error.
+pub fn run_with_errors(
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &std::ffi::OsStr)],
+    deadline: Instant,
+    limit: usize,
+) -> Result<Ran, String> {
+    run(cwd, args, env, deadline, limit)
 }
 
 /// The SSH command used for network Git when the owner has not chosen one:
@@ -185,7 +202,7 @@ fn network_run(
     if !owner_ssh(cwd, deadline)? {
         env.push(("GIT_SSH_COMMAND", BATCH_SSH.as_ref()));
     }
-    run(cwd, args, &env, deadline, limit, true)
+    run(cwd, args, &env, deadline, limit)
 }
 
 /// Git's refusal text in a form fit for a log line and an error message: its
@@ -223,31 +240,32 @@ fn owner_ssh(cwd: &Path, deadline: Instant) -> Result<bool, String> {
     if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
         return Ok(true);
     }
-    let (status, value, _) = run(
+    let (status, value) = run_with_env(
         cwd,
         &["config", "--get", "core.sshCommand"],
         &[],
         deadline,
         8192,
-        false,
     )?;
     Ok(status.success() && !value.trim_ascii().is_empty())
 }
 
 /// Exit status, standard output and standard error of one Git process.
-type Ran = (std::process::ExitStatus, Vec<u8>, Vec<u8>);
+pub type Ran = (std::process::ExitStatus, Vec<u8>, Vec<u8>);
 
+/// One Git process. Standard error keeps only its last 8 KiB, so a chatty
+/// command cannot fill the pipe or memory; the end is where Git says why it
+/// failed. The caller decides what a non-empty one means.
 fn run(
     cwd: &Path,
     args: &[&str],
     env: &[(&str, &std::ffi::OsStr)],
     deadline: Instant,
     limit: usize,
-    remote_notices: bool,
 ) -> Result<Ran, String> {
     #[cfg(not(unix))]
     {
-        let _ = (cwd, args, env, deadline, limit, remote_notices);
+        let _ = (cwd, args, env, deadline, limit);
         Err("Git observer currently requires Unix".into())
     }
     #[cfg(unix)]
@@ -296,20 +314,11 @@ fn run(
                     return Err("Git operation deadline elapsed".into());
                 }
                 drain(&mut stdout, &mut bytes, limit, &mut stdout_done)?;
-                if remote_notices {
-                    // Keep only the end, so a chatty server cannot fill the
-                    // pipe or memory; the end is where Git says why it failed.
-                    drain_tail(&mut stderr, &mut errors, 8192, &mut stderr_done)?;
-                } else {
-                    drain(&mut stderr, &mut errors, 8192, &mut stderr_done)?;
-                }
+                drain_tail(&mut stderr, &mut errors, 8192, &mut stderr_done)?;
                 if let Some(status) = child.try_wait().map_err(|e| e.to_string())?
                     && stdout_done
                     && stderr_done
                 {
-                    if status.success() && !errors.is_empty() && !remote_notices {
-                        return Err("read-only Git operation emitted a warning; observation is incomplete, check repository state".into());
-                    }
                     return Ok((status, bytes, errors));
                 }
                 std::thread::sleep(Duration::from_millis(1));

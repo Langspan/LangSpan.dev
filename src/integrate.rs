@@ -141,6 +141,82 @@ pub fn working_tree(root: &Path, deadline: Instant) -> Result<(Option<String>, S
     result
 }
 
+/// The most changed paths named in a reason; the rest are counted.
+pub const MAX_CHANGED_SHOWN: usize = 20;
+/// The most characters of one named path.
+const MAX_CHANGED_PATH: usize = 256;
+
+/// One file that differs between two trees of a checkout. The path is
+/// repository text: data, redacted, without control characters and capped.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Changed {
+    pub path: String,
+    /// `added`, `modified`, `deleted` or `type_changed`.
+    pub change: &'static str,
+    /// The checkout's index does not track it: a file the command created
+    /// that is neither committed nor ignored.
+    pub untracked: bool,
+}
+
+/// The files that differ from tree `from` to tree `to`, as the checkout at
+/// `dir` has them: at most `MAX_CHANGED_SHOWN`, with the total count.
+pub fn changed_files(
+    dir: &Path,
+    from: &str,
+    to: &str,
+    deadline: Instant,
+) -> Result<(Vec<Changed>, usize), String> {
+    let diff = git::output(
+        dir,
+        &[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--name-status",
+            from,
+            to,
+        ],
+        deadline,
+        1024 * 1024,
+    )?;
+    let untracked = git::output(
+        dir,
+        &["ls-files", "-z", "--others", "--exclude-standard"],
+        deadline,
+        1024 * 1024,
+    )?;
+    let untracked: std::collections::BTreeSet<&[u8]> = untracked
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .collect();
+    let mut fields = diff.split(|byte| *byte == 0).filter(|f| !f.is_empty());
+    let (mut shown, mut total) = (Vec::new(), 0);
+    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+        total += 1;
+        if shown.len() == MAX_CHANGED_SHOWN {
+            continue;
+        }
+        let change = match status.first() {
+            Some(b'A') => "added",
+            Some(b'D') => "deleted",
+            Some(b'T') => "type_changed",
+            _ => "modified",
+        };
+        let text: String = crate::hook::redact(&String::from_utf8_lossy(path))
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(MAX_CHANGED_PATH)
+            .collect();
+        shown.push(Changed {
+            path: text,
+            change,
+            untracked: untracked.contains(path),
+        });
+    }
+    Ok((shown, total))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Merged {
     /// A commit holding the combined result. It may be one of the inputs
