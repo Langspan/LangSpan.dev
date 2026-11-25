@@ -128,6 +128,24 @@ and per-project trust state.
 | **Denial of service**: a broken user-level hook affects every repository | The hook keeps the project form's budget, gives no decision on any failure, exits 0, and prints nothing outside a Git repository or when a project install covers the repository. | A missing executable makes the host report a failed hook on every event until `uninstall` or a reinstall; `doctor` names it and the command to run again. Under Homebrew the entries name the `opt` link rather than the versioned keg, so `brew upgrade` does not cause this; that link is resolved on every run, and anyone who can change it can already replace the binary in the same Homebrew prefix. |
 | **Elevation of privilege** | No permission, trust or approval setting of either host is written or weakened. Codex still requires its own review of the new hook; Claude Code's own permission flow still governs every tool call. The hook never answers `allow`. | Installing a user-level hook is the owner's grant of a command that runs on every session; it is shown before it is written. |
 
+## Host detection
+
+`langspan hosts`, `doctor` and the daemon's hourly host check (roadmap A7,
+[ADR 0018](../adr/0018-other-hosts-after-launch.md)) read each host's
+configuration directory entry and LangSpan's own entries in its hook and MCP
+files. The daemon now reads files in the user's home, which it did not before,
+and records what it finds in the local store.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: an entry that looks like LangSpan's is taken for an install | The same exact-shape recognition as `install` and `doctor`. | A hand-written entry of the generated shape counts as an install, as it does for `uninstall`. |
+| **Tampering**: detection changes a host's configuration | Detection has no write path: it uses the read functions of `install` only (1 MiB bound, no symlinks or special files). A test compares every file under the home before and after `hosts`, the daemon's checks and `doctor`. | None known. |
+| **Tampering**: a client records a false host | `observe_hosts` takes at most 16 names of 1–32 lower-case letters and hyphens; anything else is refused with nothing recorded. | Any same-user client can send it, as with every other observation; the next check replaces it. |
+| **Repudiation** | Each change of a host's state is an event (`host_not_installed`, `host_cleared`) with the daemon's time. | Who installed a host later is not known. |
+| **Information disclosure** | Only the host's name is stored; no path, setting or file content leaves the check. Agents are not told: the line is for the owner's `status`, dashboard and `doctor`. | `hosts --json` prints the configuration directory paths to the terminal that ran it. |
+| **Denial of service** | One bounded check per interval (default one hour, at least 100 ms) in its own thread; unreadable directories are `unknown`, never absent, and a held host that is `unknown` keeps its notice rather than being cleared. A failed check or inspection is logged once per new failure. | A host directory on a hung network filesystem can stall that thread; it does not block the state owner or a hook. |
+| **Elevation of privilege** | LangSpan never installs, upgrades or edits a host by itself; the note only names the command for the owner to run, with this coordinator's state directory single-quoted for the shell. | None. |
+
 ## The status line
 
 `langspan statusline` (roadmap H2, [ADR 0019](../adr/0019-person-facing-surfaces-and-usage-accounting.md))
