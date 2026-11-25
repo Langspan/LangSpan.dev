@@ -111,7 +111,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [D5: Export and import the source index](https://github.com/Langspan/LangSpan.dev/issues/54): a large repository's first indexing takes many passes, and the index cannot be inspected outside LangSpan.
 - [D6: Index more languages, one grammar at a time](https://github.com/Langspan/LangSpan.dev/issues/55): Java, C#, Ruby and C++ repositories get no source-index answers or interface notices.
 - [D7: Track renames so history and notices follow the new name](https://github.com/Langspan/LangSpan.dev/issues/56): a rename is reported as a removal with no new name, and history stays with the old one.
-- [D8: Report where the index is blind](https://github.com/Langspan/LangSpan.dev/issues/57): an empty impact answer does not say which files the index could not read.
+- [D8: Report where the index is blind](https://github.com/Langspan/LangSpan.dev/issues/57): an empty impact answer does not say which files the index could not read. Built as `graph blind-spots` and `coverage.blind_in_scope`; a real-host run remains.
 - [D9: Check a combination at the level of definitions](https://github.com/Langspan/LangSpan.dev/issues/58): a clean Git merge can pair a changed signature with a new call in the old shape.
 - [D10: Offer live activity as an MCP resource](https://github.com/Langspan/LangSpan.dev/issues/59): a live view of who is doing what takes three tool calls, and there is no resource to read.
 
@@ -142,7 +142,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## H. The person's view
 
-- [H2: A status line in Claude Code](https://github.com/Langspan/LangSpan.dev/issues/76): a person cannot see peers or today's refusals from the agent's own window.
 - [H3: Desktop notices for refusals and handoffs](https://github.com/Langspan/LangSpan.dev/issues/77): refusals and waiting handoffs go unnoticed when the person is not watching that agent.
 - [H4: A daily summary: `langspan today`](https://github.com/Langspan/LangSpan.dev/issues/78): `recap` shows current state, not an account of what the day's sessions did.
 - [H5: A monthly refusal count](https://github.com/Langspan/LangSpan.dev/issues/79): a person deciding whether to keep LangSpan has no count of how often it intervened.

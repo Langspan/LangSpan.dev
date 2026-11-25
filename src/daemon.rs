@@ -99,10 +99,9 @@ mod unix {
     struct IndexJob {
         workspace_id: String,
         root: PathBuf,
-        files: std::collections::BTreeMap<String, String>,
-        /// Listed but not versioned by this scan: kept in the index as
-        /// they were, never treated as removed.
-        unobserved: std::collections::BTreeSet<String>,
+        /// Its unobserved paths are kept in the index as they were, never
+        /// treated as removed.
+        scan: crate::graph::ScanView,
     }
 
     /// The index's single writer. It only ever reads working trees and its
@@ -122,13 +121,7 @@ mod unix {
         let mut last_failure: Option<String> = None;
         while let Ok(job) = jobs.recv() {
             let deadline = Instant::now() + Duration::from_secs(2);
-            match index.update(
-                &job.workspace_id,
-                &job.root,
-                &job.files,
-                &job.unobserved,
-                deadline,
-            ) {
+            match index.update(&job.workspace_id, &job.root, &job.scan, now_ms(), deadline) {
                 Ok(notices) => {
                     last_failure = None;
                     for notice in notices {
@@ -305,6 +298,83 @@ mod unix {
         let cut = keep < symbols.len();
         symbols.truncate(keep);
         cut
+    }
+
+    /// Where the index is blind (roadmap D8): read-only, from one snapshot
+    /// of the index, with the last scan failure if one is recorded.
+    fn graph_blind_spots(
+        graph: Option<&crate::graph::Index>,
+        state: &State,
+        workspace_id: &str,
+        limit: u32,
+    ) -> Result<Outcome, String> {
+        if !state.workspaces.contains_key(workspace_id) {
+            return Err("workspace is not registered".into());
+        }
+        if !(1..=crate::graph::MAX_RESULTS).contains(&limit) {
+            return Err("limit must be between 1 and 200".into());
+        }
+        let graph = graph.ok_or("the index is not available yet; try again shortly")?;
+        let (mut blind_spots, coverage) = graph
+            .with_coverage(workspace_id, |graph| graph.blind_spots(workspace_id, limit))
+            .map_err(|error| error.to_string())?;
+        let scan_failure = state.scan_failures.get(workspace_id).cloned();
+        let totals = &blind_spots.totals;
+        let mut truncated = [
+            (blind_spots.partial.len(), totals.partial),
+            (blind_spots.never_clean.len(), totals.never_clean),
+            (blind_spots.waiting.len(), totals.waiting),
+            (blind_spots.too_large.len(), totals.too_large),
+            (blind_spots.unscanned.len(), totals.unscanned),
+        ]
+        .iter()
+        .any(|(listed, total)| *listed < *total as usize);
+        truncated |= fit_blind_spots(&mut blind_spots, &coverage, scan_failure.as_ref());
+        Ok(Outcome::GraphBlindSpots {
+            blind_spots,
+            coverage,
+            scan_failure,
+            truncated,
+        })
+    }
+
+    /// Long paths can make five lists of 200 exceed one response frame. Keep
+    /// the longest prefix, the same length for every list, that fits, so a
+    /// trimmed answer is still the same on every call. Returns whether any
+    /// path was left out.
+    fn fit_blind_spots(
+        spots: &mut langspan_core::BlindSpots,
+        coverage: &langspan_core::GraphCoverage,
+        failure: Option<&langspan_core::ScanFailure>,
+    ) -> bool {
+        const ROOM: usize = 1024;
+        let size = |spots: &langspan_core::BlindSpots| {
+            serde_json::to_vec(&(spots, coverage, failure)).map_or(usize::MAX, |bytes| bytes.len())
+        };
+        if size(spots) + ROOM < MAX_FRAME_BYTES {
+            return false;
+        }
+        let cut = |spots: &langspan_core::BlindSpots, keep: usize| {
+            let mut spots = spots.clone();
+            spots.partial.truncate(keep);
+            spots.never_clean.truncate(keep);
+            spots.waiting.truncate(keep);
+            spots.too_large.truncate(keep);
+            spots.unscanned.truncate(keep);
+            spots
+        };
+        // The largest prefix that fits; zero always does.
+        let (mut low, mut high) = (0, crate::graph::MAX_RESULTS as usize);
+        while low < high {
+            let middle = (low + high).div_ceil(2);
+            if size(&cut(spots, middle)) + ROOM < MAX_FRAME_BYTES {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        *spots = cut(spots, low);
+        true
     }
 
     /// Definitions and mentioning files for names taken from a prompt. The
@@ -613,8 +683,7 @@ mod unix {
                                 let _ = index_sender.try_send(IndexJob {
                                     workspace_id: workspace_id.clone(),
                                     root: root.clone(),
-                                    files: crate::graph::indexable(&snapshot),
-                                    unobserved: snapshot.unobserved.clone(),
+                                    scan: crate::graph::ScanView::of(&snapshot),
                                 });
                                 Ok(snapshot.coverage)
                             })
@@ -1319,6 +1388,59 @@ mod unix {
         graph: Option<&crate::graph::Index>,
         request: Request,
     ) -> Response {
+        let reads_blind = reads_blind_in_scope(&request.command);
+        let mut response = answer(store, graph, request);
+        if !reads_blind {
+            for coverage in coverages(&mut response.outcome) {
+                coverage.blind_in_scope = 0;
+            }
+        }
+        response
+    }
+
+    /// Whether the client asked for `GraphCoverage::blind_in_scope`. Earlier
+    /// builds read coverage with `deny_unknown_fields`; a request that does
+    /// not ask is answered in the shape they know, the field absent.
+    fn reads_blind_in_scope(command: &Command) -> bool {
+        matches!(
+            command,
+            Command::GraphBlindSpots { .. }
+                | Command::GraphSymbol {
+                    blind_in_scope: true,
+                    ..
+                }
+                | Command::GraphReferences {
+                    blind_in_scope: true,
+                    ..
+                }
+                | Command::GraphImpact {
+                    blind_in_scope: true,
+                    ..
+                }
+        )
+    }
+
+    /// Every index coverage an outcome carries.
+    fn coverages(outcome: &mut Outcome) -> Vec<&mut langspan_core::GraphCoverage> {
+        match outcome {
+            Outcome::Graph { coverage, .. }
+            | Outcome::GraphContext { coverage, .. }
+            | Outcome::CallBreaks { coverage, .. }
+            | Outcome::GraphBlindSpots { coverage, .. } => vec![coverage],
+            Outcome::Dashboard { dashboard } => dashboard
+                .workspaces
+                .iter_mut()
+                .filter_map(|workspace| workspace.coverage.as_mut())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn answer(
+        store: &mut Store,
+        graph: Option<&crate::graph::Index>,
+        request: Request,
+    ) -> Response {
         let Request {
             version,
             request_id,
@@ -1354,9 +1476,15 @@ mod unix {
             Command::GraphSymbol { .. }
                 | Command::GraphReferences { .. }
                 | Command::GraphImpact { .. }
+                | Command::GraphBlindSpots { .. }
                 | Command::GraphContext { .. }
         ) {
             let answer = match &command {
+                Command::GraphBlindSpots {
+                    workspace_id,
+                    limit,
+                } => graph_blind_spots(graph, store.state(), workspace_id, *limit)
+                    .map_err(|message| ("index_unavailable", message)),
                 Command::GraphContext {
                     workspace_id,
                     names,
@@ -1872,6 +2000,58 @@ mod unix {
                     references: Vec::new(),
                     resolution: Some("name".into()),
                     coverage,
+                    truncated: true,
+                },
+            };
+            protocol::encode(&response).expect("fits one frame");
+        }
+
+        #[test]
+        fn blind_spots_with_long_paths_keep_one_common_prefix_that_fits_one_frame() {
+            let paths = |list: &str| -> Vec<String> {
+                (0..200)
+                    .map(|n| format!("{list}/{n:03}/{}", "x".repeat(200)))
+                    .collect()
+            };
+            let full = langspan_core::BlindSpots {
+                partial: paths("p")
+                    .into_iter()
+                    .map(|path| langspan_core::PartialFile { path, since_ms: 1 })
+                    .collect(),
+                never_clean: paths("n"),
+                waiting: paths("w"),
+                too_large: paths("t"),
+                unscanned: paths("u"),
+                ..Default::default()
+            };
+            let coverage = GraphCoverage::default();
+            let mut small = langspan_core::BlindSpots {
+                waiting: vec!["src/a.rs".into()],
+                ..Default::default()
+            };
+            assert!(!fit_blind_spots(&mut small, &coverage, None));
+            assert_eq!(small.waiting, ["src/a.rs"]);
+
+            let mut first = full.clone();
+            assert!(fit_blind_spots(&mut first, &coverage, None), "said so");
+            let kept = first.waiting.len();
+            assert!(kept > 10 && kept < 200, "{kept}");
+            assert_eq!(first.partial.len(), kept);
+            assert_eq!(first.unscanned.len(), kept);
+            assert_eq!(first.waiting[..], full.waiting[..kept], "a prefix");
+            let mut again = full.clone();
+            fit_blind_spots(&mut again, &coverage, None);
+            assert_eq!(again, first, "the same on every call");
+            let response = Response {
+                version: PROTOCOL_VERSION,
+                request_id: "r".repeat(128),
+                replayed: false,
+                generation: u64::MAX,
+                lease_valid: None,
+                outcome: Outcome::GraphBlindSpots {
+                    blind_spots: first,
+                    coverage,
+                    scan_failure: None,
                     truncated: true,
                 },
             };

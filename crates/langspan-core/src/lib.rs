@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 mod dashboard;
 mod lines;
 mod status;
+mod status_line;
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
@@ -18,6 +19,10 @@ pub use dashboard::{
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
     shrink_status, status_records, status_view,
+};
+pub use status_line::{
+    ClockAnchor, MAX_REFUSALS, REFUSAL_PATHS, REFUSAL_RETENTION_MS, RecentRefusal, RefusalKind,
+    StatusLine, status_line,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1033,6 +1038,66 @@ pub struct GraphCoverage {
     pub partial_files: u32,
     /// False when no complete scan exists: nothing is known.
     pub scanned: bool,
+    /// Supported-language files the index cannot read in full at their
+    /// current content (partial, waiting, too large, left out of the scan).
+    /// Every query matches names across the whole workspace, so any of them
+    /// may hold a match the answer lacks; above zero, an empty or short
+    /// answer is weak. `graph blind-spots` names them. Absent when zero,
+    /// and sent only to a client that asks for it (`blind_in_scope` on a
+    /// lookup, or `graph_blind_spots`): earlier builds read coverage
+    /// strictly and reject a field they do not know.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub blind_in_scope: u32,
+}
+
+/// A file indexed with a syntax error or a bound reached.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PartialFile {
+    pub path: String,
+    /// Wall-clock milliseconds since which its indexed versions have been
+    /// partial, on the coordinator's machine.
+    pub since_ms: u64,
+}
+
+/// Other source files the index has no grammar for, by extension.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LanguageCount {
+    pub extension: String,
+    pub files: u32,
+}
+
+/// Full counts of each blind-spot list, however many paths are returned.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BlindTotals {
+    pub partial: u32,
+    pub never_clean: u32,
+    pub waiting: u32,
+    pub too_large: u32,
+    pub unscanned: u32,
+}
+
+/// Where the index is blind, by reason. A file can be in more than one
+/// list (a partial file can also be waiting for its newer version).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BlindSpots {
+    /// Indexed with a syntax error or a bound reached.
+    pub partial: Vec<PartialFile>,
+    /// Indexed, but never parsed cleanly: no interface baseline, so no
+    /// interface notice can come from it.
+    pub never_clean: Vec<String>,
+    /// The scanned content is not indexed yet.
+    pub waiting: Vec<String>,
+    /// Over the index's 1 MiB bound (or the scan's 4 MiB one): never read.
+    pub too_large: Vec<String>,
+    /// Left out by the scan's file or byte bound.
+    pub unscanned: Vec<String>,
+    /// Other source files, most first, then by extension.
+    pub unsupported_languages: Vec<LanguageCount>,
+    pub totals: BlindTotals,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1407,6 +1472,14 @@ pub struct State {
     /// Automatic check results not yet delivered, per session, newest first.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub check_notices: BTreeMap<String, Vec<CheckNotice>>,
+    /// The current generation's clock anchor, once recorded. Derived from
+    /// the events on replay; not part of the status reply.
+    #[serde(skip)]
+    pub clock_anchor: Option<ClockAnchor>,
+    /// Recent refusals placed in wall time, newest first, for the status
+    /// line (roadmap H2). Derived on replay; not part of the status reply.
+    #[serde(skip)]
+    pub refusals: Vec<RecentRefusal>,
 }
 
 /// Checkout changes kept per workspace.
@@ -1448,6 +1521,25 @@ pub struct CheckoutNotice {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
     Booted {
+        generation: u64,
+    },
+    /// The daemon's clock read with the wall clock as a generation started,
+    /// so its times can be placed on a day.
+    ClockAnchored {
+        anchor: ClockAnchor,
+    },
+    /// A write or commit was refused. Recorded with the refusal's receipt,
+    /// so a retry of the same request is not counted again.
+    WriteRefused {
+        session_id: String,
+        workspace_id: String,
+        kind: RefusalKind,
+        /// At most `REFUSAL_PATHS`, sorted.
+        paths: Vec<String>,
+        /// The other session the refusal names, when there is one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_session_id: Option<String>,
+        at_ms: u64,
         generation: u64,
     },
     WorkspaceRegistered {
@@ -1976,6 +2068,22 @@ pub enum Command {
     Recap {
         workspace_id: String,
     },
+    /// Read-only: the person's status line for the directory `root`, with
+    /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
+    StatusLine {
+        root: String,
+        from_ms: u64,
+    },
+    /// A refusal the hook decided itself (a held commit), recorded as a
+    /// `WriteRefused` event. Other kinds are recorded by the admission
+    /// that refuses them.
+    RecordRefusal {
+        session_id: String,
+        kind: RefusalKind,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_session_id: Option<String>,
+    },
     /// Read-only, answered from the derived index: where `name` is defined.
     /// With `detail`, each definition also carries its body digest, calls,
     /// callers, notes and last check (roadmap D1).
@@ -1985,17 +2093,32 @@ pub enum Command {
         limit: u32,
         #[serde(default, skip_serializing_if = "is_false")]
         detail: bool,
+        /// The client reads `GraphCoverage::blind_in_scope`. A request
+        /// without it is one an earlier build sends, and its answer keeps
+        /// the coverage shape that build knows.
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
         workspace_id: String,
         name: String,
         limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: what `path` exports and which files mention those names.
     GraphImpact {
         workspace_id: String,
         path: String,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
+    },
+    /// Read-only: the files the index cannot answer for, by reason, at
+    /// most `limit` paths per list (roadmap D8).
+    GraphBlindSpots {
+        workspace_id: String,
         limit: u32,
     },
     /// Read-only: for each name that is defined in the workspace, up to
@@ -2378,6 +2501,22 @@ enum CommandWire {
     Recap {
         workspace_id: String,
     },
+    /// Read-only: the person's status line for the directory `root`, with
+    /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
+    StatusLine {
+        root: String,
+        from_ms: u64,
+    },
+    /// A refusal the hook decided itself (a held commit), recorded as a
+    /// `WriteRefused` event. Other kinds are recorded by the admission
+    /// that refuses them.
+    RecordRefusal {
+        session_id: String,
+        kind: RefusalKind,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_session_id: Option<String>,
+    },
     /// Read-only, answered from the derived index: where `name` is defined.
     /// With `detail`, each definition also carries its body digest, calls,
     /// callers, notes and last check (roadmap D1).
@@ -2387,17 +2526,32 @@ enum CommandWire {
         limit: u32,
         #[serde(default, skip_serializing_if = "is_false")]
         detail: bool,
+        /// The client reads `GraphCoverage::blind_in_scope`. A request
+        /// without it is one an earlier build sends, and its answer keeps
+        /// the coverage shape that build knows.
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
         workspace_id: String,
         name: String,
         limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: what `path` exports and which files mention those names.
     GraphImpact {
         workspace_id: String,
         path: String,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
+    },
+    /// Read-only: the files the index cannot answer for, by reason, at
+    /// most `limit` paths per list (roadmap D8).
+    GraphBlindSpots {
+        workspace_id: String,
         limit: u32,
     },
     /// Read-only: for each name that is defined in the workspace, up to
@@ -2743,6 +2897,12 @@ pub enum Outcome {
     Recap {
         recap: Recap,
     },
+    StatusLine {
+        line: StatusLine,
+    },
+    RefusalRecorded {
+        session_id: String,
+    },
     Dashboard {
         dashboard: Dashboard,
     },
@@ -2769,6 +2929,18 @@ pub enum Outcome {
         breaks: Vec<CallBreak>,
         coverage: GraphCoverage,
         ready: bool,
+    },
+    /// Where the index cannot answer for the workspace's source (roadmap
+    /// D8). Each list is in path order and holds at most the request's
+    /// limit; `totals` has the full counts. Paths only, never content.
+    GraphBlindSpots {
+        blind_spots: BlindSpots,
+        coverage: GraphCoverage,
+        /// The last scan attempt failed: the lists are as of the last
+        /// complete one, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_failure: Option<ScanFailure>,
+        truncated: bool,
     },
     InterfaceAcknowledged {
         session_id: String,
@@ -3021,9 +3193,29 @@ fn decide_checked(
                                 .is_some_and(|lease| lease.operation.is_some()))
                     })
                     .collect();
+            // Each refusal is one event, stored with the refusal's receipt:
+            // the same request again is answered from it and adds none.
+            let refused = |kind, peer: Option<&String>| Event::WriteRefused {
+                session_id: session_id.clone(),
+                workspace_id: session.workspace_id.clone(),
+                kind,
+                paths: paths.iter().take(REFUSAL_PATHS).cloned().collect(),
+                peer_session_id: peer.cloned(),
+                at_ms: now_ms,
+                generation: state.generation,
+            };
             if !holders.is_empty() {
+                // A hook's tool call; a manual `admit` refused is not a write.
                 return Ok(Decision {
-                    events: Vec::new(),
+                    events: tool_call
+                        .then(|| {
+                            refused(
+                                RefusalKind::Conflict,
+                                holders.first().map(|holder| &holder.session_id),
+                            )
+                        })
+                        .into_iter()
+                        .collect(),
                     outcome: Outcome::Conflict { holders },
                 });
             }
@@ -3048,19 +3240,25 @@ fn decide_checked(
                     // reported read, or a file that no longer exists to be
                     // read, cannot be refused for the same change forever.
                     return Ok(Decision {
-                        events: vec![Event::SourceObserved {
-                            session_id: session_id.clone(),
-                            files: stale
-                                .iter()
-                                .map(|file| ObservedFile {
-                                    path: file.path.clone(),
-                                    state: file.current.clone(),
-                                })
-                                .collect(),
-                            origin: SourceOrigin::Refused,
-                            at_ms: now_ms,
-                            generation: state.generation,
-                        }],
+                        events: vec![
+                            Event::SourceObserved {
+                                session_id: session_id.clone(),
+                                files: stale
+                                    .iter()
+                                    .map(|file| ObservedFile {
+                                        path: file.path.clone(),
+                                        state: file.current.clone(),
+                                    })
+                                    .collect(),
+                                origin: SourceOrigin::Refused,
+                                at_ms: now_ms,
+                                generation: state.generation,
+                            },
+                            refused(
+                                RefusalKind::StaleBase,
+                                stale.iter().find_map(|file| file.changed_by.as_ref()),
+                            ),
+                        ],
                         outcome: Outcome::StaleBase { stale },
                     });
                 }
@@ -3075,13 +3273,19 @@ fn decide_checked(
                         .cloned()
                         .collect();
                     return Ok(Decision {
-                        events: vec![Event::SourceObserved {
-                            session_id: session_id.clone(),
-                            files: told,
-                            origin: SourceOrigin::Refused,
-                            at_ms: now_ms,
-                            generation: state.generation,
-                        }],
+                        events: vec![
+                            Event::SourceObserved {
+                                session_id: session_id.clone(),
+                                files: told,
+                                origin: SourceOrigin::Refused,
+                                at_ms: now_ms,
+                                generation: state.generation,
+                            },
+                            refused(
+                                RefusalKind::UnreadLines,
+                                unread.first().map(|lines| &lines.session_id),
+                            ),
+                        ],
                         outcome: Outcome::UnreadLines { lines: unread },
                     });
                 }
@@ -4360,6 +4564,52 @@ fn decide_checked(
                 },
             })
         }
+        Command::StatusLine { root, from_ms } => {
+            if !root.starts_with('/') || root.len() > 4096 {
+                return Err(error(
+                    "invalid_root",
+                    "A status line names an absolute directory of at most 4096 bytes",
+                ));
+            }
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::StatusLine {
+                    line: status_line(state, root, *from_ms, now_ms),
+                },
+            })
+        }
+        Command::RecordRefusal {
+            session_id,
+            kind,
+            paths,
+            peer_session_id,
+        } => {
+            if *kind != RefusalKind::CommitHeld {
+                return Err(error(
+                    "invalid_refusal",
+                    "Only a held commit is reported; the coordinator records the other refusals itself",
+                ));
+            }
+            let session = known_session(state, session_id)?;
+            let paths = normalized_paths(paths)?;
+            if let Some(peer) = peer_session_id {
+                known_session(state, peer)?;
+            }
+            Ok(Decision {
+                events: vec![Event::WriteRefused {
+                    session_id: session_id.clone(),
+                    workspace_id: session.workspace_id.clone(),
+                    kind: *kind,
+                    paths: paths.into_iter().take(REFUSAL_PATHS).collect(),
+                    peer_session_id: peer_session_id.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }],
+                outcome: Outcome::RefusalRecorded {
+                    session_id: session_id.clone(),
+                },
+            })
+        }
         Command::ObserveInterface {
             workspace_id,
             path,
@@ -4393,6 +4643,7 @@ fn decide_checked(
         | Command::GraphSymbol { .. }
         | Command::GraphReferences { .. }
         | Command::GraphImpact { .. }
+        | Command::GraphBlindSpots { .. }
         | Command::GraphContext { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
@@ -5776,9 +6027,13 @@ fn brief(
             signature.push_str(&recent.path);
             signature.push(',');
         }
-        for text in [&peer.summary, &peer.intent, &peer.branch_ref] {
+        // A peer in this checkout is on this session's own branch, learned
+        // by the Git observer on its own thread, perhaps only after a
+        // briefing: not news. A change of that branch is a checkout change.
+        let branch = (!peer.same_workspace).then_some(&peer.branch_ref);
+        for text in [Some(&peer.summary), Some(&peer.intent), branch] {
             signature.push('|');
-            signature.push_str(text.as_deref().unwrap_or(""));
+            signature.push_str(text.and_then(Option::as_deref).unwrap_or(""));
         }
         // Only when present, so a briefing without one keeps the signature
         // it had before prompt targets existed and is not delivered again.
@@ -6230,6 +6485,8 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 ));
             }
             state.generation = *generation;
+            // The new generation's anchor, if any, is the next event.
+            state.clock_anchor = None;
             for lease in state.leases.values_mut() {
                 if lease.status == LeaseStatus::Active {
                     lease.status = LeaseStatus::Invalidated;
@@ -6251,6 +6508,39 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             // nor is one that was waiting.
             state.turns.clear();
             state.turn_queues.clear();
+        }
+        Event::ClockAnchored { anchor } => {
+            if anchor.generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A clock anchor names the generation that is starting",
+                ));
+            }
+            state.clock_anchor = Some(*anchor);
+        }
+        Event::WriteRefused {
+            session_id,
+            workspace_id,
+            paths,
+            peer_session_id,
+            at_ms,
+            generation,
+            ..
+        } => {
+            known_session(state, session_id)?;
+            validate_known_workspace(state, workspace_id)?;
+            normalized_paths(paths)?;
+            if paths.len() > REFUSAL_PATHS
+                || peer_session_id
+                    .as_ref()
+                    .is_some_and(|peer| peer.len() > 200)
+            {
+                return Err(error(
+                    "invalid_event",
+                    "A refusal keeps at most 8 paths and one peer session ID",
+                ));
+            }
+            status_line::remember(state, workspace_id, *at_ms, *generation);
         }
         Event::WorkspaceRegistered { workspace } => {
             validate_workspace(state, workspace)?;

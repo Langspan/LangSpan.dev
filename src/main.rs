@@ -80,7 +80,11 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   graph references WORKSPACE NAME  Where a name is mentioned
   graph impact WORKSPACE PATH    What a file exports and which files mention those names.
                                  All three match by name and report index coverage
-  recap WORKSPACE                A bounded account of one workspace: sessions, recent
+  graph blind-spots WORKSPACE [--limit N]
+                                 Files the index cannot answer for: partial, never
+                                 parsed cleanly, waiting, too large, left out of the
+                                 scan, and other languages by extension
+  recap WORKSPACE               A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
                                  messages not yet acknowledged
   remember WORKSPACE TEXT [PATH...] [--session ID]
@@ -118,6 +122,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  session's, no session's or not known; at most 200
                                  files. What commit --mine would commit and refuse;
                                  changes nothing. Session found as for commit --mine
+  statusline [--root DIR] [--deadline-ms N]
+                                 One line for the person: current sessions of this
+                                 repository and refusals since local midnight, as
+                                 Claude Code's statusLine (directory from its input
+                                 on stdin) or a shell prompt (--root). Never starts
+                                 the coordinator; within 200 ms (100-5000) or it
+                                 prints "coordinator not running" and exits 0
   status --all [--after CURSOR]  Read every record, history included, one page at a
                                  time; pass the page's `next` as --after for the next
   events [--after SEQ] [--limit N] Read ordered events (default limit 100; maximum 1000)
@@ -160,7 +171,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  the project rule .cursor/rules/langspan.mdc, which
                                  hooks remove cursor removes
   install [--home DIR] [--hosts claude-code,codex,cursor,gemini-cli] [--prompt-summary off]
-          [--skill] [--apply]
+          [--skill] [--statusline on|off] [--apply]
                                  Install the hooks once for every repository, in each
                                  host's user configuration, and register `langspan mcp`
                                  as the MCP server `langspan`. Hosts default to those
@@ -171,7 +182,9 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  the LangSpan skill, which teaches an agent how to work
                                  with LangSpan: Claude Code skills/langspan/SKILL.md, a
                                  marked section of Codex's AGENTS.md and of Gemini
-                                 CLI's GEMINI.md
+                                 CLI's GEMINI.md. --statusline on sets Claude Code's
+                                 statusLine to `langspan statusline` where none is
+                                 set (never replacing one); off removes LangSpan's
   uninstall [--home DIR] [--hosts ...] [--apply]
                                  Remove only what install wrote, the skill included;
                                  the state directory stays
@@ -597,6 +610,13 @@ fn user_install(
                 .into(),
         );
     }
+    let status_line = options.remove("--statusline");
+    if status_line.is_some() && !install {
+        return Err(
+            "--statusline is valid only for `install`; `uninstall` always removes LangSpan's status line"
+                .into(),
+        );
+    }
     no_unused_options(options)?;
     let vendors: Vec<Vendor> = match hosts {
         Some(list) => list
@@ -625,6 +645,27 @@ fn user_install(
         .into());
     }
     let executable = hooks::installed_executable(&std::env::current_exe()?)?;
+    // Claude Code's `statusLine` (roadmap H2): only where none is set, and
+    // removed by `uninstall` only where it is LangSpan's.
+    let status_line = match (install, status_line.as_deref()) {
+        (false, _) => user_install::StatusLineChoice::Off,
+        (true, None) => user_install::StatusLineChoice::Unchanged,
+        (true, Some("on")) => user_install::StatusLineChoice::On {
+            executable: executable.clone(),
+            state_dir: state_dir.clone(),
+        },
+        (true, Some("off")) => user_install::StatusLineChoice::Off,
+        (true, Some(other)) => {
+            return Err(format!("--statusline takes on or off, not {other:?}").into());
+        }
+    };
+    if status_line != user_install::StatusLineChoice::Unchanged
+        && install
+        && !vendors.contains(&Vendor::ClaudeCode)
+    {
+        return Err("--statusline is for Claude Code, the one host with a status-line command; add claude-code to --hosts".into());
+    }
+    let status_line = &status_line;
     let registration = install.then(|| hooks::UserRegistration {
         executable: executable.clone(),
         state_dir: state_dir.clone(),
@@ -678,8 +719,19 @@ fn user_install(
             }
             continue;
         }
-        let planned = hooks::plan_user_for(vendor, existing.clone(), registration)
-            .map_err(|e| format!("{}: {e}", files.hooks.display()))?;
+        // Claude Code's status line lives in the same settings file as its
+        // hooks: one plan, one guarded write.
+        let plan_file = move |existing: Option<serde_json::Value>| {
+            let planned = hooks::plan_user_for(vendor, existing, registration)?;
+            if vendor == Vendor::ClaudeCode {
+                user_install::plan_status_line(planned, status_line)
+            } else {
+                Ok((planned, None))
+            }
+        };
+        let (planned, note) =
+            plan_file(existing.clone()).map_err(|e| format!("{}: {e}", files.hooks.display()))?;
+        notes.extend(note);
         let path = files.hooks.clone();
         let replan = move |now: Option<&[u8]>| -> Result<Vec<u8>, langspan::Error> {
             let existing = hooks::parse_json(&path, now)?;
@@ -690,8 +742,8 @@ fn user_install(
                 )
                 .into());
             }
-            let planned = hooks::plan_user_for(vendor, existing, registration)
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+            let (planned, _) =
+                plan_file(existing).map_err(|e| format!("{}: {e}", path.display()))?;
             hooks::json_bytes(&planned)
         };
         plans.push((
@@ -1109,6 +1161,40 @@ fn commit_mine(
         println!("{}", report.text());
     }
     Ok(report.exit_code())
+}
+
+/// `statusline`: sessions here and refusals today, for the person (H2).
+/// Exits 0 with the unavailable line when the coordinator cannot answer.
+fn status_line(
+    state_dir: &std::path::Path,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    use langspan::status_line::{DEADLINE_RANGE_MS, DEFAULT_DEADLINE_MS, run};
+    let started = std::time::Instant::now();
+    let root = options.remove("--root").map(PathBuf::from);
+    let deadline_ms = number(options, "--deadline-ms", DEFAULT_DEADLINE_MS)?;
+    no_unused_options(options)?;
+    if !DEADLINE_RANGE_MS.contains(&deadline_ms) {
+        return Err(format!(
+            "--deadline-ms must be between {} and {}",
+            DEADLINE_RANGE_MS.start(),
+            DEADLINE_RANGE_MS.end()
+        )
+        .into());
+    }
+    let answer = run(
+        state_dir,
+        root,
+        std::time::Duration::from_millis(deadline_ms),
+        started,
+    );
+    if json {
+        println!("{}", answer.json());
+    } else {
+        println!("{}", answer.text());
+    }
+    Ok(0)
 }
 
 /// `status --mine`: this session's uncommitted lines, read-only (issue #40).
@@ -1694,6 +1780,87 @@ fn print_combined(
     print_renames(&merged.renames);
 }
 
+/// `graph blind-spots`: one line per non-empty list, paths quoted, with the
+/// full count in parentheses.
+fn print_blind_spots(
+    spots: &langspan_core::BlindSpots,
+    coverage: &langspan_core::GraphCoverage,
+    failure: Option<&langspan_core::ScanFailure>,
+    truncated: bool,
+) {
+    if let Some(failure) = failure {
+        println!(
+            "The last scan failed ({:?}); this is as of the last complete one.",
+            failure.detail
+        );
+    }
+    if !coverage.scanned {
+        println!("No complete scan of this workspace yet: nothing is known.");
+        return;
+    }
+    let now = langspan::clock::now_ms();
+    let since = |at: u64| {
+        let seconds = now.saturating_sub(at) / 1000;
+        match seconds {
+            0..=89 => format!("{seconds}s"),
+            90..=5399 => format!("{}m", seconds / 60),
+            5400..=129_599 => format!("{}h", seconds / 3600),
+            _ => format!("{}d", seconds / 86_400),
+        }
+    };
+    let line = |label: &str, total: u32, paths: Vec<String>| {
+        if total > 0 {
+            let more = total as usize - paths.len().min(total as usize);
+            let more = if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            };
+            println!("{label} ({total}): {}{more}", paths.join(", "));
+        }
+    };
+    let quoted = |paths: &[String]| paths.iter().map(|path| format!("{path:?}")).collect();
+    let totals = &spots.totals;
+    line(
+        "partial",
+        totals.partial,
+        spots
+            .partial
+            .iter()
+            .map(|file| format!("{:?} (since {})", file.path, since(file.since_ms)))
+            .collect(),
+    );
+    line(
+        "never parsed cleanly",
+        totals.never_clean,
+        quoted(&spots.never_clean),
+    );
+    line("waiting", totals.waiting, quoted(&spots.waiting));
+    line("too large", totals.too_large, quoted(&spots.too_large));
+    line(
+        "left out of the scan",
+        totals.unscanned,
+        quoted(&spots.unscanned),
+    );
+    if !spots.unsupported_languages.is_empty() {
+        println!(
+            "not indexed, other languages: {}",
+            spots
+                .unsupported_languages
+                .iter()
+                .map(|count| format!("{} {}", count.extension, count.files))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if coverage.blind_in_scope == 0 && spots.unsupported_languages.is_empty() {
+        println!("The index reads every supported file at its current content.");
+    }
+    if truncated {
+        println!("More paths exist than the limit allows.");
+    }
+}
+
 /// What the last completed scan did not version, in one paragraph. A
 /// partial scan is always called partial.
 fn coverage_text(coverage: &langspan_core::ScanCoverage) -> String {
@@ -1847,6 +2014,7 @@ fn doctor(
                         name: "_".into(),
                         limit: 1,
                         detail: false,
+                        blind_in_scope: true,
                     },
                 ) {
                     let behind = coverage.indexable_files - coverage.current_files;
@@ -1863,6 +2031,15 @@ fn doctor(
                             }
                         ),
                     );
+                    if coverage.blind_in_scope > 0 {
+                        note(
+                            false,
+                            format!(
+                                "Workspace {id}: the index cannot read {} supported file(s) in full; `langspan graph blind-spots {id}` names them.",
+                                coverage.blind_in_scope
+                            ),
+                        );
+                    }
                 }
                 if let Some(link) = state.remote_links.get(id) {
                     let heard = state
@@ -2482,6 +2659,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 json,
             );
         }
+        ["statusline"] => return status_line(&state_dir, &mut options, json),
         ["commit"] => return commit_mine(&state_dir, &mut options, json),
         ["status"] if options.remove("--mine").is_some() => {
             return status_mine(&state_dir, &mut options, json);
@@ -2652,19 +2830,27 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                         name: (*subject).into(),
                         limit,
                         detail: options.remove("--detail").is_some(),
+                        blind_in_scope: true,
                     },
                     "references" => Command::GraphReferences {
                         workspace_id,
                         name: (*subject).into(),
                         limit,
+                        blind_in_scope: true,
                     },
                     _ => Command::GraphImpact {
                         workspace_id,
                         path: (*subject).into(),
                         limit,
+                        blind_in_scope: true,
                     },
                 }
             }
+            ["graph", "blind-spots", workspace] => Command::GraphBlindSpots {
+                workspace_id: (*workspace).into(),
+                limit: u32::try_from(number(&mut options, "--limit", 50)?)
+                    .map_err(|_| "--limit is too large")?,
+            },
             ["recap", workspace] => Command::Recap {
                 workspace_id: (*workspace).into(),
             },
@@ -2731,6 +2917,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphSymbol { .. }
                 | Command::GraphReferences { .. }
                 | Command::GraphImpact { .. }
+                | Command::GraphBlindSpots { .. }
                 | Command::Recap { .. }
         ) {
             options
@@ -2830,7 +3017,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--workspace" | "--root" | "--budget-ms" | "--settings" | "--prompt-summary"
             | "--code-briefing" | "--max-peers" | "--remote" | "--name" | "--share-task"
             | "--onto" | "--timeout-s" | "--wait-s" | "--session" | "--to" | "--from"
-            | "--home" | "--hosts" | "--listen" | "-m" | "--message" => {
+            | "--home" | "--hosts" | "--listen" | "-m" | "--message" | "--statusline"
+            | "--deadline-ms" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -3247,6 +3435,12 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 coverage.current_files, coverage.indexable_files
             );
         }
+        Outcome::GraphBlindSpots {
+            blind_spots,
+            coverage,
+            scan_failure,
+            truncated,
+        } => print_blind_spots(blind_spots, coverage, scan_failure.as_ref(), *truncated),
         Outcome::Graph {
             symbols,
             references,
@@ -3290,6 +3484,12 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                         String::new()
                     }
                 );
+                if coverage.blind_in_scope > 0 {
+                    println!(
+                        "{} supported file(s) cannot be read in full, so an empty answer is weak; `langspan graph blind-spots` names them.",
+                        coverage.blind_in_scope
+                    );
+                }
             }
         }
         Outcome::Remembered { note } => println!(
@@ -3351,6 +3551,10 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 change.files
             )
         ),
+        Outcome::StatusLine { line } => println!("{}", line.text()),
+        Outcome::RefusalRecorded { session_id } => {
+            println!("Refusal recorded for session {session_id}.")
+        }
         Outcome::Recap { recap } => {
             println!(
                 "Workspace {} at {:?}{}.",

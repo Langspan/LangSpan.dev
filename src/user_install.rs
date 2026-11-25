@@ -426,6 +426,82 @@ pub fn plan_codex(existing: Option<&str>, server: Option<&McpServer>) -> Result<
     }
 }
 
+/// Marks the `statusLine` LangSpan writes in Claude Code's user settings. The
+/// host runs the command through a shell, which ignores the comment.
+const STATUS_LINE_MARKER: &str = " # langspan-managed:claude-code:statusline:v1";
+
+/// What `install --statusline` asks for Claude Code's `statusLine`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusLineChoice {
+    /// No `--statusline`: whatever is there stays.
+    Unchanged,
+    /// `--statusline on`: LangSpan's line, only where none is set.
+    On {
+        executable: PathBuf,
+        state_dir: PathBuf,
+    },
+    /// `--statusline off`, and every `uninstall`: LangSpan's line removed.
+    Off,
+}
+
+/// The command LangSpan's status line runs.
+pub fn status_line_command(executable: &Path, state_dir: &Path) -> String {
+    format!(
+        "{} --state-dir {} statusline{STATUS_LINE_MARKER}",
+        crate::install::quote(&executable.to_string_lossy()),
+        crate::install::quote(&state_dir.to_string_lossy())
+    )
+}
+
+/// Whether a `statusLine` value is the one LangSpan writes.
+pub fn is_langspan_status_line(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("command")
+        && value
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| command.ends_with(STATUS_LINE_MARKER))
+}
+
+/// Plan Claude Code's `statusLine` in its user settings, and what to tell
+/// the person. A status line that is not LangSpan's is never replaced or
+/// removed; every other key keeps its place.
+pub fn plan_status_line(
+    existing: Value,
+    choice: &StatusLineChoice,
+) -> Result<(Value, Option<String>), String> {
+    let Value::Object(mut settings) = existing else {
+        return Err("the settings must be a JSON object; nothing was changed".into());
+    };
+    let current = settings.get("statusLine");
+    let ours = current.is_some_and(is_langspan_status_line);
+    let note = match choice {
+        StatusLineChoice::Unchanged => None,
+        StatusLineChoice::Off => {
+            if ours {
+                settings.remove("statusLine");
+            }
+            None
+        }
+        StatusLineChoice::On { .. } if current.is_some() && !ours => Some(
+            "Claude Code already has a status line (`statusLine` in its settings); it was left as it is. To add LangSpan's counts to it, call `langspan statusline` from that command.".to_owned(),
+        ),
+        StatusLineChoice::On {
+            executable,
+            state_dir,
+        } => {
+            settings.insert(
+                "statusLine".into(),
+                json!({
+                    "type": "command",
+                    "command": status_line_command(executable, state_dir),
+                }),
+            );
+            None
+        }
+    };
+    Ok((Value::Object(settings), note))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

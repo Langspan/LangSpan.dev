@@ -1263,7 +1263,46 @@ pub fn guard_hook(config: &Config, me: &str, call: &ShellCall, deadline: Instant
             "it takes another live session's lines, and this session was told so once; not held again".into(),
         );
     }
-    Guarded::Held(held_reply(config, me, &found))
+    let mut reply = held_reply(config, me, &found);
+    if let Err(error) = record_held(config, me, &fingerprint, &found, until) {
+        reply.detail = format!("{}; the refusal was not recorded ({error})", reply.detail);
+    }
+    Guarded::Held(reply)
+}
+
+/// Record the held commit as a `WriteRefused` event, for the status line.
+/// The request ID is the hold's own fingerprint, so a repeat of the same
+/// report is answered from its receipt and counted once.
+fn record_held(
+    config: &Config,
+    me: &str,
+    fingerprint: &str,
+    found: &BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    deadline: Instant,
+) -> Result<(), String> {
+    let paths: BTreeSet<String> = found
+        .values()
+        .flat_map(|paths| paths.keys().cloned())
+        .collect();
+    let request = crate::protocol::Request {
+        version: crate::protocol::PROTOCOL_VERSION,
+        request_id: crate::hook::wire_id("refusal", &[me, fingerprint]),
+        command: Command::RecordRefusal {
+            session_id: me.into(),
+            kind: langspan_core::RefusalKind::CommitHeld,
+            paths: paths
+                .into_iter()
+                .take(langspan_core::REFUSAL_PATHS)
+                .collect(),
+            peer_session_id: found.keys().next().cloned(),
+        },
+    };
+    let response = crate::client::call_until(&config.state_dir, &request, deadline)
+        .map_err(|e| format!("coordinator: {e}"))?;
+    match response.outcome {
+        Outcome::RefusalRecorded { .. } => Ok(()),
+        other => Err(format!("coordinator answered {other:?}")),
+    }
 }
 
 fn quote(text: &str) -> String {

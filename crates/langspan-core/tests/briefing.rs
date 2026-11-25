@@ -155,6 +155,75 @@ fn an_unchanged_situation_is_not_delivered_twice_and_a_change_is() {
     assert!(brief(&mut state, "bob", "b4", 8_000).changed);
 }
 
+/// The Git observer scans a workspace after its first session registers, on
+/// its own thread. A peer in this session's own checkout shares its branch,
+/// so learning that branch after a briefing is not news; a peer in another
+/// worktree switching branch still is.
+#[test]
+fn a_branch_learned_after_delivery_is_news_only_from_another_worktree() {
+    let mut state = ready();
+    ok(run(
+        &mut state,
+        "w-late",
+        Command::WorkspaceRegister {
+            workspace_id: "late".into(),
+            root: "/repos/late".into(),
+        },
+        0,
+    ));
+    for session in ["erin", "frank"] {
+        ok(run(
+            &mut state,
+            &format!("s-{session}"),
+            Command::SessionRegister {
+                session_id: session.into(),
+                workspace_id: "late".into(),
+                parent: None,
+                headless: false,
+            },
+            0,
+        ));
+    }
+    edited(&mut state, "frank", "src/a.rs", 100);
+    let first = brief(&mut state, "erin", "b1", 200);
+    assert!(first.changed);
+    assert_eq!(first.peers[0].branch_ref, None, "not scanned yet");
+    ok(run(
+        &mut state,
+        "g-late",
+        Command::ObserveWorkspaceGit {
+            workspace_id: "late".into(),
+            repository_id: "repo-late".into(),
+            branch_ref: Some("refs/heads/main".into()),
+        },
+        300,
+    ));
+    let again = brief(&mut state, "erin", "b2", 400);
+    assert!(!again.changed, "the checkout's own branch is not news");
+    assert_eq!(
+        again.peers[0].branch_ref.as_deref(),
+        Some("refs/heads/main"),
+        "it is still shown"
+    );
+
+    edited(&mut state, "carol", "src/api.rs", 500);
+    assert!(brief(&mut state, "alice", "b3", 600).changed);
+    ok(run(
+        &mut state,
+        "g-tree-2",
+        Command::ObserveWorkspaceGit {
+            workspace_id: "tree".into(),
+            repository_id: "repo-app".into(),
+            branch_ref: Some("refs/heads/other".into()),
+        },
+        700,
+    ));
+    assert!(
+        brief(&mut state, "alice", "b4", 800).changed,
+        "another worktree's branch switch is news"
+    );
+}
+
 #[test]
 fn stale_exited_and_ended_work_is_excluded() {
     let mut state = ready();

@@ -231,6 +231,29 @@ impl Fixture {
         )
     }
 
+    /// The `WriteRefused` events the daemon recorded.
+    fn refusals(&self) -> Vec<langspan_core::Event> {
+        let request = langspan::protocol::Request {
+            version: langspan::protocol::PROTOCOL_VERSION,
+            request_id: "read".into(),
+            command: langspan_core::Command::Events {
+                after: 0,
+                limit: 1000,
+            },
+        };
+        match langspan::client::call(&self.state(), &request)
+            .unwrap()
+            .outcome
+        {
+            langspan_core::Outcome::Events { events } => events
+                .into_iter()
+                .map(|recorded| recorded.event)
+                .filter(|event| matches!(event, langspan_core::Event::WriteRefused { .. }))
+                .collect(),
+            other => panic!("{other:?}"),
+        }
+    }
+
     fn head_files(&self) -> String {
         git(
             &self.work(),
@@ -271,6 +294,22 @@ fn a_commit_all_that_would_carry_another_live_sessions_file_is_held_once_naming_
     // Nothing was committed or staged.
     assert!(f.head_files().contains("start"));
     assert_eq!(f.status(), " M a.txt\n M b.txt\n");
+    // The hold is recorded once, for the status line (roadmap H2).
+    let held = f.refusals();
+    assert_eq!(held.len(), 1, "{held:?}");
+    match &held[0] {
+        langspan_core::Event::WriteRefused {
+            kind,
+            paths,
+            peer_session_id,
+            ..
+        } => {
+            assert_eq!(*kind, langspan_core::RefusalKind::CommitHeld);
+            assert_eq!(paths, &vec!["b.txt".to_owned()]);
+            assert_eq!(peer_session_id, &Some(format!("claude-code.{BOB}")));
+        }
+        other => panic!("{other:?}"),
+    }
 
     // The same command again is the session's informed choice: not held.
     let (again, ran) = f.bash_call(ALICE, "alice-3", "git commit -am 'Alice: alpha'");
@@ -278,6 +317,11 @@ fn a_commit_all_that_would_carry_another_live_sessions_file_is_held_once_naming_
     assert!(again.detail.contains("told so once"), "{}", again.detail);
     assert!(ran.unwrap().status.success());
     assert!(f.head_files().contains("b.txt"));
+    assert_eq!(
+        f.refusals().len(),
+        1,
+        "a commit let through records nothing"
+    );
 }
 
 #[test]
