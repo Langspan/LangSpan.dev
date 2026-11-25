@@ -1,0 +1,19 @@
+ok Coordinator reachable, generation 1, protocol 3.
+ok 18 live or recent session(s) registered since it started; 0 from before it restarted are not coordinated until they act again.
+ok Workspace demo: scanned; repository and branch known; every file versioned.
+ok Workspace demo: index holds 3 of 3 supported source files at their current content.
+ok Workspace demo-wt: scanned; repository and branch known; every file versioned.
+ok Workspace demo-wt: index holds 3 of 3 supported source files at their current content.
+FIX claude-code hooks installed for 10 event(s); they use a different state directory than this command, so they talk to a different coordinator.
+FIX codex hooks installed for 6 event(s); they use a different state directory than this command, so they talk to a different coordinator. Codex runs project hooks only after you approve them in its own review.
+ok Shell commands (Bash) are covered partly: a write is refused before it runs only for literal forms such as `> file`, `sed -i` or `mv`; other commands' changes are found afterwards by comparing Git status, and are not recorded when that comparison is incomplete (ADR 0011).
+ok codex: a session started in linked worktree /private/tmp/lsc.XXXX/wt does not run the hooks installed in /private/tmp/lsc.XXXX/wt/.codex/hooks.json (observed on Codex 0.171.0); it runs the main checkout's project hooks. The main checkout's hook coordinates it as workspace demo-wt.
+ok claude-code: the LangSpan skill is not installed in ~/.claude/skills/langspan/SKILL.md (optional; `langspan install --skill --hosts claude-code --apply` writes it).
+ok claude-code: no user-level install under ~; repositories need a project install, or run `langspan install --hosts claude-code --apply`.
+ok codex: the LangSpan skill is installed and up to date in ~/.local/state/langspan-hosts/codex/AGENTS.md.
+ok codex: user-level hooks installed in ~/.local/state/langspan-hosts/codex/hooks.json for 6 event(s), state directory /private/tmp/lsc.XXXX/st. Codex runs them only after you review and trust them with /hooks.
+ok codex: MCP server `langspan` registered in ~/.local/state/langspan-hosts/codex/config.toml, state directory /private/tmp/lsc.XXXX/st.
+ok cursor: no user-level install under ~; repositories need a project install, or run `langspan install --hosts cursor --apply`.
+ok gemini-cli: the LangSpan skill is not installed in ~/.gemini/GEMINI.md (optional; `langspan install --skill --hosts gemini-cli --apply` writes it).
+ok gemini-cli: no user-level install under ~; repositories need a project install, or run `langspan install --hosts gemini-cli --apply`.
+2 thing(s) need attention.
