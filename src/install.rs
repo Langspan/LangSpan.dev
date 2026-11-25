@@ -325,6 +325,40 @@ pub struct Registration {
     pub code_briefing: bool,
 }
 
+/// Whether two paths name the same directory: compared in canonical form,
+/// so a path through a symbolic link (`/tmp` and `/private/tmp` on macOS)
+/// matches the real one. Installs write the state directory as given; this
+/// is the one comparison every check of an installed state directory uses,
+/// so older installs written either way are judged alike. A directory that
+/// does not exist yet (no coordinator has started) is resolved through its
+/// nearest existing ancestor.
+pub fn same_directory(a: &Path, b: &Path) -> bool {
+    resolved(a) == resolved(b)
+}
+
+fn resolved(path: &Path) -> PathBuf {
+    let Ok(absolute) = std::path::absolute(path) else {
+        return path.to_path_buf();
+    };
+    let mut rest = Vec::new();
+    let mut ancestor = absolute.as_path();
+    loop {
+        if let Ok(canonical) = fs::canonicalize(ancestor) {
+            return rest
+                .iter()
+                .rev()
+                .fold(canonical, |path, name| path.join(name));
+        }
+        match (ancestor.parent(), ancestor.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                ancestor = parent;
+            }
+            _ => return absolute,
+        }
+    }
+}
+
 pub fn quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
 }
@@ -1018,6 +1052,32 @@ fn write_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn same_directory_sees_through_links_even_before_the_directory_exists() {
+        let base = std::env::temp_dir().join(format!("ls-same-dir-{}", std::process::id()));
+        let real = base.join("real");
+        fs::create_dir_all(real.join("state")).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        fs::create_dir(base.join("other")).unwrap();
+        let checks = [
+            (link.join("state"), real.join("state"), true),
+            // No coordinator has started: the directory is not there yet.
+            (link.join("new/state"), real.join("new/state"), true),
+            (link.join("state"), base.join("other"), false),
+            (link.join("new/state"), real.join("new/other"), false),
+        ];
+        let results: Vec<bool> = checks
+            .iter()
+            .map(|(a, b, _)| same_directory(a, b))
+            .collect();
+        fs::remove_dir_all(&base).unwrap();
+        for ((a, b, want), got) in checks.iter().zip(results) {
+            assert_eq!(got, *want, "{} and {}", a.display(), b.display());
+        }
+    }
 
     fn registration(root: &str) -> Registration {
         Registration {

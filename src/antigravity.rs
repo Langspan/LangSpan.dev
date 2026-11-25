@@ -359,6 +359,8 @@ fn tool_call(
             &config.root,
             // `PostToolUse` takes no context (ADR 0035).
             false,
+            // Nor does `PreToolUse`: its answer is a decision or `{}`.
+            false,
         );
         return Ok((operation, config));
     }

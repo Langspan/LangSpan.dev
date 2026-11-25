@@ -10,7 +10,9 @@
 use langspan_core::FileState;
 use serde::{Deserialize, Serialize};
 
+mod formatters;
 mod git_commands;
+pub use formatters::{Formatting, Reach, formatters};
 pub use git_commands::{GitStep, git_steps};
 use std::{
     collections::{BTreeMap, BTreeSet},
