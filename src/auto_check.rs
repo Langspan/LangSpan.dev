@@ -51,8 +51,8 @@ const TAIL_LINES: usize = 20;
 
 /// The writes recorded per workspace ([`langspan_core::State::writes`]), as
 /// the state owner last published them. A run takes its workspace's count
-/// before its first tree; a rerun is compared only if the state owner's
-/// count is still that when the record arrives.
+/// before its first tree; its results, and its rerun's, are learned from
+/// only if the state owner's count is still that when the record arrives.
 pub type WriteCounts = Arc<Mutex<BTreeMap<String, u64>>>;
 
 /// The daemon's timing for automatic checks (`config.json`).
@@ -432,7 +432,7 @@ fn report(
             tail: finished.tail,
             timed_out_s: finished.timed_out_s,
         }),
-        writes_before: finished.rerun.as_ref().map(|_| finished.writes_before),
+        writes_before: finished.tests.as_ref().map(|_| finished.writes_before),
         tests: finished.tests,
         rerun: finished.rerun,
     };

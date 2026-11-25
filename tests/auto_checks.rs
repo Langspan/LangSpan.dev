@@ -833,3 +833,88 @@ fn two_check_runs_on_one_tree_with_no_write_between_record_a_flip() {
     assert_eq!(code, 0, "{stdout}{stderr}");
     assert_eq!(learned(&f, "net::times_out"), Some((1, 1)));
 }
+
+#[test]
+fn a_test_skipped_in_a_passing_run_between_two_failures_records_no_flip() {
+    let f = Fixture::new(100);
+    let log = f.log();
+    // Lines as `cargo test` prints them: the second run passes as a whole
+    // with the failing test ignored, so it says nothing about that test.
+    let script = concat!(
+        r#"n=$(cat "$0" 2>/dev/null | wc -l | tr -d ' '); echo run >> "$0"; "#,
+        r#"echo "running 3 tests"; echo "test needs_net ... ignored, needs network"; "#,
+        r#"echo "test parser::keeps_order ... ok"; "#,
+        r#"case "$n" in 1) echo "test net::times_out ... ignored"; "#,
+        r#"echo "test result: ok. 1 passed; 0 failed; 2 ignored"; exit 0;; "#,
+        r#"*) echo "test net::times_out ... FAILED"; "#,
+        r#"echo "test result: FAILED. 1 passed; 1 failed; 1 ignored"; exit 101;; esac"#,
+    );
+    let run = || {
+        f.cli(&[
+            "check",
+            "run",
+            "work",
+            "--name",
+            "tests",
+            "--",
+            "sh",
+            "-c",
+            script,
+            log.to_str().unwrap(),
+        ])
+    };
+    for expected in [1, 0, 1] {
+        let (code, stdout, stderr) = run();
+        assert_eq!(code, expected, "{stdout}{stderr}");
+    }
+    assert_eq!(
+        learned(&f, "net::times_out"),
+        None,
+        "a skipped test neither passed nor failed: fail, skip, fail is no flip"
+    );
+    assert_eq!(learned(&f, "needs_net"), None);
+}
+
+#[test]
+fn a_check_run_across_a_written_and_restored_file_is_not_compared_with_the_next() {
+    let f = Fixture::new(100);
+    let log = f.log();
+    // The first run fails after 3 s, long enough for a session to write the
+    // file and put it back; the second passes at once.
+    let script = scheduled_sleeping(&[0], &[0], "3");
+    let run = || {
+        f.cli(&[
+            "check",
+            "run",
+            "work",
+            "--name",
+            "tests",
+            "--",
+            "sh",
+            "-c",
+            &script,
+            log.to_str().unwrap(),
+        ])
+    };
+    let (code, stdout, stderr) = std::thread::scope(|scope| {
+        let first = scope.spawn(run);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while fs::read_to_string(&log).map_or(0, |log| log.lines().count()) < 1 {
+            assert!(Instant::now() < deadline, "the first run did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Recorded writes while it runs; the tree it ends on is the one it
+        // started on.
+        f.write("call-1", "changed\n");
+        f.write("call-2", "hello\n");
+        first.join().unwrap()
+    });
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let (code, stdout, stderr) = run();
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        learned(&f, "net::times_out"),
+        None,
+        "a write recorded during the first run: the two runs are not of unchanged code"
+    );
+}

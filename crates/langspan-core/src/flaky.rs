@@ -42,17 +42,25 @@ pub struct TestResults {
     /// Passing tests the output named, as many as fit the bound.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub passed: Vec<String>,
+    /// Tests the output named as skipped (ignored, or not run): neither a
+    /// pass nor a failure, so never compared. A run that passed as a whole
+    /// names every one it skipped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
     /// The run passed as a whole (exit status 0): every test it ran passed,
-    /// named here or not.
+    /// named here or not. A skipped test did not run.
     #[serde(default, skip_serializing_if = "is_false")]
     pub all_passed: bool,
 }
 
 impl TestResults {
-    /// Whether the run passed `test`: `None` when it says nothing about it.
+    /// Whether the run passed `test`: `None` when it says nothing about it,
+    /// or skipped it.
     fn passed(&self, test: &str) -> Option<bool> {
         if self.failed.iter().any(|name| name == test) {
             Some(false)
+        } else if self.skipped.iter().any(|name| name == test) {
+            None
         } else if self.all_passed || self.passed.iter().any(|name| name == test) {
             Some(true)
         } else {
@@ -61,12 +69,16 @@ impl TestResults {
     }
 }
 
-/// The last per-test result of one check, until a write in the workspace.
+/// The last per-test result of one check.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LastTests {
     pub tree_oid: String,
     pub command: String,
+    /// The workspace's write generation during its run: a later result is
+    /// compared with it only at the same generation, with no write between.
+    #[serde(default)]
+    pub writes: u64,
     pub results: TestResults,
 }
 
@@ -132,15 +144,17 @@ pub struct FlakyTest {
 }
 
 pub(crate) fn validate_test_results(results: &TestResults, passed: bool) -> Result<(), CoreError> {
-    let count = results.failed.len() + results.passed.len();
-    let bytes: usize = results
-        .failed
-        .iter()
-        .chain(&results.passed)
-        .map(String::len)
-        .sum();
+    let names = || {
+        results
+            .failed
+            .iter()
+            .chain(&results.passed)
+            .chain(&results.skipped)
+    };
+    let count = names().count();
+    let bytes: usize = names().map(String::len).sum();
     let mut seen = BTreeSet::new();
-    let names_ok = results.failed.iter().chain(&results.passed).all(|name| {
+    let names_ok = names().all(|name| {
         !name.is_empty()
             && name.len() <= MAX_TEST_NAME_BYTES
             && name.trim() == name
@@ -165,25 +179,23 @@ pub(crate) fn validate_test_results(results: &TestResults, passed: bool) -> Resu
 }
 
 impl TestLearning {
-    /// A write in the workspace: no later result is compared with an
-    /// earlier one.
-    pub(crate) fn wrote(&mut self) {
-        self.last.clear();
-    }
-
-    /// Learn from one result of check `name`, compared with the last one
-    /// when that was on the same tree with the same command.
+    /// Learn from one result of check `name`, taken with no write recorded
+    /// during its run, at write generation `writes`; compared with the last
+    /// one when that was on the same tree with the same command at the same
+    /// generation.
     pub(crate) fn learn(
         &mut self,
         name: &str,
         tree_oid: &str,
         command: &str,
+        writes: u64,
         results: &TestResults,
         now_ms: u64,
     ) {
         if let Some(last) = self.last.get(name)
             && last.tree_oid == tree_oid
             && last.command == command
+            && last.writes == writes
         {
             let tracked = self.tests.entry(name.to_owned()).or_default();
             let candidates: BTreeSet<String> = last
@@ -241,6 +253,7 @@ impl TestLearning {
             LastTests {
                 tree_oid: tree_oid.to_owned(),
                 command: command.to_owned(),
+                writes,
                 results: results.clone(),
             },
         );

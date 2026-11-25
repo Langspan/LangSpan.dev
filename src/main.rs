@@ -1088,6 +1088,13 @@ fn evidence(
     if command.is_empty() {
         return Err("give the check command after --, for example: -- cargo test".into());
     }
+    // The workspace's write generation, taken before the tree: a write
+    // recorded while the command runs, even one undone before it ends,
+    // keeps its test results from being compared. Unreadable, nothing is
+    // learned from them.
+    let writes_before = langspan::client::status_from(state_dir, &[])
+        .ok()
+        .map(|(state, _)| state.writes.get(workspace).copied().unwrap_or(0));
     let (head, before) = snapshot(&root)?;
     let (ran, duration_ms, output) = integrate::run_command_reading(&root, command, limit)?;
     let (_, after) = snapshot(&root)?;
@@ -1101,6 +1108,7 @@ fn evidence(
     // The tests its output named, to learn which flip on unchanged code.
     let tests = match (&result, &output) {
         (CheckResult::Inconclusive {}, _) | (_, None) => None,
+        _ if writes_before.is_none() => None,
         (result, Some(bytes)) => {
             langspan::test_output::read(bytes, false, matches!(result, CheckResult::Passed {}), &[])
         }
@@ -1118,9 +1126,9 @@ fn evidence(
             result: result.clone(),
             duration_ms,
             report: None,
+            writes_before: tests.as_ref().and(writes_before),
             tests,
             rerun: None,
-            writes_before: None,
         },
     )?;
     if json {

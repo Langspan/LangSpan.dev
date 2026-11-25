@@ -2,12 +2,14 @@
 //! flip on unchanged code (issue #70, ADR 0030).
 //!
 //! The runner is recognised by the shape of its lines: `cargo test`
-//! (`test NAME ... ok|FAILED`), `go test -v` (`--- PASS: NAME (…)`,
-//! `--- FAIL: NAME (…)`) and `pytest` (`FAILED path::name`, and with `-v`
-//! or `-rA` its passing tests too). An output with none of these lines names
-//! no test, and nothing is learned from it. The output is the command's own
-//! text: names are kept only when they are one short line without anything
-//! that looks like a secret.
+//! (`test NAME ... ok|FAILED|ignored`), `go test -v` (`--- PASS: NAME (…)`,
+//! `--- FAIL: NAME (…)`, `--- SKIP: NAME (…)`) and `pytest` (`FAILED
+//! path::name`, and with `-v` or `-rA` its passing and skipped tests too).
+//! A skipped test (ignored, skipped, or pytest's expected failure) is kept
+//! as skipped: it did not pass, even in a run that passed as a whole. An
+//! output with none of these lines names no test, and nothing is learned
+//! from it. The output is the command's own text: names are kept only when
+//! they are one short line without anything that looks like a secret.
 
 use langspan_core::{MAX_TEST_NAME_BYTES, MAX_TEST_NAMES, MAX_TEST_RESULT_BYTES, TestResults};
 use std::collections::BTreeSet;
@@ -21,39 +23,50 @@ pub const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 pub struct Named {
     pub failed: Vec<String>,
     pub passed: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+/// What one test line says about its test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    Passed,
+    Failed,
+    Skipped,
 }
 
 /// The tests `output` names, or `None` when no line of it is a known
 /// runner's test line.
 pub fn parse(output: &str) -> Option<Named> {
-    let mut failed = Vec::new();
-    let mut passed = Vec::new();
+    let mut named = Named::default();
     for line in output.lines() {
         let line = line.trim_end_matches('\r');
-        if let Some((name, ok)) = cargo(line).or_else(|| go(line)).or_else(|| pytest(line))
+        if let Some((name, seen)) = cargo(line).or_else(|| go(line)).or_else(|| pytest(line))
             && let Some(name) = usable(name)
         {
-            if ok {
-                passed.push(name);
-            } else {
-                failed.push(name);
+            match seen {
+                Seen::Passed => named.passed.push(name),
+                Seen::Failed => named.failed.push(name),
+                Seen::Skipped => named.skipped.push(name),
             }
         }
     }
-    if failed.is_empty() && passed.is_empty() {
+    if named.failed.is_empty() && named.passed.is_empty() && named.skipped.is_empty() {
         return None;
     }
-    // A test named as failing anywhere failed; each name once.
-    let failing: BTreeSet<String> = failed.iter().cloned().collect();
+    // A test named as failing anywhere failed, and one named as skipped
+    // anywhere else is not known to have passed; each name once.
     let mut seen = BTreeSet::new();
-    failed.retain(|name| seen.insert(name.clone()));
-    passed.retain(|name| !failing.contains(name) && seen.insert(name.clone()));
-    Some(Named { failed, passed })
+    named.failed.retain(|name| seen.insert(name.clone()));
+    named.skipped.retain(|name| seen.insert(name.clone()));
+    named.passed.retain(|name| seen.insert(name.clone()));
+    Some(named)
 }
 
-/// The results to record: every failure that fits the bound, then passing
-/// tests, those in `prefer` first. `None` when the output contradicts the
-/// exit status (a run that passed and names a failure).
+/// The results to record: every failure that fits the bound, then skipped
+/// tests, then passing tests, those in `prefer` first. `None` when the
+/// output contradicts the exit status (a run that passed and names a
+/// failure), or when a run that passed skipped more tests than fit: those
+/// left out would read as passed.
 pub fn results(named: &Named, all_passed: bool, prefer: &[String]) -> Option<TestResults> {
     if all_passed && !named.failed.is_empty() {
         return None;
@@ -68,6 +81,15 @@ pub fn results(named: &Named, all_passed: bool, prefer: &[String]) -> Option<Tes
         .take_while(|name| budget.take(name))
         .cloned()
         .collect();
+    let skipped: Vec<String> = named
+        .skipped
+        .iter()
+        .take_while(|name| budget.take(name))
+        .cloned()
+        .collect();
+    if all_passed && skipped.len() < named.skipped.len() {
+        return None;
+    }
     // A run that passed says every test it ran passed: names add nothing.
     let passed = if all_passed {
         Vec::new()
@@ -87,6 +109,7 @@ pub fn results(named: &Named, all_passed: bool, prefer: &[String]) -> Option<Tes
     Some(TestResults {
         failed,
         passed,
+        skipped,
         all_passed,
     })
 }
@@ -117,49 +140,56 @@ pub fn read(bytes: &[u8], cut: bool, all_passed: bool, prefer: &[String]) -> Opt
     results(&parse(&String::from_utf8_lossy(bytes))?, all_passed, prefer)
 }
 
-/// `test NAME ... ok` or `test NAME ... FAILED` (libtest's pretty format).
-fn cargo(line: &str) -> Option<(&str, bool)> {
+/// `test NAME ... ok`, `test NAME ... FAILED` or `test NAME ... ignored`,
+/// with `, reason` when the attribute gives one (libtest's pretty format).
+fn cargo(line: &str) -> Option<(&str, Seen)> {
     let rest = line.strip_prefix("test ")?;
     let (name, status) = rest.split_once(" ... ")?;
     let name = name.strip_suffix(" - should panic").unwrap_or(name);
-    match status.split_whitespace().next()? {
-        "ok" => Some((name, true)),
-        "FAILED" => Some((name, false)),
+    match status.split_whitespace().next()?.trim_end_matches(',') {
+        "ok" => Some((name, Seen::Passed)),
+        "FAILED" => Some((name, Seen::Failed)),
+        "ignored" => Some((name, Seen::Skipped)),
         _ => None,
     }
 }
 
-/// `--- PASS: NAME (0.00s)` or `--- FAIL: NAME (0.00s)`, indented for a
-/// subtest.
-fn go(line: &str) -> Option<(&str, bool)> {
-    let line = line.trim_start();
-    let (rest, ok) = if let Some(rest) = line.strip_prefix("--- PASS: ") {
-        (rest, true)
-    } else {
-        (line.strip_prefix("--- FAIL: ")?, false)
+/// `--- PASS: NAME (0.00s)`, `--- FAIL: NAME (0.00s)` or `--- SKIP: NAME
+/// (0.00s)`, indented for a subtest.
+fn go(line: &str) -> Option<(&str, Seen)> {
+    let line = line.trim_start().strip_prefix("--- ")?;
+    let (word, rest) = line.split_once(": ")?;
+    let seen = match word {
+        "PASS" => Seen::Passed,
+        "FAIL" => Seen::Failed,
+        "SKIP" => Seen::Skipped,
+        _ => return None,
     };
     let (name, _) = rest.split_once(" (")?;
-    Some((name, ok))
+    Some((name, seen))
 }
 
-/// `FAILED path::name - message`, `ERROR path::name`, `PASSED path::name`
-/// (the summary), or `path::name PASSED [ 50%]` (verbose).
-fn pytest(line: &str) -> Option<(&str, bool)> {
-    for (word, ok) in [("FAILED ", false), ("ERROR ", false), ("PASSED ", true)] {
-        if let Some(rest) = line.strip_prefix(word) {
-            let name = rest.split_once(" - ").map_or(rest, |(name, _)| name);
-            return name.contains("::").then_some((name, ok));
-        }
+/// `FAILED path::name - message`, `ERROR path::name`, `PASSED path::name`,
+/// `XFAIL path::name - reason` (the summary), or `path::name PASSED [ 50%]`,
+/// `path::name SKIPPED (reason) [ 50%]` (verbose). An expected failure, or
+/// an unexpected pass of one, is no plain pass or failure: it is skipped.
+/// The summary's `SKIPPED [1] path:line: reason` names no test.
+fn pytest(line: &str) -> Option<(&str, Seen)> {
+    let word = |word: &str| match word {
+        "PASSED" => Some(Seen::Passed),
+        "FAILED" | "ERROR" => Some(Seen::Failed),
+        "SKIPPED" | "XFAIL" | "XPASS" => Some(Seen::Skipped),
+        _ => None,
+    };
+    let (first, rest) = line.split_once(' ')?;
+    if let Some(seen) = word(first) {
+        let name = rest.split_once(" - ").map_or(rest, |(name, _)| name);
+        return name.contains("::").then_some((name, seen));
     }
-    let (name, rest) = line.split_once(' ')?;
-    if !name.contains("::") {
+    if !first.contains("::") {
         return None;
     }
-    match rest.split_whitespace().next()? {
-        "PASSED" => Some((name, true)),
-        "FAILED" | "ERROR" => Some((name, false)),
-        _ => None,
-    }
+    Some((first, word(rest.split_whitespace().next()?)?))
 }
 
 /// A name as it is recorded: trimmed, one line within the bound, and
@@ -177,11 +207,143 @@ fn usable(name: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn list(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
     fn named(failed: &[&str], passed: &[&str]) -> Option<Named> {
+        named_skipping(failed, passed, &[])
+    }
+
+    fn named_skipping(failed: &[&str], passed: &[&str], skipped: &[&str]) -> Option<Named> {
         Some(Named {
-            failed: failed.iter().map(|name| (*name).to_owned()).collect(),
-            passed: passed.iter().map(|name| (*name).to_owned()).collect(),
+            failed: list(failed),
+            passed: list(passed),
+            skipped: list(skipped),
         })
+    }
+
+    #[test]
+    fn a_skipped_test_is_kept_and_a_passing_run_never_says_it_passed() {
+        // `cargo test` 1.x on a crate with one failing and two ignored
+        // tests, then the same crate with the failing test ignored: output
+        // captured from real runs.
+        let failing = "\
+running 4 tests
+test needs_net ... ignored, needs network
+test slow_one ... ignored
+test passes ... ok
+test fails ... FAILED
+
+failures:
+
+---- fails stdout ----
+
+thread 'fails' (161318422) panicked at src/lib.rs:14:5:
+boom
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    fails
+
+test result: FAILED. 1 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+        let passing = "\
+running 4 tests
+test fails ... ignored
+test needs_net ... ignored, needs network
+test slow_one ... ignored
+test passes ... ok
+
+test result: ok. 1 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+        assert_eq!(
+            parse(failing),
+            named_skipping(&["fails"], &["passes"], &["needs_net", "slow_one"])
+        );
+        let rerun = read(passing.as_bytes(), false, true, &list(&["fails"])).unwrap();
+        assert!(rerun.all_passed);
+        assert_eq!(rerun.skipped, ["fails", "needs_net", "slow_one"]);
+        // `pytest -v`, and its `-rA` summary, whose skip line names a
+        // location rather than a test.
+        let pytest = "\
+tests/test_a.py::test_ok PASSED                                          [ 25%]
+tests/test_a.py::test_net SKIPPED (needs network)                        [ 50%]
+tests/test_a.py::test_known XFAIL (issue 12)                             [ 75%]
+tests/test_a.py::test_lucky XPASS                                        [100%]
+=========================== short test summary info ============================
+PASSED tests/test_a.py::test_ok
+SKIPPED [1] tests/test_a.py:7: needs network
+XFAIL tests/test_a.py::test_known - issue 12
+XPASS tests/test_a.py::test_lucky
+=================== 1 passed, 1 skipped, 1 xfailed, 1 xpassed in 0.02s ===================
+";
+        assert_eq!(
+            parse(pytest),
+            named_skipping(
+                &[],
+                &["tests/test_a.py::test_ok"],
+                &[
+                    "tests/test_a.py::test_net",
+                    "tests/test_a.py::test_known",
+                    "tests/test_a.py::test_lucky"
+                ]
+            )
+        );
+        // `go test -v`, a skipped test and a skipped subtest.
+        let go = "\
+=== RUN   TestOne
+--- PASS: TestOne (0.00s)
+=== RUN   TestNet
+    net_test.go:9: needs network
+--- SKIP: TestNet (0.00s)
+=== RUN   TestTable
+=== RUN   TestTable/slow
+    table_test.go:14: slow
+=== RUN   TestTable/fast
+--- PASS: TestTable (0.00s)
+    --- SKIP: TestTable/slow (0.00s)
+    --- PASS: TestTable/fast (0.00s)
+PASS
+ok  \texample.com/pkg\t0.004s
+";
+        assert_eq!(
+            parse(go),
+            named_skipping(
+                &[],
+                &["TestOne", "TestTable", "TestTable/fast"],
+                &["TestNet", "TestTable/slow"]
+            )
+        );
+        // A test skipped and also named as passing is not known to have
+        // passed; one that failed anywhere failed.
+        assert_eq!(
+            parse("test a ... ok\ntest a ... ignored\ntest b ... ignored\ntest b ... FAILED\n"),
+            named_skipping(&["b"], &[], &["a"])
+        );
+        // An output naming only skipped tests still names them.
+        assert_eq!(
+            parse("test a ... ignored\n"),
+            named_skipping(&[], &[], &["a"])
+        );
+    }
+
+    #[test]
+    fn a_passing_run_that_skipped_more_tests_than_fit_is_not_used() {
+        let mut output = String::new();
+        for n in 0..=MAX_TEST_NAMES {
+            output.push_str(&format!("test skip_{n:03} ... ignored\n"));
+        }
+        let named = parse(&output).unwrap();
+        assert_eq!(
+            results(&named, true, &[]),
+            None,
+            "unnamed skips read as passed"
+        );
+        // A failing run says nothing of the tests it left out.
+        let failing = results(&named, false, &[]).unwrap();
+        assert_eq!(failing.skipped.len(), MAX_TEST_NAMES);
     }
 
     #[test]
@@ -205,9 +367,10 @@ test result: FAILED. 3 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out
 ";
         assert_eq!(
             parse(output),
-            named(
+            named_skipping(
                 &["net::times_out"],
-                &["parser::keeps_order", "panics", "src/lib.rs - doc (line 3)"]
+                &["parser::keeps_order", "panics", "src/lib.rs - doc (line 3)"],
+                &["slow::one"]
             )
         );
     }

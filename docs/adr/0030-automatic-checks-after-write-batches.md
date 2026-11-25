@@ -122,24 +122,36 @@ this track had results to learn from; it is now built, issue #70.
 **Test names.** The worker keeps the command's whole combined output up to
 4 MiB (past that only its last 8 KiB, and no names are read), and `check run`
 keeps it while passing it on to standard error as before. A parser chosen by
-the lines' shape reads the tests it names: `cargo test` (`test NAME ... ok` or
-`FAILED`), `go test -v` (`--- PASS:`/`--- FAIL:`) and `pytest` (`FAILED
-path::name`, and with `-v` or `-rA` its passes). A test named as failing
-anywhere failed. At most 100 names and 10 KiB of them per run are kept,
-failures first; a name over 200 bytes, with a control character or anything
-redaction would change is left out. Output no parser recognises names
-nothing, and nothing is learned from it. `integrate check` sends no names:
-each of its runs is a new combined tree.
+the lines' shape reads the tests it names: `cargo test` (`test NAME ... ok`,
+`FAILED` or `ignored`), `go test -v` (`--- PASS:`/`--- FAIL:`/`--- SKIP:`)
+and `pytest` (`FAILED path::name`, and with `-v` or `-rA` its passes and,
+with `-v`, its skips). A skipped test (ignored, skipped, or pytest's `XFAIL`
+or `XPASS`) is kept as skipped. A test named as failing anywhere failed; one
+named as skipped anywhere else is skipped. At most 100 names and 10 KiB of
+them per run are kept, failures first, then skips, then passes; a run that
+passed and skipped more tests than fit teaches nothing, since the skips left
+out would read as passes. A name over 200 bytes, with a control character or
+anything redaction would change is left out. Output no parser recognises
+names nothing, and nothing is learned from it. `integrate check` sends no
+names: each of its runs is a new combined tree.
 
 **Evidence of a flip.** `record_check` gains optional `tests` and `rerun`
-(failed and passed names, and `all_passed` when the run exited 0: then every
-test it ran passed, named or not). The core records one `tests_recorded`
-event per result, after the `check_recorded` of its record, and compares it
-with the last one of the same check name and command in the workspace if
-that was on the same tree. A successful tool observation that changed a path
-in the workspace, or an observed file change, clears every last result, so a
-result is never compared across a recorded write, even when the write was
-undone. A test the two results disagree about flipped; a test both name the
+(failed, passed and skipped names, and `all_passed` when the run exited 0:
+then every test it ran passed, named or not; a skipped test did not run, so
+it neither passed nor failed and is never compared), and `writes_before`,
+required with them. The core counts recorded writes per workspace
+(`State::writes`, its write generation: a successful tool observation that
+changed a path in the workspace, or an observed file change, adds one;
+derived on replay and in the status reply). A run takes the count before its
+tree and sends it as `writes_before`; the core learns from the record's
+results only if the count is still that when the record arrives, so a write
+recorded while the run (or its rerun) went, even one undone before it ended,
+keeps them from being compared with anything; the record itself is kept
+either way. A result it learns from is kept as the last one of its check
+name, with its generation, and compared with the next one of the same check
+name and command in the workspace if that is on the same tree at the same
+generation: a result is never compared across a recorded write, even when
+the write was undone. A test the two results disagree about flipped; a test both name the
 same way is one more run for a test already followed, and nothing for any
 other. A test is known to flip once it has flipped at least twice in its last
 20 runs on unchanged trees, and stays so until it has gone 50 runs without a
@@ -154,15 +166,13 @@ recorded, with the same cancellation: a tree change or a turn-off stops it
 like any run. Its own time limit is the smaller of the check's and
 `flaky_rerun_max_s`; a rerun stopped at it teaches nothing. A longer failure
 is not run again. If the tree held still, the rerun's names go with the
-record as `rerun`, with `writes_before`: the workspace's count of recorded
-writes (`State::writes`, derived on replay, not in the status reply) that the
-worker read before it took the first run's tree. The core compares the rerun
-only if its count is still that when the record arrives, so a write recorded
-between the runs keeps them uncompared even when it was undone and the tree
-ended the same; the record and its first result are kept either way. The
-worker's count is published by the state owner after each request it
+record as `rerun`, under the `writes_before` the worker read before it took
+the first run's tree, so a write recorded between or during the runs keeps
+both results unlearned even when it was undone and the tree ended the same.
+The worker's count is published by the state owner after each request it
 handles, so it can only lag: a stale one refuses a comparison, never allows
-one. A rerun without `writes_before` is refused. Its result is no record of
+one; `check run` reads it from the status reply, and sends no names when it
+cannot. Test results without `writes_before` are refused. Its result is no record of
 its own, so the first run's failure is what `check status` and `land` see,
 and a passing rerun never replaces it. Writes made during the rerun get a run
 of their own, as before. The result reaches the agent later by at most

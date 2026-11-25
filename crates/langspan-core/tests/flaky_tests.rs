@@ -56,15 +56,22 @@ fn failing(failed: &[&str], passed: &[&str]) -> TestResults {
     TestResults {
         failed: names(failed),
         passed: names(passed),
-        all_passed: false,
+        ..TestResults::default()
     }
 }
 
 fn passing() -> TestResults {
     TestResults {
-        failed: Vec::new(),
-        passed: Vec::new(),
         all_passed: true,
+        ..TestResults::default()
+    }
+}
+
+/// A run that passed as a whole and skipped `skipped`.
+fn passing_skipping(skipped: &[&str]) -> TestResults {
+    TestResults {
+        skipped: names(skipped),
+        ..passing()
     }
 }
 
@@ -257,9 +264,21 @@ fn a_rerun_after_a_write_recorded_since_its_first_run_is_not_compared() {
         "{outcome:?}"
     );
     assert_eq!(history(&state, "net::times_out"), None);
-    // The first run's result is still learned from: the next run on this
-    // tree, with no write since, is compared with it.
+    // Nor is the first run's result learned from: the writes may have been
+    // recorded while it ran, so the next run on this tree, with no write
+    // since, is not compared with it either.
     record(&mut state, "c2", &tree('a'), passing(), None, 200);
+    assert_eq!(history(&state, "net::times_out"), None);
+    // That next run was of unchanged code, and the one after it is
+    // compared with it.
+    record(
+        &mut state,
+        "c2b",
+        &tree('a'),
+        failing(&["net::times_out"], &[]),
+        None,
+        250,
+    );
     assert_eq!(history(&state, "net::times_out"), Some((1, 1)));
     // A rerun without its mark is refused.
     let outcome = record_marked(
@@ -270,6 +289,60 @@ fn a_rerun_after_a_write_recorded_since_its_first_run_is_not_compared() {
         Some(passing()),
         None,
         300,
+    );
+    assert!(matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+}
+
+#[test]
+fn a_test_skipped_by_a_passing_run_is_neither_a_pass_nor_a_flip() {
+    let mut state = ready();
+    let failed = || failing(&["net::times_out"], &["parser::keeps_order"]);
+    record(&mut state, "c1", &tree('a'), failed(), None, 100);
+    // Fails, is skipped by a passing rerun, fails again: no flip.
+    record(
+        &mut state,
+        "c2",
+        &tree('a'),
+        failed(),
+        Some(passing_skipping(&["net::times_out"])),
+        200,
+    );
+    record(&mut state, "c3", &tree('a'), failed(), None, 300);
+    assert_eq!(history(&state, "net::times_out"), None);
+    // Skipped in a failing run, too.
+    record(
+        &mut state,
+        "c4",
+        &tree('a'),
+        TestResults {
+            skipped: names(&["net::times_out"]),
+            ..failing(&["parser::keeps_order"], &[])
+        },
+        None,
+        400,
+    );
+    assert_eq!(history(&state, "net::times_out"), None);
+    // A test the passing run did not name as skipped still passed in it.
+    record(
+        &mut state,
+        "c5",
+        &tree('a'),
+        failed(),
+        Some(passing_skipping(&["other::test"])),
+        500,
+    );
+    assert_eq!(history(&state, "net::times_out"), Some((1, 1)));
+    // One name in two lists is refused.
+    let outcome = record(
+        &mut state,
+        "c6",
+        &tree('a'),
+        TestResults {
+            skipped: names(&["net::times_out"]),
+            ..failed()
+        },
+        None,
+        600,
     );
     assert!(matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
 }
@@ -453,29 +526,40 @@ fn a_test_with_no_flip_in_its_last_fifty_runs_is_no_longer_flaky() {
 #[test]
 fn test_results_are_bounded_and_belong_to_a_conclusive_working_tree_check() {
     let mut state = ready();
+    let refused_marked =
+        |state: &mut State, tests: TestResults, result: CheckResult, writes_before: Option<u64>| {
+            let outcome = run(
+                state,
+                "bad",
+                Command::RecordCheck {
+                    workspace_id: "work".into(),
+                    name: "tests".into(),
+                    command: "cargo test".into(),
+                    tree_oid: tree('a'),
+                    head_oid: None,
+                    inputs: Vec::new(),
+                    result,
+                    duration_ms: 1,
+                    report: None,
+                    tests: Some(tests),
+                    rerun: None,
+                    writes_before,
+                },
+                1,
+            );
+            matches!(outcome, Outcome::Error { .. })
+        };
     let refused = |state: &mut State, tests: TestResults, result: CheckResult| {
-        let outcome = run(
-            state,
-            "bad",
-            Command::RecordCheck {
-                workspace_id: "work".into(),
-                name: "tests".into(),
-                command: "cargo test".into(),
-                tree_oid: tree('a'),
-                head_oid: None,
-                inputs: Vec::new(),
-                result,
-                duration_ms: 1,
-                report: None,
-                tests: Some(tests),
-                rerun: None,
-                writes_before: None,
-            },
-            1,
-        );
-        matches!(outcome, Outcome::Error { .. })
+        refused_marked(state, tests, result, Some(0))
     };
     let failed = CheckResult::Failed { exit_code: 1 };
+    // Test results without the write generation the run took are refused.
+    assert!(refused_marked(
+        &mut state,
+        failing(&["a"], &["b"]),
+        failed.clone(),
+        None
+    ));
     let many: Vec<String> = (0..=langspan_core::MAX_TEST_NAMES)
         .map(|n| format!("t{n}"))
         .collect();
@@ -536,6 +620,19 @@ fn the_wire_forms_of_flaky_test_commands_outcomes_and_events_are_fixed() {
         Some(&failing(&["net::times_out"], &["parser::keeps_order"]))
     );
     assert_eq!(rerun.as_ref(), Some(&passing()));
+    // Skipped tests have a list of their own.
+    assert_eq!(
+        serde_json::to_value(passing_skipping(&["net::times_out"])).unwrap(),
+        json!({"skipped": ["net::times_out"], "all_passed": true})
+    );
+    // The write generation check runs take is in the status reply.
+    let mut state = ready();
+    write(&mut state, "w1");
+    let (view, _) = langspan_core::status_view(&state, 10);
+    assert_eq!(
+        serde_json::to_value(&view).unwrap()["writes"],
+        json!({"work": 1})
+    );
     assert_eq!(
         serde_json::to_value(Command::FlakyTests {
             workspace_id: "work".into(),

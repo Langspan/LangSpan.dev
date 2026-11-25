@@ -1500,9 +1500,11 @@ pub struct State {
     #[serde(skip)]
     pub refusals: Vec<RecentRefusal>,
     /// Writes recorded per workspace since the event log was replayed: the
-    /// mark an automatic check carries across its rerun. Derived on replay;
-    /// not part of the status reply.
-    #[serde(skip)]
+    /// write generation a check run takes before its tree and carries with
+    /// its test results (`record_check.writes_before`). Derived on replay;
+    /// in the status reply, one count per workspace, so that `check run`
+    /// can read it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub writes: BTreeMap<String, u64>,
 }
 
@@ -4051,17 +4053,19 @@ fn decide_checked(
                     "A rerun's test results come with the record's own",
                 ));
             }
-            if rerun.is_some() && writes_before.is_none() {
+            if tests.is_some() && writes_before.is_none() {
                 return Err(error(
                     "invalid_test_results",
-                    "A rerun's test results come with the count of writes recorded before its first run",
+                    "Test results come with the workspace's write generation taken before the run's tree (writes_before)",
                 ));
             }
-            // A write recorded since the first run's tree was taken, even one
-            // undone before the rerun ended, means the two runs are not of
-            // unchanged code: the rerun is checked but not compared.
-            let unchanged =
-                *writes_before == Some(state.writes.get(workspace_id).copied().unwrap_or(0));
+            // The write generation the run took before its tree. A write
+            // recorded since, even one undone before the run (or its rerun)
+            // ended, means its results are not of unchanged code: they are
+            // checked but learned from by neither this record nor a later
+            // one.
+            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
+            let unchanged = *writes_before == Some(writes);
             let runs = tests
                 .iter()
                 .map(|results| (results, false))
@@ -4079,10 +4083,10 @@ fn decide_checked(
                     matches!(result, CheckResult::Passed {})
                 };
                 flaky::validate_test_results(results, passed)?;
-                if again && !unchanged {
+                if !unchanged {
                     continue;
                 }
-                learning.learn(name, tree_oid, command, results, now_ms);
+                learning.learn(name, tree_oid, command, writes, results, now_ms);
                 events.push(Event::TestsRecorded {
                     workspace_id: workspace_id.clone(),
                     check_id: check.check_id.clone(),
@@ -6395,17 +6399,12 @@ fn validate_check_report(
     Ok(())
 }
 
-/// A write was recorded in the workspace: later check results are not
-/// compared with earlier ones to learn which tests flip.
+/// A write was recorded in the workspace: its write generation moves on, so
+/// no check result is compared with one from before it to learn which tests
+/// flip.
 fn wrote_in(state: &mut State, workspace_id: &str) {
     let writes = state.writes.entry(workspace_id.to_owned()).or_default();
     *writes = writes.saturating_add(1);
-    if let Some(learning) = state.test_learning.get_mut(workspace_id) {
-        learning.wrote();
-        if learning.is_empty() {
-            state.test_learning.remove(workspace_id);
-        }
-    }
 }
 
 fn validate_forget_flaky(name: Option<&str>, test: &str) -> Result<(), CoreError> {
@@ -7382,11 +7381,14 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 }
             };
             flaky::validate_test_results(results, passed)?;
+            // Recorded only when no write came during the run: the write
+            // generation now is the one the run took.
+            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
             state
                 .test_learning
                 .entry(workspace_id.clone())
                 .or_default()
-                .learn(name, tree_oid, command, results, *at_ms);
+                .learn(name, tree_oid, command, writes, results, *at_ms);
         }
         Event::FlakyTestForgotten {
             workspace_id,
