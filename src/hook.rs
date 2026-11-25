@@ -2132,16 +2132,21 @@ fn adopted_workspace_id(config: &Config, root: &Path, deadline: Instant) -> Opti
 /// that the host would also run here, if there is one. Looked for at every
 /// directory from `cwd` up to the repository root, at the main checkout (where
 /// Claude Code keeps a worktree's local settings) and, for Claude Code, at the
-/// directory the session started in; for Gemini CLI, only at `cwd`. A file
-/// that cannot be read safely means no decision, not a guess.
+/// directory the session started in; for Gemini CLI and Antigravity, only at
+/// `cwd`. A file that cannot be read safely means no decision, not a guess.
 fn project_install(
     vendor: crate::install::Vendor,
     cwd: &Path,
     git: &crate::git::Identity,
 ) -> Result<Option<PathBuf>, Reply> {
     // Gemini CLI reads project settings only from the directory it was
-    // started in, which is the event's cwd.
-    if vendor == crate::install::Vendor::Gemini {
+    // started in, which is the event's cwd. Antigravity reads
+    // `.agents/hooks.json` at the workspace root, which its adapter passes
+    // as the cwd.
+    if matches!(
+        vendor,
+        crate::install::Vendor::Gemini | crate::install::Vendor::Antigravity
+    ) {
         let path = cwd.join(vendor.project_hook_files()[0]);
         return covered(vendor, path);
     }

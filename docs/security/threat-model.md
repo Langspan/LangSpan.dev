@@ -296,6 +296,25 @@ comparison) are unchanged.
 | Denial of service | The same 8 MiB event bound and 1.5 s budget; the installed timeout is 5,000 ms. At most 4,096 calls on the same target are numbered per session; the next gets no decision. A session's markers are removed at `SessionEnd`, and directories older than a week when another session first makes a call. |
 | Elevation of privilege | The hook never answers `allow` and never exits 2. Every outcome other than a deny prints `{}`, including a hook that cannot start or panics: empty stdout would make Gemini parse the stderr log as the answer, and it reads plain text there as `allow`. The MCP entry does not set `trust`, so it bypasses none of Gemini's confirmations. With folder trust on, project hooks load only in a folder Gemini trusts; Gemini's documentation says it warns before a new or changed project hook first runs. |
 
+## Antigravity
+
+[ADR 0035](../adr/0035-antigravity-adapter.md) adds a fifth host. Its hook is
+a new command in `.agents/hooks.json` or `~/.gemini/config/hooks.json`, its MCP
+entry a new server in `.agents/mcp_config.json` or
+`~/.gemini/config/mcp_config.json`, its skill a new rule file, and its events
+a new input. Antigravity's App, CLI and IDE all read these files, so one
+install reaches all three. The other boundaries (socket, store, shell
+comparison) are unchanged.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | An event does not say which event it is; the installed command says, with `--event`, and an event name LangSpan does not register stops the hook with `{}`. A tool call is identified by the conversation's `conversationId` and the call's `stepIdx`. Nothing authenticates either, as with every hook event: a same-user process can forge an event under another conversation's ID. If Antigravity were to give two calls of one conversation the same `stepIdx`, the second would be answered from the first's receipt; that `PreToolUse` and `PostToolUse` share it is unverified. |
+| Tampering | Tool arguments and `lastUserInput` are model or user text: data, parsed into typed fields, never run. A deny's reason is the same labelled, capped text the other hosts get; the briefing goes out as a system message in `injectSteps`, labelled as data, not instructions. Antigravity keeps injected steps in the conversation's history, so a briefing is sent only when it changed. LangSpan's entries live in its own hook definition, named `langspan`; the owner's definitions are not read for anything but their entries' ownership markers, and are written back unchanged. |
+| Repudiation | Antigravity events produce the same events and receipts as the other hosts, under sessions named `antigravity.<conversationId>`. `/hooks` in Antigravity's CLI lists LangSpan's definition by its name. |
+| Information disclosure | The hook reads `lastUserInput` only on the first model call of an execution, for the prompt summary (unless `--prompt-summary off`) and the code briefing, as other hosts' prompts. It does not read the transcript or artifact directory the event names. The MCP entry carries no `env` or `headers`. |
+| Denial of service | The same 8 MiB event bound and 1.5 s budget; the installed timeout is 5 seconds (Antigravity's default is 30). `PreInvocation` runs before every model call, so each costs one coordinator round trip within that budget. |
+| Elevation of privilege | The hook never answers `allow`, `auto_approve`, `ask` or any other permission, never uses `overwrite` or `permissionOverrides`, and never exits 2. Every outcome other than a deny prints `{}`, including a hook that cannot start or panics. What Antigravity does with a `PreToolUse` answer that lacks its documented-required `decision` is not documented; it is checked on the first real-host run. The MCP entry is a plain stdio server, so Antigravity's own MCP permission rules apply to its tools. |
+
 ## Cross-machine publication
 
 [ADR 0006](../adr/0006-remote-awareness-through-git-refs.md) is the first flow

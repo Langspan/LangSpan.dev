@@ -1,0 +1,9 @@
+{
+  "conversationId": "00000000-0000-4000-8000-0000000000a1",
+  "workspacePaths": [
+    "/work/demo"
+  ],
+  "transcriptPath": "~/.gemini/antigravity-cli/brain/00000000-0000-4000-8000-0000000000a1/.system_generated/logs/transcript.jsonl",
+  "artifactDirectoryPath": "~/.gemini/antigravity-cli/brain/00000000-0000-4000-8000-0000000000a1",
+  "modelName": "placeholder-model"
+}
