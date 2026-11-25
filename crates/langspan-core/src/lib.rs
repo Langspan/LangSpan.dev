@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 mod dashboard;
 mod lines;
+mod recall;
 mod status;
 mod status_line;
 mod today;
@@ -16,6 +17,9 @@ pub use dashboard::{
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
     LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow, PublishRow, RecentFile, ScanRow,
     WorkspaceRow, dashboard_denials,
+};
+pub use recall::{
+    RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
@@ -2220,6 +2224,16 @@ pub enum Command {
     Recap {
         workspace_id: String,
     },
+    /// Read-only: the held notes of one workspace that hold every word of
+    /// `query`, about `path` or the whole workspace when a path is given
+    /// (roadmap E2). Never recorded, never counted as delivered.
+    Recall {
+        workspace_id: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+    },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
     /// every workspace when none is named, and what is still open.
@@ -2683,6 +2697,16 @@ enum CommandWire {
     Recap {
         workspace_id: String,
     },
+    /// Read-only: the held notes of one workspace that hold every word of
+    /// `query`, about `path` or the whole workspace when a path is given
+    /// (roadmap E2). Never recorded, never counted as delivered.
+    Recall {
+        workspace_id: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+    },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
     /// every workspace when none is named, and what is still open.
@@ -3093,6 +3117,9 @@ pub enum Outcome {
     },
     Recap {
         recap: Recap,
+    },
+    Recall {
+        recall: Recall,
     },
     Today {
         today: Today,
@@ -4841,6 +4868,17 @@ fn decide_checked(
                 },
             })
         }
+        Command::Recall {
+            workspace_id,
+            query,
+            path,
+            limit,
+        } => Ok(Decision {
+            events: Vec::new(),
+            outcome: Outcome::Recall {
+                recall: recall_notes(state, workspace_id, query, path.as_deref(), *limit)?,
+            },
+        }),
         Command::StatusLine { root, from_ms } => {
             if !root.starts_with('/') || root.len() > 4096 {
                 return Err(error(
