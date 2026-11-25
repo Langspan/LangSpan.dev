@@ -166,7 +166,9 @@ yet.
   failed this scenario. Planned
   fix, not started ([ADR 0011](adr/0011-shell-writes.md#known-gap-a-heredoc-that-rewrites-a-file)).
 - **A session that ends with neither `Stop` nor `SessionEnd`** (a killed
-  host, for example) keeps an unfinished shell run counting for 10 minutes:
+  host, for example) keeps an unfinished shell run counting for two hours, a
+  shell call's supported lifetime (ten minutes before PR #6, which a
+  longer-running command outlived; ADR 0011):
   it can still contest other sessions' changes and make `commit --mine`
   without `--session` see two running sessions (PR #58).
 - **No hook for the host's own permission denial.** None is registered or

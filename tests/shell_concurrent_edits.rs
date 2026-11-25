@@ -395,6 +395,77 @@ fn commit_mine_after_a_long_command_commits_its_own_lines_and_leaves_the_editors
     );
 }
 
+/// Set `path`'s modification time to `age` ago.
+fn age(path: &Path, age: Duration) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - age)
+        .unwrap();
+}
+
+/// The files in `directory` with extension `extension`.
+fn files_with(directory: &Path, extension: &str) -> Vec<PathBuf> {
+    fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == extension))
+        .collect()
+}
+
+/// Backdate the start of the one shell run still recorded as running.
+fn backdate_running_command(state: &Path, by: Duration) {
+    let [run] = files_with(&state.join("shell"), "run").try_into().unwrap();
+    let mut record: Value = serde_json::from_slice(&fs::read(&run).unwrap()).unwrap();
+    record["started_ms"] = json!(record["started_ms"].as_u64().unwrap() - by.as_millis() as u64);
+    fs::write(&run, record.to_string()).unwrap();
+    age(&run, by);
+}
+
+const CAROL: &str = "00000000-0000-4000-8000-00000000000c";
+
+/// A shell call can run for longer than ten minutes (a background command
+/// for up to two hours): another session's later edit must not prune the
+/// finished edit marks the still-running command needs, or its result
+/// credits that session's file to the command's session.
+#[test]
+fn a_command_running_longer_than_ten_minutes_keeps_the_edit_marks_it_needs() {
+    let f = Fixture::new();
+    let (held, command) = f.start_held(ALICE, "alice-1", "printf mine > mine.txt");
+    f.write(BOB, "bob-1", "a.txt", "Bob's line\n");
+
+    // Alice's command started eleven minutes ago, Bob's edit five.
+    backdate_running_command(&f.state(), Duration::from_secs(11 * 60));
+    let [bob] = files_with(&f.state().join("shell").join("edits"), "json")
+        .try_into()
+        .unwrap();
+    age(&bob, Duration::from_secs(5 * 60));
+
+    // Carol's edit starts while the command is still running.
+    f.write(CAROL, "carol-1", "b.txt", "Carol's line\n");
+    held.release();
+
+    let post = f.bash(ALICE, "PostToolUse", "alice-1", &command);
+    assert_eq!(post.coverage, "shell_observed", "{post:?}");
+    assert_eq!(f.credited(ALICE, "Bash"), ["mine.txt"]);
+    assert_eq!(f.credited(BOB, "Write"), ["a.txt"]);
+}
+
+/// A run older than the longest a shell call can run may have lost the
+/// edit marks it needed: none of what it changed is credited to it.
+#[test]
+fn a_command_older_than_a_shell_calls_lifetime_is_credited_with_nothing() {
+    let f = Fixture::new();
+    let (held, command) = f.start_held(ALICE, "alice-1", "printf mine > mine.txt");
+    backdate_running_command(&f.state(), Duration::from_secs(3 * 60 * 60));
+    held.release();
+
+    let post = f.bash(ALICE, "PostToolUse", "alice-1", &command);
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert!(f.credited(ALICE, "Bash").is_empty());
+}
+
 /// A shell write that lands while an edit's post hook waits on the daemon
 /// is not part of that edit: the edit's mark keeps the version the post hook
 /// found on entry, so the file is not taken for the editor's alone.

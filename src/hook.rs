@@ -2874,6 +2874,11 @@ impl Session<'_> {
                             );
                             run.edited_elsewhere = theirs;
                             run.contested.extend(unknown);
+                            // Past a shell call's supported lifetime, what
+                            // other sessions did may no longer be known.
+                            if run.outlived(run.finished_ms.unwrap_or_default()) {
+                                run.contested.extend(changed.iter().cloned());
+                            }
                             run.contested.sort();
                             run.contested.dedup();
                             let attributed = run.attributed(&changed);

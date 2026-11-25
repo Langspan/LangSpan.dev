@@ -657,8 +657,13 @@ pub fn changed(
 // Run records: the "before" of each command, and what each run changed
 // ---------------------------------------------------------------------------
 
-/// A run whose result never arrived stops counting as running after this.
-pub const ABANDONED_MS: u64 = 10 * 60 * 1000;
+/// The longest a shell call is supported to run: two hours, the longest
+/// Claude Code lets a `run_in_background` command run (a foreground call
+/// stops at ten minutes). Until then an unfinished run counts as running,
+/// so the run records and edit marks it needs are kept; after it, a run
+/// whose result never arrived is taken as abandoned, and a run whose result
+/// does arrive is credited with nothing (`outlived`).
+pub const RUN_LIFETIME_MS: u64 = 2 * 60 * 60 * 1000;
 const RECORD_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_RECORDS: usize = 4096;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -696,7 +701,7 @@ pub struct Record {
     pub named: Vec<String>,
     /// Started in the background (Claude Code's `run_in_background`): it
     /// may still be running after its call returns, so until
-    /// `ABANDONED_MS` after it started it contests other sessions' changes
+    /// `RUN_LIFETIME_MS` after it started it contests other sessions' changes
     /// as a running command does.
     #[serde(default)]
     pub background: bool,
@@ -721,6 +726,13 @@ impl Record {
             .cloned()
             .collect()
     }
+
+    /// Whether the run started more than `RUN_LIFETIME_MS` before `now`:
+    /// the edit marks and run records it needed may have been pruned, so
+    /// what it changed cannot be told from other sessions' changes.
+    pub fn outlived(&self, now: u64) -> bool {
+        now.saturating_sub(self.started_ms) >= RUN_LIFETIME_MS
+    }
 }
 
 /// Whether a shell command runs `langspan commit --mine`.
@@ -736,7 +748,7 @@ pub fn committing_sessions(state_dir: &Path, workspace: &Path) -> BTreeSet<Strin
     let now = now_ms();
     listing(state_dir)
         .into_iter()
-        .filter(|(_, done, modified)| !done && now.saturating_sub(*modified) < ABANDONED_MS)
+        .filter(|(_, done, modified)| !done && now.saturating_sub(*modified) < RUN_LIFETIME_MS)
         .filter_map(|(path, _, _)| read_record(&path))
         .filter(|record| {
             record.commit_mine
@@ -880,7 +892,7 @@ pub fn start(state_dir: &Path, operation_id: &str, record: &Record) -> Result<()
     let entries = listing(state_dir);
     let earliest_running = entries
         .iter()
-        .filter(|(_, done, modified)| !done && now.saturating_sub(*modified) < ABANDONED_MS)
+        .filter(|(_, done, modified)| !done && now.saturating_sub(*modified) < RUN_LIFETIME_MS)
         .map(|(_, _, modified)| *modified)
         .min()
         .unwrap_or(now);
@@ -889,7 +901,7 @@ pub fn start(state_dir: &Path, operation_id: &str, record: &Record) -> Result<()
         // A finished background command may still be running: its record is
         // kept while it can still contest.
         let background = done
-            && now.saturating_sub(modified) < ABANDONED_MS
+            && now.saturating_sub(modified) < RUN_LIFETIME_MS
             && read_record(&path).is_some_and(|record| record.background);
         let expired = now.saturating_sub(modified) > DAY_MS
             || (done
@@ -962,7 +974,7 @@ pub fn contested(
             continue;
         }
         // A background command's call returning does not mean it stopped.
-        let still_running = |started: u64| now.saturating_sub(started) < ABANDONED_MS;
+        let still_running = |started: u64| now.saturating_sub(started) < RUN_LIFETIME_MS;
         let overlapping = match other.finished_ms {
             Some(_) if other.background => still_running(other.started_ms),
             Some(finished) => finished >= run.started_ms,
@@ -1097,7 +1109,7 @@ pub fn edit_started(
     // The earliest start of a shell run that may still be going.
     let earliest_running = listing(state_dir)
         .iter()
-        .filter(|(_, _, modified)| now.saturating_sub(*modified) < ABANDONED_MS)
+        .filter(|(_, _, modified)| now.saturating_sub(*modified) < RUN_LIFETIME_MS)
         .filter_map(|(path, _, _)| read_record(path))
         .filter(|record| record.finished_ms.is_none() || record.background)
         .map(|record| record.started_ms)
@@ -1212,7 +1224,7 @@ pub fn overlapping_edits(state_dir: &Path, run: &Record) -> Vec<EditMark> {
                     .is_none_or(|ours| *ours == mark.workspace)
                 && match mark.finished_ms {
                     Some(finished) => finished >= run.started_ms,
-                    None => now.saturating_sub(mark.started_ms) < ABANDONED_MS,
+                    None => now.saturating_sub(mark.started_ms) < RUN_LIFETIME_MS,
                 }
         })
         .collect()

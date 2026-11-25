@@ -95,14 +95,28 @@ in time could have written the same files. A file changed in this run is
 attributed to neither session when an overlapping run of another session
 changed it too, or when that run's changes are unknown (still running, or not
 observed). The coverage is `contested`. A run whose result never arrives
-stops counting after 10 minutes; one still open when its session's reply or
+stops counting after the supported lifetime of a shell call (below); one still open when its session's reply or
 the session ends is closed then, with its changes unknown (ADR 0026). Two exceptions (added 24 November 2026,
 for shared-checkout cases): a file this command names as a literal
 write target (its whole write set parsed) is this command's, unless the
 overlapping run names it too; and a Claude Code call with `run_in_background`
-counts as still running for 10 minutes after it started, since its process
+counts as still running for that lifetime after it started, since its process
 outlives the call, so it contests other sessions' changes their commands do
-not name. Tests: `concurrent_commands_credit_a_change_to_the_one_that_names_the_file`,
+not name.
+
+**A shell call's supported lifetime** (changed 25 November 2026, PR #6
+review): two hours (`RUN_LIFETIME_MS`), the longest Claude Code lets a
+`run_in_background` command run; a foreground call stops at ten minutes.
+It was ten minutes, so a longer run's still-open record was taken as
+abandoned: another session's next edit then pruned the finished edit marks
+the run still needed, and the run's result credited that session's file to
+the command's session. Until the lifetime has passed an unfinished run
+counts as running, and the run records and marks it needs are kept. A run
+whose result arrives after it (a Codex process kept alive past two hours,
+for example) may have lost those marks, so all it changed is `contested`:
+credited to no session. Tests:
+`a_command_running_longer_than_ten_minutes_keeps_the_edit_marks_it_needs`,
+`a_command_older_than_a_shell_calls_lifetime_is_credited_with_nothing`. Tests: `concurrent_commands_credit_a_change_to_the_one_that_names_the_file`,
 `a_change_no_concurrent_command_names_is_credited_to_no_session`,
 `a_running_background_command_contests_changes_no_command_names`. Only runs in the same physical workspace are
 compared: each run record keeps the workspace's canonical root, because
@@ -120,8 +134,8 @@ every edit tool call that is not refused leaves an *edit mark* in
 started and finished, and each file's version just before the call (taken by
 the pre-tool hook) and after it (taken by the post-tool hook). The shell
 post-tool hook reads the marks of other sessions in the same workspace that
-overlapped the run (finished after it started, or still going and under 10
-minutes old). For each changed file one or more of those marks touched:
+overlapped the run (finished after it started, or still going and younger
+than a shell call's supported lifetime). For each changed file one or more of those marks touched:
 
 - If the marked edits, in the order they started, form one chain of known
   versions from the file before the run to the file now, the edits alone
@@ -198,7 +212,7 @@ Coverage values: `admitted`, `denied`, `denied_stale` (before, literal forms);
 - Writes by a process that outlives the tool call: a background job, a
   daemon, Claude Code's `run_in_background`. Only what changed by the time the
   post hook ran is attributed to it. A `run_in_background` call does contest
-  other sessions' unnamed changes for 10 minutes after it started (see
+  other sessions' unnamed changes for two hours after it started (see
   "Contested changes"); a job a command backgrounds itself (`&`, `nohup`) is
   not known to be running and contests nothing.
 - Changes made by anything outside the hooks while the command ran (an
