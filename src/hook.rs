@@ -4262,7 +4262,9 @@ mod briefing_text {
             .last()
             .unwrap();
         let long = format!("src/{}.rs", "p".repeat(100));
-        let watchers: Vec<PeerWork> = (0..8)
+        // Enough bare lines that, counted before the remote ones, they would
+        // take more than the room left after the last remote line that fits.
+        let watchers: Vec<PeerWork> = (0..40)
             .map(|n| PeerWork {
                 recent: Vec::new(),
                 summary: None,
