@@ -792,6 +792,23 @@ fn codex_in_a_worktree_with_its_own_install_is_coordinated_by_the_main_checkouts
     assert_ne!(start.coverage, "deferred_to_worktree");
 }
 
+/// The worktree's own install decides the presence window too: Codex runs
+/// only the main checkout's hook there, so that hook applies it.
+#[test]
+fn codex_in_a_worktree_with_its_own_install_takes_that_installs_presence_window() {
+    let mut f = Fixture::new();
+    let tree = linked_tree(&f);
+    install_hooks_with(&f, "codex", &tree, &["--presence-minutes", "1"]);
+    let root = f.root();
+    f.start();
+    let bob = f.run("codex", &root, &[], &codex_patch(BOB, "bob-1", &tree));
+    assert_eq!(bob.coverage, "admitted", "{}", bob.stdout);
+    let state = f.state();
+    let presence = &state.presence[&format!("codex.{BOB}")];
+    assert!(presence.shown);
+    assert_eq!(presence.window_ms, 60_000);
+}
+
 /// Hosts with no retained evidence of how they load a linked worktree's
 /// project hooks (Cursor, Gemini CLI) do not step aside: the main
 /// checkout's hook decides, as the worktree's own install would. If the host

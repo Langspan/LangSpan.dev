@@ -2222,6 +2222,7 @@ pub fn resolve_workspace(
             resolved.share_prompt &= registration.share_prompt;
             resolved.code_briefing &= registration.code_briefing;
             resolved.presence &= registration.presence.shown;
+            resolved.presence_window_ms = registration.presence.window_ms();
         }
         _ => {
             resolved.workspace_id = wire_id(

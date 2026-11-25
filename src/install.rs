@@ -292,6 +292,11 @@ impl Default for Presence {
 }
 
 impl Presence {
+    /// How old a peer's presence the session is shown, in milliseconds.
+    pub fn window_ms(self) -> u64 {
+        self.minutes.unwrap_or(PRESENCE_MINUTES) * 60_000
+    }
+
     /// `--presence-minutes`: 1 to 30, the briefing horizon. The default
     /// is written as no option at all.
     pub fn minutes(value: &str) -> Result<Option<u64>, String> {

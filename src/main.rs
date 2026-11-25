@@ -311,10 +311,7 @@ fn hook(input: Vec<String>) -> ExitCode {
             share_prompt: switch(&mut options, "--prompt-summary")?,
             code_briefing: switch(&mut options, "--code-briefing")?,
             presence: presence.shown,
-            presence_window_ms: presence
-                .minutes
-                .unwrap_or(langspan::install::PRESENCE_MINUTES)
-                * 60_000,
+            presence_window_ms: presence.window_ms(),
         };
         no_unused_options(&options)?;
         if !(1..=60_000).contains(&config.ttl_ms)
