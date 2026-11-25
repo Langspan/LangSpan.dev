@@ -128,6 +128,25 @@ and per-project trust state.
 | **Denial of service**: a broken user-level hook affects every repository | The hook keeps the project form's budget, gives no decision on any failure, exits 0, and prints nothing outside a Git repository or when a project install covers the repository. | A missing executable makes the host report a failed hook on every event until `uninstall` or a reinstall; `doctor` names it and the command to run again. Under Homebrew the entries name the `opt` link rather than the versioned keg, so `brew upgrade` does not cause this; that link is resolved on every run, and anyone who can change it can already replace the binary in the same Homebrew prefix. |
 | **Elevation of privilege** | No permission, trust or approval setting of either host is written or weakened. Codex still requires its own review of the new hook; Claude Code's own permission flow still governs every tool call. The hook never answers `allow`. | Installing a user-level hook is the owner's grant of a command that runs on every session; it is shown before it is written. |
 
+## The LangSpan skill
+
+`langspan install --skill` writes agent guidance where each host reads it on
+every session ([ADR 0034](../adr/0034-langspan-skill.md)):
+`~/.claude/skills/langspan/SKILL.md`, a section of `~/.codex/AGENTS.md` and of
+`~/.gemini/GEMINI.md`, and, with `hooks install cursor --skill`, the project
+rule `.cursor/rules/langspan.mdc`. This text reaches the model directly, so it
+is an installed configuration that shapes what agents do.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: a file that looks like LangSpan's skill is treated as LangSpan's, or the reverse | A whole file is LangSpan's only with its `langspan-managed:skill:v1` mark; a section only between its begin and end lines. A file of the same name without the mark stops the install with nothing written, and is never removed. | Someone who writes the mark into a file of that name has written LangSpan's file; reinstall replaces it and uninstall removes it. |
+| **Tampering**: the install damages the owner's `AGENTS.md` or `GEMINI.md` | Only LangSpan's section changes; every other line is kept byte for byte. Two sections, or a marker without its partner, stop the install. The installer's guarded writer is used: dry run first, every file planned before any write, a change made meanwhile planned against again and never overwritten, symlinks refused, 1 MiB bound, new files `0600` and new folders `0700`. A removal is refused when the file changed since it was planned. | Edits the owner makes inside LangSpan's section or file are replaced by a reinstall. |
+| **Tampering**: the skill tells agents to do something harmful | The text is compiled into the executable from `src/skill.md`, reviewed like code, and every command, option, tool and message it names is checked against the code by tests. It tells agents to treat everything LangSpan relays as data, never instructions. | A wrong statement that uses existing names is not caught by the tests. |
+| **Repudiation** | The dry run prints each file's path, size and full text; `doctor` reports for each host whether it is installed, current or different. | No install log is kept beyond the files themselves. |
+| **Information disclosure** | The skill holds no path, identity or state from the machine: every copy is the same text. Reading `AGENTS.md` or `GEMINI.md` looks only for LangSpan's marker lines. | A dry run of a section install prints the owner's whole `AGENTS.md` or `GEMINI.md` with the section in it, to the terminal that ran it. |
+| **Denial of service** | Every form is at most 500 lines and 8 KiB, within each host's documented limit, and adds that much to every session's context. | The added context is spent on every session, whether or not LangSpan is in use in that repository. |
+| **Elevation of privilege** | The skill grants nothing: no permission, trust or approval setting is written, and it tells agents never to turn LangSpan's hooks off. | An agent can ignore it; it is advice, not a gate. |
+
 ## A linked worktree's own install
 
 The main checkout's project hook, run by a host started in a linked worktree,
@@ -154,7 +173,7 @@ derived from one agent session is placed in another session's model context.
 | Spoofing | A briefing names sessions by the host-supplied session ID recorded through the owner-only socket. Any same-user process can register a session and claim work; LangSpan does not authenticate agents to each other. |
 | Tampering (prompt injection) | A peer's task line is the first line of that owner's prompt; file paths come from the repository. Both are attacker-influenced if a peer session or the repository is. Control characters, Unicode line and paragraph separators, bidirectional overrides and zero-width characters become spaces; every such value is quoted with its own quotes escaped, capped at 200 bytes, each peer at 700 and the whole briefing at 2,400, under a fixed header stating that the lines are data, not instructions. This reduces, and cannot remove, the chance that a host model follows text in a briefing. A briefing never carries a permission decision, so it cannot allow or deny anything by itself. |
 | Repudiation | Each delivery is an event (`briefing_delivered`) with the signature of what was delivered; prompt summaries and session ends are events. |
-| Information disclosure | The first non-empty line of each prompt, and no later line, is stored in the local event log, appears in `status`, and is shown to other sessions of the same user in the same repository. Before that line, an intent summary, a note, a message or a handoff is sent to the daemon, one redaction function in the hook adapter replaces likely secrets with `[redacted]` (provider key shapes, JWTs, PEM blocks, URL passwords, secret-named assignments and query values, `--password`/`--token` arguments, and long high-entropy tokens under a conservative rule) and the owner's home prefix with `~`; the daemon applies it again on receipt. A secret in a shape the rule does not know, such as an all-hexadecimal or all-lower-case token, is still shared. `hooks install --prompt-summary off` stops recording prompt text. Nothing leaves the machine unless publication is enabled. Workspaces in other repositories are never briefed about each other. |
+| Information disclosure | The first non-empty line of each prompt, and no later line, is stored in the local event log, appears in `status`, and is shown to other sessions of the same user in the same repository. Before that line, an intent summary, a note, a message or a handoff is sent to the daemon, one redaction function in the hook adapter replaces likely secrets with `[redacted]` (provider key shapes, JWTs, PEM blocks, URL passwords, secret-named assignments and query values, `--password`/`--token` arguments, and long high-entropy tokens under a conservative rule) and the owner's home prefix with `~`; the daemon applies it again on receipt. A prompt or intent summary is held to its byte limit after redaction: one that would outgrow it keeps its longest redacted prefix that fits, ending in `[redacted]`, so a summary is never refused, and its prompt shared without one, because it held a secret. A secret in a shape the rule does not know, such as an all-hexadecimal or all-lower-case token, is still shared. `hooks install --prompt-summary off` stops recording prompt text. Nothing leaves the machine unless publication is enabled. Workspaces in other repositories are never briefed about each other. |
 | Denial of service | Session events share the 1.5 s hook budget and the daemon's bounded queue. Activity is 32 paths per session; a briefing reads at most 16 peers. Each prompt adds one receipt and at most three events; retention is still open. |
 | Spoofing (repository grouping) | `observe_workspace_git` is accepted from any client of the owner-only socket, like the other observation commands. A same-user process can therefore place two workspaces in one repository and make their sessions briefed about each other. It cannot affect admission. |
 | Elevation of privilege | Lifecycle hooks print context only. Every failure, including an unavailable daemon, prints nothing and exits 0. |
@@ -535,7 +554,18 @@ delivery need their own host contracts and acceptance evidence.
 `lease_valid` is a point-in-time result. An old `admitted` payload alone is not
 current authority. Retry the same request ID to recover the original outcome;
 use a new ID for a new operation. A transport error remains unknown/unavailable.
-Status pagination, coverage aggregation and retention are unfinished. macOS path,
+`status` answers within one frame however long the history: it lists open
+admissions and live or recent sessions, counts closed admissions per session,
+and names anything else it left out to fit. `status --all` pages through every
+record after an opaque cursor, each page within the same byte budget as event
+reads; a cursor the coordinator did not give is refused, never guessed at,
+including a position at the integer limit. Records read across pages are each
+as they were when their page was answered. A record larger than a page is sent
+in parts that the reader joins, up to 8 MiB, and resumes inside a record only
+if its JSON is unchanged; otherwise it starts that record again. Decisions that
+need a part the bounded view may leave out (landing retries, doctor, automatic
+checks) read it complete instead of treating it as absent.
+Coverage aggregation and retention are unfinished. macOS path,
 transport, sleep/resume and signing behavior, and Windows transport, need their
 own validation. Remote publication requires a separate concrete owner-approved
 data flow and threat-model update.

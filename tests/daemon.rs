@@ -405,3 +405,103 @@ fn malformed_frames_do_not_break_subsequent_requests() {
         Outcome::Status { .. }
     ));
 }
+
+/// Summaries of `limit - 12` to `limit` bytes holding several secrets, each
+/// padded with two-byte characters so the cut redaction makes falls inside
+/// one at some lengths and between two at others.
+fn summaries_near(limit: usize) -> Vec<String> {
+    let tail = " token=a password=b --token c --secret d";
+    (limit - 12..=limit)
+        .map(|len| {
+            let lead = if (len - tail.len()).is_multiple_of(2) {
+                ""
+            } else {
+                "a"
+            };
+            let pad = "é".repeat((len - lead.len() - tail.len()) / 2);
+            let summary = format!("{lead}{pad}{tail}");
+            assert_eq!(summary.len(), len, "fixture length");
+            summary
+        })
+        .collect()
+}
+
+fn assert_bounded_redaction(summary: &str, original: &str, limit: usize) {
+    assert!(summary.len() <= limit, "{} bytes: {summary}", summary.len());
+    for secret in ["=a", "=b", "--token c", "--secret d"] {
+        assert!(!summary.contains(secret), "{secret} kept: {summary}");
+    }
+    // Redaction made each of these longer than its limit, so each keeps
+    // the longest redacted prefix that fits, then the mark.
+    let kept = summary
+        .strip_suffix("[redacted]")
+        .unwrap_or_else(|| panic!("{summary}"));
+    let before_secrets = kept.split(" token=").next().unwrap_or_default();
+    assert!(original.starts_with(before_secrets), "{summary}");
+}
+
+#[test]
+fn a_summary_near_its_limit_that_holds_secrets_is_stored_redacted_never_refused() {
+    let mut f = Fixture::new();
+    f.start();
+    f.setup();
+    let prompts = summaries_near(512);
+    for (index, original) in prompts.iter().enumerate() {
+        let command = Command::SessionPrompt {
+            session_id: "alice".into(),
+            summary: original.clone(),
+        };
+        let id = format!("prompt-{index}");
+        let first = f.call(&id, command.clone());
+        assert!(
+            matches!(first.outcome, Outcome::SessionPrompted { .. }),
+            "{} bytes: {:?}",
+            original.len(),
+            first.outcome
+        );
+        // The client and the daemon both redact, so the identical retry is
+        // answered from its record only if redaction is a fixed point.
+        let retry = f.call(&id, command);
+        assert!(retry.replayed, "{:?}", retry.outcome);
+        assert_eq!(retry.outcome, first.outcome);
+    }
+    for (index, original) in summaries_near(2048).iter().enumerate() {
+        let outcome = f
+            .call(
+                &format!("intent-{index}"),
+                Command::IntentSet {
+                    session_id: "bob".into(),
+                    paths: vec!["api.rs".into()],
+                    summary: original.clone(),
+                },
+            )
+            .outcome;
+        let Outcome::Intent { intent } = outcome else {
+            panic!("{} bytes: {outcome:?}", original.len())
+        };
+        assert_bounded_redaction(&intent.summary, original, 2048);
+    }
+    let Outcome::Events { events } = f
+        .call(
+            "read",
+            Command::Events {
+                after: 0,
+                limit: 1000,
+            },
+        )
+        .outcome
+    else {
+        panic!("events")
+    };
+    let stored: Vec<String> = events
+        .into_iter()
+        .filter_map(|recorded| match recorded.event {
+            langspan_core::Event::SessionPrompted { summary, .. } => Some(summary),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stored.len(), prompts.len(), "{stored:?}");
+    for (summary, original) in stored.iter().zip(&prompts) {
+        assert_bounded_redaction(summary, original, 512);
+    }
+}

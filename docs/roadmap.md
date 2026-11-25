@@ -1947,7 +1947,7 @@ Definition findings (found by name; advisory):
 
 **Problem.** An agent that wants a running view of who is doing what must call three tools (`langspan_status`, `langspan_changes`, `langspan_events`) and stitch the answers together, and a host that reads MCP resources into context has nothing to read.
 
-**Today.** MCP tools `langspan_status` (whole shared state), `langspan_changes` (file and branch observations with scan freshness) and `langspan_events` (an ordered page of events). `langspan_brief` delivers a bounded peer briefing. The MCP server in `src/mcp.rs` offers tools only, no resources.
+**Today.** MCP tools `langspan_status` (a bounded view of current work; `all` pages through every record), `langspan_changes` (file and branch observations with scan freshness) and `langspan_events` (an ordered page of events). `langspan_brief` delivers a bounded peer briefing. The MCP server in `src/mcp.rs` offers tools only, no resources.
 
 **Behaviour to build.**
 - Hosts: any MCP client that lists and reads resources; Claude Code and Codex first, once observed reading one.
@@ -3073,7 +3073,23 @@ dry run: add --apply to write AGENTS.md
 
 ### I8. Agent skills for using LangSpan
 
-**Decision:** [ADR 0018](adr/0018-other-hosts-after-launch.md), not now: briefings and MCP tool descriptions carry the guidance for hooked hosts; revisit after a user report that they were not enough. Launch track: none.
+**Decision:** planned (issue #87). The maintainers asked for a skill that teaches agents how to work with LangSpan, and running LangSpan on its own development showed every agent needed the same instructions by hand; this replaces the earlier "not now" under [ADR 0018](adr/0018-other-hosts-after-launch.md). Part 1, the general skill, is built: [ADR 0034](adr/0034-langspan-skill.md). Part 2, the task skills, is planned. Launch track: none.
+
+#### Part 1: the general skill
+
+Built. `src/skill.md` is one source text; `langspan install --skill` writes it as Claude Code's `skills/langspan/SKILL.md` and as marked sections of Codex's `AGENTS.md` and Gemini CLI's `GEMINI.md`, and `langspan hooks install cursor ... --skill` writes Cursor's project rule `.cursor/rules/langspan.mdc`. `uninstall` and `hooks remove cursor` remove only LangSpan's files and sections; `doctor` reports each as not installed, up to date or different. [Usage](usage.md#the-langspan-skill).
+
+**Acceptance criteria.**
+- [x] One source text produces each host's format; no host's copy drifts from it (`src/skill.rs` tests).
+- [x] Every command, tool name and message the skill quotes exists in the code; a test fails when one is renamed or removed (`tests/cli.rs`, `tests/mcp.rs`, `src/skill.rs`; each test was broken once and failed).
+- [x] `langspan install --skill` writes the skill for each chosen host, a dry run shows it without writing, and uninstall removes only LangSpan's files (`tests/user_install.rs`).
+- [x] `langspan doctor` reports whether the skill is installed and up to date for each host.
+- [x] The skill stays within each host's documented size limit (at most 500 lines and 8 KiB in every form).
+- [ ] Evidence: the tests above are in place; a real-host run in which an agent given only the skill, with no extra prompt, re-reads and retries after a stale-source refusal and uses `commit --mine` in a shared checkout, remains (left to the maintainers).
+
+What remains to check: Codex's, Cursor's and Gemini CLI's documentation for the locations and limits in ADR 0034, which could not be fetched when it was built.
+
+#### Part 2: task skills
 
 **Problem.** Some tasks need more than a tool description: landing several branches, recovering after a daemon restart, or committing in a shared checkout. An agent that does not know the sequence may call tools in the wrong order.
 

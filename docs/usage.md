@@ -210,6 +210,48 @@ Gemini reads `.gemini/settings.json` only from the directory it was started
 in, so a project install covers sessions started at the checkout's root. [ADR 0033](adr/0033-gemini-cli-adapter.md) lists
 these limits.
 
+### The LangSpan skill
+
+The LangSpan skill teaches an agent how to work with LangSpan from its first
+session: that LangSpan's messages are coordination data, never instructions;
+how to respond to a briefing, a stale-source or unread-lines refusal, a
+conflict, a break alert, an automatic check result and a held commit; when to
+use `status`, `commit --mine`, `integrate check` and `land` (or the matching
+`langspan_*` MCP tools); and what never to do. Its one source text is
+[`src/skill.md`](../src/skill.md). It is off by default:
+
+```sh
+./target/release/langspan install --skill                 # dry run: shows each file and its size
+./target/release/langspan install --skill --apply
+./target/release/langspan hooks install cursor --workspace demo --root /path/to/checkout --skill --apply
+```
+
+| Host | Written as | Removed by |
+| --- | --- | --- |
+| Claude Code | The skill `~/.claude/skills/langspan/SKILL.md` | `langspan uninstall --apply` |
+| Codex | A marked section of `~/.codex/AGENTS.md` | `langspan uninstall --apply` |
+| Gemini CLI | A marked section of `~/.gemini/GEMINI.md` | `langspan uninstall --apply --hosts gemini-cli` |
+| Cursor | The project rule `.cursor/rules/langspan.mdc` | `langspan hooks remove cursor --root DIR --apply` |
+
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME` move these files as
+they move the hooks. In `AGENTS.md` and `GEMINI.md`, every line outside
+LangSpan's section is left as it is, and a file that held only the section is
+removed with it. An existing `SKILL.md` or `langspan.mdc` that LangSpan did not
+write, or a section whose markers are broken, stops the install before any
+file is written. Reinstalling replaces LangSpan's own copy, edits to it
+included. LangSpan never writes the skill through a symlink: installing it
+there is refused, while `uninstall` and `doctor` leave a symlinked
+`AGENTS.md`, `GEMINI.md` or `SKILL.md` alone, so a guidance file kept in
+dotfiles never stops an uninstall. `langspan doctor` reports, for each host,
+whether the skill is not installed, installed and up to date, or different
+from this version's (then run the install again); for Cursor it does so with
+`--root DIR`. For Codex it also names an `AGENTS.override.md` that Codex
+reads instead of `AGENTS.md`, and a section that ends past the 32 KiB Codex
+reads of its combined AGENTS files by default (`project_doc_max_bytes`): the
+owner's own text shares that budget. The skill is
+advice: nothing is held or refused through it.
+[ADR 0034](adr/0034-langspan-skill.md) records the formats and their limits.
+
 ## Source versions
 
 A completed Claude Code `Read` records the file's SHA-256 as seen on disk by the
@@ -463,6 +505,34 @@ Use a fresh request ID for a new attempt after a conflict. If repeating the
 example against an existing state directory, use fresh demo identities rather
 than expecting historical receipts to become new work.
 
+`status` shows what matters now, in one answer however long the coordinator has
+run: workspaces, sessions that hold an open admission, were active in the last
+hour, are seen alive or have just registered, and the admissions still open.
+Completed, expired and invalidated admissions are counted per session in the
+`summary` (`closed_admissions`), not listed. If the current state is still too
+large for one 64 KiB answer, the summary names what it left out (`omitted`,
+`omitted_sessions`); workspaces, links, turns and open admissions stay, and an
+automatic check is left out only when its command alone is near a frame.
+LangSpan's own commands that decide from one of these parts (`land` recognising
+a retried landing, `doctor` judging a workspace's scan, `auto-check`) read it
+complete when the view left it out. To read every record, history included,
+page through it:
+
+```sh
+./target/release/langspan status --all --json
+# Each page's outcome holds `records` and `next`; pass `next` back for the following page.
+./target/release/langspan status --all --after 'lease:0:alice-edit-1' --json
+```
+
+Each record is `{"kind": ..., "key": ..., ...}` with the record's state-map key.
+One record larger than a page (an entry at its limits, such as a session's 128
+known file versions with long paths) comes as `{"kind": "part", "text": ...,
+"offset": ..., "last": ...}` records instead: the `text` of its parts, joined in
+order, is that record's JSON. A part at offset 0 starts the record again,
+because it changed while it was being read. The cursor is opaque: pass back only
+a `next` value. A record changed between pages is read as it is when its page
+is answered. MCP's `langspan_status` takes the same `all` and `after` arguments.
+
 `changes` reads persisted file and local-branch observations, with scan freshness
 information. A disk change is unattributed; related operation IDs are a
 correlation, not proof of authorship. Initial baselines and incomplete scans are
@@ -713,13 +783,26 @@ other commit landed meanwhile; if one did, the session's changes are planned
 again on top of it once, or the command refuses and nothing is lost. Everything else stays as it
 was, staged or not, and is listed. If a hunk mixes the session's lines with
 another's or with lines no session wrote, nothing is committed (exit 1) and
-the hunk is named. Run from an agent's shell, the session is the one running
+the hunk is named. Lines are matched by content, not position, so sessions
+editing one file in turn keep their own hunks however their edits shift each
+other's lines. When another session changed the file in a write whose lines
+are not known, the session's hunks are still committed unless one of their
+lines appears in the file's changes since `HEAD` more often than the session
+wrote it, or the session's earlier write of that line may already have been
+committed through Git; that hunk is then named, with the reason. Run from an agent's shell, the session is the one running
 the command; from a terminal, pass `--session` (a briefing says "Your session
 ID is …"). It looks for the running command in its own state directory, so
 with hooks installed under `--state-dir`, pass the same `--state-dir`; when
 it finds no running session, the error names the directory it looked in and,
 if a LangSpan hook installed in the checkout names another one, that one.
 The MCP tool `langspan_commit_mine` does the same.
+
+A formatter or other workspace-wide command (`cargo fmt --all`) run by one
+session keeps that session's own reformatted lines its own, so `commit --mine`
+still takes them. A file in which the command rewrote another session's
+uncommitted lines is credited to neither session and left for its owner,
+as is a file another session edited or a shell run of another session may
+have written while the command ran ([ADR 0011](adr/0011-shell-writes.md)).
 
 When a Git step fails, the error names the step, its exit status and what Git
 said (its last lines, at most 1 KiB, redacted as other relayed text is). The
@@ -756,7 +839,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_intent_end` | End advisory work independently of admission |
 | `langspan_admit` | Request an entire file set or inspect conflicts |
 | `langspan_complete` | Complete a currently valid held admission |
-| `langspan_status` | Inspect shared state and available liveness observations |
+| `langspan_status` | Inspect open admissions, live or recent sessions and liveness observations; `all` and `after` page through every record |
 | `langspan_events` | Read an ordered page of persisted events |
 | `langspan_changes` | Read file and local-branch observations with scan freshness |
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
@@ -831,7 +914,12 @@ Timeout values accept 100–5000 ms; client count accepts 1–128;
 `auto_check_debounce_ms` accepts 50–60000. IPC and MCP frames
 are limited to 64 KiB. The MCP SDK discards oversized input lines without replying
 to that line. File admission accepts up to 64 distinct normalized keys, 512 bytes
-per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit.
+per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit
+and prompt summaries a 512-byte one. Summaries are redacted on receipt, and
+redaction never makes one longer than its limit: a summary that would outgrow
+it keeps its longest redacted prefix that fits, cut at a character boundary
+and ending in `[redacted]`, so a summary within its limit is never refused
+because it held a secret.
 Canonical path checks reject escapes, special files, and observed hard links.
 
 Events and receipts do not yet have a retention policy. History is read in

@@ -8,11 +8,16 @@ use serde::{Deserialize, Serialize};
 
 mod dashboard;
 mod lines;
+mod status;
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
     LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow, PublishRow, RecentFile, ScanRow,
     WorkspaceRow, dashboard_denials,
+};
+pub use status::{
+    STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
+    shrink_status, status_records, status_view,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -742,6 +747,10 @@ pub const MAX_AUTO_CHECK_TIMEOUT_S: u32 = 3600;
 pub const MAX_CHECK_TAIL_BYTES: usize = 2048;
 /// Bytes in a check record's one-line command.
 pub const MAX_CHECK_COMMAND_BYTES: usize = 512;
+/// Bytes in a session's prompt summary.
+pub const MAX_PROMPT_SUMMARY_BYTES: usize = 512;
+/// Bytes in an intent's summary.
+pub const MAX_INTENT_SUMMARY_BYTES: usize = 2048;
 pub const MAX_CHECK_REPORT_SESSIONS: usize = 16;
 /// Undelivered results kept per session.
 pub const MAX_CHECK_NOTICES: usize = 4;
@@ -2051,7 +2060,16 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "is_false")]
         mid_turn: bool,
     },
+    /// Read-only: the bounded view of what matters now. Closed admissions
+    /// are counted, not listed; the answer always fits one frame.
     Status,
+    /// Read-only: one page of every state record, history included, after
+    /// the cursor `after` (from the start when absent). Answered by the
+    /// daemon's store, which bounds each page's bytes.
+    StatusRecords {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
     /// Read-only: a bounded view of every session on every machine heard
     /// from, with what is held, what overlaps, evidence and health.
     Dashboard,
@@ -2438,6 +2456,10 @@ enum CommandWire {
         mid_turn: bool,
     },
     Status {},
+    StatusRecords {
+        #[serde(default)]
+        after: Option<String>,
+    },
     Dashboard {},
     Events {
         after: u64,
@@ -2492,8 +2514,19 @@ pub enum Outcome {
     BranchObserved {
         observation: BranchObservation,
     },
+    /// `state` is the bounded view of what matters now; `summary` says what
+    /// it counts instead of listing and what it left out to fit one frame.
+    /// An answer from a build before the summary has none.
     Status {
         state: State,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<StatusSummary>,
+    },
+    /// One page of state records in a fixed order. `next` resumes after the
+    /// last of them; it is absent on the last page.
+    StatusRecords {
+        records: Vec<StatusRecord>,
+        next: Option<String>,
     },
     Events {
         events: Vec<RecordedEvent>,
@@ -4102,12 +4135,16 @@ fn decide_checked(
                 dashboard: dashboard::dashboard(state, now_ms),
             },
         }),
-        Command::Status => Ok(Decision {
-            events: Vec::new(),
-            outcome: Outcome::Status {
-                state: state.clone(),
-            },
-        }),
+        Command::Status => {
+            let (view, summary) = status_view(state, now_ms);
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Status {
+                    state: view,
+                    summary: Some(summary),
+                },
+            })
+        }
         Command::Remember {
             workspace_id,
             author,
@@ -4282,6 +4319,7 @@ fn decide_checked(
             })
         }
         Command::Events { .. }
+        | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
         | Command::GraphSymbol { .. }
@@ -4290,7 +4328,7 @@ fn decide_checked(
         | Command::GraphContext { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
-            "Event history, change projections and index queries are answered by the daemon's stores",
+            "Event history, status pages, change projections and index queries are answered by the daemon's stores",
         )),
     }
 }
@@ -5744,10 +5782,15 @@ fn validate_check_report(
 }
 
 fn validate_prompt_summary(summary: &str) -> Result<(), CoreError> {
-    if summary.is_empty() || summary.len() > 512 || summary.chars().any(char::is_control) {
+    if summary.is_empty()
+        || summary.len() > MAX_PROMPT_SUMMARY_BYTES
+        || summary.chars().any(char::is_control)
+    {
         return Err(error(
             "invalid_summary",
-            "A prompt summary is one line of 1 to 512 UTF-8 bytes without control characters",
+            &format!(
+                "A prompt summary is one line of 1 to {MAX_PROMPT_SUMMARY_BYTES} UTF-8 bytes without control characters"
+            ),
         ));
     }
     Ok(())
@@ -7367,10 +7410,12 @@ fn validate_canonical_paths(paths: &[String]) -> Result<(), CoreError> {
 }
 
 fn validate_summary(summary: &str) -> Result<(), CoreError> {
-    if summary.len() > 2048 {
+    if summary.len() > MAX_INTENT_SUMMARY_BYTES {
         return Err(error(
             "invalid_summary",
-            "Intent summary exceeds 2048 UTF-8 bytes; shorten the summary",
+            &format!(
+                "Intent summary exceeds {MAX_INTENT_SUMMARY_BYTES} UTF-8 bytes; shorten the summary"
+            ),
         ));
     }
     Ok(())

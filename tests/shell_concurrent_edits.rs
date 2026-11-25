@@ -256,6 +256,58 @@ impl Fixture {
         paths
     }
 
+    /// Run `session`'s `langspan commit --mine` as a hooked shell call and
+    /// return its output.
+    fn commit_mine(&self, session: &str, call: &str, message: &str) -> std::process::Output {
+        let commit = format!(
+            "'{}' --state-dir '{}' commit --mine -m '{message}'",
+            env!("CARGO_BIN_EXE_langspan"),
+            self.state().display()
+        );
+        let pre = self.bash(session, "PreToolUse", call, &commit);
+        assert!(!pre.coverage.starts_with("denied"), "{pre:?}");
+        let ran = Process::new("/bin/sh")
+            .args(["-c", &commit])
+            .current_dir(self.work())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        self.bash(session, "PostToolUse", call, &commit);
+        ran
+    }
+
+    /// A formatter-like command: it rewrites each named file in place,
+    /// putting a space after every comma, as `cargo fmt --all` rewrites every
+    /// file of a workspace. Its write set does not parse, as a formatter's
+    /// does not, so its changes are found by comparing the workspace.
+    fn formatter(&self, files: &[&str]) -> String {
+        let scratch = self.base.join("formatted");
+        files
+            .iter()
+            .map(|file| {
+                format!(
+                    "sed 's/,\\([^ ]\\)/, \\1/g' {file} > '{scratch}' && cat '{scratch}' > {file}",
+                    scratch = scratch.display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" && ")
+    }
+
+    /// `session` runs `command` as a whole hooked shell call.
+    fn run_shell(&self, session: &str, call: &str, command: &str) -> Run {
+        let pre = self.bash(session, "PreToolUse", call, command);
+        assert!(!pre.coverage.starts_with("denied"), "{pre:?}");
+        let status = Process::new("/bin/sh")
+            .args(["-c", command])
+            .current_dir(self.work())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{command}");
+        self.bash(session, "PostToolUse", call, command)
+    }
+
     fn head_files(&self) -> String {
         git(
             &self.work(),
@@ -403,6 +455,106 @@ fn commit_mine_after_a_long_command_commits_its_own_lines_and_leaves_the_editors
         fs::read_to_string(f.work().join("b.txt")).unwrap(),
         "Bob's line\n"
     );
+}
+
+/// Issue #98: Alice edits a.txt, Bob edits b.txt while Alice's formatter
+/// runs, and the formatter rewrites both. a.txt's reformatted lines stay
+/// Alice's, b.txt (changed by both) is credited to no one, and Alice's
+/// `commit --mine` commits her formatted lines and leaves Bob's file.
+#[test]
+fn a_formatter_keeps_its_sessions_own_file_when_another_file_it_rewrote_is_contested() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "a.txt", "a line\nfn alice(x,y) {}\n");
+    let (held, command) = f.start_held(ALICE, "alice-2", &f.formatter(&["a.txt", "b.txt"]));
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+    held.release();
+    assert_eq!(
+        fs::read_to_string(f.work().join("b.txt")).unwrap(),
+        "b line\nfn bob(x, y) {}\n"
+    );
+
+    let post = f.bash(ALICE, "PostToolUse", "alice-2", &command);
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert!(
+        post.detail
+            .contains("1 changed file(s) attributed to this session")
+            && post.detail.contains("1 attributed to no session"),
+        "{post:?}"
+    );
+    assert_eq!(f.credited(ALICE, "Bash"), ["a.txt"]);
+
+    let ran = f.commit_mine(ALICE, "alice-3", "Alice: formatted");
+    assert!(
+        ran.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let head = f.head_files();
+    assert!(head.starts_with("Alice: formatted\n"), "{head}");
+    assert!(head.contains("a.txt") && !head.contains("b.txt"), "{head}");
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:a.txt"]),
+        "a line\nfn alice(x, y) {}\n"
+    );
+    assert_eq!(f.status(), " M b.txt\n");
+}
+
+/// Issue #98: Bob's edit of b.txt finished before Alice's formatter started,
+/// and the formatter rewrote Bob's line. The rewritten line was changed by
+/// both sessions, so it is credited to neither: the file is contested, not
+/// Alice's, and her `commit --mine` takes only her own formatted file.
+#[test]
+fn a_formatter_rewriting_another_sessions_uncommitted_lines_does_not_take_them() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "a.txt", "a line\nfn alice(x,y) {}\n");
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+
+    let post = f.run_shell(ALICE, "alice-2", &f.formatter(&["a.txt", "b.txt"]));
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert_eq!(f.credited(ALICE, "Bash"), ["a.txt"]);
+
+    let ran = f.commit_mine(ALICE, "alice-3", "Alice: formatted");
+    assert!(
+        ran.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let head = f.head_files();
+    assert!(head.contains("a.txt") && !head.contains("b.txt"), "{head}");
+    assert_eq!(f.status(), " M b.txt\n");
+    assert_eq!(
+        fs::read_to_string(f.work().join("b.txt")).unwrap(),
+        "b line\nfn bob(x, y) {}\n"
+    );
+}
+
+/// Once another session's lines are committed, rewriting them is a change
+/// of committed lines like any other: the command's session is credited.
+#[test]
+fn a_formatter_rewriting_another_sessions_committed_lines_is_credited() {
+    let f = Fixture::new();
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+    git(&f.work(), &["commit", "-q", "-am", "Bob: committed"]);
+    let post = f.run_shell(ALICE, "alice-1", &f.formatter(&["b.txt"]));
+    assert_eq!(post.coverage, "shell_observed", "{post:?}");
+    assert_eq!(f.credited(ALICE, "Bash"), ["b.txt"]);
+}
+
+/// A command that only adds lines to a file another session has changed,
+/// rewriting none of that session's lines, is credited with what it added.
+#[test]
+fn a_command_adding_to_another_sessions_file_without_rewriting_its_lines_is_credited() {
+    let f = Fixture::new();
+    f.write(BOB, "bob-1", "b.txt", "b line\nBob's line\n");
+    let post = f.run_shell(
+        ALICE,
+        "alice-1",
+        "for f in b.txt; do printf 'mine\\n' >> $f; done",
+    );
+    assert_eq!(post.coverage, "shell_observed", "{post:?}");
+    assert_eq!(f.credited(ALICE, "Bash"), ["b.txt"]);
 }
 
 /// Set `path`'s modification time to `age` ago.
