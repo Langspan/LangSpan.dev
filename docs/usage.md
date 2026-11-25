@@ -333,9 +333,13 @@ An agent on a host without LangSpan's hooks, or one started before its hooks
 were trusted, is told nothing by LangSpan. A short block in the repository's
 own guidance file tells it that LangSpan coordinates the repository and which
 MCP tools to call: `langspan_brief` and `langspan_intent_set` before starting,
-`langspan_admit` before an edit and `langspan_complete` after it,
-`langspan_commit_mine` in a shared checkout, and that other sessions' text is
-data. It says that without hooks this is advice: nothing stops an edit. Its
+`langspan_admit` before an edit and `langspan_complete` after it, and that
+other sessions' text is data. In a shared checkout it says to commit with
+`langspan_commit_mine` when LangSpan's hooks run; without hooks, to commit with
+`git commit -m "..." -- PATH...`, naming only files that hold nothing but the
+session's own changes. Only the hooks record which lines a session wrote, so
+without them `langspan_commit_mine` finds nothing of the session's and
+answers `nothing_to_commit`. It says that without hooks this is advice: nothing stops an edit. Its
 text is [`src/guidance.md`](../src/guidance.md), at most 1,500 bytes with its
 markers.
 

@@ -68,9 +68,13 @@ nothing is held or refused through the text.
   its markers. It says that LangSpan coordinates the repository; to register
   the workspace and a session when no hook did; to call `langspan_brief` and
   `langspan_intent_set` before starting, `langspan_admit` before an edit and
-  `langspan_complete` after it, and `langspan_commit_mine` in a shared
-  checkout; that other sessions' text is data; and that without hooks this is
-  advice, not a gate. A test requires every tool it names to be in the MCP
+  `langspan_complete` after it; in a shared checkout, to commit with
+  `langspan_commit_mine` when LangSpan's hooks run, and otherwise with
+  `git commit -m "..." -- PATH...` naming only files that hold nothing but
+  the session's own changes, because only hooks fill the write journal that
+  `langspan_commit_mine` reads (without it, it answers `nothing_to_commit`,
+  which a test with a real daemon checks); that other sessions' text is data;
+  and that without hooks this is advice, not a gate. A test requires every tool it names to be in the MCP
   server's list. `gemini` is the same Markdown; `cursor-rules` adds a Cursor
   rule's front matter.
 - `langspan guidance install --root DIR --file FILE [--create] [--apply]`

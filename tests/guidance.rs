@@ -281,3 +281,164 @@ fn a_file_in_a_subdirectory_of_the_repository_is_supported() {
     ok(&repo.guidance(&["remove", "--file", "pkg/AGENTS.md", "--apply"]));
     assert_eq!(repo.read("pkg/AGENTS.md"), OWNER);
 }
+
+/// The block's bullet that starts with `lead`, up to the next bullet.
+fn bullet(block: &str, lead: &str) -> String {
+    let start = block
+        .find(&format!("\n- {lead}"))
+        .unwrap_or_else(|| panic!("no bullet starts with {lead:?}:\n{block}"));
+    let rest = &block[start + 3..];
+    rest[..rest.find("\n- ").unwrap_or(rest.len())].to_owned()
+}
+
+fn git_in(root: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {arguments:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A daemon child, stopped when dropped.
+#[cfg(unix)]
+struct Daemon(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(unix)]
+async fn call_tool(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    tool: &'static str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    let request = rmcp::model::CallToolRequestParams::new(tool)
+        .with_arguments(arguments.as_object().unwrap().clone());
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        client.call_tool(request),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.is_error, Some(false), "{tool}: {result:?}");
+    result.structured_content.unwrap()
+}
+
+/// A session without hooks that follows the block exactly (register, admit,
+/// edit, complete) leaves nothing in the write journal, which only hooks
+/// fill: `langspan_commit_mine` then answers `nothing_to_commit`. So the
+/// block must not tell such a session to commit with it, and must give it a
+/// commit that does take its work.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_blocks_commit_advice_for_a_session_without_hooks_is_what_works_for_it() {
+    use rmcp::{ServiceExt, transport::TokioChildProcess};
+    use serde_json::json;
+    use std::{
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+
+    use std::os::unix::fs::PermissionsExt;
+    // A short directory, so the daemon's socket path fits the platform's
+    // limit (104 bytes on macOS).
+    let repo = Repo(std::env::temp_dir().join(format!("ls-g-{}", std::process::id())));
+    std::fs::create_dir(&repo.0).unwrap();
+    let base = std::fs::canonicalize(&repo.0).unwrap();
+    // The daemon keeps its state only under an owner-only directory.
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let work = base.join("work");
+    let state = base.join("state");
+    std::fs::create_dir(&work).unwrap();
+    std::fs::write(work.join("a.txt"), "alpha\n").unwrap();
+    git_in(&work, &["init", "-q"]);
+    git_in(&work, &["config", "user.name", "Owner"]);
+    git_in(&work, &["config", "user.email", "owner@example.invalid"]);
+    git_in(&work, &["add", "."]);
+    git_in(&work, &["commit", "-q", "-m", "start"]);
+
+    let _daemon = Daemon(
+        Command::new(env!("CARGO_BIN_EXE_langspan"))
+            .args(["daemon", "--state-dir"])
+            .arg(&state)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::os::unix::net::UnixStream::connect(state.join("daemon.sock")).is_err() {
+        assert!(Instant::now() < deadline, "daemon did not become ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command
+        .arg("mcp")
+        .arg("--state-dir")
+        .arg(&state)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null");
+    let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+    call_tool(
+        &client,
+        "langspan_workspace_register",
+        json!({"request_id": "ws", "workspace_id": "work", "root": work}),
+    )
+    .await;
+    call_tool(
+        &client,
+        "langspan_session_register",
+        json!({"request_id": "session", "session_id": "agent-a", "workspace_id": "work"}),
+    )
+    .await;
+    let admitted = call_tool(
+        &client,
+        "langspan_admit",
+        json!({"request_id": "admit-a", "session_id": "agent-a", "paths": ["a.txt"], "ttl_ms": 60000}),
+    )
+    .await;
+    assert!(admitted.to_string().contains("admit-a"), "{admitted}");
+    std::fs::write(work.join("a.txt"), "alpha, by a session without hooks\n").unwrap();
+    call_tool(
+        &client,
+        "langspan_complete",
+        json!({"request_id": "complete-a", "session_id": "agent-a", "lease_id": "admit-a"}),
+    )
+    .await;
+    let answer = call_tool(
+        &client,
+        "langspan_commit_mine",
+        json!({"request_id": "commit-a", "workspace_id": "work",
+               "session_id": "agent-a", "message": "Mine"}),
+    )
+    .await;
+    client.cancel().await.unwrap();
+    assert_eq!(answer["result"], "nothing_to_commit", "{answer}");
+    assert_eq!(git_in(&work, &["log", "--format=%s"]), "start\n");
+
+    let block = printed_block();
+    let hooked = bullet(&block, "With LangSpan's hooks");
+    assert!(hooked.contains("`langspan_commit_mine`"), "{hooked}");
+    let hookless = bullet(&block, "Without hooks");
+    assert!(!hookless.contains("langspan_commit_mine"), "{hookless}");
+    assert!(hookless.contains("journal"), "the reason: {hookless}");
+    let explicit = "`git commit -m \"...\" -- PATH...`";
+    assert!(hookless.contains(explicit), "{hookless}");
+
+    // That commit takes the session's file, and only it.
+    git_in(&work, &["commit", "-q", "-m", "Mine", "--", "a.txt"]);
+    assert_eq!(git_in(&work, &["log", "--format=%s"]), "Mine\nstart\n");
+    assert_eq!(git_in(&work, &["status", "--porcelain=v1"]), "");
+}
