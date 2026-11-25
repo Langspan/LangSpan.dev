@@ -28,11 +28,30 @@ LangSpan.
 
 **What a session's work is.** The core keeps one bounded activity record per
 session, derived from events: the 32 most recently successfully edited paths
-with their times, and the first non-empty line of the owner's latest prompt
-(whitespace collapsed, control and invisible characters removed, at most 200
-bytes). Later lines of a prompt never leave the session. `hooks install
+with their times, and one line of the owner's latest prompt (redacted,
+whitespace collapsed, control and invisible characters removed, at most 200
+bytes). That line is the first of the prompt's leading 32 non-empty lines to
+start with `Task:` (any case, marker removed); otherwise its first non-empty
+line. Only that one line leaves the session as text. `hooks install
 --prompt-summary off` installs hooks that record no prompt text at all. Current admissions and declared intents are
 already in state. No model call summarises anything.
+
+**Sessions from one template (issue #114).** Several agents are often started
+from one shared prompt whose first line is the same for all of them. With the
+prompt's line, the hook also sends a 128-bit SHA-256 prefix of each of its
+first 32 non-empty, redacted and cleaned lines. The core keeps them in the
+session's activity and answers with the number of leading lines that the
+latest prompt of another live session in the same repository (registered this
+generation, not ended, not known to have exited) shares. When that number is
+neither zero nor the whole prompt and the prompt has no `Task:` line, the hook
+records the prompt again under its first line that differs. A one-line prompt
+is therefore summarised as before. The comparison runs on digests so that no
+other line of either prompt is sent or stored; a digest of a short line is
+guessable by anyone who can read the local store, who can read the task lines
+already. Digests are never shown in a briefing and never published. The
+session that started first keeps its first line until its next prompt; its
+peers' lines tell them apart. A declared intent replaces the task line in a
+briefing while it is set, since it is the session's own account of its task.
 
 **Who is relevant.** A briefing for session S names another session P only when
 all of these hold:
@@ -56,7 +75,11 @@ one 64 KiB frame.
 
 **Not twice.** The core stores a 64-bit fingerprint of the last briefing
 delivered to each session, computed without ages. A prompt delivers only when
-it changed. A collision would withhold one repeat briefing and nothing else.
+it changed. The fingerprint also leaves out the branch of a peer in S's own
+checkout: that is S's branch too, and the Git observer may learn it only after
+the start briefing, which would otherwise be delivered again unchanged at the
+next prompt; a switch of that branch reaches S as a checkout change. A peer in
+another worktree changing branch is news. A collision would withhold one repeat briefing and nothing else.
 Only a request marked `deliver` is remembered: the hooks and the MCP tool set
 it, and `langspan brief` from a terminal does not, so looking never suppresses
 a session's next briefing. A prompt event the host numbered (`prompt_id` or

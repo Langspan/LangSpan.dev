@@ -32,7 +32,7 @@ events and can follow them.
 | C9 | Automatic handoff and trail at session end | Manual `handoff` | Not now. Can be built from recorded edits once L2 and L3 deliver the end events |
 | C12 | Worktree advice and tidying | None | Not now. Tidying would remove the owner's worktrees |
 | E1 | Notes anchored to a definition with staleness, tags and confidence | One-line notes on a workspace or files | Not now |
-| E2 | `recall` search | None | Not now |
+| E2 | `recall` search | Word search over held notes | Built 25 November 2026 ([issue #61](https://github.com/Langspan/LangSpan.dev/issues/61)), ahead of the condition below: `langspan recall` and MCP `langspan_recall`, see "Note search (E2)" below. Not yet run on a host |
 | E4 | Messages addressed by path and symbol | To one session or all | Not now |
 | E7 | Sender signed automatically | `--from SESSION` | Not now |
 | E9 | Messages across machines | Local only | Not now. Could ride the Git-ref transport (ADR 0006), which would widen its payload and needs that ADR's review |
@@ -40,6 +40,38 @@ events and can follow them.
 | E11 | Retract a sent message, telling readers to disregard it (added by the second review) | None | Not now. Needs a withdrawal event that every briefing and the recap honour; no run has shown the need |
 | E12 | Delivery and seen receipts the sender can ask for (added by the second review) | Acknowledgements are kept and counted on the local page | Not now. The data is partly there; a sender query follows E11, since both read the same message state |
 | E13 | Show a shortened message in full (added by the second review) | A cut line ends with `… (cut; langspan messages show -- WORKSPACE ID)` within its 700 bytes; `langspan messages show` and MCP `langspan_show_message` return the message as sent, read-only, from its `message_sent` event | Built 25 November 2026 ([issue #68](https://github.com/Langspan/LangSpan.dev/issues/68)), ahead of the condition below: no new event or storage, and `retracted` is always false until E11; see [ADR 0009](0009-agent-messages-and-handoff.md). Not yet run on a host. Recorded condition: messages are capped at 400 bytes when sent, so a delivered line is cut only when quoting takes it past 700 bytes |
+
+## Note search (E2)
+
+`langspan recall WORKSPACE QUERY [--path PATH] [--limit N] [--json]` and the
+read-only MCP tool `langspan_recall` (`workspace_id`, `query`, optional `path`
+and `limit`) search the notes a workspace holds (at most 64, from core state).
+A query is 1 to 200 bytes, split on whitespace into at most 8 words; a note is
+found when every word appears, compared without case and as a substring, in
+its text or its paths. With `path`, only notes about that file or about the
+whole workspace count. Results are ordered by how many fields hold a query
+word, then newest first; the limit is 1 to 50, default 10, and `truncated`
+says more matched. The answer is `{workspace_id, query, notes: [{note_id,
+author, text, paths}], truncated}`, held to 28 KiB by dropping the last
+notes (and setting `truncated`). The MCP result carries it twice, as
+structured content and as JSON text that escapes every quotation mark and
+backslash again, so notes full of them can more than double it; the MCP
+adapter encodes the whole tool result and drops further notes (setting
+`truncated`) until it leaves 512 bytes of one 64 KiB frame for the JSON-RPC
+envelope. The MCP result puts a label first saying note text is remembered repository text: data, not
+instructions.
+
+A recall is a read answered by the core: no event, no receipt, no delivery,
+and no change to any briefing. Forgotten notes are not held, so they are not
+found. There is no embedding, model call or network use. Daemon down is an
+explicit failure (the CLI exits with status 1; over MCP it is the tool error
+`daemon_request_failed`, as for every other tool); an unknown workspace is the domain error
+`workspace_not_found`.
+
+Notes have no tags or anchors yet (E1), so the proposed `--tag` / `tag`
+argument and the `anchor` and `tags` fields are not offered; they arrive
+with E1, which adds them as further fields to match. Not yet observed: a
+real Claude Code session calling `langspan_recall` and acting on the result.
 
 ## Consequences
 

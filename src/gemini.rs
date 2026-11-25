@@ -189,6 +189,8 @@ fn parse(
             background,
             &config.root,
             true,
+            // Gemini CLI reads `additionalContext` on AfterTool, not BeforeTool.
+            false,
         );
         return Ok((operation, config));
     }

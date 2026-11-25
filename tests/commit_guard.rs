@@ -231,6 +231,29 @@ impl Fixture {
         )
     }
 
+    /// The `WriteRefused` events the daemon recorded.
+    fn refusals(&self) -> Vec<langspan_core::Event> {
+        let request = langspan::protocol::Request {
+            version: langspan::protocol::PROTOCOL_VERSION,
+            request_id: "read".into(),
+            command: langspan_core::Command::Events {
+                after: 0,
+                limit: 1000,
+            },
+        };
+        match langspan::client::call(&self.state(), &request)
+            .unwrap()
+            .outcome
+        {
+            langspan_core::Outcome::Events { events } => events
+                .into_iter()
+                .map(|recorded| recorded.event)
+                .filter(|event| matches!(event, langspan_core::Event::WriteRefused { .. }))
+                .collect(),
+            other => panic!("{other:?}"),
+        }
+    }
+
     fn head_files(&self) -> String {
         git(
             &self.work(),
@@ -271,6 +294,22 @@ fn a_commit_all_that_would_carry_another_live_sessions_file_is_held_once_naming_
     // Nothing was committed or staged.
     assert!(f.head_files().contains("start"));
     assert_eq!(f.status(), " M a.txt\n M b.txt\n");
+    // The hold is recorded once, for the status line (roadmap H2).
+    let held = f.refusals();
+    assert_eq!(held.len(), 1, "{held:?}");
+    match &held[0] {
+        langspan_core::Event::WriteRefused {
+            kind,
+            paths,
+            peer_session_id,
+            ..
+        } => {
+            assert_eq!(*kind, langspan_core::RefusalKind::CommitHeld);
+            assert_eq!(paths, &vec!["b.txt".to_owned()]);
+            assert_eq!(peer_session_id, &Some(format!("claude-code.{BOB}")));
+        }
+        other => panic!("{other:?}"),
+    }
 
     // The same command again is the session's informed choice: not held.
     let (again, ran) = f.bash_call(ALICE, "alice-3", "git commit -am 'Alice: alpha'");
@@ -278,6 +317,11 @@ fn a_commit_all_that_would_carry_another_live_sessions_file_is_held_once_naming_
     assert!(again.detail.contains("told so once"), "{}", again.detail);
     assert!(ran.unwrap().status.success());
     assert!(f.head_files().contains("b.txt"));
+    assert_eq!(
+        f.refusals().len(),
+        1,
+        "a commit let through records nothing"
+    );
 }
 
 #[test]
@@ -452,7 +496,7 @@ fn its_later_hunks_are_committed_past_another_sessions_earlier_insertions_and_de
 }
 
 #[test]
-fn a_hunk_that_mixes_another_live_sessions_lines_with_its_own_is_held_and_not_committed() {
+fn a_hunk_that_mixes_another_live_sessions_lines_with_its_own_is_held_and_split_by_commit_mine() {
     let f = Fixture::new();
     f.edit(BOB, "bob-1", "shared.txt", "line 10\n", "line 10, by Bob\n");
     f.edit(
@@ -462,15 +506,94 @@ fn a_hunk_that_mixes_another_live_sessions_lines_with_its_own_is_held_and_not_co
         "line 11\n",
         "line 11, by Alice\n",
     );
-    // Adjacent lines: one hunk, part Bob's and part Alice's.
+    let both = f.read("shared.txt");
+    // Adjacent lines: one hunk, part Bob's and part Alice's. A plain commit
+    // would take Bob's line too: held.
     let run = f.bash(ALICE, "PreToolUse", "alice-2", "git commit -am 'Alice'");
     assert_eq!(run.coverage, "denied_commit", "{run:?}");
-    assert!(run.reason.unwrap().contains(&format!("claude-code.{BOB}")));
+    let reason = run.reason.unwrap();
+    assert!(reason.contains(&format!("claude-code.{BOB}")), "{reason}");
+    assert!(reason.contains("line 10"), "{reason}");
+    // commit --mine splits the hunk between them (issue #106).
     let (_, ran) = f.bash_call(ALICE, "alice-3", &f.commit_mine_command("Alice"));
     let ran = ran.unwrap();
-    assert!(!ran.status.success());
-    assert!(String::from_utf8_lossy(&ran.stdout).contains("nothing was committed"));
-    assert!(f.head_files().contains("start"));
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:shared.txt"]),
+        numbered().replace("line 11\n", "line 11, by Alice\n")
+    );
+    assert_eq!(f.read("shared.txt"), both);
+    assert_eq!(git(&f.work(), &["diff", "--cached"]), "");
+    let (_, ran) = f.bash_call(BOB, "bob-2", &f.commit_mine_command("Bob"));
+    let ran = ran.unwrap();
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(git(&f.work(), &["show", "HEAD:shared.txt"]), both);
+    assert_eq!(f.status(), "");
+}
+
+/// Two sessions each add a block to one file with the edit tool, each set
+/// off by a blank line and closed by the same line. Those two lines are both
+/// sessions' by the journal; at the edge of the other session's hunk they
+/// are taken as that session's, so each `commit --mine` commits its own
+/// block and refuses nothing (issue #141's acceptance run).
+#[test]
+fn lines_both_sessions_wrote_go_with_the_hunk_around_them() {
+    let f = Fixture::new();
+    f.edit(
+        ALICE,
+        "alice-1",
+        "shared.txt",
+        "line 2\n",
+        "line 2\n\nalice {\n  one\n}\n",
+    );
+    f.edit(
+        BOB,
+        "bob-1",
+        "shared.txt",
+        "line 18\n",
+        "line 18\n\nbob {\n  two\n}\n",
+    );
+    let both = f.read("shared.txt");
+
+    let (_, ran) = f.bash_call(ALICE, "alice-2", &f.commit_mine_command("Alice"));
+    let ran = ran.unwrap();
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:shared.txt"]),
+        numbered().replace("line 2\n", "line 2\n\nalice {\n  one\n}\n")
+    );
+    assert_eq!(f.read("shared.txt"), both);
+    let (_, ran) = f.bash_call(BOB, "bob-2", &f.commit_mine_command("Bob"));
+    let ran = ran.unwrap();
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(git(&f.work(), &["show", "HEAD:shared.txt"]), both);
+    assert_eq!(f.status(), "");
+}
+
+/// A line both sessions wrote is only given to the other session's hunk
+/// when this session's own copy is elsewhere in the diff: here Alice's only
+/// `}` is the one at the edge of Bob's lines, so her `commit --mine` refuses
+/// that hunk rather than commit her block without it.
+#[test]
+fn a_line_both_wrote_stays_this_sessions_when_its_only_copy_is_by_the_others() {
+    let f = Fixture::new();
+    f.edit(
+        BOB,
+        "bob-1",
+        "shared.txt",
+        "line 18\n",
+        "line 18\nbob {\n  two\n",
+    );
+    f.reread_and_edit(ALICE, "alice-1", "shared.txt", "  two\n", "  two\n}\n");
+    // Bob also wrote a `}`, elsewhere and since removed.
+    f.reread_and_edit(BOB, "bob-2", "shared.txt", "line 2\n", "line 2\n}\n");
+    f.reread_and_edit(BOB, "bob-3", "shared.txt", "line 2\n}\n", "line 2\n");
+
+    let (_, ran) = f.bash_call(ALICE, "alice-2", &f.commit_mine_command("Alice"));
+    let ran = ran.unwrap();
+    assert!(!ran.status.success(), "{}", said(&ran));
+    assert!(said(&ran).contains("shared.txt"), "{}", said(&ran));
+    assert_eq!(git(&f.work(), &["log", "--format=%s"]), "start\n");
 }
 
 impl Fixture {
@@ -1299,15 +1422,9 @@ fn status_mine_lists_this_sessions_files_and_hunks_and_changes_nothing() {
 #[test]
 fn status_mine_marks_a_file_unknown_where_commit_mine_would_refuse() {
     let f = Fixture::new();
-    // Alice and Bob each wrote one line of the same hunk.
-    f.edit(
-        ALICE,
-        "alice-1",
-        "shared.txt",
-        "line 2\n",
-        "line 2\nAlice\n",
-    );
-    f.reread_and_edit(BOB, "bob-1", "shared.txt", "Alice\n", "Alice\nBob\n");
+    // Bob replaced a line of Alice's next to another of hers: one hunk that
+    // cannot be split between them (issue #106).
+    replace_alices_line(&f);
     let value = f.status_mine(ALICE, "alice-2");
     let files = value["files"].as_array().unwrap();
     assert_eq!(files.len(), 1, "{value}");
@@ -1316,19 +1433,30 @@ fn status_mine_marks_a_file_unknown_where_commit_mine_would_refuse() {
     assert!(files[0]["hunks"][0]["reason"].is_string(), "{value}");
 }
 
-#[test]
-fn status_mine_counts_another_sessions_lines_in_an_unknown_hunk() {
-    let f = Fixture::new();
-    // Alice and Bob each wrote one line of the same hunk: it is not known
-    // whose, but Bob's line is in it.
+/// Alice changes line 2 and adds a line below it; Bob replaces her line 2.
+fn replace_alices_line(f: &Fixture) {
     f.edit(
         ALICE,
         "alice-1",
         "shared.txt",
         "line 2\n",
-        "line 2\nAlice\n",
+        "line 2, Alice\nAlice\n",
     );
-    f.reread_and_edit(BOB, "bob-1", "shared.txt", "Alice\n", "Alice\nBob\n");
+    f.reread_and_edit(
+        BOB,
+        "bob-1",
+        "shared.txt",
+        "line 2, Alice\n",
+        "line 2, Bob\n",
+    );
+}
+
+#[test]
+fn status_mine_counts_another_sessions_lines_in_an_unknown_hunk() {
+    let f = Fixture::new();
+    // A hunk of Alice's and Bob's lines that cannot be split: it is not
+    // known whose, but Bob's line is in it.
+    replace_alices_line(&f);
     let value = f.status_mine(ALICE, "alice-2");
     assert_eq!(value["files"][0]["owner"], "unknown", "{value}");
     assert_eq!(value["others"], 1, "{value}");
@@ -1414,4 +1542,289 @@ async fn the_mcp_tool_lists_the_sessions_own_changes() {
     assert_eq!(value["others"], 1, "{value}");
     client.cancel().await.unwrap();
     assert_eq!(f.snapshot(), before);
+}
+
+// ---------------------------------------------------------------------------
+// A hunk split between sessions (issue #106)
+// ---------------------------------------------------------------------------
+
+const LIST: &str = "# Done\n- one\n- two\n- three\n";
+
+/// `list.md`, committed.
+fn list_file(f: &Fixture) {
+    fs::write(f.work().join("list.md"), LIST).unwrap();
+    git(&f.work(), &["add", "list.md"]);
+    git(&f.work(), &["commit", "-q", "-m", "list"]);
+}
+
+fn entry_of(session: &str) -> String {
+    let name = if session == ALICE { "Alice" } else { "Bob" };
+    format!("- {name}'s entry\n")
+}
+
+/// Each of `sessions` in turn adds its entry directly below the one before:
+/// Git's diff joins them into one hunk.
+fn add_adjacent_entries(f: &Fixture, sessions: &[&str]) {
+    let mut above = "- two\n".to_owned();
+    for (n, session) in sessions.iter().enumerate() {
+        let entry = entry_of(session);
+        f.reread_and_edit(
+            session,
+            &format!("entry-{n}"),
+            "list.md",
+            &above,
+            &format!("{above}{entry}"),
+        );
+        above = entry;
+    }
+}
+
+/// `LIST` with `entries` below "- two".
+fn list_with(entries: &[&str]) -> String {
+    let added: String = entries.iter().map(|s| entry_of(s)).collect();
+    LIST.replace("- two\n", &format!("- two\n{added}"))
+}
+
+#[test]
+fn two_sessions_adding_adjacent_lines_to_one_list_each_commit_only_their_own_in_either_order() {
+    for order in [[ALICE, BOB], [BOB, ALICE]] {
+        let f = Fixture::new();
+        list_file(&f);
+        add_adjacent_entries(&f, &order);
+        let all = f.read("list.md");
+        assert_eq!(all, list_with(&order));
+        let one_hunk = git(&f.work(), &["diff", "-U0"]);
+        assert_eq!(one_hunk.matches("@@ -").count(), 1, "{one_hunk}");
+
+        let output = f.commit_mine(ALICE, "Alice");
+        let text = said(&output);
+        assert!(output.status.success(), "{order:?}: {text}");
+        assert!(
+            text.contains(&format!("list.md (claude-code.{BOB})")),
+            "{text}"
+        );
+        assert_eq!(
+            git(&f.work(), &["show", "HEAD:list.md"]),
+            list_with(&[ALICE]),
+            "{order:?}"
+        );
+        // Bob's line stays in the working tree, uncommitted and unstaged.
+        assert_eq!(f.read("list.md"), all);
+        assert_eq!(git(&f.work(), &["diff", "--cached"]), "");
+        let left = git(&f.work(), &["diff", "-U0"]);
+        assert!(left.contains("+- Bob's entry"), "{left}");
+        assert!(!left.contains("Alice"), "{left}");
+
+        let output = f.commit_mine(BOB, "Bob");
+        assert!(output.status.success(), "{order:?}: {}", said(&output));
+        assert_eq!(git(&f.work(), &["show", "HEAD:list.md"]), all);
+        assert_eq!(f.status(), "");
+    }
+}
+
+#[test]
+fn this_sessions_lines_on_both_sides_of_anothers_are_committed_together() {
+    let f = Fixture::new();
+    list_file(&f);
+    // Alice, Bob, then Alice again below Bob's line: one hunk of three runs.
+    add_adjacent_entries(&f, &[ALICE, BOB]);
+    f.reread_and_edit(
+        ALICE,
+        "entry-2",
+        "list.md",
+        "- Bob's entry\n",
+        "- Bob's entry\n- Alice's second\n",
+    );
+    let all = f.read("list.md");
+
+    let output = f.commit_mine(ALICE, "Alice");
+    assert!(output.status.success(), "{}", said(&output));
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:list.md"]),
+        LIST.replace("- two\n", "- two\n- Alice's entry\n- Alice's second\n")
+    );
+    assert_eq!(f.read("list.md"), all);
+    assert_eq!(git(&f.work(), &["diff", "--cached"]), "");
+
+    // status --mine, before Bob commits, shows his line as his alone.
+    let status = f.status_mine(BOB, "bob-status");
+    let hunks = &status["files"][0]["hunks"];
+    assert_eq!(status["files"][0]["owner"], "mine", "{status}");
+    assert_eq!(hunks.as_array().unwrap().len(), 1, "{status}");
+
+    let output = f.commit_mine(BOB, "Bob");
+    assert!(output.status.success(), "{}", said(&output));
+    assert_eq!(git(&f.work(), &["show", "HEAD:list.md"]), all);
+    assert_eq!(f.status(), "");
+}
+
+#[test]
+fn status_mine_lists_each_sessions_part_of_a_hunk_as_its_own() {
+    let f = Fixture::new();
+    list_file(&f);
+    add_adjacent_entries(&f, &[BOB, ALICE]);
+    let status = f.status_mine(ALICE, "alice-status");
+    let file = &status["files"][0];
+    assert_eq!(file["owner"], "mixed", "{status}");
+    let hunks: Vec<(u64, u64, &str)> = file["hunks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| {
+            (
+                h["start_line"].as_u64().unwrap(),
+                h["line_count"].as_u64().unwrap(),
+                h["owner"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(hunks, [(4, 1, "others"), (5, 1, "mine")], "{status}");
+}
+
+#[test]
+fn a_line_that_replaced_another_sessions_line_next_to_its_own_is_refused_saying_so() {
+    for (first, second) in [(BOB, ALICE), (ALICE, BOB)] {
+        let f = Fixture::new();
+        // The first session changes line 10; the second replaces that line
+        // with its own and changes line 11 too: one hunk, whose removed
+        // line 10 is the first's and whose added line is the second's.
+        f.edit(
+            first,
+            "first-1",
+            "shared.txt",
+            "line 10\n",
+            "line 10, first\n",
+        );
+        f.reread_and_edit(
+            second,
+            "second-1",
+            "shared.txt",
+            "line 10, first\nline 11\n",
+            "line 10, second\nline 11, second\n",
+        );
+        let content = f.read("shared.txt");
+        let index = fs::read(f.work().join(".git/index")).unwrap();
+
+        for session in [ALICE, BOB] {
+            let output = f.commit_mine(session, "mine");
+            let text = said(&output);
+            assert!(!output.status.success(), "{first} then {second}: {text}");
+            assert!(text.contains("nothing was committed"), "{text}");
+            assert!(text.contains("shared.txt (lines 10-11)"), "{text}");
+            assert!(
+                text.contains("replaced another session's"),
+                "{first} then {second}, committing {session}: {text}"
+            );
+        }
+        assert!(f.head_files().contains("start"));
+        assert_eq!(fs::read(f.work().join(".git/index")).unwrap(), index);
+        assert_eq!(f.read("shared.txt"), content);
+    }
+}
+
+/// The three lines one session changes and the other deletes one of, with
+/// lines around them that no session touches.
+const ABC: &str = "A\nB\nC\n";
+
+/// Where in `abc.txt` the three lines are: the whole file, its start, its
+/// end, and its middle.
+fn around_abc() -> [(&'static str, &'static str); 4] {
+    [
+        ("", ""),
+        ("", "keep 1\nkeep 2\n"),
+        ("keep 1\nkeep 2\n", ""),
+        ("keep 1\n", "keep 2\n"),
+    ]
+}
+
+#[test]
+fn a_replaced_line_that_could_pair_with_either_of_two_removed_runs_is_refused_not_moved() {
+    // The first session changes "A B C" to "B X" (it replaced C with X and
+    // deleted A); the second then deletes B. Git's one hunk removes A
+    // (first's), B (second's), C (first's) and adds X (first's): X could
+    // have taken A's place or C's, so its place next to the second
+    // session's uncommitted B is not known. Splitting it as if X replaced A
+    // committed "X B" for the first session, moving X across B.
+    for (first, second) in [(ALICE, BOB), (BOB, ALICE)] {
+        for (before, after) in around_abc() {
+            let f = Fixture::new();
+            let start = format!("{before}{ABC}{after}");
+            fs::write(f.work().join("abc.txt"), &start).unwrap();
+            git(&f.work(), &["add", "abc.txt"]);
+            git(&f.work(), &["commit", "-q", "-m", "abc"]);
+            f.reread_and_edit(first, "first-1", "abc.txt", ABC, "B\nX\n");
+            f.reread_and_edit(second, "second-1", "abc.txt", "B\nX\n", "X\n");
+            let content = f.read("abc.txt");
+            assert_eq!(content, format!("{before}X\n{after}"));
+            let one_hunk = git(&f.work(), &["diff", "-U0"]);
+            assert_eq!(one_hunk.matches("@@ -").count(), 1, "{one_hunk}");
+            let index = fs::read(f.work().join(".git/index")).unwrap();
+            let head = git(&f.work(), &["rev-parse", "HEAD"]);
+
+            for session in [first, second] {
+                let output = f.commit_mine(session, "mine");
+                let text = said(&output);
+                let case = format!("{first} first, {before:?}/{after:?}, committing {session}");
+                assert!(!output.status.success(), "{case}: {text}");
+                assert!(text.contains("nothing was committed"), "{case}: {text}");
+                assert!(text.contains("more than one order"), "{case}: {text}");
+            }
+            assert_eq!(git(&f.work(), &["rev-parse", "HEAD"]), head);
+            assert_eq!(git(&f.work(), &["show", "HEAD:abc.txt"]), start);
+            assert_eq!(fs::read(f.work().join(".git/index")).unwrap(), index);
+            assert_eq!(f.read("abc.txt"), content);
+        }
+    }
+}
+
+#[test]
+fn a_replaced_line_with_one_removed_run_of_its_session_is_still_split_in_place() {
+    // The first session replaces C with X; the second deletes B above it.
+    // X can only have taken C's place: the first session's commit is
+    // "A B X", B still in it, and the second's then removes B.
+    for (first, second) in [(ALICE, BOB), (BOB, ALICE)] {
+        for (before, after) in around_abc() {
+            let f = Fixture::new();
+            let start = format!("{before}{ABC}{after}");
+            fs::write(f.work().join("abc.txt"), &start).unwrap();
+            git(&f.work(), &["add", "abc.txt"]);
+            git(&f.work(), &["commit", "-q", "-m", "abc"]);
+            f.reread_and_edit(first, "first-1", "abc.txt", "C\n", "X\n");
+            f.reread_and_edit(second, "second-1", "abc.txt", "B\nX\n", "X\n");
+            let content = f.read("abc.txt");
+            let case = format!("{first} first, {before:?}/{after:?}");
+
+            let output = f.commit_mine(first, "first");
+            assert!(output.status.success(), "{case}: {}", said(&output));
+            assert_eq!(
+                git(&f.work(), &["show", "HEAD:abc.txt"]),
+                format!("{before}A\nB\nX\n{after}"),
+                "{case}"
+            );
+            assert_eq!(f.read("abc.txt"), content);
+            assert_eq!(git(&f.work(), &["diff", "--cached"]), "");
+        }
+    }
+}
+
+#[test]
+fn a_hunk_with_a_line_no_session_wrote_next_to_another_sessions_is_still_refused() {
+    let f = Fixture::new();
+    list_file(&f);
+    add_adjacent_entries(&f, &[ALICE, BOB]);
+    // The owner adds a line below Bob's outside any session.
+    let content = f
+        .read("list.md")
+        .replace("- Bob's entry\n", "- Bob's entry\n- by hand\n");
+    fs::write(f.work().join("list.md"), &content).unwrap();
+
+    let output = f.commit_mine(ALICE, "Alice");
+    let text = said(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains("part by another session or by none"),
+        "{text}"
+    );
+    assert!(f.head_files().contains("list"));
+    assert_eq!(f.read("list.md"), content);
 }

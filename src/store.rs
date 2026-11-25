@@ -5,17 +5,55 @@
 //! replay validity is calculated from the current recovered state.
 
 use langspan_core::{
-    Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event, LeaseStatus, Outcome,
-    RecordedEvent, SentPublication, State, StatusRecord, apply, dashboard_denials, decide,
-    expiry_events, shrink_status, status_records,
+    ClockAnchor, Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event,
+    LeaseStatus, Outcome, RecordedEvent, SentPublication, State, StatusRecord, TODAY_EVENTS,
+    TodayQuery, TodayWindow, apply, dashboard_denials, decide, expiry_events, shrink_status,
+    status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 use std::time::Duration;
 
+/// The wall clock in Unix milliseconds; 0 if it reads before the epoch.
+pub fn wall_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 /// A read answer's body stops before this many bytes, leaving the rest of
 /// the 64 KiB frame for the envelope and JSON escaping of the envelope.
 pub const PAGE_BUDGET_BYTES: usize = 48 * 1024;
+
+/// The smallest status-records page a reader can ask for. It leaves room for
+/// at least one part of a record however its text escapes, so every page
+/// moves the cursor on.
+pub const MIN_PAGE_BYTES: usize = 1024;
+
+/// A generation marker: a `booted` or `clock_anchored` event. One owner for
+/// the index over them and the lookup that must match it to use it.
+macro_rules! generation_marker {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         IN ('booted', 'clock_anchored')"
+    };
+}
+
+/// A partial index of the generation markers, a few rows per daemon start,
+/// so the anchor lookup does not read the generation's other events.
+const GENERATION_MARKER_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_generation_marker ON events(seq) WHERE ",
+    generation_marker!()
+);
+
+/// The newest generation marker before a sequence number: the anchor of the
+/// generation the event there belongs to. Read through the partial index.
+const ANCHOR_LOOKUP: &str = concat!(
+    "SELECT event_json FROM events WHERE seq < ?1 AND ",
+    generation_marker!(),
+    " ORDER BY seq DESC LIMIT 1"
+);
 
 /// Bytes a status part adds around its text: the record's fields with the
 /// largest offset, and the separator.
@@ -74,7 +112,19 @@ pub struct Execution {
 pub struct Store {
     connection: Connection,
     state: State,
+    tap: Option<Tap>,
 }
+
+/// Events committed since the tap was last drained that its filter keeps,
+/// at most `TAP_LIMIT`: a consumer reads facts already recorded, after they
+/// are durable, and never changes what is committed.
+struct Tap {
+    keep: fn(&Event) -> bool,
+    events: Vec<Event>,
+}
+
+/// The most events a tap holds between drains; later ones are not kept.
+const TAP_LIMIT: usize = 64;
 
 /// A check record written before check commands were redacted can still
 /// hold a command line as typed. It is redacted wherever it is read back:
@@ -168,19 +218,57 @@ impl Store {
             // binary refuse this history instead of failing partway through it.
             connection.pragma_update(None, "user_version", 3)?;
         }
+        // An index, not a format change: a store of any version 3 gains it
+        // when opened (one pass over the log), and a build without it
+        // reads and writes the same rows.
+        connection.execute_batch(GENERATION_MARKER_INDEX)?;
 
         let state = Self::recover(&connection)?;
         let generation = state
             .generation
             .checked_add(1)
             .ok_or("authority generation exhausted; refusing to reuse a generation")?;
-        let mut store = Self { connection, state };
-        store.commit(&[Event::Booted { generation }], None)?;
+        let mut store = Self {
+            connection,
+            state,
+            tap: None,
+        };
+        // The generation's clock against the wall clock, so times can be
+        // placed on a day (the status line and `today`).
+        let anchor = ClockAnchor {
+            generation,
+            clock_ms: crate::clock::now_ms(),
+            wall_ms: wall_now_ms(),
+        };
+        store.commit(
+            &[
+                Event::Booted { generation },
+                Event::ClockAnchored { anchor },
+            ],
+            None,
+        )?;
         Ok(store)
     }
 
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    /// From now on, keep each committed event `keep` accepts, for
+    /// `take_tapped`. Events replayed when the store opened are not kept.
+    pub fn tap(&mut self, keep: fn(&Event) -> bool) {
+        self.tap = Some(Tap {
+            keep,
+            events: Vec::new(),
+        });
+    }
+
+    /// The events kept since the last call, oldest first.
+    pub fn take_tapped(&mut self) -> Vec<Event> {
+        self.tap
+            .as_mut()
+            .map(|tap| std::mem::take(&mut tap.events))
+            .unwrap_or_default()
     }
 
     pub fn refresh(&mut self, now_ms: u64) -> StoreResult<()> {
@@ -423,9 +511,13 @@ impl Store {
                 | Command::RemoteSent { .. }
                 | Command::ShowMessage { .. }
                 | Command::CheckStatus { .. }
+                | Command::FlakyTests { .. }
                 | Command::LandingReadiness { .. }
                 | Command::TurnQueue { .. }
                 | Command::Recap { .. }
+                | Command::Recall { .. }
+                | Command::Today { .. }
+                | Command::StatusLine { .. }
                 | Command::Dashboard
         ) {
             return Ok(None);
@@ -488,6 +580,10 @@ impl Store {
         prepared: &Command,
         now_ms: u64,
     ) -> StoreResult<Execution> {
+        // Refused before a receipt or an event could hold it.
+        if let Some(refused) = crate::hook::refuse_secret(original) {
+            return Ok(self.execution(refused, false, now_ms));
+        }
         if let Some(replayed) = self.replay(request_id, original, now_ms)? {
             return Ok(replayed);
         }
@@ -509,20 +605,40 @@ impl Store {
                 }
                 outcome => outcome,
             },
-            Command::StatusRecords { after } => self.status_records(after.as_deref()),
+            Command::StatusRecords { after, page_bytes } => self.status_records(
+                after.as_deref(),
+                page_bytes.map_or(PAGE_BUDGET_BYTES, |bytes| {
+                    usize::try_from(bytes)
+                        .unwrap_or(PAGE_BUDGET_BYTES)
+                        .clamp(MIN_PAGE_BYTES, PAGE_BUDGET_BYTES)
+                }),
+            ),
             // A read: decided by the core, never recorded.
             Command::RemoteOutbox { .. }
             | Command::CheckStatus { .. }
+            | Command::FlakyTests { .. }
             | Command::LandingReadiness { .. }
             | Command::TurnQueue { .. }
-            | Command::Recap { .. } => {
+            | Command::StatusLine { .. }
+            | Command::Recap { .. }
+            | Command::Recall { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
-                    // A recap must fit one frame with room for the envelope.
+                    // A recap or a recall must fit one frame with room for
+                    // the envelope.
                     Outcome::Recap { mut recap } => {
                         recap.shrink_until(|recap| {
                             serde_json::to_vec(recap).is_ok_and(|bytes| bytes.len() <= 48 * 1024)
                         });
                         Outcome::Recap { recap }
+                    }
+                    // Within the daemon's frame. The MCP result carries the
+                    // answer twice, once escaped again as text, so the MCP
+                    // adapter trims it once more against its encoded result.
+                    Outcome::Recall { mut recall } => {
+                        recall.shrink_until(|recall| {
+                            serde_json::to_vec(recall).is_ok_and(|bytes| bytes.len() <= 28 * 1024)
+                        });
+                        Outcome::Recall { recall }
                     }
                     outcome => outcome,
                 }
@@ -535,6 +651,10 @@ impl Store {
                 outcome
             }
             Command::Events { after, limit } => self.events(*after, *limit)?,
+            Command::Today {
+                workspace_id,
+                from_ms,
+            } => self.today(workspace_id.as_deref(), *from_ms, wall_now_ms(), now_ms)?,
             Command::RemoteSent {
                 workspace_id,
                 limit,
@@ -676,12 +796,13 @@ impl Store {
         ))
     }
 
-    /// One page of state records from `after`, within `PAGE_BUDGET_BYTES`.
-    /// A record that fits a page is never split; one that does not (an
-    /// entry at its limits can be larger than a frame) is given as parts of
-    /// its JSON, so that every valid state can be read. A page holds at
-    /// least one record or part when any remain.
-    fn status_records(&self, after: Option<&str>) -> Outcome {
+    /// One page of state records from `after`, within `budget` bytes
+    /// (`PAGE_BUDGET_BYTES` unless the reader asked for less, never under
+    /// `MIN_PAGE_BYTES`). A record that fits a page is never split; one that
+    /// does not (an entry at its limits can be larger than a frame) is given
+    /// as parts of its JSON, so that every valid state can be read. A page
+    /// holds at least one record or part when any remain.
+    fn status_records(&self, after: Option<&str>, budget: usize) -> Outcome {
         let (mut resume, records) = match status_records(&self.state, after) {
             Ok(read) => read,
             Err(error) => {
@@ -717,8 +838,8 @@ impl Store {
                 }
                 _ => 0,
             };
-            if start == 0 && text.len() < PAGE_BUDGET_BYTES {
-                if bytes + text.len() + 1 > PAGE_BUDGET_BYTES {
+            if start == 0 && text.len() < budget {
+                if bytes + text.len() + 1 > budget {
                     return Outcome::StatusRecords {
                         records: page,
                         next,
@@ -729,7 +850,7 @@ impl Store {
                 next = Some(position.after());
                 continue;
             }
-            let end = part_end(&text, start, PAGE_BUDGET_BYTES.saturating_sub(bytes));
+            let end = part_end(&text, start, budget.saturating_sub(bytes));
             if end == start {
                 return Outcome::StatusRecords {
                     records: page,
@@ -788,6 +909,83 @@ impl Store {
             });
         }
         Ok(Outcome::Events { events })
+    }
+
+    /// The daily account: the newest `TODAY_EVENTS` events at most, placed
+    /// in wall time by their generation's anchor, summarised by the core.
+    /// Reads only; it writes nothing and acknowledges no message.
+    pub fn today(
+        &self,
+        workspace_id: Option<&str>,
+        from_ms: u64,
+        wall_ms: u64,
+        now_ms: u64,
+    ) -> StoreResult<Outcome> {
+        if let Some(workspace_id) = workspace_id
+            && !self.state.workspaces.contains_key(workspace_id)
+        {
+            return Ok(Outcome::Error {
+                code: "unknown_workspace".into(),
+                message: "no workspace has this ID; `langspan status` lists them".into(),
+            });
+        }
+        if from_ms > wall_ms {
+            return Ok(Outcome::Error {
+                code: "invalid_window".into(),
+                message: "the window starts after now; give a --since time in the past".into(),
+            });
+        }
+        let mut statement = self
+            .connection
+            .prepare("SELECT seq, event_json FROM events ORDER BY seq DESC LIMIT ?1")?;
+        let mut rows = statement.query([i64::try_from(TODAY_EVENTS)?])?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            events.push(RecordedEvent {
+                seq: u64::try_from(seq)?,
+                event: serde_json::from_str(&json)?,
+            });
+        }
+        events.reverse();
+        let first = events.first().map_or(0, |recorded| recorded.seq);
+        let first = i64::try_from(first)?;
+        let earlier: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1)",
+            [first],
+            |row| row.get(0),
+        )?;
+        // The generation the first event read belongs to, if it was anchored.
+        let before: Option<String> = self
+            .connection
+            .query_row(ANCHOR_LOOKUP, [first], |row| row.get(0))
+            .optional()?;
+        let anchor = match before
+            .map(|json| serde_json::from_str::<Event>(&json))
+            .transpose()?
+        {
+            Some(Event::ClockAnchored { anchor }) => Some(anchor),
+            _ => None,
+        };
+        let mut today = langspan_core::today(
+            &self.state,
+            &TodayQuery {
+                workspace_id,
+                window: TodayWindow {
+                    from_ms,
+                    to_ms: wall_ms,
+                },
+                events: &events,
+                anchor,
+                earlier,
+                now_ms,
+            },
+        );
+        today.shrink_until(|today| {
+            serde_json::to_vec(today).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+        });
+        Ok(Outcome::Today { today })
     }
 
     /// The outbound audit: what left for a workspace, newest first, read
@@ -1034,6 +1232,17 @@ impl Store {
         }
         transaction.commit()?;
         self.state = next_state;
+        if let Some(tap) = &mut self.tap {
+            let room = TAP_LIMIT.saturating_sub(tap.events.len());
+            let keep = tap.keep;
+            tap.events.extend(
+                events
+                    .iter()
+                    .filter(|event| keep(event))
+                    .take(room)
+                    .cloned(),
+            );
+        }
         Ok(())
     }
 
@@ -1134,4 +1343,38 @@ fn observed_branches(
         );
     }
     branches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `today` runs in the daemon's request handler: finding the anchor must
+    /// read the generation markers only, not every older event of a long
+    /// generation.
+    #[test]
+    fn the_anchor_lookup_reads_only_generation_markers() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-anchor-plan-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let plan: Vec<String> = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {ANCHOR_LOOKUP}"))
+            .unwrap()
+            .query_map([1_000_000i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("events_generation_marker")),
+            "{plan:?}"
+        );
+    }
 }

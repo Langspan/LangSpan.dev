@@ -50,7 +50,8 @@ every answer:
 | --- | --- | --- |
 | `graph symbol WORKSPACE NAME [--detail]` | `langspan_symbol` (`detail`) | Definitions of that name; with detail, what is around each (below) |
 | `graph references WORKSPACE NAME` | `langspan_references` | Mentions of that name |
-| `graph impact WORKSPACE PATH` | `langspan_impact` | What the file exports, and other files mentioning those names |
+| `graph impact WORKSPACE PATH [--depth N]` | `langspan_impact` (`depth`) | What the file exports, and other files mentioning those names; with a depth of 2 or 3, those files level by level (below) |
+| `graph blind-spots WORKSPACE` | `langspan_blind_spots` | The files the index cannot answer for, by reason (below) |
 
 **Symbol lookup with detail (added 25 November 2026, roadmap D1).** The
 indexer also stores, per definition, `body_digest`: the SHA-256 of the
@@ -95,6 +96,105 @@ indexer's next commit with coverage read after it). Test:
 `coverage_describes_the_same_snapshot_as_the_results_it_comes_with` in
 `src/graph.rs`.
 
+**Blind spots (added 25 November 2026, roadmap D8).** Coverage counts say how
+many files are partial, not which, so an empty answer could not be told from
+one the index was unable to give. `graph blind-spots` (MCP
+`langspan_blind_spots`) lists, each in path order and capped at `--limit`
+(1 to 200, default 50) so a capped list is the same on every call, with full
+counts in `totals`:
+
+- `partial`: indexed with a syntax error or a bound reached, with `since_ms`,
+  the wall-clock time its indexed versions became partial (kept across further
+  partial versions, cleared by a clean parse);
+- `never_clean`: indexed but never parsed cleanly, so it has no interface
+  baseline and no notice can come from it;
+- `waiting`: its scanned content is not indexed yet;
+- `too_large`: over the index's 1 MiB bound, or over the scan's 4 MiB bound;
+- `unscanned`: left out by the scan's file, byte or time bound;
+- `unsupported_languages`: other source files the scan listed, by extension,
+  from a fixed list of about 40 programming-language extensions
+  (documentation, data and images are not counted).
+
+Lookup answers' `coverage` gains `blind_in_scope`: supported files that are
+partial, not indexed at their scanned content, or not read by the last scan.
+Every query matches names across the whole workspace, so each of those files
+could hold a match the answer lacks; the field is the count of them, omitted
+when zero. Earlier builds read coverage with `deny_unknown_fields`, and the
+protocol has no negotiation, so an older CLI or a long-running MCP adapter
+would fail to read any answer that carried the field. As with symbol
+`detail`, the client asks: `graph_symbol`, `graph_references` and
+`graph_impact` take `blind_in_scope: true` (sent by this build's CLI and MCP
+tools), and `graph_blind_spots` always gets it. Every other answer that
+carries coverage (code context, call breaks, the dashboard) and every request
+without the flag gets the shape earlier builds know, the field absent; the
+daemon applies this in one place before it replies. Bumping the protocol
+version instead would have broken every command of an older client against
+this daemon, not only these. A request with the flag sent to an earlier
+daemon is refused as an unknown field, like `detail`; restart the daemon
+after upgrading. Test: `blind_spots_name_the_files_the_index_cannot_answer_for`
+(`tests/graph.rs`) reads every such answer with a strict copy of the earlier
+coverage, over the daemon's socket; it failed before the change. Paths only; nothing
+guesses what a blind file contains. With no complete scan the answer has
+`scanned: false`, and the last scan failure, if one is recorded, is in
+`scan_failure`. Lists past one 64 KiB frame are cut to the longest common
+prefix that fits, with `truncated`.
+
+To answer from one snapshot, the index keeps what the last complete scan did
+not read: up to 4,096 such supported-language paths with the reason, the full
+counts, and the language counts (tables `unread` and `scan_summary`; the paths
+are rewritten only when they change). A file between 1 and 4 MiB is marked
+too large for its scanned digest, so it is not retried every pass and no
+longer takes one of a pass's 200 places, which could stall indexing behind
+200 such files. The mark is set only after the file's bytes, read up to the
+scan's 4 MiB bound, are confirmed to be that digest: a file scanned small that
+grew before the pass ran is left for the next scan, so its scanned version is
+not skipped if it returns (`a_small_scanned_version_is_not_marked_too_large_by_a_later_large_file`). A complete scan with no supported file now counts as
+`scanned`. The schema marker went from 3 to 4, so an older file is dropped
+and rebuilt. Past 4,096 unread files the counts still hold but those paths
+are not named, and `blind_in_scope` may count one of them twice if the index
+also holds an earlier row for it. Tests: `blind_spots_name_partial_never_clean_and_waiting_files`,
+`a_file_over_the_parse_bound_is_too_large_and_not_waiting`,
+`a_capped_list_is_the_same_on_every_call`,
+`impact_on_a_file_mentioned_only_by_a_partial_file_counts_one_blind_file` and
+`files_the_scan_did_not_read_and_other_languages_come_from_a_real_scan` in
+`src/graph.rs`; `blind_spots_name_the_files_the_index_cannot_answer_for` in
+`tests/graph.rs`; `stdio_blind_spots_names_a_partial_file_through_the_daemon`
+in `tests/mcp.rs`; golden vectors `fixtures/graph-blind-spots-*-v3.json`.
+
+**Impact level by level (added 25 November 2026, roadmap D2).**
+`graph_impact` takes `depth`, 1 to 3 (`MAX_IMPACT_DEPTH`); anything else is
+refused with "depth must be between 1 and 3". Above 1 the answer adds
+`levels`: level 1 is the files mentioning a name the queried file exports,
+and level n+1 the files mentioning a name a level-n file exports. Each file
+appears once, at its first level, with `via` (the exported name it mentions)
+and `from` (the previous-level file; the queried file for level 1), so a
+cycle never brings the queried file or an earlier level back. Files are
+reached in the previous level's order, names in name order. Bounds: 200
+files across all levels (`MAX_RESULTS`), 50 distinct exported names expanded
+per level (`NAMES_PER_LEVEL`), and the answer must fit one 64 KiB frame;
+a level any of these cut, and every level after a frame cut, is `truncated`.
+The levels are read in the same snapshot as the exports, references and
+coverage (`with_coverage`). They may take 500 ms (`IMPACT_BUDGET`): the daemon
+answers one request at a time, so hooks behind a long query wait; past it the levels finished so far and the one
+in progress are returned, the last `truncated`. The answer then also has
+`resolution: "name"`, and the CLI says "Found by name, not resolved; each
+level adds false positives". An empty level is no claim that nothing is
+affected: with blind or lagging files in `coverage`, the CLI says so. At
+depth 1 the field is left out of the request and `levels` and `resolution`
+out of the answer, which is byte-for-byte the earlier one, and the request
+is the one earlier builds send. Nothing is stored. Tests:
+`impact_levels_follow_a_caller_of_a_caller_and_name_the_way`,
+`a_file_appears_once_at_its_first_level`,
+`impact_levels_expand_at_most_fifty_names_per_level_and_say_so`,
+`impact_levels_stop_at_two_hundred_files_in_total`,
+`a_passed_deadline_returns_the_levels_so_far_marked_truncated` and
+`levels_and_coverage_come_from_one_snapshot` in `src/graph.rs`;
+`impact_levels_with_long_paths_are_cut_to_one_frame_and_say_so` in
+`src/daemon.rs`;
+`impact_by_level_reaches_a_caller_of_a_caller_and_depth_one_is_unchanged`
+in `tests/graph.rs`; `stdio_impact_with_depth_returns_levels_by_name` in
+`tests/mcp.rs`; the request vectors in `tests/protocol.rs`.
+
 **Interface-change notices.** When a file is re-indexed, its exported symbols
 are compared with the previous version by name and kind. A removed symbol or
 a changed signature produces a notice with the files that mention the name.
@@ -121,6 +221,27 @@ Tests:
 `a_formatter_rewrap_of_a_signature_is_not_a_signature_change_and_a_parameter_change_is`
 and `a_one_element_tuple_losing_its_comma_is_a_signature_change_and_a_wrapped_one_is_not`
 in `crates/langspan-graph/tests/extract.rs`.
+
+Several definitions can share a name and kind in one file, such as a `text`
+method on each of two types; the comparison takes their signatures as a set
+with repeats (added 25 November 2026, issue #118). When a definition is added
+and every earlier signature is still there, the change is
+`definition_added`; when one goes and every remaining signature was there
+before, it is `definition_removed`. Either carries the signatures that came
+or went, each shown once, and two counts, `before_count` and `after_count`
+(at most 65,535), so the notice reads "a second method "text" was added: …
+(now 2 definitions with that name)" or "one of 2 methods "text" was
+removed: … (now 1 definition with that name)", never a signature "changed"
+to itself. Reordering same-named definitions is no change. Any other
+difference is a changed signature, as before, with every signature of that
+name before and after; losing the last definition is a removal. Older
+notices have no counts and read as they did. A store holding one of these
+changes does not open in an earlier build
+([ADR 0015](0015-version-tolerance.md)); the protocol stays at version 3.
+Tests: `a_second_same_named_definition_is_an_addition_and_losing_one_is_a_removal`
+in `crates/langspan-graph/tests/extract.rs`,
+`a_second_same_named_definition_is_told_as_added_and_losing_it_as_removed`
+in `tests/graph.rs`, and `crates/langspan-core/tests/interface_counts.rs`.
 
 **Code briefing at a prompt (added later).** At `UserPromptSubmit`, for both
 hosts, the hook process takes candidate names from the prompt: ASCII words of
@@ -153,9 +274,10 @@ has no complete scan or nothing matched, and any failure adds nothing.
   scanned partially (ADR 0003): changed files first, then clean ones in path
   order. The index holds the files the scan versioned; a file a partial scan
   left out keeps what was last indexed for it and is not reported removed.
-- Impact is one level: files mentioning the names a file exports. It does not
-  follow chains, and import targets are stored but not yet used to narrow
-  matches.
+- Impact is one level by default: files mentioning the names a file exports.
+  With `--depth` it follows up to three levels of such name matches; each
+  level compounds the false positives of the one before, and nothing is
+  resolved. Import targets are stored but not yet used to narrow matches.
 - Notices cover one physical workspace. A teammate on another machine or in
   another worktree is not yet told of an interface change.
 - False positives are expected for common names. False negatives occur for

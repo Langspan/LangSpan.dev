@@ -321,6 +321,10 @@ pub struct Dashboard {
     pub more_notes: u32,
     pub workspaces: Vec<WorkspaceRow>,
     pub more_workspaces: u32,
+    /// Agent hosts on this machine with no LangSpan install covering them,
+    /// by name; at most `MAX_HOSTS` (roadmap A7).
+    #[serde(default)]
+    pub uninstalled_hosts: Vec<String>,
 }
 
 /// Bytes a string takes encoded as JSON, an upper bound.
@@ -385,7 +389,7 @@ fn bounded<T>(
 
 /// `host` and the first characters of the host's session ID, the way a
 /// publication names a session.
-fn host_and_prefix(session_id: &str) -> (String, String) {
+pub(crate) fn host_and_prefix(session_id: &str) -> (String, String) {
     let (host, id) = session_id.split_once('.').unwrap_or(("agent", session_id));
     (
         host.chars().take(32).collect(),
@@ -1048,6 +1052,7 @@ pub(crate) fn dashboard(state: &State, now_ms: u64) -> Dashboard {
         more_notes,
         workspaces,
         more_workspaces,
+        uninstalled_hosts: state.uninstalled_hosts.keys().cloned().collect(),
     }
 }
 

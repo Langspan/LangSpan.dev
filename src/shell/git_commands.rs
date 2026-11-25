@@ -38,15 +38,15 @@ pub enum GitStep {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Word {
-    text: String,
+pub(super) struct Word {
+    pub(super) text: String,
     /// Holds an expansion, a substitution or an unquoted glob: its value
     /// is not the text.
-    expanded: bool,
+    pub(super) expanded: bool,
 }
 
 impl Word {
-    fn literal(&self) -> Option<&str> {
+    pub(super) fn literal(&self) -> Option<&str> {
         (!self.expanded).then_some(self.text.as_str())
     }
 }
@@ -65,22 +65,7 @@ pub fn git_steps(command: &str) -> Result<Vec<GitStep>, &'static str> {
     let mut cwd: Option<PathBuf> = None;
     let mut cwd_known = true;
     for words in Lexer::new(command).segments()? {
-        let mut words = words.as_slice();
-        // Words that run the command that follows: assignments, reserved
-        // words and the usual wrappers (`if git …`, `env X=1 git …`).
-        loop {
-            match words.first().map(|word| word.text.as_str()) {
-                Some(
-                    "if" | "then" | "elif" | "else" | "do" | "while" | "until" | "!" | "{" | "time"
-                    | "command" | "nohup" | "exec" | "env" | "sudo",
-                ) => words = &words[1..],
-                Some("timeout") if words.len() > 1 => words = &words[2..],
-                Some(text) if text.split_once('=').is_some_and(|(name, _)| is_name(name)) => {
-                    words = &words[1..]
-                }
-                _ => break,
-            }
-        }
+        let words = command_words(&words);
         let Some(first) = words.first() else {
             continue;
         };
@@ -113,6 +98,25 @@ pub fn git_steps(command: &str) -> Result<Vec<GitStep>, &'static str> {
         steps.push(step);
     }
     Ok(steps)
+}
+
+/// A simple command's words from the command it runs, past the words that
+/// run the command that follows: assignments, reserved words and the usual
+/// wrappers (`if git …`, `env X=1 git …`).
+pub(super) fn command_words(mut words: &[Word]) -> &[Word] {
+    loop {
+        match words.first().map(|word| word.text.as_str()) {
+            Some(
+                "if" | "then" | "elif" | "else" | "do" | "while" | "until" | "!" | "{" | "time"
+                | "command" | "nohup" | "exec" | "env" | "sudo",
+            ) => words = &words[1..],
+            Some("timeout") if words.len() > 1 => words = &words[2..],
+            Some(text) if text.split_once('=').is_some_and(|(name, _)| is_name(name)) => {
+                words = &words[1..]
+            }
+            _ => return words,
+        }
+    }
 }
 
 fn is_name(name: &str) -> bool {
@@ -343,7 +347,7 @@ fn commit(words: &[Word], cwd: Option<PathBuf>) -> Result<Option<GitStep>, &'sta
 // A lenient shell lexer: words and command boundaries, nothing more
 // ---------------------------------------------------------------------------
 
-struct Lexer {
+pub(super) struct Lexer {
     chars: Vec<char>,
     at: usize,
     /// Heredoc delimiters whose bodies start after the current line.
@@ -351,7 +355,7 @@ struct Lexer {
 }
 
 impl Lexer {
-    fn new(command: &str) -> Self {
+    pub(super) fn new(command: &str) -> Self {
         Self {
             chars: command.chars().collect(),
             at: 0,
@@ -364,7 +368,7 @@ impl Lexer {
     }
 
     /// The simple commands of the line, as words.
-    fn segments(mut self) -> Result<Vec<Vec<Word>>, &'static str> {
+    pub(super) fn segments(mut self) -> Result<Vec<Vec<Word>>, &'static str> {
         let mut segments = vec![Vec::new()];
         let mut word: Option<Word> = None;
         let end_word = |segments: &mut Vec<Vec<Word>>, word: &mut Option<Word>| {

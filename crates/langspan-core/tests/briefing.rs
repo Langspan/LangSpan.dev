@@ -155,6 +155,75 @@ fn an_unchanged_situation_is_not_delivered_twice_and_a_change_is() {
     assert!(brief(&mut state, "bob", "b4", 8_000).changed);
 }
 
+/// The Git observer scans a workspace after its first session registers, on
+/// its own thread. A peer in this session's own checkout shares its branch,
+/// so learning that branch after a briefing is not news; a peer in another
+/// worktree switching branch still is.
+#[test]
+fn a_branch_learned_after_delivery_is_news_only_from_another_worktree() {
+    let mut state = ready();
+    ok(run(
+        &mut state,
+        "w-late",
+        Command::WorkspaceRegister {
+            workspace_id: "late".into(),
+            root: "/repos/late".into(),
+        },
+        0,
+    ));
+    for session in ["erin", "frank"] {
+        ok(run(
+            &mut state,
+            &format!("s-{session}"),
+            Command::SessionRegister {
+                session_id: session.into(),
+                workspace_id: "late".into(),
+                parent: None,
+                headless: false,
+            },
+            0,
+        ));
+    }
+    edited(&mut state, "frank", "src/a.rs", 100);
+    let first = brief(&mut state, "erin", "b1", 200);
+    assert!(first.changed);
+    assert_eq!(first.peers[0].branch_ref, None, "not scanned yet");
+    ok(run(
+        &mut state,
+        "g-late",
+        Command::ObserveWorkspaceGit {
+            workspace_id: "late".into(),
+            repository_id: "repo-late".into(),
+            branch_ref: Some("refs/heads/main".into()),
+        },
+        300,
+    ));
+    let again = brief(&mut state, "erin", "b2", 400);
+    assert!(!again.changed, "the checkout's own branch is not news");
+    assert_eq!(
+        again.peers[0].branch_ref.as_deref(),
+        Some("refs/heads/main"),
+        "it is still shown"
+    );
+
+    edited(&mut state, "carol", "src/api.rs", 500);
+    assert!(brief(&mut state, "alice", "b3", 600).changed);
+    ok(run(
+        &mut state,
+        "g-tree-2",
+        Command::ObserveWorkspaceGit {
+            workspace_id: "tree".into(),
+            repository_id: "repo-app".into(),
+            branch_ref: Some("refs/heads/other".into()),
+        },
+        700,
+    ));
+    assert!(
+        brief(&mut state, "alice", "b4", 800).changed,
+        "another worktree's branch switch is news"
+    );
+}
+
 #[test]
 fn stale_exited_and_ended_work_is_excluded() {
     let mut state = ready();
@@ -233,6 +302,7 @@ fn current_admissions_intents_and_prompt_summaries_are_reported() {
         Command::SessionPrompt {
             session_id: "bob".into(),
             summary: "rename the gate module".into(),
+            line_digests: Vec::new(),
         },
         10,
     ));
@@ -309,10 +379,12 @@ fn invalid_briefing_inputs_are_rejected_without_events() {
         Command::SessionPrompt {
             session_id: "alice".into(),
             summary: "two\nlines".into(),
+            line_digests: Vec::new(),
         },
         Command::SessionPrompt {
             session_id: "alice".into(),
             summary: "x".repeat(513),
+            line_digests: Vec::new(),
         },
         Command::ObserveWorkspaceGit {
             workspace_id: "main".into(),
@@ -420,6 +492,7 @@ fn ending_a_session_always_labels_it_and_drops_its_task_line() {
         Command::SessionPrompt {
             session_id: "bob".into(),
             summary: "private once ended".into(),
+            line_digests: Vec::new(),
         },
         10,
     ));
@@ -508,6 +581,7 @@ fn prompted(state: &mut State, session: &str, summary: &str, now: u64) {
         Command::SessionPrompt {
             session_id: session.into(),
             summary: summary.into(),
+            line_digests: Vec::new(),
         },
         now,
     ));
@@ -990,4 +1064,123 @@ fn a_targets_event_holds_paths_only_and_from_an_older_generation_is_refused() {
     apply(&mut state, event).unwrap();
     apply(&mut state, &Event::Booted { generation: 2 }).unwrap();
     assert!(apply(&mut state, event).is_err(), "a stale generation");
+}
+
+/// A prompt's line digests, for prompts that differ only after `shared`.
+fn template(shared: usize, own: &str) -> Vec<String> {
+    let mut lines: Vec<String> = (0..shared).map(|line| format!("{line:032x}")).collect();
+    lines.push(format!("{:0>32}", own));
+    lines
+}
+
+fn prompted_with(
+    state: &mut State,
+    session: &str,
+    summary: &str,
+    lines: Vec<String>,
+    now: u64,
+) -> u32 {
+    match ok(run(
+        state,
+        &format!("p-{session}-{now}"),
+        Command::SessionPrompt {
+            session_id: session.into(),
+            summary: summary.into(),
+            line_digests: lines,
+        },
+        now,
+    )) {
+        Outcome::SessionPrompted { shared_lines, .. } => shared_lines,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_prompt_is_told_how_many_leading_lines_a_live_peer_in_its_repository_shares() {
+    let mut state = ready();
+    let first = prompted_with(&mut state, "alice", "Shared brief", template(3, "a"), 10);
+    assert_eq!(first, 0, "nobody to share with yet");
+    assert_eq!(state.activity["alice"].line_digests, template(3, "a"));
+    // Bob in the same checkout and Carol in a linked worktree share the
+    // template's three lines; Dave's repository is someone else's.
+    assert_eq!(
+        prompted_with(&mut state, "bob", "Shared brief", template(3, "b"), 20),
+        3
+    );
+    assert_eq!(
+        prompted_with(&mut state, "carol", "Shared brief", template(3, "c"), 30),
+        3
+    );
+    assert_eq!(
+        prompted_with(&mut state, "dave", "Shared brief", template(5, "d"), 40),
+        0
+    );
+    // The longest shared run counts; a session's own earlier prompt does not.
+    assert_eq!(
+        prompted_with(&mut state, "alice", "Shared brief", template(3, "a"), 50),
+        3
+    );
+    // An ended session is not live: what it shared no longer counts.
+    for session in ["alice", "bob", "carol"] {
+        if session != "bob" {
+            ok(run(
+                &mut state,
+                &format!("end-{session}"),
+                Command::SessionEnd {
+                    session_id: session.into(),
+                },
+                60,
+            ));
+        }
+    }
+    assert_eq!(
+        prompted_with(&mut state, "bob", "Shared brief", template(3, "b"), 70),
+        0
+    );
+    // Digests are bounded in number and form.
+    for lines in [
+        vec!["not hex".to_string()],
+        vec!["0".repeat(65)],
+        (0..33).map(|line| format!("{line:032x}")).collect(),
+    ] {
+        let decision = decide(
+            &state,
+            &Command::SessionPrompt {
+                session_id: "bob".into(),
+                summary: "x".into(),
+                line_digests: lines.clone(),
+            },
+            "bad",
+            80,
+        );
+        assert!(
+            matches!(decision.outcome, Outcome::Error { .. }),
+            "{lines:?}"
+        );
+    }
+}
+
+#[test]
+fn a_declared_intent_replaces_the_prompt_summary_in_a_briefing() {
+    let mut state = ready();
+    prompted_with(&mut state, "bob", "Shared brief", template(3, "b"), 10);
+    let before = brief(&mut state, "alice", "b1", 20);
+    assert_eq!(before.peers[0].summary.as_deref(), Some("Shared brief"));
+    ok(run(
+        &mut state,
+        "intent",
+        Command::IntentSet {
+            session_id: "bob".into(),
+            paths: vec!["src/session.rs".into()],
+            summary: "refresh the session handler".into(),
+        },
+        30,
+    ));
+    let after = brief(&mut state, "alice", "b2", 40);
+    assert_eq!(names(&after), ["bob"]);
+    assert_eq!(after.peers[0].summary, None);
+    assert_eq!(
+        after.peers[0].intent.as_deref(),
+        Some("refresh the session handler")
+    );
 }

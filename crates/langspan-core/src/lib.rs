@@ -7,17 +7,38 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 mod dashboard;
+mod flaky;
 mod lines;
+mod recall;
 mod status;
+mod status_line;
+mod today;
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
     LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow, PublishRow, RecentFile, ScanRow,
     WorkspaceRow, dashboard_denials,
 };
+pub use flaky::{
+    FLAKY_DECAY_RUNS, FLAKY_MIN_FLIPS, FLAKY_WINDOW_RUNS, FlakyCount, FlakyTest, LastTests,
+    MAX_FLAKY_LISTED, MAX_LEARNED_CHECKS, MAX_LEARNED_TESTS, MAX_TEST_NAME_BYTES, MAX_TEST_NAMES,
+    MAX_TEST_RESULT_BYTES, TestFailure, TestHistory, TestLearning, TestResults,
+};
+pub use recall::{
+    RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
+};
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
     shrink_status, status_records, status_view,
+};
+pub use status_line::{
+    ClockAnchor, MAX_REFUSALS, REFUSAL_PATHS, REFUSAL_RETENTION_MS, RecentRefusal, RefusalKind,
+    StatusLine, status_line,
+};
+pub use today::{
+    OpenAdmission, OpenCheck, OpenIntent, OpenMessage, TODAY_EVENTS, TODAY_FILES, TODAY_OPEN,
+    TODAY_SESSIONS, Today, TodayChecks, TodayLandings, TodayOpen, TodayQuery, TodaySession,
+    TodayWindow, today,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -485,7 +506,17 @@ pub struct SessionActivity {
     /// the source index (roadmap C8). Paths only; never the prompt's words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_targets: Option<PromptTargets>,
+    /// Digests of the leading non-empty lines of the session's last prompt,
+    /// at most `MAX_PROMPT_LINES`: compared with live peers' to tell prompts
+    /// started from one template apart (issue #114). Never the words.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub line_digests: Vec<String>,
 }
+
+/// At most this many leading prompt lines are compared by digest.
+pub const MAX_PROMPT_LINES: usize = 32;
+/// Hex characters in one prompt line digest, at most.
+pub const MAX_PROMPT_LINE_DIGEST: usize = 64;
 
 /// The definition paths a prompt's code briefing found, and when. Compared
 /// with other sessions' targets and work while within `BRIEF_HORIZON_MS`;
@@ -511,6 +542,14 @@ fn is_zero_u64(value: &u64) -> bool {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn one() -> u32 {
+    1
+}
+
+fn is_one(value: &u32) -> bool {
+    *value == 1
 }
 
 /// The signature of a briefing with nothing in it.
@@ -807,6 +846,10 @@ pub struct CheckNotice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timed_out_s: Option<u32>,
     pub tail: String,
+    /// The failing tests its output named, each labelled when it is known
+    /// to flip on unchanged code. Empty when no test was named.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<TestFailure>,
 }
 
 /// A push of an integrated result that LangSpan made at the owner's command.
@@ -1020,6 +1063,33 @@ pub struct NameRef {
     pub digest: String,
 }
 
+/// The deepest `graph impact` level a client may ask for (roadmap D2).
+pub const MAX_IMPACT_DEPTH: u32 = 3;
+
+/// One level of a multi-level impact answer (roadmap D2): the files that
+/// mention a name the previous level's files export. Found by name, not
+/// resolved, so each level compounds the false positives of the one before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ImpactLevel {
+    /// From 1: level 1 mentions an export of the queried file.
+    pub level: u32,
+    pub files: Vec<ImpactFile>,
+    /// A bound, the frame size or the request deadline cut this level.
+    pub truncated: bool,
+}
+
+/// A file reached at its first level, and how.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ImpactFile {
+    pub path: String,
+    /// The exported name of `from` that this file mentions.
+    pub via: String,
+    /// The file at the previous level (the queried file for level 1).
+    pub from: String,
+}
+
 /// How much of a workspace the index covers, so a short answer is not read
 /// as a complete one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1033,6 +1103,66 @@ pub struct GraphCoverage {
     pub partial_files: u32,
     /// False when no complete scan exists: nothing is known.
     pub scanned: bool,
+    /// Supported-language files the index cannot read in full at their
+    /// current content (partial, waiting, too large, left out of the scan).
+    /// Every query matches names across the whole workspace, so any of them
+    /// may hold a match the answer lacks; above zero, an empty or short
+    /// answer is weak. `graph blind-spots` names them. Absent when zero,
+    /// and sent only to a client that asks for it (`blind_in_scope` on a
+    /// lookup, or `graph_blind_spots`): earlier builds read coverage
+    /// strictly and reject a field they do not know.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub blind_in_scope: u32,
+}
+
+/// A file indexed with a syntax error or a bound reached.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PartialFile {
+    pub path: String,
+    /// Wall-clock milliseconds since which its indexed versions have been
+    /// partial, on the coordinator's machine.
+    pub since_ms: u64,
+}
+
+/// Other source files the index has no grammar for, by extension.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LanguageCount {
+    pub extension: String,
+    pub files: u32,
+}
+
+/// Full counts of each blind-spot list, however many paths are returned.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BlindTotals {
+    pub partial: u32,
+    pub never_clean: u32,
+    pub waiting: u32,
+    pub too_large: u32,
+    pub unscanned: u32,
+}
+
+/// Where the index is blind, by reason. A file can be in more than one
+/// list (a partial file can also be waiting for its newer version).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BlindSpots {
+    /// Indexed with a syntax error or a bound reached.
+    pub partial: Vec<PartialFile>,
+    /// Indexed, but never parsed cleanly: no interface baseline, so no
+    /// interface notice can come from it.
+    pub never_clean: Vec<String>,
+    /// The scanned content is not indexed yet.
+    pub waiting: Vec<String>,
+    /// Over the index's 1 MiB bound (or the scan's 4 MiB one): never read.
+    pub too_large: Vec<String>,
+    /// Left out by the scan's file or byte bound.
+    pub unscanned: Vec<String>,
+    /// Other source files, most first, then by extension.
+    pub unsupported_languages: Vec<LanguageCount>,
+    pub totals: BlindTotals,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1040,7 +1170,11 @@ pub struct GraphCoverage {
 pub struct InterfaceChange {
     pub name: String,
     pub kind: String,
-    /// `removed` or `signature_changed`.
+    /// `removed`, `signature_changed`, `definition_added` or
+    /// `definition_removed`. The last two mean only the number of
+    /// definitions sharing the name and kind changed: `after` (added) or
+    /// `before` (removed) holds the signatures that came or went, and the
+    /// counts say how many there were and are.
     pub change: String,
     pub before: Option<String>,
     pub after: Option<String>,
@@ -1051,7 +1185,16 @@ pub struct InterfaceChange {
     pub before_arity: Option<Arity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_arity: Option<Arity>,
+    /// Definitions with this name and kind before and after, for
+    /// `definition_added` and `definition_removed` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_count: Option<u32>,
 }
+
+/// Definitions sharing one name and kind that a notice counts at most.
+pub const MAX_DEFINITION_COUNT: u32 = 65_535;
 
 /// How many arguments a function takes, read from its signature text.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1437,10 +1580,49 @@ pub struct State {
     /// Automatic check results not yet delivered, per session, newest first.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub check_notices: BTreeMap<String, Vec<CheckNotice>>,
+    /// Tests that flip on unchanged code, learned per workspace.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub test_learning: BTreeMap<String, TestLearning>,
+    /// Agent hosts present on this machine with no LangSpan install that
+    /// covers them, by host name (roadmap A7). For the owner; agents are
+    /// not told.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub uninstalled_hosts: BTreeMap<String, UninstalledHost>,
+    /// The current generation's clock anchor, once recorded. Derived from
+    /// the events on replay; not part of the status reply.
+    #[serde(skip)]
+    pub clock_anchor: Option<ClockAnchor>,
+    /// Recent refusals placed in wall time, newest first, for the status
+    /// line (roadmap H2). Derived on replay; not part of the status reply.
+    #[serde(skip)]
+    pub refusals: Vec<RecentRefusal>,
+    /// Writes recorded per workspace since the event log was replayed: the
+    /// write generation a check run takes before its tree and carries with
+    /// its test results (`record_check.writes_before`). Derived on replay;
+    /// in the status reply, one count per workspace, so that `check run`
+    /// can read it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub writes: BTreeMap<String, u64>,
 }
 
 /// Checkout changes kept per workspace.
 pub const MAX_CHECKOUTS: usize = 4;
+
+/// Host names one host check may report.
+pub const MAX_HOSTS: usize = 16;
+
+/// An agent host whose configuration directory exists on this machine but
+/// which no LangSpan install covers: no user-level install, and no project
+/// install in a registered workspace. Only its name is kept; what the owner
+/// can run is derived from it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UninstalledHost {
+    pub host: String,
+    /// When the daemon first saw it so, by its own clock.
+    pub at_ms: u64,
+    pub generation: u64,
+}
 
 /// The checkout of one physical workspace changed under the sessions in it:
 /// its branch changed, its HEAD moved and files changed with it, or several
@@ -1478,6 +1660,25 @@ pub struct CheckoutNotice {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Event {
     Booted {
+        generation: u64,
+    },
+    /// The daemon's clock read with the wall clock as a generation started,
+    /// so its times can be placed on a day (the status line, `langspan today`).
+    ClockAnchored {
+        anchor: ClockAnchor,
+    },
+    /// A write or commit was refused. Recorded with the refusal's receipt,
+    /// so a retry of the same request is not counted again.
+    WriteRefused {
+        session_id: String,
+        workspace_id: String,
+        kind: RefusalKind,
+        /// At most `REFUSAL_PATHS`, sorted.
+        paths: Vec<String>,
+        /// The other session the refusal names, when there is one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_session_id: Option<String>,
+        at_ms: u64,
         generation: u64,
     },
     WorkspaceRegistered {
@@ -1519,6 +1720,8 @@ pub enum Event {
     SessionPrompted {
         session_id: String,
         summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        line_digests: Vec<String>,
         at_ms: u64,
         generation: u64,
     },
@@ -1616,6 +1819,32 @@ pub enum Event {
         session_id: String,
         check_id: String,
     },
+    /// Which tests one run of check `name` failed and passed on `tree_oid`:
+    /// names only, no output. Follows the `CheckRecorded` of record
+    /// `check_id`; `rerun` for the run made again on the same tree, which is
+    /// no record of its own. Compared with the check's last such result of
+    /// the same `command_id`, unless a write was recorded in the workspace
+    /// since.
+    TestsRecorded {
+        workspace_id: String,
+        check_id: String,
+        name: String,
+        tree_oid: String,
+        command: String,
+        command_id: String,
+        results: TestResults,
+        #[serde(default, skip_serializing_if = "is_false")]
+        rerun: bool,
+        at_ms: u64,
+    },
+    /// The owner cleared what was learned about `test`, in check `name` or
+    /// in every check.
+    FlakyTestForgotten {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        test: String,
+    },
     Landed {
         landing: Landing,
     },
@@ -1687,6 +1916,17 @@ pub enum Event {
     },
     CheckoutChanged {
         change: CheckoutChange,
+    },
+    /// A host check found this host present and not covered by any
+    /// LangSpan install. Recorded once; repeated only after a
+    /// `HostCleared`.
+    HostNotInstalled {
+        host: UninstalledHost,
+    },
+    /// A host recorded as not installed is covered now, or its
+    /// configuration directory is gone.
+    HostCleared {
+        host: String,
     },
 }
 
@@ -1879,6 +2119,40 @@ pub enum Command {
         /// end.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         report: Option<CheckReport>,
+        /// The tests its output named, for a working-tree check that passed
+        /// or failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tests: Option<TestResults>,
+        /// The tests of a second run on the same tree, made to learn which
+        /// tests flip; its result is not recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rerun: Option<TestResults>,
+        /// With `rerun`: the workspace's [`State::writes`] when the first
+        /// run's tree was taken. The rerun is compared only if no write was
+        /// recorded since, even one the tree no longer shows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        writes_before: Option<u64>,
+        /// With `tests`: the command's identity, 64 lowercase hex digits
+        /// that differ for any two argument vectors. `command` is a cut and
+        /// redacted summary, which two commands can share; results are
+        /// compared only when this is equal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+    },
+    /// Read-only: the tests known to flip on unchanged code, of check `name`
+    /// or of every check.
+    FlakyTests {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Clear what was learned about `test`, in check `name` or in every
+    /// check.
+    ForgetFlakyTest {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        test: String,
     },
     /// Run `argv` automatically after a session's writes in the workspace,
     /// recorded as check `name`. Replaces any earlier automatic check.
@@ -2008,9 +2282,49 @@ pub enum Command {
         to_head: Option<String>,
         files: u32,
     },
+    /// The daemon's host check: every host present now with no LangSpan
+    /// install covering it, by name (roadmap A7). Hosts held from an
+    /// earlier check and absent here are cleared.
+    ObserveHosts {
+        not_installed: Vec<String>,
+    },
     /// Read-only: a bounded account of one workspace.
     Recap {
         workspace_id: String,
+    },
+    /// Read-only: the held notes of one workspace that hold every word of
+    /// `query`, about `path` or the whole workspace when a path is given
+    /// (roadmap E2). Never recorded, never counted as delivered.
+    Recall {
+        workspace_id: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+    },
+    /// Read-only, answered from the event log: what happened since
+    /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
+    /// every workspace when none is named, and what is still open.
+    Today {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        from_ms: u64,
+    },
+    /// Read-only: the person's status line for the directory `root`, with
+    /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
+    StatusLine {
+        root: String,
+        from_ms: u64,
+    },
+    /// A refusal the hook decided itself (a held commit), recorded as a
+    /// `WriteRefused` event. Other kinds are recorded by the admission
+    /// that refuses them.
+    RecordRefusal {
+        session_id: String,
+        kind: RefusalKind,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_session_id: Option<String>,
     },
     /// Read-only, answered from the derived index: where `name` is defined.
     /// With `detail`, each definition also carries its body digest, calls,
@@ -2021,17 +2335,38 @@ pub enum Command {
         limit: u32,
         #[serde(default, skip_serializing_if = "is_false")]
         detail: bool,
+        /// The client reads `GraphCoverage::blind_in_scope`. A request
+        /// without it is one an earlier build sends, and its answer keeps
+        /// the coverage shape that build knows.
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
         workspace_id: String,
         name: String,
         limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: what `path` exports and which files mention those names.
     GraphImpact {
         workspace_id: String,
         path: String,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
+        /// Levels to follow, 1 to `MAX_IMPACT_DEPTH` (roadmap D2). Above 1
+        /// the answer adds `levels`; at 1 the field is absent from the
+        /// request, which is then the one earlier builds send, and the
+        /// answer is theirs too.
+        #[serde(default = "one", skip_serializing_if = "is_one")]
+        depth: u32,
+    },
+    /// Read-only: the files the index cannot answer for, by reason, at
+    /// most `limit` paths per list (roadmap D8).
+    GraphBlindSpots {
+        workspace_id: String,
         limit: u32,
     },
     /// Read-only: for each name that is defined in the workspace, up to
@@ -2097,6 +2432,8 @@ pub enum Command {
     SessionPrompt {
         session_id: String,
         summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        line_digests: Vec<String>,
     },
     /// Where the definitions the session's prompt named are, from the
     /// source index: replaces the session's earlier prompt targets. Paths
@@ -2144,6 +2481,11 @@ pub enum Command {
     StatusRecords {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after: Option<String>,
+        /// A smaller page than the store's own bound, in bytes; absent for
+        /// the store's bound. The MCP adapter asks for one when a full page
+        /// does not fit its reply, which carries the page twice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_bytes: Option<u32>,
     },
     /// Read-only: a bounded view of every session on every machine heard
     /// from, with what is held, what overlaps, evidence and health.
@@ -2287,6 +2629,40 @@ enum CommandWire {
         /// end.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         report: Option<CheckReport>,
+        /// The tests its output named, for a working-tree check that passed
+        /// or failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tests: Option<TestResults>,
+        /// The tests of a second run on the same tree, made to learn which
+        /// tests flip; its result is not recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rerun: Option<TestResults>,
+        /// With `rerun`: the workspace's [`State::writes`] when the first
+        /// run's tree was taken. The rerun is compared only if no write was
+        /// recorded since, even one the tree no longer shows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        writes_before: Option<u64>,
+        /// With `tests`: the command's identity, 64 lowercase hex digits
+        /// that differ for any two argument vectors. `command` is a cut and
+        /// redacted summary, which two commands can share; results are
+        /// compared only when this is equal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+    },
+    /// Read-only: the tests known to flip on unchanged code, of check `name`
+    /// or of every check.
+    FlakyTests {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Clear what was learned about `test`, in check `name` or in every
+    /// check.
+    ForgetFlakyTest {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        test: String,
     },
     /// Run `argv` automatically after a session's writes in the workspace,
     /// recorded as check `name`. Replaces any earlier automatic check.
@@ -2416,9 +2792,49 @@ enum CommandWire {
         to_head: Option<String>,
         files: u32,
     },
+    /// The daemon's host check: every host present now with no LangSpan
+    /// install covering it, by name (roadmap A7). Hosts held from an
+    /// earlier check and absent here are cleared.
+    ObserveHosts {
+        not_installed: Vec<String>,
+    },
     /// Read-only: a bounded account of one workspace.
     Recap {
         workspace_id: String,
+    },
+    /// Read-only: the held notes of one workspace that hold every word of
+    /// `query`, about `path` or the whole workspace when a path is given
+    /// (roadmap E2). Never recorded, never counted as delivered.
+    Recall {
+        workspace_id: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+    },
+    /// Read-only, answered from the event log: what happened since
+    /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
+    /// every workspace when none is named, and what is still open.
+    Today {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        from_ms: u64,
+    },
+    /// Read-only: the person's status line for the directory `root`, with
+    /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
+    StatusLine {
+        root: String,
+        from_ms: u64,
+    },
+    /// A refusal the hook decided itself (a held commit), recorded as a
+    /// `WriteRefused` event. Other kinds are recorded by the admission
+    /// that refuses them.
+    RecordRefusal {
+        session_id: String,
+        kind: RefusalKind,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_session_id: Option<String>,
     },
     /// Read-only, answered from the derived index: where `name` is defined.
     /// With `detail`, each definition also carries its body digest, calls,
@@ -2429,17 +2845,38 @@ enum CommandWire {
         limit: u32,
         #[serde(default, skip_serializing_if = "is_false")]
         detail: bool,
+        /// The client reads `GraphCoverage::blind_in_scope`. A request
+        /// without it is one an earlier build sends, and its answer keeps
+        /// the coverage shape that build knows.
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
         workspace_id: String,
         name: String,
         limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: what `path` exports and which files mention those names.
     GraphImpact {
         workspace_id: String,
         path: String,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
+        /// Levels to follow, 1 to `MAX_IMPACT_DEPTH` (roadmap D2). Above 1
+        /// the answer adds `levels`; at 1 the field is absent from the
+        /// request, which is then the one earlier builds send, and the
+        /// answer is theirs too.
+        #[serde(default = "one", skip_serializing_if = "is_one")]
+        depth: u32,
+    },
+    /// Read-only: the files the index cannot answer for, by reason, at
+    /// most `limit` paths per list (roadmap D8).
+    GraphBlindSpots {
+        workspace_id: String,
         limit: u32,
     },
     /// Read-only: for each name that is defined in the workspace, up to
@@ -2505,6 +2942,8 @@ enum CommandWire {
     SessionPrompt {
         session_id: String,
         summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        line_digests: Vec<String>,
     },
     /// Where the definitions the session's prompt named are, from the
     /// source index: replaces the session's earlier prompt targets. Paths
@@ -2547,6 +2986,8 @@ enum CommandWire {
     StatusRecords {
         #[serde(default)]
         after: Option<String>,
+        #[serde(default)]
+        page_bytes: Option<u32>,
     },
     Dashboard {},
     Events {
@@ -2566,6 +3007,9 @@ impl<'de> Deserialize<'de> for Command {
     }
 }
 
+// One reply per request, built and sent once: its size does not matter, and
+// boxing `Status`'s state would only add an allocation to every status read.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Outcome {
@@ -2628,6 +3072,10 @@ pub enum Outcome {
     },
     SessionPrompted {
         session_id: String,
+        /// Leading prompt lines a live peer's latest prompt in the same
+        /// repository shares with this one, by digest.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        shared_lines: u32,
     },
     PromptTargets {
         session_id: String,
@@ -2701,6 +3149,19 @@ pub enum Outcome {
     },
     Checks {
         checks: Vec<CheckView>,
+    },
+    /// Known-flaky tests, newest flip first; `more` when some were left out.
+    FlakyTests {
+        workspace_id: String,
+        tests: Vec<FlakyTest>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        more: bool,
+    },
+    /// `forgotten` is false when nothing was learned about the test.
+    FlakyTestForgotten {
+        workspace_id: String,
+        test: String,
+        forgotten: bool,
     },
     /// `ready` only when a passing check of that name exists for exactly
     /// the tree asked about. `reason` says what is missing otherwise.
@@ -2782,11 +3243,27 @@ pub enum Outcome {
         workspace_id: String,
         failed: bool,
     },
+    /// The hosts held as not installed after a host check.
+    HostsObserved {
+        not_installed: Vec<String>,
+    },
     CheckoutObserved {
         change: CheckoutChange,
     },
     Recap {
         recap: Recap,
+    },
+    Recall {
+        recall: Recall,
+    },
+    Today {
+        today: Today,
+    },
+    StatusLine {
+        line: StatusLine,
+    },
+    RefusalRecorded {
+        session_id: String,
     },
     Dashboard {
         dashboard: Dashboard,
@@ -2802,6 +3279,10 @@ pub enum Outcome {
         resolution: Option<String>,
         coverage: GraphCoverage,
         truncated: bool,
+        /// `graph impact` with a depth above 1: each level's files, from
+        /// the same index snapshot as `coverage`. Absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        levels: Option<Vec<ImpactLevel>>,
     },
     /// Only names with at least one definition, in the order asked.
     GraphContext {
@@ -2814,6 +3295,18 @@ pub enum Outcome {
         breaks: Vec<CallBreak>,
         coverage: GraphCoverage,
         ready: bool,
+    },
+    /// Where the index cannot answer for the workspace's source (roadmap
+    /// D8). Each list is in path order and holds at most the request's
+    /// limit; `totals` has the full counts. Paths only, never content.
+    GraphBlindSpots {
+        blind_spots: BlindSpots,
+        coverage: GraphCoverage,
+        /// The last scan attempt failed: the lists are as of the last
+        /// complete one, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_failure: Option<ScanFailure>,
+        truncated: bool,
     },
     InterfaceAcknowledged {
         session_id: String,
@@ -3066,9 +3559,29 @@ fn decide_checked(
                                 .is_some_and(|lease| lease.operation.is_some()))
                     })
                     .collect();
+            // Each refusal is one event, stored with the refusal's receipt:
+            // the same request again is answered from it and adds none.
+            let refused = |kind, peer: Option<&String>| Event::WriteRefused {
+                session_id: session_id.clone(),
+                workspace_id: session.workspace_id.clone(),
+                kind,
+                paths: paths.iter().take(REFUSAL_PATHS).cloned().collect(),
+                peer_session_id: peer.cloned(),
+                at_ms: now_ms,
+                generation: state.generation,
+            };
             if !holders.is_empty() {
+                // A hook's tool call; a manual `admit` refused is not a write.
                 return Ok(Decision {
-                    events: Vec::new(),
+                    events: tool_call
+                        .then(|| {
+                            refused(
+                                RefusalKind::Conflict,
+                                holders.first().map(|holder| &holder.session_id),
+                            )
+                        })
+                        .into_iter()
+                        .collect(),
                     outcome: Outcome::Conflict { holders },
                 });
             }
@@ -3093,19 +3606,25 @@ fn decide_checked(
                     // reported read, or a file that no longer exists to be
                     // read, cannot be refused for the same change forever.
                     return Ok(Decision {
-                        events: vec![Event::SourceObserved {
-                            session_id: session_id.clone(),
-                            files: stale
-                                .iter()
-                                .map(|file| ObservedFile {
-                                    path: file.path.clone(),
-                                    state: file.current.clone(),
-                                })
-                                .collect(),
-                            origin: SourceOrigin::Refused,
-                            at_ms: now_ms,
-                            generation: state.generation,
-                        }],
+                        events: vec![
+                            Event::SourceObserved {
+                                session_id: session_id.clone(),
+                                files: stale
+                                    .iter()
+                                    .map(|file| ObservedFile {
+                                        path: file.path.clone(),
+                                        state: file.current.clone(),
+                                    })
+                                    .collect(),
+                                origin: SourceOrigin::Refused,
+                                at_ms: now_ms,
+                                generation: state.generation,
+                            },
+                            refused(
+                                RefusalKind::StaleBase,
+                                stale.iter().find_map(|file| file.changed_by.as_ref()),
+                            ),
+                        ],
                         outcome: Outcome::StaleBase { stale },
                     });
                 }
@@ -3120,13 +3639,19 @@ fn decide_checked(
                         .cloned()
                         .collect();
                     return Ok(Decision {
-                        events: vec![Event::SourceObserved {
-                            session_id: session_id.clone(),
-                            files: told,
-                            origin: SourceOrigin::Refused,
-                            at_ms: now_ms,
-                            generation: state.generation,
-                        }],
+                        events: vec![
+                            Event::SourceObserved {
+                                session_id: session_id.clone(),
+                                files: told,
+                                origin: SourceOrigin::Refused,
+                                at_ms: now_ms,
+                                generation: state.generation,
+                            },
+                            refused(
+                                RefusalKind::UnreadLines,
+                                unread.first().map(|lines| &lines.session_id),
+                            ),
+                        ],
                         outcome: Outcome::UnreadLines { lines: unread },
                     });
                 }
@@ -3322,21 +3847,28 @@ fn decide_checked(
                 outcome: Outcome::WorkspaceGit { git },
             })
         }
+        // The summary is the adapter's one line; the digests let it learn,
+        // without any peer's words, whether a live peer's prompt began the
+        // same way, so that it can name this prompt by where it differs.
         Command::SessionPrompt {
             session_id,
             summary,
+            line_digests,
         } => {
             current_session(state, session_id)?;
             validate_prompt_summary(summary)?;
+            validate_line_digests(line_digests)?;
             Ok(Decision {
                 events: vec![Event::SessionPrompted {
                     session_id: session_id.clone(),
                     summary: summary.clone(),
+                    line_digests: line_digests.clone(),
                     at_ms: now_ms,
                     generation: state.generation,
                 }],
                 outcome: Outcome::SessionPrompted {
                     session_id: session_id.clone(),
+                    shared_lines: shared_prompt_lines(state, session_id, line_digests),
                 },
             })
         }
@@ -3721,6 +4253,10 @@ fn decide_checked(
             result,
             duration_ms,
             report,
+            tests,
+            rerun,
+            writes_before,
+            command_id,
         } => {
             let check = CheckRecord {
                 check_id: request_id.into(),
@@ -3740,6 +4276,83 @@ fn decide_checked(
             let mut events = vec![Event::CheckRecorded {
                 check: check.clone(),
             }];
+            // What this record teaches about tests that flip, learned on a
+            // copy so that its notice is labelled with it.
+            let mut learning = state
+                .test_learning
+                .get(workspace_id)
+                .cloned()
+                .unwrap_or_default();
+            if rerun.is_some() && tests.is_none() {
+                return Err(error(
+                    "invalid_test_results",
+                    "A rerun's test results come with the record's own",
+                ));
+            }
+            if tests.is_some() && writes_before.is_none() {
+                return Err(error(
+                    "invalid_test_results",
+                    "Test results come with the workspace's write generation taken before the run's tree (writes_before)",
+                ));
+            }
+            let command_id = match (tests, command_id) {
+                (None, None) => "",
+                (Some(_), Some(id)) if flaky::is_command_id(id) => id.as_str(),
+                _ => {
+                    return Err(error(
+                        "invalid_test_results",
+                        "Test results come with the command's identity (command_id: 64 lowercase hex digits), and only they do",
+                    ));
+                }
+            };
+            // The write generation the run took before its tree. A write
+            // recorded since, even one undone before the run (or its rerun)
+            // ended, means its results are not of unchanged code: they are
+            // checked but learned from by neither this record nor a later
+            // one.
+            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
+            let unchanged = *writes_before == Some(writes);
+            let runs = tests
+                .iter()
+                .map(|results| (results, false))
+                .chain(rerun.iter().map(|results| (results, true)));
+            for (results, again) in runs {
+                if !inputs.is_empty() || matches!(result, CheckResult::Inconclusive {}) {
+                    return Err(error(
+                        "invalid_test_results",
+                        "Test results belong to a working-tree check that passed or failed",
+                    ));
+                }
+                let passed = if again {
+                    results.all_passed
+                } else {
+                    matches!(result, CheckResult::Passed {})
+                };
+                flaky::validate_test_results(results, passed)?;
+                if !unchanged {
+                    continue;
+                }
+                learning.learn(name, tree_oid, command_id, writes, results, now_ms);
+                events.push(Event::TestsRecorded {
+                    workspace_id: workspace_id.clone(),
+                    check_id: check.check_id.clone(),
+                    name: name.clone(),
+                    tree_oid: tree_oid.clone(),
+                    command: command.clone(),
+                    command_id: command_id.to_owned(),
+                    results: results.clone(),
+                    rerun: again,
+                    at_ms: now_ms,
+                });
+            }
+            let failures = tests
+                .iter()
+                .flat_map(|results| &results.failed)
+                .map(|test| TestFailure {
+                    test: test.clone(),
+                    flaky: learning.label(name, test),
+                })
+                .collect();
             if let Some(report) = report {
                 let reported = Event::CheckReported {
                     session_ids: report.session_ids.clone(),
@@ -3751,6 +4364,7 @@ fn decide_checked(
                         duration_ms: check.duration_ms,
                         timed_out_s: report.timed_out_s,
                         tail: report.tail.clone(),
+                        failures,
                     },
                 };
                 validate_check_report(state, &check.workspace_id, &reported)?;
@@ -3759,6 +4373,50 @@ fn decide_checked(
             Ok(Decision {
                 events,
                 outcome: Outcome::CheckRecorded { check },
+            })
+        }
+        Command::FlakyTests { workspace_id, name } => {
+            validate_known_workspace(state, workspace_id)?;
+            let (tests, more) = state
+                .test_learning
+                .get(workspace_id)
+                .map(|learning| learning.flaky(name.as_deref(), now_ms))
+                .unwrap_or_default();
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::FlakyTests {
+                    workspace_id: workspace_id.clone(),
+                    tests,
+                    more,
+                },
+            })
+        }
+        Command::ForgetFlakyTest {
+            workspace_id,
+            name,
+            test,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            validate_forget_flaky(name.as_deref(), test)?;
+            let forgotten = state
+                .test_learning
+                .get(workspace_id)
+                .is_some_and(|learning| learning.follows(name.as_deref(), test));
+            Ok(Decision {
+                events: if forgotten {
+                    vec![Event::FlakyTestForgotten {
+                        workspace_id: workspace_id.clone(),
+                        name: name.clone(),
+                        test: test.clone(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                outcome: Outcome::FlakyTestForgotten {
+                    workspace_id: workspace_id.clone(),
+                    test: test.clone(),
+                    forgotten,
+                },
             })
         }
         Command::AutoCheckEnable {
@@ -4369,6 +5027,47 @@ fn decide_checked(
                 },
             })
         }
+        Command::ObserveHosts { not_installed } => {
+            if not_installed.len() > MAX_HOSTS {
+                return Err(error(
+                    "invalid_hosts",
+                    &format!("a host check names at most {MAX_HOSTS} hosts"),
+                ));
+            }
+            let now_missing: BTreeSet<&str> = not_installed.iter().map(String::as_str).collect();
+            if now_missing.len() != not_installed.len() {
+                return Err(error("invalid_hosts", "a host is named more than once"));
+            }
+            for host in &now_missing {
+                validate_host_name(host)?;
+            }
+            // Each change of a host's state is one fact; an unchanged
+            // host is not recorded again.
+            let mut events: Vec<Event> = state
+                .uninstalled_hosts
+                .keys()
+                .filter(|host| !now_missing.contains(host.as_str()))
+                .map(|host| Event::HostCleared { host: host.clone() })
+                .collect();
+            events.extend(
+                now_missing
+                    .iter()
+                    .filter(|host| !state.uninstalled_hosts.contains_key(**host))
+                    .map(|host| Event::HostNotInstalled {
+                        host: UninstalledHost {
+                            host: (*host).into(),
+                            at_ms: now_ms,
+                            generation: state.generation,
+                        },
+                    }),
+            );
+            Ok(Decision {
+                events,
+                outcome: Outcome::HostsObserved {
+                    not_installed: now_missing.iter().map(|host| (*host).into()).collect(),
+                },
+            })
+        }
         Command::ObserveCheckout {
             workspace_id,
             from_branch,
@@ -4405,6 +5104,63 @@ fn decide_checked(
                 },
             })
         }
+        Command::Recall {
+            workspace_id,
+            query,
+            path,
+            limit,
+        } => Ok(Decision {
+            events: Vec::new(),
+            outcome: Outcome::Recall {
+                recall: recall_notes(state, workspace_id, query, path.as_deref(), *limit)?,
+            },
+        }),
+        Command::StatusLine { root, from_ms } => {
+            if !root.starts_with('/') || root.len() > 4096 {
+                return Err(error(
+                    "invalid_root",
+                    "A status line names an absolute directory of at most 4096 bytes",
+                ));
+            }
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::StatusLine {
+                    line: status_line(state, root, *from_ms, now_ms),
+                },
+            })
+        }
+        Command::RecordRefusal {
+            session_id,
+            kind,
+            paths,
+            peer_session_id,
+        } => {
+            if *kind != RefusalKind::CommitHeld {
+                return Err(error(
+                    "invalid_refusal",
+                    "Only a held commit is reported; the coordinator records the other refusals itself",
+                ));
+            }
+            let session = known_session(state, session_id)?;
+            let paths = normalized_paths(paths)?;
+            if let Some(peer) = peer_session_id {
+                known_session(state, peer)?;
+            }
+            Ok(Decision {
+                events: vec![Event::WriteRefused {
+                    session_id: session_id.clone(),
+                    workspace_id: session.workspace_id.clone(),
+                    kind: *kind,
+                    paths: paths.into_iter().take(REFUSAL_PATHS).collect(),
+                    peer_session_id: peer_session_id.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }],
+                outcome: Outcome::RefusalRecorded {
+                    session_id: session_id.clone(),
+                },
+            })
+        }
         Command::ObserveInterface {
             workspace_id,
             path,
@@ -4432,6 +5188,7 @@ fn decide_checked(
             })
         }
         Command::Events { .. }
+        | Command::Today { .. }
         | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
@@ -4439,6 +5196,7 @@ fn decide_checked(
         | Command::GraphSymbol { .. }
         | Command::GraphReferences { .. }
         | Command::GraphImpact { .. }
+        | Command::GraphBlindSpots { .. }
         | Command::GraphContext { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
@@ -4710,9 +5468,35 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
             change.before.as_ref(),
             change.after.as_ref(),
         ];
+        let counts = match (change.before_count, change.after_count) {
+            (Some(before), Some(after)) => Some((before, after)),
+            (None, None) => None,
+            _ => Some((0, 0)),
+        };
+        // A count change names its counts, in the direction it says, and
+        // carries the signatures that came or went; nothing else has
+        // counts.
+        let shaped = match (change.change.as_str(), counts) {
+            ("removed" | "signature_changed", None) => true,
+            ("definition_added", Some((before, after))) => {
+                before >= 1
+                    && before < after
+                    && after <= MAX_DEFINITION_COUNT
+                    && change.before.is_none()
+                    && change.after.is_some()
+            }
+            ("definition_removed", Some((before, after))) => {
+                after >= 1
+                    && after < before
+                    && before <= MAX_DEFINITION_COUNT
+                    && change.before.is_some()
+                    && change.after.is_none()
+            }
+            _ => false,
+        };
         if change.name.is_empty()
             || change.name.len() > 128
-            || !matches!(change.change.as_str(), "removed" | "signature_changed")
+            || !shaped
             || change.kind.len() > 16
             || texts
                 .into_iter()
@@ -4721,7 +5505,7 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         {
             return Err(error(
                 "invalid_notice",
-                "An interface change has a name, a kind, `removed` or `signature_changed`, and single-line signatures of at most 256 bytes",
+                "An interface change has a name, a kind, `removed`, `signature_changed`, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
             ));
         }
     }
@@ -5557,8 +6341,11 @@ fn brief(
                 branch_ref: peer_git.and_then(|git| git.branch_ref.clone()),
                 liveness,
                 ended: activity.is_some_and(|activity| activity.ended),
+                // A declared intent is the session's own account of its
+                // task: it replaces the line taken from the prompt.
                 summary: activity
                     .filter(|activity| fresh && !activity.ended && !task_known)
+                    .filter(|_| intent.is_none_or(|intent| intent.summary.is_empty()))
                     .and_then(|activity| activity.summary.clone()),
                 intent: intent
                     .filter(|_| !task_known)
@@ -5822,9 +6609,13 @@ fn brief(
             signature.push_str(&recent.path);
             signature.push(',');
         }
-        for text in [&peer.summary, &peer.intent, &peer.branch_ref] {
+        // A peer in this checkout is on this session's own branch, learned
+        // by the Git observer on its own thread, perhaps only after a
+        // briefing: not news. A change of that branch is a checkout change.
+        let branch = (!peer.same_workspace).then_some(&peer.branch_ref);
+        for text in [Some(&peer.summary), Some(&peer.intent), branch] {
             signature.push('|');
-            signature.push_str(text.as_deref().unwrap_or(""));
+            signature.push_str(text.and_then(Option::as_deref).unwrap_or(""));
         }
         // Only when present, so a briefing without one keeps the signature
         // it had before prompt targets existed and is not delivered again.
@@ -5937,6 +6728,33 @@ fn validate_check_report(
     Ok(())
 }
 
+/// A write was recorded in the workspace: its write generation moves on, so
+/// no check result is compared with one from before it to learn which tests
+/// flip.
+fn wrote_in(state: &mut State, workspace_id: &str) {
+    let writes = state.writes.entry(workspace_id.to_owned()).or_default();
+    *writes = writes.saturating_add(1);
+}
+
+fn validate_forget_flaky(name: Option<&str>, test: &str) -> Result<(), CoreError> {
+    if let Some(name) = name {
+        validate_id(name, "check name")?;
+    }
+    if test.is_empty()
+        || test.len() > MAX_TEST_NAME_BYTES
+        || test.trim() != test
+        || test.chars().any(char::is_control)
+    {
+        return Err(error(
+            "invalid_test_name",
+            &format!(
+                "A test name is 1 to {MAX_TEST_NAME_BYTES} bytes on one line without surrounding spaces"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_prompt_summary(summary: &str) -> Result<(), CoreError> {
     if summary.is_empty()
         || summary.len() > MAX_PROMPT_SUMMARY_BYTES
@@ -5950,6 +6768,68 @@ fn validate_prompt_summary(summary: &str) -> Result<(), CoreError> {
         ));
     }
     Ok(())
+}
+
+fn validate_line_digests(digests: &[String]) -> Result<(), CoreError> {
+    if digests.len() > MAX_PROMPT_LINES
+        || digests.iter().any(|digest| {
+            digest.is_empty()
+                || digest.len() > MAX_PROMPT_LINE_DIGEST
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err(error(
+            "invalid_line_digests",
+            &format!(
+                "Prompt line digests are at most {MAX_PROMPT_LINES} lower-case hex strings of 1 to {MAX_PROMPT_LINE_DIGEST} characters"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// How many leading lines of `digests` the latest prompt of another live
+/// session in `session_id`'s checkout or repository begins with, at most:
+/// a session registered in this generation, not ended and not known to have
+/// exited. Zero when the session is unknown or nobody shares a line.
+fn shared_prompt_lines(state: &State, session_id: &str, digests: &[String]) -> u32 {
+    let Some(me) = state.sessions.get(session_id) else {
+        return 0;
+    };
+    let repository = |workspace_id: &str| {
+        state
+            .workspace_git
+            .get(workspace_id)
+            .map(|git| git.repository_id.as_str())
+    };
+    let mine = repository(&me.workspace_id);
+    state
+        .sessions
+        .values()
+        .filter(|peer| peer.session_id != session_id && peer.generation == state.generation)
+        .filter(|peer| {
+            peer.workspace_id == me.workspace_id
+                || (mine.is_some() && repository(&peer.workspace_id) == mine)
+        })
+        .filter(|peer| {
+            state
+                .session_liveness
+                .get(&peer.session_id)
+                .is_none_or(|liveness| liveness.status != LivenessStatus::Exited)
+        })
+        .filter_map(|peer| state.activity.get(&peer.session_id))
+        .filter(|activity| activity.generation == state.generation && !activity.ended)
+        .map(|activity| {
+            digests
+                .iter()
+                .zip(&activity.line_digests)
+                .take_while(|(mine, theirs)| mine == theirs)
+                .count()
+        })
+        .max()
+        .unwrap_or(0) as u32
 }
 
 fn validate_workspace_git(state: &State, git: &WorkspaceGit) -> Result<(), CoreError> {
@@ -6276,6 +7156,8 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 ));
             }
             state.generation = *generation;
+            // The new generation's anchor, if any, is the next event.
+            state.clock_anchor = None;
             for lease in state.leases.values_mut() {
                 if lease.status == LeaseStatus::Active {
                     lease.status = LeaseStatus::Invalidated;
@@ -6297,6 +7179,39 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             // nor is one that was waiting.
             state.turns.clear();
             state.turn_queues.clear();
+        }
+        Event::ClockAnchored { anchor } => {
+            if anchor.generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A clock anchor names the generation that is starting",
+                ));
+            }
+            state.clock_anchor = Some(*anchor);
+        }
+        Event::WriteRefused {
+            session_id,
+            workspace_id,
+            paths,
+            peer_session_id,
+            at_ms,
+            generation,
+            ..
+        } => {
+            known_session(state, session_id)?;
+            validate_known_workspace(state, workspace_id)?;
+            normalized_paths(paths)?;
+            if paths.len() > REFUSAL_PATHS
+                || peer_session_id
+                    .as_ref()
+                    .is_some_and(|peer| peer.len() > 200)
+            {
+                return Err(error(
+                    "invalid_event",
+                    "A refusal keeps at most 8 paths and one peer session ID",
+                ));
+            }
+            status_line::remember(state, workspace_id, *at_ms, *generation);
         }
         Event::WorkspaceRegistered { workspace } => {
             validate_workspace(state, workspace)?;
@@ -6406,6 +7321,9 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             // same-session holders differently; preserve those historical
             // decisions rather than rejecting an existing event log.
             if observation.result == ToolResult::Succeeded {
+                if !observation.paths.is_empty() {
+                    wrote_in(state, &observation.workspace_id);
+                }
                 let activity = activity_mut(state, &observation.session_id);
                 activity.wrote_since_boundary |= !observation.paths.is_empty();
                 // The file is no longer the version the session knew. Until
@@ -6437,11 +7355,13 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::SessionPrompted {
             session_id,
             summary,
+            line_digests,
             at_ms,
             generation,
         } => {
             current_session(state, session_id)?;
             validate_prompt_summary(summary)?;
+            validate_line_digests(line_digests)?;
             if *generation != state.generation {
                 return Err(error(
                     "invalid_event",
@@ -6450,6 +7370,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             }
             let activity = activity_mut(state, session_id);
             activity.summary = Some(summary.clone());
+            activity.line_digests = line_digests.clone();
             activity.last_ms = activity.last_ms.max(*at_ms);
         }
         Event::PromptTargetsSet {
@@ -6720,6 +7641,23 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 }
             }
         }
+        Event::HostNotInstalled { host } => {
+            validate_host_name(&host.host)?;
+            if !state.uninstalled_hosts.contains_key(&host.host)
+                && state.uninstalled_hosts.len() >= MAX_HOSTS
+            {
+                return Err(error(
+                    "invalid_hosts",
+                    &format!("at most {MAX_HOSTS} hosts are held as not installed"),
+                ));
+            }
+            state
+                .uninstalled_hosts
+                .insert(host.host.clone(), host.clone());
+        }
+        Event::HostCleared { host } => {
+            state.uninstalled_hosts.remove(host);
+        }
         Event::CheckoutChanged { change } => {
             validate_checkout(state, change)?;
             let changes = state
@@ -6810,6 +7748,81 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 if notices.is_empty() {
                     state.check_notices.remove(session_id);
                 }
+            }
+        }
+        Event::TestsRecorded {
+            workspace_id,
+            check_id,
+            name,
+            tree_oid,
+            command,
+            command_id,
+            results,
+            rerun,
+            at_ms,
+        } => {
+            if !flaky::is_command_id(command_id) {
+                return Err(error(
+                    "invalid_event",
+                    "Test results name their command's identity",
+                ));
+            }
+            let Some(record) = state
+                .checks
+                .get(workspace_id)
+                .and_then(|records| records.iter().find(|record| record.check_id == *check_id))
+            else {
+                return Err(error(
+                    "invalid_event",
+                    "Test results follow the record they belong to",
+                ));
+            };
+            if record.name != *name
+                || record.tree_oid != *tree_oid
+                || record.command != *command
+                || !record.inputs.is_empty()
+            {
+                return Err(error(
+                    "invalid_event",
+                    "Test results must match the working-tree record they belong to",
+                ));
+            }
+            let passed = match (&record.result, rerun) {
+                (_, true) => results.all_passed,
+                (CheckResult::Passed {}, false) => true,
+                (CheckResult::Failed { .. }, false) => false,
+                (CheckResult::Inconclusive {}, _) => {
+                    return Err(error(
+                        "invalid_event",
+                        "An inconclusive record has no test results",
+                    ));
+                }
+            };
+            flaky::validate_test_results(results, passed)?;
+            // Recorded only when no write came during the run: the write
+            // generation now is the one the run took.
+            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
+            state
+                .test_learning
+                .entry(workspace_id.clone())
+                .or_default()
+                .learn(name, tree_oid, command_id, writes, results, *at_ms);
+        }
+        Event::FlakyTestForgotten {
+            workspace_id,
+            name,
+            test,
+        } => {
+            validate_forget_flaky(name.as_deref(), test)?;
+            let Some(learning) = state.test_learning.get_mut(workspace_id) else {
+                return Err(error(
+                    "invalid_event",
+                    "Nothing was learned about tests in this workspace",
+                ));
+            };
+            learning.forget(name.as_deref(), test);
+            if learning.is_empty() {
+                state.test_learning.remove(workspace_id);
             }
         }
         Event::Landed { landing } => {
@@ -6999,12 +8012,14 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             validate_disk_observation(state, observation)?;
             // A first baseline is not a change. Anything else means the
             // working tree a check ran on is no longer the working tree.
-            if observation
+            let changed = observation
                 .before
                 .as_ref()
-                .is_some_and(|before| before != &observation.after)
-                && let Some(records) = state.checks.get_mut(&observation.workspace_id)
-            {
+                .is_some_and(|before| before != &observation.after);
+            if changed {
+                wrote_in(state, &observation.workspace_id);
+            }
+            if changed && let Some(records) = state.checks.get_mut(&observation.workspace_id) {
                 for record in records.iter_mut().filter(|record| record.inputs.is_empty()) {
                     record.changed_since = true;
                 }
@@ -7534,6 +8549,23 @@ fn validate_branch_observation(
                 "Observed Git object IDs must contain 40 or 64 hexadecimal characters",
             ));
         }
+    }
+    Ok(())
+}
+
+/// A host's command-line name: lower-case letters and hyphens, as the
+/// adapters name them (`claude-code`, `gemini-cli`).
+fn validate_host_name(host: &str) -> Result<(), CoreError> {
+    if host.is_empty()
+        || host.len() > 32
+        || !host
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+    {
+        return Err(error(
+            "invalid_hosts",
+            "a host name is 1 to 32 lower-case letters and hyphens",
+        ));
     }
     Ok(())
 }

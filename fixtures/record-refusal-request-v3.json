@@ -1,0 +1,1 @@
+{"version":3,"request_id":"lsh1-refusal-00000000000000000000000000000000","command":{"op":"record_refusal","session_id":"claude-code.alice","kind":"commit_held","paths":["src/api.rs"],"peer_session_id":"codex.bob"}}

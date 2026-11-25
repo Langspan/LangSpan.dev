@@ -32,7 +32,14 @@ against the file as it was just before the write:
 - a `Bash` command: the version its pre-tool snapshot recorded (its content
   kept at that moment when it was not kept already, at most 4 MiB per
   command), or, for a file Git did not list, its `HEAD` content. Contested
-  files (ADR 0011) are not journaled.
+  files (ADR 0011) are not journaled, except for the lines of one that the
+  command only reformatted (issues #124 and #141): a partial entry per
+  session whose lines were reformatted keeps just those lines, under that
+  session, and its version is not taken as the session's for a file
+  attributed whole. A shell write is not journaled twice for one session:
+  an entry with the same resulting version and the same lines as one written
+  since the command started, which a second overlapping run that saw the
+  same change would write, is skipped.
 
 When the "before" is not known exactly, or a write changes more than 8,192
 lines on one side, the entry says the session changed the file in lines that
@@ -55,6 +62,38 @@ added it (or, for a removed line, removed it); a session's subagents (IDs
 - not known otherwise: part this session's and part another's or nobody's,
   each line also another's, or a nobody's hunk in a file this session changed
   in unknown lines.
+
+**A hunk split between sessions (issue #106).** Git joins changes on adjacent
+lines into one hunk, so two sessions adding entries one below the other to a
+list made one hunk, part each one's, and neither could commit. Before
+attribution, a hunk whose every line some session wrote, and that holds both
+this session's lines and other sessions' lines, is split where they meet, as
+`git add -p` lets a person split a hunk, and each piece is attributed as a
+hunk. A zero-context hunk lists all its removed lines before all its added
+ones, so where an added line goes among the other session's removed lines is
+not in the diff. A piece takes a whole run of one side's removed lines, a
+whole run of the same side's added lines, or both; pieces alternate between
+the sides. Of every order of pieces the hunk allows, LangSpan takes those
+where the most pieces both remove and add (an added run takes the place of a
+removed run of its side), searching them all. The hunk is split only when
+exactly one order is likeliest. Otherwise it is not known, with the reason
+that the sessions' lines could be in more than one order: for example, when
+one session changed "A B C" to "B X" and the other then removed B, X could
+have taken A's place or C's, so it could go above B or below it, and a split
+that guessed would commit X on the wrong side of the other session's
+uncommitted B. The same holds when one session removed a line where the
+other added its own, or when an added run of one side could take the place
+of its side's one removed run from either side of the other's lines. The
+search's table is bounded (65,536 pairs of removed and added runs); a hunk
+past it is not split. The hunk is also not split, and is not known with the
+reason that one session's line replaced another's, when the journal shows a
+line one of them added that the other removed: the replaced line is no
+longer in the diff, and the replacing line makes sense only on top of it. Lines are known by text, not place, so that last check
+holds for the whole file, and a common line (a blank line, a lone brace) one
+session added and the other removed elsewhere keeps the file's mixed hunks
+unsplit; that errs toward refusing. A hunk with a line no session wrote is not
+split: it stays not known, with the reason it had before. A file that can be
+committed only whole (new, removed, binary) is not split either.
 
 A file that cannot be told apart by line (binary, over 512 KiB, a mode change,
 or one this session changed in a write whose lines are not known) is
@@ -137,6 +176,21 @@ untracked files); the hook detail says which.
    whole text file is the full patch; a binary, mode-only or untracked file
    of its own is added with `git update-index`). A new or removed file that
    also holds others' changes is refused: it can only be committed whole.
+   Chosen pieces of a split hunk that touch are made one hunk of the patch.
+   Before the patch is applied, LangSpan checks each split hunk's pieces
+   again, from the pieces themselves: the session takes every piece of its
+   side and none of the other's, and the pieces are the one likeliest order
+   of the two sides' lines. A patch that would move this session's lines
+   across another session's uncommitted lines is never staged, even if it
+   would apply. It then applies each file's hunks itself to
+   the version in that index, each where its header says and byte for byte,
+   with none of the searching for an offset `git apply` may do; after, the
+   index must hold exactly that result. So the version committed is the
+   index's with exactly this session's changes, each in its one place. If a
+   check fails, nothing is committed, and the error names the file and says
+   the patch does not keep this session's lines in place among another
+   session's, or does not apply exactly. The same checks guard step 7 on the
+   shared index.
 5. Commit atomically, with plumbing, keeping the owner's hooks. The hooks
    run as `git commit -m` runs them, with `GIT_INDEX_FILE` naming the private
    index: `pre-commit`, `prepare-commit-msg FILE message`, `commit-msg FILE`;
@@ -239,7 +293,16 @@ Claude Code run calling it before `commit --mine` is still to be retained.
   journaled. Entries are capped per workspace, not per session.
 - Line ownership is by content. Two sessions adding the same line to one file
   make it each one's; a hunk made only of such lines is not known and is
-  refused. A moved line is neither added nor removed by its write, so a hunk
+  refused. Inside a hunk that holds one session's lines and another's, such
+  a line (a blank line, a closing brace) goes with the lines on either side
+  of it in its list when they are one session's, or with the only side next
+  to it at the hunk's edge; between the two sides, or alone, it stays this
+  session's as before. It goes with another session's lines only while this
+  session's journaled writes still account for each copy of that line left
+  in the file's diff, so a session's own only copy is never left behind
+  (issue #141). Tests: `lines_both_sessions_wrote_go_with_the_hunk_around_them`
+  and `a_line_both_wrote_stays_this_sessions_when_its_only_copy_is_by_the_others`
+  in `tests/commit_guard.rs`. A moved line is neither added nor removed by its write, so a hunk
   that moves lines is nobody's or not known.
 - Changes made by anything other than a reported edit or an observed shell
   command (the owner's editor, a background job after its call returned)

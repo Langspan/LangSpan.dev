@@ -20,9 +20,10 @@ such numbers to be measured.
 
 | Row | Capability | Decision | Reason |
 | --- | --- | --- | --- |
-| H2 | Status line: agents here, catches today | Not now | The launch is about coordination between agents; `status` and the local page cover the owner |
-| H3 | Desktop pings and a sound | Not now | Needs OS integration outside the state directory |
-| H4, C10 | A daily summary and a "since you left" briefing | Not now | Can be derived from events later; briefings already carry current peer work |
+| H2 | Status line: agents here, catches today | Built (amended below) | First not now: the launch is about coordination between agents; `status` and the local page cover the owner |
+| H3 | Desktop pings and a sound | Built 25 November 2026 ([issue #77](https://github.com/Langspan/LangSpan.dev/issues/77)): `langspan notify on\|off\|status [--sound on\|off]`; see "Desktop notices (H3)" below. Not yet run on a macOS or Linux desktop | First not now: needs OS integration outside the state directory |
+| H4 | A daily summary | Built 25 November 2026 ([issue #78](https://github.com/Langspan/LangSpan.dev/issues/78)): `langspan today` and MCP `langspan_today`; see "Daily summary (H4)" below. Not yet run on a host over a working day | |
+| C10 | A "since you left" briefing | Not now | Can be derived from events later; briefings already carry current peer work |
 | H5 | Monthly catch counter | Not now | A count of refusals is not evidence of rework avoided |
 | H6 | Daily "tokens saved" line | Not now | No such number is shown until it is measured |
 | E3 | Recap with tokens, model and cost | Not now | Depends on J10 |
@@ -41,10 +42,157 @@ end of a turn, which releases that reply's open admissions as Stop does, and
 only its `error` type is kept. Detecting quota or usage from it is J11 and
 stays Not now.
 
+**Desktop notices (H3), built 25 November 2026.** The daemon shows a
+desktop notice for facts it already records, so no host integration is
+needed and every host is covered:
+
+- *Kinds.* `refusal` (each `write_refused` event, H2), `check_failed` (an
+  automatic check's `check_reported` with a failed result, ADR 0030; a check
+  recorded by hand has no report and raises none) and `handoff_waiting` (a
+  handoff no session has acknowledged for `notify_handoff_after_ms`, 10
+  minutes by default, told once). The store keeps the committed events of
+  the first two kinds for the daemon's owner thread, which turns them into
+  notices after they are durable; a request answered from its receipt
+  commits nothing and raises nothing, and history replayed at start raises
+  nothing. Handoffs carry no time of their own, so the daemon times each
+  from when this run first saw it waiting: one waiting when the daemon
+  starts is told 10 minutes after the start.
+- *Text.* Title `LangSpan`; the body names the workspace's directory, the
+  session (host and the first eight characters of its ID), the peer where
+  the refusal names one and at most three paths (each cut to its last 48
+  bytes) with a count of the rest. Control characters are replaced, and the
+  body is cut to 200 bytes at a character boundary. It never holds a
+  prompt, a message's text, a check's output or file content.
+- *Delivery.* `osascript` on macOS, `notify-send` elsewhere, the first
+  regular executable of that name in an absolute directory of the daemon's
+  `PATH`, found at each notice. Title and body are arguments, never spliced
+  into a script (`on run argv` for AppleScript; `--` before them for
+  `notify-send`), and the title comes first so a body starting with `-` is
+  not an option. A sound is an argument of the same call (`sound name` or a
+  `sound-name` hint); no other command is run for it. Each runs in its own
+  process group with null stdio on a dedicated thread fed by a queue of 16;
+  the group is killed at 2 seconds. A full queue drops the notice.
+- *Limits.* At most one notice of a kind per `notify_kind_interval_ms`
+  (5 minutes) and `notify_hourly_limit` (10) in any hour; a dropped notice
+  does not restart the interval. The daemon's log records each notice as
+  `notice_sent` or `notice_dropped` with kind and reason; a notifier that is
+  missing, fails or times out is logged once per daemon run for each of
+  the three. No event is added.
+- *Configuration.* `notify` and `notify_sound` in the owner-only
+  `config.json`, both off by default. `langspan notify on|off` rewrites the
+  file whole (a temporary owner-only file, then a rename), keeping other
+  keys, and refuses a file others can read. The notifier thread reads the
+  file again at each notice, so switching needs no restart; an unreadable
+  file counts as off and is logged once per change. A daemon of an older
+  build refuses to start with these keys in its configuration, as for any
+  key it does not know.
+
+Tests: `src/notify.rs` (limits on an injected clock, body length, path
+and session shortening, notifier arguments) and `tests/notify.rs` (a real
+daemon and hook executables with a stand-in notifier first on the daemon's
+`PATH` that records its arguments: none started with notices off, exactly
+one per refusal and the second dropped, a sound only when switched on, a
+hung notifier killed while the daemon answers, a failed automatic check
+and a waiting handoff, `notify status` with and without a notifier). A
+notice shown on a real macOS or Linux desktop after a Claude Code refusal is
+still to be retained.
+
+**Daily summary (H4), built 25 November 2026.** `langspan today [WORKSPACE]
+[--since RFC3339] [--json]` and the read-only MCP tool `langspan_today`
+summarise a window (local midnight to now by default) from the event log:
+each session's first and last activity, distinct files its successful edits
+named and its prompts; refusals by kind; check results; how each landing's
+last attempt ended; and, from current state, admissions held, intents not
+ended, messages not acknowledged, handoffs not taken up and checks whose
+newest result failed. It is a read: no event, no receipt, no
+acknowledgement. Three choices were needed:
+
+- *Placing events on a day.* Event times are on the daemon's monotonic clock,
+  which restarts at a reboot, and several events carry no time. Each daemon
+  start records `clock_anchored` (generation, its clock, the wall clock)
+  after `booted`, as for the status line, so a time of that generation maps
+  to wall time. An event
+  without its own time takes the time of the event before it in its
+  generation; a landing's `turn_released` therefore takes the time its
+  `turn_taken` recorded, even when it lands on check evidence from an earlier
+  day. Generations started by an earlier build have no anchor; their
+  events are counted as `undated` and in nothing else. A wall-clock change
+  while the daemon runs shifts that run's placement by the change.
+- *Counting refusals.* Refusals are the status line's `write_refused` events
+  (H2, above), counted by kind in the window: `conflict`, `stale_base`,
+  `unread_lines` and, as the hook reports a held commit, `commit_held`. Each
+  is committed with its refusal's receipt, so a retry of the same request is
+  not counted twice.
+- *Bounds.* One answer reads at most the newest 50,000 events and says
+  `truncated` when the window may reach past them: the first event read
+  that carries its own time (or an anchor) bounds the ones left out, since an
+  event without one only inherits an older time. The anchor of the oldest
+  event read is found through a partial index of `booted` and
+  `clock_anchored` rows (`events_generation_marker`, created when a store
+  opens), so its cost does not grow with the generation's history: behind
+  100,000 events of one generation it fell from 17.2 ms to 25 µs (one run,
+  debug build, arm64 macOS); building the index added about 40 ms to
+  the first open of that store. The text is at most 40
+  lines and eight files per session; the MCP text, labelled as data, at most
+  2,400 bytes, as a briefing. Local midnight is found by `local_day` from the
+  zone's offsets near that date's 00:00, read from `date` (2 s deadline), so
+  a day the clocks change starts at its own midnight; times are shown at the
+  offset now for the whole window.
+
+The two event kinds are read by this build only: an older build that opens a
+store holding them stops at the first, as for any event kind it does not know
+([ADR 0015](0015-version-tolerance.md)). Tests: `crates/langspan-core/tests/today.rs`
+(injected clocks across a simulated midnight, a restart without an anchor and
+a reboot), `tests/today.rs` (real daemon, Git, hooks and MCP adapter).
+
+**Status line (row H2), amended 25 November 2026.** H2 is built
+([issue #76](https://github.com/Langspan/LangSpan.dev/issues/76)), for Claude
+Code only, the one launch host with a status-line command:
+
+- `langspan statusline [--root DIR] [--json] [--deadline-ms N]` prints
+  `langspan · 3 sessions here · 1 refusal today`. Sessions here are the
+  conversations (not host subagents) of the asked directory's repository,
+  linked worktrees included, of the current generation, not ended or known to
+  have exited, and active within `BRIEF_HORIZON_MS`. It is a read
+  (`status_line`): no receipt, no event, answered from memory.
+- Every refusal appends one `write_refused` event (session, workspace, kind
+  `conflict`, `stale_base`, `unread_lines` or `commit_held`, at most 8 paths,
+  the peer it names, time and generation). The core records the first three
+  with the refusal's receipt, so a retried request adds none; a manual
+  `admit` refused is not a write and records none. A held commit is decided
+  by the hook, which reports it with `record_refusal` under a request ID made
+  from the hold's fingerprint; the core accepts only that kind there. H4, H5,
+  H8 and H9 can read the same event.
+- "Today" starts at local midnight. Event times are on the daemon's
+  monotonic clock, so each daemon start appends `clock_anchored` (that clock
+  with the wall clock); a refusal is placed in wall time by its generation's
+  anchor as it is applied, and a refusal of an unanchored generation (older
+  history) is never counted. The CLI finds local midnight with the system's
+  time-zone rules for that date, asking `date` for the offset at the
+  instants around midnight (so a daylight-saving day starts at its own
+  00:00, not an hour off), falling back to UTC. At most 1024 refusals from
+  the last 48 hours are kept in memory for the count; they are derived from the events on replay.
+- Failure mode: one socket call within 200 ms (100 to 5000); when the
+  coordinator is down or slow it prints `langspan · coordinator not running`
+  and exits 0. It never starts the coordinator, uses no network and writes
+  nothing. The line shows counts only, never paths, and nothing reaches the
+  model.
+- `langspan install --statusline on` sets `statusLine` in
+  `~/.claude/settings.json` only when none is set, with a marked command, and
+  says so in the dry run when one is; `--statusline off` and
+  `uninstall --apply` remove only LangSpan's.
+
+H4 (below) reads the same `write_refused` and `clock_anchored` events, with
+one definition of each. A real Claude Code session showing the line
+change after a refusal is still to be retained; the status-line input used by
+the tests is constructed from Claude Code's documentation
+(`fixtures/claude-code-statusline-constructed.json`).
+
 ## Consequences
 
 - At launch the owner sees coordination through `status`, `recap`, `doctor`
-  and `langspan dashboard`, and no usage or savings figure.
+  and `langspan dashboard`, and no usage or savings figure. Claude Code users
+  can add the status line (H2), which counts refusals but claims no saving.
 - Adding transcript reading later needs its own ADR and an update to the
   [threat model](../security/threat-model.md).
 

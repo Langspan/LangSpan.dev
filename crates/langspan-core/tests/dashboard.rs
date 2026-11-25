@@ -91,6 +91,7 @@ fn every_local_and_remote_session_is_listed_with_current_work_first() {
         Command::SessionPrompt {
             session_id: alice.into(),
             summary: "Add retry to the upload client".into(),
+            line_digests: Vec::new(),
         },
         1_000,
     );
@@ -239,6 +240,10 @@ fn evidence_and_risks_are_carried_with_their_applicability() {
             result: CheckResult::Failed { exit_code: 101 },
             duration_ms: 50,
             report: None,
+            tests: None,
+            rerun: None,
+            writes_before: None,
+            command_id: None,
         },
         100,
     );
@@ -277,6 +282,8 @@ fn evidence_and_risks_are_carried_with_their_applicability() {
                 after: Some("pub fn upload(retries: u8)".into()),
                 before_arity: None,
                 after_arity: None,
+                before_count: None,
+                after_count: None,
             }],
             dependents: vec!["src/main.rs".into()],
         },

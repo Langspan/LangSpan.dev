@@ -1,5 +1,6 @@
 use langspan::{
     client,
+    hosts::UserHome,
     protocol::{PROTOCOL_VERSION, Request, Response},
 };
 use langspan_core::{Command, LeaseStatus, Outcome};
@@ -52,6 +53,9 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Claude Code and Codex Stop), on the exact working tree,
                                  records it as check NAME and tells that session the
                                  result at its next briefing. Without options: show it
+  check flaky WORKSPACE [--name NAME] | --forget TEST [--name NAME] --request-id ID
+                                 Tests that flipped on unchanged code (two results on
+                                 one tree, no write between); --forget clears one
   integrate check WORKSPACE --onto BRANCH --name NAME BRANCH... -- COMMAND...
                                  Combine branches onto the remote's BRANCH without
                                  touching your checkout, run the command on that exact
@@ -79,14 +83,30 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  by name, notes on its file and last check
   graph references WORKSPACE NAME  Where a name is mentioned
   graph impact WORKSPACE PATH    What a file exports and which files mention those names.
+                                 [--depth N]: 1 to 3 levels, each the files that
+                                 mention an export of the level before
                                  All three match by name and report index coverage
-  recap WORKSPACE                A bounded account of one workspace: sessions, recent
+  graph blind-spots WORKSPACE [--limit N]
+                                 Files the index cannot answer for: partial, never
+                                 parsed cleanly, waiting, too large, left out of the
+                                 scan, and other languages by extension
+  recap WORKSPACE               A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
                                  messages not yet acknowledged
+  today [WORKSPACE] [--since RFC3339]
+                                 What each session did since local midnight (or the
+                                 time given), refusals by kind, checks, landings, and
+                                 what is still open. Reads only; acknowledges nothing
   remember WORKSPACE TEXT [PATH...] [--session ID]
                                  Keep a one-line note for the repository or for files;
                                  sessions working there are told. Survives restarts
   forget WORKSPACE NOTE          Remove a note
+  recall WORKSPACE QUERY [--path PATH] [--limit N]
+                                 Find held notes holding every word of QUERY (1 to 200
+                                 bytes, at most 8 words) in their text or paths, without
+                                 case; with --path, only notes about PATH or the whole
+                                 workspace. Best first, --limit 1 to 50 (default 10).
+                                 Reads only; no briefing changes
   commit --mine -m MESSAGE [--session ID] [--root DIR]
                                  Commit only this session's own uncommitted changes in
                                  a checkout other sessions share: whole files that are
@@ -113,6 +133,11 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  index, publication, the hooks installed in DIR, and
                                  the user-level install under the home, each with
                                  whether the LangSpan skill is installed and current
+  hosts [--home DIR]             List each agent host LangSpan knows (Claude Code,
+                                 Codex, Cursor, Gemini CLI): whether its configuration
+                                 directory exists, its user-level install (none,
+                                 current, outdated, other_state_dir, unknown) and the
+                                 command that installs it. Reads only
   status                         Show workspaces, live or recent sessions, intents and
                                  open admissions; closed ones are counted per session
   status --mine [--session ID] [--root DIR]
@@ -122,6 +147,22 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  session's, no session's or not known; at most 200
                                  files. What commit --mine would commit and refuse;
                                  changes nothing. Session found as for commit --mine
+  notify on|off|status [--sound on|off]
+                                 Desktop notices for the person (off by default): a
+                                 refusal, a failed automatic check, a handoff not taken
+                                 up for 10 minutes. Shown by osascript (macOS) or
+                                 notify-send, at most one of a kind per 5 minutes and
+                                 10 an hour; workspace, session and paths only, at most
+                                 200 bytes. Sound off unless --sound on. Kept as notify
+                                 and notify_sound in config.json; status names the
+                                 notifier found on this PATH, or says none was
+  statusline [--root DIR] [--deadline-ms N]
+                                 One line for the person: current sessions of this
+                                 repository and refusals since local midnight, as
+                                 Claude Code's statusLine (directory from its input
+                                 on stdin) or a shell prompt (--root). Never starts
+                                 the coordinator; within 200 ms (100-5000) or it
+                                 prints "coordinator not running" and exits 0
   status --all [--after CURSOR]  Read every record, history included, one page at a
                                  time; pass the page's `next` as --after for the next
   events [--after SEQ] [--limit N] Read ordered events (default limit 100; maximum 1000)
@@ -164,7 +205,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  the project rule .cursor/rules/langspan.mdc, which
                                  hooks remove cursor removes
   install [--home DIR] [--hosts claude-code,codex,cursor,gemini-cli] [--prompt-summary off]
-          [--skill] [--apply]
+          [--skill] [--statusline on|off] [--apply]
                                  Install the hooks once for every repository, in each
                                  host's user configuration, and register `langspan mcp`
                                  as the MCP server `langspan`. Hosts default to those
@@ -175,7 +216,9 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  the LangSpan skill, which teaches an agent how to work
                                  with LangSpan: Claude Code skills/langspan/SKILL.md, a
                                  marked section of Codex's AGENTS.md and of Gemini
-                                 CLI's GEMINI.md
+                                 CLI's GEMINI.md. --statusline on sets Claude Code's
+                                 statusLine to `langspan statusline` where none is
+                                 set (never replacing one); off removes LangSpan's
   uninstall [--home DIR] [--hosts ...] [--apply]
                                  Remove only what install wrote, the skill included;
                                  the state directory stays
@@ -513,56 +556,48 @@ fn hooks(
     Ok(0)
 }
 
-/// The home a user-level install targets. An explicit `--home` ignores the
-/// environment entirely (HOME, CLAUDE_CONFIG_DIR, CODEX_HOME,
-/// LANGSPAN_STATE_DIR, XDG_STATE_HOME), so a run against a test or a spare
-/// home can never reach the real one.
-struct UserHome {
-    home: PathBuf,
-    explicit: bool,
-}
-
-impl UserHome {
-    fn new(option: Option<PathBuf>) -> Result<Self, langspan::Error> {
-        let explicit = option.is_some();
-        let home = option
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .ok_or("choose --home; HOME is not set")?;
-        Ok(Self {
-            home: std::path::absolute(home)?,
-            explicit,
-        })
+/// `hosts`: each known host, whether its configuration directory exists and
+/// what LangSpan install it has. Reads only.
+fn hosts_report(
+    home: &UserHome,
+    state_dir: &std::path::Path,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    let reports = langspan::hosts::report(home, state_dir);
+    if json {
+        println!("{}", serde_json::json!({ "hosts": reports }));
+        return Ok(0);
     }
-
-    fn env(&self, name: &str) -> Option<PathBuf> {
-        (!self.explicit)
-            .then(|| std::env::var_os(name))
-            .flatten()
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    }
-
-    fn files(&self, vendor: langspan::install::Vendor) -> langspan::user_install::HostFiles {
-        let variable = match vendor {
-            langspan::install::Vendor::ClaudeCode => Some("CLAUDE_CONFIG_DIR"),
-            langspan::install::Vendor::Codex => Some("CODEX_HOME"),
-            langspan::install::Vendor::Cursor => None,
-            langspan::install::Vendor::Gemini => Some("GEMINI_CLI_HOME"),
+    for host in &reports {
+        let state = match (host.present, host.user_install) {
+            (None, _) => format!(
+                "unknown: {}",
+                host.error.as_deref().unwrap_or("not readable")
+            ),
+            (Some(false), _) => "not present".to_owned(),
+            (Some(true), langspan::hosts::UserInstall::Unknown) => format!(
+                "present; install unknown: {}",
+                host.error.as_deref().unwrap_or("not readable")
+            ),
+            (Some(true), install) => format!(
+                "present; user-level install: {}",
+                serde_json::to_value(install)?
+                    .as_str()
+                    .unwrap_or_default()
+                    .replace('_', " ")
+            ),
         };
-        langspan::user_install::host_files(
-            vendor,
-            &self.home,
-            variable.and_then(|variable| self.env(variable)),
-        )
+        println!("{} ({}): {state}", host.name, host.config_dir.display());
+        if let Some(next) = &host.next_step {
+            println!("  to install: {next}");
+        } else if host.not_installed() {
+            println!(
+                "  chosen only by name: langspan install --hosts {} --apply",
+                host.name
+            );
+        }
     }
-
-    fn state_dir(&self, option: Option<String>) -> PathBuf {
-        option
-            .map(PathBuf::from)
-            .or_else(|| self.env("LANGSPAN_STATE_DIR"))
-            .or_else(|| self.env("XDG_STATE_HOME").map(|p| p.join("langspan")))
-            .unwrap_or_else(|| self.home.join(".local/state/langspan"))
-    }
+    Ok(0)
 }
 
 enum Planned {
@@ -572,13 +607,15 @@ enum Planned {
     Text(Option<String>, String),
 }
 
-/// A file's path, its plan, the bytes the plan was made from, and how to
-/// make it again from other bytes.
+/// A file's path, its plan, the bytes the plan was made from, how to make
+/// it again from other bytes, and, on uninstall of a file LangSpan may have
+/// created, which planned bytes mean nothing is left so the file is removed.
 type FilePlan<'a> = (
     PathBuf,
     Planned,
     Option<Vec<u8>>,
     Box<langspan::install::Planner<'a>>,
+    Option<Box<langspan::install::LeftEmpty<'a>>>,
 );
 
 /// `install` / `uninstall`: LangSpan's user-level hooks and MCP server entry
@@ -598,6 +635,13 @@ fn user_install(
     if with_skill && !install {
         return Err(
             "--skill is valid only for `install`; `uninstall` always removes LangSpan's skill"
+                .into(),
+        );
+    }
+    let status_line = options.remove("--statusline");
+    if status_line.is_some() && !install {
+        return Err(
+            "--statusline is valid only for `install`; `uninstall` always removes LangSpan's status line"
                 .into(),
         );
     }
@@ -629,6 +673,27 @@ fn user_install(
         .into());
     }
     let executable = hooks::installed_executable(&std::env::current_exe()?)?;
+    // Claude Code's `statusLine` (roadmap H2): only where none is set, and
+    // removed by `uninstall` only where it is LangSpan's.
+    let status_line = match (install, status_line.as_deref()) {
+        (false, _) => user_install::StatusLineChoice::Off,
+        (true, None) => user_install::StatusLineChoice::Unchanged,
+        (true, Some("on")) => user_install::StatusLineChoice::On {
+            executable: executable.clone(),
+            state_dir: state_dir.clone(),
+        },
+        (true, Some("off")) => user_install::StatusLineChoice::Off,
+        (true, Some(other)) => {
+            return Err(format!("--statusline takes on or off, not {other:?}").into());
+        }
+    };
+    if status_line != user_install::StatusLineChoice::Unchanged
+        && install
+        && !vendors.contains(&Vendor::ClaudeCode)
+    {
+        return Err("--statusline is for Claude Code, the one host with a status-line command; add claude-code to --hosts".into());
+    }
+    let status_line = &status_line;
     let registration = install.then(|| hooks::UserRegistration {
         executable: executable.clone(),
         state_dir: state_dir.clone(),
@@ -643,6 +708,13 @@ fn user_install(
     let mut notes: Vec<String> = Vec::new();
     let registration = registration.as_ref();
     let server = server.as_ref();
+    // On uninstall, a file LangSpan may have created is removed when nothing
+    // but LangSpan's entries was in it, rather than left holding `{}`.
+    let emptied = |vendor: Vendor| {
+        (!install).then(|| -> Box<hooks::LeftEmpty> {
+            Box::new(move |bytes: &[u8]| hooks::json_left_empty(vendor, bytes))
+        })
+    };
     for &vendor in &vendors {
         let files = home.files(vendor);
         let original = hooks::read_bytes(&files.hooks)?;
@@ -676,14 +748,26 @@ fn user_install(
                 Planned::Json(existing, planned, Some(shown)),
                 original,
                 Box::new(replan),
+                emptied(vendor),
             ));
             if install {
                 notes.push("Gemini CLI: built from documentation, not yet verified on a real Gemini CLI (ADR 0033). Gemini CLI runs user-level hooks in every folder; it loads a project's own .gemini/settings.json only once the folder is trusted.".into());
             }
             continue;
         }
-        let planned = hooks::plan_user_for(vendor, existing.clone(), registration)
-            .map_err(|e| format!("{}: {e}", files.hooks.display()))?;
+        // Claude Code's status line lives in the same settings file as its
+        // hooks: one plan, one guarded write.
+        let plan_file = move |existing: Option<serde_json::Value>| {
+            let planned = hooks::plan_user_for(vendor, existing, registration)?;
+            if vendor == Vendor::ClaudeCode {
+                user_install::plan_status_line(planned, status_line)
+            } else {
+                Ok((planned, None))
+            }
+        };
+        let (planned, note) =
+            plan_file(existing.clone()).map_err(|e| format!("{}: {e}", files.hooks.display()))?;
+        notes.extend(note);
         let path = files.hooks.clone();
         let replan = move |now: Option<&[u8]>| -> Result<Vec<u8>, langspan::Error> {
             let existing = hooks::parse_json(&path, now)?;
@@ -694,8 +778,8 @@ fn user_install(
                 )
                 .into());
             }
-            let planned = hooks::plan_user_for(vendor, existing, registration)
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+            let (planned, _) =
+                plan_file(existing).map_err(|e| format!("{}: {e}", path.display()))?;
             hooks::json_bytes(&planned)
         };
         plans.push((
@@ -703,6 +787,7 @@ fn user_install(
             Planned::Json(existing, planned, None),
             original,
             Box::new(replan),
+            emptied(vendor),
         ));
         let original = hooks::read_bytes(&files.mcp)?;
         match vendor {
@@ -747,6 +832,8 @@ fn user_install(
                         Planned::Json(Some(existing), planned, Some(shown)),
                         original,
                         Box::new(replan),
+                        // Claude Code's own file: never removed.
+                        None,
                     ));
                 }
             },
@@ -773,6 +860,8 @@ fn user_install(
                     Planned::Json(existing, planned, None),
                     original,
                     Box::new(replan),
+                    // `{"version": 1}` is not Cursor's MCP shape: only `{}`.
+                    emptied(Vendor::ClaudeCode),
                 ));
                 if install {
                     notes.push("Cursor: built from documentation, not yet verified on a real Cursor (ADR 0032). Cursor asks before it first uses an MCP server; approve `langspan` there.".into());
@@ -794,6 +883,9 @@ fn user_install(
                     Planned::Text(existing, planned),
                     original,
                     Box::new(replan),
+                    (!install).then(|| -> Box<hooks::LeftEmpty> {
+                        Box::new(|bytes: &[u8]| bytes.is_empty())
+                    }),
                 ));
                 if install {
                     notes.push("Codex runs a new or changed hook only after you review and trust it with /hooks.".into());
@@ -821,7 +913,16 @@ fn user_install(
         skills.push(langspan::skill::plan_file(vendor, &path, install)?);
     }
     let mut changed = 0;
-    for (path, plan, original, replan) in &plans {
+    for (path, plan, original, replan, empty) in &plans {
+        let planned_bytes = match plan {
+            Planned::Json(_, planned, _) => hooks::json_bytes(planned)?,
+            Planned::Text(_, planned) => planned.clone().into_bytes(),
+        };
+        // A planned removal of a file that is there is a change even when
+        // its content would not change, as with the `{}` an earlier
+        // uninstall left; an absent file stays unchanged.
+        let removed =
+            original.is_some() && empty.as_ref().is_some_and(|empty| empty(&planned_bytes));
         let (unchanged, text) = match plan {
             Planned::Json(existing, planned, shown) => (
                 existing.as_ref() == Some(planned) || (existing.is_none() && !install),
@@ -835,19 +936,25 @@ fn user_install(
                 planned.trim_end().to_owned(),
             ),
         };
-        if unchanged {
+        if unchanged && !removed {
             println!("{} already matches; nothing to change.", path.display());
             continue;
         }
         changed += 1;
         if apply {
             // The plan is made again from the bytes it was shown from, and
-            // written only if the file still holds them.
-            if hooks::write_planned(path, original.as_deref(), &**replan)? {
-                println!("Wrote {}.", path.display());
-            } else {
-                println!("{} already matches; nothing to change.", path.display());
+            // written (or removed) only if the file still holds them.
+            let never = |_: &[u8]| false;
+            let empty = empty.as_deref().unwrap_or(&never);
+            match hooks::write_or_remove_planned(path, original.as_deref(), &**replan, empty)? {
+                hooks::Applied::Written => println!("Wrote {}.", path.display()),
+                hooks::Applied::Removed => println!("Removed {}.", path.display()),
+                hooks::Applied::Unchanged => {
+                    println!("{} already matches; nothing to change.", path.display())
+                }
             }
+        } else if removed {
+            println!("{} would be removed.", path.display());
         } else {
             println!("{} would become:", path.display());
             println!("{text}");
@@ -1033,8 +1140,15 @@ fn evidence(
     if command.is_empty() {
         return Err("give the check command after --, for example: -- cargo test".into());
     }
+    // The workspace's write generation, taken before the tree: a write
+    // recorded while the command runs, even one undone before it ends,
+    // keeps its test results from being compared. Unreadable, nothing is
+    // learned from them.
+    let writes_before = langspan::client::status_from(state_dir, &[])
+        .ok()
+        .map(|(state, _)| state.writes.get(workspace).copied().unwrap_or(0));
     let (head, before) = snapshot(&root)?;
-    let (ran, duration_ms) = integrate::run_command(&root, command, limit)?;
+    let (ran, duration_ms, output) = integrate::run_command_reading(&root, command, limit)?;
     let (_, after) = snapshot(&root)?;
     // A result is about a tree only if the tree held still while it ran.
     let result = match ran {
@@ -1042,6 +1156,17 @@ fn evidence(
         integrate::Ran::Exited(0) => CheckResult::Passed {},
         integrate::Ran::Exited(exit_code) => CheckResult::Failed { exit_code },
         integrate::Ran::Unfinished => CheckResult::Inconclusive {},
+    };
+    // The tests its output named, to learn which flip on unchanged code;
+    // none for a command that looks like it holds a secret, whose identity
+    // (a digest of it) is not sent.
+    let tests = match (&result, &output) {
+        (CheckResult::Inconclusive {}, _) | (_, None) => None,
+        _ if writes_before.is_none() => None,
+        _ if langspan::hook::contains_secret(&command.join(" ")) => None,
+        (result, Some(bytes)) => {
+            langspan::test_output::read(bytes, false, matches!(result, CheckResult::Passed {}), &[])
+        }
     };
     let outcome = ask(
         state_dir,
@@ -1056,6 +1181,12 @@ fn evidence(
             result: result.clone(),
             duration_ms,
             report: None,
+            writes_before: tests.as_ref().and(writes_before),
+            command_id: tests
+                .as_ref()
+                .map(|_| langspan::landing::command_id(command)),
+            tests,
+            rerun: None,
         },
     )?;
     if json {
@@ -1115,6 +1246,87 @@ fn commit_mine(
     Ok(report.exit_code())
 }
 
+/// `statusline`: sessions here and refusals today, for the person (H2).
+/// Exits 0 with the unavailable line when the coordinator cannot answer.
+fn status_line(
+    state_dir: &std::path::Path,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    use langspan::status_line::{DEADLINE_RANGE_MS, DEFAULT_DEADLINE_MS, run};
+    let started = std::time::Instant::now();
+    let root = options.remove("--root").map(PathBuf::from);
+    let deadline_ms = number(options, "--deadline-ms", DEFAULT_DEADLINE_MS)?;
+    no_unused_options(options)?;
+    if !DEADLINE_RANGE_MS.contains(&deadline_ms) {
+        return Err(format!(
+            "--deadline-ms must be between {} and {}",
+            DEADLINE_RANGE_MS.start(),
+            DEADLINE_RANGE_MS.end()
+        )
+        .into());
+    }
+    let answer = run(
+        state_dir,
+        root,
+        std::time::Duration::from_millis(deadline_ms),
+        started,
+    );
+    if json {
+        println!("{}", answer.json());
+    } else {
+        println!("{}", answer.text());
+    }
+    Ok(0)
+}
+
+/// `notify on|off|status [--sound on|off]`: desktop notices (H3). Writes
+/// only `notify` and `notify_sound` in `config.json`; the daemon reads them
+/// at each notice.
+fn notify(
+    state_dir: &std::path::Path,
+    action: &str,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    use langspan::notify;
+    let sound = match options.remove("--sound").as_deref() {
+        None => None,
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        Some(other) => return Err(format!("--sound takes on or off, not {other:?}").into()),
+    };
+    no_unused_options(options)?;
+    let (on, sound) = match (action, sound) {
+        ("on" | "off", sound) => notify::configure(state_dir, action == "on", sound)?,
+        ("status", None) => notify::configured(state_dir)?,
+        ("status", Some(_)) => {
+            return Err("--sound is valid with `notify on` and `notify off`".into());
+        }
+        _ => return Err(format!("notify takes on, off or status, not {action:?}").into()),
+    };
+    let found = notify::find(std::env::var_os("PATH").as_deref());
+    let program = notify::Program::here().name();
+    if json {
+        let notifier = found.as_ref().map(|(program, path)| {
+            serde_json::json!({"name": program.name(), "path": path.to_string_lossy()})
+        });
+        println!(
+            "{}",
+            serde_json::json!({"notify": on, "notify_sound": sound, "notifier": notifier})
+        );
+        return Ok(0);
+    }
+    let word = |on: bool| if on { "on" } else { "off" };
+    println!("notices: {}", word(on));
+    println!("sound: {}", word(sound));
+    match &found {
+        Some((program, path)) => println!("notifier: {} ({})", program.name(), path.display()),
+        None => println!("notifier: none found (no {program} on PATH); no notice can be shown"),
+    }
+    Ok(0)
+}
+
 /// `status --mine`: this session's uncommitted lines, read-only (issue #40).
 fn status_mine(
     state_dir: &std::path::Path,
@@ -1136,6 +1348,80 @@ fn status_mine(
         println!("{}", serde_json::to_string(&status)?);
     } else {
         println!("{}", status.text());
+    }
+    Ok(0)
+}
+
+/// `check flaky`: the tests known to flip on unchanged code, or, with
+/// `--forget`, clear what was learned about one of them.
+fn flaky_tests(
+    state_dir: &std::path::Path,
+    workspace: &str,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    let name = options.remove("--name");
+    let (request_id, command) = match options.remove("--forget") {
+        Some(test) => (
+            options
+                .remove("--request-id")
+                .ok_or("--forget requires --request-id ID; reuse it only for an identical retry")?,
+            Command::ForgetFlakyTest {
+                workspace_id: workspace.into(),
+                name,
+                test,
+            },
+        ),
+        None => (
+            "read".to_owned(),
+            Command::FlakyTests {
+                workspace_id: workspace.into(),
+                name,
+            },
+        ),
+    };
+    no_unused_options(options)?;
+    let outcome = ask(state_dir, request_id, command)?;
+    if json {
+        println!("{}", serde_json::to_string(&outcome)?);
+        return Ok(0);
+    }
+    match outcome {
+        Outcome::FlakyTests { tests, more, .. } => {
+            if tests.is_empty() {
+                println!("No test is known to flip on unchanged code in {workspace}.");
+            }
+            let ago = |ms: u64| match ms / 1000 {
+                seconds @ 0..=89 => format!("{seconds}s"),
+                seconds @ 90..=5399 => format!("{}m", seconds / 60),
+                seconds @ 5400..=172_799 => format!("{}h", seconds / 3600),
+                seconds => format!("{}d", seconds / 86_400),
+            };
+            for test in &tests {
+                // Test names come from the check command's output.
+                println!(
+                    "{}  {:?}  runs {}  flips {}  last flip {} ago",
+                    test.check_name,
+                    test.test,
+                    test.runs,
+                    test.flips,
+                    ago(test.last_flip_age_ms),
+                );
+            }
+            if more {
+                println!("(More are known; use --name NAME to list one check's, or --json.)");
+            }
+        }
+        Outcome::FlakyTestForgotten {
+            test, forgotten, ..
+        } => {
+            if forgotten {
+                println!("Forgot what was learned about {test}; its next failure is not labelled.");
+            } else {
+                println!("Nothing was learned about {test}; nothing changed.");
+            }
+        }
+        other => return Err(format!("unexpected reply: {other:?}").into()),
     }
     Ok(0)
 }
@@ -1198,14 +1484,17 @@ fn auto_check(
         println!("{}", serde_json::to_string(&outcome)?);
         return Ok(0);
     }
-    print_human(&Response {
-        version: PROTOCOL_VERSION,
-        request_id: String::new(),
-        replayed: false,
-        generation: 0,
-        lease_valid: None,
-        outcome,
-    })?;
+    print_human(
+        &Response {
+            version: PROTOCOL_VERSION,
+            request_id: String::new(),
+            replayed: false,
+            generation: 0,
+            lease_valid: None,
+            outcome,
+        },
+        state_dir,
+    )?;
     Ok(0)
 }
 
@@ -1698,6 +1987,131 @@ fn print_combined(
     print_renames(&merged.renames);
 }
 
+/// `graph impact --depth N`: one line per level, paths and names quoted
+/// because they are repository text. An empty level never claims that
+/// nothing is affected.
+fn print_impact_levels(
+    levels: &[langspan_core::ImpactLevel],
+    coverage: &langspan_core::GraphCoverage,
+) {
+    let blind = coverage.blind_in_scope > 0 || coverage.current_files < coverage.indexable_files;
+    for level in levels {
+        let files: Vec<String> = level
+            .files
+            .iter()
+            .map(|file| {
+                if level.level == 1 {
+                    format!("{:?} via {:?}", file.path, file.via)
+                } else {
+                    format!("{:?} via {:?} from {:?}", file.path, file.via, file.from)
+                }
+            })
+            .collect();
+        let heading = match (level.level, level.files.first()) {
+            (1, Some(file)) => format!("Level 1 (mentions an export of {:?})", file.from),
+            (n, _) => format!("Level {n}"),
+        };
+        let found = if files.is_empty() {
+            if blind {
+                "none found by name, but the index is not complete, so this is no claim that none is affected".to_owned()
+            } else {
+                "none found by name".to_owned()
+            }
+        } else {
+            files.join(", ")
+        };
+        println!(
+            "{heading}: {found}{}",
+            if level.truncated {
+                " (cut by a bound; more may exist)"
+            } else {
+                ""
+            }
+        );
+    }
+}
+
+/// `graph blind-spots`: one line per non-empty list, paths quoted, with the
+/// full count in parentheses.
+fn print_blind_spots(
+    spots: &langspan_core::BlindSpots,
+    coverage: &langspan_core::GraphCoverage,
+    failure: Option<&langspan_core::ScanFailure>,
+    truncated: bool,
+) {
+    if let Some(failure) = failure {
+        println!(
+            "The last scan failed ({:?}); this is as of the last complete one.",
+            failure.detail
+        );
+    }
+    if !coverage.scanned {
+        println!("No complete scan of this workspace yet: nothing is known.");
+        return;
+    }
+    let now = langspan::clock::now_ms();
+    let since = |at: u64| {
+        let seconds = now.saturating_sub(at) / 1000;
+        match seconds {
+            0..=89 => format!("{seconds}s"),
+            90..=5399 => format!("{}m", seconds / 60),
+            5400..=129_599 => format!("{}h", seconds / 3600),
+            _ => format!("{}d", seconds / 86_400),
+        }
+    };
+    let line = |label: &str, total: u32, paths: Vec<String>| {
+        if total > 0 {
+            let more = total as usize - paths.len().min(total as usize);
+            let more = if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            };
+            println!("{label} ({total}): {}{more}", paths.join(", "));
+        }
+    };
+    let quoted = |paths: &[String]| paths.iter().map(|path| format!("{path:?}")).collect();
+    let totals = &spots.totals;
+    line(
+        "partial",
+        totals.partial,
+        spots
+            .partial
+            .iter()
+            .map(|file| format!("{:?} (since {})", file.path, since(file.since_ms)))
+            .collect(),
+    );
+    line(
+        "never parsed cleanly",
+        totals.never_clean,
+        quoted(&spots.never_clean),
+    );
+    line("waiting", totals.waiting, quoted(&spots.waiting));
+    line("too large", totals.too_large, quoted(&spots.too_large));
+    line(
+        "left out of the scan",
+        totals.unscanned,
+        quoted(&spots.unscanned),
+    );
+    if !spots.unsupported_languages.is_empty() {
+        println!(
+            "not indexed, other languages: {}",
+            spots
+                .unsupported_languages
+                .iter()
+                .map(|count| format!("{} {}", count.extension, count.files))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if coverage.blind_in_scope == 0 && spots.unsupported_languages.is_empty() {
+        println!("The index reads every supported file at its current content.");
+    }
+    if truncated {
+        println!("More paths exist than the limit allows.");
+    }
+}
+
 /// What the last completed scan did not version, in one paragraph. A
 /// partial scan is always called partial.
 fn coverage_text(coverage: &langspan_core::ScanCoverage) -> String {
@@ -1748,6 +2162,14 @@ fn coverage_text(coverage: &langspan_core::ScanCoverage) -> String {
     format!("{lead} {}.", parts.join("; "))
 }
 
+/// What `doctor` learned from the coordinator about where LangSpan is in use.
+struct InUse {
+    /// Registered workspace roots.
+    roots: Vec<PathBuf>,
+    /// The hosts named by registered sessions' IDs.
+    hosts: std::collections::BTreeSet<String>,
+}
+
 /// Everything that would explain "why is nothing being coordinated": is the
 /// coordinator reachable, are hooks installed and pointing at it, is each
 /// workspace being scanned and indexed, is publication working. Exit 0 only
@@ -1760,6 +2182,8 @@ fn doctor(
 ) -> Result<u8, langspan::Error> {
     let mut findings: Vec<(bool, String)> = Vec::new();
     let mut note = |ok: bool, text: String| findings.push((ok, text));
+    // Registered workspace roots and the hosts whose sessions work in them.
+    let mut in_use: Option<InUse> = None;
     // What doctor judges a workspace by must be complete, even when the
     // bounded view leaves it out to fit a frame.
     match langspan::client::status_from(state_dir, &["workspace_git", "remote_peers"]) {
@@ -1771,6 +2195,18 @@ fn doctor(
             ),
         ),
         Ok((state, _)) => {
+            in_use = Some(InUse {
+                roots: state
+                    .workspaces
+                    .values()
+                    .map(|workspace| PathBuf::from(&workspace.root))
+                    .collect(),
+                hosts: state
+                    .sessions
+                    .keys()
+                    .filter_map(|id| id.split_once('.').map(|(host, _)| host.to_owned()))
+                    .collect(),
+            });
             note(
                 true,
                 format!(
@@ -1851,6 +2287,7 @@ fn doctor(
                         name: "_".into(),
                         limit: 1,
                         detail: false,
+                        blind_in_scope: true,
                     },
                 ) {
                     let behind = coverage.indexable_files - coverage.current_files;
@@ -1867,6 +2304,15 @@ fn doctor(
                             }
                         ),
                     );
+                    if coverage.blind_in_scope > 0 {
+                        note(
+                            false,
+                            format!(
+                                "Workspace {id}: the index cannot read {} supported file(s) in full; `langspan graph blind-spots {id}` names them.",
+                                coverage.blind_in_scope
+                            ),
+                        );
+                    }
                 }
                 if let Some(link) = state.remote_links.get(id) {
                     let heard = state
@@ -1908,29 +2354,30 @@ fn doctor(
         let mut shell_hooks = false;
         for vendor in Vendor::ALL {
             let path = root.join(vendor.project_hook_files()[0]);
-            let (managed, missing): (Vec<String>, Vec<&str>) = match install::read(&path) {
-                Err(error) => {
-                    note(false, format!("{}: {error}", path.display()));
-                    continue;
-                }
-                Ok(None) => (Vec::new(), Vec::new()),
-                Ok(Some(settings)) => {
-                    let ours = |hook: &serde_json::Value| install::is_managed_for(vendor, hook);
-                    (
-                        install::managed_hooks(&settings, ours)
-                            .iter()
-                            .filter_map(|hook| hook["command"].as_str().map(str::to_owned))
-                            .collect(),
-                        install::missing_events(vendor, &settings, ours),
-                    )
-                }
-            };
+            let (managed, missing): (Vec<install::Registration>, Vec<&str>) =
+                match install::read(&path) {
+                    Err(error) => {
+                        note(false, format!("{}: {error}", path.display()));
+                        continue;
+                    }
+                    Ok(None) => (Vec::new(), Vec::new()),
+                    Ok(Some(settings)) => {
+                        let ours = |hook: &serde_json::Value| install::is_managed_for(vendor, hook);
+                        (
+                            install::managed_hooks(&settings, ours)
+                                .iter()
+                                .filter_map(|hook| install::parse_project_hook(vendor, hook))
+                                .collect(),
+                            install::missing_events(vendor, &settings, ours),
+                        )
+                    }
+                };
             // Cursor and Gemini CLI are newer and optional: their absence is
             // not a problem.
             if managed.is_empty() && matches!(vendor, Vendor::Cursor | Vendor::Gemini) {
                 continue;
             }
-            let Some(command) = managed.first() else {
+            let Some(first) = managed.first() else {
                 note(
                     false,
                     format!(
@@ -1943,9 +2390,8 @@ fn doctor(
                 );
                 continue;
             };
-            let here = std::path::absolute(state_dir)?;
-            let points_here = command.contains(&install::quote(&here.to_string_lossy()));
-            let exists = install::executable_of(vendor, command).is_some_and(|path| path.is_file());
+            let points_here = install::same_directory(&first.state_dir, state_dir);
+            let exists = first.executable.is_file();
             note(
                 points_here && exists && missing.is_empty(),
                 format!(
@@ -2013,7 +2459,8 @@ fn doctor(
                         ),
                     ),
                     Ok(Some(Some(server))) => note(
-                        server.state_dir == here && server.executable.is_file(),
+                        install::same_directory(&server.state_dir, state_dir)
+                            && server.executable.is_file(),
                         format!(
                             "cursor: MCP server `langspan` registered in {}, state directory {}.",
                             mcp.display(),
@@ -2043,7 +2490,7 @@ fn doctor(
             note(ok, text);
         }
     }
-    for (ok, text) in user_level_findings(state_dir, home)? {
+    for (ok, text) in user_level_findings(state_dir, home, in_use.as_ref())? {
         note(ok, text);
     }
     let problems = findings.iter().filter(|(ok, _)| !ok).count();
@@ -2201,16 +2648,16 @@ fn main_install_problem(
 fn user_level_findings(
     state_dir: &std::path::Path,
     home: &UserHome,
+    in_use: Option<&InUse>,
 ) -> Result<Vec<(bool, String)>, langspan::Error> {
     use langspan::{install, install::Vendor, user_install};
-    let here = std::path::absolute(state_dir)?;
     let mut findings = Vec::new();
     let check = |executable: &std::path::Path, dir: &std::path::Path| -> String {
         let mut problems = String::new();
         if !executable.is_file() {
             problems.push_str("; its executable no longer exists, so it does nothing: run `langspan install --apply` again");
         }
-        if dir != here {
+        if !install::same_directory(dir, state_dir) {
             problems.push_str("; it uses a different state directory than this command, so it talks to a different coordinator");
         }
         problems
@@ -2290,11 +2737,28 @@ fn user_level_findings(
             }
         };
         if hooks.is_empty() && server.is_none() {
+            // Needs attention when the coordinator is in use by another
+            // host's sessions and nothing covers this one (roadmap A7).
+            let uncovered = in_use.filter(|in_use| {
+                in_use.hosts.iter().any(|host| host != name)
+                    && !langspan::hosts::not_installed(
+                        &[langspan::hosts::inspect(vendor, home, state_dir)],
+                        &in_use.roots,
+                        state_dir,
+                    )
+                    .is_empty()
+            });
             findings.push((
-                true,
+                uncovered.is_none(),
                 format!(
-                    "{name}: no user-level install under {}; repositories need a project install, or run `langspan install --hosts {name} --apply`.",
-                    home.home.display()
+                    "{name}: no user-level install under {}; repositories need a project install, or run `{}`.{}",
+                    home.home.display(),
+                    langspan::hosts::install_command(vendor, home, state_dir),
+                    if uncovered.is_some() {
+                        " Sessions of another host use this coordinator and no registered workspace has a project install for this one, so its edits are not coordinated."
+                    } else {
+                        ""
+                    }
                 ),
             ));
             continue;
@@ -2454,6 +2918,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         return user_install(action == "install", &mut options, apply);
     }
     let home_option = options.remove("--home").map(PathBuf::from);
+    let state_option = options.get("--state-dir").cloned();
     let state_dir = state_dir(&mut options)?;
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let before_command = &words[..words.len() - command.len()];
@@ -2464,8 +2929,18 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             let home = UserHome::new(home_option)?;
             return doctor(&state_dir, root.as_deref(), &home, json);
         }
+        ["hosts"] => {
+            no_unused_options(&options)?;
+            let home = UserHome::new(home_option)?;
+            // The state directory `install` would use in the same home.
+            let state_dir = std::path::absolute(home.state_dir(state_option))?;
+            return hosts_report(&home, &state_dir, json);
+        }
         ["check", "auto", workspace] => {
             return auto_check(&state_dir, workspace, &command, &mut options, json);
+        }
+        ["check", "flaky", workspace] if command.is_empty() => {
+            return flaky_tests(&state_dir, workspace, &mut options, json);
         }
         ["check", "run", workspace] | ["check", "status", workspace] => {
             return evidence(
@@ -2486,6 +2961,10 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 json,
             );
         }
+        ["statusline"] => return status_line(&state_dir, &mut options, json),
+        ["notify", action] if command.is_empty() => {
+            return notify(&state_dir, action, &mut options, json);
+        }
         ["commit"] => return commit_mine(&state_dir, &mut options, json),
         ["status"] if options.remove("--mine").is_some() => {
             return status_mine(&state_dir, &mut options, json);
@@ -2504,7 +2983,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         _ => {}
     }
     if home_option.is_some() {
-        return Err("--home is valid only for `install`, `uninstall` and `doctor`".into());
+        return Err("--home is valid only for `install`, `uninstall`, `doctor` and `hosts`".into());
     }
     if let ["hooks", action @ ("install" | "remove"), vendor] = words.as_slice()
         && let Some(vendor) = langspan::install::Vendor::from_name(vendor)
@@ -2656,21 +3135,48 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                         name: (*subject).into(),
                         limit,
                         detail: options.remove("--detail").is_some(),
+                        blind_in_scope: true,
                     },
                     "references" => Command::GraphReferences {
                         workspace_id,
                         name: (*subject).into(),
                         limit,
+                        blind_in_scope: true,
                     },
                     _ => Command::GraphImpact {
                         workspace_id,
                         path: (*subject).into(),
                         limit,
+                        blind_in_scope: true,
+                        // The daemon checks the range, so every client is
+                        // told the same.
+                        depth: u32::try_from(number(&mut options, "--depth", 1)?)
+                            .map_err(|_| "--depth must be between 1 and 3")?,
                     },
                 }
             }
+            ["graph", "blind-spots", workspace] => Command::GraphBlindSpots {
+                workspace_id: (*workspace).into(),
+                limit: u32::try_from(number(&mut options, "--limit", 50)?)
+                    .map_err(|_| "--limit is too large")?,
+            },
             ["recap", workspace] => Command::Recap {
                 workspace_id: (*workspace).into(),
+            },
+            // The words may come quoted as one argument or as several.
+            ["recall", workspace, query @ ..] if !query.is_empty() => Command::Recall {
+                workspace_id: (*workspace).into(),
+                query: query.join(" "),
+                path: options.remove("--path"),
+                limit: u32::try_from(number(&mut options, "--limit", 10)?)
+                    .map_err(|_| "--limit is too large")?,
+            },
+            ["today", workspace @ ..] if workspace.len() <= 1 => Command::Today {
+                workspace_id: workspace.first().map(|id| (*id).into()),
+                from_ms: langspan::today::window_start(
+                    options.remove("--since").as_deref(),
+                    langspan::store::wall_now_ms(),
+                )?,
             },
             ["remember", workspace, text, paths @ ..] => Command::Remember {
                 workspace_id: (*workspace).into(),
@@ -2704,6 +3210,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             },
             ["status"] if options.remove("--all").is_some() => Command::StatusRecords {
                 after: options.remove("--after"),
+                page_bytes: None,
             },
             ["status"] => Command::Status,
             ["changes", workspace] => Command::Changes {
@@ -2739,8 +3246,11 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphSymbol { .. }
                 | Command::GraphReferences { .. }
                 | Command::GraphImpact { .. }
+                | Command::GraphBlindSpots { .. }
                 | Command::Recap { .. }
                 | Command::ShowMessage { .. }
+                | Command::Recall { .. }
+                | Command::Today { .. }
         ) {
             options
                 .remove("--request-id")
@@ -2779,7 +3289,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     if json {
         println!("{}", serde_json::to_string(&response)?);
     } else {
-        print_human(&response)?;
+        print_human(&response, &state_dir)?;
     }
     Ok(match response.outcome {
         Outcome::Error { .. } => 1,
@@ -2839,7 +3349,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--workspace" | "--root" | "--budget-ms" | "--settings" | "--prompt-summary"
             | "--code-briefing" | "--max-peers" | "--remote" | "--name" | "--share-task"
             | "--onto" | "--timeout-s" | "--wait-s" | "--session" | "--to" | "--from"
-            | "--home" | "--hosts" | "--listen" | "-m" | "--message" => {
+            | "--home" | "--hosts" | "--listen" | "-m" | "--message" | "--statusline"
+            | "--deadline-ms" | "--forget" | "--since" | "--sound" | "--depth" | "--path" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -2914,7 +3425,7 @@ fn print_symbol_detail(symbol: &langspan_core::SymbolRef) {
     }
 }
 
-fn print_human(response: &Response) -> Result<(), langspan::Error> {
+fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), langspan::Error> {
     if response.replayed {
         println!(
             "Original result replayed; current daemon generation {}.",
@@ -2997,7 +3508,7 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
             "Workspace {} is in repository {} on {:?}.",
             git.workspace_id, git.repository_id, git.branch_ref
         ),
-        Outcome::SessionPrompted { session_id } => {
+        Outcome::SessionPrompted { session_id, .. } => {
             println!("Task summary recorded for {session_id}.")
         }
         Outcome::PromptTargets { session_id, paths } => println!(
@@ -3143,6 +3654,12 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
             println!("Check {} recorded for tree {}.", check.name, check.tree_oid)
         }
         Outcome::Checks { checks } => println!("{} check record(s).", checks.len()),
+        Outcome::FlakyTests { tests, .. } => {
+            println!("{} test(s) known to flip on unchanged code.", tests.len())
+        }
+        Outcome::FlakyTestForgotten {
+            test, forgotten, ..
+        } => println!("Forgot {test:?}: {forgotten}."),
         Outcome::Readiness { ready, reason, .. } => println!("Ready: {ready}. {reason}."),
         Outcome::Landed { landing } => println!(
             "Landing {} on {} recorded.",
@@ -3256,11 +3773,18 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 coverage.current_files, coverage.indexable_files
             );
         }
+        Outcome::GraphBlindSpots {
+            blind_spots,
+            coverage,
+            scan_failure,
+            truncated,
+        } => print_blind_spots(blind_spots, coverage, scan_failure.as_ref(), *truncated),
         Outcome::Graph {
             symbols,
             references,
             coverage,
             truncated,
+            levels,
             ..
         } => {
             for symbol in symbols {
@@ -3275,11 +3799,17 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 );
                 print_symbol_detail(symbol);
             }
-            for reference in references {
-                println!(
-                    "{}:{} mentions {}",
-                    reference.path, reference.line, reference.name
-                );
+            match levels {
+                // Level 1 lists the files of `references`, once each.
+                Some(levels) => print_impact_levels(levels, coverage),
+                None => {
+                    for reference in references {
+                        println!(
+                            "{}:{} mentions {}",
+                            reference.path, reference.line, reference.name
+                        );
+                    }
+                }
             }
             if *truncated {
                 println!("More results exist than the limit allows.");
@@ -3290,7 +3820,12 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 );
             } else {
                 println!(
-                    "Matches are by name, not resolved uses. Index: {} of {} supported files at their current content{}.",
+                    "{}. Index: {} of {} supported files at their current content{}.",
+                    if levels.is_some() {
+                        "Found by name, not resolved; each level adds false positives"
+                    } else {
+                        "Matches are by name, not resolved uses"
+                    },
                     coverage.current_files,
                     coverage.indexable_files,
                     if coverage.partial_files > 0 {
@@ -3299,6 +3834,12 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                         String::new()
                     }
                 );
+                if coverage.blind_in_scope > 0 {
+                    println!(
+                        "{} supported file(s) cannot be read in full, so an empty answer is weak; `langspan graph blind-spots` names them.",
+                        coverage.blind_in_scope
+                    );
+                }
             }
         }
         Outcome::Remembered { note } => println!(
@@ -3369,6 +3910,9 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
             workspace_id,
             failed,
         } => println!("Scan of {workspace_id} recorded; failed: {failed}."),
+        Outcome::HostsObserved { not_installed } => {
+            println!("Hosts not installed: {}.", not_installed.join(", "))
+        }
         Outcome::CheckoutObserved { change } => println!(
             "Checkout change recorded for {}: {}.",
             change.workspace_id,
@@ -3380,6 +3924,16 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 change.files
             )
         ),
+        Outcome::Today { today } => {
+            println!(
+                "{}",
+                langspan::today::text(today, &langspan::today::shown(&today.window))
+            );
+        }
+        Outcome::StatusLine { line } => println!("{}", line.text()),
+        Outcome::RefusalRecorded { session_id } => {
+            println!("Refusal recorded for session {session_id}.")
+        }
         Outcome::Recap { recap } => {
             println!(
                 "Workspace {} at {:?}{}.",
@@ -3517,6 +4071,36 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 );
             }
         }
+        Outcome::Recall { recall } => {
+            if recall.notes.is_empty() {
+                println!(
+                    "No held note in {} holds every word of {}.",
+                    recall.workspace_id,
+                    serde_json::to_string(&recall.query)?
+                );
+            }
+            // Note text is remembered repository text: quoted, so it reads
+            // as data.
+            for note in &recall.notes {
+                println!(
+                    "Remembered ({}{}): {}{}",
+                    note.note_id,
+                    note.author
+                        .as_ref()
+                        .map(|author| format!(", by {author}"))
+                        .unwrap_or_default(),
+                    serde_json::to_string(&note.text)?,
+                    if note.paths.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" about {:?}", note.paths)
+                    }
+                );
+            }
+            if recall.truncated {
+                println!("(More notes match; raise --limit, up to 50, or narrow the query.)");
+            }
+        }
         Outcome::Error { code, message } => println!("{code}: {}", serde_json::to_string(message)?),
         // The view is for the dashboard page; a terminal gets it as data.
         Outcome::Dashboard { dashboard } => println!("{}", serde_json::to_string(dashboard)?),
@@ -3592,6 +4176,9 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
             println!(
                 "{active} active admission(s). Session registration is not a process-liveness signal."
             );
+            for host in state.uninstalled_hosts.keys() {
+                println!("{}", langspan::hosts::status_line(host, state_dir));
+            }
             if let Some(summary) = summary {
                 let closed = summary.closed_admissions.values().sum::<u64>() + summary.other_closed;
                 if closed > 0 {
@@ -3668,21 +4255,7 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
 fn utc(ms: u64) -> String {
     let seconds = ms / 1000;
     let (days, rest) = (seconds / 86_400, seconds % 86_400);
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    let (year, month, day) = langspan::today::civil_from_days(days as i64);
     format!(
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
         rest / 3600,
