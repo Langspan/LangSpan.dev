@@ -96,6 +96,12 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Keep a one-line note for the repository or for files;
                                  sessions working there are told. Survives restarts
   forget WORKSPACE NOTE          Remove a note
+  recall WORKSPACE QUERY [--path PATH] [--limit N]
+                                 Find held notes holding every word of QUERY (1 to 200
+                                 bytes, at most 8 words) in their text or paths, without
+                                 case; with --path, only notes about PATH or the whole
+                                 workspace. Best first, --limit 1 to 50 (default 10).
+                                 Reads only; no briefing changes
   commit --mine -m MESSAGE [--session ID] [--root DIR]
                                  Commit only this session's own uncommitted changes in
                                  a checkout other sessions share: whole files that are
@@ -2966,6 +2972,14 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             ["recap", workspace] => Command::Recap {
                 workspace_id: (*workspace).into(),
             },
+            // The words may come quoted as one argument or as several.
+            ["recall", workspace, query @ ..] if !query.is_empty() => Command::Recall {
+                workspace_id: (*workspace).into(),
+                query: query.join(" "),
+                path: options.remove("--path"),
+                limit: u32::try_from(number(&mut options, "--limit", 10)?)
+                    .map_err(|_| "--limit is too large")?,
+            },
             ["today", workspace @ ..] if workspace.len() <= 1 => Command::Today {
                 workspace_id: workspace.first().map(|id| (*id).into()),
                 from_ms: langspan::today::window_start(
@@ -3038,6 +3052,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphImpact { .. }
                 | Command::GraphBlindSpots { .. }
                 | Command::Recap { .. }
+                | Command::Recall { .. }
                 | Command::Today { .. }
         ) {
             options
@@ -3138,7 +3153,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--code-briefing" | "--max-peers" | "--remote" | "--name" | "--share-task"
             | "--onto" | "--timeout-s" | "--wait-s" | "--session" | "--to" | "--from"
             | "--home" | "--hosts" | "--listen" | "-m" | "--message" | "--statusline"
-            | "--deadline-ms" | "--since" | "--sound" => {
+            | "--deadline-ms" | "--since" | "--sound" | "--path" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -3819,6 +3834,36 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                         format!(" about {:?}", note.paths)
                     }
                 );
+            }
+        }
+        Outcome::Recall { recall } => {
+            if recall.notes.is_empty() {
+                println!(
+                    "No held note in {} holds every word of {}.",
+                    recall.workspace_id,
+                    serde_json::to_string(&recall.query)?
+                );
+            }
+            // Note text is remembered repository text: quoted, so it reads
+            // as data.
+            for note in &recall.notes {
+                println!(
+                    "Remembered ({}{}): {}{}",
+                    note.note_id,
+                    note.author
+                        .as_ref()
+                        .map(|author| format!(", by {author}"))
+                        .unwrap_or_default(),
+                    serde_json::to_string(&note.text)?,
+                    if note.paths.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" about {:?}", note.paths)
+                    }
+                );
+            }
+            if recall.truncated {
+                println!("(More notes match; raise --limit, up to 50, or narrow the query.)");
             }
         }
         Outcome::Error { code, message } => println!("{code}: {}", serde_json::to_string(message)?),
