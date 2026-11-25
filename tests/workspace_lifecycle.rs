@@ -654,6 +654,9 @@ fn removal_is_a_dry_run_until_applied_and_waits_for_admissions_and_sharing() {
     for kind in ["workspace_registered", "remembered", "workspace_removed"] {
         assert!(types.contains(&kind), "{kind} in {types:?}");
     }
+    // The day's account reads that history without the removed records.
+    let today = home.json(&["today"]);
+    assert_eq!(today["outcome"]["type"], "today", "{today}");
     // The daemon recovers the removal from its log.
     home.daemon.take().map(|mut child| {
         child.kill().unwrap();

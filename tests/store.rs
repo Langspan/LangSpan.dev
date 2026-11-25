@@ -1017,3 +1017,65 @@ fn a_check_recorded_before_redaction_is_answered_when_retried_after_upgrade() {
         assert!(!answered.command.contains("ghp_"), "{answered:?}");
     }
 }
+
+/// A long-running daemon's generation holds more events than `today` reads:
+/// the summary still finds the generation's clock anchor, behind the newest
+/// `TODAY_EVENTS`, and dates what it reads by it.
+#[test]
+fn today_finds_the_anchor_behind_a_hundred_thousand_events_of_one_generation() {
+    use langspan_core::{Event, TODAY_EVENTS};
+    const EVENTS: usize = 100_000;
+    let database = Database::new();
+    let mut store = Store::open(&database.path()).unwrap();
+    register(&mut store);
+    let generation = store.state().generation;
+    let mut connection = database.connection();
+    let anchor: String = connection
+        .query_row(
+            "SELECT event_json FROM events WHERE event_json LIKE '%clock_anchored%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let Event::ClockAnchored { anchor } = serde_json::from_str::<Event>(&anchor).unwrap() else {
+        panic!("not an anchor: {anchor}");
+    };
+    let transaction = connection.transaction().unwrap();
+    {
+        let mut insert = transaction
+            .prepare("INSERT INTO events (event_json) VALUES (?1)")
+            .unwrap();
+        for index in 0..EVENTS {
+            let event = Event::SessionPrompted {
+                session_id: "session".into(),
+                summary: "work on the parser".into(),
+                at_ms: anchor.clock_ms + index as u64,
+                generation,
+            };
+            insert
+                .execute([serde_json::to_string(&event).unwrap()])
+                .unwrap();
+        }
+    }
+    transaction.commit().unwrap();
+    let started = std::time::Instant::now();
+    let Outcome::Today { today } = store
+        .today(
+            Some("workspace"),
+            anchor.wall_ms,
+            anchor.wall_ms + EVENTS as u64,
+            anchor.clock_ms + EVENTS as u64,
+        )
+        .unwrap()
+    else {
+        panic!("not a summary");
+    };
+    eprintln!(
+        "today over {EVENTS} events of one generation: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(today.undated, 0, "the anchor was found: {today:?}");
+    assert_eq!(today.sessions.len(), 1, "{today:?}");
+    assert_eq!(today.sessions[0].prompts as usize, TODAY_EVENTS);
+    assert!(today.truncated, "older prompts of the window were not read");
+}

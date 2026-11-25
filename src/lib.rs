@@ -20,6 +20,7 @@ mod sha256;
 pub mod skill;
 pub mod status_line;
 pub mod store;
+pub mod today;
 pub mod user_install;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
