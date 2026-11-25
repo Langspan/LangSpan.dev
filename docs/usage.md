@@ -387,9 +387,26 @@ receives another briefing only when its content has changed; session start can
 restore context in a new or resumed session. Briefings also name files the
 session read before a peer reported editing them in the same checkout.
 
-By default, the first non-empty line of the latest user prompt becomes a bounded
-task line shared with relevant local sessions. To leave prompt text out, install
-with `--prompt-summary off`:
+By default, one line of the latest user prompt becomes a bounded task line
+shared with relevant local sessions:
+
+- A line that starts with `Task:` (in any case, among the prompt's first 32
+  non-empty lines) names the task; the marker is left out. Give each prompt a
+  `Task:` line when several sessions start from one prompt template.
+- Otherwise the first non-empty line is used, unless a live session in the same
+  repository (this checkout or a linked worktree) has a latest prompt that
+  begins with the same lines. Then the prompt's first line that differs is
+  used, so that sessions started from one template are told apart. A one-line
+  prompt is always summarised by that line.
+- A declared intent (`langspan intent set`, MCP `langspan_intent_set`)
+  replaces the task line in briefings while it is set.
+
+To compare prompts, the hook sends the coordinator a digest of each of the
+prompt's first 32 non-empty lines, after redaction. Digests are kept with the
+session's activity, are never shown or published, and say only whether two
+prompts begin with the same lines. The line chosen keeps the same redaction and
+200-byte limit as before. To leave prompt text out, install with
+`--prompt-summary off`:
 
 ```sh
 ./target/release/langspan hooks install claude-code \
@@ -966,6 +983,21 @@ committed stay its own even while another session's command ran, so
 `cargo fmt --all` during another session's test run does not stop
 `commit --mine`. A line that other command could have changed otherwise is
 still no session's.
+
+Before such a command runs, the Bash pre-tool hook on Claude Code and Codex
+tells the session, once, which other live sessions have uncommitted changes in
+files it may rewrite: "LangSpan: this command may reformat files that another
+session in this checkout has not committed.", then each session and at most
+eight of its files, then how many more. The command is not refused, and the
+host's own permission prompt is unchanged. The hook recognises `cargo fmt` in
+any form (it formats every file of the workspace, even when files follow
+`--`), `rustfmt FILE...` (those files and the modules they declare) and
+`prettier --write PATH...` (directly or through `npx`, `pnpm exec` or `yarn`).
+A check such as `cargo fmt --check` or `prettier --check .` names nothing.
+The same files are not named again whichever formatter runs; a new file is.
+The hook's log line says why no notice was given (`formatter notice: …`). In a
+shared checkout, format only the files you changed, by name: `rustfmt FILE...`
+or `prettier --write FILE...`. The LangSpan skill says so too.
 
 When a Git step fails, the error names the step, its exit status and what Git
 said (its last lines, at most 1 KiB, redacted as other relayed text is). The
