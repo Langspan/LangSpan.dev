@@ -49,7 +49,7 @@ partial [shell-write coverage](adr/0011-shell-writes.md);
 [release pipeline](adr/0031-releases.md); the
 [LangSpan skill](adr/0034-langspan-skill.md) (`install --skill`, off by
 default; tested with a temporary home, not yet observed in use by an agent on
-a real host). The MCP server has 23 tools (`src/mcp.rs`,
+a real host). The MCP server has 24 tools (`src/mcp.rs`,
 asserted in `tests/mcp.rs`). The repository has an Apache-2.0 `LICENSE`.
 
 **Roadmap and the launch bar.** A source-level capability review on
@@ -135,6 +135,14 @@ Fixed on `main` since the validation:
   Tested with two sessions' hooked edits in alternation, each inserting above
   the other's, real Git and a real daemon (`tests/commit_guard.rs`); the
   dogfood run in a shared checkout is pending.
+- Issue #40 (B27): `langspan status --mine` and MCP `langspan_my_changes`
+  list this session's uncommitted files and hunks, each `mine`, `mixed` or
+  `unknown`, with the attribution `commit --mine` uses, and change nothing
+  ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md), section 3). Tested
+  with two sessions' hooked edits, changes no session made, a staged file,
+  a `commit --mine` afterwards, real Git and a real daemon
+  (`tests/commit_guard.rs`); the Claude Code run calling it before
+  `commit --mine` is pending.
 
 **Observed on real hosts (retained on `main`):**
 

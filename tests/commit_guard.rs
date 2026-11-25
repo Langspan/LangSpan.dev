@@ -1134,3 +1134,260 @@ fn after_a_commit_through_git_this_sessions_new_hunks_are_still_its_own() {
         "{left}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// status --mine (issue #40)
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// `langspan status --mine` as a session's Bash call would run it.
+    fn status_mine_command(&self, json: bool) -> String {
+        format!(
+            "'{}' --state-dir '{}' status --mine{}",
+            env!("CARGO_BIN_EXE_langspan"),
+            self.state().display(),
+            if json { " --json" } else { "" }
+        )
+    }
+
+    /// `status --mine --json` through a whole Bash call of `session`: its
+    /// session is found from the running call, as `commit --mine`'s is.
+    fn status_mine(&self, session: &str, call: &str) -> Value {
+        let (pre, ran) = self.bash_call(session, call, &self.status_mine_command(true));
+        assert!(!pre.coverage.starts_with("denied"), "{pre:?}");
+        let ran = ran.unwrap();
+        let text = said(&ran);
+        assert!(ran.status.success(), "{text}");
+        serde_json::from_slice(&ran.stdout).unwrap_or_else(|e| panic!("{e}: {text}"))
+    }
+
+    /// Everything the command could change: the index file, `git status`,
+    /// and each file's content.
+    fn snapshot(&self) -> (Vec<u8>, String, Vec<(String, String)>) {
+        let mut files: Vec<(String, String)> = fs::read_dir(self.work())
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_type().unwrap().is_file())
+            .map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (name.clone(), self.read(&name))
+            })
+            .collect();
+        files.sort();
+        (
+            fs::read(self.work().join(".git/index")).unwrap(),
+            self.status(),
+            files,
+        )
+    }
+}
+
+#[test]
+fn status_mine_lists_this_sessions_files_and_hunks_and_changes_nothing() {
+    let f = Fixture::new();
+    let alice = format!("claude-code.{ALICE}");
+    let bob = format!("claude-code.{BOB}");
+    f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
+    f.edit(
+        ALICE,
+        "alice-2",
+        "shared.txt",
+        "line 2\n",
+        "line 2, by Alice\n",
+    );
+    f.edit(BOB, "bob-1", "shared.txt", "line 18\n", "line 18, by Bob\n");
+    f.edit(BOB, "bob-2", "b.txt", "beta", "beta, by Bob");
+    f.write(ALICE, "alice-3", "alice-new.txt", "one\ntwo\nthree\n");
+    // Changes no session made: a line of shared.txt and a new file.
+    let shared = f
+        .read("shared.txt")
+        .replace("line 10\n", "line 10, by nobody\n");
+    fs::write(f.work().join("shared.txt"), shared).unwrap();
+    fs::write(f.work().join("stray.txt"), "nobody's\n").unwrap();
+    // Alice staged her edit of a.txt.
+    git(&f.work(), &["add", "a.txt"]);
+    let before = f.snapshot();
+
+    let value = f.status_mine(ALICE, "alice-4");
+    assert_eq!(f.snapshot(), before, "status --mine changed something");
+    assert_eq!(value["session_id"], alice, "{value}");
+    assert_eq!(value["truncated"], false, "{value}");
+    // b.txt is Bob's, shared.txt holds Bob's lines too.
+    assert_eq!(value["others"], 2, "{value}");
+    let paths: Vec<&str> = value["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["a.txt", "alice-new.txt", "shared.txt"], "{value}");
+    let file = |path: &str| {
+        value["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["path"] == path)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        file("a.txt"),
+        json!({
+            "path": "a.txt", "owner": "mine", "staged": true, "whole": false,
+            "hunks": [{"start_line": 1, "line_count": 1, "owner": "mine"}],
+        })
+    );
+    assert_eq!(
+        file("alice-new.txt"),
+        json!({
+            "path": "alice-new.txt", "owner": "mine", "staged": false, "whole": false,
+            "hunks": [{"start_line": 1, "line_count": 3, "owner": "mine"}],
+        })
+    );
+    assert_eq!(
+        file("shared.txt"),
+        json!({
+            "path": "shared.txt", "owner": "mixed", "staged": false, "whole": false,
+            "hunks": [
+                {"start_line": 2, "line_count": 1, "owner": "mine"},
+                {"start_line": 10, "line_count": 1, "owner": "none"},
+                {"start_line": 18, "line_count": 1, "owner": "others", "sessions": [bob]},
+            ],
+        })
+    );
+
+    // The same, for a person.
+    let (_, ran) = f.bash_call(ALICE, "alice-5", &f.status_mine_command(false));
+    let text = said(&ran.unwrap());
+    assert!(text.contains("shared.txt"), "{text}");
+    assert!(
+        text.contains(&format!("line 2 mine, line 10 no session's, line 18 {bob}")),
+        "{text}"
+    );
+    assert!(text.contains("a.txt") && text.contains("staged"), "{text}");
+    assert!(
+        !text.contains("stray.txt") && !text.contains("b.txt"),
+        "{text}"
+    );
+    assert_eq!(f.snapshot(), before, "status --mine changed something");
+
+    // Bob's view is his own.
+    let value = f.status_mine(BOB, "bob-3");
+    let paths: Vec<&str> = value["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["b.txt", "shared.txt"], "{value}");
+
+    // After commit --mine, what it committed is no longer listed.
+    let (_, ran) = f.bash_call(ALICE, "alice-6", &f.commit_mine_command("Alice"));
+    let ran = ran.unwrap();
+    assert!(ran.status.success(), "{}", said(&ran));
+    let value = f.status_mine(ALICE, "alice-7");
+    assert_eq!(value["files"], json!([]), "{value}");
+    assert_eq!(value["others"], 2, "{value}");
+    let (_, ran) = f.bash_call(ALICE, "alice-8", &f.status_mine_command(false));
+    let text = said(&ran.unwrap());
+    assert!(
+        text.contains("Nothing of this session's is uncommitted"),
+        "{text}"
+    );
+}
+
+#[test]
+fn status_mine_marks_a_file_unknown_where_commit_mine_would_refuse() {
+    let f = Fixture::new();
+    // Alice and Bob each wrote one line of the same hunk.
+    f.edit(
+        ALICE,
+        "alice-1",
+        "shared.txt",
+        "line 2\n",
+        "line 2\nAlice\n",
+    );
+    f.reread_and_edit(BOB, "bob-1", "shared.txt", "Alice\n", "Alice\nBob\n");
+    let value = f.status_mine(ALICE, "alice-2");
+    let files = value["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{value}");
+    assert_eq!(files[0]["owner"], "unknown", "{value}");
+    assert_eq!(files[0]["hunks"][0]["owner"], "unknown", "{value}");
+    assert!(files[0]["hunks"][0]["reason"].is_string(), "{value}");
+}
+
+#[test]
+fn status_mine_without_a_running_call_names_the_state_directory() {
+    let f = Fixture::new();
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .arg("--state-dir")
+        .arg(f.state())
+        .args(["status", "--mine", "--root"])
+        .arg(f.work())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    let text = said(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains(&format!("'{}'", f.state().display())),
+        "{text}"
+    );
+    assert!(text.contains("--session ID"), "{text}");
+
+    // With --session, it runs from anywhere.
+    f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .arg("--state-dir")
+        .arg(f.state())
+        .args(["status", "--mine", "--json", "--session"])
+        .arg(format!("claude-code.{ALICE}"))
+        .arg("--root")
+        .arg(f.work())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", said(&output));
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["files"][0]["path"], "a.txt", "{value}");
+}
+
+#[tokio::test]
+async fn the_mcp_tool_lists_the_sessions_own_changes() {
+    use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+    let f = Fixture::new();
+    f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
+    f.edit(BOB, "bob-1", "b.txt", "beta", "beta, by Bob");
+    let before = f.snapshot();
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command
+        .arg("mcp")
+        .arg("--state-dir")
+        .arg(f.state())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null");
+    let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+    let request = CallToolRequestParams::new("langspan_my_changes").with_arguments(
+        json!({
+            "request_id": "alice-mine-1", "workspace_id": "work",
+            "session_id": format!("claude-code.{ALICE}"),
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let result = tokio::time::timeout(Duration::from_secs(60), client.call_tool(request))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.is_error, Some(false), "{result:?}");
+    let value = result.structured_content.unwrap();
+    assert_eq!(value["files"][0]["path"], "a.txt", "{value}");
+    assert_eq!(value["files"][0]["owner"], "mine", "{value}");
+    assert_eq!(value["files"].as_array().unwrap().len(), 1, "{value}");
+    assert_eq!(value["others"], 1, "{value}");
+    client.cancel().await.unwrap();
+    assert_eq!(f.snapshot(), before);
+}

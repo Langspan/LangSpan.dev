@@ -683,13 +683,19 @@ fn is_live(live: &BTreeSet<String>, session: &str) -> bool {
     }
 }
 
-/// Lines `start`-`end` of a hunk, for people.
-fn lines_of(hunk: &Hunk) -> String {
-    let (start, len) = if hunk.new_len == 0 {
+/// Where a hunk is: its first line and how many lines, in the working file,
+/// or where it was in `HEAD`'s when it only removes lines.
+fn span(hunk: &Hunk) -> (u32, u32) {
+    if hunk.new_len == 0 {
         (hunk.old_start, hunk.old_len)
     } else {
         (hunk.new_start, hunk.new_len)
-    };
+    }
+}
+
+/// Lines `start`-`end` of a hunk, for people.
+fn lines_of(hunk: &Hunk) -> String {
+    let (start, len) = span(hunk);
     if len <= 1 {
         format!("line {start}")
     } else {
@@ -1147,6 +1153,15 @@ enum Choice {
     Hunks(Vec<usize>),
 }
 
+/// Why a file that holds this session's changes and others' is refused when
+/// it can be committed only whole.
+const ONLY_WHOLE: &str = "a new or removed file holds this session's changes and others'; it can be committed only whole";
+
+/// Whether a file can be committed only whole, not hunk by hunk.
+fn splits_only_whole(file: &FileDiff) -> bool {
+    file.created || file.deleted || file.whole
+}
+
 struct Planned {
     staged: Vec<(FileDiff, Choice)>,
     left: Vec<Left>,
@@ -1220,11 +1235,11 @@ fn plan(
             planned.staged.push((file, Choice::Whole));
             continue;
         }
-        if file.created || file.deleted || file.whole {
+        if splits_only_whole(&file) {
             planned.refused.push(Refusal {
                 path: file.path.clone(),
                 lines: "the whole file".into(),
-                reason: "a new or removed file holds this session's changes and others'; it can be committed only whole".into(),
+                reason: ONLY_WHOLE.into(),
             });
             continue;
         }
@@ -1607,7 +1622,8 @@ fn commit_on(
     result
 }
 
-/// The session `langspan commit --mine` was run by, when not given: the one
+/// The session `langspan commit --mine` (or `status --mine`) was run by,
+/// when not given: the one
 /// whose shell call running it now was recorded by the pre-tool hook.
 pub fn running_session(state_dir: &Path, root: &Path) -> Result<String, crate::Error> {
     let root = fs::canonicalize(root)?;
@@ -1616,7 +1632,7 @@ pub fn running_session(state_dir: &Path, root: &Path) -> Result<String, crate::E
         1 => Ok(sessions.into_iter().next().unwrap_or_default()),
         0 => Err(no_running_session(state_dir, &root).into()),
         _ => Err(format!(
-            "several sessions are running `commit --mine` here now ({}); pass --session ID",
+            "several sessions are running `commit --mine` or `status --mine` here now ({}); pass --session ID",
             sessions.into_iter().collect::<Vec<_>>().join(", ")
         )
         .into()),
@@ -1662,17 +1678,9 @@ fn no_running_session(state_dir: &Path, root: &Path) -> String {
     }
 }
 
-/// Commit only `session_id`'s changes in the checkout at `root`.
-pub fn commit_mine(
-    state_dir: &Path,
-    root: &Path,
-    session_id: &str,
-    message: &str,
-) -> Result<MineReport, crate::Error> {
-    if message.trim().is_empty() {
-        return Err("a commit message is required (-m MESSAGE)".into());
-    }
-    let deadline = Instant::now() + Duration::from_secs(60);
+/// The canonical working tree top and the Git directory of the checkout
+/// that holds `root`.
+fn checkout_paths(root: &Path, deadline: Instant) -> Result<(PathBuf, PathBuf), crate::Error> {
     let paths = git_in(
         root,
         &[
@@ -1689,8 +1697,21 @@ pub fn commit_mine(
     let (Some(top), Some(git_dir)) = (lines.next(), lines.next()) else {
         return Err("Git did not report the working tree's paths".into());
     };
-    let root = fs::canonicalize(top)?;
-    let git_dir = PathBuf::from(git_dir);
+    Ok((fs::canonicalize(top)?, PathBuf::from(git_dir)))
+}
+
+/// Commit only `session_id`'s changes in the checkout at `root`.
+pub fn commit_mine(
+    state_dir: &Path,
+    root: &Path,
+    session_id: &str,
+    message: &str,
+) -> Result<MineReport, crate::Error> {
+    if message.trim().is_empty() {
+        return Err("a commit message is required (-m MESSAGE)".into());
+    }
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let (root, git_dir) = checkout_paths(root, deadline)?;
     for marker in [
         "MERGE_HEAD",
         "rebase-merge",
@@ -1816,6 +1837,285 @@ fn update_shared_index(
     stage(root, git_dir, &planned.staged, None, deadline)
 }
 
+// ---------------------------------------------------------------------------
+// status --mine
+// ---------------------------------------------------------------------------
+
+/// The most files `status --mine` lists.
+pub const MINE_LISTED: usize = 200;
+
+/// One hunk of a file `status --mine` lists.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MineHunk {
+    /// Its first line in the working file; where it was in `HEAD`'s when it
+    /// only removes lines.
+    pub start_line: u32,
+    pub line_count: u32,
+    /// `mine`, `others`, `none` (no session wrote it) or `unknown`.
+    pub owner: &'static str,
+    /// For `others`: the sessions that wrote it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<String>,
+    /// For `unknown`: why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// A file that holds this session's uncommitted changes.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MineFile {
+    pub path: String,
+    /// `mine`: `commit --mine` would commit all of it; `mixed`: only its
+    /// hunks owned `mine`; `unknown`: `commit --mine` would refuse.
+    pub owner: &'static str,
+    /// Some of its changes are staged in the shared index.
+    pub staged: bool,
+    /// Attributed as one whole file (binary, too large, a mode change, or
+    /// changed by this session in lines that are not known): no hunks.
+    pub whole: bool,
+    pub hunks: Vec<MineHunk>,
+    /// For a whole file `unknown`: why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// This session's uncommitted changes in a shared checkout: what
+/// `commit --mine` would commit and refuse, without committing.
+#[derive(Debug, Clone, Serialize)]
+pub struct MineStatus {
+    pub session_id: String,
+    /// By path, at most `MINE_LISTED`.
+    pub files: Vec<MineFile>,
+    /// Changed files that hold other sessions' lines, listed or not.
+    pub others: usize,
+    /// More files hold this session's changes than are listed.
+    pub truncated: bool,
+}
+
+impl MineStatus {
+    /// For a person: one line per file.
+    pub fn text(&self) -> String {
+        let mut out = Vec::new();
+        if self.files.is_empty() {
+            out.push(format!(
+                "Nothing of this session's is uncommitted ({}).",
+                self.session_id
+            ));
+        }
+        let width = self.files.iter().map(|f| f.path.len()).max().unwrap_or(0);
+        for file in &self.files {
+            let parts: Vec<String> = if file.whole {
+                vec![format!(
+                    "the whole file{}",
+                    file.reason
+                        .as_ref()
+                        .map(|why| format!(": {why}"))
+                        .unwrap_or_default()
+                )]
+            } else {
+                file.hunks
+                    .iter()
+                    .map(|hunk| {
+                        let lines = if hunk.line_count <= 1 {
+                            format!("line {}", hunk.start_line)
+                        } else {
+                            format!(
+                                "lines {}-{}",
+                                hunk.start_line,
+                                hunk.start_line + hunk.line_count - 1
+                            )
+                        };
+                        let who = match hunk.owner {
+                            "others" => hunk.sessions.join(" and "),
+                            "none" => "no session's".into(),
+                            "unknown" => format!(
+                                "not known ({})",
+                                hunk.reason.as_deref().unwrap_or_default()
+                            ),
+                            mine => mine.into(),
+                        };
+                        format!("{lines} {who}")
+                    })
+                    .collect()
+            };
+            let owner = if file.staged {
+                format!("{} staged", file.owner)
+            } else {
+                file.owner.into()
+            };
+            out.push(format!(
+                "{:width$}  {owner:14}  {}",
+                file.path,
+                parts.join(", ")
+            ));
+        }
+        if self.truncated {
+            out.push(format!("Only the first {MINE_LISTED} files are listed."));
+        }
+        if self.others > 0 {
+            out.push(format!(
+                "{} changed file(s) hold other sessions' lines.",
+                self.others
+            ));
+        }
+        out.join("\n")
+    }
+}
+
+/// How `status --mine` lists one file, and whether it holds other
+/// sessions' lines. `None` when nothing of it is this session's.
+fn mine_file(file: &FileDiff, owners: &FileOwners, staged: bool) -> (Option<MineFile>, bool) {
+    let theirs = owners
+        .owners
+        .iter()
+        .any(|owner| matches!(owner, Owner::Others(_)));
+    let own = owners.owners.iter().filter(|o| **o == Owner::Own).count();
+    let unknown = owners.owners.iter().find_map(|owner| match owner {
+        Owner::Unknown(why) => Some(*why),
+        _ => None,
+    });
+    if own == 0 && unknown.is_none() {
+        return (None, theirs);
+    }
+    let all_own = own == owners.owners.len();
+    let only_whole = !all_own && unknown.is_none() && splits_only_whole(file);
+    let owner = if unknown.is_some() || only_whole {
+        "unknown"
+    } else if all_own {
+        "mine"
+    } else {
+        "mixed"
+    };
+    let hunks = if owners.whole {
+        Vec::new()
+    } else {
+        file.hunks
+            .iter()
+            .zip(&owners.owners)
+            .map(|(hunk, owner)| {
+                let (start_line, line_count) = span(hunk);
+                let (owner, sessions, reason) = match owner {
+                    Owner::Own => ("mine", Vec::new(), None),
+                    Owner::Others(sessions) => ("others", sessions.iter().cloned().collect(), None),
+                    Owner::Nobody => ("none", Vec::new(), None),
+                    Owner::Unknown(why) => ("unknown", Vec::new(), Some((*why).to_owned())),
+                };
+                MineHunk {
+                    start_line,
+                    line_count,
+                    owner,
+                    sessions,
+                    reason,
+                }
+            })
+            .collect()
+    };
+    let reason = if owners.whole {
+        unknown.map(str::to_owned)
+    } else {
+        only_whole.then(|| ONLY_WHOLE.to_owned())
+    };
+    let listed = MineFile {
+        path: file.path.clone(),
+        owner,
+        staged,
+        whole: owners.whole,
+        hunks,
+        reason,
+    };
+    (Some(listed), theirs)
+}
+
+/// The paths staged in the shared index, against `HEAD`.
+fn staged_paths(root: &Path, deadline: Instant) -> Result<BTreeSet<String>, String> {
+    let listed = git_in(
+        root,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--ignore-submodules=all",
+            "--no-relative",
+        ],
+        None,
+        deadline,
+    )?;
+    listed
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            String::from_utf8(p.to_vec()).map_err(|_| "a staged path that is not UTF-8".into())
+        })
+        .collect()
+}
+
+/// `session_id`'s uncommitted changes in the checkout at `root`, attributed
+/// as `commit --mine` attributes them. Read-only: it builds no index,
+/// commits nothing and leaves the shared index and working tree as they are
+/// (Git runs with `--no-optional-locks`).
+pub fn status_mine(
+    state_dir: &Path,
+    root: &Path,
+    session_id: &str,
+) -> Result<MineStatus, crate::Error> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let (root, _) = checkout_paths(root, deadline)?;
+    let head = current_head(&root, deadline)
+        .map_err(|_| "this repository has no commit yet; nothing is uncommitted against HEAD")?;
+    let entries = journal::entries(state_dir, &root);
+    let mut files = diff(&root, &[&head], &[], deadline)?;
+    files.extend(untracked(&root, &root, &[], deadline)?);
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let staged = staged_paths(&root, deadline)?;
+    let claims = journal::by_file(&entries);
+    let reading = Reading {
+        deadline,
+        made: None,
+    };
+    let mut status = MineStatus {
+        session_id: session_id.into(),
+        files: Vec::new(),
+        others: 0,
+        truncated: false,
+    };
+    for file in &files {
+        // A change of mode alone is nobody's (as in `plan`).
+        if file.mode_change && file.hunks.is_empty() {
+            continue;
+        }
+        let owners = file_owners(
+            session_id,
+            &root,
+            file,
+            &claims,
+            &entries,
+            &crate::hook::file_state,
+            reading,
+        );
+        let (listed, theirs) = mine_file(file, &owners, staged.contains(&file.path));
+        status.add(listed, theirs);
+    }
+    Ok(status)
+}
+
+impl MineStatus {
+    /// One file attributed: listed while fewer than `MINE_LISTED` are.
+    fn add(&mut self, listed: Option<MineFile>, theirs: bool) {
+        self.others += usize::from(theirs);
+        if let Some(listed) = listed {
+            if self.files.len() < MINE_LISTED {
+                self.files.push(listed);
+            } else {
+                self.truncated = true;
+            }
+        }
+    }
+}
+
 fn current_head(root: &Path, deadline: Instant) -> Result<String, String> {
     git_in(
         root,
@@ -1928,5 +2228,111 @@ mod tests {
             Owner::Unknown(_)
         ));
         assert!(!is_own("me", "meow") && is_own("me", "me.agent"));
+    }
+
+    #[test]
+    fn status_mine_lists_a_file_by_what_commit_mine_would_do_with_it() {
+        let files = parse_diff(DIFF_TEXT.as_bytes()).unwrap();
+        let them = || Owner::Others(BTreeSet::from(["them".to_owned()]));
+        let owners = |owners: Vec<Owner>, whole: bool| FileOwners {
+            foreign: vec![BTreeSet::new(); owners.len()],
+            owners,
+            whole,
+        };
+        let (listed, theirs) = mine_file(
+            &files[0],
+            &owners(vec![Owner::Own, them(), Owner::Nobody], false),
+            false,
+        );
+        let listed = listed.unwrap();
+        assert!(theirs);
+        assert_eq!(listed.owner, "mixed");
+        let owned: Vec<_> = listed
+            .hunks
+            .iter()
+            .map(|h| (h.start_line, h.line_count, h.owner))
+            .collect();
+        assert_eq!(owned, [(2, 1, "mine"), (19, 2, "others"), (21, 1, "none")]);
+        assert_eq!(listed.hunks[1].sessions, ["them"]);
+
+        // Nothing of it this session's: not listed, but counted as others'.
+        let (listed, theirs) = mine_file(
+            &files[0],
+            &owners(vec![them(), Owner::Nobody, Owner::Nobody], false),
+            false,
+        );
+        assert!(listed.is_none() && theirs);
+        let (listed, theirs) = mine_file(&files[0], &owners(vec![Owner::Nobody; 3], false), false);
+        assert!(listed.is_none() && !theirs);
+
+        // A new binary file attributed whole, and one partly its own that
+        // can be committed only whole: commit --mine would refuse it.
+        let (listed, _) = mine_file(&files[1], &owners(vec![Owner::Own], true), true);
+        let listed = listed.unwrap();
+        assert_eq!(
+            (listed.owner, listed.whole, listed.staged),
+            ("mine", true, true)
+        );
+        assert!(listed.hunks.is_empty());
+        let mut created = files[0].clone();
+        created.created = true;
+        let (listed, _) = mine_file(
+            &created,
+            &owners(vec![Owner::Own, them(), Owner::Own], false),
+            false,
+        );
+        let listed = listed.unwrap();
+        assert_eq!(listed.owner, "unknown");
+        assert_eq!(listed.reason.as_deref(), Some(ONLY_WHOLE));
+    }
+
+    #[test]
+    fn status_mine_text_says_whose_each_hunk_is_and_when_the_list_is_cut() {
+        let hunk = |start_line, line_count, owner: &'static str, sessions: &[&str]| MineHunk {
+            start_line,
+            line_count,
+            owner,
+            sessions: sessions.iter().map(|s| (*s).to_owned()).collect(),
+            reason: None,
+        };
+        let status = MineStatus {
+            session_id: "me".into(),
+            files: vec![MineFile {
+                path: "src/api.rs".into(),
+                owner: "mixed",
+                staged: false,
+                whole: false,
+                hunks: vec![hunk(10, 5, "mine", &[]), hunk(40, 2, "others", &["them"])],
+                reason: None,
+            }],
+            others: 3,
+            truncated: true,
+        };
+        let mut cut = MineStatus {
+            files: Vec::new(),
+            others: 0,
+            truncated: false,
+            ..status.clone()
+        };
+        for _ in 0..=MINE_LISTED {
+            cut.add(Some(status.files[0].clone()), true);
+        }
+        cut.add(None, false);
+        assert_eq!(
+            (cut.files.len(), cut.truncated, cut.others),
+            (MINE_LISTED, true, MINE_LISTED + 1)
+        );
+
+        let text = status.text();
+        assert!(text.contains("src/api.rs  mixed"), "{text}");
+        assert!(
+            text.contains("lines 10-14 mine, lines 40-41 them"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("first {MINE_LISTED} files")),
+            "{text}"
+        );
+        assert!(text.contains("3 changed file(s)"), "{text}");
     }
 }
