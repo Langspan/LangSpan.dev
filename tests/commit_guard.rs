@@ -593,6 +593,54 @@ fn a_failing_pre_commit_hook_stops_commit_mine_and_nothing_is_committed() {
 }
 
 #[test]
+fn a_read_only_git_directory_is_named_with_gits_own_words_and_the_fix() {
+    let f = Fixture::new();
+    f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
+    let git_dir = f.work().join(".git");
+    fs::set_permissions(&git_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    // Permission bits do not bind a superuser: then there is nothing to show.
+    let writable = fs::write(git_dir.join("probe"), "").is_ok();
+    let output = (!writable).then(|| f.commit_mine(ALICE, "Alice"));
+    fs::set_permissions(&git_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let Some(output) = output else {
+        eprintln!("skipped: the Git directory stays writable for this user");
+        return;
+    };
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprintln!("commit --mine said: {said}");
+    assert!(!output.status.success(), "{said}");
+    // The step, its status, and Git's own message.
+    assert!(said.contains("git read-tree"), "{said}");
+    assert!(said.contains("exit status: 128"), "{said}");
+    assert!(said.contains("Git said: fatal:"), "{said}");
+    assert!(said.contains("Permission denied"), "{said}");
+    // The cause and the usual fix.
+    assert!(said.contains("Git directory is read-only"), "{said}");
+    assert!(said.contains("outside the agent's sandbox"), "{said}");
+    assert!(said.contains("make the Git directory writable"), "{said}");
+    assert!(said.contains("nothing was committed"), "{said}");
+    assert_eq!(f.subjects(), "start\n");
+    assert_eq!(f.status(), " M a.txt\n");
+}
+
+#[test]
+fn a_failed_git_read_in_the_commit_guard_says_what_git_said() {
+    let f = Fixture::new();
+    f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
+    f.edit(BOB, "bob-1", "b.txt", "beta", "beta, by Bob");
+    // A pathspec Git refuses: the guard's own read of it fails.
+    let run = f.bash(BOB, "PreToolUse", "bob-2", "git add ':(nonsense)b.txt'");
+    assert!(run.detail.contains("commit guard: no decision"), "{run:?}");
+    assert!(run.detail.contains("exit status: 128"), "{run:?}");
+    assert!(run.detail.contains("Git said: fatal:"), "{run:?}");
+    assert!(run.detail.contains("nonsense"), "{run:?}");
+}
+
+#[test]
 fn a_mode_change_no_session_made_is_not_committed_with_the_sessions_hunks() {
     let f = Fixture::new();
     f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
