@@ -158,6 +158,30 @@ kept for more than a day; at most 4,096 are kept. Tests:
 while the other session's real hooks edit), and
 `an_edit_that_alone_explains_a_change_is_the_editors_and_anything_else_is_unknown`.
 
+**A rewrite of another session's uncommitted lines** (added 25 November
+2026, issue #98). A command that rewrites files across the workspace, such as
+a formatter (`cargo fmt --all`), changes lines other sessions wrote and have
+not committed, whether they wrote them before the command or during it. Each
+changed file is classified on its own, so a contested file never makes the
+command's other files contested: a file the command's session alone wrote,
+reformatted by its own command, stays that session's line by line, and its
+`commit --mine` can commit it. A file that no overlapping edit or run
+contests but in which the command removed a line that another session's
+journaled write added (or may have added, in lines that are not known), and
+that the file gained since `HEAD`, is `contested`: that line was changed by
+both sessions, so neither is credited with it, and the command's session
+does not commit the other session's work. A file where this cannot be told
+(its content before the command, now or in `HEAD` is not known) is
+`contested` when another session wrote it. A command that only adds lines to
+another session's file, or rewrites committed lines, is credited as before.
+Tests: the `a_formatter_*` and
+`a_command_adding_to_another_sessions_file_without_rewriting_its_lines_is_credited`
+tests in `tests/shell_concurrent_edits.rs` (a real `sed` rewrite of two files
+between two sessions' real hooks, followed by `commit --mine`). An
+overlapping shell run of another session whose changes are unknown still
+contests every file the command changed, as above: its writes cannot be told
+from the command's.
+
 The cap holds on every path that creates a mark: an edit's pre-tool hook, and
 its post-tool hook when the start was not kept. An edit call refused a mark at
 the cap goes unmarked and leaves an overflow note (`STATE/shell/edits/overflow`,

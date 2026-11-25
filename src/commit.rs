@@ -13,8 +13,13 @@
 //! none of its lines is this session's and some are that session's; nobody's
 //! when no session wrote any of it. Anything else is not known, and
 //! `commit_mine` refuses it rather than guess. Files Git cannot diff by line
-//! (binary, over 512 KiB, a mode change) belong to the session whose
-//! journaled write left them as they are now.
+//! (binary, over 512 KiB, a mode change), or that this session changed in
+//! lines that are not known, belong to the session whose journaled write
+//! left them as they are now. Another session's write of unknown lines does
+//! not make a file whole: a hunk not wholly this session's may be that
+//! session's, and one that is wholly this session's stays so only while its
+//! writes not yet committed account for every copy of its lines in the
+//! file's whole diff from `HEAD`.
 
 use crate::{
     hook::{Config, Reply, ShellCall},
@@ -251,7 +256,7 @@ pub enum Owner {
 
 /// This session or one of its subagents (a subagent's ID is its parent's
 /// followed by `.` and the agent's own).
-fn is_own(me: &str, session: &str) -> bool {
+pub(crate) fn is_own(me: &str, session: &str) -> bool {
     session == me
         || session
             .strip_prefix(me)
@@ -368,19 +373,232 @@ fn foreign_sessions(
         .collect()
 }
 
+/// Why a hunk of this session's lines is not committed when another session
+/// also changed the file in lines that are not known.
+const UNSEEN_COPY: &str = "another session changed this file in lines that are not known, and some of this hunk's lines appear more often than this session wrote them";
+const COMMITTED_COPY: &str = "another session changed this file in lines that are not known, and this session's writes of some of this hunk's lines may already be committed";
+const UNCOUNTED_COPY: &str = "another session changed this file in lines that are not known, and the file's changes since HEAD, or the commits made since this session wrote it, could not be read";
+
+/// The most moves of `HEAD` read back to find what was committed since this
+/// session's writes of a file.
+const MAX_MOVES: usize = 256;
+
+/// How one attribution reads Git: by when, and the commit `commit --mine`
+/// just made, if any, whose changes are this session's own.
+#[derive(Clone, Copy)]
+struct Reading<'a> {
+    deadline: Instant,
+    made: Option<&'a str>,
+}
+
+/// What decides whether this session's writes account for every copy of a
+/// hunk's lines, when another session changed the file in lines that are not
+/// known (issue #99 and its review).
+struct Copies {
+    /// Per line key: how many more copies this session's journaled writes
+    /// added than removed (negative when it removed more).
+    net: BTreeMap<String, i64>,
+    /// The file's whole diff from `HEAD` to the working tree, whatever part
+    /// of it a command would take. `None` when it could not be read.
+    full: Option<FileDiff>,
+    /// Line keys this session's writes added (or removed) that a move of
+    /// `HEAD` since the first of those writes also added (or removed): a
+    /// commit through Git may have taken that copy, and the journal still
+    /// counts it. `None` when the moves could not be read.
+    committed: Option<BTreeSet<String>>,
+}
+
+impl Copies {
+    fn read(me: &str, root: &Path, file: &FileDiff, entries: &[Entry], reading: Reading) -> Self {
+        let mut net: BTreeMap<String, i64> = BTreeMap::new();
+        let (mut added, mut removed) = (BTreeSet::new(), BTreeSet::new());
+        let mut since: Option<u64> = None;
+        for entry in entries
+            .iter()
+            .filter(|e| e.path == file.path && is_own(me, &e.session_id))
+        {
+            since = Some(since.map_or(entry.at_ms, |at| at.min(entry.at_ms)));
+            for key in entry.lines.iter().flat_map(|lines| &lines.added) {
+                *net.entry(key.clone()).or_default() += 1;
+                added.insert(key.clone());
+            }
+            for key in entry.lines.iter().flat_map(|lines| &lines.removed) {
+                *net.entry(key.clone()).or_default() -= 1;
+                removed.insert(key.clone());
+            }
+        }
+        let full = if file.untracked {
+            Some(file.clone())
+        } else {
+            let literal = format!(":(literal){}", file.path);
+            diff(root, &["HEAD"], &[literal], reading.deadline)
+                .ok()
+                .map(|files| {
+                    files
+                        .into_iter()
+                        .find(|f| f.path == file.path)
+                        .unwrap_or_else(|| FileDiff {
+                            hunks: Vec::new(),
+                            ..file.clone()
+                        })
+                })
+        };
+        let committed = match since {
+            Some(since) => committed_since(root, &file.path, since, (&added, &removed), reading),
+            None => Some(BTreeSet::new()),
+        };
+        Self {
+            net,
+            full,
+            committed,
+        }
+    }
+
+    /// Whether this session's uncommitted writes account for every copy, in
+    /// the file's whole diff from `HEAD`, of each line `hunk` adds and
+    /// removes; if not, why. With another session's write of unknown lines
+    /// in the file, a line it may also have written is told apart only by
+    /// count.
+    fn accounted(&self, file: &FileDiff, hunk: &Hunk) -> Result<(), &'static str> {
+        let (Some(full), Some(committed)) = (&self.full, &self.committed) else {
+            return Err(UNCOUNTED_COPY);
+        };
+        if hunk
+            .added
+            .iter()
+            .chain(&hunk.removed)
+            .any(|key| committed.contains(key))
+        {
+            return Err(COMMITTED_COPY);
+        }
+        // The diff a command takes may be part of the whole (only the staged
+        // changes), or, rarely, hold a staged line the working tree has
+        // since lost: the larger count of the two.
+        let count = |key: &str, side: fn(&Hunk) -> &Vec<String>| {
+            [file, full]
+                .iter()
+                .map(|f| {
+                    f.hunks
+                        .iter()
+                        .flat_map(side)
+                        .filter(|k| k.as_str() == key)
+                        .count() as i64
+                })
+                .max()
+                .unwrap_or_default()
+        };
+        let net = |key: &str| self.net.get(key).copied().unwrap_or_default();
+        let all = hunk
+            .added
+            .iter()
+            .all(|key| count(key, |h| &h.added) <= net(key))
+            && hunk
+                .removed
+                .iter()
+                .all(|key| count(key, |h| &h.removed) <= -net(key));
+        if all { Ok(()) } else { Err(UNSEEN_COPY) }
+    }
+}
+
+/// Of `added` and `removed` (line keys of `path` this session's writes
+/// added and removed, the first at `since_ms`), those that a move of `HEAD`
+/// at or after that write also added or removed. `HEAD`'s reflog gives the
+/// moves; its times are this machine's clock, as the journal's are, and in
+/// whole seconds, so a move in the same second as the write counts as after
+/// it. `None` when that cannot be told: no reflog, more moves than are read,
+/// or a version Git cannot give in time. The move to `reading.made`, the
+/// commit `commit --mine` just made of this session's own lines, is not one.
+fn committed_since(
+    root: &Path,
+    path: &str,
+    since_ms: u64,
+    (added, removed): (&BTreeSet<String>, &BTreeSet<String>),
+    reading: Reading,
+) -> Option<BTreeSet<String>> {
+    let deadline = reading.deadline;
+    let limit = format!("-n{}", MAX_MOVES + 1);
+    let listed = git_bounded(
+        root,
+        &[
+            "reflog",
+            "show",
+            "--format=%H %gd",
+            "--date=unix",
+            &limit,
+            "HEAD",
+            "--",
+        ],
+        None,
+        deadline,
+        1024 * 1024,
+    )
+    .ok()?;
+    let text = String::from_utf8(listed).ok()?;
+    // Newest first: each move's commit, and when it was made.
+    let mut moves: Vec<(&str, u64)> = Vec::new();
+    for line in text.lines() {
+        let (commit, selector) = line.split_once(' ')?;
+        let seconds = selector
+            .strip_prefix("HEAD@{")?
+            .strip_suffix('}')?
+            .parse::<u64>()
+            .ok()?;
+        moves.push((commit, seconds));
+    }
+    // With no reflog, no move since the write can be ruled out.
+    if moves.is_empty() {
+        return None;
+    }
+    let mut found = BTreeSet::new();
+    for (index, (commit, seconds)) in moves.iter().enumerate() {
+        if seconds.saturating_mul(1000).saturating_add(999) < since_ms {
+            return Some(found);
+        }
+        // The move before this one is where it came from; the oldest move
+        // read came from nothing only if the whole reflog was read.
+        let from = match moves.get(index + 1) {
+            Some((from, _)) => Some(*from),
+            None if moves.len() > MAX_MOVES => return None,
+            None => None,
+        };
+        if from == Some(*commit) || reading.made == Some(*commit) {
+            continue;
+        }
+        let before = match from {
+            Some(from) => journal::head_content(root, path, Some(from), deadline)?,
+            None => Vec::new(),
+        };
+        let after = journal::head_content(root, path, Some(commit), deadline)?;
+        let lines = journal::diff_lines(&before, &after)?;
+        found.extend(lines.added.into_iter().filter(|key| added.contains(key)));
+        found.extend(
+            lines
+                .removed
+                .into_iter()
+                .filter(|key| removed.contains(key)),
+        );
+    }
+    Some(found)
+}
+
 fn file_owners(
     me: &str,
     root: &Path,
     file: &FileDiff,
     claims: &BTreeMap<&str, journal::FileLines<'_>>,
+    entries: &[Entry],
     current: &impl Fn(&Path, &str) -> Option<FileState>,
+    reading: Reading,
 ) -> FileOwners {
     let path = claims.get(file.path.as_str());
-    // A write whose lines are not known, or a file too large to journal by
-    // line, makes the file attributable only whole.
+    // A file too large to journal by line, or one this session changed in
+    // lines that are not known, is attributable only whole. Another
+    // session's write of unknown lines is not a reason to: this session's
+    // hunks are still told apart by their lines (issue #99).
     let oversize = fs::symlink_metadata(root.join(&file.path))
         .is_ok_and(|m| m.len() > journal::MAX_FILE_BYTES);
-    let whole = file.whole || oversize || path.is_some_and(|p| !p.unknown.is_empty());
+    let unknown_own = path.is_some_and(|p| p.unknown.iter().any(|s| is_own(me, s)));
+    let whole = file.whole || oversize || unknown_own;
     if whole {
         let others: BTreeSet<String> = path
             .map(|p| {
@@ -408,17 +626,44 @@ fn file_owners(
             whole: true,
         };
     }
+    // Other sessions that changed the file in lines that are not known: any
+    // hunk not wholly this session's may be theirs.
+    let unseen: BTreeSet<String> = path
+        .map(|p| p.unknown.iter().map(|s| (*s).to_owned()).collect())
+        .unwrap_or_default();
+    let mut copies: Option<Copies> = None;
+    let mut owners = Vec::new();
+    let mut foreign = Vec::new();
+    for hunk in &file.hunks {
+        let mut owner = hunk_owner(me, hunk, path);
+        let mut theirs = foreign_sessions(me, hunk, path);
+        if !unseen.is_empty() {
+            owner = match owner {
+                // Read once per file, and only for a hunk that needs it.
+                Owner::Own => match copies
+                    .get_or_insert_with(|| Copies::read(me, root, file, entries, reading))
+                    .accounted(file, hunk)
+                {
+                    Ok(()) => Owner::Own,
+                    Err(why) => Owner::Unknown(why),
+                },
+                Owner::Nobody => Owner::Others(unseen.clone()),
+                Owner::Others(mut sessions) => {
+                    sessions.extend(unseen.iter().cloned());
+                    Owner::Others(sessions)
+                }
+                unknown => unknown,
+            };
+            if owner != Owner::Own {
+                theirs.extend(unseen.iter().cloned());
+            }
+        }
+        owners.push(owner);
+        foreign.push(theirs);
+    }
     FileOwners {
-        owners: file
-            .hunks
-            .iter()
-            .map(|hunk| hunk_owner(me, hunk, path))
-            .collect(),
-        foreign: file
-            .hunks
-            .iter()
-            .map(|hunk| foreign_sessions(me, hunk, path))
-            .collect(),
+        owners,
+        foreign,
         whole: false,
     }
 }
@@ -678,7 +923,18 @@ pub fn guard_hook(config: &Config, me: &str, call: &ShellCall, deadline: Instant
     let mut found: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
     let mut evidence = Vec::new();
     for file in &files {
-        let owners = file_owners(me, &config.root, file, &claims, &crate::hook::file_state);
+        let owners = file_owners(
+            me,
+            &config.root,
+            file,
+            &claims,
+            &entries,
+            &crate::hook::file_state,
+            Reading {
+                deadline: until,
+                made: None,
+            },
+        );
         for (index, sessions) in owners.foreign.iter().enumerate() {
             let where_ = match file.hunks.get(index) {
                 Some(hunk) if !owners.whole && !file.created && !file.deleted => lines_of(hunk),
@@ -897,7 +1153,13 @@ struct Planned {
     refused: Vec<Refusal>,
 }
 
-fn plan(me: &str, root: &Path, files: Vec<FileDiff>, entries: &[Entry]) -> Planned {
+fn plan(
+    me: &str,
+    root: &Path,
+    files: Vec<FileDiff>,
+    entries: &[Entry],
+    reading: Reading,
+) -> Planned {
     let claims = journal::by_file(entries);
     let mut planned = Planned {
         staged: Vec::new(),
@@ -915,7 +1177,15 @@ fn plan(me: &str, root: &Path, files: Vec<FileDiff>, entries: &[Entry]) -> Plann
                 continue;
             }
         }
-        let attributed = file_owners(me, root, &file, &claims, &crate::hook::file_state);
+        let attributed = file_owners(
+            me,
+            root,
+            &file,
+            &claims,
+            entries,
+            &crate::hook::file_state,
+            reading,
+        );
         let owners = attributed.owners;
         let mut own = Vec::new();
         let mut others = BTreeSet::new();
@@ -1443,7 +1713,11 @@ pub fn commit_mine(
     let (report, commit) = loop {
         let mut files = diff(&root, &[&head], &[], deadline)?;
         files.extend(untracked(&root, &root, &[], deadline)?);
-        let planned = plan(session_id, &root, files, &entries);
+        let reading = Reading {
+            deadline,
+            made: None,
+        };
+        let planned = plan(session_id, &root, files, &entries, reading);
         let mut report = MineReport {
             result: "refused",
             session_id: session_id.into(),
@@ -1485,14 +1759,18 @@ pub fn commit_mine(
     report.commit = Some(
         git_in(&root, &["rev-parse", "--short", &commit], None, deadline)
             .map(|short| String::from_utf8_lossy(&short).trim().to_owned())
-            .unwrap_or(commit),
+            .unwrap_or_else(|_| commit.clone()),
     );
     report.result = "committed";
     // The shared index learns the commit: this session's changes, on top of
     // whatever else is staged there, so they do not show as staged undone.
     let committed: BTreeSet<String> = report.paths.iter().cloned().collect();
+    let reading = Reading {
+        deadline,
+        made: Some(&commit),
+    };
     if let Err(error) =
-        update_shared_index(&root, &git_dir, session_id, &committed, &entries, deadline)
+        update_shared_index(&root, &git_dir, session_id, &committed, &entries, reading)
     {
         report.index = Some(format!(
             "The commit was made, but the shared index could not be updated for it ({error}): `git status` may show this session's committed changes as staged reversals. `git diff --cached` shows them."
@@ -1515,8 +1793,9 @@ fn update_shared_index(
     me: &str,
     committed: &BTreeSet<String>,
     entries: &[Entry],
-    deadline: Instant,
+    reading: Reading,
 ) -> Result<(), String> {
+    let deadline = reading.deadline;
     let pathspecs: Vec<String> = committed
         .iter()
         .map(|path| format!(":(literal){path}"))
@@ -1527,7 +1806,7 @@ fn update_shared_index(
             .into_iter()
             .filter(|file| committed.contains(&file.path)),
     );
-    let planned = plan(me, root, files, entries);
+    let planned = plan(me, root, files, entries, reading);
     if let Some(refusal) = planned.refused.first() {
         return Err(format!(
             "{} ({}) does not split the same way against it: {}",

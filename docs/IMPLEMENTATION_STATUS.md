@@ -115,6 +115,13 @@ Fixed on `main` since the validation:
   a worktree install the host will not run. Tested with real linked
   worktrees, a real daemon and constructed events; the real Codex run in a
   linked worktree is pending.
+- Issue #99: `commit --mine` no longer reports a file as wholly another
+  session's because that session made one write whose lines are not known.
+  Such a file is still attributed hunk by hunk; a hunk whose lines that
+  write may share is refused with the reason ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)).
+  Tested with two sessions' hooked edits in alternation, each inserting above
+  the other's, real Git and a real daemon (`tests/commit_guard.rs`); the
+  dogfood run in a shared checkout is pending.
 
 **Observed on real hosts (retained on `main`):**
 

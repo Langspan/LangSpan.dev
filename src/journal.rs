@@ -505,14 +505,9 @@ pub fn record(
                 Some(Some(FileState::Present { digest, .. })) => blob(state_dir, digest),
                 _ => None,
             },
-            Origin::Shell { snapshot, deadline } => match snapshot.files.get(path) {
-                Some(entry) => match &entry.state {
-                    FileState::Missing => Some(Vec::new()),
-                    FileState::Present { digest, .. } => blob(state_dir, digest),
-                },
-                // Not listed: on disk as in HEAD, or absent from both.
-                None => head_content(root, path, snapshot.head.as_deref(), *deadline),
-            },
+            Origin::Shell { snapshot, deadline } => {
+                shell_before(state_dir, root, snapshot, path, *deadline)
+            }
         };
         if let Some(bytes) = &after {
             let _ = keep_blob(state_dir, bytes);
@@ -532,9 +527,98 @@ pub fn record(
     Ok(recorded)
 }
 
-/// A file's content in `HEAD`, empty when `HEAD` does not have it, `None`
-/// when Git cannot say in time.
-fn head_content(root: &Path, path: &str, head: Option<&str>, deadline: Instant) -> Option<Vec<u8>> {
+/// A file's content before a shell command, from its snapshot: the version
+/// kept for it, or, for a file the snapshot does not list, its `HEAD`
+/// content. `None` when that content is not known.
+fn shell_before(
+    state_dir: &Path,
+    root: &Path,
+    snapshot: &crate::shell::Snapshot,
+    path: &str,
+    deadline: Instant,
+) -> Option<Vec<u8>> {
+    match snapshot.files.get(path) {
+        Some(entry) => match &entry.state {
+            FileState::Missing => Some(Vec::new()),
+            FileState::Present { digest, .. } => blob(state_dir, digest),
+        },
+        // Not listed: on disk as in HEAD, or absent from both.
+        None => head_content(root, path, snapshot.head.as_deref(), deadline),
+    }
+}
+
+/// Of `paths`, which `session_id`'s shell command changed, those in which it
+/// rewrote another session's uncommitted lines: it removed a line that the
+/// file gained since `HEAD` and that another session's journaled write
+/// added, or may have added (a write whose lines are not known). Such a line
+/// was changed by both sessions, so the file is credited to neither (issue
+/// #98, ADR 0026). A file where that cannot be told (its content before or
+/// now, or in `HEAD`, is not known) is among them when another session wrote
+/// it. A file no other session wrote, or one the command only added to, is
+/// not.
+pub fn rewrites_others(
+    state_dir: &Path,
+    root: &Path,
+    session_id: &str,
+    paths: &[String],
+    snapshot: &crate::shell::Snapshot,
+    deadline: Instant,
+) -> Vec<String> {
+    // A write of more files is not journaled, nor credited (`record`).
+    if paths.len() > MAX_PATHS_PER_WRITE {
+        return Vec::new();
+    }
+    let entries = entries_for(state_dir, root, paths);
+    let files = by_file(&entries);
+    let other = |sessions: &BTreeSet<&str>| {
+        sessions
+            .iter()
+            .any(|session| !crate::commit::is_own(session_id, session))
+    };
+    paths
+        .iter()
+        .filter(|path| {
+            let Some(file) = files.get(path.as_str()) else {
+                return false;
+            };
+            let unknown = other(&file.unknown);
+            let theirs: BTreeSet<&str> = file
+                .added
+                .iter()
+                .filter(|(_, sessions)| other(sessions))
+                .map(|(key, _)| *key)
+                .collect();
+            if !unknown && theirs.is_empty() {
+                return false;
+            }
+            let rewritten = || -> Option<bool> {
+                let before = shell_before(state_dir, root, snapshot, path, deadline)?;
+                let now = read_file(root, path)?.unwrap_or_default();
+                let removed = diff_lines(&before, &now)?.removed;
+                if removed.is_empty() {
+                    return Some(false);
+                }
+                let head = head_content(root, path, snapshot.head.as_deref(), deadline)?;
+                let uncommitted: BTreeSet<String> =
+                    diff_lines(&head, &before)?.added.into_iter().collect();
+                Some(removed.iter().any(|key| {
+                    uncommitted.contains(key) && (unknown || theirs.contains(key.as_str()))
+                }))
+            };
+            rewritten().unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+/// A file's content in `head` (any commit), empty when it does not have it,
+/// `None` when Git cannot say in time or the file is over the bound.
+pub(crate) fn head_content(
+    root: &Path,
+    path: &str,
+    head: Option<&str>,
+    deadline: Instant,
+) -> Option<Vec<u8>> {
     head_blob(root, path, head, deadline).map(Option::unwrap_or_default)
 }
 

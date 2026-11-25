@@ -735,13 +735,26 @@ other commit landed meanwhile; if one did, the session's changes are planned
 again on top of it once, or the command refuses and nothing is lost. Everything else stays as it
 was, staged or not, and is listed. If a hunk mixes the session's lines with
 another's or with lines no session wrote, nothing is committed (exit 1) and
-the hunk is named. Run from an agent's shell, the session is the one running
+the hunk is named. Lines are matched by content, not position, so sessions
+editing one file in turn keep their own hunks however their edits shift each
+other's lines. When another session changed the file in a write whose lines
+are not known, the session's hunks are still committed unless one of their
+lines appears in the file's changes since `HEAD` more often than the session
+wrote it, or the session's earlier write of that line may already have been
+committed through Git; that hunk is then named, with the reason. Run from an agent's shell, the session is the one running
 the command; from a terminal, pass `--session` (a briefing says "Your session
 ID is …"). It looks for the running command in its own state directory, so
 with hooks installed under `--state-dir`, pass the same `--state-dir`; when
 it finds no running session, the error names the directory it looked in and,
 if a LangSpan hook installed in the checkout names another one, that one.
 The MCP tool `langspan_commit_mine` does the same.
+
+A formatter or other workspace-wide command (`cargo fmt --all`) run by one
+session keeps that session's own reformatted lines its own, so `commit --mine`
+still takes them. A file in which the command rewrote another session's
+uncommitted lines is credited to neither session and left for its owner,
+as is a file another session edited or a shell run of another session may
+have written while the command ran ([ADR 0011](adr/0011-shell-writes.md)).
 
 When a Git step fails, the error names the step, its exit status and what Git
 said (its last lines, at most 1 KiB, redacted as other relayed text is). The
