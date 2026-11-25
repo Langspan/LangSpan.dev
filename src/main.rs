@@ -591,13 +591,15 @@ enum Planned {
     Text(Option<String>, String),
 }
 
-/// A file's path, its plan, the bytes the plan was made from, and how to
-/// make it again from other bytes.
+/// A file's path, its plan, the bytes the plan was made from, how to make
+/// it again from other bytes, and, on uninstall of a file LangSpan may have
+/// created, which planned bytes mean nothing is left so the file is removed.
 type FilePlan<'a> = (
     PathBuf,
     Planned,
     Option<Vec<u8>>,
     Box<langspan::install::Planner<'a>>,
+    Option<Box<langspan::install::LeftEmpty<'a>>>,
 );
 
 /// `install` / `uninstall`: LangSpan's user-level hooks and MCP server entry
@@ -690,6 +692,13 @@ fn user_install(
     let mut notes: Vec<String> = Vec::new();
     let registration = registration.as_ref();
     let server = server.as_ref();
+    // On uninstall, a file LangSpan may have created is removed when nothing
+    // but LangSpan's entries was in it, rather than left holding `{}`.
+    let emptied = |vendor: Vendor| {
+        (!install).then(|| -> Box<hooks::LeftEmpty> {
+            Box::new(move |bytes: &[u8]| hooks::json_left_empty(vendor, bytes))
+        })
+    };
     for &vendor in &vendors {
         let files = home.files(vendor);
         let original = hooks::read_bytes(&files.hooks)?;
@@ -723,6 +732,7 @@ fn user_install(
                 Planned::Json(existing, planned, Some(shown)),
                 original,
                 Box::new(replan),
+                emptied(vendor),
             ));
             if install {
                 notes.push("Gemini CLI: built from documentation, not yet verified on a real Gemini CLI (ADR 0033). Gemini CLI runs user-level hooks in every folder; it loads a project's own .gemini/settings.json only once the folder is trusted.".into());
@@ -761,6 +771,7 @@ fn user_install(
             Planned::Json(existing, planned, None),
             original,
             Box::new(replan),
+            emptied(vendor),
         ));
         let original = hooks::read_bytes(&files.mcp)?;
         match vendor {
@@ -805,6 +816,8 @@ fn user_install(
                         Planned::Json(Some(existing), planned, Some(shown)),
                         original,
                         Box::new(replan),
+                        // Claude Code's own file: never removed.
+                        None,
                     ));
                 }
             },
@@ -831,6 +844,8 @@ fn user_install(
                     Planned::Json(existing, planned, None),
                     original,
                     Box::new(replan),
+                    // `{"version": 1}` is not Cursor's MCP shape: only `{}`.
+                    emptied(Vendor::ClaudeCode),
                 ));
                 if install {
                     notes.push("Cursor: built from documentation, not yet verified on a real Cursor (ADR 0032). Cursor asks before it first uses an MCP server; approve `langspan` there.".into());
@@ -852,6 +867,9 @@ fn user_install(
                     Planned::Text(existing, planned),
                     original,
                     Box::new(replan),
+                    (!install).then(|| -> Box<hooks::LeftEmpty> {
+                        Box::new(|bytes: &[u8]| bytes.is_empty())
+                    }),
                 ));
                 if install {
                     notes.push("Codex runs a new or changed hook only after you review and trust it with /hooks.".into());
@@ -879,7 +897,16 @@ fn user_install(
         skills.push(langspan::skill::plan_file(vendor, &path, install)?);
     }
     let mut changed = 0;
-    for (path, plan, original, replan) in &plans {
+    for (path, plan, original, replan, empty) in &plans {
+        let planned_bytes = match plan {
+            Planned::Json(_, planned, _) => hooks::json_bytes(planned)?,
+            Planned::Text(_, planned) => planned.clone().into_bytes(),
+        };
+        // A planned removal of a file that is there is a change even when
+        // its content would not change, as with the `{}` an earlier
+        // uninstall left; an absent file stays unchanged.
+        let removed =
+            original.is_some() && empty.as_ref().is_some_and(|empty| empty(&planned_bytes));
         let (unchanged, text) = match plan {
             Planned::Json(existing, planned, shown) => (
                 existing.as_ref() == Some(planned) || (existing.is_none() && !install),
@@ -893,19 +920,25 @@ fn user_install(
                 planned.trim_end().to_owned(),
             ),
         };
-        if unchanged {
+        if unchanged && !removed {
             println!("{} already matches; nothing to change.", path.display());
             continue;
         }
         changed += 1;
         if apply {
             // The plan is made again from the bytes it was shown from, and
-            // written only if the file still holds them.
-            if hooks::write_planned(path, original.as_deref(), &**replan)? {
-                println!("Wrote {}.", path.display());
-            } else {
-                println!("{} already matches; nothing to change.", path.display());
+            // written (or removed) only if the file still holds them.
+            let never = |_: &[u8]| false;
+            let empty = empty.as_deref().unwrap_or(&never);
+            match hooks::write_or_remove_planned(path, original.as_deref(), &**replan, empty)? {
+                hooks::Applied::Written => println!("Wrote {}.", path.display()),
+                hooks::Applied::Removed => println!("Removed {}.", path.display()),
+                hooks::Applied::Unchanged => {
+                    println!("{} already matches; nothing to change.", path.display())
+                }
             }
+        } else if removed {
+            println!("{} would be removed.", path.display());
         } else {
             println!("{} would become:", path.display());
             println!("{text}");

@@ -96,7 +96,12 @@ precedence. `langspan doctor --root /path/to/checkout` reports both setups;
 through a symbolic link (`/tmp` and `/private/tmp` on macOS) is the same
 coordinator, and only a genuinely different directory is reported.
 `langspan uninstall --apply` removes the user-level entries it recognizes and
-leaves the coordination state directory in place.
+leaves the coordination state directory in place. A hooks or MCP file left
+holding nothing else (`{}`, or empty text) is removed rather than left behind.
+Running it again after an upgrade also removes such a file an earlier
+version left behind. A file with any of your own settings in it keeps them
+byte for byte.
+`~/.claude.json` is never removed.
 
 #### An agent tool installed later
 
