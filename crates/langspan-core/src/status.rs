@@ -6,8 +6,8 @@
 use crate::{
     AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CoreError, Intent, InterfaceNotice,
     Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, RemoteLink, RemotePeer,
-    ScanCoverage, ScanFailure, Session, SessionActivity, SessionLiveness, State, Turn, TurnWaiter,
-    Workspace, WorkspaceGit, error,
+    RetractedMessage, ScanCoverage, ScanFailure, Session, SessionActivity, SessionLiveness, State,
+    Turn, TurnWaiter, Workspace, WorkspaceGit, error,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,6 +77,10 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         checkouts,
         auto_checks,
         check_notices,
+        // Recap, the dashboard and briefings show withdrawn messages; the
+        // bounded view shows what is held, and `status --all` has these.
+        message_history: _,
+        retracted_notices: _,
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
@@ -134,6 +138,8 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         checkouts: checkouts.clone(),
         auto_checks: auto_checks.clone(),
         check_notices: keep(check_notices, of_shown),
+        retracted_notices: BTreeMap::new(),
+        message_history: BTreeMap::new(),
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),
@@ -406,6 +412,16 @@ pub enum StatusRecord {
         key: String,
         notice: CheckNotice,
     },
+    /// One of the latest messages sent in workspace `key`, with its readers.
+    SentMessage {
+        key: String,
+        message: Message,
+    },
+    /// A withdrawal session `key` has not yet been told about.
+    RetractedNotice {
+        key: String,
+        notice: RetractedMessage,
+    },
     /// Part of one record too large for a page: `text` is its JSON from
     /// byte `offset`. The parts of a record come in order, the last with
     /// `last`, and joined they are that record's JSON. A part at offset 0
@@ -418,7 +434,7 @@ pub enum StatusRecord {
 }
 
 /// Record kinds in page order. The cursor names one of these.
-const KINDS: [&str; 21] = [
+const KINDS: [&str; 23] = [
     "workspace",
     "session",
     "intent",
@@ -440,6 +456,8 @@ const KINDS: [&str; 21] = [
     "checkout",
     "auto_check",
     "check_notice",
+    "sent_message",
+    "retracted_notice",
 ];
 
 impl StatusRecord {
@@ -482,6 +500,12 @@ impl StatusRecord {
             Self::AutoCheck { key, check } => drop(state.auto_checks.insert(key, check)),
             Self::CheckNotice { key, notice } => {
                 state.check_notices.entry(key).or_default().push(notice)
+            }
+            Self::SentMessage { key, message } => {
+                state.message_history.entry(key).or_default().push(message)
+            }
+            Self::RetractedNotice { key, notice } => {
+                state.retracted_notices.entry(key).or_default().push(notice)
             }
         }
         Ok(())
@@ -669,7 +693,7 @@ pub fn status_records<'a>(
         .as_ref()
         .and_then(|after| Some((after.position.clone(), after.within?)));
     let after = after.as_ref();
-    let pages: [Page<'a>; 21] = [
+    let pages: [Page<'a>; 23] = [
         entries(0, &state.workspaces, after, |key, workspace| {
             StatusRecord::Workspace { key, workspace }
         }),
@@ -736,6 +760,12 @@ pub fn status_records<'a>(
         }),
         lists(20, &state.check_notices, after, |key, notice| {
             StatusRecord::CheckNotice { key, notice }
+        }),
+        lists(21, &state.message_history, after, |key, message| {
+            StatusRecord::SentMessage { key, message }
+        }),
+        lists(22, &state.retracted_notices, after, |key, notice| {
+            StatusRecord::RetractedNotice { key, notice }
         }),
     ];
     Ok((resume, pages.into_iter().flatten()))

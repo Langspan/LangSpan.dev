@@ -291,7 +291,8 @@ function render(d) {
     'No push turn is held or waited for.', d.more_push_turns, 'push turns');
   fill('messages', d.messages, (m) => add(el('li'),
     add(el('div', 'line'), el('span', 'mono', m.from === null ? 'owner' : m.from),
-      el('span', 'muted', recipient(m.to)), el('span', 'muted', 'in ' + m.workspace_id)),
+      el('span', 'muted', recipient(m.to)), el('span', 'muted', 'in ' + m.workspace_id),
+      m.retracted ? el('span', 'muted', 'withdrawn') : null),
     el('div', 'task', quoted(m.text)), files('about', m.paths)),
     'No messages are waiting.', d.more_messages, 'messages');
   fill('notes', d.notes, (n) => add(el('li'),

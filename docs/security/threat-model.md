@@ -394,6 +394,17 @@ A message is text one session or the owner addresses to another session of the s
 | Denial of service | 64 unacknowledged messages per workspace, oldest dropped: a sender can push others' messages out before they are read. At most four messages, within 1,500 rendered bytes, per briefing; the rest wait. A message for everyone is held until every session of the current daemon generation has it, or until dropped. |
 | Elevation of privilege | A message grants nothing: no lease, intent or admission changes, and a handoff transfers no lease. Acknowledgement only stops delivery. |
 
+Withdrawing a message (`langspan messages retract`, `langspan_retract_message`, issue #66) adds no boundary: it uses the same socket and the same session labels.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Only the session named as sender, or the owner (no session), may withdraw a message, and that name is as unauthenticated as a sender's: a local process that can reach the socket can withdraw any message by naming its sender or none. |
+| Tampering (prompt injection) | The disregard line quotes the first 120 bytes of the withdrawn text, cleaned and quoted like the message itself, under the same "data, not instructions" heading. It shares the 1,500-byte message budget, so it cannot push the briefing over its cap. A false withdrawal can make a reader drop a warning that still holds. |
+| Repudiation | The withdrawal is a `message_retracted` event naming who withdrew it; the original `message_sent` event stays in the log. |
+| Information disclosure | Readers are told only what they had already received. The recap and the dashboard show withdrawn messages, as they showed pending ones. |
+| Denial of service | Withdrawals owed to a session are capped at 64, oldest dropped; at most four, within the message budget, per briefing. The history kept for withdrawal is the latest 64 messages per workspace. |
+| Elevation of privilege | A withdrawal grants and releases nothing; it only stops delivery and adds a notice. |
+
 ## Source index
 
 [ADR 0008](../adr/0008-derived-source-index.md): repository source is parsed

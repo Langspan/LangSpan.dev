@@ -223,6 +223,41 @@ fn every_local_and_remote_session_is_listed_with_current_work_first() {
 }
 
 #[test]
+fn a_withdrawn_message_is_shown_as_withdrawn() {
+    let mut state = ready();
+    let alice = "claude-code.alice-1234567890";
+    for id in ["h1", "h2"] {
+        run(
+            &mut state,
+            id,
+            Command::Handoff {
+                session_id: alice.into(),
+                text: id.into(),
+                paths: vec![],
+            },
+            100,
+        );
+    }
+    run(
+        &mut state,
+        "r1",
+        Command::RetractMessage {
+            workspace_id: "work".into(),
+            from: Some(alice.into()),
+            message_id: Some("h1".into()),
+        },
+        100,
+    );
+    let d = view(&state, 200);
+    let shown: Vec<(&str, bool)> = d
+        .messages
+        .iter()
+        .map(|row| (row.text.as_str(), row.retracted))
+        .collect();
+    assert_eq!(shown, [("h2", false), ("h1", true)]);
+}
+
+#[test]
 fn evidence_and_risks_are_carried_with_their_applicability() {
     let mut state = ready();
     let alice = "claude-code.alice-1234567890";
@@ -393,6 +428,7 @@ fn a_crowded_state_is_bounded_with_counts_of_what_was_left_out() {
                 text: "\\".repeat(400),
                 paths: (0..8).map(quote_path).collect(),
                 acknowledged: vec![],
+                retracted: false,
             })
             .collect(),
     );

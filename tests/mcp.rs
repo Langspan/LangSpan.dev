@@ -189,6 +189,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
             "langspan_recap",
             "langspan_references",
             "langspan_remember",
+            "langspan_retract_message",
             "langspan_send_message",
             "langspan_session_register",
             "langspan_status",
@@ -897,5 +898,80 @@ async fn stdio_symbol_with_detail_returns_calls_and_callers_by_name() {
     };
     assert_eq!(resolution, None);
     assert_eq!((&symbols[0].body_digest, &symbols[0].calls), (&None, &None));
+    disconnect(client).await;
+}
+
+#[tokio::test]
+async fn stdio_retract_message_withdraws_the_callers_newest_message() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let workspace = directory.workspace();
+    let _daemon = Daemon::start(&state_dir).await;
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"w", "workspace_id":"workspace", "root":workspace}),
+        )
+        .await,
+    );
+    for session in ["agent-a", "agent-b"] {
+        response(
+            call_tool(
+                &client,
+                "langspan_session_register",
+                json!({"request_id":format!("r-{session}"), "session_id":session,
+                       "workspace_id":"workspace"}),
+            )
+            .await,
+        );
+    }
+    for id in ["m-1", "m-2"] {
+        response(
+            call_tool(
+                &client,
+                "langspan_send_message",
+                json!({"request_id":id, "workspace_id":"workspace", "session_id":"agent-a",
+                       "to":"agent-b", "text":id, "paths":[]}),
+            )
+            .await,
+        );
+    }
+    let refused = call_tool(
+        &client,
+        "langspan_retract_message",
+        json!({"request_id":"x-1", "workspace_id":"workspace", "session_id":"agent-b",
+               "message_id":"m-1"}),
+    )
+    .await;
+    assert_eq!(refused.is_error, Some(true));
+    let refused: Response =
+        serde_json::from_value(refused.structured_content.expect("domain error envelope"))
+            .expect("shared domain response");
+    assert!(
+        matches!(&refused.outcome, Outcome::Error { code, .. } if code == "not_sender"),
+        "{refused:?}"
+    );
+    let withdrawn = response(
+        call_tool(
+            &client,
+            "langspan_retract_message",
+            json!({"request_id":"x-2", "workspace_id":"workspace", "session_id":"agent-a",
+                   "message_id":"last"}),
+        )
+        .await,
+    );
+    let Outcome::MessageRetracted {
+        message_id,
+        withdrawn_unread,
+        told_to_disregard,
+    } = &withdrawn.outcome
+    else {
+        panic!("{withdrawn:?}");
+    };
+    assert_eq!(message_id, "m-2");
+    assert_eq!(withdrawn_unread, &["agent-b"]);
+    assert!(told_to_disregard.is_empty());
     disconnect(client).await;
 }
