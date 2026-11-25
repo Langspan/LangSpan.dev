@@ -512,6 +512,62 @@ fn without_a_ready_index_a_write_is_not_checked_and_not_delayed() {
 }
 
 #[test]
+fn a_second_same_named_definition_coming_or_going_is_not_a_changed_signature_at_the_write() {
+    let w = World::new(true);
+    w.wait_for_index();
+    quiet(&w.writes("bob", "b0", "src/extra.rs", "pub fn extra() {}\n"));
+    // Alice adds a second `resize`, in another module of the same file,
+    // with the same signature as the first.
+    let one = "pub fn resize(width: u32) -> u32 {\n    width\n}\n";
+    let two = format!(
+        "{one}\npub mod wide {{\n    pub fn resize(width: u32) -> u32 {{\n        width * 2\n    }}\n}}\n"
+    );
+    w.rewrites("alice", "a1", "src/api.rs", &two);
+    w.wait_for_notice("resize", "\"definition_added\"");
+    let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
+    assert!(
+        events.contains(r#""before_count":1"#) && events.contains(r#""after_count":2"#),
+        "{events}"
+    );
+    assert!(!events.contains("signature_changed"), "{events}");
+    // Nothing a call was written against changed: no alert, whatever the
+    // call's argument count.
+    quiet(&w.writes(
+        "bob",
+        "b1",
+        "src/main.rs",
+        "mod api;\nfn main() {\n    api::resize(1, 2);\n}\n",
+    ));
+
+    // Alice takes it away again: a removal, still no alert.
+    w.rewrites("alice", "a2", "src/api.rs", one);
+    w.wait_for_notice("resize", "\"definition_removed\"");
+    quiet(&w.writes(
+        "bob",
+        "b2",
+        "src/main.rs",
+        "mod api;\nfn main() {\n    api::resize(3, 4);\n}\n",
+    ));
+
+    // A real change to the one left is alerted to, as before.
+    w.rewrites(
+        "alice",
+        "a3",
+        "src/api.rs",
+        "pub fn resize(width: u32, height: u32) -> u32 {\n    width * height\n}\n",
+    );
+    w.wait_for_notice("resize", "height: u32");
+    let run = w.writes(
+        "bob",
+        "b3",
+        "src/main.rs",
+        "mod api;\nfn main() {\n    api::resize(5);\n}\n",
+    );
+    let context = alert(&run);
+    assert!(context.contains("it now takes 2"), "{context}");
+}
+
+#[test]
 fn a_notice_left_out_of_a_full_alert_is_told_at_a_later_write() {
     let w = World::new(true);
     w.wait_for_index();

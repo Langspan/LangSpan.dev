@@ -570,6 +570,80 @@ fn a_changed_exported_signature_is_reported_to_the_session_whose_files_mention_i
     assert!(w.prompt("alice").is_none());
 }
 
+/// Wait until `session`'s next prompt carries an interface notice holding
+/// `text`.
+fn told(w: &World, session: &str, text: &str) -> String {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(context) = w
+            .prompt(session)
+            .filter(|context| context.contains("Interface change") && context.contains(text))
+        {
+            return context;
+        }
+        assert!(Instant::now() < deadline, "{session} was never told {text}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[test]
+fn a_second_same_named_definition_is_told_as_added_and_losing_it_as_removed() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let upload = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    let one = format!(
+        "{upload}\npub struct A;\npub struct B;\n\nimpl A {{\n    pub fn text(&self) -> String {{\n        String::new()\n    }}\n}}\n"
+    );
+    let two = format!(
+        "{one}\nimpl B {{\n    pub fn text(&self) -> String {{\n        \"b\".into()\n    }}\n}}\n"
+    );
+    // A new name is not news to anyone: there is no notice for it.
+    w.edits("bob", "b1", "src/upload.rs", &one);
+    let main = fs::read_to_string(w.work().join("src/main.rs")).unwrap();
+    w.edits(
+        "alice",
+        "a1",
+        "src/main.rs",
+        &main.replace("fn main() {", "fn main() {\n    let _ = upload::A.text();"),
+    );
+    w.wait_for("one text method", "symbol", "text", |outcome| {
+        outcome["symbols"].as_array().is_some_and(|d| d.len() == 1)
+            && outcome["coverage"]["current_files"] == 3
+    });
+    w.wait_for("alice's mention", "references", "text", |outcome| {
+        paths(&outcome["references"])
+            .iter()
+            .any(|path| path.starts_with("src/main.rs"))
+    });
+
+    // Bob adds a second `text`, on another type, with the same signature.
+    w.edits("bob", "b2", "src/upload.rs", &two);
+    let added = r#"a second method "text" was added: "pub fn text(&self) -> String" (now 2 definitions with that name)"#;
+    let context = told(&w, "alice", added);
+    assert!(!context.contains("changed from"), "{context}");
+
+    // Bob takes it away again.
+    w.edits("bob", "b3", "src/upload.rs", &one);
+    let removed = r#"one of 2 methods "text" was removed: "pub fn text(&self) -> String" (now 1 definition with that name)"#;
+    let context = told(&w, "alice", removed);
+    assert!(!context.contains("changed from"), "{context}");
+
+    // A real change to the one left is still a changed signature.
+    w.edits(
+        "bob",
+        "b4",
+        "src/upload.rs",
+        &one.replace("text(&self)", "text(&self, limit: usize)"),
+    );
+    told(
+        &w,
+        "alice",
+        r#"method "text" changed from "pub fn text(&self) -> String" to "pub fn text(&self, limit: usize) -> String""#,
+    );
+}
+
 #[test]
 fn blind_spots_name_the_files_the_index_cannot_answer_for() {
     let w = World::new();

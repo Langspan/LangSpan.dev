@@ -1111,7 +1111,11 @@ pub struct BlindSpots {
 pub struct InterfaceChange {
     pub name: String,
     pub kind: String,
-    /// `removed` or `signature_changed`.
+    /// `removed`, `signature_changed`, `definition_added` or
+    /// `definition_removed`. The last two mean only the number of
+    /// definitions sharing the name and kind changed: `after` (added) or
+    /// `before` (removed) holds the signatures that came or went, and the
+    /// counts say how many there were and are.
     pub change: String,
     pub before: Option<String>,
     pub after: Option<String>,
@@ -1122,7 +1126,16 @@ pub struct InterfaceChange {
     pub before_arity: Option<Arity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_arity: Option<Arity>,
+    /// Definitions with this name and kind before and after, for
+    /// `definition_added` and `definition_removed` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_count: Option<u32>,
 }
+
+/// Definitions sharing one name and kind that a notice counts at most.
+pub const MAX_DEFINITION_COUNT: u32 = 65_535;
 
 /// How many arguments a function takes, read from its signature text.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -5030,9 +5043,35 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
             change.before.as_ref(),
             change.after.as_ref(),
         ];
+        let counts = match (change.before_count, change.after_count) {
+            (Some(before), Some(after)) => Some((before, after)),
+            (None, None) => None,
+            _ => Some((0, 0)),
+        };
+        // A count change names its counts, in the direction it says, and
+        // carries the signatures that came or went; nothing else has
+        // counts.
+        let shaped = match (change.change.as_str(), counts) {
+            ("removed" | "signature_changed", None) => true,
+            ("definition_added", Some((before, after))) => {
+                before >= 1
+                    && before < after
+                    && after <= MAX_DEFINITION_COUNT
+                    && change.before.is_none()
+                    && change.after.is_some()
+            }
+            ("definition_removed", Some((before, after))) => {
+                after >= 1
+                    && after < before
+                    && before <= MAX_DEFINITION_COUNT
+                    && change.before.is_some()
+                    && change.after.is_none()
+            }
+            _ => false,
+        };
         if change.name.is_empty()
             || change.name.len() > 128
-            || !matches!(change.change.as_str(), "removed" | "signature_changed")
+            || !shaped
             || change.kind.len() > 16
             || texts
                 .into_iter()
@@ -5041,7 +5080,7 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         {
             return Err(error(
                 "invalid_notice",
-                "An interface change has a name, a kind, `removed` or `signature_changed`, and single-line signatures of at most 256 bytes",
+                "An interface change has a name, a kind, `removed`, `signature_changed`, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
             ));
         }
     }
