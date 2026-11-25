@@ -1105,10 +1105,13 @@ fn evidence(
         integrate::Ran::Exited(exit_code) => CheckResult::Failed { exit_code },
         integrate::Ran::Unfinished => CheckResult::Inconclusive {},
     };
-    // The tests its output named, to learn which flip on unchanged code.
+    // The tests its output named, to learn which flip on unchanged code;
+    // none for a command that looks like it holds a secret, whose identity
+    // (a digest of it) is not sent.
     let tests = match (&result, &output) {
         (CheckResult::Inconclusive {}, _) | (_, None) => None,
         _ if writes_before.is_none() => None,
+        _ if langspan::hook::contains_secret(&command.join(" ")) => None,
         (result, Some(bytes)) => {
             langspan::test_output::read(bytes, false, matches!(result, CheckResult::Passed {}), &[])
         }
@@ -1127,6 +1130,9 @@ fn evidence(
             duration_ms,
             report: None,
             writes_before: tests.as_ref().and(writes_before),
+            command_id: tests
+                .as_ref()
+                .map(|_| langspan::landing::command_id(command)),
             tests,
             rerun: None,
         },

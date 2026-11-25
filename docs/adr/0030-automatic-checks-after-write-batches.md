@@ -128,7 +128,9 @@ and `pytest` (`FAILED path::name`, and with `-v` or `-rA` its passes and,
 with `-v`, its skips). A skipped test (ignored, skipped, or pytest's `XFAIL`
 or `XPASS`) is kept as skipped. A test named as failing anywhere failed; one
 named as skipped anywhere else is skipped. At most 100 names and 10 KiB of
-them per run are kept, failures first, then skips, then passes; a run that
+them per run are kept, failures first, then skips, then passes; the daemon
+also drops, on receipt, any failed, passed or skipped name redaction would
+change, so a request made straight to the socket keeps none either. A run that
 passed and skipped more tests than fit teaches nothing, since the skips left
 out would read as passes. A name over 200 bytes, with a control character or
 anything redaction would change is left out. Output no parser recognises
@@ -138,8 +140,14 @@ names: each of its runs is a new combined tree.
 **Evidence of a flip.** `record_check` gains optional `tests` and `rerun`
 (failed, passed and skipped names, and `all_passed` when the run exited 0:
 then every test it ran passed, named or not; a skipped test did not run, so
-it neither passed nor failed and is never compared), and `writes_before`,
-required with them. The core counts recorded writes per workspace
+it neither passed nor failed and is never compared), and `writes_before` and
+`command_id`, required with them. `command_id` is the command's identity: a
+SHA-256 of its arguments, each preceded by its length, as 64 hex digits. The
+record's `command` is only a summary, joined, redacted and cut at 120
+characters, which two commands can share, so results are compared by
+identity, never by summary. `check run` sends no names for a command that
+looks like it holds a secret (an automatic check refuses one), so a digest
+never stands for a secret redaction hid. The core counts recorded writes per workspace
 (`State::writes`, its write generation: a successful tool observation that
 changed a path in the workspace, or an observed file change, adds one;
 derived on replay and in the status reply). A run takes the count before its
@@ -149,7 +157,7 @@ recorded while the run (or its rerun) went, even one undone before it ended,
 keeps them from being compared with anything; the record itself is kept
 either way. A result it learns from is kept as the last one of its check
 name, with its generation, and compared with the next one of the same check
-name and command in the workspace if that is on the same tree at the same
+name and command identity in the workspace if that is on the same tree at the same
 generation: a result is never compared across a recorded write, even when
 the write was undone. A test the two results disagree about flipped; a test both name the
 same way is one more run for a test already followed, and nothing for any

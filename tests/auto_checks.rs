@@ -835,6 +835,72 @@ fn two_check_runs_on_one_tree_with_no_write_between_record_a_flip() {
 }
 
 #[test]
+fn two_commands_whose_summaries_are_equal_are_not_compared() {
+    let f = Fixture::new(100);
+    let log = f.log();
+    let script = scheduled(&[0], &[]);
+    // The recorded command line is cut at 120 characters, inside the
+    // script, so these two commands share it; they differ after it.
+    assert!(script.len() > 120);
+    let argv = |extra: &str| -> Vec<String> {
+        ["sh", "-c", &script, log.to_str().unwrap(), extra]
+            .map(str::to_owned)
+            .to_vec()
+    };
+    assert_eq!(
+        langspan::landing::command_line(&argv("first")),
+        langspan::landing::command_line(&argv("second")),
+        "one summary for both"
+    );
+    let run = |extra: &str| {
+        let mut args: Vec<String> = ["check", "run", "work", "--name", "tests", "--"]
+            .map(str::to_owned)
+            .to_vec();
+        args.extend(argv(extra));
+        f.cli(&args.iter().map(String::as_str).collect::<Vec<_>>())
+    };
+    let (code, stdout, stderr) = run("first");
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let (code, stdout, stderr) = run("second");
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        learned(&f, "net::times_out"),
+        None,
+        "a failure of one command and a pass of another are no flip"
+    );
+    // A command that looks like it holds a secret sends no test names, so
+    // no digest of it is stored: fail, then pass, is learned from nothing.
+    let own_log = log.with_file_name("secret-runs.log");
+    for expected in [1, 0] {
+        let args = [
+            "check",
+            "run",
+            "work",
+            "--name",
+            "secret",
+            "--",
+            "sh",
+            "-c",
+            &script,
+            own_log.to_str().unwrap(),
+            "--token",
+            "hunter2",
+        ];
+        let (code, stdout, stderr) = f.cli(&args);
+        assert_eq!(code, expected, "{stdout}{stderr}");
+    }
+    let state = f.state();
+    assert!(
+        state
+            .test_learning
+            .get("work")
+            .is_none_or(|learning| !learning.last.contains_key("secret")),
+        "{:?}",
+        state.test_learning
+    );
+}
+
+#[test]
 fn a_test_skipped_in_a_passing_run_between_two_failures_records_no_flip() {
     let f = Fixture::new(100);
     let log = f.log();

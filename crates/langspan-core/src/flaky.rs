@@ -1,7 +1,8 @@
 //! Tests that flip on unchanged code (issue #70,
 //! [ADR 0030](../../../docs/adr/0030-automatic-checks-after-write-batches.md)).
 //!
-//! Two results of one check (same name and command) on one tree, with no
+//! Two results of one check (same name and command identity) on one tree,
+//! with no
 //! recorded write in the workspace between them, that disagree about a test
 //! are one flip of that test. A test that flipped at least
 //! [`FLAKY_MIN_FLIPS`] times in its last [`FLAKY_WINDOW_RUNS`] such runs is
@@ -74,7 +75,8 @@ impl TestResults {
 #[serde(deny_unknown_fields)]
 pub struct LastTests {
     pub tree_oid: String,
-    pub command: String,
+    /// The identity of its command (`record_check.command_id`).
+    pub command_id: String,
     /// The workspace's write generation during its run: a later result is
     /// compared with it only at the same generation, with no write between.
     #[serde(default)]
@@ -143,6 +145,12 @@ pub struct FlakyTest {
     pub last_flip_age_ms: u64,
 }
 
+/// A command identity: 64 lowercase hex digits, as a SHA-256 of the
+/// argument vector is written.
+pub(crate) fn is_command_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 pub(crate) fn validate_test_results(results: &TestResults, passed: bool) -> Result<(), CoreError> {
     let names = || {
         results
@@ -181,20 +189,20 @@ pub(crate) fn validate_test_results(results: &TestResults, passed: bool) -> Resu
 impl TestLearning {
     /// Learn from one result of check `name`, taken with no write recorded
     /// during its run, at write generation `writes`; compared with the last
-    /// one when that was on the same tree with the same command at the same
-    /// generation.
+    /// one when that was on the same tree, of the command with the same
+    /// identity, at the same generation.
     pub(crate) fn learn(
         &mut self,
         name: &str,
         tree_oid: &str,
-        command: &str,
+        command_id: &str,
         writes: u64,
         results: &TestResults,
         now_ms: u64,
     ) {
         if let Some(last) = self.last.get(name)
             && last.tree_oid == tree_oid
-            && last.command == command
+            && last.command_id == command_id
             && last.writes == writes
         {
             let tracked = self.tests.entry(name.to_owned()).or_default();
@@ -252,7 +260,7 @@ impl TestLearning {
             name.to_owned(),
             LastTests {
                 tree_oid: tree_oid.to_owned(),
-                command: command.to_owned(),
+                command_id: command_id.to_owned(),
                 writes,
                 results: results.clone(),
             },

@@ -485,6 +485,7 @@ fn a_queued_landing_today_after_yesterdays_prompt_edit_and_check_is_dated_today(
             tests: None,
             rerun: None,
             writes_before: None,
+            command_id: None,
         },
         at(MIDNIGHT - 10 * 60_000),
     );

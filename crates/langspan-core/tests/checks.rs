@@ -55,6 +55,7 @@ fn record(
             tests: None,
             rerun: None,
             writes_before: None,
+            command_id: None,
         },
         10,
     )

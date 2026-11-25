@@ -433,6 +433,11 @@ fn report(
             timed_out_s: finished.timed_out_s,
         }),
         writes_before: finished.tests.as_ref().map(|_| finished.writes_before),
+        // An automatic check's command holds no secret (`refuse_secrets`).
+        command_id: finished
+            .tests
+            .as_ref()
+            .map(|_| crate::landing::command_id(&check.argv)),
         tests: finished.tests,
         rerun: finished.rerun,
     };

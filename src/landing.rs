@@ -474,6 +474,20 @@ pub fn command_line(argv: &[String]) -> String {
         .collect()
 }
 
+/// The identity of a check's command, for comparing its test results: a
+/// SHA-256 of its arguments, each preceded by its length, so two argument
+/// vectors never share it (`command_line` cuts and joins them, so they can
+/// share that). Sent only for a command that holds nothing redaction would
+/// hide, so it reveals no more than the command line itself.
+pub fn command_id(argv: &[String]) -> String {
+    let mut message = b"langspan-check-command-v1".to_vec();
+    for arg in argv {
+        message.extend_from_slice(&(arg.len() as u64).to_be_bytes());
+        message.extend_from_slice(arg.as_bytes());
+    }
+    crate::sha256::hex(&crate::sha256::digest(&message))
+}
+
 fn validate(request_id: &str, target: &Target, check: Option<&Check>) -> Result<(), crate::Error> {
     langspan_core::validate_request_id(request_id)?;
     integrate::revision(&target.remote)?;
@@ -574,6 +588,7 @@ fn run_check(
             tests: None,
             rerun: None,
             writes_before: None,
+            command_id: None,
         },
     )?
     .outcome

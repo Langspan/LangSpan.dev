@@ -90,11 +90,33 @@ fn record(
     record_marked(state, id, tree, tests, rerun, Some(writes), now)
 }
 
+/// The identity of the command `record` runs, `cargo test`.
+fn cargo_test() -> Option<String> {
+    Some("c".repeat(64))
+}
+
 /// As `record`, with the write mark the first run was taken at.
 fn record_marked(
     state: &mut State,
     id: &str,
     tree: &str,
+    tests: TestResults,
+    rerun: Option<TestResults>,
+    writes_before: Option<u64>,
+    now: u64,
+) -> Outcome {
+    let writes = writes_before;
+    record_as(state, id, tree, cargo_test(), tests, rerun, writes, now)
+}
+
+/// As `record_marked`, of the command whose identity is `command_id`; its
+/// summary is `cargo test` whatever the identity.
+#[allow(clippy::too_many_arguments)]
+fn record_as(
+    state: &mut State,
+    id: &str,
+    tree: &str,
+    command_id: Option<String>,
     tests: TestResults,
     rerun: Option<TestResults>,
     writes_before: Option<u64>,
@@ -125,6 +147,7 @@ fn record_marked(
             tests: Some(tests),
             rerun,
             writes_before,
+            command_id,
         },
         now,
     )
@@ -289,6 +312,97 @@ fn a_rerun_after_a_write_recorded_since_its_first_run_is_not_compared() {
         Some(passing()),
         None,
         300,
+    );
+    assert!(matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+}
+
+#[test]
+fn results_of_two_commands_that_share_a_summary_are_not_compared() {
+    let mut state = ready();
+    let first = || Some("1".repeat(64));
+    let second = || Some("2".repeat(64));
+    let failed = || failing(&["net::times_out"], &[]);
+    let writes = Some(0);
+    // Both are summarised `cargo test`: their identities differ.
+    record_as(
+        &mut state,
+        "c1",
+        &tree('a'),
+        first(),
+        failed(),
+        None,
+        writes,
+        100,
+    );
+    record_as(
+        &mut state,
+        "c2",
+        &tree('a'),
+        second(),
+        passing(),
+        None,
+        writes,
+        200,
+    );
+    assert_eq!(history(&state, "net::times_out"), None);
+    // A rerun counts as the same command as its own record.
+    record_as(
+        &mut state,
+        "c3",
+        &tree('a'),
+        first(),
+        failed(),
+        Some(passing()),
+        writes,
+        300,
+    );
+    assert_eq!(history(&state, "net::times_out"), Some((1, 1)));
+    // Compared with the last result of the same identity only.
+    record_as(
+        &mut state,
+        "c4",
+        &tree('a'),
+        first(),
+        failed(),
+        None,
+        writes,
+        400,
+    );
+    assert_eq!(history(&state, "net::times_out"), Some((2, 2)));
+    // Test results without an identity, or with a malformed one, are
+    // refused; so is an identity without test results.
+    for command_id in [None, Some("C".repeat(64)), Some("1".repeat(63))] {
+        let outcome = record_as(
+            &mut state,
+            "bad",
+            &tree('a'),
+            command_id,
+            failed(),
+            None,
+            writes,
+            500,
+        );
+        assert!(matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+    }
+    let outcome = run(
+        &mut state,
+        "bad",
+        Command::RecordCheck {
+            workspace_id: "work".into(),
+            name: "tests".into(),
+            command: "cargo test".into(),
+            tree_oid: tree('a'),
+            head_oid: None,
+            inputs: Vec::new(),
+            result: CheckResult::Passed {},
+            duration_ms: 1,
+            report: None,
+            tests: None,
+            rerun: None,
+            writes_before: None,
+            command_id: first(),
+        },
+        600,
     );
     assert!(matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
 }
@@ -544,6 +658,7 @@ fn test_results_are_bounded_and_belong_to_a_conclusive_working_tree_check() {
                     tests: Some(tests),
                     rerun: None,
                     writes_before,
+                    command_id: cargo_test(),
                 },
                 1,
             );
@@ -602,19 +717,21 @@ fn the_wire_forms_of_flaky_test_commands_outcomes_and_events_are_fixed() {
         "tree_oid": tree('a'), "head_oid": null, "inputs": [], "result": {"type": "failed", "exit_code": 101},
         "duration_ms": 9,
         "tests": {"failed": ["net::times_out"], "passed": ["parser::keeps_order"]},
-        "rerun": {"all_passed": true}, "writes_before": 0,
+        "rerun": {"all_passed": true}, "writes_before": 0, "command_id": "c".repeat(64),
     }))
     .unwrap();
     let Command::RecordCheck {
         tests,
         rerun,
         writes_before,
+        command_id,
         ..
     } = &command
     else {
         panic!("{command:?}")
     };
     assert_eq!(*writes_before, Some(0));
+    assert_eq!(*command_id, cargo_test());
     assert_eq!(
         tests.as_ref(),
         Some(&failing(&["net::times_out"], &["parser::keeps_order"]))
@@ -663,8 +780,8 @@ fn the_wire_forms_of_flaky_test_commands_outcomes_and_events_are_fixed() {
         serde_json::to_value(&decision.events[1]).unwrap(),
         json!({
             "type": "tests_recorded", "workspace_id": "work", "check_id": "c1", "name": "tests",
-            "tree_oid": tree('a'), "command": "cargo test",
-            "results": {"failed": ["net::times_out"], "passed": ["parser::keeps_order"]},
+            "tree_oid": tree('a'), "command": "cargo test", "command_id": "c".repeat(64),
+            "results":{"failed": ["net::times_out"], "passed": ["parser::keeps_order"]},
             "at_ms": 77,
         })
     );

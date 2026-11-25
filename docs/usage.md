@@ -882,9 +882,11 @@ See [ADR 0030](adr/0030-automatic-checks-after-write-batches.md).
 
 #### Tests that flip on unchanged code
 
-Two results of the same check (name and command) on the same tree, with no
-write recorded in the workspace between them, that disagree about a test are
-one flip of that test. A failing automatic check that named a failing test and
+Two results of the same check (name and command, compared by its whole
+argument list, not the shortened command line `check status` shows) on the
+same tree, with no write recorded in the workspace between them, that
+disagree about a test are one flip of that test. `check run` learns nothing
+from a command that looks like it holds a secret. A failing automatic check that named a failing test and
 took at most `flaky_rerun_max_s` (`config.json`, default 30, 0 turns it off)
 is run once more on the same tree, stopped after at most that long, to get
 that second result; a longer one is not run again, and a write recorded while

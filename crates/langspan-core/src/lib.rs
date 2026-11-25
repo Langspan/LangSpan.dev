@@ -1707,14 +1707,16 @@ pub enum Event {
     /// Which tests one run of check `name` failed and passed on `tree_oid`:
     /// names only, no output. Follows the `CheckRecorded` of record
     /// `check_id`; `rerun` for the run made again on the same tree, which is
-    /// no record of its own. Compared with the check's last such result,
-    /// unless a write was recorded in the workspace since.
+    /// no record of its own. Compared with the check's last such result of
+    /// the same `command_id`, unless a write was recorded in the workspace
+    /// since.
     TestsRecorded {
         workspace_id: String,
         check_id: String,
         name: String,
         tree_oid: String,
         command: String,
+        command_id: String,
         results: TestResults,
         #[serde(default, skip_serializing_if = "is_false")]
         rerun: bool,
@@ -2004,6 +2006,12 @@ pub enum Command {
         /// recorded since, even one the tree no longer shows.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         writes_before: Option<u64>,
+        /// With `tests`: the command's identity, 64 lowercase hex digits
+        /// that differ for any two argument vectors. `command` is a cut and
+        /// redacted summary, which two commands can share; results are
+        /// compared only when this is equal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
     },
     /// Read-only: the tests known to flip on unchanged code, of check `name`
     /// or of every check.
@@ -2473,6 +2481,12 @@ enum CommandWire {
         /// recorded since, even one the tree no longer shows.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         writes_before: Option<u64>,
+        /// With `tests`: the command's identity, 64 lowercase hex digits
+        /// that differ for any two argument vectors. `command` is a cut and
+        /// redacted summary, which two commands can share; results are
+        /// compared only when this is equal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
     },
     /// Read-only: the tests known to flip on unchanged code, of check `name`
     /// or of every check.
@@ -4021,6 +4035,7 @@ fn decide_checked(
             tests,
             rerun,
             writes_before,
+            command_id,
         } => {
             let check = CheckRecord {
                 check_id: request_id.into(),
@@ -4059,6 +4074,16 @@ fn decide_checked(
                     "Test results come with the workspace's write generation taken before the run's tree (writes_before)",
                 ));
             }
+            let command_id = match (tests, command_id) {
+                (None, None) => "",
+                (Some(_), Some(id)) if flaky::is_command_id(id) => id.as_str(),
+                _ => {
+                    return Err(error(
+                        "invalid_test_results",
+                        "Test results come with the command's identity (command_id: 64 lowercase hex digits), and only they do",
+                    ));
+                }
+            };
             // The write generation the run took before its tree. A write
             // recorded since, even one undone before the run (or its rerun)
             // ended, means its results are not of unchanged code: they are
@@ -4086,13 +4111,14 @@ fn decide_checked(
                 if !unchanged {
                     continue;
                 }
-                learning.learn(name, tree_oid, command, writes, results, now_ms);
+                learning.learn(name, tree_oid, command_id, writes, results, now_ms);
                 events.push(Event::TestsRecorded {
                     workspace_id: workspace_id.clone(),
                     check_id: check.check_id.clone(),
                     name: name.clone(),
                     tree_oid: tree_oid.clone(),
                     command: command.clone(),
+                    command_id: command_id.to_owned(),
                     results: results.clone(),
                     rerun: again,
                     at_ms: now_ms,
@@ -7345,10 +7371,17 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             name,
             tree_oid,
             command,
+            command_id,
             results,
             rerun,
             at_ms,
         } => {
+            if !flaky::is_command_id(command_id) {
+                return Err(error(
+                    "invalid_event",
+                    "Test results name their command's identity",
+                ));
+            }
             let Some(record) = state
                 .checks
                 .get(workspace_id)
@@ -7388,7 +7421,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 .test_learning
                 .entry(workspace_id.clone())
                 .or_default()
-                .learn(name, tree_oid, command, writes, results, *at_ms);
+                .learn(name, tree_oid, command_id, writes, results, *at_ms);
         }
         Event::FlakyTestForgotten {
             workspace_id,
