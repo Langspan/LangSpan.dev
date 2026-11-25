@@ -21,13 +21,17 @@ documentation and not yet verified on a real Cursor or a live Gemini CLI session
 <a href="https://langspan.dev/#demo">
   <picture>
     <source media="(max-width: 600px)" srcset="https://langspan.dev/assets/product/langspan-overview-compact.svg">
-    <img src="https://langspan.dev/assets/product/langspan-overview.svg" alt="LangSpan holds a file for Agent A, denies Agent B’s overlapping edit, and leaves an unrelated test file available." width="1400">
+    <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="https://langspan.dev/assets/product/langspan-card-dark-still.svg">
+    <source media="(prefers-reduced-motion: reduce)" srcset="https://langspan.dev/assets/product/langspan-card-light-still.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="https://langspan.dev/assets/product/langspan-card-dark.svg">
+    <img src="https://langspan.dev/assets/product/langspan-card-light.svg" alt="LangSpan: in a shared checkout Agent A holds src/auth/session.ts, Agent B’s overlapping request is refused, and B independently chooses tests/session.test.ts." width="1300">
   </picture>
 </a>
 
-*An authored illustration of local coordination. The brief animation settles into
-the complete picture; reduced motion shows that picture immediately.
-[Explore each step](https://langspan.dev/#demo) with Play, Pause and Replay.*
+*An authored 12-second illustration of local coordination, not a session recording.
+[Explore each step](https://langspan.dev/#demo) with Play, Pause and Replay, or open
+the motionless [light](https://langspan.dev/assets/product/langspan-card-light-still.svg) or
+[dark](https://langspan.dev/assets/product/langspan-card-dark-still.svg) version.*
 
 ## Why we're building LangSpan
 
