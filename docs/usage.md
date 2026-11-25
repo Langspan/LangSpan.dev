@@ -173,10 +173,17 @@ list you kept for one of these events (for example `"Stop": []`) goes too.
 Post callbacks record the host-reported result and complete only the matching,
 still-current admission. Late or mismatched observations do not acquire new
 authority. Linked worktrees resolve from the event's working directory, keeping
-physically separate checkouts distinct. A linked worktree with its own install
-for the same host and state directory is left to that install: the main
-checkout's hook, which the host may also run there, logs
-`deferred_to_worktree` and does nothing else.
+physically separate checkouts distinct. A linked worktree can have its own
+install for the same host and state directory. Claude Code runs both that
+install and the main checkout's there, so the main checkout's hook logs
+`deferred_to_worktree` and does nothing else. Codex 0.171.0 runs only the
+main checkout's hooks there, so that hook coordinates the session under the
+worktree install's workspace ID instead; Cursor and Gemini CLI, whose
+behavior there has not been observed, are treated the same way, so an event
+is never left undecided. `langspan doctor --root DIR` names each linked
+worktree whose install the host will not run, and fails when nothing covers
+it. The per-host rules are in
+[ADR 0003](adr/0003-native-coordination-observation.md).
 
 See [Claude adapter decisions](adr/0002-claude-code-adapter.md),
 [Codex contract coverage](evidence/m3-codex/README.md) and the

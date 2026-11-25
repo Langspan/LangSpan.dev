@@ -98,19 +98,62 @@ Git checkout and its common directory. A separate linked worktree receives a
 distinct workspace identity. Equal relative paths in two worktrees are separate
 files and do not conflict merely because they share a branch lineage.
 
-A linked worktree can also have its own project install. Claude Code started
-there runs both that install and the main checkout's (it reads the main
-checkout's local settings), so the inherited copy used to answer every event
-a second time, as `unknown` ("workspace root overlaps an existing physical
-workspace") at 29–53 ms, and ran the commit guard and Stop twice (launch
-validation, bug 3). The inherited hook now looks, by reading files only, for
-a LangSpan hook of the same host in the nearest directory holding `.git`
-under the event's cwd; when one names that worktree as its root and the same
-state directory, it prints nothing, logs coverage `deferred_to_worktree` and
-calls neither Git nor the coordinator, as a user-level hook defers to a
-project install (ADR 0010). An install there with another state directory,
-or none, leaves the inherited hook covering the worktree as before (test
-`the_main_checkouts_hook_leaves_a_worktree_with_its_own_install_to_that_install`).
+A linked worktree can also have its own project install. Hosts differ in
+which project hooks they run for a session started there, so the inherited
+hook (the main checkout's) first looks, by reading files only, for a
+LangSpan hook of the same host in the nearest directory holding `.git` under
+the event's cwd that names that worktree as its root and the same state
+directory. What it does with one depends on the host's rule
+(`Vendor::worktree_hooks` in `src/install.rs`). Every hooked event must be
+decided by a LangSpan hook, so it steps aside only where the host is known to
+run the worktree's own install for the same event:
+
+| Host | Hooks run in a linked worktree with its own install | Observed on | Inherited hook |
+| --- | --- | --- | --- |
+| Claude Code | Both: the worktree's own project hooks and the main checkout's local settings | Claude Code 2.1.330, macOS 27.2 (launch validation, bug 3) | Steps aside (`deferred_to_worktree`) |
+| Codex | Only the main checkout's project hooks; the worktree's own never run | Codex 0.171.0, macOS (issue #2) | Decides, as the worktree's install would |
+| Cursor | Not known: no run in a linked worktree is retained | — | Decides, as the worktree's install would |
+| Gemini CLI | Not known: its source reads project settings from the directory it starts in (ADR 0033), but no run in a linked worktree is retained | — | Decides, as the worktree's install would |
+
+On Claude Code the inherited copy used to answer every event a second time,
+as `unknown` ("workspace root overlaps an existing physical workspace") at
+29–53 ms, and ran the commit guard and Stop twice. It now prints nothing,
+logs coverage `deferred_to_worktree` and calls neither Git nor the
+coordinator, as a user-level hook defers to a project install (ADR 0010).
+
+On Codex that step-aside left a session in the worktree with no LangSpan
+decision at all, since Codex never runs the worktree's hooks (issue #2). Where
+the host runs only the main checkout's hooks, or where that is not known, the
+inherited hook instead checks, with Git, that the worktree shares the
+installed checkout's common directory, then decides under the worktree
+install's workspace ID and root. A session there is coordinated in the same
+workspace as sessions the worktree's own install covers (for example Claude
+Code there), and a host that turns out to run both reaches one decision for
+one workspace: the same call is the same idempotent request. A prompt-summary
+or code-briefing opt-out in either install holds: the prompt's summary and
+names are derived only after the workspace is resolved, from its settings, in
+every host adapter. An unconfirmed host
+therefore falls back to deciding, never to silence; a decision made twice
+costs one extra hook run, while silence leaves edits uncoordinated. An
+install there with another state directory, or none, leaves the inherited
+hook covering the worktree under a workspace derived from its own, as
+before. `langspan doctor` reports each linked worktree whose install the
+host will not run, and fails when nothing the host runs covers it; a main
+checkout hook whose executable is gone or that lacks a required event does
+not count as covering it. A rule
+moves to `Both` only with a retained real-host run in a linked worktree.
+
+Tests (real linked worktrees, a real daemon, constructed host events):
+`the_main_checkouts_hook_leaves_a_worktree_with_its_own_install_to_that_install`
+(Claude Code),
+`codex_in_a_worktree_with_its_own_install_is_coordinated_by_the_main_checkouts_hook`,
+`an_unconfirmed_host_decides_in_a_worktree_with_its_own_install_rather_than_stepping_aside`
+(Gemini CLI and Cursor),
+`a_worktree_installs_prompt_opt_outs_hold_when_the_main_checkouts_hook_decides`
+(Codex and Cursor),
+`doctor_reports_a_worktree_install_the_host_will_not_run` and
+`doctor_does_not_count_a_broken_main_checkout_install_as_covering_a_worktree`. A real Codex run
+in a linked worktree with a conflicting edit refused is pending.
 
 Overlapping roots still require explicit daemon verification of distinct Git
 toplevels with the same common directory. An internal prepared registration

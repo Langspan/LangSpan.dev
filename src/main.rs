@@ -1904,6 +1904,9 @@ fn doctor(
                 "Shell commands (Bash) are covered partly: a write is refused before it runs only for literal forms such as `> file`, `sed -i` or `mv`; other commands' changes are found afterwards by comparing Git status, and are not recorded when that comparison is incomplete (ADR 0011).".into(),
             );
         }
+        for (ok, text) in worktree_install_findings(state_dir, root) {
+            note(ok, text);
+        }
     }
     for (ok, text) in user_level_findings(state_dir, home)? {
         note(ok, text);
@@ -1932,6 +1935,129 @@ fn doctor(
         );
     }
     Ok(u8::from(problems > 0))
+}
+
+/// What `doctor` says about each linked worktree of `root`'s repository with
+/// a LangSpan install of its own that the host may not run there
+/// (`Vendor::worktree_hooks`, ADR 0003).
+fn worktree_install_findings(
+    state_dir: &std::path::Path,
+    root: &std::path::Path,
+) -> Vec<(bool, String)> {
+    use langspan::{
+        hook::install_at,
+        install::{Vendor, WorktreeHooks},
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let listed = match langspan::git::output(
+        root,
+        &["worktree", "list", "--porcelain", "-z"],
+        deadline,
+        1 << 20,
+    ) {
+        Ok(listed) => listed,
+        Err(error) => {
+            return vec![(
+                true,
+                format!(
+                    "Linked worktrees of {} were not checked: {error}.",
+                    root.display()
+                ),
+            )];
+        }
+    };
+    // The main worktree comes first; a listed worktree that no longer
+    // exists on disk has no install to run.
+    let mut trees = listed
+        .split(|byte| *byte == 0)
+        .filter_map(|field| field.strip_prefix(b"worktree "))
+        .filter_map(|path| std::fs::canonicalize(String::from_utf8_lossy(path).as_ref()).ok());
+    let Some(main) = trees.next() else {
+        return Vec::new();
+    };
+    let mut findings = Vec::new();
+    for tree in trees {
+        for vendor in Vendor::ALL {
+            let Some((file, own)) = install_at(vendor, state_dir, &tree) else {
+                continue;
+            };
+            let name = vendor.name();
+            match vendor.worktree_hooks() {
+                WorktreeHooks::Both => {}
+                WorktreeHooks::MainOnly => {
+                    let fix = format!(
+                        "run `langspan hooks install {name} --workspace ID --root {} --apply`",
+                        main.display()
+                    );
+                    let coverage = match install_at(vendor, state_dir, &main) {
+                        None => Err(format!("Nothing coordinates it: {fix}.")),
+                        Some((main_file, registration)) => {
+                            match main_install_problem(vendor, &main_file, &registration) {
+                                Some(problem) => Err(format!(
+                                    "Nothing coordinates it: the main checkout's hook in {} {problem}; {fix} again.",
+                                    main_file.display()
+                                )),
+                                None => Ok(format!(
+                                    "The main checkout's hook coordinates it as workspace {}.",
+                                    own.workspace_id
+                                )),
+                            }
+                        }
+                    };
+                    findings.push((
+                        coverage.is_ok(),
+                        format!(
+                            "{name}: a session started in linked worktree {} does not run the hooks installed in {} (observed on {}); it runs the main checkout's project hooks. {}",
+                            tree.display(),
+                            file.display(),
+                            vendor.worktree_hooks_observed().unwrap_or("this host"),
+                            coverage.unwrap_or_else(|problem| problem)
+                        ),
+                    ));
+                }
+                WorktreeHooks::Unconfirmed => findings.push((
+                    true,
+                    format!(
+                        "{name}: whether a session started in linked worktree {} runs the hooks installed in {} has not been observed on a real host. The main checkout's hook, where the host runs it there, also decides, as workspace {}, so it does not step aside.",
+                        tree.display(),
+                        file.display(),
+                        own.workspace_id
+                    ),
+                )),
+            }
+        }
+    }
+    findings
+}
+
+/// Why the main checkout's hook in `file`, with `registration`, cannot run
+/// for a linked worktree, if it cannot: its executable is gone or it lacks
+/// an event the host sends. Checked as `doctor` checks the root it is given,
+/// since for a host that runs only the main checkout's hooks it is the one
+/// hook a worktree session has.
+fn main_install_problem(
+    vendor: langspan::install::Vendor,
+    file: &std::path::Path,
+    registration: &langspan::install::Registration,
+) -> Option<String> {
+    use langspan::install;
+    let mut problems = Vec::new();
+    if !registration.executable.is_file() {
+        problems.push("cannot start: its executable no longer exists".to_owned());
+    }
+    match install::read(file) {
+        Ok(Some(settings)) => {
+            let missing = install::missing_events(vendor, &settings, |hook| {
+                install::is_managed_for(vendor, hook)
+            });
+            if !missing.is_empty() {
+                problems.push(format!("is not installed for {}", missing.join(", ")));
+            }
+        }
+        Ok(None) => problems.push("could not be read".to_owned()),
+        Err(error) => problems.push(format!("could not be read: {error}")),
+    }
+    (!problems.is_empty()).then(|| problems.join(" and "))
 }
 
 /// What `doctor` says about the user-level install of each host present

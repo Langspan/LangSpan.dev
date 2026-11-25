@@ -196,6 +196,32 @@ impl Vendor {
         }
     }
 
+    /// Which project hooks the host runs for a session started in a linked
+    /// worktree that has a LangSpan install of its own, as far as it has
+    /// been observed. ADR 0003 records each rule and its evidence.
+    pub fn worktree_hooks(self) -> WorktreeHooks {
+        match self {
+            // Claude Code 2.1.330 on macOS (launch validation): the
+            // worktree's own project hooks and the main checkout's local
+            // settings both run.
+            Self::ClaudeCode => WorktreeHooks::Both,
+            // Codex 0.171.0 on macOS (issue #2): only the main checkout's
+            // project hooks run; the worktree's own never do.
+            Self::Codex => WorktreeHooks::MainOnly,
+            // No run in a linked worktree has been retained.
+            Self::Cursor | Self::Gemini => WorktreeHooks::Unconfirmed,
+        }
+    }
+
+    /// The host and version a `worktree_hooks` rule was observed on.
+    pub fn worktree_hooks_observed(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudeCode => Some("Claude Code 2.1.330"),
+            Self::Codex => Some("Codex 0.171.0"),
+            Self::Cursor | Self::Gemini => None,
+        }
+    }
+
     /// One hook entry running `command` for `event`. Gemini CLI takes its
     /// timeout in milliseconds and names each hook; the other hosts take
     /// seconds.
@@ -213,6 +239,19 @@ impl Vendor {
         entry.insert("timeout".into(), timeout.into());
         entry
     }
+}
+
+/// What a host runs for a session started in a linked worktree that has its
+/// own LangSpan project install. The main checkout's hook steps aside only
+/// for `Both`; otherwise it decides, so no event goes undecided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorktreeHooks {
+    /// The worktree's own hooks and the main checkout's both run.
+    Both,
+    /// Only the main checkout's hooks run.
+    MainOnly,
+    /// Not observed on a real host.
+    Unconfirmed,
 }
 
 pub struct Registration {
