@@ -135,6 +135,16 @@ Fixed on `main` since the validation:
   Tested with two sessions' hooked edits in alternation, each inserting above
   the other's, real Git and a real daemon (`tests/commit_guard.rs`); the
   dogfood run in a shared checkout is pending.
+- Issue #106: `commit --mine` splits a hunk Git joined from this session's
+  lines and another session's at the boundaries between them and commits
+  only its own; a hunk where one session's line replaced another's, or with
+  a line no session wrote, is still refused with the reason, and a partial
+  patch that does not apply exactly to the index commits nothing
+  ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)). Tested with two
+  sessions' real hooks adding adjacent list entries in both orders, real Git
+  and a real daemon (`tests/commit_guard.rs`), and the exactness check
+  against a real temporary repository's index (`src/commit.rs`); the dogfood
+  run in a shared checkout is pending.
 - Issue #40 (B27): `langspan status --mine` and MCP `langspan_my_changes`
   list this session's uncommitted files and hunks, each `mine`, `mixed` or
   `unknown`, with the attribution `commit --mine` uses, and change nothing

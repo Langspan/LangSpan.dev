@@ -8,7 +8,11 @@
 //! a private index and commit them with the owner's identity and hooks.
 //!
 //! A line belongs to the sessions whose journaled writes added it (or, for
-//! a removed line, removed it). A hunk is this session's when each of its
+//! a removed line, removed it). A hunk Git joined from this session's lines
+//! and other sessions' lines is first split where they meet, unless one of
+//! its lines is no session's, or one session's line replaced another's
+//! (issue #106); a partial patch must apply exactly to the index it is
+//! staged in, or nothing is committed. A hunk is this session's when each of its
 //! lines is, and not every line is also another's; another session's when
 //! none of its lines is this session's and some are that session's; nobody's
 //! when no session wrote any of it. Anything else is not known, and
@@ -199,6 +203,75 @@ pub fn parse_diff(bytes: &[u8]) -> Result<Vec<FileDiff>, String> {
     Ok(files)
 }
 
+/// A hunk's body, one entry per line it removes or adds, each as Git printed
+/// it: its sign, its text, and its "\ No newline" marker if it has one.
+fn body_lines(body: &[u8]) -> Vec<&[u8]> {
+    let mut lines: Vec<(usize, usize)> = Vec::new();
+    let mut at = 0;
+    for piece in body.split_inclusive(|byte| *byte == b'\n') {
+        let end = at + piece.len();
+        match lines.last_mut() {
+            Some(last) if piece.first() == Some(&b'\\') => last.1 = end,
+            _ => lines.push((at, end)),
+        }
+        at = end;
+    }
+    lines
+        .into_iter()
+        .map(|(start, end)| &body[start..end])
+        .collect()
+}
+
+/// The text of one body line, as it is in the file: without its sign, and
+/// without its line end when a "\ No newline" marker follows.
+fn line_text(line: &[u8]) -> &[u8] {
+    let text = line.get(1..).unwrap_or_default();
+    match text.iter().position(|byte| *byte == b'\n') {
+        Some(end) if end + 1 < text.len() => &text[..end],
+        _ => text,
+    }
+}
+
+/// The first line a hunk removes, or the line its insertion goes before.
+fn old_first(hunk: &Hunk) -> u32 {
+    hunk.old_start + u32::from(hunk.old_len == 0)
+}
+
+/// `chosen` hunks of `file`, with each run that touches in the old file
+/// (as a hunk split between sessions does, issue #106) made one hunk, so
+/// that no two hunks of a patch start at the same place.
+fn joined(file: &FileDiff, chosen: &[usize]) -> Vec<Hunk> {
+    let mut out: Vec<Hunk> = Vec::new();
+    for &index in chosen {
+        let hunk = &file.hunks[index];
+        match out.last_mut() {
+            Some(last) if old_first(last) + last.old_len == old_first(hunk) => {
+                let mut lines = body_lines(&last.body);
+                let added = lines.split_off(last.removed.len());
+                let mut more = body_lines(&hunk.body);
+                let more_added = more.split_off(hunk.removed.len());
+                let body: Vec<u8> = lines
+                    .into_iter()
+                    .chain(more)
+                    .chain(added)
+                    .chain(more_added)
+                    .flatten()
+                    .copied()
+                    .collect();
+                let first = old_first(last);
+                last.removed.extend(hunk.removed.iter().cloned());
+                last.added.extend(hunk.added.iter().cloned());
+                last.old_len += hunk.old_len;
+                last.new_len += hunk.new_len;
+                last.old_start = first - u32::from(last.old_len == 0);
+                last.body = body;
+            }
+            _ => out.push(hunk.clone()),
+        }
+    }
+    out
+}
+
 /// The patch that applies `chosen` hunks of `file` to the version its diff
 /// started from. Later hunks' new positions account for the hunks left out.
 fn patch(file: &FileDiff, chosen: &[usize]) -> Vec<u8> {
@@ -218,8 +291,7 @@ fn patch(file: &FileDiff, chosen: &[usize]) -> Vec<u8> {
         out.push(b'\n');
     }
     let mut delta: i64 = 0;
-    for &index in chosen {
-        let hunk = &file.hunks[index];
+    for hunk in &joined(file, chosen) {
         let new_start = i64::from(hunk.old_start) + delta + i64::from(hunk.old_len == 0)
             - i64::from(hunk.new_len == 0);
         out.extend_from_slice(
@@ -236,6 +308,40 @@ fn patch(file: &FileDiff, chosen: &[usize]) -> Vec<u8> {
         delta += i64::from(hunk.new_len) - i64::from(hunk.old_len);
     }
     out
+}
+
+/// What `base` becomes with `chosen` hunks of `file` applied exactly where
+/// they say: each hunk's removed lines must be `base`'s lines at its stated
+/// place, byte for byte, with no search for them elsewhere. If not, why.
+fn apply_exactly(base: &[u8], file: &FileDiff, chosen: &[usize]) -> Result<Vec<u8>, String> {
+    let lines: Vec<&[u8]> = base.split_inclusive(|byte| *byte == b'\n').collect();
+    let mut out = Vec::with_capacity(base.len());
+    let mut next = 0;
+    for hunk in joined(file, chosen) {
+        let first = old_first(&hunk) as usize - 1;
+        let end = first + hunk.old_len as usize;
+        if first < next || end > lines.len() {
+            return Err(format!(
+                "its hunk at line {} is past the end of the version there",
+                first + 1
+            ));
+        }
+        out.extend(lines[next..first].iter().copied().flatten());
+        let body = body_lines(&hunk.body);
+        let (removed, added) = body.split_at(hunk.removed.len().min(body.len()));
+        for (n, (line, want)) in lines[first..end].iter().zip(removed).enumerate() {
+            if *line != line_text(want) {
+                return Err(format!(
+                    "line {} there is not the line the patch removes",
+                    first + n + 1
+                ));
+            }
+        }
+        out.extend(added.iter().flat_map(|line| line_text(line)));
+        next = end;
+    }
+    out.extend(lines[next..].iter().copied().flatten());
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +415,185 @@ fn hunk_owner(me: &str, hunk: &Hunk, path: Option<&journal::FileLines<'_>>) -> O
         };
     }
     Owner::Unknown("part of it was written by this session and part by another session or by none")
+}
+
+/// Why a hunk that holds this session's lines and another session's is not
+/// split between them.
+const REPLACED: &str = "here a line of one session's replaced another session's, so this hunk cannot be split between them";
+
+/// Whose one line of a hunk is, for splitting it between sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    /// This session's (another's too, perhaps).
+    Mine,
+    /// Only other sessions'.
+    Theirs,
+}
+
+/// `None` when no session wrote the line.
+fn side(me: &str, claimants: Option<&BTreeSet<&str>>) -> Option<Side> {
+    let claimants = claimants.filter(|c| !c.is_empty())?;
+    Some(if claimants.iter().any(|s| is_own(me, s)) {
+        Side::Mine
+    } else {
+        Side::Theirs
+    })
+}
+
+/// Runs of one side, by length.
+fn runs(sides: &[Side]) -> Vec<(Side, usize)> {
+    let mut runs: Vec<(Side, usize)> = Vec::new();
+    for side in sides {
+        match runs.last_mut() {
+            Some((last, count)) if last == side => *count += 1,
+            _ => runs.push((*side, 1)),
+        }
+    }
+    runs
+}
+
+/// Whether, by the journal, a line one of this session's writes added was
+/// removed by another session's, or the reverse. Lines are known by text,
+/// not place, so this holds for the whole file.
+fn replaced_across(me: &str, path: &journal::FileLines<'_>) -> bool {
+    let mine = |set: &BTreeSet<&str>| set.iter().any(|s| is_own(me, s));
+    let theirs = |set: &BTreeSet<&str>| set.iter().any(|s| !is_own(me, s));
+    path.added.iter().any(|(key, adders)| {
+        path.removed.get(key).is_some_and(|removers| {
+            (mine(adders) && theirs(removers)) || (theirs(adders) && mine(removers))
+        })
+    })
+}
+
+/// A hunk's pieces, in order, by how many lines each removes and adds: each
+/// takes one run of a side from its removed lines and the same side's run
+/// from its added lines, either perhaps empty. A zero-context hunk lists
+/// every removed line before every added one, so which removed lines an
+/// added run takes the place of is told only by side; where that has not one
+/// answer (one side removed lines where the other added its own), `REPLACED`.
+fn pieces(removed: &[Side], added: &[Side]) -> Result<Vec<(usize, usize)>, &'static str> {
+    let (r, a) = (runs(removed), runs(added));
+    let (mut i, mut j) = (0, 0);
+    let mut out = Vec::new();
+    loop {
+        let piece = match (r.get(i), a.get(j)) {
+            (None, None) => return Ok(out),
+            (Some(x), Some(y)) if x.0 == y.0 => {
+                (i, j) = (i + 1, j + 1);
+                (x.1, y.1)
+            }
+            // Runs alternate between the two sides: the next run on the
+            // other list is the only later one of this run's side.
+            (Some(x), Some(y)) => match (a.get(j + 1).is_some(), r.get(i + 1).is_some()) {
+                // `x`'s side adds nothing more; `y`'s removes lines after `x`.
+                (false, true) => {
+                    i += 1;
+                    (x.1, 0)
+                }
+                (true, false) => {
+                    j += 1;
+                    (0, y.1)
+                }
+                _ => return Err(REPLACED),
+            },
+            (Some(x), None) => {
+                i += 1;
+                (x.1, 0)
+            }
+            (None, Some(y)) => {
+                j += 1;
+                (0, y.1)
+            }
+        };
+        out.push(piece);
+    }
+}
+
+/// Split each of `file`'s hunks that holds this session's lines and other
+/// sessions' lines, and no line no session wrote, at the boundaries between
+/// them (issue #106), as `git add -p` lets a person split a hunk. Per hunk
+/// after the split: why it was left whole although it holds both, if so.
+fn split_between_sessions(
+    me: &str,
+    file: &mut FileDiff,
+    path: Option<&journal::FileLines<'_>>,
+) -> Vec<Option<&'static str>> {
+    let (Some(path), false) = (path, splits_only_whole(file)) else {
+        return vec![None; file.hunks.len()];
+    };
+    let mut hunks = Vec::with_capacity(file.hunks.len());
+    let mut why = Vec::with_capacity(file.hunks.len());
+    for hunk in std::mem::take(&mut file.hunks) {
+        match split_hunk(me, &hunk, path) {
+            Ok(Some(split)) => {
+                why.extend(split.iter().map(|_| None));
+                hunks.extend(split);
+            }
+            Ok(None) => {
+                hunks.push(hunk);
+                why.push(None);
+            }
+            Err(reason) => {
+                hunks.push(hunk);
+                why.push(Some(reason));
+            }
+        }
+    }
+    file.hunks = hunks;
+    why
+}
+
+/// One hunk's pieces, or `None` when it is not split.
+fn split_hunk(
+    me: &str,
+    hunk: &Hunk,
+    path: &journal::FileLines<'_>,
+) -> Result<Option<Vec<Hunk>>, &'static str> {
+    let sides = |keys: &[String], claims: &BTreeMap<&str, BTreeSet<&str>>| {
+        keys.iter()
+            .map(|key| side(me, claims.get(key.as_str())))
+            .collect::<Option<Vec<Side>>>()
+    };
+    // A line no session wrote keeps the hunk whole: it is not known.
+    let (Some(removed), Some(added)) = (
+        sides(&hunk.removed, &path.removed),
+        sides(&hunk.added, &path.added),
+    ) else {
+        return Ok(None);
+    };
+    let all: Vec<Side> = removed.iter().chain(&added).copied().collect();
+    let lines = body_lines(&hunk.body);
+    let (minus, plus) = lines.split_at(hunk.removed.len().min(lines.len()));
+    let as_listed = lines.len() == all.len()
+        && minus.iter().all(|l| l.first() == Some(&b'-'))
+        && plus.iter().all(|l| l.first() == Some(&b'+'));
+    if !(all.contains(&Side::Mine) && all.contains(&Side::Theirs)) || !as_listed {
+        return Ok(None);
+    }
+    if replaced_across(me, path) {
+        return Err(REPLACED);
+    }
+    let new_first = hunk.new_start + u32::from(hunk.new_len == 0);
+    let (mut rs, mut as_) = (0, 0);
+    let mut out = Vec::new();
+    for (rc, ac) in pieces(&removed, &added)? {
+        let (old_at, new_at) = (old_first(hunk) + rs as u32, new_first + as_ as u32);
+        out.push(Hunk {
+            old_start: old_at - u32::from(rc == 0),
+            old_len: rc as u32,
+            new_start: new_at - u32::from(ac == 0),
+            new_len: ac as u32,
+            removed: hunk.removed[rs..rs + rc].to_vec(),
+            added: hunk.added[as_..as_ + ac].to_vec(),
+            body: minus[rs..rs + rc]
+                .iter()
+                .chain(&plus[as_..as_ + ac])
+                .flat_map(|line| line.iter().copied())
+                .collect(),
+        });
+        (rs, as_) = (rs + rc, as_ + ac);
+    }
+    Ok(Some(out))
 }
 
 /// The owner of a file attributed whole: the session whose journaled write
@@ -581,10 +866,12 @@ fn committed_since(
     Some(found)
 }
 
+/// Whose each of `file`'s hunks is, after splitting those that hold this
+/// session's lines and another's (so `file.hunks` may change).
 fn file_owners(
     me: &str,
     root: &Path,
-    file: &FileDiff,
+    file: &mut FileDiff,
     claims: &BTreeMap<&str, journal::FileLines<'_>>,
     entries: &[Entry],
     current: &impl Fn(&Path, &str) -> Option<FileState>,
@@ -631,11 +918,16 @@ fn file_owners(
     let unseen: BTreeSet<String> = path
         .map(|p| p.unknown.iter().map(|s| (*s).to_owned()).collect())
         .unwrap_or_default();
+    let unsplit = split_between_sessions(me, file, path);
+    let file = &*file;
     let mut copies: Option<Copies> = None;
     let mut owners = Vec::new();
     let mut foreign = Vec::new();
-    for hunk in &file.hunks {
-        let mut owner = hunk_owner(me, hunk, path);
+    for (hunk, unsplit) in file.hunks.iter().zip(unsplit) {
+        let mut owner = match (hunk_owner(me, hunk, path), unsplit) {
+            (Owner::Unknown(_), Some(why)) => Owner::Unknown(why),
+            (owner, _) => owner,
+        };
         let mut theirs = foreign_sessions(me, hunk, path);
         if !unseen.is_empty() {
             owner = match owner {
@@ -920,7 +1212,7 @@ pub fn guard_hook(config: &Config, me: &str, call: &ShellCall, deadline: Instant
         Some(cwd) => PathBuf::from(cwd),
         None => config.root.clone(),
     };
-    let files = match taken(&config.root, &start, &steps, until) {
+    let mut files = match taken(&config.root, &start, &steps, until) {
         Ok(files) => files,
         Err(error) => return passed(format!("no decision ({error})")),
     };
@@ -928,7 +1220,7 @@ pub fn guard_hook(config: &Config, me: &str, call: &ShellCall, deadline: Instant
     // Session -> path -> where.
     let mut found: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
     let mut evidence = Vec::new();
-    for file in &files {
+    for file in &mut files {
         let owners = file_owners(
             me,
             &config.root,
@@ -1181,7 +1473,7 @@ fn plan(
         left: Vec::new(),
         refused: Vec::new(),
     };
-    for file in files {
+    for mut file in files {
         if file.mode_change {
             planned.left.push(Left {
                 path: file.path.clone(),
@@ -1195,7 +1487,7 @@ fn plan(
         let attributed = file_owners(
             me,
             root,
-            &file,
+            &mut file,
             &claims,
             entries,
             &crate::hook::file_state,
@@ -1229,7 +1521,6 @@ fn plan(
             continue;
         }
         if own.len() == owners.len() {
-            let mut file = file;
             // Staged from the working tree, not by patch.
             file.whole |= attributed.whole;
             planned.staged.push((file, Choice::Whole));
@@ -1327,9 +1618,27 @@ fn write_failed(what: &str, error: &std::io::Error) -> String {
     }
 }
 
+/// The version of `path` in the index at `index` (the shared one when
+/// `None`).
+fn index_blob(
+    root: &Path,
+    path: &str,
+    index: Option<&Path>,
+    deadline: Instant,
+) -> Result<Vec<u8>, String> {
+    git_in(
+        root,
+        &["cat-file", "blob", &format!(":{path}")],
+        index,
+        deadline,
+    )
+}
+
 /// Stage `staged` into the index at `index` (the shared one when `None`).
 /// Hunks are applied with `git apply --cached`; whole files are added from
-/// the working tree.
+/// the working tree. Before the patch is applied, each file's hunks are
+/// checked to apply exactly to the version in that index; after, the index
+/// must hold exactly what they make of it (issue #106). If not, an error.
 fn stage(
     root: &Path,
     git_dir: &Path,
@@ -1339,15 +1648,32 @@ fn stage(
 ) -> Result<(), String> {
     let mut whole: Vec<&str> = Vec::new();
     let mut patches = Vec::new();
+    // Each patched file that remains, and what the index must then hold.
+    let mut expected: Vec<(&str, Vec<u8>)> = Vec::new();
     for (file, choice) in staged {
-        match choice {
-            Choice::Whole if file.whole || file.untracked => whole.push(&file.path),
-            Choice::Whole => {
-                let all: Vec<usize> = (0..file.hunks.len()).collect();
-                patches.extend(patch(file, &all));
+        let chosen: Vec<usize> = match choice {
+            Choice::Whole if file.whole || file.untracked => {
+                whole.push(&file.path);
+                continue;
             }
-            Choice::Hunks(hunks) => patches.extend(patch(file, hunks)),
+            Choice::Whole => (0..file.hunks.len()).collect(),
+            Choice::Hunks(hunks) => hunks.clone(),
+        };
+        let base = if file.created {
+            Vec::new()
+        } else {
+            index_blob(root, &file.path, index, deadline)?
+        };
+        let after = apply_exactly(&base, file, &chosen).map_err(|why| {
+            format!(
+                "the patch of {} does not apply exactly to the version in the index: {why}",
+                file.path
+            )
+        })?;
+        if !file.deleted {
+            expected.push((&file.path, after));
         }
+        patches.extend(patch(file, &chosen));
     }
     if !patches.is_empty() {
         let patch_file = git_dir.join(format!("{}.patch", private_name()));
@@ -1366,6 +1692,13 @@ fn stage(
         );
         let _ = fs::remove_file(&patch_file);
         applied?;
+        for (path, after) in expected {
+            if index_blob(root, path, index, deadline)? != after {
+                return Err(format!(
+                    "the patch of {path} was applied, but the index does not hold the version it should"
+                ));
+            }
+        }
     }
     if !whole.is_empty() {
         let mut args = vec!["update-index", "--add", "--remove", "--"];
@@ -2085,7 +2418,7 @@ pub fn status_mine(
         others: 0,
         truncated: false,
     };
-    for file in &files {
+    for file in &mut files {
         // A change of mode alone is nobody's (as in `plan`).
         if file.mode_change && file.hunks.is_empty() {
             continue;
@@ -2190,6 +2523,230 @@ mod tests {
                 removed: removed.iter().map(|l| journal::line_key(l)).collect(),
             }),
         }
+    }
+
+    // Issue #106: a hunk split between sessions.
+
+    /// Two hunks of adjacent lines: three inserted lines (this session's,
+    /// another's, this session's), then two changed lines (another's, then
+    /// this session's).
+    const ADJACENT: &str = "diff --git a/f.txt b/f.txt\nindex 1111111..2222222 100644\n--- a/f.txt\n+++ b/f.txt\n@@ -3,0 +4,3 @@\n+mine 1\n+theirs\n+mine 2\n@@ -10,2 +13,2 @@\n-ten\n-eleven\n+ten, theirs\n+eleven, mine\n";
+
+    fn adjacent_entries() -> Vec<Entry> {
+        vec![
+            entry(
+                "me",
+                &[b"mine 1\n", b"mine 2\n", b"eleven, mine\n"],
+                &[b"eleven\n"],
+            ),
+            entry("them", &[b"theirs\n", b"ten, theirs\n"], &[b"ten\n"]),
+        ]
+    }
+
+    /// Twelve lines, ten and eleven named.
+    fn adjacent_base() -> String {
+        (1..=12)
+            .map(|n| match n {
+                10 => "ten\n".to_owned(),
+                11 => "eleven\n".to_owned(),
+                n => format!("{n}\n"),
+            })
+            .collect()
+    }
+
+    fn ranges(file: &FileDiff) -> Vec<(u32, u32, u32, u32)> {
+        file.hunks
+            .iter()
+            .map(|h| (h.old_start, h.old_len, h.new_start, h.new_len))
+            .collect()
+    }
+
+    #[test]
+    fn a_hunk_is_split_where_this_sessions_lines_meet_anothers() {
+        let mut file = parse_diff(ADJACENT.as_bytes()).unwrap().remove(0);
+        let entries = adjacent_entries();
+        let claims = journal::by_file(&entries);
+        let why = split_between_sessions("me", &mut file, claims.get("f.txt"));
+        assert_eq!(why, vec![None; 5]);
+        assert_eq!(
+            ranges(&file),
+            [
+                (3, 0, 4, 1),
+                (3, 0, 5, 1),
+                (3, 0, 6, 1),
+                (10, 1, 13, 1),
+                (11, 1, 14, 1)
+            ]
+        );
+        let owners: Vec<Owner> = file
+            .hunks
+            .iter()
+            .map(|h| hunk_owner("me", h, claims.get("f.txt")))
+            .collect();
+        let them = Owner::Others(BTreeSet::from(["them".to_owned()]));
+        assert_eq!(
+            owners,
+            [Owner::Own, them.clone(), Owner::Own, them, Owner::Own]
+        );
+
+        // This session's three pieces: the two insertions on either side of
+        // another's line are one hunk in the patch.
+        let text = String::from_utf8(patch(&file, &[0, 2, 4])).unwrap();
+        assert!(
+            text.ends_with(
+                "@@ -3,0 +4,2 @@\n+mine 1\n+mine 2\n@@ -11,1 +13,1 @@\n-eleven\n+eleven, mine\n"
+            ),
+            "{text}"
+        );
+        let base = adjacent_base();
+        let mine = apply_exactly(base.as_bytes(), &file, &[0, 2, 4]).unwrap();
+        let want = base
+            .replace("3\n", "3\nmine 1\nmine 2\n")
+            .replace("eleven\n", "eleven, mine\n");
+        assert_eq!(String::from_utf8(mine).unwrap(), want);
+        // Every piece, applied, is the whole diff.
+        let all = apply_exactly(base.as_bytes(), &file, &[0, 1, 2, 3, 4]).unwrap();
+        let want = base
+            .replace("3\n", "3\nmine 1\ntheirs\nmine 2\n")
+            .replace("ten\neleven\n", "ten, theirs\neleven, mine\n");
+        assert_eq!(String::from_utf8(all).unwrap(), want);
+    }
+
+    #[test]
+    fn a_patch_that_does_not_apply_exactly_where_it_says_is_refused() {
+        let file = parse_diff(ADJACENT.as_bytes()).unwrap().remove(0);
+        let moved = format!("0\n{}", adjacent_base());
+        let why = apply_exactly(moved.as_bytes(), &file, &[1]).unwrap_err();
+        assert!(why.contains("line 10"), "{why}");
+        let short = apply_exactly(b"1\n2\n", &file, &[1]).unwrap_err();
+        assert!(short.contains("past the end"), "{short}");
+        // A line without its newline is compared without it.
+        let files = parse_diff(DIFF_TEXT.as_bytes()).unwrap();
+        let base: String = (1..=19).map(|n| format!("{n}\n")).collect::<String>() + "end\n";
+        let ended = apply_exactly(base.as_bytes(), &files[0], &[2]).unwrap();
+        assert!(ended.ends_with(b"19\nend"), "{ended:?}");
+    }
+
+    #[test]
+    fn a_hunk_is_not_split_where_one_sessions_line_replaced_anothers_or_no_session_wrote_one() {
+        assert_eq!(pieces(&[Side::Theirs], &[Side::Mine]), Err(REPLACED));
+        assert_eq!(
+            pieces(&[Side::Mine, Side::Theirs], &[Side::Theirs, Side::Mine]),
+            Err(REPLACED)
+        );
+        assert_eq!(
+            pieces(&[Side::Mine, Side::Theirs], &[Side::Mine, Side::Theirs]),
+            Ok(vec![(1, 1), (1, 1)])
+        );
+        assert_eq!(
+            pieces(&[Side::Theirs, Side::Mine], &[Side::Mine]),
+            Ok(vec![(1, 0), (1, 1)])
+        );
+        assert_eq!(
+            pieces(&[], &[Side::Theirs, Side::Mine, Side::Theirs]),
+            Ok(vec![(0, 1), (0, 1), (0, 1)])
+        );
+
+        // Another session removed a line this session added: the journal
+        // says a line of one replaced the other's, wherever it was.
+        let mut entries = adjacent_entries();
+        entries.push(entry("them", &[], &[b"gone, mine\n"]));
+        entries.push(entry("me", &[b"gone, mine\n"], &[]));
+        let claims = journal::by_file(&entries);
+        let mut file = parse_diff(ADJACENT.as_bytes()).unwrap().remove(0);
+        let why = split_between_sessions("me", &mut file, claims.get("f.txt"));
+        assert_eq!(why, vec![Some(REPLACED); 2]);
+        assert_eq!(file.hunks.len(), 2);
+
+        // A line no session wrote: the hunk stays whole, and not known.
+        let entries = vec![entry("me", &[b"mine 1\n", b"mine 2\n"], &[])];
+        let claims = journal::by_file(&entries);
+        let mut file = parse_diff(ADJACENT.as_bytes()).unwrap().remove(0);
+        let why = split_between_sessions("me", &mut file, claims.get("f.txt"));
+        assert_eq!(why, vec![None; 2]);
+        assert!(matches!(
+            hunk_owner("me", &file.hunks[0], claims.get("f.txt")),
+            Owner::Unknown(_)
+        ));
+    }
+
+    /// A Git repository of its own in a temporary directory, removed on drop.
+    struct Repo(PathBuf);
+
+    impl Repo {
+        fn new(content: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("ls-commit-unit-{}", private_name()));
+            fs::create_dir(&dir).unwrap();
+            let repo = Self(fs::canonicalize(&dir).unwrap());
+            fs::write(repo.0.join("f.txt"), content).unwrap();
+            repo.git(&["init", "-q"]);
+            repo.git(&["add", "f.txt"]);
+            repo.git(&[
+                "-c",
+                "user.name=Owner",
+                "-c",
+                "user.email=owner@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "start",
+            ]);
+            repo
+        }
+
+        fn git(&self, args: &[&str]) -> Vec<u8> {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&self.0)
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            output.stdout
+        }
+    }
+
+    impl Drop for Repo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_partial_patch_is_checked_against_the_index_and_nothing_is_staged_when_it_does_not_apply() {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let base = adjacent_base();
+        let repo = Repo::new(&base);
+        let git_dir = repo.0.join(".git");
+        let mut file = parse_diff(ADJACENT.as_bytes()).unwrap().remove(0);
+        let entries = adjacent_entries();
+        let claims = journal::by_file(&entries);
+        split_between_sessions("me", &mut file, claims.get("f.txt"));
+        let staged = vec![(file, Choice::Hunks(vec![0, 2, 4]))];
+
+        let index = git_dir.join("private.index");
+        git_in(&repo.0, &["read-tree", "HEAD"], Some(&index), deadline).unwrap();
+        stage(&repo.0, &git_dir, &staged, Some(&index), deadline).unwrap();
+        let want = base
+            .replace("3\n", "3\nmine 1\nmine 2\n")
+            .replace("eleven\n", "eleven, mine\n");
+        assert_eq!(
+            index_blob(&repo.0, "f.txt", Some(&index), deadline).unwrap(),
+            want.as_bytes()
+        );
+
+        // The index holds another version than the diff was made from.
+        let index = git_dir.join("moved.index");
+        git_in(&repo.0, &["read-tree", "HEAD"], Some(&index), deadline).unwrap();
+        stage(&repo.0, &git_dir, &staged, Some(&index), deadline).unwrap();
+        let before = fs::read(&index).unwrap();
+        let error = stage(&repo.0, &git_dir, &staged, Some(&index), deadline).unwrap_err();
+        assert!(error.contains("does not apply exactly"), "{error}");
+        assert!(error.contains("f.txt"), "{error}");
+        assert_eq!(fs::read(&index).unwrap(), before);
+        assert_eq!(repo.git(&["diff", "--cached", "--stat"]), b"");
     }
 
     #[test]

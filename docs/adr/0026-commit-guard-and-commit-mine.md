@@ -56,6 +56,26 @@ added it (or, for a removed line, removed it); a session's subagents (IDs
   each line also another's, or a nobody's hunk in a file this session changed
   in unknown lines.
 
+**A hunk split between sessions (issue #106).** Git joins changes on adjacent
+lines into one hunk, so two sessions adding entries one below the other to a
+list made one hunk, part each one's, and neither could commit. Before
+attribution, a hunk whose every line some session wrote, and that holds both
+this session's lines and other sessions' lines, is split where they meet, as
+`git add -p` lets a person split a hunk, and each piece is attributed as a
+hunk. A zero-context hunk lists all its removed lines before all its added
+ones, so a piece pairs a run of one side's removed lines with the same side's
+run of added lines, in order. The hunk is not split, and is not known with the
+reason that one session's line replaced another's, when that pairing has more
+than one answer (one side removed lines where the other added its own), or
+when the journal shows a line one of them added that the other removed: the
+replaced line is no longer in the diff, and the replacing line makes sense
+only on top of it. Lines are known by text, not place, so that last check
+holds for the whole file, and a common line (a blank line, a lone brace) one
+session added and the other removed elsewhere keeps the file's mixed hunks
+unsplit; that errs toward refusing. A hunk with a line no session wrote is not
+split: it stays not known, with the reason it had before. A file that can be
+committed only whole (new, removed, binary) is not split either.
+
 A file that cannot be told apart by line (binary, over 512 KiB, a mode change,
 or one this session changed in a write whose lines are not known) is
 attributed whole: to the session whose journaled write left it as it is now,
@@ -137,6 +157,13 @@ untracked files); the hook detail says which.
    whole text file is the full patch; a binary, mode-only or untracked file
    of its own is added with `git update-index`). A new or removed file that
    also holds others' changes is refused: it can only be committed whole.
+   Chosen pieces of a split hunk that touch are made one hunk of the patch.
+   Before the patch is applied, LangSpan applies each file's hunks itself to
+   the version in that index, each where its header says and byte for byte,
+   with none of the searching for an offset `git apply` may do; after, the
+   index must hold exactly that result. If either fails, nothing is
+   committed, and the error names the file and says the patch does not apply
+   exactly. The same check guards step 7 on the shared index.
 5. Commit atomically, with plumbing, keeping the owner's hooks. The hooks
    run as `git commit -m` runs them, with `GIT_INDEX_FILE` naming the private
    index: `pre-commit`, `prepare-commit-msg FILE message`, `commit-msg FILE`;

@@ -797,9 +797,13 @@ built in a private index from `HEAD`, so nothing anyone else staged rides
 along, and made with your identity and Git hooks. The branch moves only if no
 other commit landed meanwhile; if one did, the session's changes are planned
 again on top of it once, or the command refuses and nothing is lost. Everything else stays as it
-was, staged or not, and is listed. If a hunk mixes the session's lines with
-another's or with lines no session wrote, nothing is committed (exit 1) and
-the hunk is named. Lines are matched by content, not position, so sessions
+was, staged or not, and is listed. When Git joins the session's lines and
+another session's into one hunk (two entries added one below the other to a
+list), the hunk is split between them and only the session's own lines are
+committed. If a hunk mixes the session's lines with lines no session wrote,
+or one session's line there replaced another's, nothing is committed (exit 1)
+and the hunk is named, with the reason. Nothing is committed either if the
+partial patch does not apply exactly to the version in the index. Lines are matched by content, not position, so sessions
 editing one file in turn keep their own hunks however their edits shift each
 other's lines. When another session changed the file in a write whose lines
 are not known, the session's hunks are still committed unless one of their
