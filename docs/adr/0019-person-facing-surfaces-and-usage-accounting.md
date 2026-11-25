@@ -22,7 +22,8 @@ such numbers to be measured.
 | --- | --- | --- | --- |
 | H2 | Status line: agents here, catches today | Built (amended below) | First not now: the launch is about coordination between agents; `status` and the local page cover the owner |
 | H3 | Desktop pings and a sound | Not now | Needs OS integration outside the state directory |
-| H4, C10 | A daily summary and a "since you left" briefing | Not now | Can be derived from events later; briefings already carry current peer work |
+| H4 | A daily summary | Built 25 November 2026 ([issue #78](https://github.com/Langspan/LangSpan.dev/issues/78)): `langspan today` and MCP `langspan_today`; see "Daily summary (H4)" below. Not yet run on a host over a working day | |
+| C10 | A "since you left" briefing | Not now | Can be derived from events later; briefings already carry current peer work |
 | H5 | Monthly catch counter | Not now | A count of refusals is not evidence of rework avoided |
 | H6 | Daily "tokens saved" line | Not now | No such number is shown until it is measured |
 | E3 | Recap with tokens, model and cost | Not now | Depends on J10 |
@@ -40,6 +41,54 @@ PostToolBatch in launch track L3
 end of a turn, which releases that reply's open admissions as Stop does, and
 only its `error` type is kept. Detecting quota or usage from it is J11 and
 stays Not now.
+
+**Daily summary (H4), built 25 November 2026.** `langspan today [WORKSPACE]
+[--since RFC3339] [--json]` and the read-only MCP tool `langspan_today`
+summarise a window (local midnight to now by default) from the event log:
+each session's first and last activity, distinct files its successful edits
+named and its prompts; refusals by kind; check results; how each landing's
+last attempt ended; and, from current state, admissions held, intents not
+ended, messages not acknowledged, handoffs not taken up and checks whose
+newest result failed. It is a read: no event, no receipt, no
+acknowledgement. Three choices were needed:
+
+- *Placing events on a day.* Event times are on the daemon's monotonic clock,
+  which restarts at a reboot, and several events carry no time. Each daemon
+  start records `clock_anchored` (generation, its clock, the wall clock)
+  after `booted`, as for the status line, so a time of that generation maps
+  to wall time. An event
+  without its own time takes the time of the event before it in its
+  generation; a landing's `turn_released` therefore takes the time its
+  `turn_taken` recorded, even when it lands on check evidence from an earlier
+  day. Generations started by an earlier build have no anchor; their
+  events are counted as `undated` and in nothing else. A wall-clock change
+  while the daemon runs shifts that run's placement by the change.
+- *Counting refusals.* Refusals are the status line's `write_refused` events
+  (H2, above), counted by kind in the window: `conflict`, `stale_base`,
+  `unread_lines` and, as the hook reports a held commit, `commit_held`. Each
+  is committed with its refusal's receipt, so a retry of the same request is
+  not counted twice.
+- *Bounds.* One answer reads at most the newest 50,000 events and says
+  `truncated` when the window may reach past them: the first event read
+  that carries its own time (or an anchor) bounds the ones left out, since an
+  event without one only inherits an older time. The anchor of the oldest
+  event read is found through a partial index of `booted` and
+  `clock_anchored` rows (`events_generation_marker`, created when a store
+  opens), so its cost does not grow with the generation's history: behind
+  100,000 events of one generation it fell from 17.2 ms to 25 µs (one run,
+  debug build, arm64 macOS); building the index added about 40 ms to
+  the first open of that store. The text is at most 40
+  lines and eight files per session; the MCP text, labelled as data, at most
+  2,400 bytes, as a briefing. Local midnight is found by `local_day` from the
+  zone's offsets near that date's 00:00, read from `date` (2 s deadline), so
+  a day the clocks change starts at its own midnight; times are shown at the
+  offset now for the whole window.
+
+The two event kinds are read by this build only: an older build that opens a
+store holding them stops at the first, as for any event kind it does not know
+([ADR 0015](0015-version-tolerance.md)). Tests: `crates/langspan-core/tests/today.rs`
+(injected clocks across a simulated midnight, a restart without an anchor and
+a reboot), `tests/today.rs` (real daemon, Git, hooks and MCP adapter).
 
 **Status line (row H2), amended 25 November 2026.** H2 is built
 ([issue #76](https://github.com/Langspan/LangSpan.dev/issues/76)), for Claude
@@ -78,8 +127,8 @@ Code only, the one launch host with a status-line command:
   says so in the dry run when one is; `--statusline off` and
   `uninstall --apply` remove only LangSpan's.
 
-The same event shape is proposed by H4 (pull request #116); whichever lands
-second keeps one definition. A real Claude Code session showing the line
+H4 (below) reads the same `write_refused` and `clock_anchored` events, with
+one definition of each. A real Claude Code session showing the line
 change after a refusal is still to be retained; the status-line input used by
 the tests is constructed from Claude Code's documentation
 (`fixtures/claude-code-statusline-constructed.json`).

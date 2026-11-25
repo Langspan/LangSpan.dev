@@ -314,6 +314,18 @@ Coverage values: `admitted`, `denied`, `denied_stale` (before, literal forms);
   one for at most a day; at most 4,096 are kept. `STATE/shell/edits/` holds
   one small owner-only file per recent edit tool call, pruned the same way,
   so each edit tool call's hooks write one more file.
+- `STATE/shell-changes/` holds, per workspace and file, a change note: the
+  last shell command known to have changed the file, its session, its command
+  line (redacted and capped at 120 bytes, as the run record now keeps it) and
+  the version it left (issue #107). A file the command is credited with, or
+  one it is withheld from only because it rewrote another session's
+  uncommitted lines, is noted; a file another session's overlapping run or
+  edit could have written is not. When another session's next edit of the
+  file is refused as stale and the version on disk is still the one the note
+  records, the refusal says "changed by a shell command of `<host>` session
+  `<id>`: `<command>`" instead of "changed outside any reported edit"; a
+  later reported edit by a different session is named instead. Notes expire
+  after a week, at most 256 are written per run and 4,096 kept per workspace.
 - The parser is a second grammar to keep conservative. A form is added only
   with a test that names its targets and the disqualifiers that go with it.
 

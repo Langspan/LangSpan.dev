@@ -2428,7 +2428,9 @@ impl Session<'_> {
                 // A stale or unread refusal is about this call's own input,
                 // refused once: the same call delivered again (same request,
                 // same input) gets the same refusal. A retry is a new call.
-                Outcome::StaleBase { stale } => deny_stale(&stale),
+                Outcome::StaleBase { stale } => deny_stale(&stale, &ids.session_id, |path| {
+                    crate::shell::change_note(&self.config.state_dir, self.root, path)
+                }),
                 Outcome::UnreadLines { lines } => deny_unread(&lines),
                 Outcome::Conflict { .. } => Reply::none(
                     "unknown",
@@ -2848,6 +2850,7 @@ impl Session<'_> {
             commit_mine: call.is_some_and(|call| crate::shell::runs_commit_mine(&call.command)),
             edited_elsewhere: Vec::new(),
             reformatted: Vec::new(),
+            command: call.map(|call| crate::shell::kept_command(&call.command)),
         };
         if let Ok(before) = &record.before {
             crate::journal::before_shell(
@@ -2983,11 +2986,14 @@ impl Session<'_> {
                             run.contested.extend(unknown);
                             // A rewrite of another session's uncommitted
                             // lines (a formatter's, say) is both sessions'.
+                            // That file was still changed by this command,
+                            // so it is noted as this command's change below.
+                            let mut noted = run.attributed(&changed);
                             let rewritten = crate::journal::rewrites_others(
                                 state_dir,
                                 self.root,
                                 &ids.session_id,
-                                &run.attributed(&changed),
+                                &noted,
                                 before,
                                 self.deadline,
                             );
@@ -2999,6 +3005,7 @@ impl Session<'_> {
                             if edits.incomplete || run.outlived(run.finished_ms.unwrap_or_default())
                             {
                                 run.contested.extend(changed.iter().cloned());
+                                noted.clear();
                             } else {
                                 // What only reformats this session's own
                                 // lines is its own, whatever ran alongside
@@ -3019,10 +3026,13 @@ impl Session<'_> {
                                     self.deadline,
                                 );
                                 run.contested.retain(|path| !reformats.whole.contains(path));
+                                // Now this session's, so this command's change.
+                                noted.extend(reformats.whole.iter().cloned());
                                 partial = reformats.partial;
                             }
                             run.contested.sort();
                             run.contested.dedup();
+                            self.note_shell_changes(&run, &noted);
                             run.reformatted =
                                 partial.iter().map(|(path, _)| path.clone()).collect();
                             if let Err(error) = crate::journal::record_partial(
@@ -3086,6 +3096,31 @@ impl Session<'_> {
                 detail: format!("{}; run record not closed: {error}", reply.detail),
                 ..reply
             },
+        }
+    }
+
+    /// Note, on this machine, that this run's command made each of `paths`
+    /// the version on disk now, so that another session's refusal for one of
+    /// them can name the command (issue #107). A file that cannot be read
+    /// within the deadline is not noted; a failure is logged, not fatal.
+    fn note_shell_changes(&self, run: &crate::shell::Record, paths: &[String]) {
+        let files: Vec<(String, langspan_core::FileState)> = paths
+            .iter()
+            .take(crate::shell::MAX_NOTED_PER_RUN)
+            .take_while(|_| Instant::now() < self.deadline)
+            .filter_map(|path| Some((path.clone(), file_state(self.root, path)?)))
+            .collect();
+        if let Err(error) = crate::shell::note_changes(
+            &self.config.state_dir,
+            self.root,
+            &run.session_id,
+            run.command.as_deref(),
+            &files,
+        ) {
+            eprintln!(
+                "{}",
+                json!({"event":"change_notes_unavailable","detail":error})
+            );
         }
     }
 
@@ -3336,10 +3371,51 @@ fn located_files(
     (base, regions, overwrites)
 }
 
-pub(crate) fn deny_stale(stale: &[langspan_core::StaleFile]) -> Reply {
+/// `session_id` as a reason names it: `claude-code session <id>`.
+fn session_label(session_id: &str) -> String {
+    match session_id.split_once('.') {
+        Some((host, id)) => format!("{} session {}", clean(host, 32), clean(id, 64)),
+        None => format!("session {}", clean(session_id, 64)),
+    }
+}
+
+/// Refuse an edit whose files changed since the session read them. Each
+/// file names what changed it: a shell command noted as leaving the version
+/// now on disk (`shell`, issue #107), else the last peer edit the daemon
+/// reported, else nothing any hook reported. A noted command of another
+/// session than the one the daemon names is not used: the daemon's is the
+/// later reported change.
+pub(crate) fn deny_stale(
+    stale: &[langspan_core::StaleFile],
+    session_id: &str,
+    shell: impl Fn(&str) -> Option<crate::shell::ChangeNote>,
+) -> Reply {
     let mut changed = String::new();
     for file in stale {
         changed.push_str(&format!("{:?}", clean(&file.path, SUMMARY_LIMIT)));
+        let command = shell(&file.path).filter(|note| {
+            note.after == file.current
+                && file
+                    .changed_by
+                    .as_ref()
+                    .is_none_or(|peer| *peer == note.session_id)
+        });
+        if let Some(note) = command {
+            let whose = if note.session_id == session_id {
+                "this session".to_owned()
+            } else {
+                session_label(&note.session_id)
+            };
+            changed.push_str(&format!(" (changed by a shell command of {whose}"));
+            if let Some(text) = note.command.filter(|text| !text.trim().is_empty()) {
+                changed.push_str(&format!(
+                    ": {}",
+                    clean(&text, crate::shell::NOTE_COMMAND_BYTES)
+                ));
+            }
+            changed.push_str("); ");
+            continue;
+        }
         match &file.changed_by {
             Some(session) => changed.push_str(&format!(
                 " (last reported edit by session {})",
@@ -3850,6 +3926,74 @@ mod briefing_text {
         let key = format!("sk_live_{}", "4eC39HqLyjWDarjtT1zdp7dc".repeat(12));
         let summary = prompt_summary(&format!("STRIPE_KEY={key} then deploy\nmore")).unwrap();
         assert_eq!(summary, "STRIPE_KEY=[redacted] then deploy");
+    }
+
+    fn version(digest: &str) -> langspan_core::FileState {
+        langspan_core::FileState::Present {
+            digest: digest.repeat(64),
+            kind: langspan_core::FileKind::Regular,
+        }
+    }
+
+    fn stale_reason(
+        changed_by: Option<&str>,
+        note: Option<(&str, &str)>,
+        session_id: &str,
+    ) -> String {
+        let file = langspan_core::StaleFile {
+            path: "src/a.rs".into(),
+            read: version("a"),
+            current: version("b"),
+            changed_by: changed_by.map(Into::into),
+        };
+        let note = note.map(|(session, after)| crate::shell::ChangeNote {
+            session_id: session.into(),
+            command: Some("cargo fmt --all".into()),
+            after: version(after),
+            at_ms: 0,
+        });
+        let reply = deny_stale(&[file], session_id, |_| note.clone());
+        let stdout: Value = serde_json::from_str(&reply.stdout).unwrap();
+        stdout["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// Issue #107: a refusal names a shell command only when it left the
+    /// version on disk now, and never instead of a later reported edit by
+    /// another session.
+    #[test]
+    fn a_stale_refusal_names_the_shell_command_that_left_the_current_version() {
+        let peer = "claude-code.peer-id";
+        let me = "claude-code.my-id";
+        assert!(
+            stale_reason(None, Some((peer, "b")), me).contains(
+                "\"src/a.rs\" (changed by a shell command of claude-code session peer-id: cargo fmt --all);"
+            )
+        );
+        assert!(
+            stale_reason(Some(peer), Some((peer, "b")), me)
+                .contains("(changed by a shell command of claude-code session peer-id: cargo fmt")
+        );
+        assert!(
+            stale_reason(None, Some((me, "b")), me)
+                .contains("(changed by a shell command of this session: cargo fmt")
+        );
+        // The command left another version: something since changed it.
+        let moved = stale_reason(None, Some((peer, "c")), me);
+        assert!(
+            moved.contains("(changed outside any reported edit)") && !moved.contains("shell"),
+            "{moved}"
+        );
+        // The daemon names a different session's later edit.
+        let other = stale_reason(Some("codex.other"), Some((peer, "b")), me);
+        assert!(
+            other.contains("(last reported edit by session codex.other)")
+                && !other.contains("shell"),
+            "{other}"
+        );
+        assert!(stale_reason(None, None, me).contains("(changed outside any reported edit)"));
     }
 }
 

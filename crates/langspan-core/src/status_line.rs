@@ -61,6 +61,18 @@ pub enum RefusalKind {
     CommitHeld,
 }
 
+impl RefusalKind {
+    /// The kind as its wire name, the key `langspan today` counts it under.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Conflict => "conflict",
+            Self::StaleBase => "stale_base",
+            Self::UnreadLines => "unread_lines",
+            Self::CommitHeld => "commit_held",
+        }
+    }
+}
+
 /// A refusal placed in wall time, for the status line's count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentRefusal {

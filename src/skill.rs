@@ -470,7 +470,7 @@ mod tests {
     fn the_refusals_the_skill_quotes_begin_with_its_words() {
         use crate::hook::{deny, deny_stale, deny_unread};
         for (reply, words) in [
-            (deny_stale(&[]), crate::hook::STALE_SOURCE),
+            (deny_stale(&[], "", |_| None), crate::hook::STALE_SOURCE),
             (deny_unread(&[]), crate::hook::UNREAD_LINES),
             (deny(&[], &[]), crate::hook::CONFLICT),
         ] {

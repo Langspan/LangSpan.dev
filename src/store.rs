@@ -6,8 +6,9 @@
 
 use langspan_core::{
     ClockAnchor, Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event,
-    LeaseStatus, Outcome, RecordedEvent, SentPublication, State, StatusRecord, apply,
-    dashboard_denials, decide, expiry_events, shrink_status, status_records,
+    LeaseStatus, Outcome, RecordedEvent, SentPublication, State, StatusRecord, TODAY_EVENTS,
+    TodayQuery, TodayWindow, apply, dashboard_denials, decide, expiry_events, shrink_status,
+    status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
@@ -24,6 +25,30 @@ pub fn wall_now_ms() -> u64 {
 /// A read answer's body stops before this many bytes, leaving the rest of
 /// the 64 KiB frame for the envelope and JSON escaping of the envelope.
 pub const PAGE_BUDGET_BYTES: usize = 48 * 1024;
+
+/// A generation marker: a `booted` or `clock_anchored` event. One owner for
+/// the index over them and the lookup that must match it to use it.
+macro_rules! generation_marker {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         IN ('booted', 'clock_anchored')"
+    };
+}
+
+/// A partial index of the generation markers, a few rows per daemon start,
+/// so the anchor lookup does not read the generation's other events.
+const GENERATION_MARKER_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_generation_marker ON events(seq) WHERE ",
+    generation_marker!()
+);
+
+/// The newest generation marker before a sequence number: the anchor of the
+/// generation the event there belongs to. Read through the partial index.
+const ANCHOR_LOOKUP: &str = concat!(
+    "SELECT event_json FROM events WHERE seq < ?1 AND ",
+    generation_marker!(),
+    " ORDER BY seq DESC LIMIT 1"
+);
 
 /// Bytes a status part adds around its text: the record's fields with the
 /// largest offset, and the separator.
@@ -176,6 +201,10 @@ impl Store {
             // binary refuse this history instead of failing partway through it.
             connection.pragma_update(None, "user_version", 3)?;
         }
+        // An index, not a format change: a store of any version 3 gains it
+        // when opened (one pass over the log), and a build without it
+        // reads and writes the same rows.
+        connection.execute_batch(GENERATION_MARKER_INDEX)?;
 
         let state = Self::recover(&connection)?;
         let generation = state
@@ -183,8 +212,8 @@ impl Store {
             .checked_add(1)
             .ok_or("authority generation exhausted; refusing to reuse a generation")?;
         let mut store = Self { connection, state };
-        // The generation's clock against the wall clock, so refusals can be
-        // placed on a day (the status line, roadmap H2).
+        // The generation's clock against the wall clock, so times can be
+        // placed on a day (the status line and `today`).
         let anchor = ClockAnchor {
             generation,
             clock_ms: crate::clock::now_ms(),
@@ -446,6 +475,7 @@ impl Store {
                 | Command::LandingReadiness { .. }
                 | Command::TurnQueue { .. }
                 | Command::Recap { .. }
+                | Command::Today { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
         ) {
@@ -557,6 +587,10 @@ impl Store {
                 outcome
             }
             Command::Events { after, limit } => self.events(*after, *limit)?,
+            Command::Today {
+                workspace_id,
+                from_ms,
+            } => self.today(workspace_id.as_deref(), *from_ms, wall_now_ms(), now_ms)?,
             Command::RemoteSent {
                 workspace_id,
                 limit,
@@ -806,6 +840,83 @@ impl Store {
             });
         }
         Ok(Outcome::Events { events })
+    }
+
+    /// The daily account: the newest `TODAY_EVENTS` events at most, placed
+    /// in wall time by their generation's anchor, summarised by the core.
+    /// Reads only; it writes nothing and acknowledges no message.
+    pub fn today(
+        &self,
+        workspace_id: Option<&str>,
+        from_ms: u64,
+        wall_ms: u64,
+        now_ms: u64,
+    ) -> StoreResult<Outcome> {
+        if let Some(workspace_id) = workspace_id
+            && !self.state.workspaces.contains_key(workspace_id)
+        {
+            return Ok(Outcome::Error {
+                code: "unknown_workspace".into(),
+                message: "no workspace has this ID; `langspan status` lists them".into(),
+            });
+        }
+        if from_ms > wall_ms {
+            return Ok(Outcome::Error {
+                code: "invalid_window".into(),
+                message: "the window starts after now; give a --since time in the past".into(),
+            });
+        }
+        let mut statement = self
+            .connection
+            .prepare("SELECT seq, event_json FROM events ORDER BY seq DESC LIMIT ?1")?;
+        let mut rows = statement.query([i64::try_from(TODAY_EVENTS)?])?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            events.push(RecordedEvent {
+                seq: u64::try_from(seq)?,
+                event: serde_json::from_str(&json)?,
+            });
+        }
+        events.reverse();
+        let first = events.first().map_or(0, |recorded| recorded.seq);
+        let first = i64::try_from(first)?;
+        let earlier: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1)",
+            [first],
+            |row| row.get(0),
+        )?;
+        // The generation the first event read belongs to, if it was anchored.
+        let before: Option<String> = self
+            .connection
+            .query_row(ANCHOR_LOOKUP, [first], |row| row.get(0))
+            .optional()?;
+        let anchor = match before
+            .map(|json| serde_json::from_str::<Event>(&json))
+            .transpose()?
+        {
+            Some(Event::ClockAnchored { anchor }) => Some(anchor),
+            _ => None,
+        };
+        let mut today = langspan_core::today(
+            &self.state,
+            &TodayQuery {
+                workspace_id,
+                window: TodayWindow {
+                    from_ms,
+                    to_ms: wall_ms,
+                },
+                events: &events,
+                anchor,
+                earlier,
+                now_ms,
+            },
+        );
+        today.shrink_until(|today| {
+            serde_json::to_vec(today).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+        });
+        Ok(Outcome::Today { today })
     }
 
     /// The outbound audit: what left for a workspace, newest first, read
@@ -1067,4 +1178,38 @@ fn observed_branches(
         );
     }
     branches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `today` runs in the daemon's request handler: finding the anchor must
+    /// read the generation markers only, not every older event of a long
+    /// generation.
+    #[test]
+    fn the_anchor_lookup_reads_only_generation_markers() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-anchor-plan-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let plan: Vec<String> = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {ANCHOR_LOOKUP}"))
+            .unwrap()
+            .query_map([1_000_000i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("events_generation_marker")),
+            "{plan:?}"
+        );
+    }
 }
