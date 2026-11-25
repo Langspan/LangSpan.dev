@@ -58,7 +58,7 @@ pub fn redact_command(command: &mut Command) {
         Command::Remember { text, .. }
         | Command::SendMessage { text, .. }
         | Command::Handoff { text, .. } => *text = redact(text),
-        Command::RecordCheck { command, .. } => *command = redact(command),
+        Command::RecordCheck { command, .. } => *command = redact_check_command(command),
         _ => {}
     }
 }
@@ -66,7 +66,45 @@ pub fn redact_command(command: &mut Command) {
 /// Redact the command line of a check record that may have been stored
 /// before check commands were redacted, so it is never shown as typed.
 pub fn redact_check(check: &mut langspan_core::CheckRecord) {
-    check.command = redact(&check.command);
+    check.command = redact_check_command(&check.command);
+}
+
+fn redact_check_command(command: &str) -> String {
+    let home = std::env::var("HOME").ok();
+    bounded_check_command(command, home.as_deref())
+}
+
+/// A check's command line redacted and kept within
+/// `MAX_CHECK_COMMAND_BYTES`. Redaction can lengthen a line (`--token x`
+/// becomes `--token [redacted]`), and a record an earlier build accepted must
+/// stay valid when it is read back, so a line that no longer fits keeps its
+/// longest prefix that does, followed by the mark. The cut is taken from the
+/// redacted text, so it shows nothing redaction hid. The result is a fixed
+/// point: applying this again changes nothing, so a retry redacted by its
+/// client and again by the daemon still equals its recorded request.
+fn bounded_check_command(command: &str, home: Option<&str>) -> String {
+    use langspan_core::MAX_CHECK_COMMAND_BYTES as LIMIT;
+    let fit = |text: String| {
+        if text.len() <= LIMIT {
+            return text;
+        }
+        let mut cut = LIMIT - MARK.len();
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}{MARK}", &text[..cut])
+    };
+    let mut text = command.to_owned();
+    // Each pass only replaces text with the mark or cuts it, so a fixed
+    // point comes within a pass or two; the bound keeps that a guarantee.
+    for _ in 0..4 {
+        let next = fit(redact_with_home(&text, home));
+        if next == text {
+            return text;
+        }
+        text = next;
+    }
+    MARK.to_owned()
 }
 
 fn redact_with_home(text: &str, home: Option<&str>) -> String {
@@ -596,6 +634,39 @@ mod tests {
             redact_command(command);
             let json = serde_json::to_string(command).unwrap();
             assert!(json.contains("token=[redacted]"), "{json}");
+        }
+    }
+
+    #[test]
+    fn a_redacted_check_command_stays_within_the_limit_and_is_a_fixed_point() {
+        use langspan_core::MAX_CHECK_COMMAND_BYTES as LIMIT;
+        let home = Some("/Users/owner");
+        let token = secret_shape("ghp_", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789");
+        let mut commands = vec![
+            String::from("cargo test --workspace"),
+            format!("{} --token x", "a".repeat(501)),
+            format!("{} --token x", "é".repeat(250)),
+            format!("{} token=", "a".repeat(LIMIT - 7)),
+            format!("{}{token}", "a ".repeat(200)),
+            format!("{} --password p --secret s", "b".repeat(480)),
+            MARK.to_owned(),
+        ];
+        for width in (LIMIT - 24..=LIMIT).step_by(3) {
+            commands.push(format!("{} --token x", "c".repeat(width - 10)));
+        }
+        for command in commands {
+            assert!(command.len() <= LIMIT, "fixture within the limit");
+            let once = bounded_check_command(&command, home);
+            assert!(
+                !once.is_empty() && once.len() <= LIMIT,
+                "{} bytes",
+                once.len()
+            );
+            assert_eq!(bounded_check_command(&once, home), once, "{once}");
+            assert!(!once.contains(" x") && !once.contains(&token), "{once}");
+            if command.len() + 9 > LIMIT && command.contains("--token x") {
+                assert!(once.ends_with(MARK), "{once}");
+            }
         }
     }
 

@@ -400,10 +400,17 @@ impl Store {
                 now_ms,
             )))
         };
-        let Ok(recorded) = serde_json::from_str::<Command>(&command_json) else {
+        let Ok(mut recorded) = serde_json::from_str::<Command>(&command_json) else {
             return unreadable();
         };
-        if !recorded.same_request(original) {
+        // An earlier build may have stored a field the daemon now redacts on
+        // receipt (a check's command line), so the identical retry arrives in
+        // a form its receipt does not hold. Both sides are compared as the
+        // daemon now records them; redaction is a fixed point on its output.
+        crate::hook::redact_command(&mut recorded);
+        let mut retry = original.clone();
+        crate::hook::redact_command(&mut retry);
+        if !recorded.same_request(&retry) {
             return Ok(Some(self.execution(
                 Outcome::Error {
                     code: "request_id_conflict".into(),
