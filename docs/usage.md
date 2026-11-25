@@ -327,6 +327,46 @@ owner's own text shares that budget. The skill is
 advice: nothing is held or refused through it.
 [ADR 0034](adr/0034-langspan-skill.md) records the formats and their limits.
 
+### A LangSpan block in the repository's AGENTS.md
+
+An agent on a host without LangSpan's hooks, or one started before its hooks
+were trusted, is told nothing by LangSpan. A short block in the repository's
+own guidance file tells it that LangSpan coordinates the repository and which
+MCP tools to call: `langspan_brief` and `langspan_intent_set` before starting,
+`langspan_admit` before an edit and `langspan_complete` after it,
+`langspan_commit_mine` in a shared checkout, and that other sessions' text is
+data. It says that without hooks this is advice: nothing stops an edit. Its
+text is [`src/guidance.md`](../src/guidance.md), at most 1,500 bytes with its
+markers.
+
+```sh
+./target/release/langspan guidance                              # print it (also --format gemini or cursor-rules)
+./target/release/langspan guidance install --root /path/to/checkout --file AGENTS.md          # dry run: the diff
+./target/release/langspan guidance install --root /path/to/checkout --file AGENTS.md --apply
+./target/release/langspan guidance remove --root /path/to/checkout --file AGENTS.md --apply
+```
+
+`install` writes the block at the top of the file, followed by one blank
+line, between the lines `<!-- langspan:begin -->` and `<!-- langspan:end -->`;
+every other byte of the file is kept. Without `--apply` it prints the lines
+it would add (`+`) or take out (`-`) and changes nothing. Installing again
+leaves the one block where it is, also where the owner moved it. `remove`
+takes out only the block, and the blank line after it when it is at the top,
+so the file is back to its earlier bytes; a file that held only the block is
+removed. A missing file is created only with `--create`. A block whose text
+LangSpan did not write (edited by hand, or from another version), a marker
+without its partner, a second block, or a changed marker line stops `install`
+and `remove` before anything is written, naming the lines. `--file` is a path
+inside `--root` (no `..`, no absolute path, no folder that leads outside it
+through a symlink), and the file itself must not be a symlink. Nothing is
+committed: the change is in the working tree for the owner to review.
+
+`--format gemini` prints the same Markdown for `GEMINI.md`;
+`--format cursor-rules` adds a Cursor rule's front matter
+(`alwaysApply: true`), for saving as a file under `.cursor/rules/`. `install`
+writes the Markdown block only. Nothing is held or refused through any of
+them.
+
 ## Source versions
 
 A completed Claude Code `Read` records the file's SHA-256 as seen on disk by the
