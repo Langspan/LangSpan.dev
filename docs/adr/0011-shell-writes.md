@@ -180,10 +180,79 @@ tests in `tests/shell_concurrent_edits.rs` (a real `sed` rewrite of two files
 between two sessions' real hooks, followed by `commit --mine`). An
 overlapping shell run of another session whose changes are unknown still
 contests every file the command changed, as above: its writes cannot be told
-from the command's, with one exception.
+from the command's, with the exceptions below.
+
+**A reformat keeps each line's author** (added 25 November 2026, issue
+#141; it widens #124's rule below from the command's own lines to every
+session's). A formatter run in a shared checkout used to make
+`commit --mine` refuse for every session: overlapping another session's
+command, or rewriting another session's uncommitted lines, made each file it
+touched no session's, new files one session alone had written included. Now,
+in a file contested only because another session's shell run overlapped, or
+only because the command rewrote another session's uncommitted lines (no
+overlapping edit contests it, in either case), each run of changed lines is
+split into groups that keep their tokens, as #124 describes. Each line a
+group leaves keeps the author of the lines it removed: a line of the file
+before the command is a session's when every copy of it there was gained
+since `HEAD` and the journaled writes of that one session (a subagent's
+count as its parent's) added it; it is committed when no copy was. A group
+of one session's lines is that session's, whoever ran the command; of
+committed lines, the command's session's when nothing overlapped and no
+session's when something did; of several sessions' lines, or of a line not
+known to be one session's, no session's. Lines without tokens (blank lines)
+join the group next to them and do not decide it, and changes the line
+comparison separated only by blank lines are compared as one. The rest of a
+change, which alters tokens, keeps today's rules: the command's session's
+when nothing overlapped and every line it removes is committed or that
+session's own (#98), otherwise no session's (#124). The journal keeps a
+partial entry per credited session with just its lines; when every line is
+the command's session's, the file is attributed to it as usual. A file
+whose lines all go to another session stays `contested` for the command's
+session: it is not credited with it and gets no version of it, so the
+other session's next edit is refused once as stale, naming the command
+(#107). Two overlapping runs that both saw the change credit it once: an
+entry with the same version and lines as one the session was given since
+the command started is not written again. An earlier entry with the same
+lines is an earlier write (one a revert may have undone since), so it does
+not count.
+
+Tokens depend on the file's extension. Rust, TypeScript and JavaScript
+(`.rs`, `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`): words
+and single punctuation bytes, with a comma just before a closing `)`, `]`
+or `}` dropped, since `rustfmt` and Prettier add or remove it when they wrap
+a list (so `(x,)` and `(x)` compare equal). Markdown (`.md`, `.markdown`,
+`.mdx`): words and punctuation, commas kept, so a re-wrapped paragraph keeps
+its author. Any other file: its text with all whitespace removed, so words
+that come to touch, or a change of indentation that matters (YAML, Python),
+are taken as formatting. Whitespace inside a string literal is taken as
+formatting in every language.
+
+Cost and bound: the comparison runs only for the files above, each at most
+512 KiB (the journal's version bound), at most 64 per command, within the
+hook's deadline. Per file it reuses the line comparison of ADR 0028
+(Myers, at most 256 edits, 4 million line comparisons and 64 MiB of compared
+bytes; past that the differing middle is one change), tokenizes each changed
+line once and then examines at most 4,000,000 tokens (`MAX_WORK` in
+[`src/reformat.rs`](../../src/reformat.rs)). Past that, or past the
+journal's 8,192 lines per side of one entry, nothing in the file is
+credited by this rule and it stays `contested`. Measured in a debug test
+build on an arm64 macOS machine, one run, toolchain 1.100.0: 8,000 lines
+(170 KiB), every one re-indented, took 149 ms
+(`a_large_reformat_is_compared_within_the_bound`); a release build is
+faster.
+
+Tests (two sessions' real hooks, a real daemon, a real Git repository, a
+real `cargo fmt --all` running `rustfmt`, and `commit --mine` for each
+session):
+`cargo_fmt_during_another_sessions_command_keeps_each_sessions_lines_its_own`,
+`a_new_file_another_sessions_formatter_reformats_stays_its_writers` and
+`a_token_change_during_another_sessions_command_is_credited_to_no_session`
+in `tests/shell_concurrent_edits.rs`, and the unit tests of
+`src/reformat.rs` (Rust, Markdown and other files; trailing commas; several
+sessions' lines in one group; the work bound).
 
 **A reformat of the session's own lines during another session's command**
-(added 25 November 2026, issue #124). A formatter keeps every token of the
+(added 25 November 2026, issue #124; widened by #141 above). A formatter keeps every token of the
 lines it rewrites and changes only whitespace and line breaks. In a file
 contested only because another session's shell run overlapped (no
 overlapping edit contests it, and the command rewrote no other session's
