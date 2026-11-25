@@ -180,7 +180,42 @@ tests in `tests/shell_concurrent_edits.rs` (a real `sed` rewrite of two files
 between two sessions' real hooks, followed by `commit --mine`). An
 overlapping shell run of another session whose changes are unknown still
 contests every file the command changed, as above: its writes cannot be told
-from the command's.
+from the command's, with one exception.
+
+**A reformat of the session's own lines during another session's command**
+(added 25 November 2026, issue #124). A formatter keeps every token of the
+lines it rewrites and changes only whitespace and line breaks. In a file
+contested only because another session's shell run overlapped (no
+overlapping edit contests it, and the command rewrote no other session's
+lines), the command's change is compared line by line with the file before
+it. Each run of changed lines is split into groups whose removed and added
+lines have the same tokens, in order (a token is a run of letters, digits,
+`_` and non-ASCII bytes, or one other non-whitespace byte); a joined or split
+line is one group. A group is the command's session's when every line it
+removes is one of that session's own uncommitted lines: a line the file
+gained since `HEAD` that its journaled writes added and no other session's
+did, counted per copy. Where tokens differ, one removed and one added line are
+left out and grouping resumes after them. When every changed line is in such
+a group, the file is attributed to the session as usual. When only some are,
+the file stays `contested` (the reply says how many are partly the
+session's) and the journal keeps a partial entry with just those lines: its
+lines count for `commit --mine` and the commit guard, but the version it left
+is not the session's alone, so it never makes a whole-file attribution the
+session's. A line left out is credited to no session, so a hunk holding it is
+refused; so is a credited line whose content the uncredited part also adds
+or removes, since the journal matches lines by content. Nothing is credited
+when the file has a write whose lines are not known, is not UTF-8, or its
+content before the command, now or in `HEAD` is not known; nor on the paths
+that contest every file (past a call's lifetime, an edit mark overflow).
+A change that keeps tokens but changes whitespace inside a string literal is
+taken as a reformat; another session's command that only did that to the
+session's own line is indistinguishable from the formatter. Tests:
+`a_formatter_reformatting_only_its_sessions_lines_during_another_sessions_command_is_credited`,
+`a_line_the_other_sessions_command_also_changed_is_credited_to_no_session` and
+`a_formatter_during_another_sessions_command_still_takes_none_of_its_lines`
+in `tests/shell_concurrent_edits.rs` (two sessions' real hooks, a real
+command held open by a signal file, a real `sed` rewrite and `commit
+--mine`), and the unit tests of `src/reformat.rs`.
 
 The cap holds on every path that creates a mark: an edit's pre-tool hook, and
 its post-tool hook when the start was not kept. An edit call refused a mark at

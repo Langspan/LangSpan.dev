@@ -259,7 +259,7 @@ fn replaced_size(len: usize, count: usize, old: usize, new: usize) -> Option<usi
 /// The runs of lines that differ between two versions, each line compared
 /// with its terminator. The common head and tail are cut first; past
 /// `MAX_DISTANCE` edits, or the work bound, the middle is one change.
-fn compared(before: &str, after: &str) -> Option<Vec<LineChange>> {
+pub(crate) fn compared(before: &str, after: &str) -> Option<Vec<LineChange>> {
     let a: Vec<&str> = before.split_inclusive('\n').collect();
     let b: Vec<&str> = after.split_inclusive('\n').collect();
     let head = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
@@ -520,6 +520,7 @@ mod tests {
                     .collect(),
                 removed: Vec::new(),
             }),
+            partial: false,
         }
     }
     fn range(start_line: u32, end_line: u32) -> LineRange {
