@@ -894,7 +894,11 @@ fn user_install(
             Planned::Json(_, planned, _) => hooks::json_bytes(planned)?,
             Planned::Text(_, planned) => planned.clone().into_bytes(),
         };
-        let removed = empty.as_ref().is_some_and(|empty| empty(&planned_bytes));
+        // A planned removal of a file that is there is a change even when
+        // its content would not change, as with the `{}` an earlier
+        // uninstall left; an absent file stays unchanged.
+        let removed =
+            original.is_some() && empty.as_ref().is_some_and(|empty| empty(&planned_bytes));
         let (unchanged, text) = match plan {
             Planned::Json(existing, planned, shown) => (
                 existing.as_ref() == Some(planned) || (existing.is_none() && !install),
@@ -908,7 +912,7 @@ fn user_install(
                 planned.trim_end().to_owned(),
             ),
         };
-        if unchanged {
+        if unchanged && !removed {
             println!("{} already matches; nothing to change.", path.display());
             continue;
         }

@@ -162,3 +162,6 @@ or the reverse, or a `langspan` server LangSpan did not write, need attention.
   bytes the plan was made from, planned once more after a change, and kept
   with an error after a second change. Directories install created are left
   in place. Project-level `hooks remove` still leaves such a file in place.
+  A file an earlier version's uninstall already left holding nothing is
+  removed the same way when uninstall runs again; a file that is absent is
+  not listed.

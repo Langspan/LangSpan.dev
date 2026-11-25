@@ -1358,6 +1358,63 @@ fn uninstall_keeps_a_file_the_owner_added_to_after_install() {
     assert!(!home.home().join(".codex/config.toml").exists());
 }
 
+#[test]
+fn uninstall_removes_files_an_earlier_uninstall_left_empty_and_skips_absent_ones() {
+    // An earlier LangSpan's uninstall left these holding nothing; running
+    // a newer uninstall again removes them.
+    let cases: [(&str, &[(&str, &str)]); 2] = [
+        (
+            "codex",
+            &[(".codex/hooks.json", "{}\n"), (".codex/config.toml", "")],
+        ),
+        (
+            "cursor",
+            &[
+                (".cursor/hooks.json", "{\n  \"version\": 1\n}\n"),
+                (".cursor/mcp.json", "{}\n"),
+            ],
+        ),
+    ];
+    for (host, files) in cases {
+        let home = Home::new();
+        for (path, body) in files {
+            home.write(path, body);
+        }
+        let before = contents(&home.home());
+        let dry = home.ok(&["uninstall", "--hosts", host]);
+        for (path, _) in files {
+            let path = home.home().join(path);
+            assert!(
+                dry.contains(&format!("{} would be removed.", path.display())),
+                "{host}: {dry}"
+            );
+        }
+        // The files LangSpan would use but that are absent are not listed.
+        assert_eq!(
+            dry.matches("would be removed.").count(),
+            files.len(),
+            "{host}: {dry}"
+        );
+        assert!(!dry.contains("would become"), "{host}: {dry}");
+        assert_eq!(contents(&home.home()), before, "{host}: dry run");
+
+        let removed = home.ok(&["uninstall", "--hosts", host, "--apply"]);
+        for (path, _) in files {
+            let path = home.home().join(path);
+            assert!(
+                removed.contains(&format!("Removed {}.", path.display())),
+                "{host}: {removed}"
+            );
+        }
+        assert_eq!(
+            removed.matches("Removed").count(),
+            files.len(),
+            "{host}: {removed}"
+        );
+        assert!(contents(&home.home()).is_empty(), "{host}");
+    }
+}
+
 /// Every file under `dir` with its content, so a check can show that
 /// nothing in a host's configuration changed.
 fn contents(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
