@@ -309,7 +309,7 @@ for current holders, the core compares them with that session's records:
 | Recorded version | Admission result |
 | --- | --- |
 | Matches the current file | The source comparison passes. |
-| Differs from the current file | `stale_base`; no files in the set are admitted. A fresh result makes the hook answer `deny`, naming the changed paths and any known editing peer. |
+| Differs from the current file | `stale_base`; no files in the set are admitted. A fresh result makes the hook answer `deny`, naming the changed paths and, for each, what changed it: a shell command that left the version now on disk ("changed by a shell command of claude-code session `<id>`: cargo fmt --all", its command line redacted and capped), the last peer that reported editing it, or "changed outside any reported edit" when no hook reported the change. |
 | No record for an existing file | Admission can proceed with the path in `base_unknown`; its version was not compared. |
 | No record and the file is missing | Admission can proceed as a new file. |
 
