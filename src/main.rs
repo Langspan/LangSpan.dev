@@ -143,6 +143,15 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  session's, no session's or not known; at most 200
                                  files. What commit --mine would commit and refuse;
                                  changes nothing. Session found as for commit --mine
+  notify on|off|status [--sound on|off]
+                                 Desktop notices for the person (off by default): a
+                                 refusal, a failed automatic check, a handoff not taken
+                                 up for 10 minutes. Shown by osascript (macOS) or
+                                 notify-send, at most one of a kind per 5 minutes and
+                                 10 an hour; workspace, session and paths only, at most
+                                 200 bytes. Sound off unless --sound on. Kept as notify
+                                 and notify_sound in config.json; status names the
+                                 notifier found on this PATH, or says none was
   statusline [--root DIR] [--deadline-ms N]
                                  One line for the person: current sessions of this
                                  repository and refusals since local midnight, as
@@ -1272,6 +1281,53 @@ fn status_line(
         println!("{}", answer.json());
     } else {
         println!("{}", answer.text());
+    }
+    Ok(0)
+}
+
+/// `notify on|off|status [--sound on|off]`: desktop notices (H3). Writes
+/// only `notify` and `notify_sound` in `config.json`; the daemon reads them
+/// at each notice.
+fn notify(
+    state_dir: &std::path::Path,
+    action: &str,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    use langspan::notify;
+    let sound = match options.remove("--sound").as_deref() {
+        None => None,
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        Some(other) => return Err(format!("--sound takes on or off, not {other:?}").into()),
+    };
+    no_unused_options(options)?;
+    let (on, sound) = match (action, sound) {
+        ("on" | "off", sound) => notify::configure(state_dir, action == "on", sound)?,
+        ("status", None) => notify::configured(state_dir)?,
+        ("status", Some(_)) => {
+            return Err("--sound is valid with `notify on` and `notify off`".into());
+        }
+        _ => return Err(format!("notify takes on, off or status, not {action:?}").into()),
+    };
+    let found = notify::find(std::env::var_os("PATH").as_deref());
+    let program = notify::Program::here().name();
+    if json {
+        let notifier = found.as_ref().map(|(program, path)| {
+            serde_json::json!({"name": program.name(), "path": path.to_string_lossy()})
+        });
+        println!(
+            "{}",
+            serde_json::json!({"notify": on, "notify_sound": sound, "notifier": notifier})
+        );
+        return Ok(0);
+    }
+    let word = |on: bool| if on { "on" } else { "off" };
+    println!("notices: {}", word(on));
+    println!("sound: {}", word(sound));
+    match &found {
+        Some((program, path)) => println!("notifier: {} ({})", program.name(), path.display()),
+        None => println!("notifier: none found (no {program} on PATH); no notice can be shown"),
     }
     Ok(0)
 }
@@ -2911,6 +2967,9 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             );
         }
         ["statusline"] => return status_line(&state_dir, &mut options, json),
+        ["notify", action] if command.is_empty() => {
+            return notify(&state_dir, action, &mut options, json);
+        }
         ["commit"] => return commit_mine(&state_dir, &mut options, json),
         ["status"] if options.remove("--mine").is_some() => {
             return status_mine(&state_dir, &mut options, json);
@@ -3291,7 +3350,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--code-briefing" | "--max-peers" | "--remote" | "--name" | "--share-task"
             | "--onto" | "--timeout-s" | "--wait-s" | "--session" | "--to" | "--from"
             | "--home" | "--hosts" | "--listen" | "-m" | "--message" | "--statusline"
-            | "--deadline-ms" | "--forget" | "--since" | "--depth" | "--path" => {
+            | "--deadline-ms" | "--forget" | "--since" | "--sound" | "--depth" | "--path" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
