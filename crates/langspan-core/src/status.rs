@@ -7,7 +7,7 @@ use crate::{
     AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CoreError, Intent, InterfaceNotice,
     Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, PresenceSetting, RemoteLink,
     RemotePeer, ScanCoverage, ScanFailure, Session, SessionActivity, SessionLiveness, State, Turn,
-    TurnWaiter, Workspace, WorkspaceGit, error,
+    TurnWaiter, UninstalledHost, Workspace, WorkspaceGit, error,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,6 +77,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         checkouts,
         auto_checks,
         check_notices,
+        uninstalled_hosts,
         presence,
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
@@ -135,6 +136,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         checkouts: checkouts.clone(),
         auto_checks: auto_checks.clone(),
         check_notices: keep(check_notices, of_shown),
+        uninstalled_hosts: uninstalled_hosts.clone(),
         presence: keep(presence, of_shown),
         sessions: shown_sessions.clone(),
         clock_anchor: None,
@@ -409,6 +411,10 @@ pub enum StatusRecord {
         key: String,
         notice: CheckNotice,
     },
+    UninstalledHost {
+        key: String,
+        host: UninstalledHost,
+    },
     Presence {
         key: String,
         setting: PresenceSetting,
@@ -425,7 +431,7 @@ pub enum StatusRecord {
 }
 
 /// Record kinds in page order. The cursor names one of these.
-const KINDS: [&str; 22] = [
+const KINDS: [&str; 23] = [
     "workspace",
     "session",
     "intent",
@@ -447,6 +453,7 @@ const KINDS: [&str; 22] = [
     "checkout",
     "auto_check",
     "check_notice",
+    "uninstalled_host",
     "presence",
 ];
 
@@ -491,6 +498,7 @@ impl StatusRecord {
             Self::CheckNotice { key, notice } => {
                 state.check_notices.entry(key).or_default().push(notice)
             }
+            Self::UninstalledHost { key, host } => drop(state.uninstalled_hosts.insert(key, host)),
             Self::Presence { key, setting } => drop(state.presence.insert(key, setting)),
         }
         Ok(())
@@ -678,7 +686,7 @@ pub fn status_records<'a>(
         .as_ref()
         .and_then(|after| Some((after.position.clone(), after.within?)));
     let after = after.as_ref();
-    let pages: [Page<'a>; 22] = [
+    let pages: [Page<'a>; 23] = [
         entries(0, &state.workspaces, after, |key, workspace| {
             StatusRecord::Workspace { key, workspace }
         }),
@@ -746,7 +754,10 @@ pub fn status_records<'a>(
         lists(20, &state.check_notices, after, |key, notice| {
             StatusRecord::CheckNotice { key, notice }
         }),
-        entries(21, &state.presence, after, |key, setting| {
+        entries(21, &state.uninstalled_hosts, after, |key, host| {
+            StatusRecord::UninstalledHost { key, host }
+        }),
+        entries(22, &state.presence, after, |key, setting| {
             StatusRecord::Presence { key, setting }
         }),
     ];
