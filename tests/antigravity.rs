@@ -792,6 +792,42 @@ fn a_user_level_conversation_is_coordinated_in_each_of_its_workspace_folders() {
     assert!(stdout.contains("antigravity"), "{stdout}");
 }
 
+#[test]
+fn a_linked_worktree_inside_the_repository_is_its_own_workspace_folder() {
+    let f = Fixture::new();
+    let state = f.base.join("state");
+    let worktree = f.root().join(".worktrees/topic");
+    git(
+        &f.root(),
+        &["worktree", "add", "--quiet", "-b", "topic"]
+            .into_iter()
+            .chain([worktree.to_str().unwrap()])
+            .collect::<Vec<_>>(),
+    );
+    // The outer repository first: the worktree's files lie under both
+    // folders, and the more specific one is theirs.
+    let folders = json!([f.root(), worktree]);
+    let in_worktree = |name: &str, step: u64| {
+        let mut body = event(name, &worktree);
+        body["workspacePaths"] = folders.clone();
+        body["stepIdx"] = json!(step);
+        body
+    };
+    for (step, name) in [(30, "pre-replace.json"), (31, "pre-run-command.json")] {
+        let (coverage, stdout) = user_hook(&state, "PreToolUse", &in_worktree(name, step));
+        assert!(coverage.starts_with("admitted:"), "{name}: {coverage}");
+        assert_eq!(stdout, "{}");
+    }
+
+    // Admitted under the worktree's workspace: another conversation open
+    // only on the worktree is refused the file the first one holds there.
+    let mut other = event("pre-write-to-file.json", &worktree);
+    other["conversationId"] = json!("00000000-0000-4000-8000-0000000000c3");
+    let (coverage, stdout) = user_hook(&state, "PreToolUse", &other);
+    assert!(coverage.starts_with("denied:"), "{coverage}");
+    assert!(stdout.contains("antigravity"), "{stdout}");
+}
+
 /// The text an Antigravity answer places in the model's context.
 fn injected(stdout: &str) -> String {
     let reply: Value = serde_json::from_str(stdout).unwrap_or(Value::Null);

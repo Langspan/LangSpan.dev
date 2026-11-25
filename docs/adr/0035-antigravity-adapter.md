@@ -149,8 +149,10 @@ missing events, the MCP entry and the skill.
 **Deferring to a project install.** Antigravity reads `.agents/hooks.json` at
 the workspace root. The user-level hook steps aside only when the event's
 workspace folder holds a LangSpan project hook, as for Gemini CLI. The workspace
-folder is the one in `workspacePaths` that holds the target file (for
-`run_command`, its `Cwd`), else the first. A command run below that folder is
+folder is the most specific one in `workspacePaths` that holds the target file
+(for `run_command`, its `Cwd`), compared by whole path components, else the
+first. A linked worktree listed inside its repository is therefore its own
+folder whatever the order, and `/work/repo2` is never inside `/work/repo`. A command run below that folder is
 still resolved from the folder, since that is where Antigravity reads its
 hooks. A project definition with `"enabled": false` runs none of its hooks,
 so it covers nothing: the user-level hook decides there. The other hosts'

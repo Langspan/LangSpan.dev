@@ -74,13 +74,20 @@ impl HostEvent {
             .filter(|dir| Path::new(dir).is_absolute())
     }
 
-    /// The workspace folder the event is about: the one holding `target`,
-    /// else the first. Each must be absolute.
+    /// The workspace folder the event is about: the most specific one
+    /// holding `target`, else the first. Each must be absolute. A linked
+    /// worktree listed inside its repository is its own folder, whatever
+    /// the order; `Path::starts_with` compares whole components, so
+    /// `/work/repo2` is not inside `/work/repo`.
     fn directory(&self, target: Option<&str>) -> Option<&str> {
-        let mut folders = self.folders();
+        let folders = self.folders();
         let first = folders.clone().next();
         target
-            .and_then(|target| folders.find(|dir| Path::new(target).starts_with(dir)))
+            .and_then(|target| {
+                folders
+                    .filter(|dir| Path::new(target).starts_with(dir))
+                    .max_by_key(|dir| Path::new(dir).components().count())
+            })
             .or(first)
     }
 
@@ -831,6 +838,24 @@ mod tests {
         assert_eq!(event.directory(None), Some("/work/one"));
         assert_eq!(event.directory(Some("/work/two/a.txt")), Some("/work/two"));
         assert_eq!(event.directory(Some("/elsewhere/a.txt")), Some("/work/one"));
+        // The most specific folder holding the target, whatever the order,
+        // compared by whole path components.
+        let nested: HostEvent = serde_json::from_value(json!({
+            "workspacePaths": ["/work/repo", "/work/repo/.worktrees/topic", "/work/repo2"],
+        }))
+        .unwrap();
+        for (target, folder) in [
+            (
+                "/work/repo/.worktrees/topic/a.txt",
+                "/work/repo/.worktrees/topic",
+            ),
+            ("/work/repo/.worktrees/topic", "/work/repo/.worktrees/topic"),
+            ("/work/repo/.worktrees/topical/a.txt", "/work/repo"),
+            ("/work/repo/a.txt", "/work/repo"),
+            ("/work/repo2/a.txt", "/work/repo2"),
+        ] {
+            assert_eq!(nested.directory(Some(target)), Some(folder), "{target}");
+        }
         let none: HostEvent = serde_json::from_value(json!({"workspacePaths": []})).unwrap();
         assert_eq!(none.directory(None), None);
     }
