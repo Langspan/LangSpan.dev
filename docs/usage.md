@@ -885,8 +885,13 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol and SQLite schema marker are version 3. Upgrade the
-daemon and clients together. Earlier persisted records remain readable.
+The current wire protocol is version 3 and the SQLite schema marker version 4
+(retention). Upgrade the daemon and clients together. Earlier persisted
+records remain readable; a build older than the marker refuses the file.
+
+Receipts are kept until [retention](#retention) removes them, at the
+earliest 7 days after they were recorded; a retry after that is a new
+request.
 
 A daemon restart advances the generation and invalidates outstanding grants.
 Sessions and intents remain visible as stale. Reattach with a new registration
@@ -911,7 +916,8 @@ Optional `config.json` in the state directory must be owner-only (`0600`):
 ```
 
 Timeout values accept 100–5000 ms; client count accepts 1–128;
-`auto_check_debounce_ms` accepts 50–60000. IPC and MCP frames
+`auto_check_debounce_ms` accepts 50–60000; `retention_days` (unset by
+default) accepts 7–3650 and is described under [Retention](#retention). IPC and MCP frames
 are limited to 64 KiB. The MCP SDK discards oversized input lines without replying
 to that line. File admission accepts up to 64 distinct normalized keys, 512 bytes
 per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit
@@ -922,10 +928,45 @@ and ending in `[redacted]`, so a summary within its limit is never refused
 because it held a secret.
 Canonical path checks reject escapes, special files, and observed hard links.
 
-Events and receipts do not yet have a retention policy. History is read in
-bounded pages; large status snapshots remain subject to the IPC response limit.
-Git observation also has explicit file, byte, branch, and deadline bounds; an
-incomplete scan does not become a complete snapshot. See
-[implementation status](IMPLEMENTATION_STATUS.md) and the
+History is read in bounded pages; large status snapshots remain subject to
+the IPC response limit. Git observation also has explicit file, byte, branch,
+and deadline bounds; an incomplete scan does not become a complete snapshot.
+See [implementation status](IMPLEMENTATION_STATUS.md) and the
 [threat model](security/threat-model.md) for current coverage,
 platform limits, and the cooperative boundary.
+
+### Retention
+
+Events and receipts are kept until they are compacted
+([ADR 0025](adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md)).
+Nothing is ever deleted unless you run `langspan compact --apply` or set
+`retention_days`. For example (the numbers are illustrative):
+
+```text
+$ langspan compact --keep-days 90
+would delete 812,440 events (seq 1..812440, before 2026-08-27T09:00:00Z) and 61,204 receipts
+snapshot at seq 812440; about 410 MiB freed
+dry run: add --apply to compact
+```
+
+`compact` (default 90 days, 7–3650) is a dry run: it deletes nothing and
+reports what would go. With `--apply` the daemon writes the state those
+events built into a snapshot and, in the same transaction, deletes the
+events and receipts recorded before the window. It starts from the newest
+snapshot and replays only the events after it. With `retention_days` in
+`config.json` the daemon does the same when it starts and then once a day,
+logging a `compacted` line.
+
+- The snapshot is checked first: read back, with the later events applied, it
+  must give the state the daemon holds, or the compaction stops with
+  `snapshot_mismatch` and deletes nothing.
+- It stops before anything still open: an admission, a push turn, a waiting
+  landing or an unacknowledged message. The report says which (`held_by`).
+- A retry whose receipt was removed is answered as a new request.
+- `remote sent` lists every publication within the window and says from which
+  date it is complete.
+- Ages are wall-clock times recorded with each event and receipt; records
+  from before this version count from the upgrade.
+- The freed space is reused by SQLite; the file does not shrink.
+- The daemon does nothing else while it compacts: about 0.6 s for 500,000
+  small events on one laptop (see the ADR).
