@@ -324,6 +324,10 @@ pub struct Dashboard {
     pub more_notes: u32,
     pub workspaces: Vec<WorkspaceRow>,
     pub more_workspaces: u32,
+    /// Agent hosts on this machine with no LangSpan install covering them,
+    /// by name; at most `MAX_HOSTS` (roadmap A7).
+    #[serde(default)]
+    pub uninstalled_hosts: Vec<String>,
 }
 
 /// Bytes a string takes encoded as JSON, an upper bound.
@@ -1059,6 +1063,7 @@ pub(crate) fn dashboard(state: &State, now_ms: u64) -> Dashboard {
         more_notes,
         workspaces,
         more_workspaces,
+        uninstalled_hosts: state.uninstalled_hosts.keys().cloned().collect(),
     }
 }
 

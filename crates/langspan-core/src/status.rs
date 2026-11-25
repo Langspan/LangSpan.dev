@@ -7,7 +7,7 @@ use crate::{
     AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CoreError, Intent, InterfaceNotice,
     Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, RemoteLink, RemotePeer,
     RetractedMessage, ScanCoverage, ScanFailure, Session, SessionActivity, SessionLiveness, State,
-    Turn, TurnWaiter, Workspace, WorkspaceGit, error,
+    Turn, TurnWaiter, UninstalledHost, Workspace, WorkspaceGit, error,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,6 +77,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         checkouts,
         auto_checks,
         check_notices,
+        uninstalled_hosts,
         // Recap, the dashboard and briefings show withdrawn messages; the
         // bounded view shows what is held, and `status --all` has these.
         message_history: _,
@@ -138,6 +139,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         checkouts: checkouts.clone(),
         auto_checks: auto_checks.clone(),
         check_notices: keep(check_notices, of_shown),
+        uninstalled_hosts: uninstalled_hosts.clone(),
         retracted_notices: BTreeMap::new(),
         message_history: BTreeMap::new(),
         sessions: shown_sessions.clone(),
@@ -412,6 +414,10 @@ pub enum StatusRecord {
         key: String,
         notice: CheckNotice,
     },
+    UninstalledHost {
+        key: String,
+        host: UninstalledHost,
+    },
     /// One of the latest messages sent in workspace `key`, with its readers.
     SentMessage {
         key: String,
@@ -434,7 +440,7 @@ pub enum StatusRecord {
 }
 
 /// Record kinds in page order. The cursor names one of these.
-const KINDS: [&str; 23] = [
+const KINDS: [&str; 24] = [
     "workspace",
     "session",
     "intent",
@@ -456,6 +462,7 @@ const KINDS: [&str; 23] = [
     "checkout",
     "auto_check",
     "check_notice",
+    "uninstalled_host",
     "sent_message",
     "retracted_notice",
 ];
@@ -501,6 +508,7 @@ impl StatusRecord {
             Self::CheckNotice { key, notice } => {
                 state.check_notices.entry(key).or_default().push(notice)
             }
+            Self::UninstalledHost { key, host } => drop(state.uninstalled_hosts.insert(key, host)),
             Self::SentMessage { key, message } => {
                 state.message_history.entry(key).or_default().push(message)
             }
@@ -693,7 +701,7 @@ pub fn status_records<'a>(
         .as_ref()
         .and_then(|after| Some((after.position.clone(), after.within?)));
     let after = after.as_ref();
-    let pages: [Page<'a>; 23] = [
+    let pages: [Page<'a>; 24] = [
         entries(0, &state.workspaces, after, |key, workspace| {
             StatusRecord::Workspace { key, workspace }
         }),
@@ -761,10 +769,13 @@ pub fn status_records<'a>(
         lists(20, &state.check_notices, after, |key, notice| {
             StatusRecord::CheckNotice { key, notice }
         }),
-        lists(21, &state.message_history, after, |key, message| {
+        entries(21, &state.uninstalled_hosts, after, |key, host| {
+            StatusRecord::UninstalledHost { key, host }
+        }),
+        lists(22, &state.message_history, after, |key, message| {
             StatusRecord::SentMessage { key, message }
         }),
-        lists(22, &state.retracted_notices, after, |key, notice| {
+        lists(23, &state.retracted_notices, after, |key, notice| {
             StatusRecord::RetractedNotice { key, notice }
         }),
     ];

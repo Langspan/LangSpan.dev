@@ -88,6 +88,7 @@ li:first-child { border-top: 0; }
     </div>
   </section>
   <section><h2>Health</h2><ul id="workspaces"></ul><div id="workspaces-more"></div>
+    <ul id="hosts"></ul><div id="hosts-more"></div>
     <p class="note">Publication failures are written to the daemon's log, not recorded in state; a sequence that keeps rising means publications are being pushed.</p>
   </section>
 </main>
@@ -228,7 +229,7 @@ function coverage(c) {
     (c.partial_files > 0 ? ', ' + c.partial_files + ' partial' : '');
 }
 
-function render(d) {
+function render(d, install_advice) {
   const stats = byId('stats');
   stats.replaceChildren();
   const stat = (label, value) => add(stats, add(el('span'), label + ' ', el('b', null, value)));
@@ -316,6 +317,12 @@ function render(d) {
           (w.publishing.share_task ? ', task lines shared' : ', task lines not shared') + '; ' + w.teammates + ' teammate(s) received'),
     el('div', 'muted', coverage(w.coverage))),
     'No workspace is registered.', d.more_workspaces, 'workspaces');
+  fill('hosts', d.uninstalled_hosts || [], (h) => add(el('li'),
+    add(el('div', 'line'), el('span', 'warn', 'not coordinated'), el('b', null, h),
+      el('span', 'muted', 'has a configuration directory but no LangSpan hooks')),
+    add(el('div', 'line'), el('span', 'muted', 'preview the install with'),
+      el('span', 'mono', install_advice[h] || ''), el('span', 'muted', 'then add --apply'))),
+    'Every agent host found on this machine has a LangSpan install.', 0, 'hosts');
 }
 
 function banner(text) {
@@ -341,7 +348,7 @@ async function refresh() {
       unavailable(body.error || ('HTTP ' + response.status));
       return;
     }
-    render(body.dashboard);
+    render(body.dashboard, body.install_advice || {});
     lastSuccess = Date.now();
     banner(null);
   } catch (error) {

@@ -101,7 +101,9 @@ binding to a VPN address and the limits of that setup.
 Within one workspace, agents can ask for a recap, save short notes, message
 another session or leave a handoff for the next one. Notes survive coordinator
 restarts. Messages and handoffs arrive through supported briefing events;
-they do not wake idle sessions. These records stay local to the coordinator.
+they do not wake idle sessions. A message that no longer holds can be
+withdrawn, and sessions that already read it are told to disregard it. These
+records stay local to the coordinator.
 
 ## Get started
 
