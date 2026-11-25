@@ -476,6 +476,7 @@ fn month_count(context: &Context) -> serde_json::Value {
                 .map(count::Month::label)
                 .unwrap_or_default();
             let mut value = serde_json::to_value(&answer).unwrap_or_default();
+            value["line"] = answer.summary(&label).into();
             value["label"] = label.into();
             value["note"] = count::DISCLAIMER.into();
             value

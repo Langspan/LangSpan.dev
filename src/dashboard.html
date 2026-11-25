@@ -219,10 +219,8 @@ function monthRefusals(m) {
     node.textContent = 'This month’s refusal count could not be read' + (m && m.error ? ': ' + m.error : '.');
     return;
   }
-  const kinds = ['conflict', 'stale_base', 'unread_lines', 'commit_held']
-    .map((kind) => (m.by_kind[kind] || 0) + ' ' + kind).join(', ');
-  node.textContent = m.label + ': ' + m.refusals + (m.refusals === 1 ? ' refusal' : ' refusals') +
-    ' (' + kinds + '), once per session, kind and files a day. ' + m.note;
+  // The daemon's own line: the count, its kinds and any truncation.
+  node.textContent = m.line + ', once per session, kind and files a day. ' + m.note;
 }
 
 function checkResult(result) {

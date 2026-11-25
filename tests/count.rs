@@ -417,3 +417,98 @@ fn count_requests_match_the_committed_golden_vector() {
     let unknown = String::from_utf8_lossy(wire).replace(r#""days":"#, r#""x":1,"days":"#);
     assert!(serde_json::from_str::<Request>(&unknown).is_err());
 }
+
+/// Copy the log's first refusal until it holds `extra` more, with the
+/// daemon stopped.
+fn copy_first_refusal(state: &std::path::Path, extra: u32) {
+    let connection = rusqlite::Connection::open(state.join("state.sqlite3")).unwrap();
+    let copied = connection
+        .execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1)
+             INSERT INTO events (event_json)
+             SELECT (SELECT event_json FROM events
+                     WHERE json_extract(event_json, '$.type') = 'write_refused'
+                     ORDER BY seq LIMIT 1)
+             FROM n",
+            [extra],
+        )
+        .unwrap();
+    assert_eq!(copied, extra as usize);
+}
+
+#[test]
+fn a_truncated_month_says_so_wherever_its_count_is_shown() {
+    let mut w = World::new();
+    w.start();
+    w.started("alice");
+    w.started("bob");
+    assert!(!w.write("bob", "hold", "src/lib.rs", "PreToolUse"));
+    assert!(w.write("alice", "try-1", "src/lib.rs", "PreToolUse"));
+    w.stop();
+    copy_first_refusal(&w.state(), 20_000);
+    w.start();
+    assert_eq!(w.count(None, None)["truncated"], true);
+    let qualifier = "truncated: counted from the newest 20000 refusal records only";
+
+    // `today`'s one line.
+    let (code, today, _) = w.cli(&["today", "app"], None);
+    assert_eq!(code, 0, "{today}");
+    let line = today
+        .lines()
+        .find(|line| line.starts_with("This month, "))
+        .unwrap_or_else(|| panic!("{today}"));
+    assert!(line.contains(qualifier), "{line}");
+
+    // The local page: the line it shows, and the page showing that line.
+    let (port, token) = w.dashboard();
+    let month = &api_state(port, &token)["refusals_this_month"];
+    assert_eq!(month["truncated"], true, "{month:#}");
+    assert!(
+        month["line"].as_str().unwrap_or("").contains(qualifier),
+        "{month:#}"
+    );
+    let page = include_str!("../src/dashboard.html");
+    assert!(
+        page.contains("m.line"),
+        "the page renders the daemon's line"
+    );
+}
+
+#[test]
+fn a_month_whose_day_starts_cannot_all_be_read_is_not_counted() {
+    let mut w = World::new();
+    w.start();
+    // A `date` that answers once and then fails.
+    let bin = w.base.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let calls = w.base.join("date-calls");
+    fs::write(
+        bin.join("date"),
+        format!(
+            "#!/bin/sh\nif [ -e '{0}' ]; then exit 1; fi\n: > '{0}'\necho +0000\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("date"), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .arg("--state-dir")
+        .arg(w.state())
+        .args(["count", "--month", "2027-03"])
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    let (out, err) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(calls.exists(), "the first offset was read");
+    assert_eq!(output.status.code(), Some(1), "{out}{err}");
+    assert!(out.is_empty(), "no count from a partial month: {out}");
+    assert!(err.contains("time zone"), "{err}");
+}

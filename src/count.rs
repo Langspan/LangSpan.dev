@@ -119,15 +119,17 @@ impl Month {
 
     /// Each local day's start and the next month's first: the window the
     /// daemon counts. `offset_at` gives the zone's offset (minutes east of
-    /// UTC) at an instant; `None` when it cannot be read for the month's
-    /// first day.
+    /// UTC) at an instant; `None` when any offset the month needs cannot be
+    /// read, so no count is built from a partial or guessed month.
     pub fn day_starts(self, mut offset_at: impl FnMut(u64) -> Option<i32>) -> Option<Vec<u64>> {
         let mut asked: Vec<(u64, Option<i32>)> = Vec::new();
-        let mut ask = move |at: u64| {
+        let mut failed = false;
+        let mut ask = |at: u64| {
             if let Some(&(_, answer)) = asked.iter().find(|(seen, _)| *seen == at) {
                 return answer;
             }
             let answer = offset_at(at);
+            failed |= answer.is_none();
             asked.push((at, answer));
             answer
         };
@@ -141,7 +143,12 @@ impl Month {
         for day in first..=first + self.days() {
             // 1970-01-01 east of UTC would be before the epoch: start at it.
             let noon = u64::try_from((day * DAY_MS + DAY_MS / 2 - offset).max(0)).ok()?;
+            // `local_midnight_ms` falls back to UTC or another sampled
+            // offset when a lookup fails; `failed` refuses that fallback.
             starts.push(local_day::local_midnight_ms(noon, &mut ask));
+        }
+        if failed {
+            return None;
         }
         // A zone that skipped a whole day has two days with one start.
         starts.dedup();
@@ -176,6 +183,26 @@ impl MonthCount {
             refusals(self.count.refusals),
             kinds.join(", ")
         )
+    }
+
+    /// `truncated: counted from ...` when the daemon counted only the
+    /// newest records: shown next to the count wherever it appears.
+    pub fn truncation(&self) -> Option<String> {
+        self.count.truncated.then(|| {
+            format!(
+                "truncated: counted from the newest {} refusal records only",
+                langspan_core::COUNT_REFUSALS
+            )
+        })
+    }
+
+    /// The headline and, when the count is partial, its truncation: the
+    /// one line `today` and the local page show.
+    pub fn summary(&self, label: &str) -> String {
+        match self.truncation() {
+            Some(truncation) => format!("{} ({truncation})", self.headline(label)),
+            None => self.headline(label),
+        }
     }
 
     /// The text for a person.
@@ -215,11 +242,9 @@ impl MonthCount {
                 count.repeats
             ));
         }
-        if count.truncated {
-            lines.push(format!(
-                "Truncated: counted from the newest {} refusal records only.",
-                langspan_core::COUNT_REFUSALS
-            ));
+        if let Some(truncation) = self.truncation() {
+            let (first, rest) = truncation.split_at(1);
+            lines.push(format!("{}{rest}.", first.to_uppercase()));
         }
         if count.undated > 0 {
             lines.push(format!(
@@ -262,7 +287,7 @@ pub fn day_starts(month: Month) -> Result<Vec<u64>, String> {
         .day_starts(|at| local_day::offset_at(at, deadline, None))
         .ok_or_else(|| {
             format!(
-                "could not read the local time zone for {} (`date` gave no offset within 2 s)",
+                "could not read the local time zone for every day of {} (`date` failed or gave no offset within 2 s); no count is shown from a partial month",
                 month.key()
             )
         })
@@ -301,8 +326,12 @@ pub fn today_line(state_dir: &Path, workspace_id: Option<&str>, now_ms: u64) -> 
                 ),
                 None => String::new(),
             };
+            let truncation = count
+                .truncation()
+                .map(|truncation| format!(" ({truncation})"))
+                .unwrap_or_default();
             format!(
-                "This month, {}{part}. {DISCLAIMER}",
+                "This month, {}{part}{truncation}. {DISCLAIMER}",
                 count.headline(&month.label())
             )
         }
@@ -369,6 +398,15 @@ mod tests {
         assert_eq!(lengths.iter().filter(|&&ms| ms == 24 * HOUR).count(), 30);
         // Without the first day's offset there is no window.
         assert!(march.day_starts(|_| None).is_none());
+        // Nor when any later lookup fails: no month from fallback offsets.
+        for answered in [1, 2, 10, 60] {
+            let mut calls = 0;
+            let partial = march.day_starts(|at| {
+                calls += 1;
+                if calls > answered { None } else { new_york(at) }
+            });
+            assert!(partial.is_none(), "after {answered} answers: {partial:?}");
+        }
     }
 
     #[test]
@@ -405,7 +443,27 @@ mod tests {
             "{text}"
         );
         assert!(text.ends_with(DISCLAIMER), "{text}");
+        assert!(
+            text.contains("\nTruncated: counted from the newest 20000 refusal records only.\n"),
+            "{text}"
+        );
         assert_no_outcome_claimed(&text);
+        let summary = count.summary("March 2027");
+        assert!(
+            summary.ends_with(
+                "1 commit_held) (truncated: counted from the newest 20000 refusal records only)"
+            ),
+            "{summary}"
+        );
+        let whole = MonthCount {
+            count: RefusalCount {
+                truncated: false,
+                ..count.count.clone()
+            },
+            ..count.clone()
+        };
+        assert_eq!(whole.summary("March 2027"), whole.headline("March 2027"));
+        assert!(!whole.text("March 2027").contains("runcated"));
     }
 
     /// Words that would claim what a refusal achieved. The disclaimer's own
