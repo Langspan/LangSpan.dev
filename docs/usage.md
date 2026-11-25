@@ -1046,13 +1046,19 @@ gone and NEW_ROOT must be the top of a Git checkout. With `--switch`, the old
 root still exists and NEW_ROOT is another checkout of the same repository
 (its object database holds the old root's `HEAD` commit), for example a fresh
 clone that replaces a broken one; the old root then stops being coordinated
-under the ID. The ID, notes, pending messages, check records, landings, the
-automatic check and the remote setting are kept. File versions sessions read
+under the ID. `--switch` is refused (`root_derived_id`) when the ID is the one
+user-level hooks derived from the old root, since new sessions there would
+claim it again; move or delete the old checkout and run the move without
+`--switch`, or register NEW_ROOT with `workspace add`. The ID, notes, pending
+messages, check records, landings, the automatic check and the remote setting
+are kept; an automatic check waiting or running in the old root is cancelled,
+and the next writes in NEW_ROOT are checked there. File versions sessions read
 under the old root are dropped, so a session's next edit of an existing file
 has an unknown base until it reads it again; the next scan and the source
 index start again from NEW_ROOT. A refused move changes nothing and says
 which check failed: `not_checkout_top`, `old_root_exists`,
-`old_root_missing`, `different_repository` or `workspace_conflict` (NEW_ROOT
+`old_root_missing`, `root_derived_id`, `different_repository` or
+`workspace_conflict` (NEW_ROOT
 is registered already or overlaps another workspace).
 
 User-level hooks need nothing: an event from NEW_ROOT joins the moved ID.

@@ -48,8 +48,8 @@ pub enum Message {
         root: PathBuf,
         session_id: String,
     },
-    /// The owner turned the check off or changed it: stop what runs, forget
-    /// what waits.
+    /// The owner turned the check off or changed it, or moved, switched or
+    /// removed the workspace: stop what runs, forget what waits.
     Off { workspace_id: String },
     Finished {
         workspace_id: String,
@@ -100,6 +100,8 @@ struct Running {
     /// the sessions the run started for.
     sessions: BTreeMap<String, u64>,
     check: AutoCheck,
+    /// The checkout it runs in.
+    root: PathBuf,
 }
 
 /// Requests to compare the tree again, one per burst of writes that
@@ -288,8 +290,9 @@ pub fn worker(
                 for session in std::mem::take(&mut workspace.waiting) {
                     running.wrote_again(session, request);
                 }
-            } else if !still_enabled(&record, &check) {
-                // A turn-off that did not reach this worker: nothing runs.
+            } else if !still_enabled(&record, &check, &root) {
+                // A turn-off or move that did not reach this worker: nothing
+                // runs.
                 workspace.check = None;
                 workspace.waiting.clear();
             } else {
@@ -303,6 +306,7 @@ pub fn worker(
                         .map(|session| (session, 0))
                         .collect(),
                     check: check.clone(),
+                    root: root.clone(),
                 };
                 let (cancel, recheck, sender) = (
                     running.cancel.clone(),
@@ -335,16 +339,27 @@ pub fn worker(
     }
 }
 
-/// Whether the owner's current setting is still `check`, asked of the state
-/// owner just before a run starts. Unreachable counts as not enabled. A
-/// check at its size limits can be left out of the bounded view, so it is
-/// read complete then.
-fn still_enabled(record: &impl Fn(String, Command) -> Option<Outcome>, check: &AutoCheck) -> bool {
+/// Whether the owner's current setting is still `check` and the workspace is
+/// still registered at `root`, asked of the state owner just before a run
+/// starts and before its result is reported: a workspace moved or switched
+/// to another checkout is not checked, or reported on, in the old one.
+/// Unreachable counts as not enabled. A check at its size limits can be left
+/// out of the bounded view, so it is read complete then.
+fn still_enabled(
+    record: &impl Fn(String, Command) -> Option<Outcome>,
+    check: &AutoCheck,
+    root: &Path,
+) -> bool {
     let ask = |command| {
         record("read".into(), command).ok_or_else(|| crate::Error::from("the state owner is gone"))
     };
-    crate::client::status_with(ask, &["auto_checks"])
-        .is_ok_and(|(state, _)| state.auto_checks.get(&check.workspace_id) == Some(check))
+    crate::client::status_with(ask, &["auto_checks"]).is_ok_and(|(state, _)| {
+        state.auto_checks.get(&check.workspace_id) == Some(check)
+            && state
+                .workspaces
+                .get(&check.workspace_id)
+                .is_some_and(|workspace| Path::new(&workspace.root) == root)
+    })
 }
 
 impl Workspace {
@@ -372,6 +387,11 @@ fn report(
     running: Running,
     finished: Finished,
 ) {
+    // Moved, switched or turned off after the run ended, before the worker
+    // heard: the result is about a checkout the workspace no longer is.
+    if !still_enabled(record, &running.check, &running.root) {
+        return;
+    }
     let check = running.check;
     let request_id = crate::hook::wire_id(
         "auto-check",
@@ -704,6 +724,7 @@ mod tests {
                 argv: vec!["true".into()],
                 timeout_s: 1,
             },
+            root: PathBuf::new(),
         };
         running.recheck.requested.store(2, Ordering::SeqCst);
         // The run found the tree unchanged after the first request only.
@@ -729,6 +750,7 @@ mod tests {
                 argv: vec!["true".into()],
                 timeout_s: 1,
             },
+            root: PathBuf::new(),
         };
         running.wrote_again("first".into(), 1);
         running.wrote_again("first".into(), 2);
@@ -755,6 +777,7 @@ mod tests {
                 argv: vec!["true".into()],
                 timeout_s: 1,
             },
+            root: PathBuf::new(),
         };
         // The run's final snapshot found the tree unchanged, then "first"
         // wrote again and the run finished before that write's debounce.

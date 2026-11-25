@@ -1247,17 +1247,25 @@ mod unix {
         }
     }
 
-    /// For a request that turns a workspace's automatic check on or off:
-    /// that workspace and its check before the request.
-    fn auto_check_of(
-        state: &State,
-        command: &Command,
-    ) -> Option<(String, Option<langspan_core::AutoCheck>)> {
+    /// A workspace's automatic check and root before a request that can
+    /// change either.
+    type CheckBefore = (String, Option<langspan_core::AutoCheck>, Option<String>);
+
+    /// For a request that turns a workspace's automatic check on or off, or
+    /// moves, switches or removes the workspace: that workspace with its
+    /// check and root before the request.
+    fn auto_check_of(state: &State, command: &Command) -> Option<CheckBefore> {
         match command {
             Command::AutoCheckEnable { workspace_id, .. }
-            | Command::AutoCheckDisable { workspace_id } => Some((
+            | Command::AutoCheckDisable { workspace_id }
+            | Command::WorkspaceMove { workspace_id, .. }
+            | Command::WorkspaceRemove { workspace_id, .. } => Some((
                 workspace_id.clone(),
                 state.auto_checks.get(workspace_id).cloned(),
+                state
+                    .workspaces
+                    .get(workspace_id)
+                    .map(|workspace| workspace.root.clone()),
             )),
             _ => None,
         }
@@ -1274,19 +1282,27 @@ mod unix {
 
     /// What the automatic-check worker is told after a request: a session
     /// that wrote reached a batch or stop in a workspace with a check on, or
-    /// the owner changed the check. A replayed request tells it nothing.
+    /// the owner changed the check or the workspace's root. What waits or
+    /// runs for the old check or in the old root is stopped; the setting
+    /// itself applies to the next writes. A replayed request tells it
+    /// nothing.
     fn auto_check_message(
         state: &State,
-        check_before: Option<(String, Option<langspan_core::AutoCheck>)>,
+        check_before: Option<CheckBefore>,
         boundary: Option<String>,
         response: &Response,
     ) -> Option<auto_check::Message> {
         if response.replayed {
             return None;
         }
-        if let Some((workspace_id, before)) = check_before {
-            return (state.auto_checks.get(&workspace_id) != before.as_ref())
-                .then_some(auto_check::Message::Off { workspace_id });
+        if let Some((workspace_id, before, root_before)) = check_before {
+            let root = state
+                .workspaces
+                .get(&workspace_id)
+                .map(|workspace| &workspace.root);
+            return (state.auto_checks.get(&workspace_id) != before.as_ref()
+                || root != root_before.as_ref())
+            .then_some(auto_check::Message::Off { workspace_id });
         }
         let session_id = boundary?;
         let wrote = matches!(
@@ -1793,6 +1809,17 @@ mod unix {
                     "old_root_missing",
                     format!(
                         "The old root {} no longer exists; for a checkout that was moved, run without --switch. Nothing changed",
+                        old.display()
+                    ),
+                ));
+            }
+            // User-level hooks derive this ID from the old root, so every
+            // new session there would claim it again and be refused.
+            (true, true) if workspace_id == crate::hook::user_workspace_id(old) => {
+                return Err((
+                    "root_derived_id",
+                    format!(
+                        "Workspace {workspace_id} has the ID user-level hooks derive from {}, so new sessions there would still claim it. To coordinate NEW_ROOT under this ID, move or delete that checkout first, then run this again without --switch; to coordinate both, register NEW_ROOT with `langspan workspace add`. Nothing changed",
                         old.display()
                     ),
                 ));

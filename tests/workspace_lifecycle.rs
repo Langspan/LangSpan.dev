@@ -511,6 +511,58 @@ fn a_move_that_fails_a_check_says_which_and_changes_nothing() {
 }
 
 #[test]
+fn a_switch_away_from_the_checkout_its_id_was_derived_from_is_refused() {
+    let mut home = Home::new();
+    home.install();
+    home.start();
+    let old = home.repo("app");
+    let id = user_workspace_id(&old);
+    let (_, coverage) = home.session_start(".claude/settings.json", ALICE, &old);
+    assert_ne!(coverage, "unsupported");
+    let clone = home.base.join("clone");
+    git(&home.base, &["clone", "--quiet", text(&old), text(&clone)]);
+    let args = [
+        "workspace",
+        "move",
+        &id,
+        text(&clone),
+        "--switch",
+        "--request-id",
+        "switch-1",
+    ];
+    let refused = home.json(&args);
+    assert_eq!(refused["outcome"]["code"], "root_derived_id", "{refused}");
+    let message = refused["outcome"]["message"].as_str().unwrap();
+    assert!(message.contains(text(&old)), "{message}");
+    assert!(message.contains("without --switch"), "{message}");
+    assert_eq!(home.workspaces()[0]["root"], text(&old), "nothing changed");
+    // A fresh session in the old checkout still joins it.
+    let (_, coverage) = home.session_start(".claude/settings.json", ALICE_LATER, &old);
+    assert_ne!(coverage, "unsupported");
+    assert_eq!(
+        home.sessions()
+            .get(&format!("claude-code.{ALICE_LATER}"))
+            .map(|s| &s["workspace_id"]),
+        Some(&json!(id))
+    );
+
+    // Once the old checkout is gone, the clone takes the ID over by a move.
+    fs::remove_dir_all(&old).unwrap();
+    home.ok(&[
+        "workspace",
+        "move",
+        &id,
+        text(&clone),
+        "--request-id",
+        "move-1",
+    ]);
+    assert_eq!(
+        home.workspaces()[0]["root"],
+        text(&fs::canonicalize(&clone).unwrap())
+    );
+}
+
+#[test]
 fn removal_is_a_dry_run_until_applied_and_waits_for_admissions_and_sharing() {
     let mut home = Home::new();
     home.start();

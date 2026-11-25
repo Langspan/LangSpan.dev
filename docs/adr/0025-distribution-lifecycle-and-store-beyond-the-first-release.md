@@ -44,14 +44,30 @@ against, so it stays an owner command, as with `remote enable`.
   otherwise). With `--switch`, the old root must still exist
   (`old_root_missing`) and its `HEAD` commit must be in NEW_ROOT's object
   database (`git cat-file -e`; `different_repository` otherwise); the old
-  root then stops being coordinated under the ID. NEW_ROOT is then checked as
+  root then stops being coordinated under the ID. `--switch` is refused
+  (`root_derived_id`) for an ID that user-level hooks derived from the old
+  root: every new session there would derive and claim it again and be
+  refused as `workspace_conflict`, leaving the still-existing checkout
+  uncoordinated. Re-deriving a fresh ID for the old root instead would split
+  its notes and history from it silently. The owner moves or deletes the old
+  checkout and runs the move without `--switch`, or registers NEW_ROOT as a
+  second workspace; a named ID (`workspace add`) can be switched. The same
+  limit remains after a move without `--switch`: a new checkout later made
+  at the old path derives the moved ID and is refused until it is
+  registered under another ID. NEW_ROOT is
+  then checked as
   `workspace add` checks a root: one registered under another ID, or
   overlapping one other than a verified linked worktree, is
   `workspace_conflict`. A refused move changes nothing and says which check
   failed. The core appends `workspace_moved` (the new registration and the
   old root): the ID, notes, pending messages, check records, landings, the
   automatic check and the remote setting stay, since they name
-  workspace-relative paths.
+  workspace-relative paths. An automatic check waiting to run or running in
+  the old root is cancelled when the move is recorded (as turning the check
+  off cancels it), and a run that already ended is not reported: the worker
+  asks the state owner, before it starts a run and before it records one,
+  whether the workspace is still at the root the run was for. The setting
+  applies to the next writes in NEW_ROOT.
 - After a move, each session's recorded file versions in the workspace are
   dropped, so its next edit of an existing file has an unknown base until it
   reads the file again. The workspace's last Git snapshot is deleted in the
