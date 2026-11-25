@@ -92,7 +92,10 @@ User-level hooks find the Git repository from the agent's working directory and
 do nothing outside a repository. An existing LangSpan project install takes
 precedence. `langspan doctor --root /path/to/checkout` reports both setups;
 `langspan uninstall --apply` removes the user-level entries it recognizes and
-leaves the coordination state directory in place.
+leaves the coordination state directory in place. A hooks or MCP file left
+holding nothing else (`{}`, or empty text) is removed rather than left behind;
+a file with any of your own settings in it keeps them byte for byte.
+`~/.claude.json` is never removed.
 
 #### A status line in Claude Code
 

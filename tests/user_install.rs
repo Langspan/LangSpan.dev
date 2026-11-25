@@ -1246,3 +1246,133 @@ fn cursor_gets_the_skill_as_a_project_rule_that_hooks_remove_takes_away() {
         }
     );
 }
+
+/// Every regular file under `dir`, with its bytes.
+fn files_under(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_owned()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(path);
+            } else {
+                found.push((path.clone(), fs::read(&path).unwrap()));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+const HOSTS: [&str; 4] = ["claude-code", "codex", "cursor", "gemini-cli"];
+
+#[test]
+fn uninstall_removes_the_files_install_created_in_an_empty_home_for_every_host() {
+    for host in HOSTS {
+        let home = Home::new();
+        home.ok(&["install", "--hosts", host, "--apply"]);
+        let installed = files_under(&home.home());
+        assert!(!installed.is_empty(), "{host}: install wrote nothing");
+
+        let dry = home.ok(&["uninstall", "--hosts", host]);
+        for (path, _) in &installed {
+            assert!(
+                dry.contains(&format!("{} would be removed.", path.display())),
+                "{host}: {dry}"
+            );
+        }
+        assert_eq!(files_under(&home.home()), installed, "{host}: dry run");
+
+        let removed = home.ok(&["uninstall", "--hosts", host, "--apply"]);
+        for (path, _) in &installed {
+            assert!(
+                removed.contains(&format!("Removed {}.", path.display())),
+                "{host}: {removed}"
+            );
+        }
+        assert_eq!(
+            files_under(&home.home()),
+            [],
+            "{host}: uninstall leaves no file that install created"
+        );
+        let again = home.ok(&["uninstall", "--hosts", host, "--apply"]);
+        assert!(!again.contains("Removed"), "{host}: {again}");
+        assert_eq!(files_under(&home.home()), [], "{host}");
+    }
+}
+
+const CURSOR_HOOKS: &str = r#"{
+  "version": 1,
+  "hooks": {
+    "stop": [
+      {
+        "command": "say done"
+      }
+    ]
+  }
+}
+"#;
+const CURSOR_MCP: &str = r#"{
+  "mcpServers": {
+    "docs": {
+      "command": "npx",
+      "args": [
+        "docs"
+      ]
+    }
+  }
+}
+"#;
+
+#[test]
+fn uninstall_keeps_files_that_held_the_owners_entries_byte_for_byte_for_every_host() {
+    for host in HOSTS {
+        let home = Home::new();
+        match host {
+            "claude-code" => {
+                home.write(".claude/settings.json", CLAUDE_SETTINGS);
+                home.write(".claude.json", CLAUDE_JSON);
+            }
+            "codex" => {
+                home.write(".codex/hooks.json", CODEX_HOOKS);
+                home.write(".codex/config.toml", CODEX_CONFIG);
+            }
+            "cursor" => {
+                home.write(".cursor/hooks.json", CURSOR_HOOKS);
+                home.write(".cursor/mcp.json", CURSOR_MCP);
+            }
+            _ => {
+                home.write(".gemini/settings.json", GEMINI_SETTINGS);
+            }
+        }
+        let before = files_under(&home.home());
+        home.ok(&["install", "--hosts", host, "--apply"]);
+        let installed = files_under(&home.home());
+        assert_eq!(installed.len(), before.len(), "{host}: no file added");
+        assert_ne!(installed, before, "{host}: install changed nothing");
+        let removed = home.ok(&["uninstall", "--hosts", host, "--apply"]);
+        assert!(!removed.contains("Removed"), "{host}: {removed}");
+        assert_eq!(
+            files_under(&home.home()),
+            before,
+            "{host}: only LangSpan's entries are removed"
+        );
+    }
+}
+
+#[test]
+fn uninstall_keeps_a_file_the_owner_added_to_after_install() {
+    // The file LangSpan created, which the owner (or the host) then wrote
+    // a setting into, is theirs too: only LangSpan's entries go.
+    let home = Home::new();
+    home.ok(&["install", "--hosts", "codex", "--apply"]);
+    let path = home.home().join(".codex/hooks.json");
+    let mut settings: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    settings["description"] = json!("mine");
+    fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+    home.ok(&["uninstall", "--hosts", "codex", "--apply"]);
+    let left: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(left, json!({"description": "mine"}));
+    assert!(!home.home().join(".codex/config.toml").exists());
+}

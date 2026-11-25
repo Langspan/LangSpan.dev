@@ -149,5 +149,16 @@ or the reverse, or a `langspan` server LangSpan did not write, need attention.
   LangSpan-shaped project hook. The user-level hook then defers to that hook,
   which runs only if the host trusts the repository. That is the same outcome
   as the repository opting out of coordination.
-- Uninstall leaves a file that LangSpan created (for example a new
-  `hooks.json`) in place as `{}` or empty text, rather than deleting files.
+- Uninstall removes a file LangSpan may have created once nothing but
+  LangSpan's entries was in it, rather than leave it as `{}` or empty text:
+  each host's hooks file (`settings.json`, `hooks.json`; for Cursor, a file
+  left holding only `version: 1`), Cursor's `mcp.json` and Codex's
+  `config.toml`. LangSpan keeps no record of which files it created, so the
+  rule is the content: a file left holding nothing changes nothing for its
+  host, whoever made it. A file with anything else in it, including a key the
+  owner or the host added after the install, is kept with only LangSpan's
+  entries taken out. `~/.claude.json` is never removed. The removal has the
+  same guard as a write: the file is removed only while it still holds the
+  bytes the plan was made from, planned once more after a change, and kept
+  with an error after a second change. Directories install created are left
+  in place. Project-level `hooks remove` still leaves such a file in place.
