@@ -166,37 +166,10 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
         .expect("tools/list timed out")
         .expect("tools/list failed");
     let names: BTreeSet<_> = tools.iter().map(|tool| tool.name.as_ref()).collect();
-    assert_eq!(
-        names,
-        BTreeSet::from([
-            "langspan_admit",
-            "langspan_blind_spots",
-            "langspan_brief",
-            "langspan_changes",
-            "langspan_commit_mine",
-            "langspan_complete",
-            "langspan_events",
-            "langspan_forget",
-            "langspan_handoff",
-            "langspan_impact",
-            "langspan_integrate_check",
-            "langspan_intent_end",
-            "langspan_land",
-            "langspan_land_cancel",
-            "langspan_land_queue",
-            "langspan_intent_set",
-            "langspan_my_changes",
-            "langspan_recap",
-            "langspan_references",
-            "langspan_remember",
-            "langspan_send_message",
-            "langspan_session_register",
-            "langspan_status",
-            "langspan_symbol",
-            "langspan_today",
-            "langspan_workspace_register",
-        ])
-    );
+    // The server lists exactly the tools in the one list, `TOOL_NAMES`.
+    if let Err(problem) = langspan::mcp::compare_tool_names(names.iter().copied()) {
+        panic!("{problem}");
+    }
     // Every tool the LangSpan skill names is one this server lists.
     let named = langspan::skill::tools();
     assert!(!named.is_empty());
@@ -223,6 +196,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_impact"
                 | "langspan_blind_spots"
                 | "langspan_recap"
+                | "langspan_recall"
                 | "langspan_today"
                 | "langspan_land_queue"
         ) {
