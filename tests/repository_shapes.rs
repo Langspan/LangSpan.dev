@@ -229,21 +229,22 @@ impl World {
     /// A shell call by `session` through its hooks: `run` stands for the
     /// command running between the pre- and post-tool hooks.
     fn shell(&self, session: &str, call: &str, command: &str, run: impl FnOnce()) -> Run {
-        let event = |name: &str| {
-            json!({
-                "session_id": session, "transcript_path": "/dev/null", "cwd": self.work(),
-                "hook_event_name": name, "tool_name": "Bash", "tool_use_id": call,
-                "tool_input": {"command": command, "description": "test command"},
-                "tool_response": {"stdout": "", "stderr": "", "interrupted": false},
-            })
-        };
-        let pre = self.hook(event("PreToolUse"));
+        let pre = self.shell_hook(session, call, command, "PreToolUse");
         assert!(
             !matches!(pre.coverage.as_str(), "denied" | "denied_stale"),
             "{pre:?}"
         );
         run();
-        self.hook(event("PostToolUse"))
+        self.shell_hook(session, call, command, "PostToolUse")
+    }
+    /// One hook event of `session`'s shell call `call`.
+    fn shell_hook(&self, session: &str, call: &str, command: &str, name: &str) -> Run {
+        self.hook(json!({
+            "session_id": session, "transcript_path": "/dev/null", "cwd": self.work(),
+            "hook_event_name": name, "tool_name": "Bash", "tool_use_id": call,
+            "tool_input": {"command": command, "description": "test command"},
+            "tool_response": {"stdout": "", "stderr": "", "interrupted": false},
+        }))
     }
     fn prompt(&self, session: &str) -> Run {
         self.hook(json!({
@@ -469,24 +470,7 @@ fn a_checkout_switch_is_briefed_to_the_sessions_in_it_and_refused_once_per_file(
 /// explains (the owner's terminal) is still told to both.
 #[test]
 fn a_sessions_own_merge_is_not_briefed_to_it_and_is_named_to_the_others() {
-    let w = World::new(|work| {
-        for file in ["a.txt", "b.txt", "c.txt"] {
-            fs::write(work.join(file), format!("main {file}\n")).unwrap();
-        }
-        ok(work, &["add", "."]);
-        ok(work, &["commit", "--quiet", "-m", "main"]);
-        // What the remote's main has: a commit on top, as a remote-tracking ref.
-        ok(work, &["checkout", "--quiet", "-b", "upstream"]);
-        for file in ["a.txt", "b.txt"] {
-            fs::write(work.join(file), format!("upstream {file}\n")).unwrap();
-        }
-        ok(work, &["commit", "--quiet", "-am", "upstream"]);
-        let upstream = ok(work, &["rev-parse", "HEAD"]);
-        ok(work, &["update-ref", "refs/remotes/origin/main", &upstream]);
-        ok(work, &["checkout", "--quiet", "main"]);
-        ok(work, &["branch", "--quiet", "-D", "upstream"]);
-        ok(work, &["branch", "--quiet", "other"]);
-    });
+    let w = World::new(upstream_to_merge);
     w.read(ALICE, "read-a", "a.txt");
     w.read(BOB, "read-b", "b.txt");
     w.wait_for_scan_of_head();
@@ -544,6 +528,107 @@ fn a_sessions_own_merge_is_not_briefed_to_it_and_is_named_to_the_others() {
             "nobody is named: {line}"
         );
     }
+}
+
+/// `main` with three files, `origin/main` a commit ahead changing two of
+/// them, and a branch `other` at `main`.
+fn upstream_to_merge(work: &Path) {
+    for file in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(work.join(file), format!("main {file}\n")).unwrap();
+    }
+    ok(work, &["add", "."]);
+    ok(work, &["commit", "--quiet", "-m", "main"]);
+    // What the remote's main has: a commit on top, as a remote-tracking ref.
+    ok(work, &["checkout", "--quiet", "-b", "upstream"]);
+    for file in ["a.txt", "b.txt"] {
+        fs::write(work.join(file), format!("upstream {file}\n")).unwrap();
+    }
+    ok(work, &["commit", "--quiet", "-am", "upstream"]);
+    let upstream = ok(work, &["rev-parse", "HEAD"]);
+    ok(work, &["update-ref", "refs/remotes/origin/main", &upstream]);
+    ok(work, &["checkout", "--quiet", "main"]);
+    ok(work, &["branch", "--quiet", "-D", "upstream"]);
+    ok(work, &["branch", "--quiet", "other"]);
+}
+
+/// Issue #139, redelivery: Alice's post-tool hook cannot reach the daemon
+/// when her merge finishes, and the host delivers it again later, after
+/// more time than the merge took. The run keeps the merge's own window on
+/// the daemon's clock, so her own merge is still not news to her; Bob is
+/// told, with her named. The hook and the daemon read different clocks
+/// (wall time and time since boot), which only the real binaries show.
+#[test]
+fn a_redelivered_merge_report_keeps_the_merges_own_window() {
+    let w = World::new(upstream_to_merge);
+    w.read(ALICE, "read-a", "a.txt");
+    w.read(BOB, "read-b", "b.txt");
+    w.wait_for_scan_of_head();
+
+    let command = "git merge origin/main";
+    let started = Instant::now();
+    let pre = w.shell_hook(ALICE, "alice-merge", command, "PreToolUse");
+    assert!(!pre.coverage.starts_with("denied"), "{pre:?}");
+    ok(&w.work(), &["merge", "--quiet", "origin/main"]);
+    let merged = w.wait("the merge's checkout change", || {
+        w.state().checkouts.get("work")?.first().cloned()
+    });
+    assert_eq!(merged.files, 2);
+
+    // The daemon is unreachable when the command finishes: its socket is
+    // moved aside, so the hook keeps the outcome for a redelivery.
+    let socket = w.state_dir().join("daemon.sock");
+    let aside = w.state_dir().join("daemon.sock.aside");
+    fs::rename(&socket, &aside).unwrap();
+    let first = w.shell_hook(ALICE, "alice-merge", command, "PostToolUse");
+    fs::rename(&aside, &socket).unwrap();
+    assert_eq!(first.coverage, "unavailable", "{first:?}");
+    let ran = started.elapsed();
+
+    // Redelivered after longer than the whole run took, so a window placed
+    // back from the redelivery's arrival would start after the scan saw
+    // the merge.
+    std::thread::sleep(ran + Duration::from_secs(2));
+    let post = w.shell_hook(ALICE, "alice-merge", command, "PostToolUse");
+    assert!(!post.coverage.starts_with("unavailable"), "{post:?}");
+    let own = post.context.unwrap_or_default();
+    assert!(!own.contains("The checkout changed"), "{own}");
+    let own = w.prompt(ALICE).context.unwrap_or_default();
+    assert!(
+        !own.contains("The checkout changed"),
+        "Alice's own merge is not news to her after a redelivery: {own}"
+    );
+    let run = w.state().checkout_runs["work"][0].clone();
+    assert!(
+        run.started_ms <= merged.at_ms && merged.at_ms <= run.finished_ms,
+        "the run's window holds the scan's observation: {run:?} {merged:?}"
+    );
+    // A report the daemon recorded but whose reply was lost is sent again
+    // with a larger age: answered from its receipt, not refused.
+    let report = |ago| Request {
+        version: PROTOCOL_VERSION,
+        request_id: "checkout-run-retried".into(),
+        command: Command::ObserveCheckoutRun {
+            session_id: run.session_id.clone(),
+            command: run.command.clone(),
+            to_branch: run.to_branch.clone(),
+            to_head: run.to_head.clone(),
+            ran_ms: 10,
+            finished_ago_ms: ago,
+        },
+    };
+    let first = client::call(&w.state_dir(), &report(0)).unwrap();
+    let again = client::call(&w.state_dir(), &report(5_000)).unwrap();
+    assert_eq!(first.outcome, again.outcome);
+
+    let theirs = w.prompt(BOB).context.unwrap_or_default();
+    assert!(
+        theirs.contains("The checkout changed under you"),
+        "{theirs}"
+    );
+    assert!(
+        theirs.contains(&format!("session claude-code.{ALICE}")),
+        "{theirs}"
+    );
 }
 
 /// A file in conflict is never held, with one deliberate exception: a session that read the file before the merge is

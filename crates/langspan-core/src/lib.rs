@@ -1648,8 +1648,9 @@ pub struct CheckoutRun {
     /// The checkout the command left.
     pub to_branch: Option<String>,
     pub to_head: Option<String>,
-    /// When the command started and finished, as its hook recorded them
-    /// (never after the report reached the daemon), whenever it is reported.
+    /// When the command started and finished on the daemon's clock, placed
+    /// back from the report's arrival by the durations its hook measured
+    /// (never after the arrival), whenever it is reported.
     pub started_ms: u64,
     pub finished_ms: u64,
     pub generation: u64,
@@ -1974,13 +1975,19 @@ impl Command {
     /// of each written-lines entry of an admission (`WrittenLines::age_ms`),
     /// which changes between two deliveries of one tool call.
     pub fn same_request(&self, other: &Command) -> bool {
+        // Ages grow between a request and its retry; the rest must match.
         fn ageless(command: &Command) -> Option<Command> {
             let mut command = command.clone();
-            let Command::AdmitTool { overwrites, .. } = &mut command else {
-                return None;
-            };
-            for entry in overwrites.iter_mut() {
-                entry.age_ms = 0;
+            match &mut command {
+                Command::AdmitTool { overwrites, .. } => {
+                    for entry in overwrites.iter_mut() {
+                        entry.age_ms = 0;
+                    }
+                }
+                Command::ObserveCheckoutRun {
+                    finished_ago_ms, ..
+                } => *finished_ago_ms = 0,
+                _ => return None,
             }
             Some(command)
         }
@@ -2255,11 +2262,13 @@ pub enum Command {
         to_head: Option<String>,
         /// How long the command ran, as its hook measured it.
         ran_ms: u64,
-        /// When the command finished, as its hook recorded it then: a
-        /// report redelivered later keeps the command's own window. The
-        /// hook and daemon share one machine's clock; a time past the
-        /// report is taken as the report.
-        finished_ms: u64,
+        /// How long ago the command finished, as its hook measured it when
+        /// sending: a report redelivered later keeps the command's own
+        /// window. A duration, not a time: the daemon places the finish
+        /// this long before its own now, never after it. Absent from an
+        /// earlier hook, which reported as the command finished.
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        finished_ago_ms: u64,
     },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
@@ -2741,11 +2750,13 @@ enum CommandWire {
         to_head: Option<String>,
         /// How long the command ran, as its hook measured it.
         ran_ms: u64,
-        /// When the command finished, as its hook recorded it then: a
-        /// report redelivered later keeps the command's own window. The
-        /// hook and daemon share one machine's clock; a time past the
-        /// report is taken as the report.
-        finished_ms: u64,
+        /// How long ago the command finished, as its hook measured it when
+        /// sending: a report redelivered later keeps the command's own
+        /// window. A duration, not a time: the daemon places the finish
+        /// this long before its own now, never after it. Absent from an
+        /// earlier hook, which reported as the command finished.
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        finished_ago_ms: u64,
     },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
@@ -4914,7 +4925,7 @@ fn decide_checked(
             to_branch,
             to_head,
             ran_ms,
-            finished_ms,
+            finished_ago_ms,
         } => {
             let Some(session) = state.sessions.get(session_id) else {
                 return Err(error(
@@ -4922,6 +4933,11 @@ fn decide_checked(
                     "A checkout run names a registered session; register it first",
                 ));
             };
+            // When the command ran, not when its report arrived: a
+            // redelivered report credits no later change. Placed back from
+            // the daemon's own now by durations, so never after it; a run
+            // two hours at most, a shell call's lifetime.
+            let finished_ms = now_ms.saturating_sub(*finished_ago_ms);
             let run = CheckoutRun {
                 run_id: request_id.into(),
                 workspace_id: session.workspace_id.clone(),
@@ -4929,13 +4945,8 @@ fn decide_checked(
                 command: command.clone(),
                 to_branch: to_branch.clone(),
                 to_head: to_head.clone(),
-                // When the command ran, not when its report arrived: a
-                // redelivered report credits no later change. Never after
-                // the report; two hours at most, a shell call's lifetime.
-                started_ms: (*finished_ms)
-                    .min(now_ms)
-                    .saturating_sub((*ran_ms).min(MAX_CHECKOUT_RUN_MS)),
-                finished_ms: (*finished_ms).min(now_ms),
+                started_ms: finished_ms.saturating_sub((*ran_ms).min(MAX_CHECKOUT_RUN_MS)),
+                finished_ms,
                 generation: state.generation,
             };
             validate_checkout_run(state, &run)?;

@@ -2989,6 +2989,7 @@ impl Session<'_> {
             session_id: ids.session_id.clone(),
             workspace: Some(crate::shell::workspace_identity(self.root)),
             started_ms: crate::shell::now_ms(),
+            started_clock_ms: Some(crate::clock::now_ms()),
             admitted: false,
             before: crate::shell::snapshot(self.root, snapshot_deadline),
             finished_ms: None,
@@ -3008,6 +3009,7 @@ impl Session<'_> {
             command: call.map(|call| crate::shell::kept_command(&call.command)),
             moves_checkout: call.is_some_and(|call| crate::shell::moves_checkout(&call.command)),
             checkout: None,
+            finished_clock_ms: None,
         };
         if let Ok(before) = &record.before {
             crate::journal::before_shell(
@@ -3142,6 +3144,7 @@ impl Session<'_> {
                 let mut run = record;
                 run.checkout = checkout;
                 run.finished_ms = Some(crate::shell::now_ms());
+                run.finished_clock_ms = Some(crate::clock::now_ms());
                 match result {
                     Ok(changed) => {
                         run.contested =
@@ -3326,6 +3329,9 @@ impl Session<'_> {
         // First, so that this hook's own briefing already leaves it out.
         if let Some(left) = &run.checkout {
             self.attach(ids)?;
+            // Durations on the daemon's clock, read from the record written
+            // when the command finished, so a redelivery keeps its window.
+            let (ran_ms, finished_ago_ms) = run.checkout_timing(crate::clock::now_ms());
             match self.call(
                 wire_id(
                     "checkout-run",
@@ -3336,13 +3342,8 @@ impl Session<'_> {
                     command: run.command.clone(),
                     to_branch: left.branch.clone(),
                     to_head: left.head.clone(),
-                    // From the record, written when the command finished:
-                    // a retry sends the same request and the same window.
-                    ran_ms: run
-                        .finished_ms
-                        .unwrap_or(run.started_ms)
-                        .saturating_sub(run.started_ms),
-                    finished_ms: run.finished_ms.unwrap_or(run.started_ms),
+                    ran_ms,
+                    finished_ago_ms,
                 },
             ) {
                 Ok(_) => {}

@@ -304,14 +304,19 @@ operation that can change the checkout (`git merge`, `pull`, `rebase`,
 `am`, `commit`; not one naming another `--git-dir` or `--work-tree`). When
 such a command finishes with the branch or HEAD moved, or files changed, the
 post-tool hook records a checkout run: the session, its redacted command line
-(at most 120 bytes), the branch and HEAD it left, how long it ran, and when it
-finished, read from the machine's clock when the command finished and kept
-in the hook's record. The hook and the daemon are on one machine and read
-the same clock. A report redelivered after the daemon was unreachable sends
-the same finish time, so the run keeps its own window rather than moving to
-the retry's arrival: a retry neither loses the command's change nor credits
-a later one to it. A finish time after the report is taken as the report,
-and a duration as two hours at most. The run explains a checkout change the scan observed while it ran, or the first
+(at most 120 bytes), the branch and HEAD it left, how long it ran, and how
+long ago it finished. The hook reads the daemon's own clock (time since
+boot, sleep included; not wall time) when the command starts and finishes
+and keeps both readings in its record; it sends durations, not times, and
+the daemon places the run back from its own now by them, so the run never
+reaches past the daemon's now. A report redelivered after the daemon was
+unreachable sends the age measured at that delivery, so the run keeps its
+own window rather than moving to the retry's arrival: a retry neither loses
+the command's change nor credits a later one to it. A retry differing from
+a recorded report only in that age is the same request. A record written
+before these readings, or read before a reboot restarted the clock, reports
+the run as finishing on arrival. A duration counts as two hours at most. The
+run explains a checkout change the scan observed while it ran, or the first
 change observed after it, within 60 seconds, at the branch and HEAD it left.
 Either order works: the scan may see the change before the hook reports, or
 after. The session that ran it is not told of a change it explains; every

@@ -780,9 +780,40 @@ pub struct Record {
     /// changed while it ran (issue #139).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout: Option<CheckoutLeft>,
+    /// When the command started and finished on the daemon's clock
+    /// (`crate::clock`, time since boot, the same in every process on this
+    /// machine), unlike the wall-clock `started_ms` and `finished_ms`. A
+    /// checkout run's report sends durations measured on it, so a
+    /// redelivered report keeps the command's window (issue #139). `None`
+    /// in a record written before they were kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_clock_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_clock_ms: Option<u64>,
 }
 
 impl Record {
+    /// A finished run's timing for its checkout run's report, as durations
+    /// on the daemon's clock read at `now_clock`: how long it ran and how
+    /// long ago it finished. A record without those readings (written
+    /// before they were kept) reports the wall-clock duration, finished now.
+    /// A reading from before a reboot is later than `now_clock`, and also
+    /// counts as finished now.
+    pub fn checkout_timing(&self, now_clock: u64) -> (u64, u64) {
+        match (self.started_clock_ms, self.finished_clock_ms) {
+            (Some(started), Some(finished)) => (
+                finished.saturating_sub(started),
+                now_clock.saturating_sub(finished),
+            ),
+            _ => (
+                self.finished_ms
+                    .unwrap_or(self.started_ms)
+                    .saturating_sub(self.started_ms),
+                0,
+            ),
+        }
+    }
+
     /// Of `changed`, the paths this run's session is credited with: neither
     /// contested nor another session's edit.
     pub fn attributed(&self, changed: &[String]) -> Vec<String> {
@@ -2037,6 +2068,8 @@ mod diff {
             command: None,
             moves_checkout: false,
             checkout: None,
+            started_clock_ms: None,
+            finished_clock_ms: None,
         };
         let note = marks(&state).join(OVERFLOW);
         assert!(!overlapping_edits(&state, &run).incomplete);
@@ -2068,5 +2101,34 @@ mod diff {
         assert!(!mark_path(&state, "late").exists());
         assert!(read_overflow(&state).unwrap().is_some_and(|at| at >= now));
         fs::remove_dir_all(&state).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod checkout_timing {
+    use super::*;
+
+    /// A finished record as a build before the daemon-clock readings wrote
+    /// it: wall-clock times only.
+    fn older() -> Record {
+        serde_json::from_value(serde_json::json!({
+            "session_id": "s", "started_ms": 1_700_000_000_000_u64, "admitted": true,
+            "before": {"Err": "test"}, "finished_ms": 1_700_000_000_300_u64, "changed": null,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn durations_come_from_the_daemons_clock_and_an_older_record_reports_now() {
+        let mut record = older();
+        assert_eq!(record.started_clock_ms, None);
+        // No readings: the wall-clock duration, finished as reported.
+        assert_eq!(record.checkout_timing(5_000), (300, 0));
+        // Both readings: the run on the daemon's clock, and its age now.
+        record.started_clock_ms = Some(1_000);
+        record.finished_clock_ms = Some(1_250);
+        assert_eq!(record.checkout_timing(5_000), (250, 3_750));
+        // Read before a reboot restarted the clock: finished now.
+        assert_eq!(record.checkout_timing(100), (250, 0));
     }
 }

@@ -89,18 +89,11 @@ fn checkout(state: &mut State, id: &str, branch: &str, to: char, now: u64) {
 /// `session`'s `git merge` ran for `ran` ms and left `main` at `to`;
 /// reported at `now`, as it finished.
 fn merged(state: &mut State, session: &str, to: char, ran: u64, now: u64) -> Outcome {
-    reported(state, session, to, ran, now, now)
+    reported(state, session, to, ran, 0, now)
 }
 
-/// As `merged`, finished at `finished` and reported at `now`.
-fn reported(
-    state: &mut State,
-    session: &str,
-    to: char,
-    ran: u64,
-    finished: u64,
-    now: u64,
-) -> Outcome {
+/// As `merged`, finished `ago` ms before it was reported at `now`.
+fn reported(state: &mut State, session: &str, to: char, ran: u64, ago: u64, now: u64) -> Outcome {
     run(
         state,
         &format!("run-{session}-{now}"),
@@ -110,7 +103,7 @@ fn reported(
             to_branch: Some(MAIN.into()),
             to_head: Some(oid(to)),
             ran_ms: ran,
-            finished_ms: finished,
+            finished_ago_ms: ago,
         },
         now,
     )
@@ -199,11 +192,12 @@ fn a_change_the_command_did_not_leave_or_that_came_too_late_or_too_early_is_told
 fn a_redelivered_report_keeps_the_commands_own_window() {
     // Alice's one-second merge ran from 9_000 to 10_000; the scan saw it at
     // 10_500. Another checkout change, nobody's, came at 69_500. Alice's
-    // post hook reached the daemon only at 70_000, on redelivery.
+    // post hook reached the daemon only at 70_000, on redelivery: 60 s after
+    // the merge finished, as the hook measured.
     let mut state = ready();
     checkout(&mut state, "c1", MAIN, 'b', 10_500);
     checkout(&mut state, "c2", OTHER, 'c', 69_500);
-    let outcome = reported(&mut state, "alice", 'b', 1_000, 10_000, 70_000);
+    let outcome = reported(&mut state, "alice", 'b', 1_000, 60_000, 70_000);
     assert!(
         matches!(&outcome, Outcome::CheckoutRunObserved { run }
             if run.started_ms == 9_000 && run.finished_ms == 10_000),
@@ -237,7 +231,7 @@ fn a_run_is_refused_for_an_unknown_session_or_an_invalid_state() {
             to_branch: Some("main".into()),
             to_head: Some(oid('b')),
             ran_ms: 0,
-            finished_ms: 1_000,
+            finished_ago_ms: 0,
         },
         1_000,
     );
@@ -251,7 +245,7 @@ fn a_run_is_refused_for_an_unknown_session_or_an_invalid_state() {
             to_branch: Some(MAIN.into()),
             to_head: Some(oid('b')),
             ran_ms: 0,
-            finished_ms: 1_000,
+            finished_ago_ms: 0,
         },
         1_000,
     );
@@ -264,12 +258,38 @@ fn a_run_is_refused_for_an_unknown_session_or_an_invalid_state() {
             if run.started_ms == 10_000_000_000 - langspan_core::MAX_CHECKOUT_RUN_MS),
         "{outcome:?}"
     );
-    // A finish after the report is taken as the report: a run never
-    // reaches past what the daemon has seen.
+    // A finish longer ago than the daemon's clock has run is taken as its
+    // start: the run is placed back from the daemon's now, never past it.
     let outcome = reported(&mut state, "alice", 'b', 300, u64::MAX, 20_000);
     assert!(
         matches!(&outcome, Outcome::CheckoutRunObserved { run }
-            if run.started_ms == 19_700 && run.finished_ms == 20_000),
+            if run.started_ms == 0 && run.finished_ms == 0),
         "{outcome:?}"
+    );
+}
+
+/// The hook measures how long ago the command finished each time it sends
+/// the report, so a retry of a request the daemon already recorded differs
+/// only in that age: the same request, answered from its receipt rather
+/// than refused as another command.
+#[test]
+fn a_retry_differing_only_in_the_finish_age_is_the_same_request() {
+    let command = |to, ran, ago| Command::ObserveCheckoutRun {
+        session_id: "alice".into(),
+        command: Some("git merge origin/main".into()),
+        to_branch: Some(MAIN.into()),
+        to_head: Some(oid(to)),
+        ran_ms: ran,
+        finished_ago_ms: ago,
+    };
+    let first = command('b', 300, 0);
+    assert!(first.same_request(&command('b', 300, 5_000)));
+    assert!(
+        !first.same_request(&command('c', 300, 0)),
+        "the head counts"
+    );
+    assert!(
+        !first.same_request(&command('b', 301, 0)),
+        "the duration counts"
     );
 }
