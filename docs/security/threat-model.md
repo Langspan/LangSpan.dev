@@ -131,14 +131,18 @@ and per-project trust state.
 ## A linked worktree's own install
 
 The main checkout's project hook, run by a host started in a linked worktree,
-reads that worktree's project hook files to decide whether to step aside
+reads that worktree's project hook files to decide whether to step aside or,
+on a host that does not run them, which workspace to decide under
 ([ADR 0003](../adr/0003-native-coordination-observation.md)). Those files are
-repository text in the worktree.
+repository text in the worktree. `langspan doctor --root` reads the same
+files for each worktree `git worktree list` names.
 
 | Concern | Behavior and remaining boundary |
 | --- | --- |
-| Tampering: repository text switches the inherited hook off | It steps aside only for a hook of the same host in LangSpan's exact generated shape that names this worktree as its root and the same state directory: the hook the host runs there itself. The file is read with the installer's guards (no symlink, 1 MiB bound); anything unreadable is no match. Nothing in it is executed or relayed. A worktree's settings could already add or remove hooks the host runs there, so this switches off nothing the worktree's own settings could not. |
-| Denial of service | No Git process and no coordinator call: a few `stat`s and one small JSON read per hook run. |
+| Tampering: repository text switches the inherited hook off | It steps aside only on a host known to run the worktree's own hooks there (Claude Code), and only for a hook of the same host in LangSpan's exact generated shape that names this worktree as its root and the same state directory: the hook the host runs there itself. The file is read with the installer's guards (no symlink, 1 MiB bound); anything unreadable is no match. Nothing in it is executed or relayed. A worktree's settings could already add or remove hooks the host runs there, so this switches off nothing the worktree's own settings could not. On any other host, a match never silences the hook. |
+| Tampering: repository text chooses the workspace | On Codex, Cursor and Gemini CLI a matching hook's workspace ID and opt-outs are adopted for that worktree. The worktree must first share the installed checkout's Git common directory, and its root is the one Git reports. Its ID is the one the worktree's own install would register there; a file naming another workspace's ID for this root meets the coordinator's ordinary overlap and alias refusals. Opt-outs only ever narrow: either install's `off` holds. |
+| Information disclosure | Only the hook command's own words are parsed; no other setting in the file is read or printed. `doctor` prints the worktree path, file path and workspace ID, as it already does for the main checkout. |
+| Denial of service | Stepping aside costs a few `stat`s and one small JSON read, with no Git process and no coordinator call. Deciding instead costs two bounded `git rev-parse` calls within the hook's deadline, as covering a worktree without an install already did. `doctor` runs one `git worktree list` with a 5 s deadline and a 1 MiB output bound. |
 
 ## Session events and peer briefings
 
