@@ -354,6 +354,106 @@ fn definitions_mentions_and_impact_are_answered_with_coverage_and_follow_the_fil
     assert!(human.contains("by name, not resolved uses"), "{human}");
 }
 
+/// Roadmap D2: `graph impact --depth N` through a real daemon and indexer,
+/// on a constructed three-level repository with a cycle back to the start.
+#[test]
+fn impact_by_level_reaches_a_caller_of_a_caller_and_depth_one_is_unchanged() {
+    let w = World::new();
+    for (path, text) in [
+        ("src/a.rs", "pub fn alpha() { gamma(); }\n"),
+        ("src/b.rs", "pub fn beta() { alpha(); }\n"),
+        ("src/c.rs", "pub fn gamma() { beta(); }\n"),
+    ] {
+        fs::write(w.work().join(path), text).unwrap();
+    }
+    let impact = |extra: &[&str]| {
+        let mut args = vec!["graph", "impact", "app", "src/a.rs"];
+        args.extend_from_slice(extra);
+        args.push("--json");
+        w.cli(&args)
+    };
+    let deadline = Instant::now() + WAIT;
+    let two = loop {
+        let (_, text) = impact(&["--depth", "2"]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome["levels"][1]["files"]
+            .as_array()
+            .is_some_and(|files| !files.is_empty())
+            && outcome["coverage"]["current_files"] == 6
+        {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "never indexed: {outcome:#}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(
+        two["levels"],
+        json!([
+            {"level": 1, "truncated": false,
+             "files": [{"path": "src/b.rs", "via": "alpha", "from": "src/a.rs"}]},
+            {"level": 2, "truncated": false,
+             "files": [{"path": "src/c.rs", "via": "beta", "from": "src/b.rs"}]},
+        ]),
+        "{two:#}"
+    );
+    assert_eq!(two["resolution"], "name");
+    assert_eq!(two["truncated"], false);
+    assert_eq!(two["coverage"]["indexable_files"], 6);
+
+    // The cycle: `c.rs` exports `gamma`, which `a.rs` mentions. Level 3
+    // does not bring `a.rs` back.
+    let (_, text) = impact(&["--depth", "3"]);
+    let three = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+    assert_eq!(three["levels"][2]["files"], json!([]), "{three:#}");
+
+    // Depth 1, asked for or not, is the answer earlier builds give. The
+    // store's generation can move between two calls; compare two answers
+    // given at the same one.
+    let generation =
+        |text: &str| serde_json::from_str::<Value>(text).unwrap()["generation"].clone();
+    let (plain, one) = loop {
+        let (code, plain) = impact(&[]);
+        assert_eq!(code, 0);
+        let (_, one) = impact(&["--depth", "1"]);
+        if generation(&plain) == generation(&one) {
+            break (plain, one);
+        }
+        assert!(Instant::now() < deadline, "the generation never settled");
+    };
+    assert_eq!(one, plain, "byte-identical");
+    let plain: Value = serde_json::from_str(&plain).unwrap();
+    assert!(plain["outcome"].get("levels").is_none(), "{plain:#}");
+    assert!(plain["outcome"].get("resolution").is_none());
+    let raw = w.raw(&json!({"version": 3, "request_id": "read", "command":
+        {"op": "graph_impact", "workspace_id": "app", "path": "src/a.rs", "limit": 50,
+         "blind_in_scope": true}}));
+    assert_eq!(
+        raw["outcome"], plain["outcome"],
+        "the request without depth gets the same answer"
+    );
+
+    for depth in ["0", "4"] {
+        let (code, text) = impact(&["--depth", depth]);
+        assert_eq!(code, 1, "{text}");
+        assert!(text.contains("depth must be between 1 and 3"), "{text}");
+    }
+
+    let (code, human) = w.cli(&["graph", "impact", "app", "src/a.rs", "--depth", "2"]);
+    assert_eq!(code, 0, "{human}");
+    assert!(
+        human.contains(r#"Level 1 (mentions an export of "src/a.rs"): "src/b.rs" via "alpha""#),
+        "{human}"
+    );
+    assert!(
+        human.contains(r#"Level 2: "src/c.rs" via "beta" from "src/b.rs""#),
+        "{human}"
+    );
+    assert!(
+        human.contains("Found by name, not resolved; each level adds false positives"),
+        "{human}"
+    );
+}
+
 /// The `upload` function of `src/upload.rs` in the detail test: it calls
 /// `open` twice and `hash` once.
 const UPLOAD: &str = "pub fn upload(path: &str) -> bool {\n    let file = open(path);\n    let again = open(path);\n    hash(file, again)\n}\n\npub fn gate(user: &str) -> bool {\n    user == \"admin\"\n}\n";

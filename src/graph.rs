@@ -870,7 +870,95 @@ impl Index {
         }
         Ok((symbols, references))
     }
+
+    /// The files reached from `path` level by level, up to `depth` levels
+    /// (roadmap D2). Level n+1 is the files mentioning an exported name of
+    /// a level-n file; each file appears once, at its first level, with the
+    /// name (`via`) and the previous-level file (`from`) that reached it.
+    /// At most `MAX_RESULTS` files in all and `NAMES_PER_LEVEL` names
+    /// expanded per level; a level a bound cut is `truncated`. Past
+    /// `deadline` the levels so far are returned, the last one `truncated`.
+    /// Call it inside `with_coverage` so the levels and the coverage are one
+    /// snapshot.
+    pub fn impact_levels(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        depth: u32,
+        deadline: Instant,
+    ) -> Result<Vec<langspan_core::ImpactLevel>, Failure> {
+        let limit = MAX_RESULTS as usize;
+        let mut seen = BTreeSet::from([path.to_owned()]);
+        let mut frontier = vec![path.to_owned()];
+        let mut levels = Vec::new();
+        for level in 1..=depth {
+            let mut files: Vec<langspan_core::ImpactFile> = Vec::new();
+            let mut truncated = false;
+            let mut late = false;
+            let mut expanded = BTreeSet::new();
+            'level: for from in &frontier {
+                for name in self.exported_names(workspace_id, from)? {
+                    if expanded.contains(&name) {
+                        continue;
+                    }
+                    if expanded.len() == NAMES_PER_LEVEL {
+                        truncated = true;
+                        break 'level;
+                    }
+                    if Instant::now() >= deadline {
+                        (truncated, late) = (true, true);
+                        break 'level;
+                    }
+                    let mentions = self.mentioned_in(workspace_id, &name, MAX_RESULTS)?;
+                    truncated |= mentions.len() > limit;
+                    for mention in mentions.into_iter().take(limit) {
+                        if seen.contains(&mention) {
+                            continue;
+                        }
+                        // `seen` holds the queried file too: `limit` files
+                        // have been reached.
+                        if seen.len() > limit {
+                            truncated = true;
+                            break 'level;
+                        }
+                        seen.insert(mention.clone());
+                        files.push(langspan_core::ImpactFile {
+                            path: mention,
+                            via: name.clone(),
+                            from: from.clone(),
+                        });
+                    }
+                    expanded.insert(name);
+                }
+            }
+            frontier = files.iter().map(|file| file.path.clone()).collect();
+            levels.push(langspan_core::ImpactLevel {
+                level,
+                files,
+                truncated,
+            });
+            if late {
+                break;
+            }
+        }
+        Ok(levels)
+    }
+
+    /// The distinct exported names of `path`, in name order.
+    fn exported_names(&self, workspace_id: &str, path: &str) -> Result<Vec<String>, Failure> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT DISTINCT name FROM symbols WHERE workspace_id = ?1 AND path = ?2
+             AND exported = 1 ORDER BY name",
+        )?;
+        let rows = statement
+            .query_map(params![workspace_id, path], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(rows)
+    }
 }
+
+/// Exported names one `impact_levels` level expands at most.
+pub const NAMES_PER_LEVEL: usize = 50;
 
 /// For each call, in the same order, the name of the innermost definition
 /// whose lines hold its line. Definitions nest, so one sweep in line order
@@ -1473,6 +1561,162 @@ mod review_regressions {
         let (symbols, references) = index.impact("w", "src/api.rs", 1).unwrap();
         assert_eq!(symbols[0].name, "upload");
         assert_eq!(references[0].path, "src/main.rs");
+    }
+
+    fn levels(index: &Index, path: &str, depth: u32) -> Vec<langspan_core::ImpactLevel> {
+        index
+            .impact_levels("w", path, depth, Instant::now() + Duration::from_secs(10))
+            .unwrap()
+    }
+
+    fn reached(level: &langspan_core::ImpactLevel) -> Vec<(&str, &str, &str)> {
+        level
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.via.as_str(), file.from.as_str()))
+            .collect()
+    }
+
+    /// `a.rs` exports `alpha`, `b.rs` mentions it and exports `beta`,
+    /// `c.rs` mentions `beta` and exports `gamma`, which `a.rs` mentions.
+    const CHAIN: [(&str, &str); 3] = [
+        ("src/a.rs", "pub fn alpha() { gamma(); }\n"),
+        ("src/b.rs", "pub fn beta() { alpha(); }\n"),
+        ("src/c.rs", "pub fn gamma() { beta(); }\n"),
+    ];
+
+    #[test]
+    fn impact_levels_follow_a_caller_of_a_caller_and_name_the_way() {
+        let (dir, mut index) = setup("levels");
+        pass(&dir, &mut index, &CHAIN);
+        let two = levels(&index, "src/a.rs", 2);
+        assert_eq!(two.len(), 2);
+        assert_eq!((two[0].level, two[1].level), (1, 2));
+        assert_eq!(reached(&two[0]), [("src/b.rs", "alpha", "src/a.rs")]);
+        assert_eq!(reached(&two[1]), [("src/c.rs", "beta", "src/b.rs")]);
+        assert!(!two[0].truncated && !two[1].truncated);
+
+        // `c.rs` exports `gamma`, which `a.rs` mentions: the cycle does
+        // not bring the queried file back, and nothing appears twice.
+        let three = levels(&index, "src/a.rs", 3);
+        assert_eq!(three.len(), 3);
+        assert_eq!(three[2].files, []);
+        assert!(!three[2].truncated);
+        let one = levels(&index, "src/a.rs", 1);
+        assert_eq!(one.len(), 1);
+        assert_eq!(reached(&one[0]), [("src/b.rs", "alpha", "src/a.rs")]);
+    }
+
+    #[test]
+    fn a_file_appears_once_at_its_first_level() {
+        let (dir, mut index) = setup("levels-once");
+        // `d.rs` mentions both `alpha` (level 1) and `beta` (level 2).
+        let both = ("src/d.rs", "fn d() { alpha(); beta(); }\n");
+        pass(&dir, &mut index, &[CHAIN[0], CHAIN[1], CHAIN[2], both]);
+        let two = levels(&index, "src/a.rs", 2);
+        assert_eq!(
+            reached(&two[0]),
+            [
+                ("src/b.rs", "alpha", "src/a.rs"),
+                ("src/d.rs", "alpha", "src/a.rs")
+            ]
+        );
+        assert_eq!(reached(&two[1]), [("src/c.rs", "beta", "src/b.rs")]);
+    }
+
+    #[test]
+    fn impact_levels_expand_at_most_fifty_names_per_level_and_say_so() {
+        let (dir, mut index) = setup("levels-names");
+        let exports: String = (0..NAMES_PER_LEVEL + 1)
+            .map(|n| format!("pub fn n{n:02}() {{}}\n"))
+            .collect();
+        // Mentions only the last name in path order, which is past the bound.
+        let last = format!("fn x() {{ n{NAMES_PER_LEVEL:02}(); }}\n");
+        let first = "fn y() { n00(); }\n";
+        pass(
+            &dir,
+            &mut index,
+            &[
+                ("src/api.rs", &exports),
+                ("src/first.rs", first),
+                ("src/last.rs", &last),
+            ],
+        );
+        let one = levels(&index, "src/api.rs", 2);
+        assert_eq!(reached(&one[0]), [("src/first.rs", "n00", "src/api.rs")]);
+        assert!(one[0].truncated, "the 51st name was not expanded");
+        assert!(!one[1].truncated);
+    }
+
+    #[test]
+    fn impact_levels_stop_at_two_hundred_files_in_total() {
+        let (dir, mut index) = setup("levels-total");
+        let mut files: Vec<(String, String)> = vec![
+            ("src/api.rs".into(), "pub fn root() {}\n".into()),
+            ("src/hub.rs".into(), "pub fn hub() { root(); }\n".into()),
+        ];
+        // 150 files at level 1, 150 more at level 2: 100 are left out.
+        for n in 0..150 {
+            files.push((format!("src/l1_{n:03}.rs"), "fn f() { root(); }\n".into()));
+            files.push((format!("src/l2_{n:03}.rs"), "fn f() { hub(); }\n".into()));
+        }
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        // One pass parses at most `FILES_PER_PASS`; the second the rest.
+        pass(&dir, &mut index, &borrowed);
+        pass(&dir, &mut index, &borrowed);
+        let two = levels(&index, "src/api.rs", 2);
+        assert_eq!(two[0].files.len(), 151, "hub and 150 more");
+        assert!(!two[0].truncated);
+        assert_eq!(
+            two[0].files.len() + two[1].files.len(),
+            MAX_RESULTS as usize
+        );
+        assert!(two[1].truncated);
+    }
+
+    #[test]
+    fn a_passed_deadline_returns_the_levels_so_far_marked_truncated() {
+        let (dir, mut index) = setup("levels-deadline");
+        pass(&dir, &mut index, &CHAIN);
+        let late = index
+            .impact_levels("w", "src/a.rs", 3, Instant::now())
+            .unwrap();
+        assert!(late.len() <= 3);
+        assert!(late.last().is_some_and(|level| level.truncated), "{late:?}");
+    }
+
+    #[test]
+    fn levels_and_coverage_come_from_one_snapshot() {
+        let (dir, mut index) = setup("levels-snapshot");
+        pass(&dir, &mut index, &CHAIN);
+        let reader = Index::open_reader(&dir.0.join("graph.sqlite3")).unwrap();
+        // The writer adds a file between the reader's levels and its
+        // coverage: neither the levels nor the coverage see it.
+        let (two, coverage) = reader
+            .with_coverage("w", |reader| {
+                let two = reader.impact_levels(
+                    "w",
+                    "src/a.rs",
+                    2,
+                    Instant::now() + Duration::from_secs(10),
+                )?;
+                let more = ("src/d.rs", "fn d() { beta(); }\n");
+                pass(&dir, &mut index, &[CHAIN[0], CHAIN[1], CHAIN[2], more]);
+                Ok(two)
+            })
+            .unwrap();
+        assert_eq!(reached(&two[1]), [("src/c.rs", "beta", "src/b.rs")]);
+        assert_eq!(coverage.indexable_files, 3, "{coverage:?}");
+        let (after, coverage) = reader
+            .with_coverage("w", |reader| {
+                reader.impact_levels("w", "src/a.rs", 2, Instant::now() + Duration::from_secs(10))
+            })
+            .unwrap();
+        assert_eq!(after[1].files.len(), 2);
+        assert_eq!(coverage.indexable_files, 4);
     }
 
     #[test]
