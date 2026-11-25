@@ -91,6 +91,7 @@ fn prompt(state: &mut State, session: &str, now: u64) {
         Command::SessionPrompt {
             session_id: session.into(),
             summary: "work".into(),
+            line_digests: Vec::new(),
         },
         now,
     );

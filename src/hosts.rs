@@ -177,11 +177,7 @@ fn user_install_of(
             UserInstall::None
         });
     };
-    // The state directory may not exist yet, or be reached through a link.
-    let same = |a: &Path, b: &Path| {
-        let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        canonical(a) == canonical(b)
-    };
+    let same = install::same_directory;
     if !same(&first.state_dir, state_dir) {
         return Ok(UserInstall::OtherStateDir);
     }
@@ -205,8 +201,7 @@ pub fn install_command(vendor: Vendor, home: &UserHome, state_dir: &Path) -> Str
         command.push_str(" --home ");
         command.push_str(&install::quote(&home.home.to_string_lossy()));
     }
-    let default = std::path::absolute(home.state_dir(None)).ok();
-    if std::path::absolute(state_dir).ok() != default {
+    if !install::same_directory(state_dir, &home.state_dir(None)) {
         command.push_str(" --state-dir ");
         command.push_str(&install::quote(&state_dir.to_string_lossy()));
     }

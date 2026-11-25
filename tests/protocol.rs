@@ -275,6 +275,21 @@ fn v3_blind_spots_request_and_response_match_the_committed_golden_vectors() {
         }
     ));
     assert_eq!(encode(&request).unwrap(), format!("{plain}\n").as_bytes());
+
+    // Roadmap D2: a depth above 1 is on the wire; depth 1 never is, so a
+    // depth-1 request is byte-identical to the one earlier builds send.
+    let deep = r#"{"version":3,"request_id":"read","command":{"op":"graph_impact","workspace_id":"app","path":"src/a.rs","limit":10,"blind_in_scope":true,"depth":2}}"#;
+    let request: Request = serde_json::from_str(deep).unwrap();
+    assert!(matches!(
+        request.command,
+        Command::GraphImpact { depth: 2, .. }
+    ));
+    assert_eq!(encode(&request).unwrap(), format!("{deep}\n").as_bytes());
+    let request: Request = serde_json::from_str(asked).unwrap();
+    assert!(matches!(
+        request.command,
+        Command::GraphImpact { depth: 1, .. }
+    ));
 }
 
 #[test]

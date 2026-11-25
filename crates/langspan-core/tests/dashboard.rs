@@ -91,6 +91,7 @@ fn every_local_and_remote_session_is_listed_with_current_work_first() {
         Command::SessionPrompt {
             session_id: alice.into(),
             summary: "Add retry to the upload client".into(),
+            line_digests: Vec::new(),
         },
         1_000,
     );
