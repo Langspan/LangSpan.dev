@@ -1,5 +1,6 @@
 use langspan::{
     client,
+    hosts::UserHome,
     protocol::{PROTOCOL_VERSION, Request, Response},
 };
 use langspan_core::{Command, LeaseStatus, Outcome};
@@ -117,6 +118,11 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  index, publication, the hooks installed in DIR, and
                                  the user-level install under the home, each with
                                  whether the LangSpan skill is installed and current
+  hosts [--home DIR]             List each agent host LangSpan knows (Claude Code,
+                                 Codex, Cursor, Gemini CLI): whether its configuration
+                                 directory exists, its user-level install (none,
+                                 current, outdated, other_state_dir, unknown) and the
+                                 command that installs it. Reads only
   status                         Show workspaces, live or recent sessions, intents and
                                  open admissions; closed ones are counted per session
   status --mine [--session ID] [--root DIR]
@@ -526,56 +532,48 @@ fn hooks(
     Ok(0)
 }
 
-/// The home a user-level install targets. An explicit `--home` ignores the
-/// environment entirely (HOME, CLAUDE_CONFIG_DIR, CODEX_HOME,
-/// LANGSPAN_STATE_DIR, XDG_STATE_HOME), so a run against a test or a spare
-/// home can never reach the real one.
-struct UserHome {
-    home: PathBuf,
-    explicit: bool,
-}
-
-impl UserHome {
-    fn new(option: Option<PathBuf>) -> Result<Self, langspan::Error> {
-        let explicit = option.is_some();
-        let home = option
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .ok_or("choose --home; HOME is not set")?;
-        Ok(Self {
-            home: std::path::absolute(home)?,
-            explicit,
-        })
+/// `hosts`: each known host, whether its configuration directory exists and
+/// what LangSpan install it has. Reads only.
+fn hosts_report(
+    home: &UserHome,
+    state_dir: &std::path::Path,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    let reports = langspan::hosts::report(home, state_dir);
+    if json {
+        println!("{}", serde_json::json!({ "hosts": reports }));
+        return Ok(0);
     }
-
-    fn env(&self, name: &str) -> Option<PathBuf> {
-        (!self.explicit)
-            .then(|| std::env::var_os(name))
-            .flatten()
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    }
-
-    fn files(&self, vendor: langspan::install::Vendor) -> langspan::user_install::HostFiles {
-        let variable = match vendor {
-            langspan::install::Vendor::ClaudeCode => Some("CLAUDE_CONFIG_DIR"),
-            langspan::install::Vendor::Codex => Some("CODEX_HOME"),
-            langspan::install::Vendor::Cursor => None,
-            langspan::install::Vendor::Gemini => Some("GEMINI_CLI_HOME"),
+    for host in &reports {
+        let state = match (host.present, host.user_install) {
+            (None, _) => format!(
+                "unknown: {}",
+                host.error.as_deref().unwrap_or("not readable")
+            ),
+            (Some(false), _) => "not present".to_owned(),
+            (Some(true), langspan::hosts::UserInstall::Unknown) => format!(
+                "present; install unknown: {}",
+                host.error.as_deref().unwrap_or("not readable")
+            ),
+            (Some(true), install) => format!(
+                "present; user-level install: {}",
+                serde_json::to_value(install)?
+                    .as_str()
+                    .unwrap_or_default()
+                    .replace('_', " ")
+            ),
         };
-        langspan::user_install::host_files(
-            vendor,
-            &self.home,
-            variable.and_then(|variable| self.env(variable)),
-        )
+        println!("{} ({}): {state}", host.name, host.config_dir.display());
+        if let Some(next) = &host.next_step {
+            println!("  to install: {next}");
+        } else if host.not_installed() {
+            println!(
+                "  chosen only by name: langspan install --hosts {} --apply",
+                host.name
+            );
+        }
     }
-
-    fn state_dir(&self, option: Option<String>) -> PathBuf {
-        option
-            .map(PathBuf::from)
-            .or_else(|| self.env("LANGSPAN_STATE_DIR"))
-            .or_else(|| self.env("XDG_STATE_HOME").map(|p| p.join("langspan")))
-            .unwrap_or_else(|| self.home.join(".local/state/langspan"))
-    }
+    Ok(0)
 }
 
 enum Planned {
@@ -1284,14 +1282,17 @@ fn auto_check(
         println!("{}", serde_json::to_string(&outcome)?);
         return Ok(0);
     }
-    print_human(&Response {
-        version: PROTOCOL_VERSION,
-        request_id: String::new(),
-        replayed: false,
-        generation: 0,
-        lease_valid: None,
-        outcome,
-    })?;
+    print_human(
+        &Response {
+            version: PROTOCOL_VERSION,
+            request_id: String::new(),
+            replayed: false,
+            generation: 0,
+            lease_valid: None,
+            outcome,
+        },
+        state_dir,
+    )?;
     Ok(0)
 }
 
@@ -1915,6 +1916,14 @@ fn coverage_text(coverage: &langspan_core::ScanCoverage) -> String {
     format!("{lead} {}.", parts.join("; "))
 }
 
+/// What `doctor` learned from the coordinator about where LangSpan is in use.
+struct InUse {
+    /// Registered workspace roots.
+    roots: Vec<PathBuf>,
+    /// The hosts named by registered sessions' IDs.
+    hosts: std::collections::BTreeSet<String>,
+}
+
 /// Everything that would explain "why is nothing being coordinated": is the
 /// coordinator reachable, are hooks installed and pointing at it, is each
 /// workspace being scanned and indexed, is publication working. Exit 0 only
@@ -1927,6 +1936,8 @@ fn doctor(
 ) -> Result<u8, langspan::Error> {
     let mut findings: Vec<(bool, String)> = Vec::new();
     let mut note = |ok: bool, text: String| findings.push((ok, text));
+    // Registered workspace roots and the hosts whose sessions work in them.
+    let mut in_use: Option<InUse> = None;
     // What doctor judges a workspace by must be complete, even when the
     // bounded view leaves it out to fit a frame.
     match langspan::client::status_from(state_dir, &["workspace_git", "remote_peers"]) {
@@ -1938,6 +1949,18 @@ fn doctor(
             ),
         ),
         Ok((state, _)) => {
+            in_use = Some(InUse {
+                roots: state
+                    .workspaces
+                    .values()
+                    .map(|workspace| PathBuf::from(&workspace.root))
+                    .collect(),
+                hosts: state
+                    .sessions
+                    .keys()
+                    .filter_map(|id| id.split_once('.').map(|(host, _)| host.to_owned()))
+                    .collect(),
+            });
             note(
                 true,
                 format!(
@@ -2220,7 +2243,7 @@ fn doctor(
             note(ok, text);
         }
     }
-    for (ok, text) in user_level_findings(state_dir, home)? {
+    for (ok, text) in user_level_findings(state_dir, home, in_use.as_ref())? {
         note(ok, text);
     }
     let problems = findings.iter().filter(|(ok, _)| !ok).count();
@@ -2378,6 +2401,7 @@ fn main_install_problem(
 fn user_level_findings(
     state_dir: &std::path::Path,
     home: &UserHome,
+    in_use: Option<&InUse>,
 ) -> Result<Vec<(bool, String)>, langspan::Error> {
     use langspan::{install, install::Vendor, user_install};
     let here = std::path::absolute(state_dir)?;
@@ -2467,11 +2491,28 @@ fn user_level_findings(
             }
         };
         if hooks.is_empty() && server.is_none() {
+            // Needs attention when the coordinator is in use by another
+            // host's sessions and nothing covers this one (roadmap A7).
+            let uncovered = in_use.filter(|in_use| {
+                in_use.hosts.iter().any(|host| host != name)
+                    && !langspan::hosts::not_installed(
+                        &[langspan::hosts::inspect(vendor, home, state_dir)],
+                        &in_use.roots,
+                        state_dir,
+                    )
+                    .is_empty()
+            });
             findings.push((
-                true,
+                uncovered.is_none(),
                 format!(
-                    "{name}: no user-level install under {}; repositories need a project install, or run `langspan install --hosts {name} --apply`.",
-                    home.home.display()
+                    "{name}: no user-level install under {}; repositories need a project install, or run `{}`.{}",
+                    home.home.display(),
+                    langspan::hosts::install_command(vendor, home, state_dir),
+                    if uncovered.is_some() {
+                        " Sessions of another host use this coordinator and no registered workspace has a project install for this one, so its edits are not coordinated."
+                    } else {
+                        ""
+                    }
                 ),
             ));
             continue;
@@ -2631,6 +2672,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         return user_install(action == "install", &mut options, apply);
     }
     let home_option = options.remove("--home").map(PathBuf::from);
+    let state_option = options.get("--state-dir").cloned();
     let state_dir = state_dir(&mut options)?;
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let before_command = &words[..words.len() - command.len()];
@@ -2640,6 +2682,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             no_unused_options(&options)?;
             let home = UserHome::new(home_option)?;
             return doctor(&state_dir, root.as_deref(), &home, json);
+        }
+        ["hosts"] => {
+            no_unused_options(&options)?;
+            let home = UserHome::new(home_option)?;
+            // The state directory `install` would use in the same home.
+            let state_dir = std::path::absolute(home.state_dir(state_option))?;
+            return hosts_report(&home, &state_dir, json);
         }
         ["check", "auto", workspace] => {
             return auto_check(&state_dir, workspace, &command, &mut options, json);
@@ -2682,7 +2731,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         _ => {}
     }
     if home_option.is_some() {
-        return Err("--home is valid only for `install`, `uninstall` and `doctor`".into());
+        return Err("--home is valid only for `install`, `uninstall`, `doctor` and `hosts`".into());
     }
     if let ["hooks", action @ ("install" | "remove"), vendor] = words.as_slice()
         && let Some(vendor) = langspan::install::Vendor::from_name(vendor)
@@ -2969,7 +3018,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     if json {
         println!("{}", serde_json::to_string(&response)?);
     } else {
-        print_human(&response)?;
+        print_human(&response, &state_dir)?;
     }
     Ok(match response.outcome {
         Outcome::Error { .. } => 1,
@@ -3105,7 +3154,7 @@ fn print_symbol_detail(symbol: &langspan_core::SymbolRef) {
     }
 }
 
-fn print_human(response: &Response) -> Result<(), langspan::Error> {
+fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), langspan::Error> {
     if response.replayed {
         println!(
             "Original result replayed; current daemon generation {}.",
@@ -3552,6 +3601,9 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
             workspace_id,
             failed,
         } => println!("Scan of {workspace_id} recorded; failed: {failed}."),
+        Outcome::HostsObserved { not_installed } => {
+            println!("Hosts not installed: {}.", not_installed.join(", "))
+        }
         Outcome::CheckoutObserved { change } => println!(
             "Checkout change recorded for {}: {}.",
             change.workspace_id,
@@ -3789,6 +3841,9 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
             println!(
                 "{active} active admission(s). Session registration is not a process-liveness signal."
             );
+            for host in state.uninstalled_hosts.keys() {
+                println!("{}", langspan::hosts::status_line(host, state_dir));
+            }
             if let Some(summary) = summary {
                 let closed = summary.closed_admissions.values().sum::<u64>() + summary.other_closed;
                 if closed > 0 {

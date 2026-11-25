@@ -7,7 +7,7 @@ use crate::{
     AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CoreError, Intent, InterfaceNotice,
     Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, RemoteLink, RemotePeer,
     ScanCoverage, ScanFailure, Session, SessionActivity, SessionLiveness, State, Turn, TurnWaiter,
-    Workspace, WorkspaceGit, error,
+    UninstalledHost, Workspace, WorkspaceGit, error,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -78,6 +78,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         checkout_runs,
         auto_checks,
         check_notices,
+        uninstalled_hosts,
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
@@ -136,6 +137,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         checkout_runs: checkout_runs.clone(),
         auto_checks: auto_checks.clone(),
         check_notices: keep(check_notices, of_shown),
+        uninstalled_hosts: uninstalled_hosts.clone(),
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),
@@ -409,6 +411,10 @@ pub enum StatusRecord {
         key: String,
         notice: CheckNotice,
     },
+    UninstalledHost {
+        key: String,
+        host: UninstalledHost,
+    },
     /// Part of one record too large for a page: `text` is its JSON from
     /// byte `offset`. The parts of a record come in order, the last with
     /// `last`, and joined they are that record's JSON. A part at offset 0
@@ -421,7 +427,7 @@ pub enum StatusRecord {
 }
 
 /// Record kinds in page order. The cursor names one of these.
-const KINDS: [&str; 21] = [
+const KINDS: [&str; 22] = [
     "workspace",
     "session",
     "intent",
@@ -443,6 +449,7 @@ const KINDS: [&str; 21] = [
     "checkout",
     "auto_check",
     "check_notice",
+    "uninstalled_host",
 ];
 
 impl StatusRecord {
@@ -486,6 +493,7 @@ impl StatusRecord {
             Self::CheckNotice { key, notice } => {
                 state.check_notices.entry(key).or_default().push(notice)
             }
+            Self::UninstalledHost { key, host } => drop(state.uninstalled_hosts.insert(key, host)),
         }
         Ok(())
     }
@@ -672,7 +680,7 @@ pub fn status_records<'a>(
         .as_ref()
         .and_then(|after| Some((after.position.clone(), after.within?)));
     let after = after.as_ref();
-    let pages: [Page<'a>; 21] = [
+    let pages: [Page<'a>; 22] = [
         entries(0, &state.workspaces, after, |key, workspace| {
             StatusRecord::Workspace { key, workspace }
         }),
@@ -739,6 +747,9 @@ pub fn status_records<'a>(
         }),
         lists(20, &state.check_notices, after, |key, notice| {
             StatusRecord::CheckNotice { key, notice }
+        }),
+        entries(21, &state.uninstalled_hosts, after, |key, host| {
+            StatusRecord::UninstalledHost { key, host }
         }),
     ];
     Ok((resume, pages.into_iter().flatten()))
