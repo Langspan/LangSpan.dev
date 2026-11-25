@@ -2897,8 +2897,9 @@ impl Session<'_> {
                         if let Ok(before) = &run.before {
                             // Another session's hooked edits while the
                             // command ran are that session's, or unknown.
+                            let edits = crate::shell::overlapping_edits(state_dir, &run);
                             let (theirs, unknown) = crate::shell::classify_edits(
-                                &crate::shell::overlapping_edits(state_dir, &run),
+                                &edits.marks,
                                 &changed,
                                 |path| match before.files.get(path) {
                                     Some(entry) => Some(entry.state.clone()),
@@ -2914,8 +2915,10 @@ impl Session<'_> {
                             run.edited_elsewhere = theirs;
                             run.contested.extend(unknown);
                             // Past a shell call's supported lifetime, what
-                            // other sessions did may no longer be known.
-                            if run.outlived(run.finished_ms.unwrap_or_default()) {
+                            // other sessions did may no longer be known; nor
+                            // when an edit may have gone unmarked at the cap.
+                            if edits.incomplete || run.outlived(run.finished_ms.unwrap_or_default())
+                            {
                                 run.contested.extend(changed.iter().cloned());
                             }
                             run.contested.sort();

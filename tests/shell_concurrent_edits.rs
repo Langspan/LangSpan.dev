@@ -67,6 +67,16 @@ impl Held {
     }
 }
 
+/// A test that fails before releasing its command does not leave it running.
+impl Drop for Held {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 impl Fixture {
     fn new() -> Self {
         let base = fs::canonicalize(std::env::temp_dir())
@@ -517,4 +527,51 @@ fn a_shell_write_during_an_edits_post_hook_is_not_taken_for_the_edits() {
         "{post:?}"
     );
     assert_eq!(post.coverage, "contested", "{post:?}");
+}
+
+/// The most edit marks kept at once (`MAX_RECORDS` in `src/shell.rs`).
+const MAX_MARKS: usize = 4096;
+
+/// Fill the edit-mark directory to its cap with edits still under way in
+/// this workspace, as 4,096 concurrent edit calls would leave it.
+fn fill_edit_marks(state: &Path, work: &Path) {
+    let directory = state.join("shell").join("edits");
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mark = json!({
+        "session_id": "filler", "workspace": work, "started_ms": now,
+        "finished_ms": null, "files": {},
+    })
+    .to_string();
+    let existing = files_with(&directory, "json").len();
+    for n in existing..MAX_MARKS {
+        let path = directory.join(format!("filler-{n}.json"));
+        fs::write(&path, &mark).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+/// While the edit-mark directory is full, an edit whose start could not be
+/// marked must not be marked by its post hook either (the directory would
+/// outgrow what a shell observation reads), and a shell run going at the
+/// same time credits nothing it changed: it cannot tell its own changes from
+/// that unmarked edit's.
+#[test]
+fn a_full_edit_mark_directory_stays_bounded_and_credits_the_command_nothing() {
+    let f = Fixture::new();
+    let (held, command) = f.start_held(ALICE, "alice-1", "printf mine > mine.txt");
+    fill_edit_marks(&f.state(), &f.work());
+    f.write(BOB, "bob-1", "b.txt", "Bob's line\n");
+    let marks = files_with(&f.state().join("shell").join("edits"), "json").len();
+    assert!(marks <= MAX_MARKS, "{marks} edit marks kept");
+    held.release();
+
+    let post = f.bash(ALICE, "PostToolUse", "alice-1", &command);
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert!(f.credited(ALICE, "Bash").is_empty());
+    assert_eq!(f.credited(BOB, "Write"), ["b.txt"]);
 }

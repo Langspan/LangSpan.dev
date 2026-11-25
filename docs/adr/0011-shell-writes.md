@@ -158,6 +158,17 @@ kept for more than a day; at most 4,096 are kept. Tests:
 while the other session's real hooks edit), and
 `an_edit_that_alone_explains_a_change_is_the_editors_and_anything_else_is_unknown`.
 
+The cap holds on every path that creates a mark: an edit's pre-tool hook, and
+its post-tool hook when the start was not kept. An edit call refused a mark at
+the cap goes unmarked and leaves an overflow note (`STATE/shell/edits/overflow`,
+the time it happened). A shell run then cannot vouch for any file it changed:
+if the note is younger than a shell call's supported lifetime before the run
+started, or the directory holds more marks than a listing reads (as an older
+build could leave), every changed file is `contested` and the run's session
+is credited with nothing. Tests:
+`a_full_edit_mark_directory_stays_bounded_and_credits_the_command_nothing` and
+`overflowing_edit_marks_make_a_runs_overlapping_edits_incomplete`.
+
 The window between an edit's pre-tool hook and the tool's own write is not
 seen: a command that writes the file inside it, before the tool reads and
 replaces it, is taken as part of the edit. That window is the time the host

@@ -99,7 +99,8 @@ Fixed on `main` since the validation:
   changed through its hooked edit tool while the command ran. Edit tool calls
   leave edit marks, and the shell comparison credits such a file to the
   editor, or to no session when both may have changed it
-  ([ADR 0011](adr/0011-shell-writes.md)). Tested with a real command held
+  ([ADR 0011](adr/0011-shell-writes.md)). At the 4,096-mark cap an edit
+  goes unmarked and a shell run it could affect credits nothing. Tested with a real command held
   open while the other session's hooks edit, real Git and a real daemon
   (`tests/shell_concurrent_edits.rs`); the real-host rerun of the reported
   scenario is pending.
