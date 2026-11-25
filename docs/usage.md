@@ -757,6 +757,7 @@ scans and can lag changes on disk. Replace `PROJECT` with a registered workspace
 ```sh
 ./target/release/langspan graph symbol PROJECT upload --limit 50 --json
 ./target/release/langspan graph symbol PROJECT upload --detail --json
+./target/release/langspan graph impact PROJECT src/api.rs --depth 2 --json
 ./target/release/langspan graph references PROJECT upload --limit 50 --json
 ./target/release/langspan graph impact PROJECT src/api.rs --limit 50 --json
 ```
@@ -782,7 +783,28 @@ The answer has `resolution: "name"`: calls and callers are matched by name,
 not resolved, so a call of another function with the same name counts. No
 source body is returned. Definitions that would make the answer larger than
 64 KiB are left out and `truncated` is true. `references` finds mentions of the name. `impact` lists the file's
-exports and other files mentioning those names, one level deep. These queries
+exports and other files mentioning those names, one level deep.
+
+With `--depth N` (1 to 3, default 1; MCP: `langspan_impact` with `depth`),
+`impact` also returns `levels`: level 1 is the files mentioning an export of
+the file, and each further level the files mentioning an export of a file on
+the level before. Each file appears once, at its first level, with `via` (the
+name it mentions) and `from` (the file on the previous level). At most 200
+files in all and 50 exported names per level are followed; a level that a
+bound, the 64 KiB answer size or the 500 ms time budget cut has `truncated:
+true`. Levels are found by name, not resolved, and each level adds false
+positives. An empty level is no claim that nothing is affected; check
+`coverage` first. `--depth 1` gives exactly the answer without the flag; a
+depth outside 1 to 3 is refused:
+
+```text
+$ langspan graph impact PROJECT src/store.rs --depth 2
+Level 1 (mentions an export of "src/store.rs"): "src/api.rs" via "save", "src/cli.rs" via "load"
+Level 2: "src/server.rs" via "router" from "src/api.rs", "tests/api.rs" via "router" from "src/api.rs"
+Found by name, not resolved; each level adds false positives. Index: 120 of 120 supported files at their current content.
+```
+
+These queries
 match names without resolving scopes, types, modules or imports. Common names
 can produce unrelated matches; dynamic uses can be missed.
 
@@ -1100,7 +1122,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
 | `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check |
 | `langspan_references` | Find name mentions, with coverage and truncation |
-| `langspan_impact` | Find a file's exports and files mentioning those names, one level deep |
+| `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
