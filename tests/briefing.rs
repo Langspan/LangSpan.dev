@@ -505,6 +505,13 @@ fn multi_edit_and_notebook_edit_are_coordinated_like_edit() {
 /// A linked worktree `tree` of the fixture's checkout, on branch `feature`,
 /// with `vendor`'s LangSpan hooks installed in it as workspace `tree`.
 fn linked_tree_with_install(f: &Fixture, vendor: &str) -> PathBuf {
+    let tree = linked_tree(f);
+    install_hooks(f, vendor, &tree);
+    tree
+}
+
+/// A linked worktree `tree` of the fixture's checkout, on branch `feature`.
+fn linked_tree(f: &Fixture) -> PathBuf {
     let tree = f.base.join("tree");
     git(
         &f.root(),
@@ -517,12 +524,15 @@ fn linked_tree_with_install(f: &Fixture, vendor: &str) -> PathBuf {
             tree.to_str().unwrap(),
         ],
     );
-    let tree = fs::canonicalize(tree).unwrap();
-    install_hooks(f, vendor, &tree);
-    tree
+    fs::canonicalize(tree).unwrap()
 }
 
 fn install_hooks(f: &Fixture, vendor: &str, root: &Path) {
+    install_hooks_with(f, vendor, root, &[]);
+}
+
+/// `install_hooks`, with `extra` options (such as an opt-out) for the hook.
+fn install_hooks_with(f: &Fixture, vendor: &str, root: &Path, extra: &[&str]) {
     let installed = Process::new(env!("CARGO_BIN_EXE_langspan"))
         .args(["hooks", "install", vendor, "--workspace"])
         .arg(root.file_name().unwrap())
@@ -530,6 +540,7 @@ fn install_hooks(f: &Fixture, vendor: &str, root: &Path) {
         .arg(root)
         .arg("--state-dir")
         .arg(f.state_dir())
+        .args(extra)
         .arg("--apply")
         .output()
         .unwrap();
@@ -707,46 +718,51 @@ fn an_unconfirmed_host_decides_in_a_worktree_with_its_own_install_rather_than_st
     }
 }
 
+/// What `doctor --root root` says that names `tree`: (ok, detail) pairs.
+fn doctor_about(f: &Fixture, root: &Path, tree: &Path) -> Vec<(bool, String)> {
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .args(["doctor", "--json", "--state-dir"])
+        .arg(f.state_dir())
+        .arg("--home")
+        .arg(&f.base)
+        .arg("--root")
+        .arg(root)
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["ok"].as_bool().unwrap(),
+                item["detail"].as_str().unwrap().to_owned(),
+            )
+        })
+        .filter(|(_, detail)| detail.contains(tree.to_str().unwrap()))
+        .collect()
+}
+
+/// `doctor`'s finding about Codex not running `tree`'s own install.
+fn codex_worktree_finding(f: &Fixture, root: &Path, tree: &Path) -> (bool, String) {
+    let findings = doctor_about(f, root, tree);
+    findings
+        .into_iter()
+        .find(|(_, detail)| detail.starts_with("codex:") && detail.contains("does not run"))
+        .unwrap_or_else(|| panic!("no Codex worktree finding"))
+}
+
 /// `doctor` names a linked worktree whose install the host will not run.
 #[test]
 fn doctor_reports_a_worktree_install_the_host_will_not_run() {
     let f = Fixture::new();
     let tree = linked_tree_with_install(&f, "codex");
-    let doctor = |root: &Path| -> Value {
-        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
-            .args(["doctor", "--json", "--state-dir"])
-            .arg(f.state_dir())
-            .arg("--home")
-            .arg(&f.base)
-            .arg("--root")
-            .arg(root)
-            .output()
-            .unwrap();
-        serde_json::from_slice(&output.stdout).unwrap()
-    };
-    let about_tree = |report: &Value| -> Vec<(bool, String)> {
-        report["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|item| {
-                (
-                    item["ok"].as_bool().unwrap(),
-                    item["detail"].as_str().unwrap().to_owned(),
-                )
-            })
-            .filter(|(_, detail)| detail.contains(tree.to_str().unwrap()))
-            .collect()
-    };
 
     // No Codex install in the main checkout: nothing Codex runs covers the
     // worktree, so it needs fixing.
     for root in [f.root(), tree.clone()] {
-        let findings = about_tree(&doctor(&root));
-        let finding = findings
-            .iter()
-            .find(|(_, detail)| detail.starts_with("codex:") && detail.contains("does not run"))
-            .unwrap_or_else(|| panic!("{findings:?}"));
+        let finding = codex_worktree_finding(&f, &root, &tree);
         assert!(!finding.0, "{finding:?}");
         assert!(finding.1.contains("Nothing coordinates it"), "{finding:?}");
         assert!(finding.1.contains("0.171.0"), "{finding:?}");
@@ -754,21 +770,161 @@ fn doctor_reports_a_worktree_install_the_host_will_not_run() {
 
     // With one, the main checkout's hook covers it: reported, not a fault.
     install_hooks(&f, "codex", &f.root());
-    let findings = about_tree(&doctor(&f.root()));
-    let finding = findings
-        .iter()
-        .find(|(_, detail)| detail.starts_with("codex:") && detail.contains("does not run"))
-        .unwrap_or_else(|| panic!("{findings:?}"));
+    let finding = codex_worktree_finding(&f, &f.root(), &tree);
     assert!(finding.0, "{finding:?}");
     assert!(finding.1.contains("as workspace tree"), "{finding:?}");
 
     // A host that runs the worktree's own install there is not reported.
     install_hooks(&f, "claude-code", &tree);
-    let findings = about_tree(&doctor(&f.root()));
+    let findings = doctor_about(&f, &f.root(), &tree);
     assert!(
         findings
             .iter()
             .all(|(_, detail)| !detail.starts_with("claude-code:")),
         "{findings:?}"
     );
+}
+
+/// A main-checkout install that cannot run, because its executable is gone
+/// or it lacks an event the host needs, does not cover a linked worktree
+/// whose own install the host will not run, whichever root `doctor` is
+/// given.
+#[test]
+fn doctor_does_not_count_a_broken_main_checkout_install_as_covering_a_worktree() {
+    let f = Fixture::new();
+    let tree = linked_tree_with_install(&f, "codex");
+    let hooks = f.root().join(".codex/hooks.json");
+    let executable = fs::canonicalize(env!("CARGO_BIN_EXE_langspan")).unwrap();
+    let gone = f.base.join("gone").join("langspan");
+
+    install_hooks(&f, "codex", &f.root());
+    let text = fs::read_to_string(&hooks).unwrap();
+    assert!(text.contains(executable.to_str().unwrap()), "{text}");
+    fs::write(
+        &hooks,
+        text.replace(executable.to_str().unwrap(), gone.to_str().unwrap()),
+    )
+    .unwrap();
+    for root in [f.root(), tree.clone()] {
+        let finding = codex_worktree_finding(&f, &root, &tree);
+        assert!(!finding.0, "{finding:?}");
+        assert!(
+            finding.1.contains("executable no longer exists"),
+            "{finding:?}"
+        );
+        assert!(!finding.1.contains("coordinates it as"), "{finding:?}");
+    }
+
+    // Reinstalled, then left without the prompt event: still not covered.
+    install_hooks(&f, "codex", &f.root());
+    assert!(codex_worktree_finding(&f, &f.root(), &tree).0);
+    let mut settings: Value = serde_json::from_str(&fs::read_to_string(&hooks).unwrap()).unwrap();
+    settings["hooks"]
+        .as_object_mut()
+        .unwrap()
+        .remove("UserPromptSubmit")
+        .unwrap();
+    fs::write(&hooks, settings.to_string()).unwrap();
+    for root in [f.root(), tree.clone()] {
+        let finding = codex_worktree_finding(&f, &root, &tree);
+        assert!(!finding.0, "{finding:?}");
+        assert!(finding.1.contains("UserPromptSubmit"), "{finding:?}");
+    }
+}
+
+/// A prompt event for `vendor`, submitted in `cwd`. `turn` numbers it.
+fn prompt_event(vendor: &str, session: &str, turn: u32, cwd: &Path, text: &str) -> Value {
+    match vendor {
+        "cursor" => json!({
+            "conversation_id": session, "generation_id": format!("gen-{turn}"),
+            "model": "default", "session_id": session,
+            "hook_event_name": "beforeSubmitPrompt", "cursor_version": "1.7.2",
+            "workspace_roots": [cwd], "user_email": null, "transcript_path": null,
+            "prompt": text, "attachments": [], "composer_mode": "agent",
+        }),
+        _ => {
+            let mut event = lifecycle("UserPromptSubmit", session, cwd, Some(text));
+            event["turn_id"] = json!(format!("turn-{turn}"));
+            event["model"] = json!("example");
+            event["permission_mode"] = json!("default");
+            event
+        }
+    }
+}
+
+/// A host the main checkout's hook decides for in a linked worktree with its
+/// own install (Codex, which reads the prompt through `lifecycle_event`, and
+/// Cursor, whose adapter parses it and calls `lifecycle_parsed`) keeps that
+/// install's opt-outs: with `--prompt-summary off` nothing of the prompt is
+/// recorded, and with `--code-briefing off` no source index section is sent,
+/// although the main checkout's hook has both on.
+#[test]
+fn a_worktree_installs_prompt_opt_outs_hold_when_the_main_checkouts_hook_decides() {
+    const HEADER: &str = "LangSpan source index:";
+    for vendor in ["codex", "cursor"] {
+        let mut f = Fixture::new();
+        let root = f.root();
+        fs::write(root.join("src/upload.rs"), "pub fn zebra_upload() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "--quiet", "-m", "upload"]);
+        let tree = linked_tree(&f);
+        install_hooks(&f, vendor, &tree);
+        f.start();
+        let events = || {
+            let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .arg("--state-dir")
+                .arg(f.state_dir())
+                .args(["events", "--limit", "1000", "--json"])
+                .output()
+                .unwrap();
+            String::from_utf8(output.stdout).unwrap()
+        };
+
+        // With both on in each install, the prompt is shared and its names
+        // are looked up in the worktree's source index.
+        let mut turn = 0;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            turn += 1;
+            let text = "Where is zebra_upload defined?";
+            let run = f.run(
+                vendor,
+                &root,
+                &[],
+                &prompt_event(vendor, BOB, turn, &tree, text),
+            );
+            if run.stdout.contains(HEADER) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{vendor}: never code-briefed: {}",
+                run.stdout
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(events().contains("Where is zebra_upload"), "{vendor}");
+
+        // The worktree's own install switches both off; the main checkout's
+        // hook, the one that runs, still has both on.
+        install_hooks_with(
+            &f,
+            vendor,
+            &tree,
+            &["--prompt-summary", "off", "--code-briefing", "off"],
+        );
+        let text = "quokka_marker: where is zebra_upload defined?";
+        let run = f.run(
+            vendor,
+            &root,
+            &[],
+            &prompt_event(vendor, BOB, turn + 1, &tree, text),
+        );
+        assert_ne!(run.coverage, "deferred_to_worktree", "{vendor}");
+        assert!(
+            !events().contains("quokka_marker"),
+            "{vendor}: the prompt summary was recorded"
+        );
+        assert!(!run.stdout.contains(HEADER), "{vendor}: {}", run.stdout);
+    }
 }

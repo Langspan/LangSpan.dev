@@ -495,11 +495,13 @@ fn resend(config: &Config, until: Instant, entry: &crate::spool::Entry) -> crate
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LifecycleKind {
     Start,
-    /// `summary` is what may be recorded; `names` are identifiers to look up
-    /// in the source index and are never recorded.
+    /// The prompt as the host submitted it. What of it is recorded (its
+    /// summary) or looked up in the source index (its names, never
+    /// recorded) is decided in `lifecycle` from the settings of the
+    /// workspace the event resolves to, so a linked worktree's own opt-outs
+    /// hold (`resolve_workspace`). It never leaves this process otherwise.
     Prompt {
-        summary: Option<String>,
-        names: Vec<String>,
+        prompt: Option<String>,
     },
     End,
 }
@@ -563,7 +565,9 @@ pub fn lifecycle_event(
     let kind = match event.hook_event_name.as_str() {
         "SessionStart" => LifecycleKind::Start,
         // Gemini CLI calls the prompt event BeforeAgent.
-        "UserPromptSubmit" | "BeforeAgent" => prompt_kind(event.prompt.as_deref(), config),
+        "UserPromptSubmit" | "BeforeAgent" => LifecycleKind::Prompt {
+            prompt: event.prompt.clone(),
+        },
         "SessionEnd" => LifecycleKind::End,
         "Stop" | "StopFailure" | "SubagentStop" | "PostToolBatch" => {
             return Some(turn_event(event, source, config, deadline));
@@ -601,18 +605,19 @@ pub fn lifecycle_event(
     ))
 }
 
-/// What a submitted prompt contributes, within the owner's settings: its
-/// summary, if shared, and the names to look up, if code briefing is on.
-pub fn prompt_kind(prompt: Option<&str>, config: &Config) -> LifecycleKind {
-    LifecycleKind::Prompt {
-        summary: prompt
+/// What a submitted prompt contributes, within the settings of the workspace
+/// it resolved to: its summary, if shared, and the names to look up, if code
+/// briefing is on.
+fn prompt_parts(prompt: Option<&str>, config: &Config) -> (Option<String>, Vec<String>) {
+    (
+        prompt
             .filter(|_| config.share_prompt)
             .and_then(prompt_summary),
-        names: prompt
+        prompt
             .filter(|_| config.code_briefing)
             .map(prompt_identifiers)
             .unwrap_or_default(),
-    }
+    )
 }
 
 /// A lifecycle event a vendor adapter has already parsed, for a host whose
@@ -952,7 +957,8 @@ fn lifecycle(
                 Err(failure) => failed(failure),
             };
         }
-        LifecycleKind::Prompt { summary, names } => {
+        LifecycleKind::Prompt { prompt } => {
+            let (summary, names) = prompt_parts(prompt.as_deref(), config);
             if let Some(summary) = summary
                 && let Err(failure) = step(
                     "prompt",

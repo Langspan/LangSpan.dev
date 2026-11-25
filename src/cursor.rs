@@ -135,7 +135,9 @@ fn dispatch(event: HostEvent, config: &Config, deadline: Instant) -> Reply {
     let phase = match event.hook_event_name.as_str() {
         "sessionStart" => return lifecycle(LifecycleKind::Start),
         "beforeSubmitPrompt" => {
-            return lifecycle(hook::prompt_kind(event.prompt.as_deref(), config));
+            return lifecycle(LifecycleKind::Prompt {
+                prompt: event.prompt.clone(),
+            });
         }
         "sessionEnd" => return lifecycle(LifecycleKind::End),
         "preToolUse" => Phase::Pre,

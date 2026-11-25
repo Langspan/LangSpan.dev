@@ -130,13 +130,17 @@ install's workspace ID and root. A session there is coordinated in the same
 workspace as sessions the worktree's own install covers (for example Claude
 Code there), and a host that turns out to run both reaches one decision for
 one workspace: the same call is the same idempotent request. A prompt-summary
-or code-briefing opt-out in either install holds. An unconfirmed host
+or code-briefing opt-out in either install holds: the prompt's summary and
+names are derived only after the workspace is resolved, from its settings, in
+every host adapter. An unconfirmed host
 therefore falls back to deciding, never to silence; a decision made twice
 costs one extra hook run, while silence leaves edits uncoordinated. An
 install there with another state directory, or none, leaves the inherited
 hook covering the worktree under a workspace derived from its own, as
 before. `langspan doctor` reports each linked worktree whose install the
-host will not run, and fails when nothing the host runs covers it. A rule
+host will not run, and fails when nothing the host runs covers it; a main
+checkout hook whose executable is gone or that lacks a required event does
+not count as covering it. A rule
 moves to `Both` only with a retained real-host run in a linked worktree.
 
 Tests (real linked worktrees, a real daemon, constructed host events):
@@ -144,8 +148,11 @@ Tests (real linked worktrees, a real daemon, constructed host events):
 (Claude Code),
 `codex_in_a_worktree_with_its_own_install_is_coordinated_by_the_main_checkouts_hook`,
 `an_unconfirmed_host_decides_in_a_worktree_with_its_own_install_rather_than_stepping_aside`
-(Gemini CLI and Cursor) and
-`doctor_reports_a_worktree_install_the_host_will_not_run`. A real Codex run
+(Gemini CLI and Cursor),
+`a_worktree_installs_prompt_opt_outs_hold_when_the_main_checkouts_hook_decides`
+(Codex and Cursor),
+`doctor_reports_a_worktree_install_the_host_will_not_run` and
+`doctor_does_not_count_a_broken_main_checkout_install_as_covering_a_worktree`. A real Codex run
 in a linked worktree with a conflicting edit refused is pending.
 
 Overlapping roots still require explicit daemon verification of distinct Git

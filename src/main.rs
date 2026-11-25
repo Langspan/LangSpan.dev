@@ -1977,25 +1977,33 @@ fn worktree_install_findings(
             match vendor.worktree_hooks() {
                 WorktreeHooks::Both => {}
                 WorktreeHooks::MainOnly => {
-                    let covered = install_at(vendor, state_dir, &main);
+                    let fix = format!(
+                        "run `langspan hooks install {name} --workspace ID --root {} --apply`",
+                        main.display()
+                    );
+                    let coverage = match install_at(vendor, state_dir, &main) {
+                        None => Err(format!("Nothing coordinates it: {fix}.")),
+                        Some((main_file, registration)) => {
+                            match main_install_problem(vendor, &main_file, &registration) {
+                                Some(problem) => Err(format!(
+                                    "Nothing coordinates it: the main checkout's hook in {} {problem}; {fix} again.",
+                                    main_file.display()
+                                )),
+                                None => Ok(format!(
+                                    "The main checkout's hook coordinates it as workspace {}.",
+                                    own.workspace_id
+                                )),
+                            }
+                        }
+                    };
                     findings.push((
-                        covered.is_some(),
+                        coverage.is_ok(),
                         format!(
                             "{name}: a session started in linked worktree {} does not run the hooks installed in {} (observed on {}); it runs the main checkout's project hooks. {}",
                             tree.display(),
                             file.display(),
                             vendor.worktree_hooks_observed().unwrap_or("this host"),
-                            if covered.is_some() {
-                                format!(
-                                    "The main checkout's hook coordinates it as workspace {}.",
-                                    own.workspace_id
-                                )
-                            } else {
-                                format!(
-                                    "Nothing coordinates it: run `langspan hooks install {name} --workspace ID --root {} --apply`.",
-                                    main.display()
-                                )
-                            }
+                            coverage.unwrap_or_else(|problem| problem)
                         ),
                     ));
                 }
@@ -2012,6 +2020,36 @@ fn worktree_install_findings(
         }
     }
     findings
+}
+
+/// Why the main checkout's hook in `file`, with `registration`, cannot run
+/// for a linked worktree, if it cannot: its executable is gone or it lacks
+/// an event the host sends. Checked as `doctor` checks the root it is given,
+/// since for a host that runs only the main checkout's hooks it is the one
+/// hook a worktree session has.
+fn main_install_problem(
+    vendor: langspan::install::Vendor,
+    file: &std::path::Path,
+    registration: &langspan::install::Registration,
+) -> Option<String> {
+    use langspan::install;
+    let mut problems = Vec::new();
+    if !registration.executable.is_file() {
+        problems.push("cannot start: its executable no longer exists".to_owned());
+    }
+    match install::read(file) {
+        Ok(Some(settings)) => {
+            let missing = install::missing_events(vendor, &settings, |hook| {
+                install::is_managed_for(vendor, hook)
+            });
+            if !missing.is_empty() {
+                problems.push(format!("is not installed for {}", missing.join(", ")));
+            }
+        }
+        Ok(None) => problems.push("could not be read".to_owned()),
+        Err(error) => problems.push(format!("could not be read: {error}")),
+    }
+    (!problems.is_empty()).then(|| problems.join(" and "))
 }
 
 /// What `doctor` says about the user-level install of each host present
