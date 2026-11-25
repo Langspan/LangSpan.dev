@@ -46,7 +46,7 @@ is introduced by M3.
 | --- | --- |
 | Spoofing | State directory `0700`, socket/database/lock `0600`, effective-user ownership checks and exclusive lifetime lock. Native session/tool IDs and host process names are cooperative identifiers, not authenticated identities. A process token distinguishes a PID incarnation, not the truth of an agent's claims. |
 | Tampering | Strict core commands, bounded paths/IDs/digests, canonical scope and immutable original-command receipts. Tool-input changes under the same request ID fail. Post scope/input mismatches cannot complete a lease. Same-user programs can still alter files or storage; corrupted history fails instead of silently resetting. |
-| Repudiation | Ordered events and durable original outcomes retain retry, generation and observation evidence. Denials are receipts, not events. Disk observations are unattributed and any related operation IDs are unverified correlation. This is not a signed or tamper-proof audit log. |
+| Repudiation | Ordered events and durable original outcomes retain retry, generation and observation evidence. Denials are receipts; since H4 an admission refused for a conflict, a stale base or unread lines is also a `write_refused` event, written with its receipt, so a retry of the same request adds no second one. Disk observations are unattributed and any related operation IDs are unverified correlation. This is not a signed or tamper-proof audit log. |
 | Information disclosure | Local owner-only storage; no telemetry or remote coordination layer. Shared clients can read paths, intent text, process IDs, digests and branch identities in that domain. Git stderr is not relayed verbatim because it can contain repository-controlled private values. Native edit bodies and process arguments/environment are not stored or forwarded. |
 | Denial of service | 64 KiB IPC frames, bounded clients/queue and deadlines; 8 MiB hook envelopes; 4 MiB Codex patches and 64 paths. One bounded background Git worker isolates scan I/O from request ownership. Event/changes pages are byte-bounded. Large status, disk exhaustion, retained history growth and hostile same-user processes remain limitations. |
 | Elevation of privilege | LangSpan never answers `allow`, changes host permissions, applies code or grants OS access. Git observation does not mutate the index or working tree. Installer writes are explicit and scoped. Admission controls cooperative coordination, not filesystem writes. |
@@ -411,6 +411,24 @@ messages, notes and workspace roots.
 | Information disclosure | Loopback only unless `--allow-network` is given, which warns; a non-loopback address is refused otherwise, and an IPv4-mapped loopback address counts as non-loopback. Plain HTTP: off the machine, the token and view are only as private as the channel, so the documented way from a phone is an SSH tunnel or a VPN to the Mac. Responses are `no-store`, `no-referrer`, `nosniff` and not frameable. A teammate's work is shown as it was published to this machine; nothing new leaves the machine. |
 | Denial of service | At most 16 connections at once, the rest closed unanswered; one thread each. A request head of at most 8 KiB and 64 headers, 2 s per read and 5 s in total, then 408 or 431. Each view is one socket request to the coordinator, under its own 64 KiB frame and deadlines; the denial search reads at most the newest 5,000 receipts and events. A page polls every 2 s; many open pages multiply that load. |
 | Elevation of privilege | The server runs as the owner and can only read. It has no route that changes state, runs a command or reads a file other than through the coordinator's view. |
+
+## Daily summary
+
+`langspan today` and `langspan_today` (roadmap H4,
+[ADR 0019](../adr/0019-person-facing-surfaces-and-usage-accounting.md)) read
+the event log over the owner-only socket and summarise a window of the day.
+Two things are new: the CLI and MCP adapter start one child process, `date
++%z`, to learn the local time zone; and the daemon records two event kinds,
+`clock_anchored` at each start and `write_refused` at each refused admission.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | `date` is found on the owner's `PATH`, like `git`; a program placed earlier on it runs as the owner, which it could already do. Only its offset is read: anything other than `+HHMM` or `-HHMM` within 18 hours is refused, and the default window cannot be computed (`--since` still works). |
+| Tampering (prompt injection) | The MCP answer places session IDs, file paths and intent text, written by other sessions and the repository, in a model's context. It starts with a line saying they are coordination data, not instructions; paths and intent text are quoted with escapes, intent text is cut to 120 characters, each line to 240 bytes and the whole to 2,400 bytes, the same cap as a briefing. No message text is included, only message IDs and recipients. |
+| Repudiation | Reading leaves no trace: the command is answered from the store, records no event or receipt, and acknowledges no message. A refusal's event carries the session, workspace, paths, kind and time; a same-user process could already cause refusals by holding files. |
+| Information disclosure | Nothing new is stored beyond the two event kinds, which hold IDs, paths, a kind and two clock readings. Nothing leaves the machine. |
+| Denial of service | One answer reads at most the newest 50,000 events and parses each, then one backward search for the generation's anchor; the cost is bounded by that count, not by history, and the answer says `truncated` when the window reaches past it. `date` has a 2 s deadline and is killed at it. The answer fits one 48 KiB frame: listed files, then sessions, are dropped and counted. |
+| Elevation of privilege | It grants nothing and decides nothing; a failure is an error answer. |
 
 ## Region admission
 

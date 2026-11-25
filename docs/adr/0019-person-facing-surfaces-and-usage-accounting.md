@@ -22,7 +22,8 @@ such numbers to be measured.
 | --- | --- | --- | --- |
 | H2 | Status line: agents here, catches today | Not now | The launch is about coordination between agents; `status` and the local page cover the owner |
 | H3 | Desktop pings and a sound | Not now | Needs OS integration outside the state directory |
-| H4, C10 | A daily summary and a "since you left" briefing | Not now | Can be derived from events later; briefings already carry current peer work |
+| H4 | A daily summary | Built 25 November 2026 ([issue #78](https://github.com/Langspan/LangSpan.dev/issues/78)): `langspan today` and MCP `langspan_today`; see "Daily summary (H4)" below. Not yet run on a host over a working day | |
+| C10 | A "since you left" briefing | Not now | Can be derived from events later; briefings already carry current peer work |
 | H5 | Monthly catch counter | Not now | A count of refusals is not evidence of rework avoided |
 | H6 | Daily "tokens saved" line | Not now | No such number is shown until it is measured |
 | E3 | Recap with tokens, model and cost | Not now | Depends on J10 |
@@ -40,6 +41,43 @@ PostToolBatch in launch track L3
 end of a turn, which releases that reply's open admissions as Stop does, and
 only its `error` type is kept. Detecting quota or usage from it is J11 and
 stays Not now.
+
+**Daily summary (H4), built 25 November 2026.** `langspan today [WORKSPACE]
+[--since RFC3339] [--json]` and the read-only MCP tool `langspan_today`
+summarise a window (local midnight to now by default) from the event log:
+each session's first and last activity, distinct files its successful edits
+named and its prompts; refusals by kind; check results; how each landing's
+last attempt ended; and, from current state, admissions held, intents not
+ended, messages not acknowledged, handoffs not taken up and checks whose
+newest result failed. It is a read: no event, no receipt, no
+acknowledgement. Three choices were needed:
+
+- *Placing events on a day.* Event times are on the daemon's monotonic clock,
+  which restarts at a reboot, and several events carry no time. Each daemon
+  start now records `clock_anchored` (generation, its clock, the wall clock)
+  after `booted`, so a time of that generation maps to wall time. An event
+  without its own time takes the time of the event before it in its
+  generation. Generations started by an earlier build have no anchor; their
+  events are counted as `undated` and in nothing else. A wall-clock change
+  while the daemon runs shifts that run's placement by the change.
+- *Counting refusals.* Conflicts were receipts only, without a time. An
+  admission refused for a conflict, a stale base or unread lines now also
+  records `write_refused` (session, workspace, paths, kind, time), committed
+  with the receipt, so a retry of the same request is not counted twice. A
+  commit the guard holds is decided in the hook from the journal and records
+  nothing in the daemon, so `commit_held` is not counted; recording it would
+  need a new command from the hook.
+- *Bounds.* One answer reads at most the newest 50,000 events and says
+  `truncated` when the window may reach past them. The text is at most 40
+  lines and eight files per session; the MCP text, labelled as data, at most
+  2,400 bytes, as a briefing. The local offset comes from `date +%z` (2 s
+  deadline), shown at one offset for the whole window.
+
+Both new event kinds are read by this build only: an older build that opens a
+store holding them stops at the first, as for any event kind it does not know
+([ADR 0015](0015-version-tolerance.md)). Tests: `crates/langspan-core/tests/today.rs`
+(injected clocks across a simulated midnight, a restart without an anchor and
+a reboot), `tests/today.rs` (real daemon, Git, hooks and MCP adapter).
 
 ## Consequences
 

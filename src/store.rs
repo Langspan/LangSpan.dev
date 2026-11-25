@@ -5,10 +5,19 @@
 //! replay validity is calculated from the current recovered state.
 
 use langspan_core::{
-    Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event, LeaseStatus, Outcome,
-    RecordedEvent, SentPublication, State, StatusRecord, apply, dashboard_denials, decide,
-    expiry_events, shrink_status, status_records,
+    ClockAnchor, Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event,
+    LeaseStatus, Outcome, RecordedEvent, SentPublication, State, StatusRecord, TODAY_EVENTS,
+    TodayQuery, TodayWindow, apply, dashboard_denials, decide, expiry_events, shrink_status,
+    status_records,
 };
+
+/// The wall clock in Unix milliseconds; 0 if it reads before the epoch.
+pub fn wall_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 use std::time::Duration;
@@ -175,7 +184,20 @@ impl Store {
             .checked_add(1)
             .ok_or("authority generation exhausted; refusing to reuse a generation")?;
         let mut store = Self { connection, state };
-        store.commit(&[Event::Booted { generation }], None)?;
+        // The generation's clock against the wall clock, so `today` can
+        // place its times on a day.
+        let anchor = ClockAnchor {
+            generation,
+            clock_ms: crate::clock::now_ms(),
+            wall_ms: wall_now_ms(),
+        };
+        store.commit(
+            &[
+                Event::Booted { generation },
+                Event::ClockAnchored { anchor },
+            ],
+            None,
+        )?;
         Ok(store)
     }
 
@@ -425,6 +447,7 @@ impl Store {
                 | Command::LandingReadiness { .. }
                 | Command::TurnQueue { .. }
                 | Command::Recap { .. }
+                | Command::Today { .. }
                 | Command::Dashboard
         ) {
             return Ok(None);
@@ -534,6 +557,10 @@ impl Store {
                 outcome
             }
             Command::Events { after, limit } => self.events(*after, *limit)?,
+            Command::Today {
+                workspace_id,
+                from_ms,
+            } => self.today(workspace_id.as_deref(), *from_ms, wall_now_ms(), now_ms)?,
             Command::RemoteSent {
                 workspace_id,
                 limit,
@@ -783,6 +810,90 @@ impl Store {
             });
         }
         Ok(Outcome::Events { events })
+    }
+
+    /// The daily account: the newest `TODAY_EVENTS` events at most, placed
+    /// in wall time by their generation's anchor, summarised by the core.
+    /// Reads only; it writes nothing and acknowledges no message.
+    pub fn today(
+        &self,
+        workspace_id: Option<&str>,
+        from_ms: u64,
+        wall_ms: u64,
+        now_ms: u64,
+    ) -> StoreResult<Outcome> {
+        if let Some(workspace_id) = workspace_id
+            && !self.state.workspaces.contains_key(workspace_id)
+        {
+            return Ok(Outcome::Error {
+                code: "unknown_workspace".into(),
+                message: "no workspace has this ID; `langspan status` lists them".into(),
+            });
+        }
+        if from_ms > wall_ms {
+            return Ok(Outcome::Error {
+                code: "invalid_window".into(),
+                message: "the window starts after now; give a --since time in the past".into(),
+            });
+        }
+        let mut statement = self
+            .connection
+            .prepare("SELECT seq, event_json FROM events ORDER BY seq DESC LIMIT ?1")?;
+        let mut rows = statement.query([i64::try_from(TODAY_EVENTS)?])?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            events.push(RecordedEvent {
+                seq: u64::try_from(seq)?,
+                event: serde_json::from_str(&json)?,
+            });
+        }
+        events.reverse();
+        let first = events.first().map_or(0, |recorded| recorded.seq);
+        let first = i64::try_from(first)?;
+        let earlier: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1)",
+            [first],
+            |row| row.get(0),
+        )?;
+        // The generation the first event read belongs to, if it was anchored.
+        let before: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT event_json FROM events
+                 WHERE seq < ?1
+                   AND json_extract(event_json, '$.type') IN ('booted', 'clock_anchored')
+                 ORDER BY seq DESC LIMIT 1",
+                [first],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let anchor = match before
+            .map(|json| serde_json::from_str::<Event>(&json))
+            .transpose()?
+        {
+            Some(Event::ClockAnchored { anchor }) => Some(anchor),
+            _ => None,
+        };
+        let mut today = langspan_core::today(
+            &self.state,
+            &TodayQuery {
+                workspace_id,
+                window: TodayWindow {
+                    from_ms,
+                    to_ms: wall_ms,
+                },
+                events: &events,
+                anchor,
+                earlier,
+                now_ms,
+            },
+        );
+        today.shrink_until(|today| {
+            serde_json::to_vec(today).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+        });
+        Ok(Outcome::Today { today })
     }
 
     /// The outbound audit: what left for a workspace, newest first, read

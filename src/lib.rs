@@ -18,6 +18,7 @@ mod sha1;
 mod sha256;
 pub mod skill;
 pub mod store;
+pub mod today;
 pub mod user_install;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;

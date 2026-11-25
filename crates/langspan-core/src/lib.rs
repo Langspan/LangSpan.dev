@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 mod dashboard;
 mod lines;
 mod status;
+mod today;
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
@@ -18,6 +19,11 @@ pub use dashboard::{
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
     shrink_status, status_records, status_view,
+};
+pub use today::{
+    ClockAnchor, OpenAdmission, OpenCheck, OpenIntent, OpenMessage, RefusalKind, TODAY_EVENTS,
+    TODAY_FILES, TODAY_OPEN, TODAY_SESSIONS, Today, TodayChecks, TodayLandings, TodayOpen,
+    TodayQuery, TodaySession, TodayWindow, today,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1426,6 +1432,21 @@ pub enum Event {
     Booted {
         generation: u64,
     },
+    /// The daemon's clock read with the wall clock as a generation started,
+    /// so its times can be placed on a day (`langspan today`).
+    ClockAnchored {
+        anchor: ClockAnchor,
+    },
+    /// An admission was refused. Recorded with the refusal's receipt, so a
+    /// retry of the same request is not counted again.
+    WriteRefused {
+        session_id: String,
+        workspace_id: String,
+        kind: RefusalKind,
+        paths: Vec<String>,
+        at_ms: u64,
+        generation: u64,
+    },
     WorkspaceRegistered {
         workspace: Workspace,
     },
@@ -1944,6 +1965,14 @@ pub enum Command {
     Recap {
         workspace_id: String,
     },
+    /// Read-only, answered from the event log: what happened since
+    /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
+    /// every workspace when none is named, and what is still open.
+    Today {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        from_ms: u64,
+    },
     /// Read-only, answered from the derived index: where `name` is defined.
     /// With `detail`, each definition also carries its body digest, calls,
     /// callers, notes and last check (roadmap D1).
@@ -2339,6 +2368,14 @@ enum CommandWire {
     Recap {
         workspace_id: String,
     },
+    /// Read-only, answered from the event log: what happened since
+    /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
+    /// every workspace when none is named, and what is still open.
+    Today {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        from_ms: u64,
+    },
     /// Read-only, answered from the derived index: where `name` is defined.
     /// With `detail`, each definition also carries its body digest, calls,
     /// callers, notes and last check (roadmap D1).
@@ -2693,6 +2730,9 @@ pub enum Outcome {
     Recap {
         recap: Recap,
     },
+    Today {
+        today: Today,
+    },
     Dashboard {
         dashboard: Dashboard,
     },
@@ -2971,9 +3011,17 @@ fn decide_checked(
                                 .is_some_and(|lease| lease.operation.is_some()))
                     })
                     .collect();
+            let refused = |kind| Event::WriteRefused {
+                session_id: session_id.clone(),
+                workspace_id: session.workspace_id.clone(),
+                kind,
+                paths: paths.clone(),
+                at_ms: now_ms,
+                generation: state.generation,
+            };
             if !holders.is_empty() {
                 return Ok(Decision {
-                    events: Vec::new(),
+                    events: vec![refused(RefusalKind::Conflict)],
                     outcome: Outcome::Conflict { holders },
                 });
             }
@@ -2998,19 +3046,22 @@ fn decide_checked(
                     // reported read, or a file that no longer exists to be
                     // read, cannot be refused for the same change forever.
                     return Ok(Decision {
-                        events: vec![Event::SourceObserved {
-                            session_id: session_id.clone(),
-                            files: stale
-                                .iter()
-                                .map(|file| ObservedFile {
-                                    path: file.path.clone(),
-                                    state: file.current.clone(),
-                                })
-                                .collect(),
-                            origin: SourceOrigin::Refused,
-                            at_ms: now_ms,
-                            generation: state.generation,
-                        }],
+                        events: vec![
+                            Event::SourceObserved {
+                                session_id: session_id.clone(),
+                                files: stale
+                                    .iter()
+                                    .map(|file| ObservedFile {
+                                        path: file.path.clone(),
+                                        state: file.current.clone(),
+                                    })
+                                    .collect(),
+                                origin: SourceOrigin::Refused,
+                                at_ms: now_ms,
+                                generation: state.generation,
+                            },
+                            refused(RefusalKind::StaleBase),
+                        ],
                         outcome: Outcome::StaleBase { stale },
                     });
                 }
@@ -3025,13 +3076,16 @@ fn decide_checked(
                         .cloned()
                         .collect();
                     return Ok(Decision {
-                        events: vec![Event::SourceObserved {
-                            session_id: session_id.clone(),
-                            files: told,
-                            origin: SourceOrigin::Refused,
-                            at_ms: now_ms,
-                            generation: state.generation,
-                        }],
+                        events: vec![
+                            Event::SourceObserved {
+                                session_id: session_id.clone(),
+                                files: told,
+                                origin: SourceOrigin::Refused,
+                                at_ms: now_ms,
+                                generation: state.generation,
+                            },
+                            refused(RefusalKind::UnreadLines),
+                        ],
                         outcome: Outcome::UnreadLines { lines: unread },
                     });
                 }
@@ -4319,6 +4373,7 @@ fn decide_checked(
             })
         }
         Command::Events { .. }
+        | Command::Today { .. }
         | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
@@ -6537,6 +6592,24 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                     state.scan_coverage.remove(workspace_id);
                 }
             }
+        }
+        Event::ClockAnchored { anchor } => {
+            if anchor.generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A clock anchor names the generation that is starting",
+                ));
+            }
+        }
+        Event::WriteRefused {
+            session_id,
+            workspace_id,
+            paths,
+            ..
+        } => {
+            known_session(state, session_id)?;
+            validate_known_workspace(state, workspace_id)?;
+            normalized_paths(paths)?;
         }
         Event::CheckoutChanged { change } => {
             validate_checkout(state, change)?;

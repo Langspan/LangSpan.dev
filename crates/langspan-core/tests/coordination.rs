@@ -148,7 +148,8 @@ fn all_or_none_admission_does_not_reserve_nonconflicting_subset() {
             }]
         }
     );
-    assert!(blocked.events.is_empty());
+    // Only the refusal is recorded (for `langspan today`); nothing is held.
+    assert!(only_refused(&blocked.events), "{:?}", blocked.events);
     assert_eq!(state, before);
     assert!(matches!(
         run(&mut state, admit("alice", &["b.rs"], 500), "lease-c", 100).outcome,
@@ -195,7 +196,18 @@ fn a_sessions_own_active_lease_conflicts_with_a_new_acquisition() {
     run(&mut state, admit("alice", &["a.rs"], 10), "lease-a", 0);
     let decision = run(&mut state, admit("alice", &["a.rs"], 10), "lease-a2", 1);
     assert!(matches!(decision.outcome, Outcome::Conflict { .. }));
-    assert!(decision.events.is_empty());
+    assert!(only_refused(&decision.events), "{:?}", decision.events);
+}
+
+/// A refused admission records that it was refused and nothing else.
+fn only_refused(events: &[Event]) -> bool {
+    matches!(
+        events,
+        [Event::WriteRefused {
+            kind: langspan_core::RefusalKind::Conflict,
+            ..
+        }]
+    )
 }
 
 #[test]
