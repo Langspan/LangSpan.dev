@@ -906,7 +906,11 @@ pub struct LandingAttempt {
 
 /// A symbol definition found by structural indexing. `digest` is the content
 /// of the file it was read from; a match is by name and kind only.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// The fields after `digest` are present only when a lookup asked for
+/// detail (`GraphSymbol { detail: true }`); otherwise the record is the one
+/// every earlier version sent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolRef {
     pub path: String,
@@ -917,6 +921,69 @@ pub struct SymbolRef {
     pub signature: String,
     pub exported: bool,
     pub digest: String,
+    /// SHA-256 of the definition's own bytes as indexed: a change elsewhere
+    /// in the file leaves it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_digest: Option<String>,
+    /// Distinct names called within the definition's lines, first call
+    /// first, at most `MAX_SYMBOL_CALLS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls: Option<Vec<CallCount>>,
+    /// Call sites outside this definition whose callee has this name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callers: Option<Callers>,
+    /// Notes whose paths include this file, newest first, at most
+    /// `MAX_SYMBOL_NOTES`. Their text is data, never instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Vec<SymbolNote>>,
+    /// The newest conclusive check record whose tree holds this file's
+    /// indexed content. Absent when none was found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check: Option<LastCheck>,
+}
+
+/// Distinct callees listed for one definition.
+pub const MAX_SYMBOL_CALLS: u32 = 32;
+/// Caller locations listed for one definition; all of them are counted.
+pub const MAX_CALLER_SITES: u32 = 8;
+/// Notes listed for one definition.
+pub const MAX_SYMBOL_NOTES: usize = 4;
+
+/// One name called within a definition: how often, and the line of the
+/// first call. A name, not a resolved target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CallCount {
+    pub name: String,
+    pub count: u32,
+    pub line: u32,
+}
+
+/// Call sites of a name, found by name only. `sites` are `path:line`, in
+/// path and line order, at most `MAX_CALLER_SITES`; `count` is all of them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Callers {
+    pub count: u32,
+    pub sites: Vec<String>,
+}
+
+/// A remembered note, quoted for a symbol lookup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolNote {
+    pub id: String,
+    pub text: String,
+}
+
+/// A check record named by a symbol lookup: its name, `passed` or
+/// `failed`, and the tree it ran on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LastCheck {
+    pub name: String,
+    pub result: String,
+    pub tree: String,
 }
 
 /// A place a name is mentioned. Not a resolved use: any symbol of that name.
@@ -1878,10 +1945,14 @@ pub enum Command {
         workspace_id: String,
     },
     /// Read-only, answered from the derived index: where `name` is defined.
+    /// With `detail`, each definition also carries its body digest, calls,
+    /// callers, notes and last check (roadmap D1).
     GraphSymbol {
         workspace_id: String,
         name: String,
         limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        detail: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
@@ -2269,10 +2340,14 @@ enum CommandWire {
         workspace_id: String,
     },
     /// Read-only, answered from the derived index: where `name` is defined.
+    /// With `detail`, each definition also carries its body digest, calls,
+    /// callers, notes and last check (roadmap D1).
     GraphSymbol {
         workspace_id: String,
         name: String,
         limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        detail: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
@@ -2626,6 +2701,10 @@ pub enum Outcome {
     Graph {
         symbols: Vec<SymbolRef>,
         references: Vec<NameRef>,
+        /// `name` on a detailed symbol lookup: callers are found by name,
+        /// not resolved. Absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution: Option<String>,
         coverage: GraphCoverage,
         truncated: bool,
     },

@@ -684,7 +684,7 @@ enum Reading {
 
 /// The Git blob ID of `bytes` in a repository whose object IDs have
 /// `object_length` hexadecimal characters: SHA-1 (40) or SHA-256 (64).
-fn blob_id(bytes: &[u8], object_length: usize) -> Option<String> {
+pub(crate) fn blob_id(bytes: &[u8], object_length: usize) -> Option<String> {
     let header = format!("blob {}\0", bytes.len());
     match object_length {
         40 => Some(crate::sha256::hex(&crate::sha1::digest(&[

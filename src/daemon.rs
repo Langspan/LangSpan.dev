@@ -167,6 +167,10 @@ mod unix {
         }
     }
 
+    /// How long a detailed symbol lookup may spend comparing check trees
+    /// with Git. What is not compared by then has no `last_check`.
+    const LAST_CHECK_BUDGET: Duration = Duration::from_millis(300);
+
     /// Answer an index query. The index is derived and may lag the working
     /// tree; `coverage` in the answer says by how much.
     fn graph_query(
@@ -200,10 +204,17 @@ mod unix {
         }
         let graph = graph.ok_or("the index is not available yet; try again shortly")?;
         let failed = |error: Box<dyn std::error::Error + Send + Sync>| error.to_string();
+        let detail = matches!(command, Command::GraphSymbol { detail: true, .. });
         let ((mut symbols, mut references), coverage) = graph
             .with_coverage(workspace_id, |graph| match command {
                 Command::GraphSymbol { name, .. } => {
-                    Ok((graph.symbol(workspace_id, name, limit)?, Vec::new()))
+                    let mut symbols = graph.symbol(workspace_id, name, limit)?;
+                    if detail {
+                        for symbol in symbols.iter_mut().take(limit as usize) {
+                            graph.add_detail(workspace_id, symbol)?;
+                        }
+                    }
+                    Ok((symbols, Vec::new()))
                 }
                 Command::GraphReferences { name, .. } => Ok((
                     Vec::new(),
@@ -213,15 +224,87 @@ mod unix {
                 _ => unreachable!("matched above"),
             })
             .map_err(failed)?;
-        let truncated = symbols.len() > limit as usize || references.len() > limit as usize;
+        let mut truncated = symbols.len() > limit as usize || references.len() > limit as usize;
         symbols.truncate(limit as usize);
         references.truncate(limit as usize);
+        if detail {
+            add_notes_and_checks(state, workspace_id, &mut symbols);
+            truncated |= fit_frame(&mut symbols, &coverage);
+        }
         Ok(Outcome::Graph {
             symbols,
             references,
+            resolution: detail.then(|| "name".into()),
             coverage,
             truncated,
         })
+    }
+
+    /// What the coordinator, not the index, knows about each definition's
+    /// file: notes that name it, and the newest conclusive check record
+    /// whose tree holds its indexed content.
+    fn add_notes_and_checks(
+        state: &State,
+        workspace_id: &str,
+        symbols: &mut [langspan_core::SymbolRef],
+    ) {
+        let notes = state.notes.get(workspace_id).map(Vec::as_slice);
+        let files: std::collections::BTreeMap<String, String> = symbols
+            .iter()
+            .map(|symbol| (symbol.path.clone(), symbol.digest.clone()))
+            .collect();
+        let checked = match (
+            state.workspaces.get(workspace_id),
+            state.checks.get(workspace_id),
+        ) {
+            (Some(workspace), Some(records)) => crate::graph::last_checks(
+                Path::new(&workspace.root),
+                &files,
+                records,
+                Instant::now() + LAST_CHECK_BUDGET,
+            ),
+            _ => Default::default(),
+        };
+        for symbol in symbols {
+            symbol.notes = Some(
+                notes
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|note| note.paths.contains(&symbol.path))
+                    .take(langspan_core::MAX_SYMBOL_NOTES)
+                    .map(|note| langspan_core::SymbolNote {
+                        id: note.note_id.clone(),
+                        text: note.text.clone(),
+                    })
+                    .collect(),
+            );
+            symbol.last_check = checked.get(&symbol.path).cloned();
+        }
+    }
+
+    /// Keep the leading definitions whose answer fits one response frame.
+    /// Returns whether any was left out.
+    fn fit_frame(
+        symbols: &mut Vec<langspan_core::SymbolRef>,
+        coverage: &langspan_core::GraphCoverage,
+    ) -> bool {
+        // The rest of the response: its envelope, the request ID and the
+        // outcome's other fields.
+        const ROOM: usize = 1024;
+        fn size(value: &impl serde::Serialize) -> usize {
+            serde_json::to_vec(value).map_or(usize::MAX / 2, |bytes| bytes.len())
+        }
+        let mut used = ROOM + size(coverage);
+        let keep = symbols
+            .iter()
+            .take_while(|symbol| {
+                used = used.saturating_add(size(*symbol) + 1);
+                used < MAX_FRAME_BYTES
+            })
+            .count();
+        let cut = keep < symbols.len();
+        symbols.truncate(keep);
+        cut
     }
 
     /// Definitions and mentioning files for names taken from a prompt. The
@@ -1749,6 +1832,51 @@ mod unix {
             return Err("resolved file key exceeds 512 bytes".into());
         }
         Ok(relative)
+    }
+
+    #[cfg(test)]
+    mod frame_tests {
+        use super::*;
+        use langspan_core::{GraphCoverage, SymbolNote, SymbolRef};
+
+        #[test]
+        fn a_detailed_answer_keeps_the_definitions_that_fit_one_frame() {
+            let symbol = |index: usize| SymbolRef {
+                path: format!("src/file{index}.rs"),
+                name: "upload".into(),
+                notes: Some(vec![
+                    SymbolNote {
+                        id: "note".into(),
+                        text: "x".repeat(300),
+                    };
+                    4
+                ]),
+                ..SymbolRef::default()
+            };
+            let coverage = GraphCoverage::default();
+            let mut few: Vec<SymbolRef> = (0..3).map(symbol).collect();
+            assert!(!fit_frame(&mut few, &coverage));
+            assert_eq!(few.len(), 3);
+
+            let mut many: Vec<SymbolRef> = (0..200).map(symbol).collect();
+            assert!(fit_frame(&mut many, &coverage), "left out, and said so");
+            assert!(many.len() > 10, "{}", many.len());
+            let response = Response {
+                version: PROTOCOL_VERSION,
+                request_id: "r".repeat(128),
+                replayed: false,
+                generation: u64::MAX,
+                lease_valid: None,
+                outcome: Outcome::Graph {
+                    symbols: many,
+                    references: Vec::new(),
+                    resolution: Some("name".into()),
+                    coverage,
+                    truncated: true,
+                },
+            };
+            protocol::encode(&response).expect("fits one frame");
+        }
     }
 
     #[cfg(all(test, target_os = "linux"))]

@@ -1,0 +1,1 @@
+{"version":3,"request_id":"read","command":{"op":"graph_symbol","workspace_id":"app","name":"upload","limit":10,"detail":true}}

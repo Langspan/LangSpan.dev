@@ -33,7 +33,7 @@ version is dropped and rebuilt. Rows are keyed by workspace and path and
 carry the digest of the exact content they came from. Each worktree is
 therefore indexed as it is on disk, uncommitted changes included, which is
 the revision-aware overlay: the index never describes a version other than
-the one whose digest it names. No separate graph engine: three indexed tables
+the one whose digest it names. No separate graph engine: a few indexed tables
 answer every query here.
 
 **Updating.** After each complete Git scan, the daemon hands the indexer the
@@ -48,9 +48,43 @@ every answer:
 
 | CLI | MCP | Returns |
 | --- | --- | --- |
-| `graph symbol WORKSPACE NAME` | `langspan_symbol` | Definitions of that name |
+| `graph symbol WORKSPACE NAME [--detail]` | `langspan_symbol` (`detail`) | Definitions of that name; with detail, what is around each (below) |
 | `graph references WORKSPACE NAME` | `langspan_references` | Mentions of that name |
 | `graph impact WORKSPACE PATH` | `langspan_impact` | What the file exports, and other files mentioning those names |
+
+**Symbol lookup with detail (added 25 November 2026, roadmap D1).** The
+indexer also stores, per definition, `body_digest`: the SHA-256 of the
+definition's own bytes (its Tree-sitter node, without leading comments or
+attributes), so an edit elsewhere in the file changes the file's `digest`
+but not this one. It stores every call site `calls()` finds (ADR 0029) in a
+`calls` table: workspace, path, the innermost definition whose lines hold
+the call, callee name, line and argument count, replaced with the file's
+other rows. The schema marker went from 2 to 3, so an older file is dropped
+and rebuilt. A lookup with `detail` adds to each definition:
+
+- `calls`: the distinct names called within its lines, with a count and the
+  first line, first call first, at most 32;
+- `callers`: how many call sites outside the definition have its name as
+  callee, and the first 8 as `path:line` in path order. A call of the
+  definition within itself is not counted;
+- `notes`: remembered notes whose paths include its file, newest first, at
+  most 4, with their ID and text. A workspace-wide note is not included;
+- `last_check`: of the 8 newest conclusive check records of the workspace
+  (ADR 0007), the newest whose tree holds the file's indexed content at that
+  path (name, `passed` or `failed`, tree). The daemon reads the file again,
+  only if it still has the indexed digest, computes its raw Git blob ID and
+  compares it with one read-only `git ls-tree` per record, within 300 ms in
+  all. A file Git stores through a clean filter never matches. Absent when
+  none matched: absence claims nothing.
+
+The answer carries `resolution: "name"`: calls and callers are matched by
+name, never resolved to a definition. No source text other than signatures
+and note text is returned. Definitions that would take the response past one
+64 KiB frame are left out, and `truncated` says so. Without `detail` the
+request and the answer are byte for byte what they were (golden vectors
+`fixtures/graph-symbol-detail-*-v3.json`; test
+`a_detailed_lookup_adds_calls_callers_digest_notes_and_check_and_is_rebuilt`
+in `tests/graph.rs`).
 
 Coverage is: supported files in the last scan, how many are indexed at their
 current content, how many only partly parsed, and whether any scan exists.

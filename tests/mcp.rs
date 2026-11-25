@@ -738,3 +738,92 @@ async fn stdio_rejects_oversized_frames_and_recovers_for_the_next_request() {
             .success()
     );
 }
+
+/// `langspan_symbol` with `detail` through a real MCP client, daemon,
+/// indexer and Git repository (roadmap D1).
+#[tokio::test]
+async fn stdio_symbol_with_detail_returns_calls_and_callers_by_name() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let workspace = directory.workspace();
+    for (path, text) in [
+        (
+            "src/upload.rs",
+            "pub fn upload(path: &str) -> bool {\n    let file = open(path);\n    let again = open(path);\n    hash(file, again)\n}\n",
+        ),
+        ("src/cli.rs", "fn main() {\n    upload(\"a\");\n}\n"),
+        ("src/api.rs", "fn serve() {\n\n    upload(\"b\");\n}\n"),
+    ] {
+        fs::write(workspace.join(path), text).expect("write source");
+    }
+    for args in [
+        &["init", "--quiet", "--initial-branch=main"][..],
+        &["add", "."],
+        &["commit", "--quiet", "-m", "init"],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?}");
+    }
+    let _daemon = Daemon::start(&state_dir).await;
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"workspace-register", "workspace_id":"workspace", "root":workspace}),
+        )
+        .await,
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let outcome = loop {
+        let answer = call_tool(
+            &client,
+            "langspan_symbol",
+            json!({"workspace_id":"workspace", "name":"upload", "limit":10, "detail":true}),
+        )
+        .await;
+        let outcome = answer.structured_content.unwrap_or_default()["outcome"].clone();
+        if outcome["symbols"][0]["callers"]["count"] == 2 {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "never indexed: {outcome:#}");
+        sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(outcome["resolution"], "name");
+    let upload = &outcome["symbols"][0];
+    assert_eq!(
+        upload["calls"],
+        json!([{"name":"open","count":2,"line":2},{"name":"hash","count":1,"line":4}])
+    );
+    assert_eq!(
+        upload["callers"]["sites"],
+        json!(["src/api.rs:3", "src/cli.rs:2"])
+    );
+    assert_eq!(upload["body_digest"].as_str().map(str::len), Some(64));
+
+    let plain = response(
+        call_tool(
+            &client,
+            "langspan_symbol",
+            json!({"workspace_id":"workspace", "name":"upload", "limit":10}),
+        )
+        .await,
+    );
+    let Outcome::Graph {
+        symbols,
+        resolution,
+        ..
+    } = plain.outcome
+    else {
+        panic!("{:?}", plain.outcome);
+    };
+    assert_eq!(resolution, None);
+    assert_eq!((&symbols[0].body_digest, &symbols[0].calls), (&None, &None));
+    disconnect(client).await;
+}

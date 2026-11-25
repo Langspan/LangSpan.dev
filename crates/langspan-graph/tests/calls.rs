@@ -162,3 +162,31 @@ fn parameter_counts_of_signatures_as_the_index_stores_them() {
         assert_eq!(counts(language, signature), expected, "{signature}");
     }
 }
+
+/// A symbol lookup with detail (roadmap D1) counts the calls inside one
+/// definition by line and digests that definition's own bytes, so both
+/// rest on these two facts.
+#[test]
+fn a_definitions_bytes_and_the_calls_within_its_lines() {
+    let source = "use std::fs;\n\npub fn upload(path: &str) -> u8 {\n    let a = open(path);\n    let b = open(path);\n    hash(a, b)\n}\n\nfn other() { open(\"x\"); }\n";
+    let graph = langspan_graph::extract(Language::Rust, source.as_bytes()).unwrap();
+    let upload = graph
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "upload")
+        .unwrap();
+    assert_eq!(
+        &source[upload.bytes.clone()],
+        "pub fn upload(path: &str) -> u8 {\n    let a = open(path);\n    let b = open(path);\n    hash(a, b)\n}"
+    );
+    let within: Vec<(String, u32)> = calls(Language::Rust, source.as_bytes())
+        .unwrap()
+        .into_iter()
+        .filter(|call| (upload.line..=upload.end_line).contains(&call.line))
+        .map(|call| (call.name, call.line))
+        .collect();
+    assert_eq!(
+        within,
+        [("open".into(), 4), ("open".into(), 5), ("hash".into(), 6)]
+    );
+}

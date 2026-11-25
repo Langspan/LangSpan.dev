@@ -20,7 +20,7 @@ about graph depth waits.
 
 | Row | Capability | LangSpan today | Decision |
 | --- | --- | --- | --- |
-| D1 | Symbol lookup with calls, span, hash, notes and check state | Path, line, kind, signature | Not now |
+| D1 | Symbol lookup with calls, span, hash, notes and check state | Path, line, kind, signature | Built 25 November 2026 at the owner's request ([issue #50](https://github.com/Langspan/LangSpan.dev/issues/50)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Not yet called on a host |
 | D2 | Blast radius level by level | One level | Not now |
 | D3 | Typed edges, paths between symbols, a repository map | Name mentions | Not now |
 | D4 | A definition's history with rationales and reverted attempts | Raw `events` and `recap` | Not now |
