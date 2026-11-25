@@ -1952,6 +1952,12 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
         let bare = line.ends_with(':');
         let mut line = truncate(&line, PEER_LINE_LIMIT);
         line.push('\n');
+        // A line that is only presence is placed with the rest of presence,
+        // after every work line, local and remote.
+        if bare {
+            local.push((line, with_presence, bare));
+            continue;
+        }
         if used + line.len() + footer.len() + 64 > limit {
             omitted += 1;
             continue;
@@ -1996,15 +2002,14 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
         remote.push_str(&line);
     }
     for (line, with_presence, bare) in local {
+        // A bare line has not been counted in `used`; a work line has.
+        let counted = if bare { 0 } else { line.len() };
         match with_presence {
-            Some(full) if used - line.len() + full.len() + footer.len() + 64 <= limit => {
-                used += full.len() - line.len();
+            Some(full) if used - counted + full.len() + footer.len() + 64 <= limit => {
+                used += full.len() - counted;
                 text.push_str(&full);
             }
-            _ if bare => {
-                used -= line.len();
-                omitted += 1;
-            }
+            _ if bare => omitted += 1,
             _ => text.push_str(&line),
         }
     }
@@ -4169,6 +4174,47 @@ mod briefing_text {
             text.contains(r#"in this checkout on branch "main": looking at "src/auth.rs";"#),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_peer_known_only_by_presence_never_displaces_remote_work() {
+        let remote = |n: usize| langspan_core::RemotePeerWork {
+            name: format!("dev{n}"),
+            work: langspan_core::RemoteWork {
+                host: "codex".into(),
+                session: format!("s{n}"),
+                branch_ref: Some("refs/heads/main".into()),
+                summary: Some("t".repeat(200)),
+                editing: vec![format!("src/{}{n}.rs", "r".repeat(60))],
+                recent: Vec::new(),
+            },
+            overlap: Vec::new(),
+            received_age_ms: 1_000,
+        };
+        let with = |locals: Vec<PeerWork>, remotes: usize| {
+            render_briefing(&Briefing {
+                remote: (0..remotes).map(remote).collect(),
+                ..briefing(locals)
+            })
+        };
+        // The most remote lines that fit on their own.
+        let fit = (1..64)
+            .take_while(|&n| !with(Vec::new(), n).contains("not shown"))
+            .last()
+            .unwrap();
+        let long = format!("src/{}.rs", "p".repeat(100));
+        let watchers: Vec<PeerWork> = (0..8)
+            .map(|n| PeerWork {
+                recent: Vec::new(),
+                summary: None,
+                ..looking(&format!("watcher{n}"), "x", &[long.as_str()])
+            })
+            .collect();
+        let text = with(watchers, fit);
+        assert!(text.len() <= BRIEFING_LIMIT, "{}", text.len());
+        for n in 0..fit {
+            assert!(text.contains(&format!("\"dev{n}\"'s")), "dev{n}: {text}");
+        }
     }
 
     #[test]
