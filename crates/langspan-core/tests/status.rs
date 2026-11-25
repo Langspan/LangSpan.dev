@@ -205,12 +205,28 @@ fn a_page_resumes_after_its_cursor_at_every_split_without_loss_or_repeat() {
                 .collect(),
         );
     }
+    // What the workspace learned about tests that flip is one record.
+    let mut learning = langspan_core::TestLearning::default();
+    learning.tests.insert(
+        "tests".into(),
+        [(
+            "net::times_out".into(),
+            langspan_core::TestHistory {
+                runs: vec![true, false, true],
+                flaky: true,
+                last_flip_ms: NOW,
+            },
+        )]
+        .into_iter()
+        .collect(),
+    );
+    state.test_learning.insert("w".into(), learning);
     let all: Vec<(String, StatusRecord)> = status_records(&state, None)
         .unwrap()
         .1
         .map(|(position, record)| (position.after(), record))
         .collect();
-    assert_eq!(all.len(), 1 + 5 + 5 + 5 + 9);
+    assert_eq!(all.len(), 1 + 5 + 5 + 5 + 9 + 1);
     for split in 0..all.len() {
         let rest: Vec<StatusRecord> = status_records(&state, Some(&all[split].0))
             .unwrap()
