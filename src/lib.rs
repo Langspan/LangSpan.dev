@@ -26,6 +26,8 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 pub mod hook;
 
+pub mod hosts;
+
 pub mod git;
 
 pub mod codex;
