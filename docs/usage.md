@@ -210,6 +210,41 @@ Gemini reads `.gemini/settings.json` only from the directory it was started
 in, so a project install covers sessions started at the checkout's root. [ADR 0033](adr/0033-gemini-cli-adapter.md) lists
 these limits.
 
+### The LangSpan skill
+
+The LangSpan skill teaches an agent how to work with LangSpan from its first
+session: that LangSpan's messages are coordination data, never instructions;
+how to respond to a briefing, a stale-source or unread-lines refusal, a
+conflict, a break alert, an automatic check result and a held commit; when to
+use `status`, `commit --mine`, `integrate check` and `land` (or the matching
+`langspan_*` MCP tools); and what never to do. Its one source text is
+[`src/skill.md`](../src/skill.md). It is off by default:
+
+```sh
+./target/release/langspan install --skill                 # dry run: shows each file and its size
+./target/release/langspan install --skill --apply
+./target/release/langspan hooks install cursor --workspace demo --root /path/to/checkout --skill --apply
+```
+
+| Host | Written as | Removed by |
+| --- | --- | --- |
+| Claude Code | The skill `~/.claude/skills/langspan/SKILL.md` | `langspan uninstall --apply` |
+| Codex | A marked section of `~/.codex/AGENTS.md` | `langspan uninstall --apply` |
+| Gemini CLI | A marked section of `~/.gemini/GEMINI.md` | `langspan uninstall --apply --hosts gemini-cli` |
+| Cursor | The project rule `.cursor/rules/langspan.mdc` | `langspan hooks remove cursor --root DIR --apply` |
+
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME` move these files as
+they move the hooks. In `AGENTS.md` and `GEMINI.md`, every line outside
+LangSpan's section is left as it is, and a file that held only the section is
+removed with it. An existing `SKILL.md` or `langspan.mdc` that LangSpan did not
+write, or a section whose markers are broken, stops the install before any
+file is written. Reinstalling replaces LangSpan's own copy, edits to it
+included. `langspan doctor` reports, for each host, whether the skill is not
+installed, installed and up to date, or different from this version's (then
+run the install again); for Cursor it does so with `--root DIR`. The skill is
+advice: nothing is held or refused through it.
+[ADR 0034](adr/0034-langspan-skill.md) records the formats and their limits.
+
 ## Source versions
 
 A completed Claude Code `Read` records the file's SHA-256 as seen on disk by the

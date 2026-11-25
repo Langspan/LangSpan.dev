@@ -46,7 +46,10 @@ partial [shell-write coverage](adr/0011-shell-writes.md);
 [region admission](adr/0012-region-admission.md); the read-only
 [dashboard](adr/0013-dashboard.md); the [observation spool](adr/0014-observation-spool.md);
 [version tolerance](adr/0015-version-tolerance.md); the
-[release pipeline](adr/0031-releases.md). The MCP server has 23 tools (`src/mcp.rs`,
+[release pipeline](adr/0031-releases.md); the
+[LangSpan skill](adr/0034-langspan-skill.md) (`install --skill`, off by
+default; tested with a temporary home, not yet observed in use by an agent on
+a real host). The MCP server has 23 tools (`src/mcp.rs`,
 asserted in `tests/mcp.rs`). The repository has an Apache-2.0 `LICENSE`.
 
 **Roadmap and the launch bar.** A source-level capability review on

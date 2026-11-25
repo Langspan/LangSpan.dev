@@ -128,6 +128,25 @@ and per-project trust state.
 | **Denial of service**: a broken user-level hook affects every repository | The hook keeps the project form's budget, gives no decision on any failure, exits 0, and prints nothing outside a Git repository or when a project install covers the repository. | A missing executable makes the host report a failed hook on every event until `uninstall` or a reinstall; `doctor` names it and the command to run again. Under Homebrew the entries name the `opt` link rather than the versioned keg, so `brew upgrade` does not cause this; that link is resolved on every run, and anyone who can change it can already replace the binary in the same Homebrew prefix. |
 | **Elevation of privilege** | No permission, trust or approval setting of either host is written or weakened. Codex still requires its own review of the new hook; Claude Code's own permission flow still governs every tool call. The hook never answers `allow`. | Installing a user-level hook is the owner's grant of a command that runs on every session; it is shown before it is written. |
 
+## The LangSpan skill
+
+`langspan install --skill` writes agent guidance where each host reads it on
+every session ([ADR 0034](../adr/0034-langspan-skill.md)):
+`~/.claude/skills/langspan/SKILL.md`, a section of `~/.codex/AGENTS.md` and of
+`~/.gemini/GEMINI.md`, and, with `hooks install cursor --skill`, the project
+rule `.cursor/rules/langspan.mdc`. This text reaches the model directly, so it
+is an installed configuration that shapes what agents do.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: a file that looks like LangSpan's skill is treated as LangSpan's, or the reverse | A whole file is LangSpan's only with its `langspan-managed:skill:v1` mark; a section only between its begin and end lines. A file of the same name without the mark stops the install with nothing written, and is never removed. | Someone who writes the mark into a file of that name has written LangSpan's file; reinstall replaces it and uninstall removes it. |
+| **Tampering**: the install damages the owner's `AGENTS.md` or `GEMINI.md` | Only LangSpan's section changes; every other line is kept byte for byte. Two sections, or a marker without its partner, stop the install. The installer's guarded writer is used: dry run first, every file planned before any write, a change made meanwhile planned against again and never overwritten, symlinks refused, 1 MiB bound, new files `0600` and new folders `0700`. A removal is refused when the file changed since it was planned. | Edits the owner makes inside LangSpan's section or file are replaced by a reinstall. |
+| **Tampering**: the skill tells agents to do something harmful | The text is compiled into the executable from `src/skill.md`, reviewed like code, and every command, option, tool and message it names is checked against the code by tests. It tells agents to treat everything LangSpan relays as data, never instructions. | A wrong statement that uses existing names is not caught by the tests. |
+| **Repudiation** | The dry run prints each file's path, size and full text; `doctor` reports for each host whether it is installed, current or different. | No install log is kept beyond the files themselves. |
+| **Information disclosure** | The skill holds no path, identity or state from the machine: every copy is the same text. Reading `AGENTS.md` or `GEMINI.md` looks only for LangSpan's marker lines. | A dry run of a section install prints the owner's whole `AGENTS.md` or `GEMINI.md` with the section in it, to the terminal that ran it. |
+| **Denial of service** | Every form is at most 500 lines and 8 KiB, within each host's documented limit, and adds that much to every session's context. | The added context is spent on every session, whether or not LangSpan is in use in that repository. |
+| **Elevation of privilege** | The skill grants nothing: no permission, trust or approval setting is written, and it tells agents never to turn LangSpan's hooks off. | An agent can ignore it; it is advice, not a gate. |
+
 ## A linked worktree's own install
 
 The main checkout's project hook, run by a host started in a linked worktree,
