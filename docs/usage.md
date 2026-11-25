@@ -597,6 +597,17 @@ its line count and its first 6 lines (at most 200 characters each, control
 characters replaced). Git's conflict type is given per file, such as `contents`
 or `modify/delete`. These lines are the repository's text, shown as data.
 
+An inconclusive `integrate check` says why, in the same words on the CLI and in
+the MCP result's `inconclusive` field: its `cause` (`changed_during_run`,
+`checked_out_differently`, `did_not_finish`, or `replayed` for a retry of a
+request whose record does not keep the reason), a `message`, up to 20 of the
+`changed` files with whether each was added, modified or deleted and whether
+it is untracked (`changed_total` counts them all), and what to do `next`. A
+check command that writes a file the branch does not track, such as a lock
+file a build tool creates, is the usual cause: commit the file on the branch or
+add it to `.gitignore`, then run the check again under a new request ID. The
+paths are the repository's text, redacted and without control characters.
+
 Combining always follows renames, whatever `merge.renames` is set to: when the
 target renamed a file after a branch started, the branch's edits to the old name
 are combined into the new file, and the result's `renames` (and the printed
@@ -678,6 +689,15 @@ with hooks installed under `--state-dir`, pass the same `--state-dir`; when
 it finds no running session, the error names the directory it looked in and,
 if a LangSpan hook installed in the checkout names another one, that one.
 The MCP tool `langspan_commit_mine` does the same.
+
+When a Git step fails, the error names the step, its exit status and what Git
+said (its last lines, at most 1 KiB, redacted as other relayed text is). The
+commit is built in the Git directory, so it needs to write there: inside an
+agent's workspace sandbox that directory is often read-only, and the error then
+says so. Run `commit --mine` outside the sandbox (from a terminal, or with the
+host's permission to run it unsandboxed), or make the Git directory writable.
+The commit guard's own Git reads report a failure the same way, in the hook's
+log line, and give no decision.
 
 Which lines are whose comes from a journal the hooks keep on this machine
 (`STATE/journal/`, owner-only): for each reported edit and observed shell
