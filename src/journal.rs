@@ -89,6 +89,12 @@ pub struct Entry {
     /// write changed more than the journal keeps: the session changed this
     /// file, in lines that are not known.
     pub lines: Option<Lines>,
+    /// Only part of the write is this session's: the lines its shell
+    /// command reformatted while another session's command could also have
+    /// written the file (issue #124). Its lines count; the version it left
+    /// is not this session's alone, so it is not among the file's versions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
 }
 
 /// Who wrote which lines of one file, from its journal entries: the public
@@ -112,7 +118,9 @@ pub fn by_file(entries: &[Entry]) -> BTreeMap<&str, FileLines<'_>> {
     for entry in entries {
         let file = files.entry(entry.path.as_str()).or_default();
         let session = entry.session_id.as_str();
-        file.versions.push((entry.at_ms, session, &entry.after));
+        if !entry.partial {
+            file.versions.push((entry.at_ms, session, &entry.after));
+        }
         match &entry.lines {
             None => {
                 file.unknown.insert(session);
@@ -494,6 +502,7 @@ pub fn record(
                 at_ms: now_ms(),
                 after,
                 lines: None,
+                partial: false,
             };
             write_entry(&directory, &operation, &entry)?;
             recorded += 1;
@@ -519,6 +528,7 @@ pub fn record(
             at_ms: now_ms(),
             after: state_of(after.as_deref()),
             lines: start.and_then(|start| diff_lines(&start, after_bytes)),
+            partial: false,
         };
         write_entry(&directory, &operation, &entry)?;
         recorded += 1;
@@ -609,6 +619,104 @@ pub fn rewrites_others(
         })
         .cloned()
         .collect()
+}
+
+/// Of the files a shell command changed, what only reformats its own
+/// session's lines (issue #124): files whose whole change does, and the
+/// credited lines of files where only part of it does.
+#[derive(Debug, Default)]
+pub struct Reformats {
+    pub whole: Vec<String>,
+    pub partial: Vec<(String, Lines)>,
+}
+
+/// Of `paths`, files `session_id`'s shell command changed while another
+/// session's overlapping command could also have written them, the part of
+/// each change that only reformats this session's own uncommitted lines
+/// (`crate::reformat`). A line may be credited once per copy the file
+/// gained since `HEAD` that this session's journaled writes added and no
+/// other session's did. A file with a write whose lines are not known, or
+/// whose content before the command, now or in `HEAD` is not known, has
+/// none.
+pub fn own_reformats(
+    state_dir: &Path,
+    root: &Path,
+    session_id: &str,
+    paths: &[String],
+    snapshot: &crate::shell::Snapshot,
+    deadline: Instant,
+) -> Reformats {
+    let mut found = Reformats::default();
+    // A write of more files is not journaled, nor credited (`record`).
+    if paths.len() > MAX_PATHS_PER_WRITE {
+        return found;
+    }
+    let entries = entries_for(state_dir, root, paths);
+    let files = by_file(&entries);
+    for path in paths {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let Some(file) = files.get(path.as_str()) else {
+            continue;
+        };
+        if !file.unknown.is_empty() {
+            continue;
+        }
+        let credited = || -> Option<crate::reformat::Credited> {
+            let before = shell_before(state_dir, root, snapshot, path, deadline)?;
+            let now = read_file(root, path)??;
+            let head = head_content(root, path, snapshot.head.as_deref(), deadline)?;
+            let mut own: BTreeMap<String, usize> = BTreeMap::new();
+            for key in diff_lines(&head, &before)?.added {
+                let only_own = file.added.get(key.as_str()).is_some_and(|sessions| {
+                    sessions
+                        .iter()
+                        .all(|session| crate::commit::is_own(session_id, session))
+                });
+                if only_own {
+                    *own.entry(key).or_default() += 1;
+                }
+            }
+            crate::reformat::own_reformat(&before, &now, &own)
+        };
+        match credited() {
+            Some(credited) if credited.whole => found.whole.push(path.clone()),
+            Some(credited)
+                if !credited.lines.added.is_empty() || !credited.lines.removed.is_empty() =>
+            {
+                found.partial.push((path.clone(), credited.lines));
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Record the credited part of `session_id`'s shell write of each file, as
+/// `own_reformats` found it: a partial entry with those lines.
+pub fn record_partial(
+    state_dir: &Path,
+    root: &Path,
+    session_id: &str,
+    parts: &[(String, Lines)],
+) -> Result<usize, String> {
+    let directory = workspace_dir(state_dir, root);
+    for (path, lines) in parts {
+        let Some(after) = crate::hook::file_state(root, path) else {
+            continue;
+        };
+        let entry = Entry {
+            session_id: session_id.into(),
+            path: path.clone(),
+            at_ms: now_ms(),
+            after,
+            lines: Some(lines.clone()),
+            partial: true,
+        };
+        write_entry(&directory, "", &entry)?;
+    }
+    Ok(parts.len())
 }
 
 /// A file's content in `head` (any commit), empty when it does not have it,
@@ -867,6 +975,7 @@ mod tests {
             at_ms,
             after: state_of(Some(after)),
             lines: diff_lines(before, after),
+            partial: false,
         };
         let entries = vec![
             entry("a", 1, b"x\ny\n", b"x\nA\ny\n"),
@@ -917,6 +1026,7 @@ mod tests {
             at_ms,
             after: state_of(Some(b"x\n")),
             lines: diff_lines(b"", b"x\n"),
+            partial: false,
         }
     }
 

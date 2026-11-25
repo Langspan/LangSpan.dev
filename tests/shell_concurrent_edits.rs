@@ -568,6 +568,134 @@ fn a_formatter_rewriting_another_sessions_uncommitted_lines_does_not_take_them()
     );
 }
 
+/// The commit output, for an assertion's message.
+fn said(ran: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    )
+}
+
+/// Issue #124: Alice's formatter runs while Bob's long command (a test run,
+/// say) is still going, and only reformats lines Alice wrote. Bob's command
+/// could have written anything, yet a change that keeps every token of
+/// Alice's own lines and changes only their whitespace is hers: the file is
+/// credited to her and her `commit --mine` takes it.
+#[test]
+fn a_formatter_reformatting_only_its_sessions_lines_during_another_sessions_command_is_credited() {
+    let f = Fixture::new();
+    f.write(
+        ALICE,
+        "alice-1",
+        "a.txt",
+        "a line\nfn alice(x,y) {}\nfn more(p,q,r) {}\n",
+    );
+    let (bob, bob_command) = f.start_held(BOB, "bob-1", "true");
+
+    let post = f.run_shell(ALICE, "alice-2", &f.formatter(&["a.txt"]));
+    assert_eq!(post.coverage, "shell_observed", "{post:?}");
+    assert_eq!(f.credited(ALICE, "Bash"), ["a.txt"]);
+
+    let ran = f.commit_mine(ALICE, "alice-3", "Alice: formatted");
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:a.txt"]),
+        "a line\nfn alice(x, y) {}\nfn more(p, q, r) {}\n"
+    );
+    assert_eq!(f.status(), "");
+    bob.release();
+    f.bash(BOB, "PostToolUse", "bob-1", &bob_command);
+}
+
+/// Issue #124: as above, but Bob's command also changed one of Alice's lines
+/// while her formatter ran. That line is credited to no session; her other
+/// reformatted line is still hers, and `commit --mine` commits it alone.
+#[test]
+fn a_line_the_other_sessions_command_also_changed_is_credited_to_no_session() {
+    let f = Fixture::new();
+    fs::write(f.work().join("a.txt"), "one\ntwo\nthree\nfour\nfive\n").unwrap();
+    git(&f.work(), &["commit", "-q", "-am", "five lines"]);
+    f.write(
+        ALICE,
+        "alice-1",
+        "a.txt",
+        "fn alice(x,y) {}\ntwo\nthree\nfour\nfn other(x,y) {}\n",
+    );
+    // Bob's command changes Alice's last line, after Alice's formatter has
+    // started and before it rewrites the file.
+    let scratch = f.base.join("bob-scratch");
+    let (bob, bob_command) = f.start_held(
+        BOB,
+        "bob-1",
+        &format!(
+            "sed '5s/(x,y)/(x,z)/' a.txt > '{0}' && cat '{0}' > a.txt",
+            scratch.display()
+        ),
+    );
+    let (alice, alice_command) = f.start_held(ALICE, "alice-2", &f.formatter(&["a.txt"]));
+    bob.release();
+    alice.release();
+    assert_eq!(
+        fs::read_to_string(f.work().join("a.txt")).unwrap(),
+        "fn alice(x, y) {}\ntwo\nthree\nfour\nfn other(x, z) {}\n"
+    );
+
+    let post = f.bash(ALICE, "PostToolUse", "alice-2", &alice_command);
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert!(
+        post.detail.contains("1 of them partly this session's"),
+        "{post:?}"
+    );
+    assert!(f.credited(ALICE, "Bash").is_empty());
+    f.bash(BOB, "PostToolUse", "bob-1", &bob_command);
+
+    // `commit --mine` commits nothing while a hunk's owner is not known, and
+    // names that hunk: line 5 alone, so line 1 is Alice's.
+    let ran = f.commit_mine(ALICE, "alice-3", "Alice: formatted");
+    assert!(!ran.status.success(), "{}", said(&ran));
+    let refused = said(&ran);
+    assert!(
+        refused.contains("a.txt (line 5): part of it was written by this session and part by another session or by none")
+            && !refused.contains("line 1"),
+        "{refused}"
+    );
+    assert_eq!(f.head_files(), "five lines\n\na.txt\n");
+    assert_eq!(
+        fs::read_to_string(f.work().join("a.txt")).unwrap(),
+        "fn alice(x, y) {}\ntwo\nthree\nfour\nfn other(x, z) {}\n"
+    );
+}
+
+/// Issue #124: a formatter that reformats another session's uncommitted
+/// lines while that session's command runs takes none of them: Alice's own
+/// file is hers, Bob's stays nobody's and out of her `commit --mine`.
+#[test]
+fn a_formatter_during_another_sessions_command_still_takes_none_of_its_lines() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "a.txt", "a line\nfn alice(x,y) {}\n");
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+    let (bob, bob_command) = f.start_held(BOB, "bob-2", "true");
+
+    let post = f.run_shell(ALICE, "alice-2", &f.formatter(&["a.txt", "b.txt"]));
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert!(
+        post.detail
+            .contains("1 changed file(s) attributed to this session")
+            && post.detail.contains("1 attributed to no session"),
+        "{post:?}"
+    );
+    assert_eq!(f.credited(ALICE, "Bash"), ["a.txt"]);
+    bob.release();
+    f.bash(BOB, "PostToolUse", "bob-2", &bob_command);
+
+    let ran = f.commit_mine(ALICE, "alice-3", "Alice: formatted");
+    assert!(ran.status.success(), "{}", said(&ran));
+    let head = f.head_files();
+    assert!(head.contains("a.txt") && !head.contains("b.txt"), "{head}");
+    assert_eq!(f.status(), " M b.txt\n");
+}
+
 /// Once another session's lines are committed, rewriting them is a change
 /// of committed lines like any other: the command's session is credited.
 #[test]
