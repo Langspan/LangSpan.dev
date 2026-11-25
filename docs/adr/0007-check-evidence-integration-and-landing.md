@@ -21,7 +21,12 @@ tree of everything the command could read. For a working directory that tree
 is built through a private index from every tracked and every untracked,
 unignored file, so it is exact even with uncommitted changes. The tree is taken
 before and after the command. If they differ, or the command did not finish,
-the result is **inconclusive**: it is not about any one tree.
+the result is **inconclusive**: it is not about any one tree. An inconclusive
+combined check says why, as one reason the CLI prints and the MCP result
+carries in `inconclusive`: the cause, the files that differed from the combined
+tree (at most 20 named, each added, modified or deleted and whether it is
+untracked; paths redacted, as data) and the next step. The reason is part of
+the result, not the record: a replay of the same request says only that.
 
 **Applicability is a comparison, not a memory.** `langspan check status`
 builds the tree as it is now and compares. A record applies only if its tree

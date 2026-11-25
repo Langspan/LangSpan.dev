@@ -153,6 +153,17 @@ character (test
 A retry is safe without a receipt: what was committed is no longer
 uncommitted.
 
+A failed Git step, in `commit --mine` or in the guard's own reads, is
+reported with the step, its exit status and Git's standard error as
+`git::said` gives it (the last six lines, at most 1 KiB, control characters
+removed, redacted), labelled `Git said:`. When Git or LangSpan could not
+write (`Read-only file system`, `Permission denied`, `Operation not
+permitted`), the error adds the usual cause, a Git directory that is
+read-only inside an agent's workspace sandbox, and the fix: run the command
+outside the sandbox or make the Git directory writable (added from issue #4;
+tests `a_read_only_git_directory_is_named_with_gits_own_words_and_the_fix`
+and `a_failed_git_read_in_the_commit_guard_says_what_git_said`).
+
 ## Never covered
 
 - The hook fallback for Git before 2.36 (running files from the hooks

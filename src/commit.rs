@@ -479,8 +479,7 @@ fn diff(
     args.extend_from_slice(extra);
     args.push("--");
     args.extend(pathspecs.iter().map(String::as_str));
-    let bytes = crate::git::output(dir, &args, deadline, MAX_DIFF_BYTES)
-        .map_err(|e| format!("git diff: {e}"))?;
+    let bytes = git_in(dir, &args, None, deadline)?;
     parse_diff(&bytes)
 }
 
@@ -505,8 +504,7 @@ fn untracked(
         args.push(":/");
     }
     args.extend(pathspecs.iter().map(String::as_str));
-    let listed = crate::git::output(dir, &args, deadline, 1024 * 1024)
-        .map_err(|e| format!("git ls-files: {e}"))?;
+    let listed = git_bounded(dir, &args, None, deadline, 1024 * 1024)?;
     let mut files = Vec::new();
     for path in listed.split(|b| *b == 0).filter(|p| !p.is_empty()) {
         if files.len() >= MAX_UNTRACKED {
@@ -973,15 +971,73 @@ fn git_in(
     index: Option<&Path>,
     deadline: Instant,
 ) -> Result<Vec<u8>, String> {
+    git_bounded(root, args, index, deadline, MAX_DIFF_BYTES)
+}
+
+/// The most characters of a Git command line named in an error.
+const SHOWN_COMMAND: usize = 160;
+
+/// One Git step of the commit or of the guard. A failure names the step,
+/// its exit status and Git's own words (redacted and capped by
+/// `git::said`), with the usual fix when Git could not write.
+fn git_bounded(
+    root: &Path,
+    args: &[&str],
+    index: Option<&Path>,
+    deadline: Instant,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
     let env: Vec<(&str, &std::ffi::OsStr)> = index
         .map(|index| vec![("GIT_INDEX_FILE", index.as_os_str())])
         .unwrap_or_default();
-    let (status, bytes) = crate::git::run_with_env(root, args, &env, deadline, MAX_DIFF_BYTES)
+    let (status, bytes, errors) = crate::git::run_with_errors(root, args, &env, deadline, limit)
         .map_err(|e| format!("git {}: {e}", args.first().unwrap_or(&"")))?;
-    if !status.success() {
-        return Err(format!("git {} failed ({status})", args.join(" ")));
+    if status.success() && errors.is_empty() {
+        return Ok(bytes);
     }
-    Ok(bytes)
+    let command: String = crate::hook::redact(&args.join(" "))
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(SHOWN_COMMAND)
+        .collect();
+    let what = if status.success() {
+        "printed a warning".to_owned()
+    } else {
+        format!("failed ({status})")
+    };
+    let said = crate::git::said(&errors);
+    let mut error = format!("git {command} {what}");
+    if !said.is_empty() {
+        error.push_str(&format!(". Git said: {said}"));
+    }
+    let text = String::from_utf8_lossy(&errors);
+    if !status.success()
+        && [
+            "Read-only file system",
+            "Permission denied",
+            "Operation not permitted",
+        ]
+        .iter()
+        .any(|cause| text.contains(cause))
+    {
+        error.push_str(&format!(". {READ_ONLY}"));
+    }
+    Err(error)
+}
+
+/// The usual cause and fix when Git, or LangSpan in the Git directory,
+/// cannot write.
+const READ_ONLY: &str = "The Git directory is read-only for this process, as it is inside some agents' workspace sandboxes: run `langspan commit --mine` outside the agent's sandbox (for example from a terminal, or with the host's permission to run it unsandboxed), or make the Git directory writable, then run it again";
+
+/// A file LangSpan writes in the Git directory could not be written: what,
+/// why, and the usual fix when the cause is a read-only directory.
+fn write_failed(what: &str, error: &std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::PermissionDenied => {
+            format!("cannot write {what}: {error}. {READ_ONLY}")
+        }
+        _ => format!("cannot write {what}: {error}"),
+    }
 }
 
 /// Stage `staged` into the index at `index` (the shared one when `None`).
@@ -1008,7 +1064,7 @@ fn stage(
     }
     if !patches.is_empty() {
         let patch_file = git_dir.join(format!("{}.patch", private_name()));
-        fs::write(&patch_file, &patches).map_err(|e| format!("cannot write the patch: {e}"))?;
+        fs::write(&patch_file, &patches).map_err(|e| write_failed("the patch", &e))?;
         let applied = git_in(
             root,
             &[
@@ -1197,7 +1253,7 @@ fn commit_on(
         stage(root, git_dir, staged, Some(&index), deadline).map_err(failed)?;
         // As `git commit -m` hands it to the hooks: cleaned, newline-ended.
         fs::write(&message_file, clean_message(message))
-            .map_err(|e| failed(format!("cannot write the commit message: {e}")))?;
+            .map_err(|e| failed(write_failed("the commit message", &e)))?;
         let message_path = message_file.to_string_lossy().into_owned();
         let hooks = Hooks::find(root, deadline).map_err(failed)?;
         for (hook, args) in [
@@ -1219,7 +1275,7 @@ fn commit_on(
             return Err(failed("the commit message is empty".into()));
         }
         fs::write(&message_file, &cleaned)
-            .map_err(|e| failed(format!("cannot write the commit message: {e}")))?;
+            .map_err(|e| failed(write_failed("the commit message", &e)))?;
         let tree = git_in(root, &["write-tree"], Some(&index), deadline).map_err(failed)?;
         let tree = String::from_utf8_lossy(&tree).trim().to_owned();
         let sign = crate::git::run_with_env(
