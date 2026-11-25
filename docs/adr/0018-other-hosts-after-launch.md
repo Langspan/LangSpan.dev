@@ -60,7 +60,7 @@ it never installs, upgrades or edits a host's configuration.
 ### I11, as built
 
 The hooked-host part of row I11 is built, after measuring what it saves:
-about 2.6 KB of a 31 KB tool list (8.4%), as recorded in
+about 2.6 KB of a 32 KB tool list (8.1%, 28 tools), as recorded in
 [benchmarks/mcp-tools](../../benchmarks/mcp-tools/README.md).
 
 - `langspan mcp --tools all|hooked --host claude-code|codex`. The default is

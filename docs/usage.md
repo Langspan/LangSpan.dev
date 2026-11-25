@@ -190,7 +190,7 @@ their hooks are verified on a real host, and the dry run says so. Like every
 install, it writes nothing until `--apply`. `--mcp-tools all`, or installing
 again without the option, writes the plain entry back; `uninstall --apply`
 removes the entry with its flags. The default is `all`, and LangSpan never
-switches it by itself. The measured saving is about 2.6 KB of the 31 KB list
+switches it by itself. The measured saving is about 2.6 KB of the 32 KB list
 ([benchmarks/mcp-tools](../benchmarks/mcp-tools/README.md)).
 
 User-level installation has been tested with a temporary home and real daemon,

@@ -29,9 +29,9 @@ the whole sample.
 
 | | Tools | Tool list bytes | Instructions bytes | Total |
 | --- | ---: | ---: | ---: | ---: |
-| `--tools all` (default) | 27 | 30,639 | 494 | 31,133 |
-| `--tools hooked`, hooks reporting | 23 | 27,749 | 781 | 28,530 |
-| Difference | 4 | 2,890 | +287 | 2,603 (8.4%) |
+| `--tools all` (default) | 28 | 31,840 | 494 | 32,334 |
+| `--tools hooked`, hooks reporting | 24 | 28,950 | 781 | 29,731 |
+| Difference | 4 | 2,890 | +287 | 2,603 (8.1%) |
 
 The four tools left out while hooks report:
 
@@ -48,8 +48,8 @@ test's output.
 
 ## Reading it
 
-The whole list is about 31 KB on every request that carries it. Hiding the
-four bookkeeping tools saves about 2.6 KB of that, 8.4%, once the longer
+The whole list is about 32 KB on every request that carries it. Hiding the
+four bookkeeping tools saves about 2.6 KB of that, 8.1%, once the longer
 instructions naming them are counted. Whether that is worth having is the
 owner's call: the option is off unless an install asks for it
 (`install --mcp-tools hooked`), and LangSpan never turns it on by itself. The larger effect the issue names,
