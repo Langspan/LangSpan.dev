@@ -273,9 +273,68 @@ pub fn not_installed(reports: &[HostReport], roots: &[PathBuf], state_dir: &Path
         .collect()
 }
 
-/// The line `status` shows for a host held as not installed.
-pub fn status_line(host: &str) -> String {
+/// One daemon check: the hosts to hold as not installed, and why any host
+/// could not be inspected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Observation {
+    pub not_installed: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// What the daemon's check reports, given the hosts already `held` as not
+/// installed. A held host whose inspection is unknown stays held: neither
+/// an install nor a removal is established, so its notice is not cleared.
+pub fn observe(
+    reports: &[HostReport],
+    roots: &[PathBuf],
+    state_dir: &Path,
+    held: &[String],
+) -> Observation {
+    let mut not_installed: Vec<String> = not_installed(reports, roots, state_dir)
+        .into_iter()
+        .map(|vendor| vendor.name().to_owned())
+        .collect();
+    let mut errors = Vec::new();
+    for report in reports {
+        let unknown = report.present.is_none() || report.user_install == UserInstall::Unknown;
+        if !unknown {
+            continue;
+        }
+        errors.push(format!(
+            "{}: {}",
+            report.name,
+            report.error.as_deref().unwrap_or("could not be inspected")
+        ));
+        if held.iter().any(|host| host == report.name)
+            && !not_installed.iter().any(|host| host == report.name)
+        {
+            not_installed.push(report.name.to_owned());
+        }
+    }
+    Observation {
+        not_installed,
+        errors,
+    }
+}
+
+/// The command that previews an install of `host` for the coordinator at
+/// `state_dir`. The state directory is always named: the shell it is run
+/// in may choose another by default, and hooks installed for another
+/// coordinator do not coordinate with this one. `host` is a name the core
+/// accepted: lower-case letters and hyphens, so it needs no quoting.
+pub fn preview_command(host: &str, state_dir: &Path) -> String {
+    let state_dir = std::path::absolute(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
     format!(
-        "hosts: {host} has a configuration directory but no LangSpan hooks; run `langspan install --hosts {host}` to preview, then add --apply"
+        "langspan install --hosts {host} --state-dir {}",
+        install::quote(&state_dir.to_string_lossy())
+    )
+}
+
+/// The line `status` shows for a host held as not installed by the
+/// coordinator at `state_dir`.
+pub fn status_line(host: &str, state_dir: &Path) -> String {
+    format!(
+        "hosts: {host} has a configuration directory but no LangSpan hooks; run `{}` to preview, then add --apply",
+        preview_command(host, state_dir)
     )
 }

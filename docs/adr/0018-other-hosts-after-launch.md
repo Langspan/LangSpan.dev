@@ -42,8 +42,14 @@ it never installs, upgrades or edits a host's configuration.
   owner as one `observe_hosts` request with their names only. The core records
   `host_not_installed` once per host and `host_cleared` when it is covered or
   gone, so an unchanged host is never recorded twice, across restarts too.
+  A held host that cannot be inspected at a check (an unreadable directory,
+  an unparseable file) stays held and the error is logged: neither an install
+  nor a removal is established, so the notice is not cleared.
 - `langspan status`, the dashboard and `doctor` show it to the owner; agents
-  are not told. `doctor` marks the host as needing attention only when sessions
+  are not told. The install command `status` and the dashboard name always
+  carries the coordinator's `--state-dir`, shell-quoted, since an install for
+  another state directory would not coordinate with the coordinator that
+  reported the host. `doctor` marks the host as needing attention only when sessions
   of another host use the coordinator.
 - Gemini CLI is reported but never proposed or recorded, as `install` does not
   choose it by itself.

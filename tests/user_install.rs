@@ -1500,3 +1500,147 @@ fn the_daemon_notes_an_uninstalled_host_once_until_it_is_installed() {
     assert_eq!(events("host_cleared"), 1);
     assert_eq!(events("host_not_installed"), 1);
 }
+
+impl Home {
+    /// A daemon in this home checking its hosts every 200 ms, logging to
+    /// `daemon.log` in the base directory.
+    fn start_host_check(&mut self) {
+        fs::create_dir(self.state_dir()).unwrap();
+        fs::set_permissions(self.state_dir(), fs::Permissions::from_mode(0o700)).unwrap();
+        let config = self.state_dir().join("config.json");
+        fs::write(&config, r#"{"host_check_ms": 200}"#).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        let log = fs::File::create(self.base.join("daemon.log")).unwrap();
+        let mut daemon = Process::new(env!("CARGO_BIN_EXE_langspan"));
+        support::in_home(&mut daemon, &self.home())
+            .args(["daemon", "--state-dir"])
+            .arg(self.state_dir())
+            .stdout(Stdio::null())
+            .stderr(log);
+        self.daemon = Some(daemon.spawn().unwrap());
+    }
+    /// Wait until `host` is held as not installed (or not); the state then.
+    fn held(&self, host: &str, want: bool) -> langspan_core::State {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(response) = client::call(&self.state_dir(), &status())
+                && let Outcome::Status { state, .. } = response.outcome
+                && state.uninstalled_hosts.contains_key(host) == want
+            {
+                return state;
+            }
+            assert!(Instant::now() < deadline, "{host} never held as {want}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    /// How many events of `kind` the coordinator has recorded.
+    fn count(&self, kind: &str) -> usize {
+        let Outcome::Events { events } = client::call(
+            &self.state_dir(),
+            &Request {
+                version: PROTOCOL_VERSION,
+                request_id: "read".into(),
+                command: Command::Events {
+                    after: 0,
+                    limit: 1000,
+                },
+            },
+        )
+        .unwrap()
+        .outcome
+        else {
+            panic!("events expected");
+        };
+        events
+            .iter()
+            .filter(|event| serde_json::to_value(&event.event).unwrap()["type"] == kind)
+            .count()
+    }
+}
+
+#[test]
+fn a_host_notice_is_kept_while_the_host_cannot_be_inspected() {
+    let mut home = Home::new();
+    home.claude_and_codex();
+    home.ok(&["install", "--hosts", "claude-code,codex", "--apply"]);
+    fs::create_dir(home.home().join(".cursor")).unwrap();
+    home.start_host_check();
+    home.held("cursor", true);
+
+    // Cursor's hook file cannot be parsed for a moment: neither an install
+    // nor a removal is established, so the notice stays, nothing new is
+    // recorded, and the inspection error is logged once.
+    let hooks = home.write(".cursor/hooks.json", "{ not json");
+    std::thread::sleep(Duration::from_millis(1200));
+    let state = home.held("cursor", true);
+    assert!(state.uninstalled_hosts.contains_key("cursor"));
+    assert_eq!(home.count("host_cleared"), 0);
+    let log = fs::read_to_string(home.base.join("daemon.log")).unwrap();
+    let failed: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("host_check_failed"))
+        .collect();
+    assert_eq!(failed.len(), 1, "logged once: {log}");
+    assert!(
+        failed[0].contains("cursor") && failed[0].contains("hooks.json"),
+        "{log}"
+    );
+
+    // Readable again and still not installed: the same notice, not a new one.
+    fs::remove_file(hooks).unwrap();
+    std::thread::sleep(Duration::from_millis(1000));
+    home.held("cursor", true);
+    assert_eq!(home.count("host_cleared"), 0);
+    assert_eq!(home.count("host_not_installed"), 1);
+}
+
+#[test]
+fn following_the_status_advice_verbatim_installs_for_this_coordinator() {
+    let mut home = Home::new();
+    home.claude_and_codex();
+    home.ok(&["install", "--hosts", "claude-code,codex", "--apply"]);
+    fs::create_dir(home.home().join(".cursor")).unwrap();
+    // The coordinator's state directory is not this home's default one.
+    home.start_host_check();
+    home.held("cursor", true);
+
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .args(["status", "--state-dir"])
+        .arg(home.state_dir())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("hosts: cursor"))
+        .unwrap_or_else(|| panic!("{text}"));
+    let advice = line.split('`').nth(1).unwrap_or_else(|| panic!("{line}"));
+
+    // Run as the owner would, in a shell in that home with `langspan` on
+    // the path: the preview, then the same command with --apply.
+    let bin = Path::new(env!("CARGO_BIN_EXE_langspan")).parent().unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    for command in [advice.to_owned(), format!("{advice} --apply")] {
+        let mut shell = Process::new("/bin/sh");
+        let output = support::in_home(&mut shell, &home.home())
+            .args(["-c", &command])
+            .env("PATH", &path)
+            .current_dir(&home.base)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command}: {output:?}");
+    }
+
+    let report: Value = serde_json::from_str(&home.ok(&["hosts", "--json"])).unwrap();
+    assert_eq!(
+        host(&report, "cursor")["user_install"],
+        "current",
+        "{advice}: {report}"
+    );
+    home.held("cursor", false);
+}

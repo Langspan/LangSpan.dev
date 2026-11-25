@@ -807,37 +807,42 @@ mod unix {
         let mut checks: u64 = 0;
         let mut last_failure: Option<String> = None;
         loop {
-            let roots = match ask(&sender, "read".into(), Command::Status) {
-                Some(Outcome::Status { state, .. }) => Some(
+            let known = match ask(&sender, "read".into(), Command::Status) {
+                Some(Outcome::Status { state, .. }) => Some((
                     state
                         .workspaces
                         .values()
                         .map(|workspace| PathBuf::from(&workspace.root))
                         .collect::<Vec<_>>(),
-                ),
+                    state.uninstalled_hosts.keys().cloned().collect::<Vec<_>>(),
+                )),
                 _ => None,
             };
-            let failure = match roots {
+            let failure = match known {
                 // The owner is busy or stopping: the next check counts.
                 None => Some("the state owner did not answer".to_owned()),
-                Some(roots) => {
+                Some((roots, held)) => {
                     let reports = crate::hosts::report(&home, &directory);
-                    let not_installed = crate::hosts::not_installed(&reports, &roots, &directory)
-                        .into_iter()
-                        .map(|vendor| vendor.name().to_owned())
-                        .collect();
+                    // A host that could not be inspected keeps the notice
+                    // it has, and the reason is logged.
+                    let observation = crate::hosts::observe(&reports, &roots, &directory, &held);
                     checks += 1;
-                    match ask(
+                    let answer = match ask(
                         &sender,
                         format!("hosts-{}-{checks}", now_ms()),
-                        Command::ObserveHosts { not_installed },
+                        Command::ObserveHosts {
+                            not_installed: observation.not_installed,
+                        },
                     ) {
                         Some(Outcome::HostsObserved { .. }) => None,
                         Some(Outcome::Error { code, message }) => {
                             Some(format!("{code}: {message}"))
                         }
                         _ => Some("the state owner did not answer".to_owned()),
-                    }
+                    };
+                    let mut problems = observation.errors;
+                    problems.extend(answer);
+                    (!problems.is_empty()).then(|| problems.join("; "))
                 }
             };
             if failure != last_failure {

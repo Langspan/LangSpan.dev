@@ -143,8 +143,8 @@ and records what it finds in the local store.
 | **Tampering**: a client records a false host | `observe_hosts` takes at most 16 names of 1–32 lower-case letters and hyphens; anything else is refused with nothing recorded. | Any same-user client can send it, as with every other observation; the next check replaces it. |
 | **Repudiation** | Each change of a host's state is an event (`host_not_installed`, `host_cleared`) with the daemon's time. | Who installed a host later is not known. |
 | **Information disclosure** | Only the host's name is stored; no path, setting or file content leaves the check. Agents are not told: the line is for the owner's `status`, dashboard and `doctor`. | `hosts --json` prints the configuration directory paths to the terminal that ran it. |
-| **Denial of service** | One bounded check per interval (default one hour, at least 100 ms) in its own thread; unreadable directories are `unknown`, never absent. A failed check is logged once per new failure. | A host directory on a hung network filesystem can stall that thread; it does not block the state owner or a hook. |
-| **Elevation of privilege** | LangSpan never installs, upgrades or edits a host by itself; the note only names the command for the owner to run. | None. |
+| **Denial of service** | One bounded check per interval (default one hour, at least 100 ms) in its own thread; unreadable directories are `unknown`, never absent, and a held host that is `unknown` keeps its notice rather than being cleared. A failed check or inspection is logged once per new failure. | A host directory on a hung network filesystem can stall that thread; it does not block the state owner or a hook. |
+| **Elevation of privilege** | LangSpan never installs, upgrades or edits a host by itself; the note only names the command for the owner to run, with this coordinator's state directory single-quoted for the shell. | None. |
 
 ## The status line
 

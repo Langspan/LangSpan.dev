@@ -1282,14 +1282,17 @@ fn auto_check(
         println!("{}", serde_json::to_string(&outcome)?);
         return Ok(0);
     }
-    print_human(&Response {
-        version: PROTOCOL_VERSION,
-        request_id: String::new(),
-        replayed: false,
-        generation: 0,
-        lease_valid: None,
-        outcome,
-    })?;
+    print_human(
+        &Response {
+            version: PROTOCOL_VERSION,
+            request_id: String::new(),
+            replayed: false,
+            generation: 0,
+            lease_valid: None,
+            outcome,
+        },
+        state_dir,
+    )?;
     Ok(0)
 }
 
@@ -3015,7 +3018,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     if json {
         println!("{}", serde_json::to_string(&response)?);
     } else {
-        print_human(&response)?;
+        print_human(&response, &state_dir)?;
     }
     Ok(match response.outcome {
         Outcome::Error { .. } => 1,
@@ -3151,7 +3154,7 @@ fn print_symbol_detail(symbol: &langspan_core::SymbolRef) {
     }
 }
 
-fn print_human(response: &Response) -> Result<(), langspan::Error> {
+fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), langspan::Error> {
     if response.replayed {
         println!(
             "Original result replayed; current daemon generation {}.",
@@ -3835,7 +3838,7 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 "{active} active admission(s). Session registration is not a process-liveness signal."
             );
             for host in state.uninstalled_hosts.keys() {
-                println!("{}", langspan::hosts::status_line(host));
+                println!("{}", langspan::hosts::status_line(host, state_dir));
             }
             if let Some(summary) = summary {
                 let closed = summary.closed_admissions.values().sum::<u64>() + summary.other_closed;

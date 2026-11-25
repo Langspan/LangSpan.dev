@@ -109,13 +109,18 @@ The coordinator checks the same at start and then every hour
 (`host_check_ms` in `config.json`). A host that is present, has no user-level
 install and has no project install in any registered workspace is recorded once
 as a `host_not_installed` event, with the host name only, and recorded again
-only after it was covered (`host_cleared`). `langspan status` then shows:
+only after it was covered (`host_cleared`). A host whose directory or files
+cannot be read at a check keeps the notice it had; the reason is logged as
+`host_check_failed`, and nothing is recorded until an install or a removal is
+seen. `langspan status` then shows:
 
 ```text
-hosts: cursor has a configuration directory but no LangSpan hooks; run `langspan install --hosts cursor` to preview, then add --apply
+hosts: cursor has a configuration directory but no LangSpan hooks; run `langspan install --hosts cursor --state-dir '/path/to/state'` to preview, then add --apply
 ```
 
-The dashboard shows the same under Health. `langspan doctor` marks the host as
+The command always names this coordinator's state directory, so the hooks it
+installs talk to the coordinator that reported the host, whatever the shell's
+own default. The dashboard shows the same command under Health. `langspan doctor` marks the host as
 needing attention once sessions of another host use this coordinator. Agents
 are not told. LangSpan never installs or edits a host's configuration by itself;
 after you run the install, the line is gone at the next check.
