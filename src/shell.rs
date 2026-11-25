@@ -10,7 +10,9 @@
 use langspan_core::FileState;
 use serde::{Deserialize, Serialize};
 
+mod formatters;
 mod git_commands;
+pub use formatters::{Formatting, Reach, formatters};
 pub use git_commands::{GitStep, git_steps};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -797,8 +799,8 @@ pub struct Record {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edited_elsewhere: Vec<String>,
     /// Once finished: of `contested`, the paths part of whose change only
-    /// reformatted this session's own lines, journaled as this session's
-    /// (issue #124).
+    /// reformatted lines, journaled as the sessions' that wrote them
+    /// (issues #124 and #141).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reformatted: Vec<String>,
     /// The command line, redacted and capped (`kept_command`), for a later

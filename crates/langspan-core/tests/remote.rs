@@ -80,6 +80,7 @@ fn works(state: &mut State, session: &str, path: &str, task: &str, now: u64) {
         Command::SessionPrompt {
             session_id: session.into(),
             summary: task.into(),
+            line_digests: Vec::new(),
         },
         now,
     ));

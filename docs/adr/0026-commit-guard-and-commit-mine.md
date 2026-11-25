@@ -33,9 +33,13 @@ against the file as it was just before the write:
   kept at that moment when it was not kept already, at most 4 MiB per
   command), or, for a file Git did not list, its `HEAD` content. Contested
   files (ADR 0011) are not journaled, except for the lines of one that the
-  command only reformatted of its session's own (issue #124): a partial
-  entry keeps just those lines, and its version is not taken as the
-  session's for a file attributed whole.
+  command only reformatted (issues #124 and #141): a partial entry per
+  session whose lines were reformatted keeps just those lines, under that
+  session, and its version is not taken as the session's for a file
+  attributed whole. A shell write is not journaled twice for one session:
+  an entry with the same resulting version and the same lines as one written
+  since the command started, which a second overlapping run that saw the
+  same change would write, is skipped.
 
 When the "before" is not known exactly, or a write changes more than 8,192
 lines on one side, the entry says the session changed the file in lines that
@@ -289,7 +293,16 @@ Claude Code run calling it before `commit --mine` is still to be retained.
   journaled. Entries are capped per workspace, not per session.
 - Line ownership is by content. Two sessions adding the same line to one file
   make it each one's; a hunk made only of such lines is not known and is
-  refused. A moved line is neither added nor removed by its write, so a hunk
+  refused. Inside a hunk that holds one session's lines and another's, such
+  a line (a blank line, a closing brace) goes with the lines on either side
+  of it in its list when they are one session's, or with the only side next
+  to it at the hunk's edge; between the two sides, or alone, it stays this
+  session's as before. It goes with another session's lines only while this
+  session's journaled writes still account for each copy of that line left
+  in the file's diff, so a session's own only copy is never left behind
+  (issue #141). Tests: `lines_both_sessions_wrote_go_with_the_hunk_around_them`
+  and `a_line_both_wrote_stays_this_sessions_when_its_only_copy_is_by_the_others`
+  in `tests/commit_guard.rs`. A moved line is neither added nor removed by its write, so a hunk
   that moves lines is nobody's or not known.
 - Changes made by anything other than a reported edit or an observed shell
   command (the owner's editor, a background job after its call returned)

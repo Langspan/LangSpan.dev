@@ -204,6 +204,8 @@ fn dispatch(event: HostEvent, config: &Config, deadline: Instant) -> Reply {
             false,
             &config.root,
             true,
+            // Not yet seen to reach the model from a real Cursor (ADR 0029).
+            false,
         );
         return hook::execute(operation, &config, deadline);
     }

@@ -338,6 +338,127 @@ fn a_prompt_summary_stays_private_when_switched_off_and_session_end_withdraws_wo
     );
 }
 
+/// The prompt every agent in a swarm starts from, with its own task line.
+fn from_template(task: &str) -> String {
+    format!(
+        "You are a coding agent working on this repository.\n\
+         Read the guide first and follow it.\n\n\
+         Task: {task}\n\
+         When you are done, commit your work."
+    )
+}
+
+fn session(index: u8) -> String {
+    format!("00000000-0000-4000-8000-0000000001{index:02}")
+}
+
+fn task_lines(context: &str) -> Vec<&str> {
+    context
+        .lines()
+        .filter_map(|line| line.split_once(" task: ").map(|(_, task)| task))
+        .collect()
+}
+
+#[test]
+fn sessions_started_from_one_template_are_told_apart_in_briefings() {
+    let mut f = Fixture::new();
+    f.start();
+    let tasks = [
+        "fix issue #1, the retry loop",
+        "fix issue #2, the gate module",
+        "fix issue #3, the upload client",
+        "fix issue #4, the status line",
+        "fix issue #5, the session handler",
+    ];
+    for (index, task) in tasks.iter().enumerate() {
+        f.prompt(
+            "claude-code",
+            &session(index as u8),
+            &from_template(task),
+            &[],
+        );
+    }
+    for (index, task) in tasks.iter().enumerate() {
+        let start = f.lifecycle(
+            "claude-code",
+            "SessionStart",
+            &session(index as u8),
+            &f.root(),
+        );
+        let context = start.context.unwrap();
+        let mut seen = task_lines(&context);
+        seen.sort();
+        let mut expected: Vec<String> = tasks
+            .iter()
+            .filter(|other| *other != task)
+            .map(|other| format!("{other:?};"))
+            .collect();
+        expected.sort();
+        assert_eq!(seen, expected, "{context}");
+        assert!(!context.contains("coding agent"), "{context}");
+    }
+}
+
+#[test]
+fn without_a_task_line_a_prompt_sharing_a_peers_first_lines_is_summarised_where_it_differs() {
+    let mut f = Fixture::new();
+    f.start();
+    let (first, second, third) = (session(10), session(11), session(12));
+    let shared = "Shared brief for this sprint.\nRead the guide.\n";
+    f.prompt(
+        "claude-code",
+        &first,
+        &format!("{shared}Rename the gate module\nTOKEN=x"),
+        &[],
+    );
+    f.prompt(
+        "claude-code",
+        &second,
+        &format!("{shared}Add retry to the upload client"),
+        &[],
+    );
+    // A one-line prompt is summarised as before, shared or not.
+    f.prompt("claude-code", &third, "Shared brief for this sprint.", &[]);
+    let start = f.lifecycle("claude-code", "SessionStart", ALICE, &f.root());
+    let context = start.context.unwrap();
+    let seen = task_lines(&context);
+    assert!(
+        seen.contains(&r#""Add retry to the upload client";"#),
+        "{context}"
+    );
+    assert!(
+        seen.contains(&r#""Shared brief for this sprint.";"#),
+        "{context}"
+    );
+    assert!(!context.contains("TOKEN"), "{context}");
+
+    // A declared intent replaces the prompt-derived task line.
+    let declared = client::call(
+        &f.state_dir(),
+        &Request {
+            version: PROTOCOL_VERSION,
+            request_id: "intent".into(),
+            command: Command::IntentSet {
+                session_id: format!("claude-code.{second}"),
+                paths: vec!["src/c.rs".into()],
+                summary: "make uploads resumable".into(),
+            },
+        },
+    )
+    .unwrap();
+    assert!(
+        !matches!(declared.outcome, Outcome::Error { .. }),
+        "{declared:?}"
+    );
+    let after = f.lifecycle("claude-code", "SessionStart", ALICE, &f.root());
+    let context = after.context.unwrap();
+    assert!(
+        context.contains(r#"declared: "make uploads resumable""#),
+        "{context}"
+    );
+    assert!(!context.contains("Add retry"), "{context}");
+}
+
 #[test]
 fn a_linked_worktree_is_briefed_as_logical_overlap_and_another_repository_is_not() {
     let mut f = Fixture::new();

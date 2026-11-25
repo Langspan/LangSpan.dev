@@ -80,6 +80,8 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  by name, notes on its file and last check
   graph references WORKSPACE NAME  Where a name is mentioned
   graph impact WORKSPACE PATH    What a file exports and which files mention those names.
+                                 [--depth N]: 1 to 3 levels, each the files that
+                                 mention an export of the level before
                                  All three match by name and report index coverage
   graph blind-spots WORKSPACE [--limit N]
                                  Files the index cannot answer for: partial, never
@@ -602,13 +604,15 @@ enum Planned {
     Text(Option<String>, String),
 }
 
-/// A file's path, its plan, the bytes the plan was made from, and how to
-/// make it again from other bytes.
+/// A file's path, its plan, the bytes the plan was made from, how to make
+/// it again from other bytes, and, on uninstall of a file LangSpan may have
+/// created, which planned bytes mean nothing is left so the file is removed.
 type FilePlan<'a> = (
     PathBuf,
     Planned,
     Option<Vec<u8>>,
     Box<langspan::install::Planner<'a>>,
+    Option<Box<langspan::install::LeftEmpty<'a>>>,
 );
 
 /// `install` / `uninstall`: LangSpan's user-level hooks and MCP server entry
@@ -703,6 +707,13 @@ fn user_install(
     let mut notes: Vec<String> = Vec::new();
     let registration = registration.as_ref();
     let server = server.as_ref();
+    // On uninstall, a file LangSpan may have created is removed when nothing
+    // but LangSpan's entries was in it, rather than left holding `{}`.
+    let emptied = |vendor: Vendor| {
+        (!install).then(|| -> Box<hooks::LeftEmpty> {
+            Box::new(move |bytes: &[u8]| hooks::json_left_empty(vendor, bytes))
+        })
+    };
     for &vendor in &vendors {
         let files = home.files(vendor);
         let original = hooks::read_bytes(&files.hooks)?;
@@ -736,6 +747,7 @@ fn user_install(
                 Planned::Json(existing, planned, Some(shown)),
                 original,
                 Box::new(replan),
+                emptied(vendor),
             ));
             if install {
                 notes.push("Gemini CLI: built from documentation, not yet verified on a real Gemini CLI (ADR 0033). Gemini CLI runs user-level hooks in every folder; it loads a project's own .gemini/settings.json only once the folder is trusted.".into());
@@ -774,6 +786,7 @@ fn user_install(
             Planned::Json(existing, planned, None),
             original,
             Box::new(replan),
+            emptied(vendor),
         ));
         let original = hooks::read_bytes(&files.mcp)?;
         match vendor {
@@ -818,6 +831,8 @@ fn user_install(
                         Planned::Json(Some(existing), planned, Some(shown)),
                         original,
                         Box::new(replan),
+                        // Claude Code's own file: never removed.
+                        None,
                     ));
                 }
             },
@@ -844,6 +859,8 @@ fn user_install(
                     Planned::Json(existing, planned, None),
                     original,
                     Box::new(replan),
+                    // `{"version": 1}` is not Cursor's MCP shape: only `{}`.
+                    emptied(Vendor::ClaudeCode),
                 ));
                 if install {
                     notes.push("Cursor: built from documentation, not yet verified on a real Cursor (ADR 0032). Cursor asks before it first uses an MCP server; approve `langspan` there.".into());
@@ -865,6 +882,9 @@ fn user_install(
                     Planned::Text(existing, planned),
                     original,
                     Box::new(replan),
+                    (!install).then(|| -> Box<hooks::LeftEmpty> {
+                        Box::new(|bytes: &[u8]| bytes.is_empty())
+                    }),
                 ));
                 if install {
                     notes.push("Codex runs a new or changed hook only after you review and trust it with /hooks.".into());
@@ -892,7 +912,16 @@ fn user_install(
         skills.push(langspan::skill::plan_file(vendor, &path, install)?);
     }
     let mut changed = 0;
-    for (path, plan, original, replan) in &plans {
+    for (path, plan, original, replan, empty) in &plans {
+        let planned_bytes = match plan {
+            Planned::Json(_, planned, _) => hooks::json_bytes(planned)?,
+            Planned::Text(_, planned) => planned.clone().into_bytes(),
+        };
+        // A planned removal of a file that is there is a change even when
+        // its content would not change, as with the `{}` an earlier
+        // uninstall left; an absent file stays unchanged.
+        let removed =
+            original.is_some() && empty.as_ref().is_some_and(|empty| empty(&planned_bytes));
         let (unchanged, text) = match plan {
             Planned::Json(existing, planned, shown) => (
                 existing.as_ref() == Some(planned) || (existing.is_none() && !install),
@@ -906,19 +935,25 @@ fn user_install(
                 planned.trim_end().to_owned(),
             ),
         };
-        if unchanged {
+        if unchanged && !removed {
             println!("{} already matches; nothing to change.", path.display());
             continue;
         }
         changed += 1;
         if apply {
             // The plan is made again from the bytes it was shown from, and
-            // written only if the file still holds them.
-            if hooks::write_planned(path, original.as_deref(), &**replan)? {
-                println!("Wrote {}.", path.display());
-            } else {
-                println!("{} already matches; nothing to change.", path.display());
+            // written (or removed) only if the file still holds them.
+            let never = |_: &[u8]| false;
+            let empty = empty.as_deref().unwrap_or(&never);
+            match hooks::write_or_remove_planned(path, original.as_deref(), &**replan, empty)? {
+                hooks::Applied::Written => println!("Wrote {}.", path.display()),
+                hooks::Applied::Removed => println!("Removed {}.", path.display()),
+                hooks::Applied::Unchanged => {
+                    println!("{} already matches; nothing to change.", path.display())
+                }
             }
+        } else if removed {
+            println!("{} would be removed.", path.display());
         } else {
             println!("{} would become:", path.display());
             println!("{text}");
@@ -1806,6 +1841,50 @@ fn print_combined(
     print_renames(&merged.renames);
 }
 
+/// `graph impact --depth N`: one line per level, paths and names quoted
+/// because they are repository text. An empty level never claims that
+/// nothing is affected.
+fn print_impact_levels(
+    levels: &[langspan_core::ImpactLevel],
+    coverage: &langspan_core::GraphCoverage,
+) {
+    let blind = coverage.blind_in_scope > 0 || coverage.current_files < coverage.indexable_files;
+    for level in levels {
+        let files: Vec<String> = level
+            .files
+            .iter()
+            .map(|file| {
+                if level.level == 1 {
+                    format!("{:?} via {:?}", file.path, file.via)
+                } else {
+                    format!("{:?} via {:?} from {:?}", file.path, file.via, file.from)
+                }
+            })
+            .collect();
+        let heading = match (level.level, level.files.first()) {
+            (1, Some(file)) => format!("Level 1 (mentions an export of {:?})", file.from),
+            (n, _) => format!("Level {n}"),
+        };
+        let found = if files.is_empty() {
+            if blind {
+                "none found by name, but the index is not complete, so this is no claim that none is affected".to_owned()
+            } else {
+                "none found by name".to_owned()
+            }
+        } else {
+            files.join(", ")
+        };
+        println!(
+            "{heading}: {found}{}",
+            if level.truncated {
+                " (cut by a bound; more may exist)"
+            } else {
+                ""
+            }
+        );
+    }
+}
+
 /// `graph blind-spots`: one line per non-empty list, paths quoted, with the
 /// full count in parentheses.
 fn print_blind_spots(
@@ -2129,29 +2208,30 @@ fn doctor(
         let mut shell_hooks = false;
         for vendor in Vendor::ALL {
             let path = root.join(vendor.project_hook_files()[0]);
-            let (managed, missing): (Vec<String>, Vec<&str>) = match install::read(&path) {
-                Err(error) => {
-                    note(false, format!("{}: {error}", path.display()));
-                    continue;
-                }
-                Ok(None) => (Vec::new(), Vec::new()),
-                Ok(Some(settings)) => {
-                    let ours = |hook: &serde_json::Value| install::is_managed_for(vendor, hook);
-                    (
-                        install::managed_hooks(&settings, ours)
-                            .iter()
-                            .filter_map(|hook| hook["command"].as_str().map(str::to_owned))
-                            .collect(),
-                        install::missing_events(vendor, &settings, ours),
-                    )
-                }
-            };
+            let (managed, missing): (Vec<install::Registration>, Vec<&str>) =
+                match install::read(&path) {
+                    Err(error) => {
+                        note(false, format!("{}: {error}", path.display()));
+                        continue;
+                    }
+                    Ok(None) => (Vec::new(), Vec::new()),
+                    Ok(Some(settings)) => {
+                        let ours = |hook: &serde_json::Value| install::is_managed_for(vendor, hook);
+                        (
+                            install::managed_hooks(&settings, ours)
+                                .iter()
+                                .filter_map(|hook| install::parse_project_hook(vendor, hook))
+                                .collect(),
+                            install::missing_events(vendor, &settings, ours),
+                        )
+                    }
+                };
             // Cursor and Gemini CLI are newer and optional: their absence is
             // not a problem.
             if managed.is_empty() && matches!(vendor, Vendor::Cursor | Vendor::Gemini) {
                 continue;
             }
-            let Some(command) = managed.first() else {
+            let Some(first) = managed.first() else {
                 note(
                     false,
                     format!(
@@ -2164,9 +2244,8 @@ fn doctor(
                 );
                 continue;
             };
-            let here = std::path::absolute(state_dir)?;
-            let points_here = command.contains(&install::quote(&here.to_string_lossy()));
-            let exists = install::executable_of(vendor, command).is_some_and(|path| path.is_file());
+            let points_here = install::same_directory(&first.state_dir, state_dir);
+            let exists = first.executable.is_file();
             note(
                 points_here && exists && missing.is_empty(),
                 format!(
@@ -2234,7 +2313,8 @@ fn doctor(
                         ),
                     ),
                     Ok(Some(Some(server))) => note(
-                        server.state_dir == here && server.executable.is_file(),
+                        install::same_directory(&server.state_dir, state_dir)
+                            && server.executable.is_file(),
                         format!(
                             "cursor: MCP server `langspan` registered in {}, state directory {}.",
                             mcp.display(),
@@ -2425,14 +2505,13 @@ fn user_level_findings(
     in_use: Option<&InUse>,
 ) -> Result<Vec<(bool, String)>, langspan::Error> {
     use langspan::{install, install::Vendor, user_install};
-    let here = std::path::absolute(state_dir)?;
     let mut findings = Vec::new();
     let check = |executable: &std::path::Path, dir: &std::path::Path| -> String {
         let mut problems = String::new();
         if !executable.is_file() {
             problems.push_str("; its executable no longer exists, so it does nothing: run `langspan install --apply` again");
         }
-        if dir != here {
+        if !install::same_directory(dir, state_dir) {
             problems.push_str("; it uses a different state directory than this command, so it talks to a different coordinator");
         }
         problems
@@ -2930,6 +3009,10 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                         path: (*subject).into(),
                         limit,
                         blind_in_scope: true,
+                        // The daemon checks the range, so every client is
+                        // told the same.
+                        depth: u32::try_from(number(&mut options, "--depth", 1)?)
+                            .map_err(|_| "--depth must be between 1 and 3")?,
                     },
                 }
             }
@@ -2984,6 +3067,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             },
             ["status"] if options.remove("--all").is_some() => Command::StatusRecords {
                 after: options.remove("--after"),
+                page_bytes: None,
             },
             ["status"] => Command::Status,
             ["changes", workspace] => Command::Changes {
@@ -3122,7 +3206,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--code-briefing" | "--presence" | "--presence-minutes" | "--max-peers"
             | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s" | "--wait-s"
             | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen" | "-m"
-            | "--message" | "--statusline" | "--deadline-ms" | "--since" | "--path" => {
+            | "--message" | "--statusline" | "--deadline-ms" | "--since" | "--depth" | "--path" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -3280,7 +3364,7 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             "Workspace {} is in repository {} on {:?}.",
             git.workspace_id, git.repository_id, git.branch_ref
         ),
-        Outcome::SessionPrompted { session_id } => {
+        Outcome::SessionPrompted { session_id, .. } => {
             println!("Task summary recorded for {session_id}.")
         }
         Outcome::PromptTargets { session_id, paths } => println!(
@@ -3565,6 +3649,7 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             references,
             coverage,
             truncated,
+            levels,
             ..
         } => {
             for symbol in symbols {
@@ -3579,11 +3664,17 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 );
                 print_symbol_detail(symbol);
             }
-            for reference in references {
-                println!(
-                    "{}:{} mentions {}",
-                    reference.path, reference.line, reference.name
-                );
+            match levels {
+                // Level 1 lists the files of `references`, once each.
+                Some(levels) => print_impact_levels(levels, coverage),
+                None => {
+                    for reference in references {
+                        println!(
+                            "{}:{} mentions {}",
+                            reference.path, reference.line, reference.name
+                        );
+                    }
+                }
             }
             if *truncated {
                 println!("More results exist than the limit allows.");
@@ -3594,7 +3685,12 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 );
             } else {
                 println!(
-                    "Matches are by name, not resolved uses. Index: {} of {} supported files at their current content{}.",
+                    "{}. Index: {} of {} supported files at their current content{}.",
+                    if levels.is_some() {
+                        "Found by name, not resolved; each level adds false positives"
+                    } else {
+                        "Matches are by name, not resolved uses"
+                    },
                     coverage.current_files,
                     coverage.indexable_files,
                     if coverage.partial_files > 0 {

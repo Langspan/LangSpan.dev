@@ -284,6 +284,7 @@ fn status_answers_within_a_frame_after_ten_thousand_admissions_and_all_pages_thr
             "read",
             Command::StatusRecords {
                 after: after.clone(),
+                page_bytes: None,
             },
         );
         assert!(frame_bytes(&page) < MAX_FRAME_BYTES);
@@ -460,6 +461,7 @@ fn a_state_entry_larger_than_a_frame_is_read_whole_in_parts() {
             "read",
             Command::StatusRecords {
                 after: after.clone(),
+                page_bytes: None,
             },
         );
         assert!(frame_bytes(&page) < MAX_FRAME_BYTES);
@@ -528,6 +530,58 @@ fn a_record_that_changes_while_its_parts_are_read_is_read_again_whole() {
     assert!(pages > 3, "the check was read in one page");
     assert_eq!(whole.auto_checks["w"].argv, changed);
     assert_eq!(whole.activity["big"].known.len(), 128);
+}
+
+/// A reader may ask for smaller pages (the MCP adapter does, since its reply
+/// carries each page twice). Even a page size of nothing is raised to the
+/// floor, so every page moves the cursor on and the pages still put back
+/// exactly the state a full-size read gives.
+#[test]
+fn smaller_pages_asked_for_still_read_every_record() {
+    let f = Fixture::new();
+    f.fill_large();
+    let mut store = Store::open(&f.state_dir().join("state.sqlite3")).unwrap();
+    let full = client::read_all(|command| {
+        Ok(store
+            .execute("read", &command, &command, 3)
+            .unwrap()
+            .outcome)
+    })
+    .unwrap();
+    let (mut pages, mut small_pages) = (0, 0);
+    let small = client::read_all(|mut command| {
+        if let Command::StatusRecords { page_bytes, .. } = &mut command {
+            *page_bytes = Some(0);
+        }
+        let page = store
+            .execute("read", &command, &command, 3)
+            .unwrap()
+            .outcome;
+        if let Outcome::StatusRecords { records, .. } = &page {
+            small_pages += 1;
+            let size = serde_json::to_vec(records).unwrap().len();
+            assert!(
+                size <= 2 * langspan::store::MIN_PAGE_BYTES,
+                "a page of {size} bytes"
+            );
+            assert!(!records.is_empty(), "a page without a record");
+        }
+        Ok(page)
+    })
+    .unwrap();
+    client::read_all(|command| {
+        pages += 1;
+        Ok(store
+            .execute("read", &command, &command, 3)
+            .unwrap()
+            .outcome)
+    })
+    .unwrap();
+    assert!(
+        small_pages > pages,
+        "{small_pages} small pages, {pages} full"
+    );
+    assert_eq!(small, full);
 }
 
 #[test]
@@ -660,6 +714,7 @@ fn a_malformed_status_cursor_is_refused_with_a_reason() {
         "read",
         Command::StatusRecords {
             after: Some("no-such-kind:0:x".into()),
+            page_bytes: None,
         },
     );
     let Outcome::Error { code, message } = response.outcome else {
