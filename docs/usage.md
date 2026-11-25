@@ -205,6 +205,45 @@ session-end handling. Claude Code and Codex get end-of-reply handling
 host's own folder and hook trust requirements still apply. For Codex, review the
 project hooks through its native hook-trust flow.
 
+#### Codex: start and resume at the resolved path
+
+Codex keys its hook trust to the exact path of the project's hooks file. A
+session whose hooks were trusted with Codex started at `/tmp/work` and that is
+later reopened with `codex exec resume` at `/private/tmp/work` (the same
+directory on macOS, by another path) counts them as untrusted there: Codex runs
+none of LangSpan's hooks, prints no warning, and the session edits
+uncoordinated. A symbolic link anywhere in the path does the same. To avoid it:
+
+- Start Codex, trust LangSpan's hooks, and resume Codex in the checkout's
+  resolved path, with no symbolic links. `langspan hooks install codex` prints
+  it:
+
+  ```text
+  Codex: start and resume Codex in '/private/tmp/work', the resolved root with no symbolic links. ...
+  ```
+
+- If a session must be resumed under another path, trust the hooks again there
+  with `/hooks` before it edits.
+
+LangSpan cannot see a hook that never runs, but it notices the result. When
+the coordinator's scan sees a file's content change in a checkout and no
+session of the checkout reported it, while a Codex session is registered there, it records an
+`uncoordinated_changed` event naming up to two of the checkout's Codex
+sessions, most recently active first, as the likely cause (not a proven
+author: a hand edit looks the same). Files held by an admitted edit, versions a
+session read or wrote, and files a checkout change (a branch switch, reset or
+stash) accounts for are left out. The next briefing to each session of that
+checkout carries one line, once per session:
+
+```text
+LangSpan: edits not coordinated. Files in this checkout changed 12s ago and no session reported the edit. codex session 0198c0de may be running without LangSpan's hooks: ... Read these files again before changing them: "src/a.rs"
+```
+
+A Codex session named is not named again while that notice is held (the
+briefing horizon), and a file a session reports at that version afterwards
+drops out of the line. Without a registered Codex session nothing is recorded.
+`langspan status --json` shows the held notices under `uncoordinated`.
+
 Cursor: built from documentation, not yet verified on a real Cursor. Its
 installer writes `.cursor/hooks.json` (`preToolUse`, `postToolUse` and
 `postToolUseFailure` for `Write`, `Delete` and `Shell`, `postToolUse` also for
