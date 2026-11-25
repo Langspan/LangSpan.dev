@@ -27,7 +27,7 @@ about graph depth waits.
 | D5 | Graph export and import | None | Not now |
 | D6 | 11 languages | 4 languages | Not now. A grammar is a new C-built dependency, each with a row in [dependencies](../dependencies.md) |
 | D7, B10 (renames) | Renames that keep history | A rename is a removal | Not now. Landing's adaptation to landed renames (track L7) is separate and in the bar |
-| D8 | Parse states and a blind-spots query | Coverage on every answer; whole-file fallback; `doctor` | Not now |
+| D8 | Parse states and a blind-spots query | Coverage on every answer, with `blind_in_scope`; whole-file fallback; `doctor`; `graph blind-spots` | Built 25 November 2026 ([issue #57](https://github.com/Langspan/LangSpan.dev/issues/57)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Not yet called on a host |
 | D9 | Symbol-level merge simulation | Git-level combine plus a real check (ADR 0007) | Not now. A real check of the combined tree is the stronger evidence |
 | C2 | Prompt briefing ranked with dependents | Unranked names | Not now |
 | C7 | In-flight unpushed signatures told to dependents | Peers' files | Not now |

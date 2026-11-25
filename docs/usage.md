@@ -94,6 +94,50 @@ precedence. `langspan doctor --root /path/to/checkout` reports both setups;
 `langspan uninstall --apply` removes the user-level entries it recognizes and
 leaves the coordination state directory in place.
 
+#### A status line in Claude Code
+
+`langspan install --statusline on` also sets Claude Code's `statusLine` in
+`~/.claude/settings.json`, so the person sees, under the prompt after each
+message:
+
+```text
+langspan · 3 sessions here · 1 refusal today
+```
+
+"Sessions here" counts the conversations (not host subagents) of this
+checkout's repository, including its linked worktrees, that are of the
+running coordinator, not ended and active within the last 30 minutes, this
+one included. "Refusals today" counts what LangSpan refused in that
+repository since local midnight: a write held by another session, a stale or
+unread edit, and a held commit. Each refusal counts once; a retry of the same
+call adds none. Refusals recorded by a build without this feature, or before
+the coordinator first started with it, are not counted. The line shows counts,
+never paths, and nothing of it reaches the model.
+
+The setting is written only where no `statusLine` is set: a status line of
+your own is never replaced, and the dry run says so. `install` without
+`--statusline` leaves the setting as it is; `--statusline off` and
+`uninstall --apply` remove LangSpan's line and nothing else. Other hosts have
+no status-line command; a shell prompt or terminal multiplexer can show the
+same line with:
+
+```sh
+langspan statusline --root /path/to/checkout
+langspan statusline --root /path/to/checkout --json
+# {"workspace_id":"...","sessions_here":3,"refusals_today":1,"coordinator":"running"}
+```
+
+Without `--root` it takes the directory from the status-line input Claude Code
+sends on stdin (`workspace.current_dir`, then `cwd`), or else the current
+directory. It asks the coordinator once with a 200 ms deadline
+(`--deadline-ms`, 100 to 5000). When the coordinator is not running or does
+not answer in time it prints `langspan · coordinator not running` and exits 0;
+it never starts the coordinator, never uses the network, and writes nothing.
+"Local midnight" follows the system's time zone (honouring `TZ`): `date`
+gives the offset at the instants around midnight, so on a day the clocks
+change the count still starts at that day's 00:00. If `date` fails, midnight
+UTC is used. A day of more than 1024 refusals shows 1024.
+
 User-level installation has been tested with a temporary home and real daemon,
 Git and hook executable. It has not been observed in a native Claude Code or
 Codex session. Claude's user-scope MCP key remains inferred from its documentation;
@@ -618,16 +662,16 @@ files per session, with a count of the rest; `--json` carries `window`
 both optional) returns the same text, labelled as data, within 2,400 bytes.
 
 It is a peek, like `recap`: it writes nothing and acknowledges no message.
-Refusals are counted from `write_refused` events, one per refused admission
-(conflict, stale base or unread lines); a held commit is a hook reply, not an
-event, and is not counted. Each daemon start records a `clock_anchored` event
+Refusals are counted from `write_refused` events, the status line's, by kind:
+a refused write (conflict, stale base or unread lines) or a held commit the
+hook reported (`commit_held`). Each daemon start records a `clock_anchored` event
 that places that run's times on the wall clock; events recorded by a build
 before this one have no such anchor and are counted only as `undated`. A
 landing is placed at the time it took its turn to land. A
 window with more than 50,000 events is summarised from the newest 50,000 and
 says `truncated: true`; when the oldest of those carries no time of its own,
-the first that does decides whether the window may reach past them. With the daemon down it exits 1 with "coordination
-unavailable".
+the first that does decides whether the window may reach past them. With the
+daemon down it exits 1 with "coordination unavailable".
 
 ## Look up symbols and affected files
 
@@ -674,6 +718,30 @@ code is affected. Queries return at most 200 results. Files over 1 MiB are not
 parsed, syntax errors can leave partial results, and other languages are outside
 the index. The observer's 4,096-file limit can prevent a larger repository from
 producing the complete scan needed for indexing.
+
+When `coverage.blind_in_scope` is above zero, that many supported files could
+not be read in full, so an empty or short answer is weak. Ask which ones:
+
+```sh
+./target/release/langspan graph blind-spots PROJECT --limit 50 --json
+```
+
+```text
+partial (2): "src/legacy/parse.rs" (since 3h), "web/src/app.tsx" (since 10m)
+waiting (1): "src/api.rs"
+too large (1): "src/generated/schema.rs"
+not indexed, other languages: .java 10, .rb 3
+```
+
+The lists are `partial` (a syntax error or a bound reached, with since when),
+`never_clean` (never parsed cleanly, so no interface notice can come from it),
+`waiting` (its current content is not indexed yet), `too_large` (over 1 MiB),
+`unscanned` (left out by the scan's bound) and `unsupported_languages` (other
+source files by extension). Each is in path order and holds at most `--limit`
+paths (1 to 200), so a capped list is the same on every call; `totals` has the
+full counts. MCP: `langspan_blind_spots`. Read those files directly when the
+index is silent; nothing guesses what they contain. `langspan doctor` also
+says when a workspace has blind files.
 
 When an indexed export disappears or its signature changes, relevant sessions
 receive an interface notice at their next prompt. The notice names files they
@@ -927,6 +995,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check |
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names, one level deep |
+| `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |

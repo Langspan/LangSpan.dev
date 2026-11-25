@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::dashboard::host_and_prefix;
 use crate::{
-    AttemptResult, CheckResult, Event, Recipient, RecordedEvent, State, ToolResult, is_zero,
-    live_lease, owed_to,
+    AttemptResult, CheckResult, ClockAnchor, Event, Recipient, RecordedEvent, State, ToolResult,
+    is_zero, live_lease, owed_to,
 };
 
 /// The most events one summary reads, newest first; an older part of a
@@ -32,51 +32,6 @@ pub const TODAY_FILES: usize = 8;
 pub const TODAY_OPEN: usize = 8;
 /// The longest intent summary carried, in characters, before its ellipsis.
 const TODAY_TEXT: usize = 120;
-
-/// The daemon's monotonic clock read together with the wall clock when a
-/// generation started.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ClockAnchor {
-    pub generation: u64,
-    /// The daemon's clock (`now_ms` as the core is told it).
-    pub clock_ms: u64,
-    /// Milliseconds since the Unix epoch.
-    pub wall_ms: u64,
-}
-
-impl ClockAnchor {
-    /// Where a time on this generation's clock falls in wall time.
-    pub fn wall(&self, clock_ms: u64) -> u64 {
-        if clock_ms >= self.clock_ms {
-            self.wall_ms.saturating_add(clock_ms - self.clock_ms)
-        } else {
-            self.wall_ms.saturating_sub(self.clock_ms - clock_ms)
-        }
-    }
-}
-
-/// Why an admission was refused: the kind a `WriteRefused` event records.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum RefusalKind {
-    /// Another session holds one of the paths.
-    Conflict,
-    /// A file changed after this session last read it.
-    StaleBase,
-    /// The edit would change lines another session wrote, unread.
-    UnreadLines,
-}
-
-impl RefusalKind {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Conflict => "conflict",
-            Self::StaleBase => "stale_base",
-            Self::UnreadLines => "unread_lines",
-        }
-    }
-}
 
 /// Wall-clock milliseconds since the Unix epoch, `from_ms` included.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

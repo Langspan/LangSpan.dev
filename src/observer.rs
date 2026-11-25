@@ -23,6 +23,19 @@ pub struct Snapshot {
     /// the previous scan only: none of them is a deletion. Not persisted.
     #[serde(skip)]
     pub unobserved: BTreeSet<String>,
+    /// The working-tree files among `unobserved` that this scan did not
+    /// read, and why: for the index's blind-spots answer. Not persisted.
+    #[serde(skip)]
+    pub unread: BTreeMap<String, Unread>,
+}
+
+/// Why a scan listed a working-tree file but did not read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unread {
+    /// Over the scan's per-file byte bound.
+    TooLarge,
+    /// Past the scan's file, byte or time bound.
+    Omitted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +208,7 @@ pub fn scan_with_limits(
         let mut clean_bytes = 0;
         let mut skip_clean = false;
         let mut files = BTreeMap::new();
+        let mut unread = BTreeMap::new();
         for path in candidates {
             let indexed = index.get(&path);
             let mut too_large = false;
@@ -258,6 +272,12 @@ pub fn scan_with_limits(
                 if !too_large {
                     coverage.omitted += 1;
                 }
+                let reason = if too_large {
+                    Unread::TooLarge
+                } else {
+                    Unread::Omitted
+                };
+                unread.insert(path.clone(), reason);
                 unobserved.insert(path);
                 continue;
             };
@@ -293,6 +313,7 @@ pub fn scan_with_limits(
             branches: listing.branches,
             coverage,
             unobserved,
+            unread,
         })
     }
 }

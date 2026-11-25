@@ -10,6 +10,9 @@ use langspan_core::{
     TodayQuery, TodayWindow, apply, dashboard_denials, decide, expiry_events, shrink_status,
     status_records,
 };
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use std::path::Path;
+use std::time::Duration;
 
 /// The wall clock in Unix milliseconds; 0 if it reads before the epoch.
 pub fn wall_now_ms() -> u64 {
@@ -18,9 +21,6 @@ pub fn wall_now_ms() -> u64 {
         .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
 }
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use std::path::Path;
-use std::time::Duration;
 
 /// A read answer's body stops before this many bytes, leaving the rest of
 /// the 64 KiB frame for the envelope and JSON escaping of the envelope.
@@ -212,8 +212,8 @@ impl Store {
             .checked_add(1)
             .ok_or("authority generation exhausted; refusing to reuse a generation")?;
         let mut store = Self { connection, state };
-        // The generation's clock against the wall clock, so `today` can
-        // place its times on a day.
+        // The generation's clock against the wall clock, so times can be
+        // placed on a day (the status line and `today`).
         let anchor = ClockAnchor {
             generation,
             clock_ms: crate::clock::now_ms(),
@@ -476,6 +476,7 @@ impl Store {
                 | Command::TurnQueue { .. }
                 | Command::Recap { .. }
                 | Command::Today { .. }
+                | Command::StatusLine { .. }
                 | Command::Dashboard
         ) {
             return Ok(None);
@@ -565,6 +566,7 @@ impl Store {
             | Command::CheckStatus { .. }
             | Command::LandingReadiness { .. }
             | Command::TurnQueue { .. }
+            | Command::StatusLine { .. }
             | Command::Recap { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
                     // A recap must fit one frame with room for the envelope.

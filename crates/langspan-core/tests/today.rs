@@ -2,8 +2,8 @@
 //! is injected, on the daemon's clock and on the wall clock.
 use langspan_core::{
     AttemptResult, CheckResult, ClockAnchor, Command, Event, LandingAttempt, Outcome,
-    RecordedEvent, State, TODAY_SESSIONS, Today, TodayQuery, TodayWindow, ToolResult, TurnQueueing,
-    apply, decide, today,
+    RecordedEvent, RefusalKind, State, TODAY_SESSIONS, Today, TodayQuery, TodayWindow,
+    ToolIdentity, ToolResult, TurnQueueing, apply, decide, today,
 };
 
 /// Midnight, wall clock, in Unix milliseconds (2026-11-25T00:00:00Z).
@@ -173,34 +173,57 @@ fn a_session_that_edited_three_files_today_and_one_yesterday_shows_three() {
 #[test]
 fn each_refusal_in_the_window_is_counted_once_under_its_kind() {
     let mut log = Log::ready();
-    let admit = |session: &str| Command::Admit {
-        session_id: session.into(),
+    let hold = Command::Admit {
+        session_id: "codex.bob".into(),
         paths: vec!["src/lib.rs".into()],
         ttl_ms: 60_000,
     };
+    // A hook's tool call: a refused one is a refused write.
+    let edit = |id: &str| Command::AdmitTool {
+        session_id: "claude-code.alice".into(),
+        operation: ToolIdentity {
+            operation_id: format!("op-{id}"),
+            source: "test".into(),
+            tool: "Edit".into(),
+            input_digest: "f".repeat(64),
+        },
+        paths: vec!["src/lib.rs".into()],
+        base: Vec::new(),
+        regions: Vec::new(),
+        overwrites: Vec::new(),
+        ttl_ms: 30_000,
+    };
     // Yesterday: bob holds the file and alice is refused.
-    log.run("hold-1", admit("codex.bob"), at(MIDNIGHT - 2 * 60_000));
-    let refused = log.run(
-        "try-1",
-        admit("claude-code.alice"),
-        at(MIDNIGHT - 2 * 60_000 + 1_000),
-    );
+    log.run("hold-1", hold.clone(), at(MIDNIGHT - 2 * 60_000));
+    let refused = log.run("try-1", edit("try-1"), at(MIDNIGHT - 2 * 60_000 + 1_000));
     assert!(matches!(refused, Outcome::Conflict { .. }), "{refused:?}");
-    // Today: twice more.
-    log.run("hold-2", admit("codex.bob"), at(MIDNIGHT + 60_000));
+    // Today: twice more, and a commit the hook held.
+    log.run("hold-2", hold, at(MIDNIGHT + 60_000));
     for id in ["try-2", "try-3"] {
-        let refused = log.run(id, admit("claude-code.alice"), at(MIDNIGHT + 61_000));
+        let refused = log.run(id, edit(id), at(MIDNIGHT + 61_000));
         assert!(matches!(refused, Outcome::Conflict { .. }), "{refused:?}");
     }
+    let held = log.run(
+        "held-commit",
+        Command::RecordRefusal {
+            session_id: "claude-code.alice".into(),
+            kind: RefusalKind::CommitHeld,
+            paths: vec!["src/lib.rs".into()],
+            peer_session_id: Some("codex.bob".into()),
+        },
+        at(MIDNIGHT + 62_000),
+    );
+    assert!(matches!(held, Outcome::RefusalRecorded { .. }), "{held:?}");
     let written = log
         .events
         .iter()
         .filter(|recorded| matches!(recorded.event, Event::WriteRefused { .. }))
         .count();
-    assert_eq!(written, 3, "one write_refused event per refusal");
+    assert_eq!(written, 4, "one write_refused event per refusal");
     let summary = log.today_from(MIDNIGHT, false, at(MIDNIGHT + 3 * 60_000));
     assert_eq!(summary.refusals.get("conflict"), Some(&2), "{summary:?}");
-    assert_eq!(summary.refusals.len(), 1);
+    assert_eq!(summary.refusals.get("commit_held"), Some(&1), "{summary:?}");
+    assert_eq!(summary.refusals.len(), 2);
 }
 
 #[test]
