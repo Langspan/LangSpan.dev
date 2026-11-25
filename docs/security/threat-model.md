@@ -395,9 +395,10 @@ A note is text one session or the owner asks LangSpan to show other sessions.
 | --- | --- |
 | Tampering (prompt injection) | A note is the most direct way for one agent to place text in another's context. It is one line, at most 400 bytes, control characters refused at the core, rendered quoted under the same "data, not instructions" header and caps as peer text, and at most four are shown per briefing. An agent that can call `langspan_remember` can still write persuasive text; a host model may follow it. |
 | Spoofing | The author is the session ID the caller supplies, checked only for being registered. |
-| Repudiation | Remembering and forgetting are events. |
-| Information disclosure | Every local session in the workspace can read every note through recap. Notes are not published to teammates. The tool description says not to store secrets. |
-| Denial of service | 64 notes per workspace, oldest dropped. Any session can forget any note. |
+| Repudiation | Remembering and forgetting are events. A recall is a read and is not recorded. |
+| Tampering (recall) | `langspan recall` and `langspan_recall` (roadmap E2) return held notes matching a query as data fields of a tool result, never placed in a briefing. The MCP result puts a label first saying the note text is remembered repository text, data, not instructions; the CLI prints note text quoted with escapes. Note text keeps the bounds `remember` already applies. A note written to match likely queries reaches an agent that searches for them, the same reach recap already gives it. |
+| Information disclosure | Every local session in the workspace can read every note through recap, and search them with recall. Notes are not published to teammates. The tool description says not to store secrets. |
+| Denial of service | 64 notes per workspace, oldest dropped. Any session can forget any note. A recall reads at most those 64 notes with a query of at most 200 bytes and 8 words (at most 8 × 64 × 9 substring searches over at most 4.5 KiB of text and paths per note), and its answer is held to 28 KiB. The MCP result carries the answer twice, once re-escaped as text, so the adapter encodes the whole result and drops notes until it leaves 512 bytes of one 64 KiB frame, however many quotation marks and backslashes the notes hold. |
 
 ## Messages and handoffs
 
