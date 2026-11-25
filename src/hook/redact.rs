@@ -625,6 +625,7 @@ mod tests {
             Command::SessionPrompt {
                 session_id: "s".into(),
                 summary: secret.into(),
+                line_digests: Vec::new(),
             },
             Command::IntentSet {
                 session_id: "s".into(),

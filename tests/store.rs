@@ -1057,6 +1057,7 @@ fn today_finds_the_anchor_behind_a_hundred_thousand_events_of_one_generation() {
             let event = Event::SessionPrompted {
                 session_id: "session".into(),
                 summary: "work on the parser".into(),
+                line_digests: Vec::new(),
                 at_ms: anchor.clock_ms + index as u64,
                 generation,
             };
