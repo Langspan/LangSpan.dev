@@ -1,0 +1,26 @@
+{
+  "recorded_date": "2026-11-24",
+  "host_version": "codex-cli 0.172.0-alpha.2",
+  "target": "x86_64-unknown-linux-musl",
+  "executable_sha256": "b8c20a7af7f4608bd02dea61981fa42de10e49101ae19bfa9bff1ed6bc400ec0",
+  "paths": "Scratch and runtime paths are replaced with explanatory placeholders.",
+  "attempts": [
+    {
+      "command": "codex --no-daemon exec --ignore-user-config --ephemeral --skip-git-repo-check --sandbox read-only --json -C <fresh-scratch-directory> 'Write exactly OK and do not use any tools.'",
+      "exit_code": 1,
+      "stdout": "",
+      "diagnostic": "Error: failed to initialize in-process app-server client: Read-only file system (os error 30)",
+      "preceding_diagnostic": "Codex could not open its state DB under the read-only runtime home.",
+      "model_request_reached": false,
+      "tool_events_captured": 0
+    },
+    {
+      "command": "codex --no-daemon exec --ignore-user-config --ephemeral --skip-git-repo-check --sandbox read-only --json -c 'sqlite_home=<fresh-scratch-state-directory>' -c 'log_dir=<fresh-scratch-log-directory>' -C <fresh-scratch-work-directory> 'Write exactly OK and do not use any tools.'",
+      "exit_code": 1,
+      "stdout": "",
+      "diagnostic": "Error: failed to initialize in-process app-server client: Read-only file system (os error 30)",
+      "model_request_reached": false,
+      "tool_events_captured": 0
+    }
+  ]
+}

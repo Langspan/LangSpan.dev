@@ -1,0 +1,16 @@
+{
+  "session_id": "00000000-0000-4000-8000-0000000000e1",
+  "transcript_path": "/home/user/.gemini/tmp/0000000000000000000000000000000000000000000000000000000000000000/chats/session-2026-11-24T23-15-00000000.json",
+  "cwd": "/work/demo",
+  "hook_event_name": "AfterTool",
+  "timestamp": "2026-11-24T23:15:04.300Z",
+  "tool_name": "run_shell_command",
+  "tool_input": {
+    "command": "ls",
+    "description": "List the files in the current directory."
+  },
+  "tool_response": {
+    "llmContent": "Output: notes.txt\nProcess Group PGID: 4242",
+    "returnDisplay": "notes.txt"
+  }
+}

@@ -1,0 +1,52 @@
+name: Bug report
+description: LangSpan did something wrong or failed.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a suspected vulnerability, use the private security report instead (see SECURITY.md).
+        Remove tokens, private paths and other people's text from anything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: LangSpan version
+      description: The output of `langspan --version`, and how you installed it.
+      placeholder: langspan 0.1.0, built from source
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: macOS 27.2 arm64
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host and version
+      description: Claude Code or Codex, and its version, if one was involved.
+      placeholder: Claude Code 2.1.331
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. langspan daemon
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: langspan doctor output
+      description: The output of `langspan doctor` (add `--root DIR` for a project install).
+      render: text

@@ -1,0 +1,1 @@
+{"version":1,"request_id":"edit-a","replayed":true,"generation":2,"lease_valid":false,"outcome":{"type":"admitted","lease":{"lease_id":"edit-a","session_id":"alice","workspace_id":"demo","paths":["src/api.rs"],"generation":1,"expires_at_ms":5000,"status":"active"}}}

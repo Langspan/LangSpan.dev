@@ -1,0 +1,16 @@
+# cargo-about configuration for THIRD-PARTY-LICENSES.html, the licence
+# notices of the crates linked into a release binary. The release workflow
+# runs: cargo about generate --locked --fail -c packaging/about.toml packaging/about.hbs
+# Reference: https://embarkstudios.github.io/cargo-about/cli/generate/config.html
+accepted = ["Apache-2.0", "MIT", "Unicode-3.0", "Zlib"]
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+]
+# Only what is linked into the binary: not build scripts' or tests' crates,
+# and not LangSpan's own (unpublished) crates, which LICENSE covers.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+private = { ignore = true }

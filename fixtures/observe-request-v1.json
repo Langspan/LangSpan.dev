@@ -1,0 +1,1 @@
+{"version":1,"request_id":"lsh1-observe-post_tool_use-0123456789abcdef0123456789abcdef","command":{"op":"observe","session_id":"claude-code.00000000-0000-4000-8000-000000000001","operation_id":"lsh1-op-0123456789abcdef0123456789abcdef","source":"claude-code","tool":"Edit","paths":["src/api.rs"],"result":"succeeded","lease_id":"lsh1-admit-0123456789abcdef0123456789abcdef"}}

@@ -1,0 +1,43 @@
+# Dependency updates. Version updates come weekly, grouped, after a cooldown.
+# Security updates are separate pull requests and the cooldown never delays
+# them. Commit message prefixes are Conventional Commits types, so
+# release-please files each update under the right changelog heading.
+# Options: https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00" # UTC
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+        # Before 1.0 a minor release can break, so these crates get one pull
+        # request each.
+        exclude-patterns: ["rmcp*", "tree-sitter*", "rusqlite", "libsqlite3-sys"]
+    commit-message:
+      prefix: build(deps)
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00" # UTC
+    # github-actions supports only default-days.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        applies-to: version-updates
+        patterns: ["*"]
+    commit-message:
+      prefix: ci(deps)

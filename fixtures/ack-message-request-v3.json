@@ -1,0 +1,1 @@
+{"version":3,"request_id":"ack-1","command":{"op":"ack_message","session_id":"claude-code.alice","message_id":"msg-1"}}

@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "coordination-v0",
+  "items": [
+    {
+      "id": "stale-write-after-release",
+      "description": "Owner-configured stale-read/released-lease scenario; preserve the native decision ordering and final integrated check.",
+      "arms": {
+        "no_tool": {
+          "versions": [
+            {
+              "id": "host-versions",
+              "argv": [
+                "<owner-provided version capture command>"
+              ],
+              "cwd": "<absolute checkout for no_tool>",
+              "timeout_seconds": 10
+            }
+          ],
+          "setup": [],
+          "agents": [
+            {
+              "id": "agent-a",
+              "argv": [
+                "<native agent executable>",
+                "<owner-provided task arguments>"
+              ],
+              "cwd": "<absolute checkout for no_tool>",
+              "timeout_seconds": 600
+            },
+            {
+              "id": "agent-b",
+              "argv": [
+                "<native agent executable>",
+                "<owner-provided task arguments>"
+              ],
+              "cwd": "<absolute checkout for no_tool>",
+              "timeout_seconds": 600
+            }
+          ],
+          "checks": [
+            {
+              "id": "integrated-result",
+              "argv": [
+                "<task-specific integrated-result verifier>"
+              ],
+              "cwd": "<absolute checkout for no_tool>",
+              "timeout_seconds": 120,
+              "assesses": "integrated_correctness"
+            }
+          ],
+          "evidence_file": "assessment.json"
+        },
+        "coarse_claims": {
+          "versions": [
+            {
+              "id": "host-versions",
+              "argv": [
+                "<owner-provided version capture command>"
+              ],
+              "cwd": "<absolute checkout for coarse_claims>",
+              "timeout_seconds": 10
+            }
+          ],
+          "setup": [],
+          "agents": [
+            {
+              "id": "agent-a",
+              "argv": [
+                "<native agent executable>",
+                "<owner-provided task arguments>"
+              ],
+              "cwd": "<absolute checkout for coarse_claims>",
+              "timeout_seconds": 600
+            },
+            {
+              "id": "agent-b",
+              "argv": [
+                "<native agent executable>",
+                "<owner-provided task arguments>"
+              ],
+              "cwd": "<absolute checkout for coarse_claims>",
+              "timeout_seconds": 600
+            }
+          ],
+          "checks": [
+            {
+              "id": "integrated-result",
+              "argv": [
+                "<task-specific integrated-result verifier>"
+              ],
+              "cwd": "<absolute checkout for coarse_claims>",
+              "timeout_seconds": 120,
+              "assesses": "integrated_correctness"
+            }
+          ],
+          "evidence_file": "assessment.json"
+        },
+        "langspan": {
+          "versions": [
+            {
+              "id": "host-versions",
+              "argv": [
+                "<owner-provided version capture command>"
+              ],
+              "cwd": "<absolute checkout for langspan>",
+              "timeout_seconds": 10
+            }
+          ],
+          "setup": [],
+          "agents": [
+            {
+              "id": "agent-a",
+              "argv": [
+                "<native agent executable>",
+                "<owner-provided task arguments>"
+              ],
+              "cwd": "<absolute checkout for langspan>",
+              "timeout_seconds": 600
+            },
+            {
+              "id": "agent-b",
+              "argv": [
+                "<native agent executable>",
+                "<owner-provided task arguments>"
+              ],
+              "cwd": "<absolute checkout for langspan>",
+              "timeout_seconds": 600
+            }
+          ],
+          "checks": [
+            {
+              "id": "integrated-result",
+              "argv": [
+                "<task-specific integrated-result verifier>"
+              ],
+              "cwd": "<absolute checkout for langspan>",
+              "timeout_seconds": 120,
+              "assesses": "integrated_correctness"
+            }
+          ],
+          "evidence_file": "assessment.json"
+        }
+      }
+    }
+  ]
+}

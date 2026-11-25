@@ -1,0 +1,13 @@
+# Terms refused in this repository and in pull request text, as salted
+# digests (see scripts/content-check.py). One per line: WORDS LENGTH DIGEST.
+# Add one with: python3 -I -B scripts/content-check.py --entry 'PHRASE'
+# Never write the term itself in this file, a commit message or a review.
+1 4 e1745859b8828d2520acd768
+1 11 f9e6c014f6afa66aed4c396f
+1 8 0157c0ee91f325a18eb859eb
+1 11 877a150b0cdca52af6c2decb
+2 0 49ec65724b5029f7ec9b7744
+2 0 c21163e607b81f905585749e
+2 0 047549095a55fe0856933262
+1 8 433252e066f9a8ec648dc95c
+4 0 68ab538030aeee106748f0fb

@@ -1,0 +1,25 @@
+{
+  "session_id": "00000000-0000-4000-8000-0000000000e1",
+  "transcript_path": "/home/user/.gemini/tmp/0000000000000000000000000000000000000000000000000000000000000000/chats/session-2026-11-24T23-15-00000000.json",
+  "cwd": "/work/demo",
+  "hook_event_name": "AfterTool",
+  "timestamp": "2026-11-24T23:15:02.200Z",
+  "tool_name": "replace",
+  "tool_input": {
+    "file_path": "/work/demo/notes.txt",
+    "instruction": "Change the line beta to BETA.",
+    "old_string": "beta",
+    "new_string": "BETA"
+  },
+  "tool_response": {
+    "llmContent": "Successfully modified file: /work/demo/notes.txt (1 replacements). Here is the updated code:\nalpha\nBETA",
+    "returnDisplay": {
+      "fileDiff": "Index: notes.txt\n===================================================================\n--- notes.txt\tCurrent\n+++ notes.txt\tProposed\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+BETA\n",
+      "fileName": "notes.txt",
+      "filePath": "/work/demo/notes.txt",
+      "originalContent": "alpha\nbeta\n",
+      "newContent": "alpha\nBETA\n",
+      "isNewFile": false
+    }
+  }
+}

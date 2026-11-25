@@ -1,0 +1,1 @@
+{"version":3,"request_id":"admit-3","replayed":false,"generation":2,"lease_valid":null,"outcome":{"type":"unread_lines","lines":[{"path":"src/upload.rs","session_id":"claude-code.alice","lines":[{"start_line":3,"end_line":3}],"age_ms":2000}]}}

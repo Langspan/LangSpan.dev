@@ -1,0 +1,44 @@
+# cargo-deny policy, run by scripts/check.sh as `cargo deny --locked check`.
+# Reference: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+
+[graph]
+# The release targets. Crates used only on other platforms (Windows, wasm)
+# are left out of every check below.
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+]
+all-features = true
+
+[advisories]
+# RustSec advisories. Vulnerabilities always fail, and so do unmaintained or
+# unsound crates anywhere in the tree (not only direct dependencies, the
+# default) and yanked versions. Each ignore needs an id and a reason, and is
+# listed in docs/dependencies.md.
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 is unmaintained with no fixed release; it comes in only through rmcp and schemars. Follow the upstream SDK migration (docs/dependencies.md)." },
+]
+
+[licenses]
+# Exactly the licences the dependency tree uses today, found by running
+# `cargo deny check licenses`. A new licence fails the check until it is
+# reviewed and added here.
+confidence-threshold = 0.93
+allow = ["Apache-2.0", "MIT", "Unicode-3.0", "Zlib"]
+
+[bans]
+# syn 2 and syn 3 are both in the tree today, so duplicates warn.
+multiple-versions = "warn"
+wildcards = "deny"
+# The workspace's own path dependencies carry no version.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

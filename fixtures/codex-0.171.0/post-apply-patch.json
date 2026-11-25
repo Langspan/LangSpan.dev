@@ -1,0 +1,15 @@
+{
+ "session_id": "01a21050-2d3e-7243-a3ca-bf8517eca23c",
+ "turn_id": "01a21050-2f1a-7a70-bbd7-79324e16b8c8",
+ "transcript_path": "/home/user/.codex/sessions/2026/11/24/rollout-2026-11-24T19-26-59-01a21050-2d3e-7243-a3ca-bf8517eca23c.jsonl",
+ "cwd": "/work/demo",
+ "hook_event_name": "PostToolUse",
+ "model": "gpt-6.2-sol",
+ "permission_mode": "bypassPermissions",
+ "tool_name": "apply_patch",
+ "tool_input": {
+  "command": "*** Begin Patch\n*** Update File: README.md\n@@\n # demo\n+edited by codex\n*** End Patch"
+ },
+ "tool_response": "Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nM README.md\n",
+ "tool_use_id": "exec-9866f0dc-5329-4b91-bd0d-a0b62248441f"
+}

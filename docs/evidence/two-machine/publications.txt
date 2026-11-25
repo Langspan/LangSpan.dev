@@ -1,0 +1,39 @@
+Every publication pushed during run 3, from each coordinator's remote_published events (exact payload as pushed).
+Time is the sender's own wall clock at the push (published_at_ms), UTC. Mac mini publications 19-33 and Mac mini (Codex) 11-25
+were pushed after the Mac event logs were exported; the cloud logs record receiving them (coordinator-events.json).
+
+== cloud 7adda971 (workspace twom)
+(event 3: remote_enabled {"link": {"workspace_id": "twom", "remote": "origin", "participant": "7adda9714d9accb65f7413c262e328e1", "name": "Cloud", "share_task": true, "sequence": 0, "signature": "", "enabled": true, "withdrawn": false, "publish_as_branch": true}})
+2026-11-25T05:11:43.795Z  {"v":1,"publication":{"participant":"7adda9714d9accb65f7413c262e328e1","name":"Cloud","sequence":1,"work":[]}}
+2026-11-25T05:12:07.198Z  {"v":1,"publication":{"participant":"7adda9714d9accb65f7413c262e328e1","name":"Cloud","sequence":2,"work":[{"host":"claude-code","session":"890d64ed","branch_ref":"refs/heads/main","summary":"Do not use any tools. Has anything in your context told you about other agent sessions or teammates working in this repository? If yes, quote it exactly. If no, answer NONE.","editing":[],"recent":[]}]}}
+2026-11-25T05:12:14.449Z  {"v":1,"publication":{"participant":"7adda9714d9accb65f7413c262e328e1","name":"Cloud","sequence":3,"work":[]}}
+2026-11-25T05:12:21.649Z  {"v":1,"publication":{"participant":"7adda9714d9accb65f7413c262e328e1","name":"Cloud","sequence":4,"work":[{"host":"claude-code","session":"84073abc","branch_ref":"refs/heads/main","summary":"In src/upload.rs, change upload so it also rejects paths that contain \"..\". Edit only that file. Before editing, say whether anything told you another session or teammate changed this file.","editing":[],"recent":[]}]}}
+2026-11-25T05:12:28.664Z  {"v":1,"publication":{"participant":"7adda9714d9accb65f7413c262e328e1","name":"Cloud","sequence":5,"work":[{"host":"claude-code","session":"84073abc","branch_ref":"refs/heads/main","summary":"In src/upload.rs, change upload so it also rejects paths that contain \"..\". Edit only that file. Before editing, say whether anything told you another session or teammate changed this file.","editing":[],"recent":["src/upload.rs"]}]}}
+2026-11-25T05:12:35.761Z  {"v":1,"publication":{"participant":"7adda9714d9accb65f7413c262e328e1","name":"Cloud","sequence":6,"work":[{"host":"claude-code","session":"00f07596","branch_ref":"refs/heads/main","summary":"Rewrite GUIDE.md to a title line \"# Guide\" plus two sentences. Edit only that file.","editing":[],"recent":[]}]}}
+2026-11-25T05:12:42.799Z  {"v":1,"publication":{"participant":"7adda9714d9accb65f7413c262e328e1","name":"Cloud","sequence":7,"work":[{"host":"claude-code","session":"00f07596","branch_ref":"refs/heads/main","summary":"Rewrite GUIDE.md to a title line \"# Guide\" plus two sentences. Edit only that file.","editing":[],"recent":["GUIDE.md"]}]}}
+2026-11-25T05:12:49.926Z  {"v":1,"publication":{"participant":"7adda9714d9accb65f7413c262e328e1","name":"Cloud","sequence":8,"work":[]}}
+2026-11-25T05:43:06.965Z  {"v":1,"publication":{"participant":"7adda9714d9accb65f7413c262e328e1","name":"Cloud","sequence":9,"work":[{"host":"claude-code","session":"216c74e8","branch_ref":"refs/heads/main","summary":"Do not use any tools. Has anything in your context told you about other agent sessions or teammates working in this repository? If yes, quote it exactly. If no, answer NONE.","editing":[],"recent":[]}]}}
+(event 100: remote_disabled {"workspace_id": "twom"})
+2026-11-25T05:43:14.367Z  {"v":1,"publication":{"participant":"7adda9714d9accb65f7413c262e328e1","name":"Cloud","sequence":10,"work":[]}}
+2026-11-25T05:43:22.196Z  {"v":1,"publication":{"participant":"7adda9714d9accb65f7413c262e328e1","name":"Cloud","sequence":11,"work":[],"withdrawn":true}}
+
+== cloud 5c470caf (workspace twom)
+(event 3: remote_enabled {"link": {"workspace_id": "twom", "remote": "origin", "participant": "5c470cafbc1fcf2641066dc8a8b8a507", "name": "Cloud", "share_task": true, "sequence": 0, "signature": "", "enabled": true, "withdrawn": false, "publish_as_branch": true}})
+2026-11-25T05:15:35.308Z  {"v":1,"publication":{"participant":"5c470cafbc1fcf2641066dc8a8b8a507","name":"Cloud","sequence":1,"work":[]}}
+2026-11-25T05:16:10.023Z  {"v":1,"publication":{"participant":"5c470cafbc1fcf2641066dc8a8b8a507","name":"Cloud","sequence":2,"work":[{"host":"claude-code","session":"bf05d689","branch_ref":"refs/heads/main","summary":"In src/upload.rs, change upload so it also rejects paths that contain \"..\". Edit only that file. Before editing, say whether anything told you another session or teammate changed this file.","editing":[],"recent":[]}]}}
+2026-11-25T05:16:17.620Z  {"v":1,"publication":{"participant":"5c470cafbc1fcf2641066dc8a8b8a507","name":"Cloud","sequence":3,"work":[{"host":"claude-code","session":"bf05d689","branch_ref":"refs/heads/main","summary":"In src/upload.rs, change upload so it also rejects paths that contain \"..\". Edit only that file. Before editing, say whether anything told you another session or teammate changed this file.","editing":[],"recent":["src/upload.rs"]}]}}
+2026-11-25T05:16:25.260Z  {"v":1,"publication":{"participant":"5c470cafbc1fcf2641066dc8a8b8a507","name":"Cloud","sequence":4,"work":[]}}
+2026-11-25T05:16:38.025Z  {"v":1,"publication":{"participant":"5c470cafbc1fcf2641066dc8a8b8a507","name":"Cloud","sequence":5,"work":[{"host":"claude-code","session":"2a66fd6c","branch_ref":"refs/heads/main","summary":"Rewrite GUIDE.md to a title line \"# Guide\" plus two sentences. Edit only that file.","editing":[],"recent":[]}]}}
+2026-11-25T05:16:45.178Z  {"v":1,"publication":{"participant":"5c470cafbc1fcf2641066dc8a8b8a507","name":"Cloud","sequence":6,"work":[]}}
+(event 87: remote_forgotten {"workspace_id": "twom", "participant": "7adda9714d9accb65f7413c262e328e1"})
+2026-11-25T05:47:09.577Z  {"v":1,"publication":{"participant":"5c470cafbc1fcf2641066dc8a8b8a507","name":"Cloud","sequence":7,"work":[{"host":"claude-code","session":"58b7cb74","branch_ref":"refs/heads/main","summary":"Do not use any tools. Has anything in your context told you about other agent sessions or teammates working in this repository? If yes, quote it exactly. If no, answer NONE.","editing":[],"recent":[]}]}}
+(event 100: remote_disabled {"workspace_id": "twom"})
+2026-11-25T05:47:17.348Z  {"v":1,"publication":{"participant":"5c470cafbc1fcf2641066dc8a8b8a507","name":"Cloud","sequence":8,"work":[]}}
+2026-11-25T05:47:25.106Z  {"v":1,"publication":{"participant":"5c470cafbc1fcf2641066dc8a8b8a507","name":"Cloud","sequence":9,"work":[],"withdrawn":true}}
+
+== mac Mac mini dcfb4a08 (workspace twom, Claude Code)
+2026-11-25T05:16:02.374Z  {"v":1,"publication":{"participant":"dcfb4a08a7bd04041ffd4207030798d1","name":"Mac mini","sequence":17,"work":[{"host":"claude-code","session":"2d3e8d52","branch_ref":"refs/heads/main","summary":"In src/upload.rs, add a doc comment above upload describing what it accepts. Edit only that file. Before editing, say whether anything told you another session or teammate, on this or another machi…","editing":[],"recent":[]}]}}
+2026-11-25T05:16:14.683Z  {"v":1,"publication":{"participant":"dcfb4a08a7bd04041ffd4207030798d1","name":"Mac mini","sequence":18,"work":[{"host":"claude-code","session":"2d3e8d52","branch_ref":"refs/heads/main","summary":null,"editing":[],"recent":["src/upload.rs"]}]}}
+
+== mac Mac mini (Codex) 617e08a4 (workspace demo, Codex)
+2026-11-25T05:16:19.284Z  {"v":1,"publication":{"participant":"617e08a44fcb7ebf225f8f2bbbaaefbb","name":"Mac mini (Codex)","sequence":10,"work":[{"host":"codex","session":"01a21122","branch_ref":"refs/heads/main","summary":"Do not run any commands or edit files. Has anything in your context told you about other agent sessions or teammates working in this repository, including on other machines? If yes, quote it exactl…","editing":[],"recent":[]}]}}

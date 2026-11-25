@@ -1,0 +1,252 @@
+[
+ {
+  "seq": 1,
+  "event": {
+   "type": "booted",
+   "generation": 1
+  }
+ },
+ {
+  "seq": 2,
+  "event": {
+   "type": "workspace_registered",
+   "workspace": {
+    "workspace_id": "demo",
+    "root": "/work/accept/demo"
+   }
+  }
+ },
+ {
+  "seq": 3,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.63920920-6209-4d32-a73e-0807d2509454",
+    "workspace_id": "demo",
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 4,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "claude-code.63920920-6209-4d32-a73e-0807d2509454",
+   "summary": "In src/upload.rs, make upload also reject paths longer than 255 characters. Edit only that file and do nothing else.",
+   "at_ms": 27,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 5,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-4-0",
+    "workspace_id": "demo",
+    "path": ".claude/settings.local.json",
+    "before": null,
+    "after": {
+     "type": "present",
+     "digest": "e03a32e254ba739d84258745eb75faf5c3b471ec5d95ec985fadecfeca8f8826"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 133,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 6,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-4-1",
+    "workspace_id": "demo",
+    "path": ".codex/hooks.json",
+    "before": null,
+    "after": {
+     "type": "present",
+     "digest": "104e3d2cdd814b4d8ca0f46ba2e0e8d8a45b6f00c49be71b41ce1f095de4b5c2"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 133,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 7,
+  "event": {
+   "type": "branch_observed",
+   "observation": {
+    "observation_id": "scan-1-4-2",
+    "workspace_id": "demo",
+    "branch_ref": "HEAD",
+    "head_oid": "96b857275eedcbe1b0ceb62f4321182f55d2874b",
+    "tree_oid": "ab9275ccdcaaac995f4b3a79331f521a090b0afb",
+    "observed_at_ms": 133,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 8,
+  "event": {
+   "type": "branch_observed",
+   "observation": {
+    "observation_id": "scan-1-4-3",
+    "workspace_id": "demo",
+    "branch_ref": "refs/heads/feature",
+    "head_oid": "96b857275eedcbe1b0ceb62f4321182f55d2874b",
+    "tree_oid": "ab9275ccdcaaac995f4b3a79331f521a090b0afb",
+    "observed_at_ms": 133,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 9,
+  "event": {
+   "type": "branch_observed",
+   "observation": {
+    "observation_id": "scan-1-4-4",
+    "workspace_id": "demo",
+    "branch_ref": "refs/heads/main",
+    "head_oid": "96b857275eedcbe1b0ceb62f4321182f55d2874b",
+    "tree_oid": "ab9275ccdcaaac995f4b3a79331f521a090b0afb",
+    "observed_at_ms": 133,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 10,
+  "event": {
+   "type": "workspace_git_observed",
+   "git": {
+    "workspace_id": "demo",
+    "repository_id": "local-d475d47d65699afe07558193a9439680",
+    "branch_ref": "refs/heads/main"
+   }
+  }
+ },
+ {
+  "seq": 11,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-a4033e2d2a528b4462decc7fcc67eb3f",
+    "session_id": "claude-code.63920920-6209-4d32-a73e-0807d2509454",
+    "workspace_id": "demo",
+    "paths": [
+     "src/upload.rs"
+    ],
+    "generation": 1,
+    "expires_at_ms": 37717,
+    "status": "active",
+    "operation": {
+     "operation_id": "lsh1-op-396fcaf68977a3d187dc43b52eecb90a",
+     "source": "claude-code",
+     "tool": "Edit",
+     "input_digest": "c1567e5356ecf8bf0badb9a581bef9887cb8d931c7699d7b97a23196baa6ed56"
+    }
+   }
+  }
+ },
+ {
+  "seq": 12,
+  "event": {
+   "type": "operation_observed",
+   "observation": {
+    "observation_id": "lsh1-observe-post_tool_use-acebe69fc6035890ce14dde85c6d6e74",
+    "session_id": "claude-code.63920920-6209-4d32-a73e-0807d2509454",
+    "workspace_id": "demo",
+    "operation_id": "lsh1-op-396fcaf68977a3d187dc43b52eecb90a",
+    "source": "claude-code",
+    "tool": "Edit",
+    "paths": [
+     "src/upload.rs"
+    ],
+    "result": "succeeded",
+    "lease_id": "lsh1-admit-a4033e2d2a528b4462decc7fcc67eb3f",
+    "lease_relation": "current",
+    "concurrent_holders": [],
+    "observed_at_ms": 7736,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 13,
+  "event": {
+   "type": "lease_completed",
+   "lease_id": "lsh1-admit-a4033e2d2a528b4462decc7fcc67eb3f"
+  }
+ },
+ {
+  "seq": 14,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-13-0",
+    "workspace_id": "demo",
+    "path": "src/upload.rs",
+    "before": {
+     "type": "present",
+     "digest": "8c3a59b1cd63d8b0b828dc43823ef2d1f24297fd7759543fb64fd2162f029a06"
+    },
+    "after": {
+     "type": "present",
+     "digest": "4f1dd07bd5f1358772bdd365749eb37d4c3394e7b69376872cce8db08a598361"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 8380,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 15,
+  "event": {
+   "type": "session_ended",
+   "session_id": "claude-code.63920920-6209-4d32-a73e-0807d2509454"
+  }
+ },
+ {
+  "seq": 16,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.f749fa7e-302f-422b-b1ed-d8103a462147",
+    "workspace_id": "demo",
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 17,
+  "event": {
+   "type": "briefing_delivered",
+   "session_id": "claude-code.f749fa7e-302f-422b-b1ed-d8103a462147",
+   "signature": "claude-code.63920920-6209-4d32-a73e-0807d2509454|||src/upload.rs,|In src/upload.rs, make upload also reject paths longer than 255 characters. Edit only that file and do nothing else.||refs/heads/main|ended\n"
+  }
+ },
+ {
+  "seq": 18,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "claude-code.f749fa7e-302f-422b-b1ed-d8103a462147",
+   "summary": "Do not use any tools. Has anything in your context told you about other agent sessions working in this repository? If yes, quote that text exactly as you received it. If no, answer NONE.",
+   "at_ms": 11786,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 19,
+  "event": {
+   "type": "session_ended",
+   "session_id": "claude-code.f749fa7e-302f-422b-b1ed-d8103a462147"
+  }
+ }
+]

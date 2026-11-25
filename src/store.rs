@@ -1,0 +1,870 @@
+//! The daemon's single SQLite owner. The caller holds the lifetime OS lock.
+//!
+//! Decisions are applied to a private candidate state, persisted with their
+//! receipts, and published only after commit. Receipts retain original outcomes;
+//! replay validity is calculated from the current recovered state.
+
+use langspan_core::{
+    Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event, LeaseStatus, Outcome,
+    RecordedEvent, SentPublication, State, apply, dashboard_denials, decide, expiry_events,
+};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use std::path::Path;
+use std::time::Duration;
+
+pub type StoreResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+#[derive(Debug, Clone)]
+pub struct Execution {
+    pub outcome: Outcome,
+    pub replayed: bool,
+    pub generation: u64,
+    pub lease_valid: Option<bool>,
+}
+
+pub struct Store {
+    connection: Connection,
+    state: State,
+}
+
+impl Store {
+    pub fn open(path: &Path) -> StoreResult<Self> {
+        let mut connection = Connection::open(path)?;
+        connection.busy_timeout(Duration::from_millis(250))?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if !(0..=3).contains(&version) {
+            return Err(
+                format!("unsupported SQLite schema version {version}; expected at most 3").into(),
+            );
+        }
+        if version == 0 {
+            let tables: i64 = connection.query_row(
+                "SELECT count(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )?;
+            if tables != 0 {
+                return Err(
+                    "unversioned database contains tables; refusing to reset history".into(),
+                );
+            }
+        }
+
+        let journal: String =
+            connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        if !journal.eq_ignore_ascii_case("wal") {
+            return Err(
+                "SQLite WAL could not be enabled; use a supported file-backed database".into(),
+            );
+        }
+        connection.pragma_update(None, "synchronous", "FULL")?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        if version == 0 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "CREATE TABLE events (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_json TEXT NOT NULL
+                 );
+                 CREATE TABLE receipts (
+                    request_id TEXT PRIMARY KEY NOT NULL,
+                    command_json TEXT NOT NULL,
+                    outcome_json TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 1;",
+            )?;
+            transaction.commit()?;
+        }
+
+        if version < 2 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "CREATE TABLE git_snapshots (
+                    workspace_id TEXT PRIMARY KEY NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    summary_json TEXT NOT NULL
+                 );
+                 CREATE INDEX observation_workspace_sequence ON events(
+                    CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.observation.workspace_id') END, seq
+                 );
+                 PRAGMA user_version = 2;"
+            )?;
+            transaction.commit()?;
+        }
+
+        if version < 3 {
+            // Version 3 adds event kinds, not tables. The marker makes an older
+            // binary refuse this history instead of failing partway through it.
+            connection.pragma_update(None, "user_version", 3)?;
+        }
+
+        let state = Self::recover(&connection)?;
+        let generation = state
+            .generation
+            .checked_add(1)
+            .ok_or("authority generation exhausted; refusing to reuse a generation")?;
+        let mut store = Self { connection, state };
+        store.commit(&[Event::Booted { generation }], None)?;
+        Ok(store)
+    }
+
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+
+    pub fn refresh(&mut self, now_ms: u64) -> StoreResult<()> {
+        let events = expiry_events(&self.state, now_ms);
+        if !events.is_empty() {
+            self.commit(&events, None)?;
+        }
+        Ok(())
+    }
+
+    /// Persist a complete read-only Git scan and its derived facts atomically.
+    pub fn record_scan(
+        &mut self,
+        workspace_id: &str,
+        snapshot: &crate::observer::Snapshot,
+        now_ms: u64,
+    ) -> StoreResult<usize> {
+        let workspace = self
+            .state
+            .workspaces
+            .get(workspace_id)
+            .ok_or("cannot store a scan for an unregistered workspace")?;
+        if workspace.root != snapshot.root {
+            return Err("scan root differs from the registered physical workspace".into());
+        }
+        let limits = crate::observer::Limits::default();
+        if snapshot.files.len() > limits.max_files || snapshot.branches.len() > limits.max_branches
+        {
+            return Err("complete scan exceeds the persistence bounds".into());
+        }
+        for (path, version) in &snapshot.files {
+            let state = observed_file_state(Some(version))?;
+            langspan_core::validate_observed_file(path, &state)?;
+        }
+        let branches = observed_branches(snapshot);
+        if branches.len() != snapshot.branches.len() + 1 {
+            return Err("Git snapshot contains duplicate branch identities".into());
+        }
+        for (name, (head_oid, tree_oid)) in &branches {
+            let command = Command::ObserveBranch {
+                workspace_id: workspace_id.into(),
+                branch_ref: name.clone(),
+                head_oid: head_oid.clone(),
+                tree_oid: tree_oid.clone(),
+            };
+            if let Outcome::Error { code, message } =
+                decide(&self.state, &command, "scan-validation", now_ms).outcome
+            {
+                return Err(format!("invalid complete Git snapshot: {code}: {message}").into());
+            }
+        }
+        let snapshot_json = serde_json::to_string(snapshot)?;
+        if snapshot_json.len() > 4 * 1024 * 1024 {
+            return Err("serialized Git snapshot exceeds 4 MiB".into());
+        }
+        let previous_json: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT snapshot_json FROM git_snapshots WHERE workspace_id=?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let previous: Option<crate::observer::Snapshot> = previous_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?;
+        if previous
+            .as_ref()
+            .is_some_and(|old| old.root != snapshot.root || old.common_dir != snapshot.common_dir)
+        {
+            return Err("Git identity changed since the previous scan; register the replacement as a new workspace".into());
+        }
+        let changes = crate::observer::diff(&previous, snapshot);
+        let sequence: i64 =
+            self.connection
+                .query_row("SELECT coalesce(max(seq), 0) FROM events", [], |row| {
+                    row.get(0)
+                })?;
+        let scan_id = format!("scan-{}-{sequence}", self.state.generation);
+        let mut commands = Vec::new();
+        // Several changed files back at their committed version at once,
+        // with HEAD where it was: a reset, stash or checkout of files.
+        let restored = changes
+            .iter()
+            .filter(|change| {
+                change.before.as_ref().is_some_and(|before| before.dirty)
+                    && change.after.as_ref().is_some_and(|after| !after.dirty)
+            })
+            .count();
+        let file_changes = u32::try_from(changes.len()).unwrap_or(u32::MAX);
+        // A changed file now at a version a session of this workspace wrote
+        // or read is explained by that session, not by the checkout: an edit
+        // no scan saw before it was committed moves HEAD "with the files".
+        let known = |path: &str, after: &langspan_core::FileState| {
+            self.state.activity.iter().any(|(session, activity)| {
+                self.state
+                    .sessions
+                    .get(session)
+                    .is_some_and(|s| s.workspace_id == workspace_id)
+                    && activity
+                        .known
+                        .iter()
+                        .any(|version| version.path == path && version.state == *after)
+            })
+        };
+        let unexplained = changes
+            .iter()
+            .filter(|change| {
+                observed_file_state(change.after.as_ref())
+                    .map_or(true, |after| !known(&change.path, &after))
+            })
+            .count();
+        for change in changes {
+            // A new path absent from an existing complete baseline was missing.
+            // No previous baseline, or a previous scan that did not version
+            // the path, is deliberately recorded as unknown instead.
+            let before = if previous.is_some() && !change.before_unknown {
+                Some(observed_file_state(change.before.as_ref())?)
+            } else {
+                None
+            };
+            commands.push(Command::ObserveDisk {
+                workspace_id: workspace_id.into(),
+                path: change.path,
+                before,
+                after: observed_file_state(change.after.as_ref())?,
+                related_operation_ids: Vec::new(),
+            });
+        }
+        let previous_branches = previous.as_ref().map(observed_branches).unwrap_or_default();
+        let names: std::collections::BTreeSet<_> =
+            branches.keys().chain(previous_branches.keys()).collect();
+        for name in names {
+            let current = branches.get(name);
+            let changed = current != previous_branches.get(name)
+                || name == "HEAD"
+                    && previous
+                        .as_ref()
+                        .is_some_and(|old| old.branch != snapshot.branch);
+            if changed {
+                let (head_oid, tree_oid) = current.cloned().unwrap_or_default();
+                commands.push(Command::ObserveBranch {
+                    workspace_id: workspace_id.into(),
+                    branch_ref: name.clone(),
+                    head_oid,
+                    tree_oid,
+                });
+            }
+        }
+        let facts = commands.len();
+        // The checkout changed under the sessions in it: another branch, a
+        // HEAD that moved with files no session put there, or a bulk
+        // restore. A commit moves HEAD without changing any file, or with
+        // only files at versions their sessions wrote, and is not one.
+        if let Some(old) = &previous {
+            let head_moved = old.head != snapshot.head;
+            if old.branch != snapshot.branch
+                || head_moved && unexplained > 0
+                || !head_moved && restored >= CHECKOUT_RESTORED_FILES
+            {
+                let branch =
+                    |name: &Option<String>| name.as_ref().map(|name| format!("refs/heads/{name}"));
+                commands.push(Command::ObserveCheckout {
+                    workspace_id: workspace_id.into(),
+                    from_branch: branch(&old.branch),
+                    to_branch: branch(&snapshot.branch),
+                    from_head: old.head.clone(),
+                    to_head: snapshot.head.clone(),
+                    files: file_changes,
+                });
+            }
+        }
+        // Worktrees of one repository share a Git common directory. Only its
+        // digest is recorded; it groups workspaces without merging them.
+        commands.push(Command::ObserveWorkspaceGit {
+            workspace_id: workspace_id.into(),
+            repository_id: format!(
+                "local-{}",
+                &crate::sha256::hex(&crate::sha256::digest(snapshot.common_dir.as_bytes()))[..32]
+            ),
+            branch_ref: snapshot
+                .branch
+                .as_ref()
+                .map(|name| format!("refs/heads/{name}")),
+        });
+        let mut events = Vec::new();
+        // The returned count is of disk and branch facts, not the grouping record.
+        let mut observed = 0;
+        for (index, command) in commands.iter().enumerate() {
+            let id = format!("{scan_id}-{index}");
+            let decision = decide(&self.state, command, &id, now_ms);
+            if let Outcome::Error { code, message } = decision.outcome {
+                return Err(format!("invalid Git observation: {code}: {message}").into());
+            }
+            events.extend(decision.events);
+            if index + 1 == facts {
+                observed = events.len();
+            }
+        }
+        let summary = langspan_core::ScanSummary {
+            workspace_id: workspace_id.into(),
+            observed_at_ms: now_ms,
+            generation: self.state.generation,
+            file_count: snapshot.files.len() as u64,
+            branch_count: snapshot.branches.len() as u64,
+            head_oid: snapshot.head.clone(),
+            branch_ref: snapshot
+                .branch
+                .as_ref()
+                .map(|name| format!("refs/heads/{name}")),
+            coverage: (snapshot.coverage != langspan_core::ScanCoverage::default())
+                .then(|| snapshot.coverage.clone()),
+        };
+        self.commit_with_snapshot(
+            &events,
+            None,
+            Some((
+                workspace_id,
+                &snapshot_json,
+                &serde_json::to_string(&summary)?,
+            )),
+        )?;
+        Ok(observed)
+    }
+
+    pub fn replay(
+        &mut self,
+        request_id: &str,
+        original: &Command,
+        now_ms: u64,
+    ) -> StoreResult<Option<Execution>> {
+        self.refresh(now_ms)?;
+        if matches!(
+            original,
+            Command::Status
+                | Command::Events { .. }
+                | Command::Changes { .. }
+                | Command::RemoteOutbox { .. }
+                | Command::RemoteSent { .. }
+                | Command::CheckStatus { .. }
+                | Command::LandingReadiness { .. }
+                | Command::TurnQueue { .. }
+                | Command::Recap { .. }
+                | Command::Dashboard
+        ) {
+            return Ok(None);
+        }
+        let receipt: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT command_json, outcome_json FROM receipts WHERE request_id = ?1",
+                [request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((command_json, outcome_json)) = receipt else {
+            return Ok(None);
+        };
+        let unreadable = || {
+            Ok(Some(self.execution(
+                Outcome::Error {
+                    code: "receipt_unreadable".into(),
+                    message: "this request ID's earlier outcome was written in a form this build cannot read, so it cannot be answered again; send the operation with a new request ID".into(),
+                },
+                false,
+                now_ms,
+            )))
+        };
+        let Ok(recorded) = serde_json::from_str::<Command>(&command_json) else {
+            return unreadable();
+        };
+        if !recorded.same_request(original) {
+            return Ok(Some(self.execution(
+                Outcome::Error {
+                    code: "request_id_conflict".into(),
+                    message:
+                        "request_id already belongs to a different command; use a new ID".into(),
+                },
+                false,
+                now_ms,
+            )));
+        }
+        let Ok(outcome) = serde_json::from_str(&outcome_json) else {
+            return unreadable();
+        };
+        Ok(Some(self.execution(outcome, true, now_ms)))
+    }
+
+    pub fn execute(
+        &mut self,
+        request_id: &str,
+        original: &Command,
+        prepared: &Command,
+        now_ms: u64,
+    ) -> StoreResult<Execution> {
+        if let Some(replayed) = self.replay(request_id, original, now_ms)? {
+            return Ok(replayed);
+        }
+        let outcome = match original {
+            Command::Status => Outcome::Status {
+                state: self.state.clone(),
+            },
+            // A read: decided by the core, never recorded.
+            Command::RemoteOutbox { .. }
+            | Command::CheckStatus { .. }
+            | Command::LandingReadiness { .. }
+            | Command::TurnQueue { .. }
+            | Command::Recap { .. } => {
+                match decide(&self.state, prepared, request_id, now_ms).outcome {
+                    // A recap must fit one frame with room for the envelope.
+                    Outcome::Recap { mut recap } => {
+                        recap.shrink_until(|recap| {
+                            serde_json::to_vec(recap).is_ok_and(|bytes| bytes.len() <= 48 * 1024)
+                        });
+                        Outcome::Recap { recap }
+                    }
+                    outcome => outcome,
+                }
+            }
+            Command::Dashboard => {
+                let mut outcome = decide(&self.state, prepared, request_id, now_ms).outcome;
+                if let Outcome::Dashboard { dashboard } = &mut outcome {
+                    dashboard.denials = Some(self.denials(now_ms)?);
+                }
+                outcome
+            }
+            Command::Events { after, limit } => self.events(*after, *limit)?,
+            Command::RemoteSent {
+                workspace_id,
+                limit,
+            } => self.sent(workspace_id, *limit)?,
+            Command::Changes {
+                workspace_id,
+                after,
+                limit,
+            } => self.changes(workspace_id, *after, *limit)?,
+            _ => {
+                let decision = decide(&self.state, prepared, request_id, now_ms);
+                self.commit(
+                    &decision.events,
+                    Some((request_id, original, &decision.outcome)),
+                )?;
+                decision.outcome
+            }
+        };
+        Ok(self.execution(outcome, false, now_ms))
+    }
+
+    fn execution(&self, outcome: Outcome, replayed: bool, now_ms: u64) -> Execution {
+        let lease_id = match &outcome {
+            Outcome::Admitted { lease } => Some(&lease.lease_id),
+            Outcome::Completed { lease_id } => Some(lease_id),
+            Outcome::Observed { observation } => observation.lease_id.as_ref(),
+            _ => None,
+        };
+        let lease_valid = lease_id.map(|id| {
+            self.state.leases.get(id).is_some_and(|lease| {
+                lease.status == LeaseStatus::Active
+                    && lease.generation == self.state.generation
+                    && lease.expires_at_ms > now_ms
+            })
+        });
+        Execution {
+            outcome,
+            replayed,
+            generation: self.state.generation,
+            lease_valid,
+        }
+    }
+
+    /// Recent refusals for the dashboard. Conflicts are receipts, not
+    /// events, and carry no time; stale-source refusals are the events that
+    /// recorded what a refused session was told. Only the newest
+    /// `DENIAL_WINDOW` rows of each table are searched, so the cost of a read
+    /// does not grow with history.
+    fn denials(&self, now_ms: u64) -> StoreResult<Denials> {
+        let page = i64::try_from(DASHBOARD_ITEMS / 2 + 1)?;
+        let window = i64::from(DENIAL_WINDOW);
+        let mut statement = self.connection.prepare(
+            "SELECT command_json, outcome_json FROM receipts
+             WHERE rowid > (SELECT coalesce(max(rowid), 0) FROM receipts) - ?1
+               AND json_extract(outcome_json, '$.type') = 'conflict'
+             ORDER BY rowid DESC LIMIT ?2",
+        )?;
+        let mut rows = statement.query(params![window, page])?;
+        let mut conflicts = Vec::new();
+        while let Some(row) = rows.next()? {
+            // A receipt this build cannot read is no denial it can show.
+            let (Ok(command), Ok(outcome)) = (
+                serde_json::from_str::<Command>(&row.get::<_, String>(0)?),
+                serde_json::from_str::<Outcome>(&row.get::<_, String>(1)?),
+            ) else {
+                continue;
+            };
+            let (Command::Admit {
+                session_id, paths, ..
+            }
+            | Command::AdmitTool {
+                session_id, paths, ..
+            }) = command
+            else {
+                continue;
+            };
+            let Outcome::Conflict { holders } = outcome else {
+                continue;
+            };
+            conflicts.push(DenialRecord {
+                session_id,
+                paths,
+                holders: holders
+                    .into_iter()
+                    .map(|holder| holder.session_id)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                at_ms: None,
+                generation: None,
+            });
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT event_json FROM events
+             WHERE seq > (SELECT coalesce(max(seq), 0) FROM events) - ?1
+               AND json_extract(event_json, '$.type') = 'source_observed'
+               AND json_extract(event_json, '$.origin') = 'refused'
+             ORDER BY seq DESC LIMIT ?2",
+        )?;
+        let mut rows = statement.query(params![window, page])?;
+        let mut refusals = Vec::new();
+        while let Some(row) = rows.next()? {
+            if let Event::SourceObserved {
+                session_id,
+                files,
+                at_ms,
+                generation,
+                ..
+            } = serde_json::from_str(&row.get::<_, String>(0)?)?
+            {
+                refusals.push(DenialRecord {
+                    session_id,
+                    paths: files.into_iter().map(|file| file.path).collect(),
+                    holders: Vec::new(),
+                    at_ms: Some(at_ms),
+                    generation: Some(generation),
+                });
+            }
+        }
+        let limit = DASHBOARD_ITEMS / 2;
+        let more = |records: &mut Vec<DenialRecord>| {
+            let more = records.len() > limit;
+            records.truncate(limit);
+            more
+        };
+        let more_conflicts = more(&mut conflicts);
+        let more_refusals = more(&mut refusals);
+        Ok(dashboard_denials(
+            &self.state,
+            now_ms,
+            conflicts,
+            more_conflicts,
+            refusals,
+            more_refusals,
+        ))
+    }
+
+    fn events(&self, after: u64, limit: u32) -> StoreResult<Outcome> {
+        if !(1..=1000).contains(&limit) {
+            return Ok(Outcome::Error {
+                code: "invalid_limit".into(),
+                message: "event limit must be between 1 and 1000".into(),
+            });
+        }
+        let after = i64::try_from(after).unwrap_or(i64::MAX);
+        let mut statement = self
+            .connection
+            .prepare("SELECT seq, event_json FROM events WHERE seq > ?1 ORDER BY seq LIMIT ?2")?;
+        let mut rows = statement.query(params![after, i64::from(limit)])?;
+        let mut events = Vec::new();
+        let mut page_bytes = 0;
+        while let Some(row) = rows.next()? {
+            let sequence: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            if page_bytes + json.len() + 64 > 48 * 1024 {
+                if events.is_empty() {
+                    return Err("one event exceeds the transport page budget".into());
+                }
+                break;
+            }
+            page_bytes += json.len() + 64;
+            events.push(RecordedEvent {
+                seq: u64::try_from(sequence)?,
+                event: serde_json::from_str(&json)?,
+            });
+        }
+        Ok(Outcome::Events { events })
+    }
+
+    /// The outbound audit: what left for a workspace, newest first, read
+    /// from the `remote_published` events. Each payload is at most 16 KiB,
+    /// which JSON escaping can at most double, so one record always fits a
+    /// frame; the answer stops before 48 KiB and says whether it did.
+    fn sent(&self, workspace_id: &str, limit: u32) -> StoreResult<Outcome> {
+        if !self.state.remote_links.contains_key(workspace_id) {
+            return Ok(Outcome::Error {
+                code: "remote_not_enabled".into(),
+                message: "this workspace has never published; nothing has left the machine for it"
+                    .into(),
+            });
+        }
+        if !(1..=100).contains(&limit) {
+            return Ok(Outcome::Error {
+                code: "invalid_limit".into(),
+                message: "limit must be between 1 and 100".into(),
+            });
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT seq, event_json FROM events
+             WHERE json_valid(event_json)
+               AND json_extract(event_json, '$.type') = 'remote_published'
+               AND json_extract(event_json, '$.workspace_id') = ?1
+             ORDER BY seq DESC LIMIT ?2",
+        )?;
+        let mut rows = statement.query(params![workspace_id, i64::from(limit)])?;
+        let mut sent = Vec::new();
+        let mut bytes = 0;
+        let mut more = false;
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            let Event::RemotePublished {
+                sequence,
+                payload,
+                published_at_ms,
+                ..
+            } = serde_json::from_str(&json)?
+            else {
+                return Err("a remote_published row holds another event".into());
+            };
+            let record = SentPublication {
+                seq: u64::try_from(seq)?,
+                sequence,
+                published_at_ms,
+                payload,
+            };
+            let size = serde_json::to_vec(&record)?.len() + 16;
+            if bytes + size > 48 * 1024 {
+                more = true;
+                break;
+            }
+            bytes += size;
+            sent.push(record);
+        }
+        Ok(Outcome::RemoteSent { sent, more })
+    }
+
+    fn changes(&self, workspace_id: &str, after: u64, limit: u32) -> StoreResult<Outcome> {
+        if !self.state.workspaces.contains_key(workspace_id) {
+            return Ok(Outcome::Error {
+                code: "unknown_workspace".into(),
+                message: "register this workspace before reading its changes".into(),
+            });
+        }
+        if !(1..=1000).contains(&limit) {
+            return Ok(Outcome::Error {
+                code: "invalid_limit".into(),
+                message: "change limit must be between 1 and 1000".into(),
+            });
+        }
+        let summary: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT summary_json FROM git_snapshots WHERE workspace_id=?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let scan = summary
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?;
+        let mut statement = self.connection.prepare(
+            "SELECT seq,event_json FROM events
+             WHERE json_extract(event_json,'$.type') IN ('disk_observed','branch_observed')
+               AND (CASE WHEN json_valid(event_json) THEN json_extract(event_json,'$.observation.workspace_id') END)=?1 AND seq>?2
+             ORDER BY seq LIMIT ?3"
+        )?;
+        let mut rows = statement.query(params![
+            workspace_id,
+            i64::try_from(after).unwrap_or(i64::MAX),
+            i64::from(limit)
+        ])?;
+        let mut events = Vec::new();
+        let mut bytes = 0;
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            if bytes + json.len() + 64 > 48 * 1024 {
+                if events.is_empty() {
+                    return Err("one observation exceeds the transport page budget".into());
+                }
+                break;
+            }
+            bytes += json.len() + 64;
+            events.push(RecordedEvent {
+                seq: u64::try_from(seq)?,
+                event: serde_json::from_str(&json)?,
+            });
+        }
+        Ok(Outcome::Changes { events, scan })
+    }
+
+    fn commit(
+        &mut self,
+        events: &[Event],
+        receipt: Option<(&str, &Command, &Outcome)>,
+    ) -> StoreResult<()> {
+        self.commit_with_snapshot(events, receipt, None)
+    }
+
+    fn commit_with_snapshot(
+        &mut self,
+        events: &[Event],
+        receipt: Option<(&str, &Command, &Outcome)>,
+        snapshot: Option<(&str, &str, &str)>,
+    ) -> StoreResult<()> {
+        let mut next_state = self.state.clone();
+        for event in events {
+            apply(&mut next_state, event)?;
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for event in events {
+            transaction.execute(
+                "INSERT INTO events(event_json) VALUES (?1)",
+                [serde_json::to_string(event)?],
+            )?;
+        }
+        if let Some((request_id, command, outcome)) = receipt {
+            transaction.execute(
+                "INSERT INTO receipts(request_id, command_json, outcome_json) VALUES (?1, ?2, ?3)",
+                params![
+                    request_id,
+                    serde_json::to_string(command)?,
+                    serde_json::to_string(outcome)?,
+                ],
+            )?;
+        }
+        if let Some((workspace_id, snapshot_json, summary_json)) = snapshot {
+            transaction.execute(
+                "INSERT INTO git_snapshots(workspace_id,snapshot_json,summary_json) VALUES (?1,?2,?3)
+                 ON CONFLICT(workspace_id) DO UPDATE SET snapshot_json=excluded.snapshot_json,summary_json=excluded.summary_json",
+                params![workspace_id, snapshot_json, summary_json],
+            )?;
+        }
+        transaction.commit()?;
+        self.state = next_state;
+        Ok(())
+    }
+
+    fn recover(connection: &Connection) -> StoreResult<State> {
+        let mut state = State::default();
+        let mut statement =
+            connection.prepare("SELECT seq, event_json FROM events ORDER BY seq")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let sequence: i64 = row.get(0)?;
+            if sequence <= 0 {
+                return Err("event history contains a non-positive sequence".into());
+            }
+            let json: String = row.get(1)?;
+            let event: Event = serde_json::from_str(&json).map_err(|error| {
+                format!("invalid persisted event at sequence {sequence}: {error}")
+            })?;
+            apply(&mut state, &event).map_err(|error| {
+                format!("invalid persisted transition at sequence {sequence}: {error}")
+            })?;
+        }
+
+        // Receipts only answer retries. One this build cannot read (written
+        // by another version, or damaged) does not stop the store opening:
+        // it is counted, and its request is refused if it is ever retried.
+        let mut statement =
+            connection.prepare("SELECT command_json, outcome_json FROM receipts")?;
+        let mut rows = statement.query([])?;
+        let mut unreadable = 0u64;
+        while let Some(row) = rows.next()? {
+            let command: String = row.get(0)?;
+            let outcome: String = row.get(1)?;
+            if serde_json::from_str::<Command>(&command).is_err()
+                || serde_json::from_str::<Outcome>(&outcome).is_err()
+            {
+                unreadable += 1;
+            }
+        }
+        if unreadable > 0 {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "warn",
+                    "event": "receipts_unreadable",
+                    "count": unreadable,
+                    "detail": "receipts this build cannot read were skipped; their requests cannot be replayed and a retry of one is refused",
+                })
+            );
+        }
+        Ok(state)
+    }
+}
+
+/// Changed files that went back to their committed version in one scan,
+/// with HEAD unmoved, before it counts as the checkout changing. One file is
+/// as likely an edit undone by hand.
+const CHECKOUT_RESTORED_FILES: usize = 2;
+
+fn observed_file_state(
+    version: Option<&crate::observer::FileVersion>,
+) -> StoreResult<langspan_core::FileState> {
+    use crate::observer::FileKind;
+    match version {
+        None
+        | Some(crate::observer::FileVersion {
+            kind: FileKind::Missing,
+            digest: None,
+            ..
+        }) => Ok(langspan_core::FileState::Missing),
+        Some(crate::observer::FileVersion {
+            kind,
+            digest: Some(digest),
+            ..
+        }) if *kind != FileKind::Missing => Ok(langspan_core::FileState::Present {
+            digest: digest.clone(),
+            kind: if *kind == FileKind::Symlink {
+                langspan_core::FileKind::Symlink
+            } else {
+                langspan_core::FileKind::Regular
+            },
+        }),
+        _ => Err("inconsistent file kind and digest in complete Git snapshot".into()),
+    }
+}
+
+fn observed_branches(
+    snapshot: &crate::observer::Snapshot,
+) -> std::collections::BTreeMap<String, (Option<String>, Option<String>)> {
+    let mut branches = std::collections::BTreeMap::from([(
+        "HEAD".into(),
+        (snapshot.head.clone(), snapshot.head_tree.clone()),
+    )]);
+    for branch in &snapshot.branches {
+        branches.insert(
+            format!("refs/heads/{}", branch.name),
+            (Some(branch.commit.clone()), Some(branch.tree.clone())),
+        );
+    }
+    branches
+}

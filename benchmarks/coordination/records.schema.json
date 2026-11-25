@@ -1,0 +1,600 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LangSpan raw per-item per-arm run journal v1",
+  "description": "One started and one finished row per attempt. An unmatched start remains an incomplete unknown attempt. Count finished rows once by run_id; never discard the unmatched starts.",
+  "allOf": [
+    {
+      "$ref": "#/$defs/common"
+    }
+  ],
+  "oneOf": [
+    {
+      "properties": {
+        "record_type": {
+          "const": "run_started"
+        }
+      },
+      "required": [
+        "record_type"
+      ]
+    },
+    {
+      "properties": {
+        "record_type": {
+          "const": "run_finished"
+        },
+        "finished_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "elapsed_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent_phase_elapsed_ns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "timed_out",
+            "setup_failed",
+            "interrupted"
+          ]
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        },
+        "evidence_errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "versions_status": {
+          "enum": [
+            "captured",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "record_type",
+        "finished_at",
+        "elapsed_ns",
+        "agent_phase_elapsed_ns",
+        "status",
+        "commands",
+        "evidence_errors",
+        "versions_status"
+      ]
+    }
+  ],
+  "unevaluatedProperties": false,
+  "$defs": {
+    "common": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "benchmark_id": {
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "item_id": {
+          "type": "string"
+        },
+        "item_description": {
+          "type": "string"
+        },
+        "arm": {
+          "enum": [
+            "no_tool",
+            "coarse_claims",
+            "langspan",
+            "comparable_tool"
+          ]
+        },
+        "repetition": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "arm_order": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        },
+        "metrics": {
+          "$ref": "#/$defs/metrics"
+        },
+        "missing_comparison_arms": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "no_tool",
+              "coarse_claims",
+              "langspan"
+            ]
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "benchmark_id",
+        "manifest_sha256",
+        "item_id",
+        "item_description",
+        "arm",
+        "repetition",
+        "arm_order",
+        "run_id",
+        "started_at",
+        "environment",
+        "metrics",
+        "missing_comparison_arms"
+      ]
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "system": {
+          "type": "string"
+        },
+        "release": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "python": {
+          "type": "string"
+        },
+        "cpu_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "monotonic_resolution_seconds": {
+          "type": "number"
+        },
+        "runner_sha256": {
+          "type": "string"
+        },
+        "environment_values_recorded": {
+          "const": false
+        }
+      },
+      "required": [
+        "system",
+        "release",
+        "machine",
+        "python",
+        "cpu_count",
+        "monotonic_resolution_seconds",
+        "runner_sha256",
+        "environment_values_recorded"
+      ]
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "reported"
+              ]
+            },
+            "observed_tool_calls": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "counts": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "admitted": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "denied": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "unavailable": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "timeout": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "unsupported": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "late_observation": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "unattributed": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "unknown": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "admitted",
+                "denied",
+                "unavailable",
+                "timeout",
+                "unsupported",
+                "late_observation",
+                "unattributed",
+                "unknown"
+              ]
+            },
+            "evidence_refs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "status",
+            "observed_tool_calls",
+            "counts",
+            "evidence_refs"
+          ]
+        },
+        "human_interventions": {
+          "$ref": "#/$defs/counter"
+        },
+        "unnecessary_denials": {
+          "$ref": "#/$defs/counter"
+        },
+        "missed_stale_writes": {
+          "$ref": "#/$defs/counter"
+        },
+        "integrated_correctness": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "passed",
+                "failed"
+              ]
+            },
+            "source": {
+              "enum": [
+                null,
+                "designated_check_exit_status",
+                "retained_evidence"
+              ]
+            },
+            "evidence_refs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "check_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "status",
+            "source",
+            "evidence_refs",
+            "check_ids"
+          ]
+        },
+        "awareness": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "enum": [
+                "unknown",
+                "reported"
+              ]
+            },
+            "received_before_decision": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "changed_approach": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "human_relay": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "delay_ms": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "evidence_refs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "status",
+            "received_before_decision",
+            "changed_approach",
+            "human_relay",
+            "delay_ms",
+            "evidence_refs"
+          ]
+        }
+      },
+      "required": [
+        "coverage",
+        "human_interventions",
+        "unnecessary_denials",
+        "missed_stale_writes",
+        "integrated_correctness",
+        "awareness"
+      ]
+    },
+    "counter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "unknown",
+            "reported"
+          ]
+        },
+        "count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "status",
+        "count",
+        "evidence_refs"
+      ]
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "version",
+            "setup",
+            "agent",
+            "check"
+          ]
+        },
+        "assesses": {
+          "enum": [
+            "diagnostic",
+            "integrated_correctness"
+          ]
+        },
+        "executable": {
+          "type": "string"
+        },
+        "argv_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "max_output_bytes_per_stream": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "elapsed_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "signal": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "timed_out",
+            "spawn_error",
+            "interrupted",
+            "output_limit",
+            "cleanup_incomplete"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stdout_path": {
+          "type": "string"
+        },
+        "stderr_path": {
+          "type": "string"
+        },
+        "stdout_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stderr_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stdout_truncated": {
+          "type": "boolean"
+        },
+        "stderr_truncated": {
+          "type": "boolean"
+        },
+        "cleanup": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sigterm_sent": {
+              "type": "boolean"
+            },
+            "sigkill_sent": {
+              "type": "boolean"
+            },
+            "pipe_drain_incomplete": {
+              "type": "boolean"
+            },
+            "process_still_running": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "sigterm_sent",
+            "sigkill_sent",
+            "pipe_drain_incomplete",
+            "process_still_running"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "phase",
+        "assesses",
+        "executable",
+        "argv_sha256",
+        "cwd",
+        "timeout_seconds",
+        "max_output_bytes_per_stream",
+        "started_at",
+        "elapsed_ns",
+        "exit_code",
+        "signal",
+        "status",
+        "error",
+        "stdout_path",
+        "stderr_path",
+        "stdout_bytes",
+        "stderr_bytes",
+        "stdout_truncated",
+        "stderr_truncated",
+        "cleanup"
+      ]
+    }
+  }
+}

@@ -1,0 +1,34 @@
+name: Content
+on:
+  pull_request:
+    # `edited` re-runs the check when the title or body changes.
+    types: [opened, edited, reopened, synchronize]
+  push:
+    branches: [main]
+# No token permission unless a job asks for it; the job reads only.
+permissions: {}
+concurrency:
+  group: content-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  # The job name is the check name a ruleset requires: keep it stable.
+  content:
+    name: Content
+    # Only the public repository runs it; elsewhere the job is skipped.
+    if: github.repository == 'Langspan/LangSpan.dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The title and body reach the script only through the environment,
+      # never through the command line or the script's text. On a push to
+      # main both are empty and only the tree is checked.
+      - name: Check the tree and the pull request's title and body
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 -I -B scripts/content-check.py --text-env PR_TITLE --text-env PR_BODY .

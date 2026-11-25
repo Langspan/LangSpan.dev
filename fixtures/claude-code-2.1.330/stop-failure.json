@@ -1,0 +1,12 @@
+{
+ "session_id": "c907d8cd-a246-4975-bd3c-f67d6e5a275a",
+ "transcript_path": "/home/user/.claude/projects/-work-demo/c907d8cd-a246-4975-bd3c-f67d6e5a275a.jsonl",
+ "cwd": "/work/demo",
+ "prompt_id": "f036337a-2afe-4a57-a847-626416674353",
+ "effort": {
+  "level": "high"
+ },
+ "hook_event_name": "StopFailure",
+ "error": "model_not_found",
+ "last_assistant_message": "There's an issue with the selected model (claude-langspan-nonexistent-1). It may not exist or you may not have access to it. Run --model to pick a different model."
+}

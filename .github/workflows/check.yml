@@ -1,0 +1,140 @@
+name: Rust checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # The release workflow starts this on release-please's branch: a pull
+  # request opened with GITHUB_TOKEN starts no pull_request run of its own.
+  workflow_dispatch:
+# No token permission unless a job asks for it; each job reads only.
+permissions: {}
+env:
+  # Line numbers in backtraces and no other debug info. Measured on an
+  # Apple M6 at two jobs: rebuilding the workspace's tests took 17.7 s
+  # instead of 21.2 s, and a clean target directory 1.4 GB instead of
+  # 1.6 GB (so a smaller cache). Local builds keep full debug info.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  # scripts/check.sh: a pull request runs the demonstration on the debug
+  # binary only; main and manual runs also build the release binary and run
+  # it again on that.
+  LANGSPAN_CHECK_RELEASE: ${{ github.event_name != 'pull_request' }}
+# A newer push to a pull request cancels its older run. Runs on main are
+# never cancelled, so every commit on main keeps its own result.
+concurrency:
+  group: check-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# Job names are the check names a ruleset requires: keep them stable.
+jobs:
+  linux:
+    name: Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      # Two commits deep: a pull request's run checks out the merge commit,
+      # whose first parent is the base, so the change is HEAD^1..HEAD with
+      # no further fetch (none could authenticate without kept credentials).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      # A pull request that changes only Markdown builds nothing: no test or
+      # build step reads a .md file. Other files under docs/ count as code,
+      # since a test replays a recorded host session kept in docs/evidence/.
+      # The jobs still run and pass, so a required check is never left
+      # waiting, as it would be with a workflow-level paths filter. Pushes
+      # to main and manual runs always check.
+      - name: Decide whether the change touches code
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          code=true
+          if [ "$EVENT" = pull_request ]; then
+            # A failed diff stops the step (bash -e) instead of reading as
+            # "nothing but Markdown".
+            changed=$(git diff --name-only HEAD^1 HEAD)
+            if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -Ev '\.md$' | grep -q .; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "touches code: $code"
+      # rustup 1.28 and later no longer install the toolchain on first use;
+      # with no argument this installs the one rust-toolchain.toml names.
+      - name: Install the toolchain from rust-toolchain.toml
+        if: steps.changes.outputs.code == 'true'
+        run: |
+          rustup --version
+          rustup toolchain install
+          rustc --version
+      # Only main saves the cache, so a pull request cannot write an entry
+      # that a later run on main restores.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.changes.outputs.code == 'true'
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install the dependency policy and unused-dependency checkers
+        if: steps.changes.outputs.code == 'true'
+        run: |
+          bash scripts/install-ci-tools.sh "$RUNNER_TEMP/ci-tools"
+          echo "$RUNNER_TEMP/ci-tools" >> "$GITHUB_PATH"
+      - name: Check formatting, dependencies, lint, real integration tests and the demonstration
+        if: steps.changes.outputs.code == 'true'
+        run: sh scripts/check.sh
+  # The same check on Apple silicon. `macos-26` is GitHub's current arm64
+  # image (`macos-latest` points at it); a pinned label, so an image change
+  # is a deliberate edit here.
+  #
+  # macOS runners are the costlier and scarcer ones, so this job starts
+  # only after Linux passes and only when code changed: most
+  # failures show on both, and macOS is kept for what only it finds (it
+  # caught the races fixed in #29 and #40). A job skipped this way counts as
+  # passed for a required check.
+  macos:
+    name: macOS
+    needs: linux
+    if: needs.linux.outputs.code == 'true'
+    runs-on: macos-26
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain from rust-toolchain.toml
+        run: |
+          rustup --version
+          rustup toolchain install
+          rustc --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install the dependency policy and unused-dependency checkers
+        run: |
+          bash scripts/install-ci-tools.sh "$RUNNER_TEMP/ci-tools"
+          echo "$RUNNER_TEMP/ci-tools" >> "$GITHUB_PATH"
+      - name: Check formatting, dependencies, lint, real integration tests and the demonstration
+        run: sh scripts/check.sh
+  # zizmor audits the workflows and dependabot.yml: injection, over-broad
+  # permissions, credential persistence, unpinned or impostor action
+  # commits. Its online audits read public GitHub data with this job's
+  # read-only token.
+  workflows:
+    name: Workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Audit the workflows with zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pipx run --spec zizmor==1.33.1 zizmor --format github .

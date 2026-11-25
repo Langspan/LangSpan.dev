@@ -1,0 +1,24 @@
+{
+ "session_id": "f07c8058-f448-4429-afd5-303f4a458c6e",
+ "transcript_path": "/home/user/.claude/projects/-work-demo/f07c8058-f448-4429-afd5-303f4a458c6e.jsonl",
+ "cwd": "/work/demo",
+ "prompt_id": "7250fc85-f9d5-44ae-8611-ff88e2a9a574",
+ "permission_mode": "acceptEdits",
+ "agent_id": "a8830b110c1d1bfdf",
+ "agent_type": "Explore",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolBatch",
+ "tool_calls": [
+  {
+   "tool_name": "Read",
+   "tool_input": {
+    "file_path": "/work/demo/README.md",
+    "limit": 1
+   },
+   "tool_use_id": "toolu_014NvXVJpNDLrPx6ADpbXrjP",
+   "tool_response": "1\t# demo"
+  }
+ ]
+}

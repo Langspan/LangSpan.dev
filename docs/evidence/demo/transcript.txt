@@ -1,0 +1,63 @@
+
+== Setup: one repository, a shared remote, two developers with their own coordinators
+   ok: alice and bob each run a coordinator; nothing is shared yet
+
+== 1. Automatic discovery and awareness in one checkout (Claude Code and Codex)
+   ok: the Codex session is told about the Claude Code session at start
+   ok: with the file it edited
+   ok: and its task in the owner's words
+   ok: labelled as data
+
+== 2. A deliberately conflicting change is denied before it runs
+   ok: Claude Code is admitted to edit GUIDE.md
+   ok: Codex is denied the same file while that edit is in progress
+   ok: with a host deny decision naming the holder
+
+== 3. Control: non-overlapping work is not serialized
+   ok: Codex is admitted to a different file at the same time
+   ok: both edits completed
+
+== 4. Stale source: an edit from an old read is refused once, with the reason
+   ok: Claude Code's write from its old read is refused
+   ok: naming the session that changed the file
+   ok: after reading again it is admitted
+
+== 5. A shared interface changes; the session whose file calls it is told
+   ok: the source index covers the checkout
+   ok: the index sees main.rs mention upload
+   ok: Claude Code is told of the interface change at its next prompt
+   ok: the recap records it
+
+== 6. Two machines: each developer's agent learns of the other's work
+   ok: bob's coordinator receives alice's publication
+   ok: alice's coordinator receives bob's
+   ok: bob's Codex session is told about alice's Claude Code session
+   ok: under the name she chose
+   ok: with her task line, which she chose to share
+   ok: bob's own task line does not leave his machine
+   ok: work in another clone is never held: bob may edit a file alice edited
+
+== 7. Combined validation against exact revisions, then landing
+   ok: two branches that edit the same lines are reported before anything runs
+   ok: naming the conflicting file
+   ok: landing without evidence is refused
+   ok: both developers' branches pass together on one exact tree
+   ok: evidence for both together is not evidence for one alone
+   ok: that exact result is landed
+   ok: main on the shared remote holds both changes
+
+== 8. A coordinator restarts
+   ok: with no coordinator the hook gives no decision and the host proceeds
+   ok: after restart, earlier sessions are reported as not coordinated until they act
+   ok: and bob's coordinator hears alice again
+   ok: bob's session is coordinated again as soon as it acts
+
+== 9. The network goes away and comes back
+   ok: local coordination continues while the remote is unreachable
+   ok: publication resumes by itself once it is back
+
+== 10. A session that ended, and one that went quiet
+   ok: an ended session's recent edits are still reported, labelled ended
+   ok: alice stops publishing and bob stops seeing her
+
+All steps passed.

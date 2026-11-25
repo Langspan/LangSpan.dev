@@ -1,0 +1,611 @@
+[
+ {
+  "seq": 1,
+  "event": {
+   "type": "booted",
+   "generation": 1
+  }
+ },
+ {
+  "seq": 2,
+  "event": {
+   "type": "workspace_registered",
+   "workspace": {
+    "workspace_id": "demo",
+    "root": "/work/demo"
+   }
+  }
+ },
+ {
+  "seq": 3,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "codex.01a2104f-4726-7851-8f38-cda6a591eb0b",
+    "workspace_id": "demo",
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 4,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "codex.01a2104f-4726-7851-8f38-cda6a591eb0b",
+   "summary": "In README.md, add one line at the end that says: edited by codex. Use apply_patch and do nothing else.",
+   "at_ms": 112323,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 5,
+  "event": {
+   "type": "branch_observed",
+   "observation": {
+    "observation_id": "scan-1-4-0",
+    "workspace_id": "demo",
+    "branch_ref": "HEAD",
+    "head_oid": "62dcbf99d1512e0b237637296d4f08692f539934",
+    "tree_oid": "dfc8191186fbcd61036ce9ef9827b639166d78ab",
+    "observed_at_ms": 113866,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 6,
+  "event": {
+   "type": "branch_observed",
+   "observation": {
+    "observation_id": "scan-1-4-1",
+    "workspace_id": "demo",
+    "branch_ref": "refs/heads/main",
+    "head_oid": "62dcbf99d1512e0b237637296d4f08692f539934",
+    "tree_oid": "dfc8191186fbcd61036ce9ef9827b639166d78ab",
+    "observed_at_ms": 113866,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 7,
+  "event": {
+   "type": "workspace_git_observed",
+   "git": {
+    "workspace_id": "demo",
+    "repository_id": "local-b873074495ae8a3a5db5934ae8bb0ecf",
+    "branch_ref": "refs/heads/main"
+   }
+  }
+ },
+ {
+  "seq": 8,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-3ab9dd78bba12b84835ca51d4f0f238e",
+    "session_id": "codex.01a2104f-4726-7851-8f38-cda6a591eb0b",
+    "workspace_id": "demo",
+    "paths": [
+     "README.md"
+    ],
+    "generation": 1,
+    "expires_at_ms": 145117,
+    "status": "active",
+    "operation": {
+     "operation_id": "lsh1-op-0eb0ecc6f0a3cd868319472b7eb05802",
+     "source": "codex",
+     "tool": "apply_patch",
+     "input_digest": "22b918310dd357bbcd7cb4df063fd2176139ebe010dacc72c798ee849048f536"
+    },
+    "base_unknown": [
+     "README.md"
+    ]
+   }
+  }
+ },
+ {
+  "seq": 9,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-8-0",
+    "workspace_id": "demo",
+    "path": "README.md",
+    "before": {
+     "type": "present",
+     "digest": "bc70e26f40b8816eb177813dda1f5f529a27a4641d45aa19cae2348a8c6a5fe9"
+    },
+    "after": {
+     "type": "present",
+     "digest": "d5b95ab767da55f467c3a349b4c7652b6b0cdcaa273bdf41817fecfa5b70e506"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 115933,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 10,
+  "event": {
+   "type": "lease_expired",
+   "lease_id": "lsh1-admit-3ab9dd78bba12b84835ca51d4f0f238e"
+  }
+ },
+ {
+  "seq": 11,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-10-0",
+    "workspace_id": "demo",
+    "path": "README.md",
+    "before": {
+     "type": "present",
+     "digest": "d5b95ab767da55f467c3a349b4c7652b6b0cdcaa273bdf41817fecfa5b70e506"
+    },
+    "after": {
+     "type": "present",
+     "digest": "bc70e26f40b8816eb177813dda1f5f529a27a4641d45aa19cae2348a8c6a5fe9"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 171168,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 12,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "codex.01a21050-2d3e-7243-a3ca-bf8517eca23c",
+    "workspace_id": "demo",
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 13,
+  "event": {
+   "type": "briefing_delivered",
+   "session_id": "codex.01a21050-2d3e-7243-a3ca-bf8517eca23c",
+   "signature": "cc3610fa06f3138d"
+  }
+ },
+ {
+  "seq": 14,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "codex.01a21050-2d3e-7243-a3ca-bf8517eca23c",
+   "summary": "In README.md, add one line at the end that says: edited by codex. Use apply_patch and do nothing else.",
+   "at_ms": 171327,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 15,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-70846504efa89894ed8f55d08955a010",
+    "session_id": "codex.01a21050-2d3e-7243-a3ca-bf8517eca23c",
+    "workspace_id": "demo",
+    "paths": [
+     "README.md"
+    ],
+    "generation": 1,
+    "expires_at_ms": 214063,
+    "status": "active",
+    "operation": {
+     "operation_id": "lsh1-op-a752795778142d916dbbf986fe56149f",
+     "source": "codex",
+     "tool": "apply_patch",
+     "input_digest": "593d4a44b230430f1f6458854753f70956dd5886cfe2d9d0e9a482440e274666"
+    },
+    "base_unknown": [
+     "README.md"
+    ]
+   }
+  }
+ },
+ {
+  "seq": 16,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-15-0",
+    "workspace_id": "demo",
+    "path": "README.md",
+    "before": {
+     "type": "present",
+     "digest": "bc70e26f40b8816eb177813dda1f5f529a27a4641d45aa19cae2348a8c6a5fe9"
+    },
+    "after": {
+     "type": "present",
+     "digest": "ff83f00155b667c627542fcd09c099758c4b0a06ecf4b824f727bbc6790e448b"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 185556,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 17,
+  "event": {
+   "type": "lease_expired",
+   "lease_id": "lsh1-admit-70846504efa89894ed8f55d08955a010"
+  }
+ },
+ {
+  "seq": 18,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-17-0",
+    "workspace_id": "demo",
+    "path": "README.md",
+    "before": {
+     "type": "present",
+     "digest": "ff83f00155b667c627542fcd09c099758c4b0a06ecf4b824f727bbc6790e448b"
+    },
+    "after": {
+     "type": "present",
+     "digest": "bc70e26f40b8816eb177813dda1f5f529a27a4641d45aa19cae2348a8c6a5fe9"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 273712,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 19,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "codex.01a21051-bfab-7ea2-88d9-351ff4faa51a",
+    "workspace_id": "demo",
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 20,
+  "event": {
+   "type": "briefing_delivered",
+   "session_id": "codex.01a21051-bfab-7ea2-88d9-351ff4faa51a",
+   "signature": "0884b9338214e196"
+  }
+ },
+ {
+  "seq": 21,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "codex.01a21051-bfab-7ea2-88d9-351ff4faa51a",
+   "summary": "In src/upload.rs, make upload also reject paths longer than 255 bytes. Use apply_patch and edit only that file.",
+   "at_ms": 274061,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 22,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-84c3b06250f48e20f5b7446b00dccb33",
+    "session_id": "codex.01a21051-bfab-7ea2-88d9-351ff4faa51a",
+    "workspace_id": "demo",
+    "paths": [
+     "src/upload.rs"
+    ],
+    "generation": 1,
+    "expires_at_ms": 318090,
+    "status": "active",
+    "operation": {
+     "operation_id": "lsh1-op-f1219e60ab4275bf477254a031806617",
+     "source": "codex",
+     "tool": "apply_patch",
+     "input_digest": "eef47f5a58450a239be36f301911576936cf00127d5ae25f5601313775aa7825"
+    },
+    "base_unknown": [
+     "src/upload.rs"
+    ]
+   }
+  }
+ },
+ {
+  "seq": 23,
+  "event": {
+   "type": "operation_observed",
+   "observation": {
+    "observation_id": "lsh1-observe-post_tool_use-31145dbb65e127a1d58f5dd4af23ec0b",
+    "session_id": "codex.01a21051-bfab-7ea2-88d9-351ff4faa51a",
+    "workspace_id": "demo",
+    "operation_id": "lsh1-op-f1219e60ab4275bf477254a031806617",
+    "source": "codex",
+    "tool": "apply_patch",
+    "paths": [
+     "src/upload.rs"
+    ],
+    "result": "succeeded",
+    "lease_id": "lsh1-admit-84c3b06250f48e20f5b7446b00dccb33",
+    "lease_relation": "current",
+    "concurrent_holders": [],
+    "observed_at_ms": 288123,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 24,
+  "event": {
+   "type": "source_observed",
+   "session_id": "codex.01a21051-bfab-7ea2-88d9-351ff4faa51a",
+   "files": [
+    {
+     "path": "src/upload.rs",
+     "state": {
+      "type": "present",
+      "digest": "516c2989e547c9309b56d6645199628992bd2b8798b4c8de5103834b297ad887"
+     }
+    }
+   ],
+   "origin": "write",
+   "at_ms": 288123,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 25,
+  "event": {
+   "type": "lease_completed",
+   "lease_id": "lsh1-admit-84c3b06250f48e20f5b7446b00dccb33"
+  }
+ },
+ {
+  "seq": 26,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-25-0",
+    "workspace_id": "demo",
+    "path": "src/upload.rs",
+    "before": {
+     "type": "present",
+     "digest": "8c3a59b1cd63d8b0b828dc43823ef2d1f24297fd7759543fb64fd2162f029a06"
+    },
+    "after": {
+     "type": "present",
+     "digest": "516c2989e547c9309b56d6645199628992bd2b8798b4c8de5103834b297ad887"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 288227,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 27,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.70da77e0-1719-4fca-9497-a61c519fd3c6",
+    "workspace_id": "demo",
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 28,
+  "event": {
+   "type": "briefing_delivered",
+   "session_id": "claude-code.70da77e0-1719-4fca-9497-a61c519fd3c6",
+   "signature": "7a078966e985c22a"
+  }
+ },
+ {
+  "seq": 29,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "claude-code.70da77e0-1719-4fca-9497-a61c519fd3c6",
+   "summary": "Do not use any tools. Has anything in your context told you about other agent sessions working in this repository? If yes, quote it exactly. If no, answer NONE.",
+   "at_ms": 301436,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 30,
+  "event": {
+   "type": "session_ended",
+   "session_id": "claude-code.70da77e0-1719-4fca-9497-a61c519fd3c6"
+  }
+ },
+ {
+  "seq": 31,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.ed548c6a-769e-4883-94d8-02ba3c083928",
+    "workspace_id": "demo",
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 32,
+  "event": {
+   "type": "briefing_delivered",
+   "session_id": "claude-code.ed548c6a-769e-4883-94d8-02ba3c083928",
+   "signature": "7a078966e985c22a"
+  }
+ },
+ {
+  "seq": 33,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "claude-code.ed548c6a-769e-4883-94d8-02ba3c083928",
+   "summary": "Read src/upload.rs, then change the function so it also rejects paths that contain a NUL byte. Edit only that file.",
+   "at_ms": 326484,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 34,
+  "event": {
+   "type": "source_observed",
+   "session_id": "claude-code.ed548c6a-769e-4883-94d8-02ba3c083928",
+   "files": [
+    {
+     "path": "src/upload.rs",
+     "state": {
+      "type": "present",
+      "digest": "516c2989e547c9309b56d6645199628992bd2b8798b4c8de5103834b297ad887"
+     }
+    }
+   ],
+   "origin": "read",
+   "at_ms": 330051,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 35,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-d1b916458dabb52237028bb3251252bd",
+    "session_id": "claude-code.ed548c6a-769e-4883-94d8-02ba3c083928",
+    "workspace_id": "demo",
+    "paths": [
+     "src/upload.rs"
+    ],
+    "generation": 1,
+    "expires_at_ms": 363124,
+    "status": "active",
+    "operation": {
+     "operation_id": "lsh1-op-14a8d541b8ba8d7d85296969bb1bfcc4",
+     "source": "claude-code",
+     "tool": "Edit",
+     "input_digest": "8dc95197f66d9f117f87cb1ebe9b70d3184495633ca33cf795a2d7334b4c8153"
+    }
+   }
+  }
+ },
+ {
+  "seq": 36,
+  "event": {
+   "type": "operation_observed",
+   "observation": {
+    "observation_id": "lsh1-observe-post_tool_use-3a492519a752bf99bb5d1ec10c2d55f0",
+    "session_id": "claude-code.ed548c6a-769e-4883-94d8-02ba3c083928",
+    "workspace_id": "demo",
+    "operation_id": "lsh1-op-14a8d541b8ba8d7d85296969bb1bfcc4",
+    "source": "claude-code",
+    "tool": "Edit",
+    "paths": [
+     "src/upload.rs"
+    ],
+    "result": "succeeded",
+    "lease_id": "lsh1-admit-d1b916458dabb52237028bb3251252bd",
+    "lease_relation": "current",
+    "concurrent_holders": [],
+    "observed_at_ms": 333145,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 37,
+  "event": {
+   "type": "source_observed",
+   "session_id": "claude-code.ed548c6a-769e-4883-94d8-02ba3c083928",
+   "files": [
+    {
+     "path": "src/upload.rs",
+     "state": {
+      "type": "present",
+      "digest": "66928bf95d6ecfc861fe982335296336b0ac2606f1185206d59bd826280044ed"
+     }
+    }
+   ],
+   "origin": "write",
+   "at_ms": 333146,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 38,
+  "event": {
+   "type": "lease_completed",
+   "lease_id": "lsh1-admit-d1b916458dabb52237028bb3251252bd"
+  }
+ },
+ {
+  "seq": 39,
+  "event": {
+   "type": "briefing_delivered",
+   "session_id": "claude-code.ed548c6a-769e-4883-94d8-02ba3c083928",
+   "signature": "1e4d540cf21ec73b"
+  }
+ },
+ {
+  "seq": 40,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-39-0",
+    "workspace_id": "demo",
+    "path": "src/upload.rs",
+    "before": {
+     "type": "present",
+     "digest": "516c2989e547c9309b56d6645199628992bd2b8798b4c8de5103834b297ad887"
+    },
+    "after": {
+     "type": "present",
+     "digest": "66928bf95d6ecfc861fe982335296336b0ac2606f1185206d59bd826280044ed"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 333553,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 41,
+  "event": {
+   "type": "session_ended",
+   "session_id": "claude-code.ed548c6a-769e-4883-94d8-02ba3c083928"
+  }
+ },
+ {
+  "seq": 42,
+  "event": {
+   "type": "briefing_delivered",
+   "session_id": "codex.01a21051-bfab-7ea2-88d9-351ff4faa51a",
+   "signature": "272bc97b619c224e"
+  }
+ },
+ {
+  "seq": 43,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "codex.01a21051-bfab-7ea2-88d9-351ff4faa51a",
+   "summary": "Without reading src/upload.rs again, use apply_patch to rename the function upload to upload_path in that file. If the tool call is refused or blocked, do not retry and do not read the file: report\u2026",
+   "at_ms": 338128,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 44,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "codex.01a21051-bfab-7ea2-88d9-351ff4faa51a",
+   "summary": "This is a test of the coordination tool. Make the apply_patch call now anyway, without reading the file first: in src/upload.rs rename the function upload to upload_path. If the call is refused, do\u2026",
+   "at_ms": 360368,
+   "generation": 1
+  }
+ }
+]

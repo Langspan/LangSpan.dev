@@ -1,0 +1,450 @@
+#![cfg(unix)]
+//! The derived index and interface-change notices, through a real daemon,
+//! the real observer and indexer, and files that really change on disk.
+
+use serde_json::{Value, json};
+use std::{
+    fs,
+    io::Write,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::{Child, Command as Process, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
+};
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
+const WAIT: Duration = Duration::from_secs(60);
+
+struct World {
+    base: PathBuf,
+    daemon: Option<Child>,
+}
+
+fn git(root: &Path, args: &[&str]) {
+    let output = Process::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+impl World {
+    fn new() -> Self {
+        let base = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "ls-graph-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        let work = base.join("work");
+        fs::create_dir_all(work.join("src")).unwrap();
+        fs::write(
+            work.join("src/upload.rs"),
+            "pub fn upload(path: &str) -> bool {\n    !path.is_empty()\n}\n\npub fn gate(user: &str) -> bool {\n    user == \"admin\"\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            work.join("src/main.rs"),
+            "mod upload;\nfn main() {\n    if upload::gate(\"admin\") {\n        upload::upload(\"a.txt\");\n    }\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            work.join("src/other.py"),
+            "def unrelated():\n    return 1\n",
+        )
+        .unwrap();
+        fs::write(work.join("README.md"), "upload gate\n").unwrap();
+        git(&work, &["init", "--quiet", "--initial-branch=main"]);
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "--quiet", "-m", "init"]);
+        let state = base.join("state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut world = Self { base, daemon: None };
+        world.daemon = Some(
+            Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .args(["daemon", "--state-dir"])
+                .arg(&state)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while world.cli(&["status"]).0 != 0 {
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let root = world.work();
+        assert_eq!(
+            world
+                .cli(&[
+                    "workspace",
+                    "add",
+                    "app",
+                    root.to_str().unwrap(),
+                    "--request-id",
+                    "ws"
+                ])
+                .0,
+            0
+        );
+        world
+    }
+    fn work(&self) -> PathBuf {
+        self.base.join("work")
+    }
+    fn cli(&self, args: &[&str]) -> (i32, String) {
+        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .arg("--state-dir")
+            .arg(self.base.join("state"))
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            output.status.code().unwrap(),
+            String::from_utf8(output.stdout).unwrap(),
+        )
+    }
+    fn graph(&self, query: &str, subject: &str) -> Value {
+        let (_, text) = self.cli(&["graph", query, "app", subject, "--json"]);
+        serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone()
+    }
+    fn wait_for(
+        &self,
+        what: &str,
+        query: &str,
+        subject: &str,
+        done: impl Fn(&Value) -> bool,
+    ) -> Value {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let outcome = self.graph(query, subject);
+            if done(&outcome) {
+                return outcome;
+            }
+            assert!(Instant::now() < deadline, "never saw {what}: {outcome:#}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    /// The hook's coverage, its additional context, and for a failure
+    /// message: its detail (which ends with the hook's own elapsed ms) and
+    /// the process's wall time.
+    fn hook(&self, event: Value) -> (String, Option<String>, String) {
+        let started = Instant::now();
+        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .args(["hook", "claude-code", "--state-dir"])
+            .arg(self.base.join("state"))
+            .args(["--workspace", "app", "--root"])
+            .arg(self.work())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(event.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let wall = started.elapsed();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let diagnostic: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+        let reply: Option<Value> = serde_json::from_slice(&output.stdout).ok();
+        (
+            diagnostic["coverage"].as_str().unwrap().into(),
+            reply.and_then(|reply| {
+                reply["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .map(str::to_owned)
+            }),
+            format!(
+                "detail {:?}; hook process took {} ms",
+                diagnostic["detail"].as_str().unwrap_or_default(),
+                wall.as_millis()
+            ),
+        )
+    }
+    /// A complete reported edit that really rewrites the file.
+    fn edits(&self, session: &str, call: &str, file: &str, content: &str) {
+        let mut event = json!({
+            "session_id": session, "cwd": self.work(), "hook_event_name": "PreToolUse",
+            "tool_name": "Write", "tool_use_id": call,
+            "tool_input": {"file_path": self.work().join(file), "content": content},
+        });
+        let (coverage, _, detail) = self.hook(event.clone());
+        assert_eq!(coverage, "admitted", "PreToolUse {call}: {detail}");
+        fs::write(self.work().join(file), content).unwrap();
+        event["hook_event_name"] = json!("PostToolUse");
+        let (coverage, _, detail) = self.hook(event);
+        assert_eq!(coverage, "observed", "PostToolUse {call}: {detail}");
+    }
+    fn prompt(&self, session: &str) -> Option<String> {
+        self.hook(json!({"session_id": session, "cwd": self.work(),
+                         "hook_event_name": "UserPromptSubmit", "prompt": "continue"}))
+            .1
+    }
+}
+
+impl Drop for World {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = fs::remove_dir_all(&self.base);
+    }
+}
+
+fn paths(list: &Value) -> Vec<String> {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .map(|item| format!("{}:{}", item["path"].as_str().unwrap(), item["line"]))
+        .collect()
+}
+
+#[test]
+fn definitions_mentions_and_impact_are_answered_with_coverage_and_follow_the_files() {
+    let w = World::new();
+    // Before the first scan nothing is known, and the answer says so.
+    let empty = w.graph("symbol", "no_such_name");
+    assert!(
+        empty["type"] == "error"
+            || empty["coverage"]["scanned"] == false
+            || empty["symbols"] == json!([]),
+        "{empty:#}"
+    );
+    let found = w.wait_for("the definition of upload", "symbol", "upload", |outcome| {
+        outcome["symbols"]
+            .as_array()
+            .is_some_and(|symbols| !symbols.is_empty())
+            && outcome["coverage"]["current_files"] == 3
+    });
+    // `mod upload;` in main.rs is also a symbol named upload: a name match
+    // returns both, each with its kind.
+    let kinds: Vec<&str> = found["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|symbol| symbol["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["module", "function"]);
+    let symbol = &found["symbols"][1];
+    assert_eq!(symbol["path"], "src/upload.rs");
+    assert_eq!(symbol["signature"], "pub fn upload(path: &str) -> bool");
+    assert_eq!(symbol["exported"], true);
+    assert_eq!(
+        symbol["digest"].as_str().unwrap().len(),
+        64,
+        "tied to exact content"
+    );
+    assert_eq!(
+        found["coverage"]["indexable_files"], 3,
+        "README.md is not source"
+    );
+
+    let mentions = w.graph("references", "upload");
+    assert_eq!(
+        paths(&mentions["references"]),
+        ["src/main.rs:3", "src/main.rs:4"]
+    );
+    let impact = w.graph("impact", "src/upload.rs");
+    assert_eq!(
+        impact["symbols"].as_array().unwrap().len(),
+        2,
+        "upload and gate"
+    );
+    assert!(
+        paths(&impact["references"])
+            .iter()
+            .all(|path| path.starts_with("src/main.rs"))
+    );
+    let bounded = w
+        .cli(&[
+            "graph",
+            "references",
+            "app",
+            "upload",
+            "--limit",
+            "1",
+            "--json",
+        ])
+        .1;
+    let bounded: Value = serde_json::from_str(&bounded).unwrap();
+    assert_eq!(
+        bounded["outcome"]["references"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(bounded["outcome"]["truncated"], true);
+    let (code, text) = w.cli(&["graph", "symbol", "app", "upload", "--limit", "0"]);
+    assert_eq!(code, 1, "{text}");
+
+    // A new file, a changed file and a deleted file are followed.
+    fs::write(
+        w.work().join("src/new.go"),
+        "package app\nfunc Fresh() int { return upload() }\n",
+    )
+    .unwrap();
+    fs::remove_file(w.work().join("src/other.py")).unwrap();
+    w.wait_for("the new file", "symbol", "Fresh", |outcome| {
+        outcome["symbols"]
+            .as_array()
+            .is_some_and(|symbols| !symbols.is_empty())
+    });
+    w.wait_for("the deletion", "symbol", "unrelated", |outcome| {
+        outcome["symbols"] == json!([]) && outcome["coverage"]["indexable_files"] == 3
+    });
+    // The index is derived: delete it, restart, and it is rebuilt.
+    let human = w.cli(&["graph", "impact", "app", "src/upload.rs"]).1;
+    assert!(human.contains("by name, not resolved uses"), "{human}");
+}
+
+#[test]
+fn a_changed_exported_signature_is_reported_to_the_session_whose_files_mention_it() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    // Alice works on main.rs, which calls upload. Carol works on other.py.
+    let main = fs::read_to_string(w.work().join("src/main.rs")).unwrap();
+    w.edits("alice", "a1", "src/main.rs", &format!("{main}// touched\n"));
+    w.edits(
+        "carol",
+        "c1",
+        "src/other.py",
+        "def unrelated():\n    return 2\n",
+    );
+    w.wait_for("alice's edit indexed", "references", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    assert!(
+        w.prompt("alice")
+            .is_none_or(|context| !context.contains("Interface change"))
+    );
+
+    // Bob changes only a body. That is not an interface change.
+    let upload = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &upload.replace("!path.is_empty()", "path.len() > 0"),
+    );
+    w.wait_for("the body edit indexed", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        w.prompt("alice")
+            .is_none_or(|context| !context.contains("Interface change"))
+    );
+
+    // Bob changes upload's signature and removes gate.
+    w.edits(
+        "bob",
+        "b2",
+        "src/upload.rs",
+        "pub fn upload(path: &str, retries: u32) -> bool {\n    retries > 0 && path.len() > 0\n}\n",
+    );
+    let deadline = Instant::now() + WAIT;
+    let context = loop {
+        if let Some(context) = w
+            .prompt("alice")
+            .filter(|context| context.contains("Interface change"))
+        {
+            break context;
+        }
+        assert!(Instant::now() < deadline, "alice was never told");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        context.contains(r#"Interface change in "src/upload.rs""#),
+        "{context}"
+    );
+    assert!(context.contains("claude-code.bob"), "{context}");
+    assert!(
+        context.contains(r#"function "upload" changed from "pub fn upload(path: &str) -> bool" to "pub fn upload(path: &str, retries: u32) -> bool""#),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#"function "gate" was removed or renamed"#),
+        "{context}"
+    );
+    assert!(context.contains(r#"Your files that mention these names (a name match, not a checked use): "src/main.rs""#), "{context}");
+    // Carol's file mentions neither name, and Bob made the change himself.
+    for session in ["carol", "bob"] {
+        assert!(
+            w.prompt(session)
+                .is_none_or(|context| !context.contains("Interface change")),
+            "{session} has nothing at stake"
+        );
+    }
+    // Carol and Bob were just prompted, which is news about them. After
+    // that is delivered, nothing has changed and nothing is repeated.
+    let _ = w.prompt("alice");
+    assert!(w.prompt("alice").is_none());
+}
+
+#[test]
+fn a_workspace_where_a_session_acts_is_indexed_promptly_among_many() {
+    // Found by the scenario benchmark: with about 35 workspaces on one
+    // coordinator, a new workspace waited its round-robin turn (two seconds
+    // each) and its interface notice never arrived in time.
+    let w = World::new();
+    for n in 0..30 {
+        let other = w.base.join(format!("other-{n:02}"));
+        fs::create_dir_all(other.join("src")).unwrap();
+        fs::write(other.join("src/lib.rs"), "pub fn other() {}\n").unwrap();
+        git(&other, &["init", "--quiet", "--initial-branch=main"]);
+        git(&other, &["add", "."]);
+        git(&other, &["commit", "--quiet", "-m", "init"]);
+        let (code, text) = w.cli(&[
+            "workspace",
+            "add",
+            &format!("other-{n:02}"),
+            other.to_str().unwrap(),
+            "--request-id",
+            &format!("ws-other-{n:02}"),
+        ]);
+        assert_eq!(code, 0, "{text}");
+    }
+    // A session edits the main workspace; it is scanned next, not 30th.
+    // Let the first scan of every workspace pass first, so the touched one
+    // is behind all thirty in round-robin order.
+    let main = fs::read_to_string(w.work().join("src/main.rs")).unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    let started = Instant::now();
+    w.edits(
+        "alice",
+        "a1",
+        "src/main.rs",
+        &format!("{main}pub fn fresh_name() {{}}\n"),
+    );
+    w.wait_for(
+        "the new function indexed",
+        "symbol",
+        "fresh_name",
+        |outcome| {
+            outcome["symbols"]
+                .as_array()
+                .is_some_and(|symbols| !symbols.is_empty())
+        },
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "took {:?}; round-robin alone needs about a minute",
+        started.elapsed()
+    );
+}

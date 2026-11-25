@@ -1,0 +1,299 @@
+[
+ {
+  "seq": 1,
+  "event": {
+   "type": "booted",
+   "generation": 1
+  }
+ },
+ {
+  "seq": 2,
+  "event": {
+   "type": "workspace_registered",
+   "workspace": {
+    "workspace_id": "demo",
+    "root": "/work/accept/ws"
+   }
+  }
+ },
+ {
+  "seq": 3,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.4b770ea9-bbe5-49e0-be79-d234a47145ec",
+    "workspace_id": "demo",
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 4,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-9df3e8659db83d174d314c912ba8ecf0",
+    "session_id": "claude-code.4b770ea9-bbe5-49e0-be79-d234a47145ec",
+    "workspace_id": "demo",
+    "paths": [
+     "src/api.ts"
+    ],
+    "generation": 1,
+    "expires_at_ms": 39631,
+    "status": "active"
+   }
+  }
+ },
+ {
+  "seq": 5,
+  "event": {
+   "type": "operation_observed",
+   "observation": {
+    "observation_id": "lsh1-observe-post_tool_use-9706d4d7a837157da253588d4a934b42",
+    "session_id": "claude-code.4b770ea9-bbe5-49e0-be79-d234a47145ec",
+    "workspace_id": "demo",
+    "operation_id": "lsh1-op-3526c35fa8abb456474420c950680e17",
+    "source": "claude-code",
+    "tool": "Edit",
+    "paths": [
+     "src/api.ts"
+    ],
+    "result": "succeeded",
+    "lease_id": "lsh1-admit-9df3e8659db83d174d314c912ba8ecf0",
+    "lease_relation": "current",
+    "concurrent_holders": [],
+    "observed_at_ms": 9673,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 6,
+  "event": {
+   "type": "lease_completed",
+   "lease_id": "lsh1-admit-9df3e8659db83d174d314c912ba8ecf0"
+  }
+ },
+ {
+  "seq": 7,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.1f2450a0-d964-4b63-b9c9-7cd7d0d474e2",
+    "workspace_id": "demo",
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 8,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-fa82257ba583f0ab500c759a059f3786",
+    "session_id": "claude-code.1f2450a0-d964-4b63-b9c9-7cd7d0d474e2",
+    "workspace_id": "demo",
+    "paths": [
+     "src/api.ts"
+    ],
+    "generation": 1,
+    "expires_at_ms": 135237,
+    "status": "active"
+   }
+  }
+ },
+ {
+  "seq": 9,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.946c1338-5697-469f-a80a-53d0425a3542",
+    "workspace_id": "demo",
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 10,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-1c5a2c54e629c4e798f17371db224bb8",
+    "session_id": "claude-code.946c1338-5697-469f-a80a-53d0425a3542",
+    "workspace_id": "demo",
+    "paths": [
+     "src/other.ts"
+    ],
+    "generation": 1,
+    "expires_at_ms": 161675,
+    "status": "active"
+   }
+  }
+ },
+ {
+  "seq": 11,
+  "event": {
+   "type": "operation_observed",
+   "observation": {
+    "observation_id": "lsh1-observe-post_tool_use-405fefa5f308cd6947aac1fb2ef53864",
+    "session_id": "claude-code.946c1338-5697-469f-a80a-53d0425a3542",
+    "workspace_id": "demo",
+    "operation_id": "lsh1-op-f44108c592d305c778687b0706b15afc",
+    "source": "claude-code",
+    "tool": "Edit",
+    "paths": [
+     "src/other.ts"
+    ],
+    "result": "succeeded",
+    "lease_id": "lsh1-admit-1c5a2c54e629c4e798f17371db224bb8",
+    "lease_relation": "current",
+    "concurrent_holders": [],
+    "observed_at_ms": 131716,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 12,
+  "event": {
+   "type": "lease_completed",
+   "lease_id": "lsh1-admit-1c5a2c54e629c4e798f17371db224bb8"
+  }
+ },
+ {
+  "seq": 13,
+  "event": {
+   "type": "lease_expired",
+   "lease_id": "lsh1-admit-fa82257ba583f0ab500c759a059f3786"
+  }
+ },
+ {
+  "seq": 14,
+  "event": {
+   "type": "operation_observed",
+   "observation": {
+    "observation_id": "lsh1-observe-post_tool_use-86705a5bc17a179de9756eab1bb4ee35",
+    "session_id": "claude-code.1f2450a0-d964-4b63-b9c9-7cd7d0d474e2",
+    "workspace_id": "demo",
+    "operation_id": "lsh1-op-e82824f619dbe2ee7fe864b7db1412a5",
+    "source": "claude-code",
+    "tool": "Edit",
+    "paths": [
+     "src/api.ts"
+    ],
+    "result": "succeeded",
+    "lease_id": "lsh1-admit-fa82257ba583f0ab500c759a059f3786",
+    "lease_relation": "expired",
+    "concurrent_holders": [],
+    "observed_at_ms": 145443,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 15,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-f873668d9cc09b68cd3dd082194fe2c4",
+    "session_id": "claude-code.1f2450a0-d964-4b63-b9c9-7cd7d0d474e2",
+    "workspace_id": "demo",
+    "paths": [
+     "src/api.ts"
+    ],
+    "generation": 1,
+    "expires_at_ms": 195750,
+    "status": "active"
+   }
+  }
+ },
+ {
+  "seq": 16,
+  "event": {
+   "type": "lease_expired",
+   "lease_id": "lsh1-admit-f873668d9cc09b68cd3dd082194fe2c4"
+  }
+ },
+ {
+  "seq": 17,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-599222c5d3e79f5afc1da8b185a4c667",
+    "session_id": "claude-code.1f2450a0-d964-4b63-b9c9-7cd7d0d474e2",
+    "workspace_id": "demo",
+    "paths": [
+     "src/api.ts"
+    ],
+    "generation": 1,
+    "expires_at_ms": 258823,
+    "status": "active"
+   }
+  }
+ },
+ {
+  "seq": 18,
+  "event": {
+   "type": "booted",
+   "generation": 2
+  }
+ },
+ {
+  "seq": 19,
+  "event": {
+   "type": "operation_observed",
+   "observation": {
+    "observation_id": "lsh1-observe-post_tool_use-148670217ea19cdb9806e68d4366fede",
+    "session_id": "claude-code.1f2450a0-d964-4b63-b9c9-7cd7d0d474e2",
+    "workspace_id": "demo",
+    "operation_id": "lsh1-op-5e8c10c3435ee9eb09c592f07a1d0695",
+    "source": "claude-code",
+    "tool": "Edit",
+    "paths": [
+     "src/api.ts"
+    ],
+    "result": "succeeded",
+    "lease_id": "lsh1-admit-599222c5d3e79f5afc1da8b185a4c667",
+    "lease_relation": "invalidated",
+    "concurrent_holders": [],
+    "observed_at_ms": 1069,
+    "generation": 2
+   }
+  }
+ },
+ {
+  "seq": 20,
+  "event": {
+   "type": "booted",
+   "generation": 3
+  }
+ },
+ {
+  "seq": 21,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.0b285619-96b2-4096-871e-d9276ff9100d",
+    "workspace_id": "demo",
+    "generation": 3
+   }
+  }
+ },
+ {
+  "seq": 22,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-99241e3eefa369cf79b9a43383fba97b",
+    "session_id": "claude-code.0b285619-96b2-4096-871e-d9276ff9100d",
+    "workspace_id": "demo",
+    "paths": [
+     "src/other.ts"
+    ],
+    "generation": 3,
+    "expires_at_ms": 40117,
+    "status": "active"
+   }
+  }
+ }
+]

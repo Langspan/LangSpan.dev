@@ -1,0 +1,10 @@
+{
+ "session_id": "01a21050-2d3e-7243-a3ca-bf8517eca23c",
+ "turn_id": "01a21050-2f1a-7a70-bbd7-79324e16b8c8",
+ "transcript_path": "/home/user/.codex/sessions/2026/11/24/rollout-2026-11-24T19-26-59-01a21050-2d3e-7243-a3ca-bf8517eca23c.jsonl",
+ "cwd": "/work/demo",
+ "hook_event_name": "UserPromptSubmit",
+ "model": "gpt-6.2-sol",
+ "permission_mode": "bypassPermissions",
+ "prompt": "In README.md, add one line at the end that says: edited by codex. Use apply_patch and do nothing else."
+}

@@ -1,0 +1,59 @@
+===== cloud 7adda971 C (84073abc): git diff of src/upload.rs
+diff --git a/src/upload.rs b/src/upload.rs
+index e915af8..3207fce 100644
+--- a/src/upload.rs
++++ b/src/upload.rs
+@@ -1,3 +1,3 @@
+ pub fn upload(path: &str) -> bool {
+-    !path.is_empty()
++    !path.is_empty() && !path.contains("..")
+ }
+
+===== cloud 7adda971 D (00f07596): git diff of GUIDE.md
+diff --git a/GUIDE.md b/GUIDE.md
+index 7e2b643..327534c 100644
+--- a/GUIDE.md
++++ b/GUIDE.md
+@@ -1 +1,3 @@
+-guide
++# Guide
++
++This guide explains how to get started with the project. Read it before making your first change.
+
+===== cloud 5c470caf C (bf05d689): git diff of src/upload.rs
+diff --git a/src/upload.rs b/src/upload.rs
+index e915af8..3207fce 100644
+--- a/src/upload.rs
++++ b/src/upload.rs
+@@ -1,3 +1,3 @@
+ pub fn upload(path: &str) -> bool {
+-    !path.is_empty()
++    !path.is_empty() && !path.contains("..")
+ }
+
+===== cloud 5c470caf D (2a66fd6c): git diff of GUIDE.md
+diff --git a/GUIDE.md b/GUIDE.md
+index 7e2b643..e52f612 100644
+--- a/GUIDE.md
++++ b/GUIDE.md
+@@ -1 +1,3 @@
+-guide
++# Guide
++
++This guide is where to start if you're new to the repository. It will cover setup, everyday workflows and where to find more information.
+
+===== mac Mac mini edit (2d3e8d52): git diff of src/upload.rs. The 255-byte check was already uncommitted in this clone from an earlier run (session e9d10778); 2d3e8d52 added the doc comment
+diff --git a/src/upload.rs b/src/upload.rs
+index e915af8..a517c4a 100644
+--- a/src/upload.rs
++++ b/src/upload.rs
+@@ -1,3 +1,8 @@
++/// Checks whether `path` is acceptable for upload.
++///
++/// Accepts any non-empty path up to 255 bytes long (measured in UTF-8
++/// bytes, not characters). Returns `true` if the path is accepted, or
++/// `false` if it is empty or longer than 255 bytes.
+ pub fn upload(path: &str) -> bool {
+-    !path.is_empty()
++    !path.is_empty() && path.len() <= 255
+ }

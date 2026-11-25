@@ -1,0 +1,295 @@
+//! Synchronous local IPC used by the CLI and MCP adapter.
+
+#[cfg(unix)]
+mod unix {
+    use crate::protocol::{PROTOCOL_VERSION, Request, Response, encode, read_frame};
+    use rustix::{
+        event::{PollFd, PollFlags, Timespec, poll},
+        io::Errno,
+        net::{self, AddressFamily, SocketAddrUnix, SocketType},
+    };
+    use std::{
+        io::{self, Read, Write},
+        os::unix::net::UnixStream,
+        path::Path,
+        time::{Duration, Instant},
+    };
+
+    const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+    pub fn call(state_dir: &Path, request: &Request) -> Result<Response, crate::Error> {
+        call_until(state_dir, request, Instant::now() + CALL_TIMEOUT)
+    }
+
+    /// Like `call`, bounded by the caller's total deadline instead of the default.
+    pub fn call_until(
+        state_dir: &Path,
+        request: &Request,
+        deadline: Instant,
+    ) -> Result<Response, crate::Error> {
+        remaining(deadline)?;
+        // Owner and agent text is redacted here, before it leaves the client.
+        let mut request = request.clone();
+        crate::hook::redact_command(&mut request.command);
+        let bytes = encode(&request)?;
+        crate::local::check_endpoint(state_dir).map_err(|error| {
+            format!("coordination unavailable: {error}; start `langspan daemon --state-dir <dir>`")
+        })?;
+        let socket = state_dir.join("daemon.sock");
+        let stream = connect(&socket, deadline).map_err(|error| {
+            format!(
+                "coordination unavailable at {}: {error}; start `langspan daemon --state-dir <dir>`",
+                socket.display()
+            )
+        })?;
+        // A coordinator that stops during the call resets or closes the
+        // connection. That is the same unavailability as a refused connect,
+        // except the request may already be recorded, so the retry must reuse
+        // its request ID.
+        let frame = DeadlineStream::new(stream, deadline)
+            .and_then(|mut stream| {
+                stream.write_all(&bytes)?;
+                read_frame(stream)
+            })
+            .map_err(|error| {
+                format!(
+                    "coordination unavailable at {}: {error}; once `langspan daemon --state-dir <dir>` is running, retry with the same request_id",
+                    socket.display()
+                )
+            })?;
+        let response: Response = serde_json::from_slice(&frame)?;
+        if response.version != PROTOCOL_VERSION || response.request_id != request.request_id {
+            return Err(
+                "daemon response does not match the request identity or protocol version".into(),
+            );
+        }
+        remaining(deadline)?;
+        Ok(response)
+    }
+
+    fn timed_out() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "coordination I/O deadline elapsed; retry with the same request_id",
+        )
+    }
+
+    fn remaining(deadline: Instant) -> io::Result<Duration> {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(timed_out)
+    }
+
+    fn wait_ready(stream: &UnixStream, flags: PollFlags, deadline: Instant) -> io::Result<()> {
+        loop {
+            let timeout = Timespec::try_from(remaining(deadline)?).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid coordination I/O deadline",
+                )
+            })?;
+            let mut descriptors = [PollFd::new(stream, flags)];
+            match poll(&mut descriptors, Some(&timeout)) {
+                Ok(0) | Err(Errno::INTR) => continue,
+                Ok(_) if descriptors[0].revents().contains(PollFlags::NVAL) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid daemon socket",
+                    ));
+                }
+                Ok(_) => return Ok(()),
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    /// Whether the daemon accepts a connection before `deadline`: the same
+    /// owner-only socket checks and nonblocking connect as a call, so a full
+    /// listen backlog or a stalled daemon answers "no" in time.
+    pub fn accepts(state_dir: &Path, deadline: Instant) -> bool {
+        crate::local::check_endpoint(state_dir).is_ok()
+            && connect(&state_dir.join("daemon.sock"), deadline).is_ok()
+    }
+
+    fn connect(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+        remaining(deadline)?;
+        let address = SocketAddrUnix::new(path)?;
+        // Create both flags atomically where available. Other Unix platforms
+        // set CLOEXEC before the descriptor can be used by this adapter.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let descriptor = net::socket_with(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            net::SocketFlags::CLOEXEC | net::SocketFlags::NONBLOCK,
+            None,
+        )?;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let descriptor = {
+            let descriptor = net::socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
+            rustix::io::fcntl_setfd(&descriptor, rustix::io::FdFlags::CLOEXEC)?;
+            descriptor
+        };
+        let stream = UnixStream::from(descriptor);
+        stream.set_nonblocking(true)?;
+        match net::connect(&stream, &address) {
+            Ok(()) => {}
+            Err(Errno::INPROGRESS | Errno::ALREADY | Errno::INTR) => {
+                wait_ready(&stream, PollFlags::OUT, deadline)?;
+                net::sockopt::socket_error(&stream)??;
+                // Readiness alone is not proof that the connection completed.
+                stream.peer_addr()?;
+            }
+            // In particular, Unix EAGAIN can mean a full listen backlog.
+            // Fail promptly; never mistake an unconnected writable fd for success.
+            Err(error) => return Err(error.into()),
+        }
+        remaining(deadline)?;
+        Ok(stream)
+    }
+
+    struct DeadlineStream {
+        stream: UnixStream,
+        deadline: Instant,
+    }
+
+    impl DeadlineStream {
+        fn new(stream: UnixStream, deadline: Instant) -> io::Result<Self> {
+            remaining(deadline)?;
+            stream.set_nonblocking(true)?;
+            Ok(Self { stream, deadline })
+        }
+
+        fn perform<T>(
+            &mut self,
+            flags: PollFlags,
+            mut operation: impl FnMut(&mut UnixStream) -> io::Result<T>,
+        ) -> io::Result<T> {
+            loop {
+                remaining(self.deadline)?;
+                match operation(&mut self.stream) {
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        wait_ready(&self.stream, flags, self.deadline)?;
+                    }
+                    result => return result,
+                }
+            }
+        }
+    }
+
+    impl Read for DeadlineStream {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.perform(PollFlags::IN, |stream| stream.read(buffer))
+        }
+    }
+
+    impl Write for DeadlineStream {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.perform(PollFlags::OUT, |stream| stream.write(buffer))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.perform(PollFlags::OUT, Write::flush)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn read_progress_does_not_restart_the_total_deadline() {
+            let (client, mut peer) = UnixStream::pair().unwrap();
+            peer.write_all(b"ab").unwrap();
+            let deadline = Instant::now() + Duration::from_millis(100);
+            let mut stream = DeadlineStream::new(client, deadline).unwrap();
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).unwrap(), 1);
+            assert_eq!(byte, [b'a']);
+            std::thread::sleep(
+                deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+            );
+            let error = stream
+                .read(&mut byte)
+                .expect_err("buffered progress must not extend the deadline");
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        }
+
+        #[test]
+        fn write_progress_does_not_restart_the_total_deadline() {
+            let (client, _peer) = UnixStream::pair().unwrap();
+            let deadline = Instant::now() + Duration::from_millis(100);
+            let mut stream = DeadlineStream::new(client, deadline).unwrap();
+            assert_eq!(stream.write(b"a").unwrap(), 1);
+            std::thread::sleep(
+                deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+            );
+            let error = stream
+                .write(b"b")
+                .expect_err("write progress must not extend the deadline");
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        }
+
+        #[test]
+        fn an_idle_peer_times_out_without_resetting_the_poll_budget() {
+            let (client, _peer) = UnixStream::pair().unwrap();
+            let started = Instant::now();
+            let budget = Duration::from_millis(20);
+            let mut stream = DeadlineStream::new(client, started + budget).unwrap();
+            let error = stream.read(&mut [0]).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            // Load can lengthen this wait, so there is no scheduling-sensitive
+            // upper latency assertion.
+            assert!(started.elapsed() >= budget);
+        }
+
+        #[test]
+        fn a_coordinator_that_drops_the_call_is_reported_as_unavailable() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("ls-lost-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(dir.join("daemon.sock")).unwrap();
+            std::fs::set_permissions(
+                dir.join("daemon.sock"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            // A coordinator that goes away after the connect: it accepts,
+            // then closes without answering.
+            let peer = std::thread::spawn(move || drop(listener.accept().unwrap()));
+            let request = crate::protocol::Request {
+                version: crate::protocol::PROTOCOL_VERSION,
+                request_id: "read".into(),
+                command: langspan_core::Command::Dashboard,
+            };
+            let error = call(&dir, &request).unwrap_err().to_string();
+            peer.join().unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert!(error.starts_with("coordination unavailable at "), "{error}");
+            assert!(error.contains("retry with the same request_id"), "{error}");
+        }
+    }
+}
+
+#[cfg(unix)]
+pub use unix::{accepts, call, call_until};
+
+#[cfg(not(unix))]
+pub fn call_until(
+    state_dir: &std::path::Path,
+    request: &crate::protocol::Request,
+    _deadline: std::time::Instant,
+) -> Result<crate::protocol::Response, crate::Error> {
+    call(state_dir, request)
+}
+
+#[cfg(not(unix))]
+pub fn call(
+    _state_dir: &std::path::Path,
+    _request: &crate::protocol::Request,
+) -> Result<crate::protocol::Response, crate::Error> {
+    Err("this initial transport requires Unix sockets; Windows support is not implemented".into())
+}

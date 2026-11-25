@@ -1,0 +1,35 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "transcript_path": "/home/user/.claude/projects/-work-demo/00000000-0000-4000-8000-000000000001.jsonl",
+  "cwd": "/work/demo",
+  "prompt_id": "00000000-0000-4000-8000-0000000000aa",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/work/demo/b.txt",
+    "content": "b"
+  },
+  "tool_response": {
+    "type": "create",
+    "filePath": "/work/demo/b.txt",
+    "content": "b",
+    "structuredPatch": [],
+    "originalFile": null,
+    "userModified": false,
+    "gitDiff": {
+      "filename": "b.txt",
+      "status": "added",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1,
+      "patch": "@@ -0,0 +1,1 @@\n+b",
+      "repository": null
+    }
+  },
+  "tool_use_id": "toolu_01C4MdzupDWArGxgFP3dYYFC",
+  "duration_ms": 6
+}

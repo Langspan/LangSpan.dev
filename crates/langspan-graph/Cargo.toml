@@ -1,0 +1,24 @@
+[package]
+name = "langspan-graph"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+publish = false
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Structural extraction of symbols and references from source text"
+
+[dependencies]
+tree-sitter = "=0.27.2"
+tree-sitter-rust = "=0.24.2"
+tree-sitter-python = "=0.25.0"
+tree-sitter-typescript = "=0.23.2"
+tree-sitter-go = "=0.25.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"

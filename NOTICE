@@ -1,0 +1,13 @@
+LangSpan
+Copyright 2026 the LangSpan authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party material
+--------------------
+
+This repository holds no code copied from other projects.
+
+Release binaries statically link Rust crates, and C code built by some of
+them (SQLite, Tree-sitter), under their own licences. Each release archive
+carries their notices in THIRD-PARTY-LICENSES.html.

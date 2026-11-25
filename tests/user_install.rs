@@ -1,0 +1,896 @@
+#![cfg(unix)]
+//! `langspan install` / `uninstall` against a temporary home, and the hook
+//! command they write, run as the host would run it, against a real daemon.
+
+#[allow(dead_code)] // Only `output_once_not_busy` is used here.
+mod support;
+
+use langspan::{
+    client,
+    hook::user_workspace_id,
+    protocol::{PROTOCOL_VERSION, Request},
+};
+use langspan_core::{Command, Outcome};
+use serde_json::{Value, json};
+use std::{
+    fs,
+    io::Write,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::{Child, Command as Process, Output, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
+};
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
+const SESSION: &str = "00000000-0000-4000-8000-0000000000c1";
+
+const CLAUDE_SETTINGS: &str = r#"{
+  "theme": "dark",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/x/guard.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "model": "m"
+}
+"#;
+const CLAUDE_JSON: &str = r#"{
+  "numStartups": 4,
+  "mcpServers": {
+    "docs": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "docs"
+      ]
+    }
+  },
+  "projects": {}
+}
+"#;
+const CODEX_HOOKS: &str = r#"{
+  "description": "mine",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "say done"
+          }
+        ]
+      }
+    ]
+  }
+}
+"#;
+const CODEX_CONFIG: &str =
+    "model = \"o3\"\n\n[mcp_servers.docs]\ncommand = \"npx\"\nargs = [\"-y\", \"docs\"]\n";
+
+struct Home {
+    base: PathBuf,
+    daemon: Option<Child>,
+}
+
+impl Home {
+    fn new() -> Self {
+        let base = std::env::temp_dir().join(format!(
+            "ls-user-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        let base = fs::canonicalize(base).unwrap();
+        fs::create_dir(base.join("home")).unwrap();
+        Self { base, daemon: None }
+    }
+    fn home(&self) -> PathBuf {
+        self.base.join("home")
+    }
+    fn state_dir(&self) -> PathBuf {
+        self.base.join("state")
+    }
+    fn write(&self, relative: &str, text: &str) -> PathBuf {
+        let path = self.home().join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, text).unwrap();
+        path
+    }
+    fn claude_and_codex(&self) {
+        self.write(".claude/settings.json", CLAUDE_SETTINGS);
+        self.write(".claude.json", CLAUDE_JSON);
+        self.write(".codex/hooks.json", CODEX_HOOKS);
+        self.write(".codex/config.toml", CODEX_CONFIG);
+    }
+    fn files(&self) -> Vec<(PathBuf, Option<String>)> {
+        [
+            ".claude/settings.json",
+            ".claude.json",
+            ".codex/hooks.json",
+            ".codex/config.toml",
+        ]
+        .iter()
+        .map(|relative| {
+            let path = self.home().join(relative);
+            let text = fs::read_to_string(&path).ok();
+            (path, text)
+        })
+        .collect()
+    }
+    fn langspan(&self, args: &[&str]) -> Output {
+        Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .args(args)
+            .arg("--home")
+            .arg(self.home())
+            .arg("--state-dir")
+            .arg(self.state_dir())
+            .env_remove("CLAUDE_PROJECT_DIR")
+            .output()
+            .unwrap()
+    }
+    fn ok(&self, args: &[&str]) -> String {
+        let output = self.langspan(args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    }
+    fn start(&mut self) {
+        self.daemon = Some(
+            Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .args(["daemon", "--state-dir"])
+                .arg(self.state_dir())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while client::call(&self.state_dir(), &status()).is_err() {
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    /// The installed command for one event, exactly as written to the file.
+    fn installed_command(&self, relative: &str, event: &str) -> String {
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(self.home().join(relative)).unwrap()).unwrap();
+        settings["hooks"][event]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|group| group["hooks"].as_array().unwrap())
+            .map(|hook| hook["command"].as_str().unwrap().to_owned())
+            .find(|command| command.contains(":user:v1"))
+            .unwrap()
+    }
+    /// Run a hook command through the shell, as the host does, with `cwd`
+    /// as its working directory. Returns stdout and the logged coverage.
+    fn run_hook(&self, command: &str, cwd: &Path, event: &Value) -> (String, String) {
+        let mut child = Process::new("/bin/sh")
+            .args(["-c", command])
+            .current_dir(cwd)
+            .env_remove("CLAUDE_PROJECT_DIR")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(event.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(0), "{stderr}");
+        let diagnostic: Value = serde_json::from_str(stderr.lines().last().unwrap())
+            .unwrap_or_else(|_| panic!("structured diagnostic expected: {stderr}"));
+        (
+            String::from_utf8(output.stdout).unwrap(),
+            diagnostic["coverage"].as_str().unwrap().to_owned(),
+        )
+    }
+    fn repo(&self, name: &str) -> PathBuf {
+        let root = self.base.join(name);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/a.rs"), "fn a() {}\n").unwrap();
+        let status = Process::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::canonicalize(root).unwrap()
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = fs::remove_dir_all(&self.base);
+    }
+}
+
+fn status() -> Request {
+    Request {
+        version: PROTOCOL_VERSION,
+        request_id: "read".into(),
+        command: Command::Status,
+    }
+}
+
+fn edit(cwd: &Path, file: &Path, tool_use_id: &str) -> Value {
+    json!({
+        "session_id": SESSION,
+        "transcript_path": "/dev/null",
+        "cwd": cwd,
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": file,
+            "old_string": "a",
+            "new_string": "b",
+            "replace_all": false
+        },
+        "tool_use_id": tool_use_id,
+    })
+}
+
+#[test]
+fn dry_run_writes_nothing_and_apply_then_uninstall_round_trips_every_file() {
+    let home = Home::new();
+    home.claude_and_codex();
+    fs::set_permissions(
+        home.home().join(".claude.json"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let before = home.files();
+
+    let dry = home.ok(&["install"]);
+    assert!(dry.contains("Dry run; nothing was written"), "{dry}");
+    assert!(dry.contains("[mcp_servers.langspan]"), "{dry}");
+    // The host's own state in ~/.claude.json is not echoed back.
+    assert!(!dry.contains("numStartups"), "{dry}");
+    assert!(dry.contains("only this entry changes"), "{dry}");
+    assert_eq!(home.files(), before);
+    assert!(!home.state_dir().exists());
+
+    home.ok(&["install", "--apply"]);
+    let installed = home.files();
+    for ((path, old), (_, new)) in before.iter().zip(&installed) {
+        assert_ne!(old, new, "{} was not changed", path.display());
+    }
+    let claude: Value = serde_json::from_str(installed[1].1.as_ref().unwrap()).unwrap();
+    let keys: Vec<_> = claude.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(keys, ["numStartups", "mcpServers", "projects"]);
+    assert_eq!(claude["mcpServers"]["docs"]["command"], "npx");
+    assert_eq!(
+        claude["mcpServers"]["langspan"]["args"],
+        json!(["mcp", "--state-dir", home.state_dir()])
+    );
+    let executable = claude["mcpServers"]["langspan"]["command"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(Path::new(&executable).is_file());
+    assert_eq!(
+        fs::metadata(home.home().join(".claude.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let toml = installed[3].1.as_ref().unwrap();
+    assert!(toml.starts_with(CODEX_CONFIG), "{toml}");
+    assert!(
+        toml.contains(&format!("command = \"{executable}\"")),
+        "{toml}"
+    );
+    let pre = home.installed_command(".claude/settings.json", "PreToolUse");
+    assert!(
+        !pre.contains("--workspace") && !pre.contains("--root"),
+        "{pre}"
+    );
+
+    let again = home.ok(&["install", "--apply"]);
+    assert_eq!(again.matches("already matches").count(), 4, "{again}");
+    assert_eq!(home.files(), installed);
+
+    // The user's state is never part of what uninstall removes.
+    fs::create_dir_all(home.state_dir()).unwrap();
+    let dry = home.ok(&["uninstall"]);
+    assert!(dry.contains("Dry run"), "{dry}");
+    assert_eq!(home.files(), installed);
+    home.ok(&["uninstall", "--apply"]);
+    assert_eq!(
+        home.files(),
+        before,
+        "uninstall restores every file exactly"
+    );
+    assert!(home.state_dir().is_dir());
+    let nothing = home.ok(&["uninstall", "--apply"]);
+    assert_eq!(nothing.matches("already matches").count(), 4, "{nothing}");
+}
+
+#[test]
+fn default_hosts_are_those_present_and_refusals_write_nothing() {
+    let home = Home::new();
+    home.write(".codex/config.toml", CODEX_CONFIG);
+    home.ok(&["install", "--apply"]);
+    assert!(!home.home().join(".claude").exists());
+    assert!(home.home().join(".codex/hooks.json").is_file());
+    home.ok(&["uninstall", "--apply"]);
+
+    let empty = Home::new();
+    let output = empty.langspan(&["install"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--hosts"));
+
+    // A foreign `langspan` server stops the whole install, hooks included.
+    let foreign = Home::new();
+    foreign.claude_and_codex();
+    foreign.write(
+        ".claude.json",
+        r#"{"mcpServers":{"langspan":{"command":"/somewhere/else","args":[]}}}"#,
+    );
+    let before = foreign.files();
+    let output = foreign.langspan(&["install", "--apply"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not written by LangSpan"),
+        "{output:?}"
+    );
+    assert_eq!(foreign.files(), before);
+
+    let table = Home::new();
+    table.claude_and_codex();
+    table.write(
+        ".codex/config.toml",
+        "[mcp_servers.langspan]\ncommand = \"/mine\"\n",
+    );
+    let before = table.files();
+    let output = table.langspan(&["install", "--apply"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("did not write"));
+    assert_eq!(table.files(), before);
+
+    let linked = Home::new();
+    linked.claude_and_codex();
+    let target = linked.base.join("real-settings.json");
+    fs::write(&target, CLAUDE_SETTINGS).unwrap();
+    fs::remove_file(linked.home().join(".claude/settings.json")).unwrap();
+    std::os::unix::fs::symlink(&target, linked.home().join(".claude/settings.json")).unwrap();
+    let output = linked.langspan(&["install", "--apply"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("symlink"));
+    assert_eq!(fs::read_to_string(&target).unwrap(), CLAUDE_SETTINGS);
+    assert_eq!(
+        fs::read_to_string(linked.home().join(".claude.json")).unwrap(),
+        CLAUDE_JSON
+    );
+}
+
+#[test]
+fn the_installed_user_level_hook_coordinates_any_repository_by_its_cwd() {
+    let mut home = Home::new();
+    home.claude_and_codex();
+    home.ok(&["install", "--apply"]);
+    home.start();
+    let pre = home.installed_command(".claude/settings.json", "PreToolUse");
+
+    let repo = home.repo("project");
+    let (stdout, coverage) = home.run_hook(
+        &pre,
+        &repo,
+        &edit(&repo.join("src"), &repo.join("src/a.rs"), "toolu_u1"),
+    );
+    assert_eq!((coverage.as_str(), stdout.as_str()), ("admitted", ""));
+    let Outcome::Status { state } = client::call(&home.state_dir(), &status()).unwrap().outcome
+    else {
+        panic!("status expected");
+    };
+    let id = user_workspace_id(&repo);
+    langspan_core::validate_request_id(&id).unwrap();
+    assert_eq!(id, user_workspace_id(&repo), "derived deterministically");
+    assert_eq!(state.workspaces[&id].root, repo.to_string_lossy());
+
+    // A working directory outside any repository: no decision, no output.
+    let outside = home.base.join("plain");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("x.txt"), "x\n").unwrap();
+    let (stdout, coverage) = home.run_hook(
+        &pre,
+        &outside,
+        &edit(&outside, &outside.join("x.txt"), "toolu_u2"),
+    );
+    assert_eq!((coverage.as_str(), stdout.as_str()), ("unsupported", ""));
+
+    // The doctor reports the user-level install for both hosts.
+    let report = home.langspan(&["doctor"]);
+    let text = String::from_utf8(report.stdout).unwrap();
+    assert!(
+        text.contains("ok claude-code: user-level hooks installed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("ok claude-code: MCP server `langspan` registered"),
+        "{text}"
+    );
+    assert!(
+        text.contains("ok codex: MCP server `langspan` registered"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_repository_with_a_project_install_is_left_to_that_install() {
+    let mut home = Home::new();
+    home.claude_and_codex();
+    home.ok(&["install", "--apply"]);
+    home.start();
+    let repo = home.repo("covered");
+    for vendor in ["claude-code", "codex"] {
+        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .args([
+                "hooks",
+                "install",
+                vendor,
+                "--workspace",
+                "covered",
+                "--apply",
+            ])
+            .arg("--root")
+            .arg(&repo)
+            .arg("--state-dir")
+            .arg(home.state_dir())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    let claude = home.installed_command(".claude/settings.json", "PreToolUse");
+    let (stdout, coverage) = home.run_hook(
+        &claude,
+        &repo,
+        &edit(&repo, &repo.join("src/a.rs"), "toolu_p1"),
+    );
+    assert_eq!(
+        (coverage.as_str(), stdout.as_str()),
+        ("deferred_to_project", "")
+    );
+    let codex = home.installed_command(".codex/hooks.json", "SessionStart");
+    let start = json!({
+        "session_id": SESSION,
+        "hook_event_name": "SessionStart",
+        "cwd": repo.join("src"),
+        "source": "startup",
+    });
+    let (stdout, coverage) = home.run_hook(&codex, &repo, &start);
+    assert_eq!(
+        (coverage.as_str(), stdout.as_str()),
+        ("deferred_to_project", "")
+    );
+    let Outcome::Status { state } = client::call(&home.state_dir(), &status()).unwrap().outcome
+    else {
+        panic!("status expected");
+    };
+    assert!(
+        !state.workspaces.contains_key(&user_workspace_id(&repo)),
+        "the user-level hook registered nothing"
+    );
+}
+
+#[test]
+fn a_user_level_hook_adopts_the_id_a_project_install_already_registered() {
+    // Review finding: Claude Code keeps its project install while Codex uses
+    // the user-level hooks. The repository is registered as "covered"; the
+    // user-level hook's derived ID must not make every Codex event fail.
+    let mut home = Home::new();
+    home.claude_and_codex();
+    home.ok(&["install", "--apply"]);
+    home.start();
+    let repo = home.repo("mixed");
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .args([
+            "hooks",
+            "install",
+            "claude-code",
+            "--workspace",
+            "covered",
+            "--apply",
+        ])
+        .arg("--root")
+        .arg(&repo)
+        .arg("--state-dir")
+        .arg(home.state_dir())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    // The project-level Claude Code hook registers the repository first.
+    let project = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .args(["workspace", "add", "covered"])
+        .arg(&repo)
+        .args(["--request-id", "ws-covered", "--state-dir"])
+        .arg(home.state_dir())
+        .output()
+        .unwrap();
+    assert!(project.status.success(), "{project:?}");
+    let codex = home.installed_command(".codex/hooks.json", "SessionStart");
+    let start = json!({
+        "session_id": SESSION,
+        "hook_event_name": "SessionStart",
+        "cwd": repo,
+        "source": "startup",
+    });
+    let (stdout, coverage) = home.run_hook(&codex, &repo, &start);
+    assert_ne!(coverage, "unknown", "{stdout}");
+    assert_ne!(coverage, "unsupported", "{stdout}");
+    let Outcome::Status { state } = client::call(&home.state_dir(), &status()).unwrap().outcome
+    else {
+        panic!("status expected");
+    };
+    assert!(
+        !state.workspaces.contains_key(&user_workspace_id(&repo)),
+        "no second ID"
+    );
+    let session = state
+        .sessions
+        .values()
+        .find(|session| session.session_id.starts_with("codex."))
+        .expect("the Codex session is registered");
+    assert_eq!(
+        session.workspace_id, "covered",
+        "it joined the existing workspace"
+    );
+}
+
+#[test]
+fn a_user_install_registers_the_end_of_reply_events_and_doctor_names_any_left_out() {
+    let home = Home::new();
+    home.claude_and_codex();
+    home.ok(&["install", "--apply"]);
+    for (file, events) in [
+        (
+            ".claude/settings.json",
+            &["Stop", "StopFailure", "SubagentStop", "PostToolBatch"][..],
+        ),
+        (".codex/hooks.json", &["Stop", "SessionEnd"][..]),
+    ] {
+        for event in events {
+            assert!(
+                home.installed_command(file, event).contains("hook"),
+                "{file} {event}"
+            );
+        }
+    }
+    // The owner's own Codex Stop hook is kept, ahead of LangSpan's.
+    let codex: Value =
+        serde_json::from_str(&fs::read_to_string(home.home().join(".codex/hooks.json")).unwrap())
+            .unwrap();
+    assert_eq!(codex["hooks"]["Stop"][0]["hooks"][0]["command"], "say done");
+
+    // A user-level install from before these events existed.
+    let path = home.home().join(".codex/hooks.json");
+    let mut older = codex.clone();
+    older["hooks"]["Stop"].as_array_mut().unwrap().truncate(1);
+    older["hooks"].as_object_mut().unwrap().remove("SessionEnd");
+    fs::write(&path, older.to_string()).unwrap();
+    let text = String::from_utf8(home.langspan(&["doctor"]).stdout).unwrap();
+    assert!(
+        text.contains("FIX codex: user-level hooks installed")
+            && text.contains("not for Stop, SessionEnd")
+            && text.contains("run `langspan install --hosts codex --apply` again"),
+        "{text}"
+    );
+    home.ok(&["install", "--apply"]);
+    let text = String::from_utf8(home.langspan(&["doctor"]).stdout).unwrap();
+    assert!(
+        text.contains("ok codex: user-level hooks installed"),
+        "{text}"
+    );
+    // Uninstall takes every entry it wrote, the new ones included.
+    home.ok(&["uninstall", "--apply"]);
+    let after: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(after, serde_json::from_str::<Value>(CODEX_HOOKS).unwrap());
+    let claude: Value = serde_json::from_str(
+        &fs::read_to_string(home.home().join(".claude/settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        claude,
+        serde_json::from_str::<Value>(CLAUDE_SETTINGS).unwrap()
+    );
+}
+
+/// Gemini CLI's user settings, with a credential in an MCP server's `env`
+/// that a dry run must not print.
+const GEMINI_SETTINGS: &str = r#"{
+  "general": {
+    "vimMode": true
+  },
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "write_file",
+        "hooks": [
+          {
+            "name": "guard",
+            "type": "command",
+            "command": "/x/guard.sh",
+            "timeout": 2000
+          }
+        ]
+      }
+    ]
+  },
+  "mcpServers": {
+    "docs": {
+      "command": "npx",
+      "args": [
+        "docs"
+      ],
+      "env": {
+        "DOCS_TOKEN": "not-a-real-token-but-shaped-like-one"
+      }
+    }
+  }
+}
+"#;
+
+#[test]
+fn gemini_settings_get_hooks_and_the_mcp_server_in_one_guarded_write_and_lose_them_exactly() {
+    let mut home = Home::new();
+    let settings = home.write(".gemini/settings.json", GEMINI_SETTINGS);
+    // Without `--hosts`, Gemini CLI is not chosen: its adapter is not yet
+    // verified on a live session, and other tools also make `~/.gemini`.
+    assert!(!home.langspan(&["install"]).status.success());
+    let dry = home.ok(&["install", "--hosts", "gemini-cli"]);
+    assert!(dry.contains("Dry run; nothing was written"), "{dry}");
+    assert!(dry.contains("LangSpan's hook on 5 event(s)"), "{dry}");
+    assert!(dry.contains(r#""mcpServers": { "langspan""#), "{dry}");
+    assert!(
+        !dry.contains("not-a-real-token"),
+        "the owner's settings are not shown: {dry}"
+    );
+    assert!(!home.home().join(".claude").exists() && !home.home().join(".codex").exists());
+    assert_eq!(fs::read_to_string(&settings).unwrap(), GEMINI_SETTINGS);
+
+    let applied = home.ok(&["install", "--hosts", "gemini-cli", "--apply"]);
+    assert_eq!(
+        applied.matches("Wrote").count(),
+        1,
+        "one file, one write: {applied}"
+    );
+    let installed = fs::read_to_string(&settings).unwrap();
+    let value: Value = serde_json::from_str(&installed).unwrap();
+    assert_eq!(value["general"]["vimMode"], true);
+    assert_eq!(
+        value["hooks"]["BeforeTool"][0]["hooks"][0]["command"],
+        "/x/guard.sh"
+    );
+    assert_eq!(
+        value["mcpServers"]["docs"]["env"]["DOCS_TOKEN"],
+        "not-a-real-token-but-shaped-like-one"
+    );
+    assert_eq!(
+        value["mcpServers"]["langspan"]["args"],
+        json!(["mcp", "--state-dir", home.state_dir()])
+    );
+    assert!(value["mcpServers"]["langspan"].get("trust").is_none());
+    let again = home.ok(&["install", "--hosts", "gemini-cli", "--apply"]);
+    assert_eq!(again.matches("already matches").count(), 1, "{again}");
+    assert_eq!(fs::read_to_string(&settings).unwrap(), installed);
+
+    // The installed command, run as Gemini CLI runs it, coordinates the
+    // repository it is started in and always answers with a JSON object.
+    home.start();
+    let repo = home.repo("project");
+    let command = home.installed_command(".gemini/settings.json", "BeforeTool");
+    let event = json!({
+        "session_id": "00000000-0000-4000-8000-0000000000e2",
+        "transcript_path": "", "cwd": repo, "hook_event_name": "BeforeTool",
+        "timestamp": "2026-11-24T23:15:02.000Z", "tool_name": "write_file",
+        "tool_input": {"file_path": repo.join("src/a.rs"), "content": "fn b() {}\n"},
+    });
+    let (stdout, coverage) = home.run_hook(&command, &repo, &event);
+    assert_eq!((coverage.as_str(), stdout.as_str()), ("admitted", "{}"));
+    let report = String::from_utf8(home.langspan(&["doctor"]).stdout).unwrap();
+    assert!(
+        report.contains("ok gemini-cli: user-level hooks installed"),
+        "{report}"
+    );
+    assert!(
+        report.contains("ok gemini-cli: MCP server `langspan` registered"),
+        "{report}"
+    );
+
+    home.ok(&["uninstall", "--hosts", "gemini-cli", "--apply"]);
+    assert_eq!(
+        fs::read_to_string(&settings).unwrap(),
+        GEMINI_SETTINGS,
+        "uninstall restores the file exactly"
+    );
+    let nothing = home.ok(&["uninstall", "--hosts", "gemini-cli", "--apply"]);
+    assert_eq!(nothing.matches("already matches").count(), 1, "{nothing}");
+
+    // An entry the owner changed after install is theirs: an uninstall dry
+    // run keeps it and does not print it.
+    home.ok(&["install", "--hosts", "gemini-cli", "--apply"]);
+    let mut value: Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+    value["mcpServers"]["langspan"]["env"] = json!({"SECRET": "owner-added-secret"});
+    fs::write(
+        &settings,
+        serde_json::to_string_pretty(&value).unwrap() + "\n",
+    )
+    .unwrap();
+    let dry = home.ok(&["uninstall", "--hosts", "gemini-cli"]);
+    assert!(
+        dry.contains("kept as it is: LangSpan did not write it"),
+        "{dry}"
+    );
+    assert!(!dry.contains("owner-added-secret"), "{dry}");
+
+    // A `langspan` server LangSpan did not write stops the install.
+    let foreign = Home::new();
+    let path = foreign.write(
+        ".gemini/settings.json",
+        r#"{"mcpServers":{"langspan":{"httpUrl":"https://example.invalid/mcp"}}}"#,
+    );
+    let before = fs::read_to_string(&path).unwrap();
+    let output = foreign.langspan(&["install", "--hosts", "gemini-cli", "--apply"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not written by LangSpan"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
+fn a_gemini_user_hook_defers_only_to_project_settings_gemini_loads() {
+    let mut home = Home::new();
+    home.write(".gemini/settings.json", "{}\n");
+    home.ok(&["install", "--hosts", "gemini-cli", "--apply"]);
+    home.start();
+    let command = home.installed_command(".gemini/settings.json", "BeforeTool");
+    let repo = home.repo("project");
+    let project = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .args([
+            "hooks",
+            "install",
+            "gemini-cli",
+            "--workspace",
+            "covered",
+            "--root",
+        ])
+        .arg(&repo)
+        .arg("--state-dir")
+        .arg(home.state_dir())
+        .arg("--apply")
+        .output()
+        .unwrap();
+    assert!(project.status.success(), "{project:?}");
+    let event = |cwd: &Path, n: u32| {
+        json!({
+            "session_id": format!("00000000-0000-4000-8000-0000000000f{n}"),
+            "transcript_path": "", "cwd": cwd, "hook_event_name": "BeforeTool",
+            "timestamp": "2026-11-24T23:15:02.000Z", "tool_name": "write_file",
+            "tool_input": {"file_path": repo.join("src/a.rs"), "content": "x\n"},
+        })
+    };
+    // Started at the root, Gemini loads the project hook: the user hook steps aside.
+    let (stdout, coverage) = home.run_hook(&command, &repo, &event(&repo, 1));
+    assert_eq!(
+        (coverage.as_str(), stdout.as_str()),
+        ("deferred_to_project", "{}")
+    );
+    // Started in a subdirectory, Gemini reads only that directory's
+    // settings, so the project hook does not run and the user hook does.
+    let sub = repo.join("src");
+    let (stdout, coverage) = home.run_hook(&command, &sub, &event(&sub, 2));
+    assert_eq!((coverage.as_str(), stdout.as_str()), ("admitted", "{}"));
+}
+
+/// A Homebrew-shaped prefix under the test's base: the binary in a versioned
+/// keg, with the `opt` and `bin` links Homebrew makes pointing at it.
+fn brew_keg(base: &Path, version: &str) -> PathBuf {
+    let keg = base.join("brew/Cellar/langspan").join(version);
+    fs::create_dir_all(keg.join("bin")).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_langspan"), keg.join("bin/langspan")).unwrap();
+    for (link, target) in [
+        ("brew/opt/langspan", format!("../Cellar/langspan/{version}")),
+        (
+            "brew/bin/langspan",
+            format!("../Cellar/langspan/{version}/bin/langspan"),
+        ),
+    ] {
+        let link = base.join(link);
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+    keg
+}
+
+#[test]
+fn a_homebrew_install_names_the_stable_opt_path_and_survives_an_upgrade() {
+    let home = Home::new();
+    home.write(".claude/settings.json", CLAUDE_SETTINGS);
+    home.write(".claude.json", CLAUDE_JSON);
+    let repo = home.repo("project");
+    let old = brew_keg(&home.base, "0.1.0");
+    let brew = |args: &[&str]| -> String {
+        let output = support::output_once_not_busy(|| {
+            let mut command = Process::new(home.base.join("brew/bin/langspan"));
+            command
+                .args(args)
+                .arg("--state-dir")
+                .arg(home.state_dir())
+                .env_remove("CLAUDE_PROJECT_DIR");
+            command
+        });
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let home_dir = home.home();
+    let home_arg = home_dir.to_str().unwrap();
+    let root = repo.to_str().unwrap();
+    brew(&[
+        "install",
+        "--hosts",
+        "claude-code",
+        "--home",
+        home_arg,
+        "--apply",
+    ]);
+    brew(&[
+        "hooks",
+        "install",
+        "claude-code",
+        "--workspace",
+        "app",
+        "--root",
+        root,
+        "--apply",
+    ]);
+
+    let stable = home.base.join("brew/opt/langspan/bin/langspan");
+    let quoted = format!("'{}'", stable.display());
+    let claude: Value =
+        serde_json::from_str(&fs::read_to_string(home_dir.join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(
+        claude["mcpServers"]["langspan"]["command"],
+        json!(stable),
+        "the MCP entry names the opt link, not the keg"
+    );
+    let user = home.installed_command(".claude/settings.json", "PreToolUse");
+    assert!(user.starts_with(&quoted), "{user}");
+    let project = fs::read_to_string(repo.join(".claude/settings.local.json")).unwrap();
+    assert!(project.contains(&quoted), "{project}");
+    assert!(!project.contains("Cellar"), "{project}");
+
+    // `brew upgrade`: a new keg, the links moved to it, the old keg removed.
+    brew_keg(&home.base, "0.2.0");
+    fs::remove_dir_all(old).unwrap();
+    let text = brew(&["doctor", "--home", home_arg, "--root", root]);
+    assert!(!text.contains("no longer exists"), "{text}");
+    assert!(
+        text.contains("ok claude-code: user-level hooks installed"),
+        "{text}"
+    );
+}

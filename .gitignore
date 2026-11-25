@@ -1,0 +1,7 @@
+/target/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sock
+# Golden stores every build must open (ADR 0015).
+!/tests/fixtures/store-*/*.sqlite3

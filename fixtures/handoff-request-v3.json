@@ -1,0 +1,1 @@
+{"version":3,"request_id":"handoff-1","command":{"op":"handoff","session_id":"claude-code.alice","text":"Login form half done; tests/login.rs fails on the empty password case","paths":["tests/login.rs"]}}

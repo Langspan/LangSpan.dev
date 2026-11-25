@@ -1,0 +1,1 @@
+{"version":2,"request_id":"disk-kind-change","command":{"op":"observe_disk","workspace_id":"work","path":"src/link","before":{"type":"present","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"after":{"type":"present","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"symlink"},"related_operation_ids":[]}}

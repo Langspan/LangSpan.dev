@@ -1,0 +1,14 @@
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "turn_id": "turn_example",
+  "transcript_path": null,
+  "cwd": "/work/demo",
+  "hook_event_name": "PreToolUse",
+  "model": "example-model",
+  "permission_mode": "default",
+  "tool_name": "apply_patch",
+  "tool_use_id": "call_example",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** Add File: new.txt\n+created\n*** End Patch"
+  }
+}

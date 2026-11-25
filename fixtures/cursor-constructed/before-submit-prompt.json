@@ -1,0 +1,16 @@
+{
+  "conversation_id": "00000000-0000-4000-8000-0000000000c1",
+  "generation_id": "00000000-0000-4000-8000-0000000000e1",
+  "model": "default",
+  "session_id": "00000000-0000-4000-8000-0000000000c1",
+  "hook_event_name": "beforeSubmitPrompt",
+  "cursor_version": "1.7.2",
+  "workspace_roots": [
+    "/work/demo"
+  ],
+  "user_email": null,
+  "transcript_path": null,
+  "prompt": "Rename the parser module",
+  "attachments": [],
+  "composer_mode": "agent"
+}

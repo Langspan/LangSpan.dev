@@ -1,0 +1,1831 @@
+#![cfg(unix)]
+//! Checks bound to exact trees, combining branches and landing, through the
+//! real CLI, a real daemon and real Git repositories with a shared remote.
+
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::{Child, Command as Process, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
+};
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
+
+fn git(root: &Path, args: &[&str]) -> String {
+    let output = Process::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "-c",
+            "user.name=Dev",
+            "-c",
+            "user.email=dev@example.invalid",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+struct World {
+    base: PathBuf,
+    daemon: Option<Child>,
+}
+
+impl World {
+    fn new() -> Self {
+        let base = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "ls-land-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+        fs::create_dir(&base).unwrap();
+        let hub = base.join("hub.git");
+        git(
+            &base,
+            &[
+                "init",
+                "--quiet",
+                "--bare",
+                "--initial-branch=main",
+                hub.to_str().unwrap(),
+            ],
+        );
+        let work = base.join("work");
+        git(
+            &base,
+            &[
+                "clone",
+                "--quiet",
+                hub.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        git(&work, &["config", "user.name", "Dev"]);
+        git(&work, &["config", "user.email", "dev@example.invalid"]);
+        git(&work, &["checkout", "--quiet", "-b", "main"]);
+        for file in ["a.txt", "b.txt"] {
+            fs::write(work.join(file), "base\n").unwrap();
+        }
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "--quiet", "-m", "base"]);
+        git(&work, &["push", "--quiet", "origin", "main"]);
+        // Three branches: A and B touch different files, C conflicts with A.
+        for (branch, file, text) in [
+            ("feature-a", "a.txt", "A\n"),
+            ("feature-b", "b.txt", "B\n"),
+            ("feature-c", "a.txt", "C\n"),
+        ] {
+            git(&work, &["checkout", "--quiet", "-b", branch, "main"]);
+            fs::write(work.join(file), text).unwrap();
+            git(&work, &["commit", "--quiet", "-am", branch]);
+        }
+        git(&work, &["checkout", "--quiet", "main"]);
+        let state = base.join("state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut world = Self { base, daemon: None };
+        world.daemon = Some(
+            Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .args(["daemon", "--state-dir"])
+                .arg(&state)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while world.cli(&["status"]).0 != 0 {
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let root = world.work();
+        let (code, text) = world.cli(&[
+            "workspace",
+            "add",
+            "app",
+            root.to_str().unwrap(),
+            "--request-id",
+            "ws",
+        ]);
+        assert_eq!(code, 0, "{text}");
+        world
+    }
+    fn work(&self) -> PathBuf {
+        self.base.join("work")
+    }
+    fn hub(&self) -> PathBuf {
+        self.base.join("hub.git")
+    }
+    fn cli(&self, args: &[&str]) -> (i32, String) {
+        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .arg("--state-dir")
+            .arg(self.base.join("state"))
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            output.status.code().unwrap(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+    }
+    /// Everything about the owner's checkout that these commands must not move.
+    fn checkout(&self) -> String {
+        let work = self.work();
+        format!(
+            "{}\n{}\n{}\n{}",
+            git(&work, &["symbolic-ref", "HEAD"]),
+            git(
+                &work,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                    "refs/heads/"
+                ]
+            ),
+            git(&work, &["status", "--porcelain"]),
+            git(&work, &["worktree", "list", "--porcelain"]),
+        )
+    }
+}
+
+impl Drop for World {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = fs::remove_dir_all(&self.base);
+    }
+}
+
+#[test]
+fn a_check_result_stops_applying_the_moment_the_working_tree_differs() {
+    let w = World::new();
+    let before = w.checkout();
+    let (code, text) = w.cli(&[
+        "check", "run", "app", "--name", "unit", "--", "test", "-f", "a.txt",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("unit passed on tree"), "{text}");
+    let (_, status) = w.cli(&["check", "status", "app"]);
+    assert!(
+        status.contains("Applies to the working tree as it is now"),
+        "{status}"
+    );
+    assert_eq!(w.checkout(), before, "snapshotting moved nothing");
+
+    // One byte changes, in a file Git does not even track yet.
+    fs::write(w.work().join("new-untracked.txt"), "x").unwrap();
+    let (_, status) = w.cli(&["check", "status", "app"]);
+    assert!(status.contains("Does NOT apply"), "{status}");
+    assert!(
+        status.contains("passed"),
+        "the old result is kept as history: {status}"
+    );
+    fs::remove_file(w.work().join("new-untracked.txt")).unwrap();
+    let (_, status) = w.cli(&["check", "status", "app"]);
+    assert!(
+        status.contains("Applies to the working tree"),
+        "the same tree again: {status}"
+    );
+
+    // A failing command is recorded as a failure on that tree.
+    let (code, text) = w.cli(&["check", "run", "app", "--name", "lint", "--", "false"]);
+    assert_eq!(code, 1, "{text}");
+    // A command that changes its own inputs proves nothing about any tree.
+    let (code, text) = w.cli(&[
+        "check",
+        "run",
+        "app",
+        "--name",
+        "gen",
+        "--",
+        "sh",
+        "-c",
+        "echo generated >> b.txt",
+    ]);
+    assert_eq!(code, 5, "{text}");
+    assert!(text.contains("inconclusive"), "{text}");
+    // So does one that does not finish.
+    let (code, text) = w.cli(&[
+        "check",
+        "run",
+        "app",
+        "--name",
+        "slow",
+        "--timeout-s",
+        "1",
+        "--",
+        "sleep",
+        "30",
+    ]);
+    assert_eq!(code, 5, "{text}");
+}
+
+#[test]
+fn independent_branches_are_checked_together_and_landed_only_on_current_evidence() {
+    let w = World::new();
+    let before = w.checkout();
+    let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    let original = hub_main();
+    let both = ["feature-a", "feature-b"];
+    let verify = ["--", "sh", "-c", "grep -q A a.txt && grep -q B b.txt"];
+
+    // A conflicting pair is reported before anything runs.
+    let (code, text) = w.cli(
+        &[
+            &[
+                "integrate",
+                "check",
+                "app",
+                "--onto",
+                "main",
+                "--name",
+                "unit",
+                "feature-a",
+                "feature-c",
+            ][..],
+            &verify[..],
+        ]
+        .concat(),
+    );
+    assert_eq!(code, 2, "{text}");
+    assert!(
+        text.contains("Not combinable") && text.contains("a.txt"),
+        "{text}"
+    );
+
+    // Landing without evidence is refused, and says how to get it.
+    let land = |extra: &[&str]| {
+        w.cli(
+            &[
+                &["land", "app", "--onto", "main", "--name", "unit"][..],
+                extra,
+            ]
+            .concat(),
+        )
+    };
+    let (code, text) = land(&both);
+    assert_eq!(code, 6, "{text}");
+    assert!(text.contains("no check of that name"), "{text}");
+
+    // The two independent branches are combined and checked as one tree,
+    // which exists in no checkout.
+    let (code, text) = w.cli(
+        &[
+            &[
+                "integrate",
+                "check",
+                "app",
+                "--onto",
+                "main",
+                "--name",
+                "unit",
+            ][..],
+            &both[..],
+            &verify[..],
+        ]
+        .concat(),
+    );
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("unit passed on the combined tree"), "{text}");
+
+    // Evidence for A and B together says nothing about A alone.
+    let (code, text) = land(&["feature-a"]);
+    assert_eq!(code, 6, "{text}");
+    assert!(text.contains("other trees"), "{text}");
+
+    // A dry run pushes nothing.
+    let (code, text) = land(&both);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("Ready") && text.contains("Dry run"), "{text}");
+    assert_eq!(hub_main(), original);
+
+    // Someone else lands first. The evidence was for a different result.
+    let other = w.base.join("other");
+    git(
+        &w.base,
+        &[
+            "clone",
+            "--quiet",
+            w.hub().to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    fs::write(other.join("c.txt"), "theirs\n").unwrap();
+    git(&other, &["add", "."]);
+    git(&other, &["commit", "--quiet", "-m", "concurrent"]);
+    git(&other, &["push", "--quiet", "origin", "HEAD:main"]);
+    let moved = hub_main();
+    let (code, text) = land(&[&both[..], &["--apply"]].concat());
+    assert_eq!(code, 6, "{text}");
+    assert_eq!(hub_main(), moved, "nothing was pushed on stale evidence");
+
+    // Checked again against the new target, it lands.
+    let (code, text) = w.cli(
+        &[
+            &[
+                "integrate",
+                "check",
+                "app",
+                "--onto",
+                "main",
+                "--name",
+                "unit",
+            ][..],
+            &both[..],
+            &verify[..],
+        ]
+        .concat(),
+    );
+    assert_eq!(code, 0, "{text}");
+    let (code, text) = land(&[&both[..], &["--apply"]].concat());
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("Landed"), "{text}");
+    let landed = hub_main();
+    assert_ne!(landed, moved);
+    for (file, content) in [("a.txt", "A"), ("b.txt", "B"), ("c.txt", "theirs")] {
+        assert_eq!(
+            git(&w.hub(), &["show", &format!("{landed}:{file}")]),
+            content
+        );
+    }
+    // History is preserved: both branches and the concurrent commit are ancestors.
+    for commit in ["feature-a", "feature-b"] {
+        let tip = git(&w.work(), &["rev-parse", commit]);
+        git(&w.hub(), &["merge-base", "--is-ancestor", &tip, &landed]);
+    }
+    git(&w.hub(), &["merge-base", "--is-ancestor", &moved, &landed]);
+
+    // The owner's checkout, HEAD and branches are where they were. Git itself
+    // moved the remote-tracking ref to what the push put on the remote.
+    assert_eq!(w.checkout(), before);
+    assert_eq!(
+        git(&w.work(), &["rev-parse", "refs/remotes/origin/main"]),
+        landed
+    );
+    // Landing the same thing again finds nothing to do.
+    let (code, text) = land(&[&both[..], &["--apply"]].concat());
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("Nothing to land"), "{text}");
+    let (_, events) = w.cli(&["events", "--limit", "1000"]);
+    assert!(events.contains(r#""type":"landed""#), "{events}");
+}
+
+#[test]
+fn a_failed_combined_check_blocks_landing_and_bad_names_are_refused() {
+    let w = World::new();
+    let (code, text) = w.cli(&[
+        "integrate",
+        "check",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "feature-a",
+        "--",
+        "false",
+    ]);
+    assert_eq!(code, 1, "{text}");
+    let (code, text) = w.cli(&[
+        "land",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "feature-a",
+        "--apply",
+    ]);
+    assert_eq!(code, 6, "{text}");
+    assert!(text.contains("failed on exactly this tree"), "{text}");
+    for bad in [
+        "--upload-pack=x",
+        "main..feature-a",
+        "feature-a^{tree}",
+        "no-such-branch",
+    ] {
+        let (code, text) = w.cli(&[
+            "integrate",
+            "check",
+            "app",
+            "--onto",
+            "main",
+            "--name",
+            "unit",
+            "--",
+            bad,
+        ]);
+        assert_ne!(code, 0, "{bad}: {text}");
+    }
+    let (code, text) = w.cli(&[
+        "integrate",
+        "check",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "no-such-branch",
+        "--",
+        "true",
+    ]);
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("does not name a commit"), "{text}");
+}
+
+#[test]
+fn a_combined_check_that_changes_its_own_tree_is_not_evidence_for_it() {
+    // Review finding: a command that fixes a file and then passes must not
+    // authorize landing the original, unfixed tree.
+    let w = World::new();
+    let (code, text) = w.cli(&[
+        "integrate",
+        "check",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "feature-a",
+        "--",
+        "sh",
+        "-c",
+        "echo fixed > a.txt",
+    ]);
+    assert_eq!(code, 5, "{text}");
+    assert!(
+        text.contains("did not hold exactly the combined tree"),
+        "{text}"
+    );
+    let (code, text) = w.cli(&[
+        "land",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "feature-a",
+        "--apply",
+    ]);
+    assert_eq!(code, 6, "{text}");
+    assert!(text.contains("inconclusive"), "{text}");
+}
+
+#[test]
+fn a_timed_out_check_leaves_nothing_running() {
+    // Review finding: a descendant of the check outlived its time limit.
+    let w = World::new();
+    let marker = w.base.join("late-write");
+    let script = format!("(sleep 2; touch {}) & sleep 30", marker.display());
+    let (code, text) = w.cli(&[
+        "check",
+        "run",
+        "app",
+        "--name",
+        "slow",
+        "--timeout-s",
+        "1",
+        "--",
+        "sh",
+        "-c",
+        &script,
+    ]);
+    assert_eq!(code, 5, "{text}");
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        !marker.exists(),
+        "a descendant of the check ran after its time limit"
+    );
+}
+
+/// The tree `check run` printed.
+fn recorded_tree(text: &str) -> String {
+    text.split("passed on tree ")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_hexdigit()).next())
+        .unwrap_or_else(|| panic!("no tree in: {text}"))
+        .to_owned()
+}
+
+/// In a sparse checkout, the files outside
+/// it are part of the tree, not deletions from it.
+#[test]
+fn check_run_in_a_sparse_checkout_records_heads_tree_when_nothing_changed() {
+    let w = World::new();
+    let work = w.work();
+    for file in ["docs/guide.txt", "src/main.txt"] {
+        fs::create_dir_all(work.join(file).parent().unwrap()).unwrap();
+        fs::write(work.join(file), "content\n").unwrap();
+    }
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "--quiet", "-m", "dirs"]);
+    git(&work, &["sparse-checkout", "set", "src"]);
+    assert!(!work.join("docs").exists());
+    let head_tree = git(&work, &["rev-parse", "HEAD^{tree}"]);
+    let (code, text) = w.cli(&["check", "run", "app", "--name", "unit", "--", "true"]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(recorded_tree(&text), head_tree, "{text}");
+    let (_, status) = w.cli(&["check", "status", "app"]);
+    assert!(status.contains("Applies to the working tree"), "{status}");
+    assert!(
+        git(&work, &["status", "--porcelain"]).is_empty(),
+        "the owner's index is untouched"
+    );
+}
+
+/// Git LFS is configured, required and not
+/// installed. Its filters are not run; the tree is HEAD plus the raw local
+/// change.
+#[test]
+fn check_run_with_a_required_filter_that_is_not_installed_records_the_raw_tree() {
+    let w = World::new();
+    let work = w.work();
+    // Not named `lfs`: a machine with Git LFS installed (GitHub's macOS
+    // image) defines that filter globally, and it would run on the commit.
+    fs::write(work.join(".gitattributes"), "*.bin filter=missing-tool\n").unwrap();
+    fs::write(work.join("asset.bin"), "pointer-like text\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "--quiet", "-m", "asset"]);
+    let missing = w.base.join("no-such-git-lfs");
+    for (key, value) in [
+        (
+            "filter.missing-tool.clean",
+            format!("{} clean -- %f", missing.display()),
+        ),
+        (
+            "filter.missing-tool.smudge",
+            format!("{} smudge -- %f", missing.display()),
+        ),
+        (
+            "filter.missing-tool.process",
+            format!("{} filter-process", missing.display()),
+        ),
+        ("filter.missing-tool.required", "true".into()),
+    ] {
+        git(&work, &["config", key, &value]);
+    }
+    let (code, text) = w.cli(&["check", "run", "app", "--name", "unit", "--", "true"]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(
+        recorded_tree(&text),
+        git(&work, &["rev-parse", "HEAD^{tree}"])
+    );
+
+    // A local change: the expected tree, built independently from HEAD and
+    // the file's raw bytes.
+    fs::write(work.join("asset.bin"), "local change\n").unwrap();
+    let blob = git(&work, &["hash-object", "-w", "--no-filters", "asset.bin"]);
+    let index = w.base.join("expected-index");
+    let with_index = |args: &[&str]| {
+        let output = Process::new("git")
+            .arg("-C")
+            .arg(&work)
+            .args(args)
+            .env("GIT_INDEX_FILE", &index)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    with_index(&["read-tree", "HEAD"]);
+    with_index(&[
+        "update-index",
+        "--cacheinfo",
+        &format!("100644,{blob},asset.bin"),
+    ]);
+    let expected = with_index(&["write-tree"]);
+    let (code, text) = w.cli(&["check", "run", "app", "--name", "unit", "--", "true"]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(recorded_tree(&text), expected, "{text}");
+}
+
+/// A shallow clone cannot combine
+/// branches correctly, so it is refused before anything is fetched.
+#[test]
+fn integrate_and_land_in_a_shallow_clone_are_refused_with_what_to_do() {
+    let w = World::new();
+    let work = w.work();
+    fs::write(work.join("a.txt"), "second\n").unwrap();
+    git(&work, &["commit", "--quiet", "-am", "second"]);
+    git(&work, &["push", "--quiet", "origin", "main", "feature-a"]);
+    let shallow = w.base.join("shallow");
+    let url = format!("file://{}", w.hub().display());
+    git(
+        &w.base,
+        &[
+            "clone",
+            "--quiet",
+            "--depth",
+            "1",
+            "--no-single-branch",
+            &url,
+            shallow.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        git(&shallow, &["rev-parse", "--is-shallow-repository"]),
+        "true"
+    );
+    git(
+        &shallow,
+        &["branch", "--quiet", "feature-a", "origin/feature-a"],
+    );
+    let (code, text) = w.cli(&[
+        "workspace",
+        "add",
+        "thin",
+        shallow.to_str().unwrap(),
+        "--request-id",
+        "ws-thin",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let before = git(&shallow, &["for-each-ref"]);
+    for args in [
+        &[
+            "integrate",
+            "check",
+            "thin",
+            "--onto",
+            "main",
+            "--name",
+            "unit",
+            "feature-a",
+            "--",
+            "true",
+        ][..],
+        &[
+            "land",
+            "thin",
+            "--onto",
+            "main",
+            "--name",
+            "unit",
+            "feature-a",
+            "--apply",
+        ][..],
+    ] {
+        let (code, text) = w.cli(args);
+        assert_ne!(code, 0, "{text}");
+        assert!(
+            text.contains("this clone is shallow") && text.contains("git fetch --unshallow"),
+            "{args:?}: {text}"
+        );
+    }
+    assert_eq!(
+        git(&shallow, &["for-each-ref"]),
+        before,
+        "nothing was fetched"
+    );
+}
+
+impl World {
+    /// Standard output alone, for `--json`.
+    fn json(&self, args: &[&str]) -> (i32, serde_json::Value) {
+        let output = self.spawn(args).wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        (
+            output.status.code().unwrap(),
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}")),
+        )
+    }
+    fn spawn(&self, args: &[&str]) -> Child {
+        Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .arg("--state-dir")
+            .arg(self.base.join("state"))
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+    /// The owner's own pre-push hook, which every landing must run.
+    fn pre_push(&self, script: &str) {
+        let hook = self.work().join(".git/hooks/pre-push");
+        fs::write(&hook, format!("#!/bin/sh\n{script}\nexit 0\n")).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    /// A second clone, as a teammate would have, with one commit ready to push.
+    fn teammate(&self, file: &str) -> PathBuf {
+        let other = self.base.join(format!("other-{file}"));
+        git(
+            &self.base,
+            &[
+                "clone",
+                "--quiet",
+                self.hub().to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        fs::write(other.join(file), "theirs\n").unwrap();
+        git(&other, &["add", "."]);
+        git(&other, &["commit", "--quiet", "-m", file]);
+        other
+    }
+    fn events(&self) -> Vec<serde_json::Value> {
+        let (code, value) = self.json(&["events", "--limit", "1000", "--json"]);
+        assert_eq!(code, 0);
+        value["outcome"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["event"].clone())
+            .collect()
+    }
+}
+
+const VERIFY: &str = "test -f a.txt && test -f b.txt";
+
+fn land_args<'a>(branch: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    [
+        &[
+            "land", "app", "--onto", "main", "--name", "unit", branch, "--apply",
+        ][..],
+        extra,
+    ]
+    .concat()
+}
+
+impl World {
+    /// `land-queue` for the main branch, as JSON.
+    fn queue(&self) -> serde_json::Value {
+        let (code, value) = self.json(&["land-queue", "app", "--onto", "main", "--json"]);
+        assert_eq!(code, 0, "{value}");
+        value
+    }
+    /// Wait, at most 20 s, until the queue view satisfies `ready`.
+    fn queue_until(&self, ready: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let queue = self.queue();
+            if ready(&queue) {
+                return queue;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the queue never got there: {queue}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// A finished child's exit code, standard output and both streams together.
+fn finish(child: Child) -> (i32, String, String) {
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let both = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    (output.status.code().unwrap(), stdout, both)
+}
+
+fn holds(queue: &serde_json::Value, ticket: &str) -> bool {
+    queue["holder"]["turn_id"] == ticket
+}
+
+#[test]
+fn a_second_landing_waits_its_turn_and_lands_on_the_new_target_with_its_check_run_again() {
+    let w = World::new();
+    let before = w.checkout();
+    let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    let original = hub_main();
+    // A slow pre-push hook keeps the first landing inside its turn.
+    w.pre_push("sleep 3");
+    let again = ["--json", "--check-again", "--", "sh", "-c", VERIFY];
+    let first = w.spawn(
+        &[
+            &land_args("feature-a", &["--request-id", "land-1"])[..],
+            &again,
+        ]
+        .concat(),
+    );
+    w.queue_until(|queue| holds(queue, "land-1"));
+    let second = w.spawn(
+        &[
+            &land_args(
+                "feature-b",
+                &["--request-id", "land-2", "--session", "agent-2"],
+            )[..],
+            &again,
+        ]
+        .concat(),
+    );
+    // While it waits, the line is visible with who holds the turn.
+    let queue = w.queue_until(|queue| queue["waiting"][0]["ticket"] == "land-2");
+    assert!(holds(&queue, "land-1"), "{queue}");
+    assert_eq!(queue["waiting"][0]["position"], 1, "{queue}");
+    assert_eq!(queue["waiting"][0]["session_id"], "agent-2", "{queue}");
+    assert_eq!(queue["waiting"].as_array().unwrap().len(), 1, "{queue}");
+
+    let (code, out, text) = finish(first);
+    assert_eq!(code, 0, "the first landing lands: {text}");
+    let first: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let (code, out, text) = finish(second);
+    assert_eq!(code, 0, "the second waited instead of failing: {text}");
+    let second: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(second["result"], "landed", "{second}");
+    assert!(second["waited_ms"].as_u64().unwrap() > 0, "{second}");
+
+    // It combined onto what the first landed, not onto the target it saw
+    // when it started, and checked that new tree before pushing it.
+    let after_first = first["landing"]["commit_oid"].as_str().unwrap().to_owned();
+    assert_ne!(after_first, original);
+    assert_eq!(
+        second["landing"]["inputs"][0],
+        after_first.as_str(),
+        "{second}"
+    );
+    let last = hub_main();
+    assert_eq!(second["landing"]["commit_oid"], last.as_str());
+    git(
+        &w.hub(),
+        &["merge-base", "--is-ancestor", &after_first, &last],
+    );
+    for (file, content) in [("a.txt", "A"), ("b.txt", "B")] {
+        assert_eq!(git(&w.hub(), &["show", &format!("{last}:{file}")]), content);
+    }
+    let events = w.events();
+    let check = events
+        .iter()
+        .find(|event| {
+            event["type"] == "check_recorded"
+                && event["check"]["check_id"] == second["landing"]["check_id"]
+        })
+        .unwrap_or_else(|| panic!("the second landing's check: {second}"));
+    assert_eq!(check["check"]["tree_oid"], second["landing"]["tree_oid"]);
+    assert_eq!(check["check"]["inputs"][0], after_first.as_str());
+    assert_eq!(check["check"]["result"]["type"], "passed");
+    assert_eq!(w.checkout(), before, "the owner's checkout never moved");
+
+    // The log: the second joined the line while the first held the turn,
+    // took it only after the first released it, and one held it at a time.
+    let mut holder: Option<String> = None;
+    let mut order = Vec::new();
+    for event in &events {
+        match event["type"].as_str().unwrap() {
+            "turn_taken" => {
+                assert!(holder.is_none(), "two holders at once: {event}");
+                let id = event["turn"]["turn_id"].as_str().unwrap().to_owned();
+                order.push(format!("taken {id}"));
+                holder = Some(id);
+            }
+            "turn_released" | "turn_expired" if holder.as_deref() == event["turn_id"].as_str() => {
+                order.push(format!("released {}", holder.take().unwrap()));
+            }
+            "turn_queue_joined" => order.push(format!(
+                "joined {}",
+                event["waiter"]["ticket"].as_str().unwrap()
+            )),
+            "turn_queue_left" => panic!("nobody left the line: {event}"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        order,
+        [
+            "taken land-1",
+            "joined land-2",
+            "released land-1",
+            "taken land-2",
+            "released land-2"
+        ]
+    );
+    assert_eq!(w.queue()["waiting"], serde_json::json!([]));
+}
+
+#[test]
+fn a_waiting_landing_stops_at_its_wait_limit_or_when_cancelled_and_pushes_nothing() {
+    let w = World::new();
+    let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    w.pre_push("sleep 5");
+    let again = ["--check-again", "--", "sh", "-c", VERIFY];
+    let first = w.spawn(
+        &[
+            &land_args("feature-a", &["--request-id", "land-1"])[..],
+            &again,
+        ]
+        .concat(),
+    );
+    w.queue_until(|queue| holds(queue, "land-1"));
+
+    // Asked not to wait, it is told at once, as before the queue.
+    let (code, text) = w.cli(&[&land_args("feature-b", &["--wait-s", "0"])[..], &again].concat());
+    assert_eq!(code, 7, "{text}");
+    assert!(
+        text.contains("another landing is in progress") && text.contains("a terminal"),
+        "{text}"
+    );
+
+    // A short wait runs out: exit 7, nothing fetched or pushed, out of line.
+    let started = Instant::now();
+    let (code, text) = w.cli(
+        &[
+            &land_args("feature-b", &["--request-id", "land-2", "--wait-s", "1"])[..],
+            &again,
+        ]
+        .concat(),
+    );
+    assert!(started.elapsed() >= Duration::from_secs(1), "it waited");
+    assert_eq!(code, 7, "{text}");
+    assert!(
+        text.contains("waited 1 s for the push turn")
+            && text.contains("Nothing was fetched or pushed"),
+        "{text}"
+    );
+    assert_eq!(w.queue()["waiting"], serde_json::json!([]));
+
+    // A waiting landing is cancelled from elsewhere, by its request ID.
+    let third = w.spawn(
+        &[
+            &land_args("feature-b", &["--request-id", "land-3", "--wait-s", "60"])[..],
+            &again,
+        ]
+        .concat(),
+    );
+    w.queue_until(|queue| queue["waiting"][0]["ticket"] == "land-3");
+    let (code, text) = w.cli(&[
+        "land-cancel",
+        "app",
+        "--onto",
+        "main",
+        "--request-id",
+        "land-3",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("land-3 stopped waiting"), "{text}");
+    let (code, _, text) = finish(third);
+    assert_eq!(code, 7, "{text}");
+    assert!(text.contains("cancelled"), "{text}");
+    // Cancelling again changes nothing and says so.
+    let (code, text) = w.cli(&[
+        "land-cancel",
+        "app",
+        "--onto",
+        "main",
+        "--request-id",
+        "land-3",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("was not waiting"), "{text}");
+
+    let (code, _, text) = finish(first);
+    assert_eq!(code, 0, "{text}");
+    let landed = hub_main();
+    assert_eq!(git(&w.hub(), &["show", &format!("{landed}:b.txt")]), "base");
+    let left: Vec<_> = w
+        .events()
+        .into_iter()
+        .filter(|event| event["type"] == "turn_queue_left")
+        .map(|event| (event["ticket"].clone(), event["reason"].clone()))
+        .collect();
+    assert_eq!(
+        left,
+        [
+            ("land-2".into(), "timed_out".into()),
+            ("land-3".into(), "cancelled".into())
+        ]
+    );
+}
+
+impl World {
+    /// Commit `files` on `branch`, starting it from `from`, in the owner's clone.
+    fn commit_on(&self, branch: &str, from: &str, files: &[(&str, String)]) {
+        let work = self.work();
+        git(&work, &["checkout", "--quiet", "-B", branch, from]);
+        for (file, text) in files {
+            fs::write(work.join(file), text).unwrap();
+        }
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "--quiet", "-m", branch]);
+        git(&work, &["checkout", "--quiet", "main"]);
+    }
+}
+
+fn numbered(count: usize, line: impl Fn(usize) -> String) -> String {
+    (1..=count).map(|n| line(n) + "\n").collect()
+}
+
+#[test]
+fn a_conflict_reports_its_hunks_per_file_bounded_and_as_data() {
+    let w = World::new();
+    let base_many = numbered(60, |n| format!("line {n}"));
+    let base_long = numbered(20, |n| format!("long {n}"));
+    w.commit_on(
+        "main",
+        "main",
+        &[("many.txt", base_many.clone()), ("long.txt", base_long)],
+    );
+    git(&w.work(), &["push", "--quiet", "origin", "main"]);
+    // Ten separate one-line conflicts in one file, one twenty-line conflict
+    // in another, and a branch line carrying a terminal escape.
+    let changed = |side: &str| {
+        numbered(60, |n| {
+            if n % 6 == 1 {
+                format!("{side} {n}")
+            } else {
+                format!("line {n}")
+            }
+        })
+    };
+    w.commit_on(
+        "target-side",
+        "main",
+        &[
+            ("many.txt", changed("target")),
+            ("long.txt", numbered(20, |n| format!("target long {n}"))),
+        ],
+    );
+    git(
+        &w.work(),
+        &["push", "--quiet", "origin", "target-side:main"],
+    );
+    w.commit_on(
+        "clash",
+        "main",
+        &[
+            ("many.txt", changed("branch")),
+            (
+                "long.txt",
+                numbered(20, |n| {
+                    if n == 1 {
+                        "branch \u{1b}[2J long 1".into()
+                    } else {
+                        format!("branch long {n}")
+                    }
+                }),
+            ),
+        ],
+    );
+    let (code, report) = w.json(&[
+        "integrate",
+        "check",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "clash",
+        "--json",
+        "--",
+        "true",
+    ]);
+    assert_eq!(code, 2, "{report}");
+    assert_eq!(report["result"], "not_combinable", "{report}");
+    assert_eq!(report["paths"], serde_json::json!(["long.txt", "many.txt"]));
+    let conflicts = report["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 2, "{report}");
+
+    let long = &conflicts[0];
+    assert_eq!(long["path"], "long.txt");
+    assert_eq!(long["kinds"], serde_json::json!(["contents"]));
+    let hunk = &long["hunks"][0];
+    assert_eq!(
+        (&hunk["target"]["start"], &hunk["target"]["lines"]),
+        (&1.into(), &20.into())
+    );
+    assert_eq!(
+        (&hunk["branch"]["start"], &hunk["branch"]["lines"]),
+        (&1.into(), &20.into())
+    );
+    let shown = hunk["target"]["text"].as_array().unwrap();
+    assert_eq!(shown.len(), 6, "a few lines of each side: {hunk}");
+    assert_eq!(shown[0], "target long 1");
+    let first_branch = hunk["branch"]["text"][0].as_str().unwrap();
+    assert!(
+        first_branch.starts_with("branch ") && !first_branch.contains('\u{1b}'),
+        "control characters are not relayed: {first_branch:?}"
+    );
+
+    let many = &conflicts[1];
+    assert_eq!(many["path"], "many.txt");
+    assert_eq!(many["hunks"].as_array().unwrap().len(), 4, "{many}");
+    assert_eq!(many["more_hunks"], 6, "{many}");
+    for (index, hunk) in many["hunks"].as_array().unwrap().iter().enumerate() {
+        let line = 6 * index + 1;
+        assert_eq!(hunk["target"]["start"], line, "{hunk}");
+        assert_eq!(hunk["branch"]["start"], line, "{hunk}");
+        assert_eq!(
+            hunk["target"]["text"],
+            serde_json::json!([format!("target {line}")])
+        );
+        assert_eq!(
+            hunk["branch"]["text"],
+            serde_json::json!([format!("branch {line}")])
+        );
+    }
+
+    // The same detail, for a person, labelled as the repository's text.
+    let (code, text) = w.cli(&[
+        "integrate",
+        "check",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "clash",
+        "--",
+        "true",
+    ]);
+    assert_eq!(code, 2, "{text}");
+    assert!(text.contains("repository text, shown as data"), "{text}");
+    assert!(text.contains("many.txt line 7"), "{text}");
+    assert!(text.contains("| branch 7"), "{text}");
+    assert!(text.contains("and 6 more conflicts in this file"), "{text}");
+    // A dry-run landing reports the same.
+    let (code, report) = w.json(&[
+        "land", "app", "--onto", "main", "--name", "unit", "clash", "--json",
+    ]);
+    assert_eq!(code, 2, "{report}");
+    assert_eq!(
+        report["conflicts"],
+        serde_json::Value::Array(conflicts.clone())
+    );
+}
+
+#[test]
+fn conflict_line_numbers_are_each_sides_own_after_clean_changes_elsewhere() {
+    let w = World::new();
+    w.commit_on(
+        "main",
+        "main",
+        &[("f.txt", numbered(30, |n| format!("line {n}")))],
+    );
+    git(&w.work(), &["push", "--quiet", "origin", "main"]);
+    // The target adds two lines at the top and conflicts at line 20; the
+    // branch deletes line 5 and conflicts at the same line.
+    let edit = |side: &str, keep: &dyn Fn(usize) -> bool, top: &str| {
+        top.to_owned()
+            + &numbered(30, |n| {
+                if n == 20 {
+                    format!("{side} 20")
+                } else {
+                    format!("line {n}")
+                }
+            })
+            .lines()
+            .enumerate()
+            .filter(|(i, _)| keep(i + 1))
+            .map(|(_, l)| format!("{l}\n"))
+            .collect::<String>()
+    };
+    w.commit_on(
+        "target-side",
+        "main",
+        &[("f.txt", edit("target", &|_| true, "new 1\nnew 2\n"))],
+    );
+    git(
+        &w.work(),
+        &["push", "--quiet", "origin", "target-side:main"],
+    );
+    w.commit_on(
+        "clash",
+        "main",
+        &[("f.txt", edit("branch", &|n| n != 5, ""))],
+    );
+    let (code, report) = w.json(&[
+        "integrate",
+        "check",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "clash",
+        "--json",
+        "--",
+        "true",
+    ]);
+    assert_eq!(code, 2, "{report}");
+    let hunk = &report["conflicts"][0]["hunks"][0];
+    assert_eq!(
+        hunk["target"]["text"],
+        serde_json::json!(["target 20"]),
+        "{report}"
+    );
+    assert_eq!(
+        hunk["target"]["start"], 22,
+        "after two lines added on top: {report}"
+    );
+    assert_eq!(
+        hunk["branch"]["start"], 19,
+        "after one line deleted above: {report}"
+    );
+}
+
+#[test]
+fn a_rename_that_already_landed_is_followed_and_said() {
+    let w = World::new();
+    let work = w.work();
+    // The target renames a.txt; feature-a, made before that, edits a.txt.
+    git(&work, &["mv", "a.txt", "renamed.txt"]);
+    git(&work, &["commit", "--quiet", "-m", "rename a"]);
+    git(&work, &["push", "--quiet", "origin", "main"]);
+    // The owner turned rename detection off for their own merges; a
+    // landing's combination does not depend on that setting.
+    git(&work, &["config", "merge.renames", "false"]);
+    let rename = serde_json::json!([{"branch": "feature-a", "from": "a.txt", "to": "renamed.txt"}]);
+    let check = ["sh", "-c", "test ! -e a.txt && grep -q A renamed.txt"];
+    let (code, report) = w.json(
+        &[
+            &[
+                "integrate",
+                "check",
+                "app",
+                "--onto",
+                "main",
+                "--name",
+                "unit",
+                "feature-a",
+            ][..],
+            &["--json", "--"],
+            &check,
+        ]
+        .concat(),
+    );
+    assert_eq!(
+        code, 0,
+        "the branch's edit is combined onto the new path: {report}"
+    );
+    assert_eq!(report["combined"]["renames"], rename, "{report}");
+    let (code, text) = w.cli(
+        &land_args("feature-a", &[])
+            .iter()
+            .filter(|a| **a != "--apply")
+            .copied()
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("Followed a rename that already landed: feature-a edits \"a.txt\", which is now \"renamed.txt\"."),
+        "{text}"
+    );
+    let (code, report) = w.json(&land_args("feature-a", &["--json"]));
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+    assert_eq!(report["renames"], rename, "{report}");
+    let landed = git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    assert_eq!(
+        git(&w.hub(), &["show", &format!("{landed}:renamed.txt")]),
+        "A"
+    );
+    assert_eq!(
+        git(&w.hub(), &["ls-tree", "--name-only", &landed]),
+        "b.txt\nrenamed.txt"
+    );
+    // A branch that touches no renamed file reports none.
+    let (code, report) = w.json(&[
+        "integrate",
+        "check",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "feature-b",
+        "--json",
+        "--",
+        "true",
+    ]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(
+        report["combined"]["renames"],
+        serde_json::json!([]),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_target_that_moves_during_the_push_is_landed_only_on_a_new_passing_check() {
+    let w = World::new();
+    let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    // A teammate pushes while the owner's push is under way, once per marker.
+    let moves = |file: &str| {
+        let other = w.teammate(file);
+        let marker = w.base.join(format!("moved-{file}"));
+        w.pre_push(&format!(
+            "if [ ! -e {m} ]; then touch {m}; env -i PATH=\"$PATH\" HOME=\"$HOME\" git -C {o} push --quiet origin HEAD:main; fi",
+            m = marker.display(),
+            o = other.display()
+        ));
+        other
+    };
+    let (code, text) = w.cli(&[
+        "integrate",
+        "check",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "feature-a",
+        "--",
+        "test",
+        "-f",
+        "a.txt",
+    ]);
+    assert_eq!(code, 0, "{text}");
+
+    // Without --check-again the new combination has no evidence: refused.
+    let other = moves("c.txt");
+    let (code, text) = w.cli(&land_args("feature-a", &[]));
+    assert_eq!(code, 6, "{text}");
+    assert!(
+        text.contains("moved during the landing") && text.contains("2 attempts"),
+        "{text}"
+    );
+    assert_eq!(
+        hub_main(),
+        git(&other, &["rev-parse", "HEAD"]),
+        "only the teammate's commit is there; nothing unchecked was pushed"
+    );
+
+    // With it, each new combined tree is checked before it is pushed.
+    moves("d.txt");
+    let (code, report) = w.json(
+        &[
+            &land_args("feature-a", &["--check-again", "--json", "--"])[..],
+            &["test", "-f", "a.txt"],
+        ]
+        .concat(),
+    );
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+    let attempts = report["attempts"].as_array().unwrap();
+    let kinds: Vec<_> = attempts
+        .iter()
+        .map(|a| a["result"]["type"].clone())
+        .collect();
+    assert_eq!(kinds, ["moved", "landed"], "{report}");
+    assert_ne!(attempts[0]["target_oid"], attempts[1]["target_oid"]);
+    let landed = hub_main();
+    assert_eq!(report["landing"]["commit_oid"], landed.as_str());
+    for (file, content) in [("a.txt", "A"), ("c.txt", "theirs"), ("d.txt", "theirs")] {
+        assert_eq!(
+            git(&w.hub(), &["show", &format!("{landed}:{file}")]),
+            content
+        );
+    }
+    // The landing relied on a passing check of exactly the tree it pushed.
+    let tree = git(&w.hub(), &["rev-parse", &format!("{landed}^{{tree}}")]);
+    assert_eq!(report["landing"]["tree_oid"], tree.as_str());
+    let events = w.events();
+    assert!(events.iter().any(|event| event["type"] == "check_recorded"
+        && event["check"]["check_id"] == report["landing"]["check_id"]
+        && event["check"]["tree_oid"] == tree.as_str()
+        && event["check"]["result"]["type"] == "passed"));
+    // Each attempt is recorded with the release of its turn.
+    let released: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "turn_released")
+        .map(|event| event["attempts"].as_array().unwrap().len())
+        .collect();
+    assert_eq!(released, [2, 2]);
+}
+
+#[test]
+fn a_push_refused_by_a_hook_is_not_retried() {
+    let w = World::new();
+    let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    let original = hub_main();
+    let count = w.base.join("hook-runs");
+    w.pre_push(&format!("echo run >> {}; exit 1", count.display()));
+    let (code, text) = w.cli(&land_args(
+        "feature-a",
+        &["--check-again", "--", "test", "-f", "a.txt"],
+    ));
+    assert_eq!(code, 2, "{text}");
+    assert!(text.contains("is not retried"), "{text}");
+    assert_eq!(fs::read_to_string(&count).unwrap().lines().count(), 1);
+    assert_eq!(hub_main(), original);
+}
+
+impl World {
+    /// The owner's pre-push hook stops the daemon, so the push goes ahead
+    /// and recording the landing after it cannot.
+    fn stop_daemon_in_pre_push(&self) {
+        let pid = self.daemon.as_ref().unwrap().id();
+        self.pre_push(&format!("kill -9 {pid}; sleep 0.5"));
+    }
+}
+
+#[test]
+fn a_push_whose_landing_cannot_be_recorded_is_reported_as_pushed() {
+    let w = World::new();
+    let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    let original = hub_main();
+    w.stop_daemon_in_pre_push();
+    let (code, text) = w.cli(&land_args(
+        "feature-a",
+        &["--check-again", "--", "test", "-f", "a.txt"],
+    ));
+    let landed = hub_main();
+    assert_ne!(landed, original, "the push happened: {text}");
+    assert_eq!(code, 8, "{text}");
+    assert!(
+        text.contains(&format!("Pushed {landed} to origin/main")),
+        "{text}"
+    );
+    assert!(text.contains("could not record the landing"), "{text}");
+    assert!(text.contains("git -C"), "{text}");
+    assert!(text.contains("ls-remote origin refs/heads/main"), "{text}");
+    assert!(!text.contains("othing was pushed"), "{text}");
+}
+
+#[tokio::test]
+async fn an_mcp_landing_whose_record_fails_reports_the_push_and_commit() {
+    use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+    let w = World::new();
+    let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    let original = hub_main();
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command
+        .arg("mcp")
+        .arg("--state-dir")
+        .arg(w.base.join("state"));
+    let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+    let call = |name: &'static str, arguments: serde_json::Value| {
+        let request =
+            CallToolRequestParams::new(name).with_arguments(arguments.as_object().unwrap().clone());
+        let client = &client;
+        async move {
+            let result = tokio::time::timeout(Duration::from_secs(60), client.call_tool(request))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.is_error, Some(false), "{result:?}");
+            result.structured_content.unwrap()
+        }
+    };
+    let checked = call(
+        "langspan_integrate_check",
+        serde_json::json!({
+            "request_id": "agent-check-1", "workspace_id": "app", "onto": "main",
+            "name": "unit", "branches": ["feature-a"],
+            "command": ["test", "-f", "a.txt"], "timeout_s": 60,
+        }),
+    )
+    .await;
+    assert_eq!(checked["check"]["result"]["type"], "passed", "{checked}");
+    w.stop_daemon_in_pre_push();
+    let landed = call(
+        "langspan_land",
+        serde_json::json!({
+            "request_id": "agent-land-1", "workspace_id": "app", "onto": "main",
+            "name": "unit", "branches": ["feature-a"], "apply": true,
+        }),
+    )
+    .await;
+    let tip = hub_main();
+    assert_ne!(tip, original, "the push happened: {landed}");
+    assert_eq!(
+        (&landed["result"], &landed["exit_code"]),
+        (&"pushed_not_recorded".into(), &8.into()),
+        "{landed}"
+    );
+    assert_eq!(landed["combined"]["commit"], tip.as_str(), "{landed}");
+    assert_eq!(landed["target_oid"], original.as_str(), "{landed}");
+    assert!(
+        landed["verify"]
+            .as_str()
+            .unwrap()
+            .ends_with("ls-remote origin refs/heads/main"),
+        "{landed}"
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn agents_check_and_land_through_the_mcp_adapter() {
+    use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+    let w = World::new();
+    let before = w.checkout();
+    let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    let original = hub_main();
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command
+        .arg("mcp")
+        .arg("--state-dir")
+        .arg(w.base.join("state"));
+    let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+    let call = |name: &'static str, arguments: serde_json::Value| {
+        let request =
+            CallToolRequestParams::new(name).with_arguments(arguments.as_object().unwrap().clone());
+        let client = &client;
+        async move {
+            let result = tokio::time::timeout(Duration::from_secs(60), client.call_tool(request))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.is_error, Some(false), "{result:?}");
+            result.structured_content.unwrap()
+        }
+    };
+    let check = serde_json::json!({
+        "request_id": "agent-check-1", "workspace_id": "app", "onto": "main",
+        "name": "unit", "branches": ["feature-a", "feature-b"],
+        "command": ["sh", "-c", "grep -q A a.txt && grep -q B b.txt"], "timeout_s": 60,
+    });
+    let first = call("langspan_integrate_check", check.clone()).await;
+    assert_eq!(
+        (
+            &first["result"],
+            &first["exit_code"],
+            &first["check"]["result"]["type"]
+        ),
+        (&"checked".into(), &0.into(), &"passed".into()),
+        "{first}"
+    );
+    assert_eq!(first["check"]["check_id"], "agent-check-1");
+    // A retry is the same record, not a second run.
+    let retry = call("langspan_integrate_check", check).await;
+    assert_eq!(retry["replayed"], true, "{retry}");
+    assert_eq!(retry["check"], first["check"]);
+
+    let land = |apply: bool, id: &'static str| {
+        serde_json::json!({
+            "request_id": id, "workspace_id": "app", "onto": "main", "name": "unit",
+            "branches": ["feature-a", "feature-b"], "apply": apply, "session_id": "agent-1",
+        })
+    };
+    let dry = call("langspan_land", land(false, "agent-land-dry")).await;
+    assert_eq!(
+        (&dry["result"], &dry["exit_code"]),
+        (&"ready".into(), &0.into()),
+        "{dry}"
+    );
+    assert_eq!(dry["combined"]["tree"], first["combined"]["tree"]);
+    assert_eq!(hub_main(), original, "a dry run pushes nothing");
+
+    let landed = call("langspan_land", land(true, "agent-land-1")).await;
+    assert_eq!(landed["result"], "landed", "{landed}");
+    assert_eq!(landed["landing"]["commit_oid"], hub_main().as_str());
+    let again = call("langspan_land", land(true, "agent-land-1")).await;
+    assert_eq!(
+        (&again["result"], &again["replayed"]),
+        (&"landed".into(), &true.into()),
+        "a retry reports the landing: {again}"
+    );
+    assert_eq!(w.checkout(), before);
+    client.cancel().await.unwrap();
+}
+
+impl World {
+    /// `cli` with the push budget cut to `budget_ms`, a test-only setting.
+    fn cli_with_push_budget(&self, budget_ms: u64, args: &[&str]) -> (i32, String) {
+        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .arg("--state-dir")
+            .arg(self.base.join("state"))
+            .args(args)
+            .env("LANGSPAN_TEST_PUSH_BUDGET_MS", budget_ms.to_string())
+            .output()
+            .unwrap();
+        (
+            output.status.code().unwrap(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+    }
+    /// A hook in the shared remote that runs after it has updated its refs,
+    /// as a slow hosted remote answers late.
+    fn post_receive(&self, script: &str) {
+        let hook = self.hub().join("hooks/post-receive");
+        fs::write(&hook, format!("#!/bin/sh\n{script}\nexit 0\n")).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// The remote took the push but answered after the push's budget: the
+/// remote's tip is the pushed commit, so it landed and is recorded.
+#[test]
+fn a_push_that_timed_out_after_the_remote_took_it_is_settled_as_landed() {
+    let w = World::new();
+    let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    let original = hub_main();
+    w.post_receive("sleep 4");
+    let started = Instant::now();
+    let (code, text) = w.cli_with_push_budget(
+        1_000,
+        &land_args("feature-a", &["--check-again", "--", "test", "-f", "a.txt"]),
+    );
+    let landed = hub_main();
+    assert_ne!(landed, original, "the remote took the push: {text}");
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("did not finish"), "{text}");
+    assert!(text.contains(&format!("Landed {landed}")), "{text}");
+    assert!(started.elapsed() < Duration::from_secs(30), "bounded");
+    assert!(
+        w.events()
+            .iter()
+            .any(|event| event["type"] == "landed"
+                && event["landing"]["commit_oid"] == landed.as_str()),
+        "the landing is recorded"
+    );
+}
+
+/// The push was stopped before it reached the remote: the remote's tip is
+/// the one before it, so nothing was pushed, and the report says so.
+#[test]
+fn a_push_that_timed_out_before_reaching_the_remote_is_settled_as_not_pushed() {
+    let w = World::new();
+    let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    let original = hub_main();
+    w.pre_push("sleep 5");
+    let (code, text) = w.cli_with_push_budget(
+        1_000,
+        &land_args("feature-a", &["--check-again", "--", "test", "-f", "a.txt"]),
+    );
+    assert_eq!(hub_main(), original);
+    assert_eq!(code, 2, "{text}");
+    assert!(text.contains("did not finish"), "{text}");
+    assert!(text.contains(&format!("still at {original}")), "{text}");
+    assert!(text.contains("othing was pushed"), "{text}");
+    assert!(!w.events().iter().any(|event| event["type"] == "landed"));
+}
+
+/// While the push hung, someone else moved the target: the remote's tip is
+/// neither commit, so whether this push happened is still not known.
+#[test]
+fn a_push_that_timed_out_while_the_target_moved_stays_unknown_with_how_to_check() {
+    let w = World::new();
+    let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    let teammate = w.teammate("t.txt");
+    let teammate = teammate.display().to_string();
+    w.pre_push(&format!(
+        "git -C {teammate} push --quiet origin HEAD:main; sleep 5"
+    ));
+    let (code, text) = w.cli_with_push_budget(
+        2_000,
+        &land_args("feature-a", &["--check-again", "--", "test", "-f", "a.txt"]),
+    );
+    let now = hub_main();
+    assert_eq!(code, 9, "{text}");
+    assert!(
+        text.contains("Whether the remote branch changed is not known"),
+        "{text}"
+    );
+    assert!(text.contains(&format!("is at {now}")), "{text}");
+    assert!(text.contains("ls-remote origin refs/heads/main"), "{text}");
+}
+
+/// A landing combines named, committed
+/// branches in a private index and pushes that commit, so uncommitted work
+/// in the checkout, whoever made it, is never pushed and never blocks it;
+/// there is no "this session's own work" case to refuse. The work stays
+/// exactly where it was.
+#[test]
+fn uncommitted_work_in_the_checkout_never_blocks_a_landing_and_is_never_pushed() {
+    let w = World::new();
+    let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
+    // Half-done work: a tracked file changed and a new file, neither committed.
+    fs::write(w.work().join("b.txt"), "half done\n").unwrap();
+    fs::write(w.work().join("notes.txt"), "draft\n").unwrap();
+    let before = w.checkout();
+    let (code, text) = w.cli(&land_args(
+        "feature-a",
+        &["--check-again", "--", "test", "-f", "a.txt"],
+    ));
+    assert_eq!(code, 0, "{text}");
+    let landed = hub_main();
+    assert_eq!(git(&w.hub(), &["show", &format!("{landed}:a.txt")]), "A");
+    assert_eq!(
+        git(&w.hub(), &["show", &format!("{landed}:b.txt")]),
+        "base",
+        "the uncommitted change was not pushed"
+    );
+    let (listed, _) = (git(&w.hub(), &["ls-tree", "--name-only", &landed]), ());
+    assert!(!listed.contains("notes.txt"), "{listed}");
+    assert_eq!(w.checkout(), before, "the checkout is as it was");
+    assert_eq!(
+        fs::read_to_string(w.work().join("b.txt")).unwrap(),
+        "half done\n"
+    );
+}
+
+#[tokio::test]
+async fn agents_see_the_landing_queue_and_conflict_hunks_and_cancel_a_wait_through_mcp() {
+    use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+    let w = World::new();
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command
+        .arg("mcp")
+        .arg("--state-dir")
+        .arg(w.base.join("state"));
+    let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+    let call = |name: &'static str, arguments: serde_json::Value| {
+        let request =
+            CallToolRequestParams::new(name).with_arguments(arguments.as_object().unwrap().clone());
+        let client = &client;
+        async move {
+            let result = tokio::time::timeout(Duration::from_secs(60), client.call_tool(request))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.is_error, Some(false), "{result:?}");
+            result.structured_content.unwrap()
+        }
+    };
+
+    // Conflicting branches: the hunks, not only the paths.
+    let conflict = call(
+        "langspan_integrate_check",
+        serde_json::json!({
+            "request_id": "agent-check-c", "workspace_id": "app", "onto": "main",
+            "name": "unit", "branches": ["feature-a", "feature-c"],
+            "command": ["true"], "timeout_s": 60,
+        }),
+    )
+    .await;
+    assert_eq!(
+        (&conflict["result"], &conflict["exit_code"]),
+        (&"not_combinable".into(), &2.into()),
+        "{conflict}"
+    );
+    let hunk = &conflict["conflicts"][0]["hunks"][0];
+    assert_eq!(conflict["conflicts"][0]["path"], "a.txt", "{conflict}");
+    assert_eq!(
+        hunk["target"]["text"],
+        serde_json::json!(["A"]),
+        "{conflict}"
+    );
+    assert_eq!(
+        hunk["branch"]["text"],
+        serde_json::json!(["C"]),
+        "{conflict}"
+    );
+
+    // A landing holds the turn and another waits: an agent sees both.
+    w.pre_push("sleep 5");
+    let again = ["--check-again", "--", "sh", "-c", VERIFY];
+    let first = w.spawn(
+        &[
+            &land_args("feature-a", &["--request-id", "land-1"])[..],
+            &again,
+        ]
+        .concat(),
+    );
+    w.queue_until(|queue| holds(queue, "land-1"));
+    let waiter = w.spawn(
+        &[
+            &land_args("feature-b", &["--request-id", "land-2", "--wait-s", "60"])[..],
+            &again,
+        ]
+        .concat(),
+    );
+    w.queue_until(|queue| queue["waiting"][0]["ticket"] == "land-2");
+    let queue = call(
+        "langspan_land_queue",
+        serde_json::json!({"workspace_id": "app", "onto": "main"}),
+    )
+    .await;
+    assert_eq!(queue["holder"]["turn_id"], "land-1", "{queue}");
+    assert_eq!(queue["waiting"][0]["ticket"], "land-2", "{queue}");
+    assert_eq!(queue["waiting"][0]["position"], 1, "{queue}");
+
+    // An agent that does not wait is told who holds the turn and who waits.
+    let busy = call(
+        "langspan_land",
+        serde_json::json!({
+            "request_id": "agent-land-busy", "workspace_id": "app", "onto": "main",
+            "name": "unit", "branches": ["feature-b"], "apply": true, "wait_s": 0,
+        }),
+    )
+    .await;
+    assert_eq!(
+        (&busy["result"], &busy["exit_code"], &busy["reason"]),
+        (&"busy".into(), &7.into(), &"turn_held".into()),
+        "{busy}"
+    );
+    assert_eq!(busy["holder"]["turn_id"], "land-1", "{busy}");
+    assert_eq!(busy["waiting"][0]["ticket"], "land-2", "{busy}");
+
+    let cancelled = call(
+        "langspan_land_cancel",
+        serde_json::json!({"workspace_id": "app", "onto": "main", "request_id": "land-2"}),
+    )
+    .await;
+    assert_eq!(cancelled["left"], true, "{cancelled}");
+    let (code, _, text) = finish(waiter);
+    assert_eq!(code, 7, "{text}");
+    assert!(text.contains("cancelled"), "{text}");
+    let (code, _, text) = finish(first);
+    assert_eq!(code, 0, "{text}");
+    client.cancel().await.unwrap();
+}

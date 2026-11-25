@@ -1,0 +1,1 @@
+{"version":2,"request_id":"changes-1","replayed":false,"generation":2,"lease_valid":null,"outcome":{"type":"changes","events":[],"scan":{"workspace_id":"work","observed_at_ms":20,"generation":2,"file_count":3,"branch_count":1,"head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","branch_ref":"refs/heads/main"}}}

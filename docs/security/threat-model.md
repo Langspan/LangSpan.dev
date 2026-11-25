@@ -1,0 +1,531 @@
+# Local coordination threat model
+
+**Scope:** the M3 working tree, extending [ADR 0001](../adr/0001-local-coordination.md),
+[ADR 0002](../adr/0002-claude-code-adapter.md) and
+[ADR 0003](../adr/0003-native-coordination-observation.md). Native-host M3
+acceptance is pending. LangSpan is a cooperative developer tool, not an
+isolation boundary between programs running as the same OS user.
+
+## Data and boundaries
+
+The daemon stores canonical workspace locations, logical session IDs, user-supplied
+intent summaries, file keys, typed operation digests, grant/denial receipts,
+process-incarnation observations, disk/branch observations and event history.
+SQLite and its sidecars live in an owner-only state directory. A different state
+directory remains an independent coordination domain.
+
+M3 expands the read boundary. The Git observer reads bounded repository metadata
+and file contents to compute digests, including symlink target text without
+following the link. Full file contents and native edit bodies are not persisted
+or relayed by the coordination engine. Process observation reads same-user Linux
+process metadata and boot identity, not command arguments or environment. The
+installer can modify the selected project hook settings only after explicit
+apply. The engine does not apply a patch, run an agent or execute arbitrary
+repository instructions.
+
+| Boundary | Treatment |
+| --- | --- |
+| CLI/MCP JSON → daemon | Protocol 3, typed commands, strict internal request fields, bounded frames and durable mutation identity. MCP uses the SDK lifecycle and the same operations. |
+| Native host event → hook | Bounded envelope, vendor-specific supported shapes, usable native IDs and a typed semantic input digest. Unknown host fields grant no authority. |
+| Supplied paths → filesystem/Git identity | Canonical roots and paths, traversal/escape checks, verified worktree relationships and registered-descendant exclusions. |
+| Git subprocess/content → observer | Fixed read-only commands, optional locks and lazy fetching disabled, bounded output/deadline and no interpretation of repository text as instructions. Incomplete scans fail without replacing the previous complete snapshot. A scan over its content bounds is partial and says so; what it left out is never reported as deleted. `git status` (partial scans) and `check run`'s private index run with every configured filter driver switched off and fsmonitor off, so no repository program runs; only the driver names are read from the configuration, never their commands, and a name containing `=` or a newline fails the operation. Submodules are not read into. A checkout change is built by the daemon's own scan; like `observe_disk`, the internal `observe_checkout` command is also accepted from any client of the owner-only socket, so a same-user process can fabricate one. It reaches briefings only, as cleaned and quoted branch names and hexadecimal commit IDs. |
+| Process metadata → session evidence | Same-user process incarnation, alive/exited/unknown, explicit time and generation; no effect on admission authority. |
+| Persisted JSON → replay and read views | Versioned schema, validated replay, preserved historical records, one owner and atomic event/receipt or event/snapshot commits. An event that does not parse stops the store opening; a receipt that does not parse is skipped and its request refused on retry ([ADR 0015](../adr/0015-version-tolerance.md)). |
+| Hook settings → disk | Dry run first, explicit apply, recognized owned entries only, preservation of unrelated settings and refusal of settings-file symlinks. |
+| Daemon → automatic check | Off by default; the owner's own command, set through the CLI only, run without a shell in its own process group within its time limit, outside any agent host's sandbox. Its output's redacted, bounded end reaches the event log and the triggering sessions' context as labelled data ([ADR 0030](../adr/0030-automatic-checks-after-write-batches.md)). |
+| Browser → dashboard (TCP) | Loopback by default, a per-run 256-bit token, a `Host` check against the arrival address, `GET` only, bounded heads and deadlines, read-only through the socket client ([ADR 0013](../adr/0013-dashboard.md)). |
+
+Intent text, filenames, branch names and another participant's identity are data.
+LangSpan does not treat them as executable instructions. Relayed conflict context
+is labelled as coordination data and capped. No UI or remote publication service
+is introduced by M3.
+
+## STRIDE assessment
+
+| Concern | Concrete behavior and remaining boundary |
+| --- | --- |
+| Spoofing | State directory `0700`, socket/database/lock `0600`, effective-user ownership checks and exclusive lifetime lock. Native session/tool IDs and host process names are cooperative identifiers, not authenticated identities. A process token distinguishes a PID incarnation, not the truth of an agent's claims. |
+| Tampering | Strict core commands, bounded paths/IDs/digests, canonical scope and immutable original-command receipts. Tool-input changes under the same request ID fail. Post scope/input mismatches cannot complete a lease. Same-user programs can still alter files or storage; corrupted history fails instead of silently resetting. |
+| Repudiation | Ordered events and durable original outcomes retain retry, generation and observation evidence. Denials are receipts, not events. Disk observations are unattributed and any related operation IDs are unverified correlation. This is not a signed or tamper-proof audit log. |
+| Information disclosure | Local owner-only storage; no telemetry or remote coordination layer. Shared clients can read paths, intent text, process IDs, digests and branch identities in that domain. Git stderr is not relayed verbatim because it can contain repository-controlled private values. Native edit bodies and process arguments/environment are not stored or forwarded. |
+| Denial of service | 64 KiB IPC frames, bounded clients/queue and deadlines; 8 MiB hook envelopes; 4 MiB Codex patches and 64 paths. One bounded background Git worker isolates scan I/O from request ownership. Event/changes pages are byte-bounded. Large status, disk exhaustion, retained history growth and hostile same-user processes remain limitations. |
+| Elevation of privilege | LangSpan never answers `allow`, changes host permissions, applies code or grants OS access. Git observation does not mutate the index or working tree. Installer writes are explicit and scoped. Admission controls cooperative coordination, not filesystem writes. |
+
+## Native adapters and installation
+
+Claude Code covers `Edit`/`Write`; Codex covers canonical `apply_patch` additions,
+updates, deletions and moves. A move claims source and destination in one set.
+Both hosts' `Bash` calls are covered partly, as described under "Shell
+commands" below. Shell wrappers around `apply_patch`, remote-environment selectors, unknown directives, unsupported
+paths and Codex subagent envelopes receive no coordination decision. Missing or
+unrecognized post results remain unknown. Real Codex host acceptance is not
+inferred from the source-derived fixtures.
+
+Only a newly returned conflict creates a JSON denial. Failures and unknown states
+produce no permission decision, leaving the native host's ordinary controls in
+place. LangSpan's own malformed-input, path, socket and state checks still reject
+its operation; a failed coordination check does not become an `allow` result.
+A replayed historical conflict is not reported as a freshly established holder.
+
+One absolute deadline bounds stdin, workspace resolution and daemon calls
+(1.5 seconds by default; installed host timeout 5 seconds). A permission prompt
+or native refusal can hold an admission until its TTL (30 seconds by default,
+maximum 60 seconds). Missing post callbacks do not cause implicit renewal. A
+later callback may be expired or invalidated; it does not prove when the actual
+write occurred. Optional liveness recording cannot suppress the main lifecycle.
+
+The installer recognizes a stable `langspan-managed` marker plus the exact
+expected generated command shape. That supports executable relocation without
+duplicate hooks. The narrow legacy Claude format remains recognized; unrelated
+commands remain user-owned. Reads use no-follow opens and bounded settings data;
+writes preserve existing mode, use a new temporary file and atomic replacement,
+and re-check that the destination is not a symlink. A pre-existing temporary
+entry is never treated as the installer's own cleanup target. Same-user races
+are not a claimed isolation boundary.
+
+Host trust is still separate: writing configuration is not evidence that the
+host loaded it. Historical Claude behavior is recorded in the
+[M2 evidence](../evidence/m2-claude-code/README.md); current Codex source and
+host-probe limits are in the [M3 evidence](../evidence/m3-codex/README.md).
+With the daemon unavailable, failure evidence remains best-effort stderr or
+host retention. There is no durable local failure spool or complete operation
+denominator in M3.
+
+## Cursor adapter
+
+[ADR 0032](../adr/0032-cursor-adapter.md). Built from documentation, not yet verified on a real Cursor. The new boundaries are three:
+
+- Cursor's event JSON on the hook's stdin;
+- the command string Cursor runs through a shell, with that JSON appended as a heredoc;
+- the `.cursor/hooks.json` and `.cursor/mcp.json` files LangSpan writes (project) and `~/.cursor/hooks.json` and `~/.cursor/mcp.json` (user).
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: another program's event, or another host's, is taken for a Cursor session | Identity comes only from `conversation_id`/`session_id` and `tool_use_id`, as `cursor.<id>`. An ID outside the grammar becomes a digest. A subagent call becomes its own session under its parent. The Claude Code adapter refuses any payload carrying `cursor_version`, so Cursor running Claude Code's hooks never coordinates one call under two identities. | Any local process that can run the hook command can claim a Cursor session. That is the same as for the other hosts, since the hook is not an authentication boundary. |
+| **Tampering**: event text runs as shell code | Cursor CLI 2026.11.22 appends the event to the command as a heredoc. LangSpan's command therefore has no trailing comment: its marker is a leading `LANGSPAN_MANAGED=…` assignment, and every argument is single-quoted. A test runs the installed command that way under `sh`, `bash` and `zsh` with `$(touch …)` in a Write's content, and checks that the event is read as data. | The transport comes from the CLI's source. A Cursor version that builds the command differently has not been seen. The editor's transport is not known. |
+| **Tampering**: the install damages the user's Cursor configuration | The same guarded writer as the other hosts: dry run first, every file planned before any write, a concurrent change never overwritten, mode kept, new files `0600`, symlinks refused, 1 MiB bound. Only entries with LangSpan's exact marked shape are replaced or removed. `version`, which Cursor requires, is added only if missing and never removed. | A hand-written entry in LangSpan's exact shape is treated as LangSpan's. |
+| **Repudiation** | Each run writes one structured line to stderr with its coverage. Cursor keeps hook runs in its Hooks output channel. `doctor` reports what is installed. | Where Cursor keeps stderr is not documented. |
+| **Information disclosure** | Fields that are read and never kept: `user_email`, `transcript_path`, `model`, a Write's `content` and a Shell's output. The prompt is used only as for the other hosts: a redacted first line if shared, and names for a local index lookup. A reply carries only the denial reason or briefing, both labelled as data and capped, and the briefing under Cursor's 10,000-character limit. | Project `.cursor/*.json` files are often committed, and LangSpan's entries hold this machine's executable and state-directory paths. The installer says so; it does not edit `.git/info/exclude`. `LANGSPAN_CAPTURE_DIR`, opt-in, saves raw events, which include the email and paths, as `0600` files. |
+| **Denial of service**: LangSpan blocks Cursor's work | No `failClosed`, so a crash or timeout lets the action proceed. Every non-decision is an empty reply, which Cursor treats as a failed hook that does not block. Only documented fields are sent, because Cursor blocks a permission hook on a reply it cannot read. 5 s host timeout, 1.5 s own budget. | Each empty reply is logged by Cursor as a failed hook. A Cursor version that starts blocking on empty replies would block every covered call. The capture must confirm that it does not. |
+| **Elevation of privilege** | The adapter never answers `allow`, which Cursor would merge as an approval, and never exits 2. Cursor's workspace trust, MCP approval and command permissions are not written or weakened. | Installing hooks is the owner's grant of a command that runs on every covered Cursor call. It is shown before it is written. |
+
+## User-level install
+
+`langspan install` writes to each host's user configuration
+([ADR 0010](../adr/0010-user-level-install.md)): `~/.claude/settings.json`,
+`~/.claude.json`, `~/.codex/hooks.json` and `~/.codex/config.toml`. This is a
+wider boundary than a project install. A hook written there runs for every
+repository the user opens, and `~/.claude.json` also holds the host's account
+and per-project trust state.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: an entry that looks like LangSpan's is treated as LangSpan's, or the reverse | Hooks carry a user-level marker distinct from the project marker and must match the exact generated shape. The JSON MCP entry is LangSpan's only in its exact shape; the TOML table only between LangSpan's marker lines. A `langspan` server LangSpan did not write stops `install` with nothing written and is never removed. | Someone who hand-writes the exact generated shape has written LangSpan's entry, and `uninstall` will remove it. |
+| **Tampering**: the install damages or loses the user's configuration | Dry run by default; every file planned and every refusal raised before any write; JSON key order kept; TOML edited only inside LangSpan's lines; symlinked or non-regular files refused; 1 MiB bound; atomic replace keeping the file's mode, new files `0600`, new directories `0700`. `~/.claude.json` is never created. Just before each rename the file is read again and compared with the bytes the plan was made from; a change made meanwhile (Claude Code rewrites `~/.claude.json` often) is kept and planned against once more, and a second change refuses with nothing written. | The moment between that last read and the rename remains: with no lock the hosts honour it can be made short, not closed. Same-user races are not an isolation boundary. |
+| **Tampering**: repository text switches coordination off | A LangSpan-shaped project hook in a repository makes the user-level hook defer to it. | A committed `.claude/settings.json` can opt a repository out of user-level coordination. The deferred-to hook still runs only if the host trusts the repository. Repository text is read only to look for that marker, never executed or relayed. |
+| **Repudiation**: what was installed is unclear later | The dry run prints each file in full; `doctor` reports what is installed for each host, the executable and the state directory. | No install log is kept beyond the files themselves. |
+| **Information disclosure** | Nothing is read from the configuration files beyond the keys LangSpan owns and the shape checks; no credential, token or account field is read, logged or printed except as part of a settings file the user asked to see in a dry run. For `~/.claude.json`, which holds the host's account and project state, the dry run shows only LangSpan's entry. The MCP entry carries only the executable path and state directory. | A dry run prints the whole planned `settings.json`, `hooks.json` and `config.toml`, including any value the user keeps in them (for example an `env` block), to the terminal that ran it, as the project install already does. |
+| **Denial of service**: a broken user-level hook affects every repository | The hook keeps the project form's budget, gives no decision on any failure, exits 0, and prints nothing outside a Git repository or when a project install covers the repository. | A missing executable makes the host report a failed hook on every event until `uninstall` or a reinstall; `doctor` names it and the command to run again. Under Homebrew the entries name the `opt` link rather than the versioned keg, so `brew upgrade` does not cause this; that link is resolved on every run, and anyone who can change it can already replace the binary in the same Homebrew prefix. |
+| **Elevation of privilege** | No permission, trust or approval setting of either host is written or weakened. Codex still requires its own review of the new hook; Claude Code's own permission flow still governs every tool call. The hook never answers `allow`. | Installing a user-level hook is the owner's grant of a command that runs on every session; it is shown before it is written. |
+
+## A linked worktree's own install
+
+The main checkout's project hook, run by a host started in a linked worktree,
+reads that worktree's project hook files to decide whether to step aside
+([ADR 0003](../adr/0003-native-coordination-observation.md)). Those files are
+repository text in the worktree.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Tampering: repository text switches the inherited hook off | It steps aside only for a hook of the same host in LangSpan's exact generated shape that names this worktree as its root and the same state directory: the hook the host runs there itself. The file is read with the installer's guards (no symlink, 1 MiB bound); anything unreadable is no match. Nothing in it is executed or relayed. A worktree's settings could already add or remove hooks the host runs there, so this switches off nothing the worktree's own settings could not. |
+| Denial of service | No Git process and no coordinator call: a few `stat`s and one small JSON read per hook run. |
+
+## Session events and peer briefings
+
+[ADR 0004](../adr/0004-automatic-peer-briefing.md) adds one new flow: text
+derived from one agent session is placed in another session's model context.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | A briefing names sessions by the host-supplied session ID recorded through the owner-only socket. Any same-user process can register a session and claim work; LangSpan does not authenticate agents to each other. |
+| Tampering (prompt injection) | A peer's task line is the first line of that owner's prompt; file paths come from the repository. Both are attacker-influenced if a peer session or the repository is. Control characters, Unicode line and paragraph separators, bidirectional overrides and zero-width characters become spaces; every such value is quoted with its own quotes escaped, capped at 200 bytes, each peer at 700 and the whole briefing at 2,400, under a fixed header stating that the lines are data, not instructions. This reduces, and cannot remove, the chance that a host model follows text in a briefing. A briefing never carries a permission decision, so it cannot allow or deny anything by itself. |
+| Repudiation | Each delivery is an event (`briefing_delivered`) with the signature of what was delivered; prompt summaries and session ends are events. |
+| Information disclosure | The first non-empty line of each prompt, and no later line, is stored in the local event log, appears in `status`, and is shown to other sessions of the same user in the same repository. Before that line, an intent summary, a note, a message or a handoff is sent to the daemon, one redaction function in the hook adapter replaces likely secrets with `[redacted]` (provider key shapes, JWTs, PEM blocks, URL passwords, secret-named assignments and query values, `--password`/`--token` arguments, and long high-entropy tokens under a conservative rule) and the owner's home prefix with `~`; the daemon applies it again on receipt. A secret in a shape the rule does not know, such as an all-hexadecimal or all-lower-case token, is still shared. `hooks install --prompt-summary off` stops recording prompt text. Nothing leaves the machine unless publication is enabled. Workspaces in other repositories are never briefed about each other. |
+| Denial of service | Session events share the 1.5 s hook budget and the daemon's bounded queue. Activity is 32 paths per session; a briefing reads at most 16 peers. Each prompt adds one receipt and at most three events; retention is still open. |
+| Spoofing (repository grouping) | `observe_workspace_git` is accepted from any client of the owner-only socket, like the other observation commands. A same-user process can therefore place two workspaces in one repository and make their sessions briefed about each other. It cannot affect admission. |
+| Elevation of privilege | Lifecycle hooks print context only. Every failure, including an unavailable daemon, prints nothing and exits 0. |
+
+Guarded by tests: unrelated repositories and idle, exited, stale-generation or
+aged-out sessions are excluded; an unchanged situation is not delivered twice;
+output stays within its cap; a switched-off prompt summary and a slash command
+never reach a peer; subagent events and a working directory outside the
+installed repository print nothing.
+
+## Source versions
+
+[ADR 0005](../adr/0005-source-versions-and-stale-writes.md): the hook reads a
+workspace file to hash it, and a hook-supplied digest decides an admission.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing / tampering | Versions are supplied by clients of the owner-only socket. A same-user process can record a false read version for a session and so cause or avoid a `stale_base` for it. It cannot write files or grant admission to another session's paths. The daemon maps every observed path through the same canonical file-key checks as an admission. |
+| Information disclosure | Only a SHA-256 of file content is stored, never content. A digest confirms a guess of a small file's content to anyone who can read the event log, which is owner-only. |
+| Denial of service | The hook reads at most 4 MiB per file and at most 64 files, inside its existing deadline; larger files are not hashed. Records are capped at 128 per session. |
+| Elevation of privilege | The only new decision is another `deny`. A failure to read or record a version never denies: the file is admitted as `base_unknown`. This is fail-open by design and is reported, because refusing every edit of an unreadable file would make LangSpan stricter than the host it sits beside. |
+| Symlinks | A file key that is a symlink is not followed for hashing; it has no version. |
+
+## End of a reply, tool batches and Codex snapshots
+
+[ADR 0027](../adr/0027-turn-and-batch-events.md) adds four host events
+(`Stop`, `StopFailure`, `SubagentStop`, `PostToolBatch`), registers Codex
+`Stop` and `SessionEnd`, and adds one source-version origin. The input is the
+host's event JSON, bounded at 8 MiB like every hook event; no new socket,
+file or network path is added.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | A stop names its session by the host-supplied session ID, as every hook event does. Any same-user process that can reach the owner-only socket can stop a session and so complete its open tool admissions early; it could already complete them one by one with `complete`. A stop releases only the named session's tool admissions, never another session's or a manual admission. A Codex event that names a subagent is refused, so a Codex subagent's stop is never taken for its parent's. |
+| Tampering (prompt injection) | Of the new payloads only `session_id`, `agent_id`, `cwd`, StopFailure's `error` and each batch call's `tool_use_id` are read. `last_assistant_message`, `error_details`, `background_tasks`, tool inputs and tool results are never read or stored. `error` is kept only as 1 to 40 lower-case letters or underscores, otherwise as `unknown`; the core refuses any other value. A batch's briefing is the existing bounded, labelled briefing. |
+| Repudiation | Each stop is a `session_stopped` event naming the admissions it released, after one `lease_completed` per admission; each batch is a `tool_batch_observed` event. A Codex snapshot is a `source_observed` event with origin `snapshot`. |
+| Information disclosure | Recorded: session, lease and operation IDs, a call count, an error type, and for a snapshot a SHA-256 of the file, as for any version. No model output, prompt text or file content. |
+| Denial of service | A batch names at most 64 operations; a stop touches only its session's active leases. Both run inside the existing 1.5 s budget, and a failure prints nothing. A stop is not kept for resending, so a down coordinator leaves the admissions to their TTL, as before. |
+| Elevation of privilege | Stop hooks never print, so they cannot keep a host working or block it. `PostToolBatch` prints only a briefing in `additionalContext`, never a decision. A snapshot can only cause a later `stale_base` refusal, never an admission; it is not reported as a read, and the admission it follows still says its base was not compared. |
+
+Guarded by tests (`tests/turn_events.rs`, `crates/langspan-core/tests/host_stops.rs`):
+only the stopping session's open tool admissions are released; a parent's
+stop leaves a running subagent's admissions open; free text is never kept as
+a failure; a stop prints nothing; an unknown session is not registered by a
+stop; Codex subagent events are refused; Claude Code edits get no snapshot.
+
+## Shell commands
+
+[ADR 0011](../adr/0011-shell-writes.md): the hook now parses agent shell
+commands, runs Git and reads changed files before and after each `Bash` call,
+and keeps a run record per call under the state directory.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | The command text comes from the host event, which a same-user process could forge, as with every hook event. A forged event can admit paths for, or attribute changes to, the session it names; it cannot write files. Run records name their session and are owner-only. |
+| Tampering | Command text is model output: data, never instructions. It is parsed, never executed or rewritten by LangSpan. A same-user process can edit or delete a run record (`STATE/shell/`, `0700`/`0600`, no-follow opens, size-capped reads) and so change what is attributed; the records are not a boundary against the owner's own processes. |
+| Repudiation | An attributed change is an ordinary observation event in the append-only log, tool `Bash`. A change the comparison could not separate is `shell_unobserved` or `contested`, never attributed by guess. A file the command names as a literal write target is attributed to it even when another session's run overlapped, unless that run names it too; a same-user forged event could name a file to claim it, as it could already admit one. A `run_in_background` call contests other sessions' unnamed changes for 10 minutes, so a forged one can at most make changes unattributed. |
+| Information disclosure | Only file paths and SHA-256 digests enter run records and events, never file content or the command text. Git runs with `--no-optional-locks`, and its stderr is never relayed. |
+| Denial of service | Commands over 8 KiB are not parsed. A snapshot reads at most 1,024 files, 64 MiB and 1 MiB of status output, inside the hook deadline; over a bound it is incomplete and records nothing. Run records are pruned and capped at 4,096. A run whose result never arrives can mark another session's overlapping changes `contested` for at most 10 minutes. |
+| Elevation of privilege | The only new decision is `deny`, and only for literal targets inside the workspace with a current holder or a stale version. A parse failure, an incomplete snapshot, a merge or rebase in progress, or any other failure gives no decision; the host's own permission flow is untouched. |
+| Isolation claim | Shell coverage is partial and cooperative. Writes outside the workspace, in ignored files, by background processes after the call returns, or by other programs during it are not separated; see the ADR's "Never covered". |
+
+## Commits in a shared checkout
+
+[ADR 0026](../adr/0026-commit-guard-and-commit-mine.md): the hooks keep a line
+journal under `STATE/journal/`; the `Bash` pre-tool hook reads the index and
+working tree through Git before a staging or commit command and can deny it;
+`langspan commit --mine` and `langspan_commit_mine` write a commit and the
+shared index.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Journal entries name the session the hook event named, which a same-user process could forge, as with every hook event. A forged entry can make a change look like another session's (so a commit is held once, or `commit --mine` leaves it out) or like the forger's own (so `commit --mine` takes it). The CLI's `--session` and the MCP tool's `session_id` are claims, like every session ID; without `--session`, the session comes from a running shell record its own pre-tool hook wrote, and two or none is an error. A session's open records are closed when its reply or the session ends, so a forged Stop or SessionEnd can at most make that session's own `commit --mine` ask for `--session`. |
+| Tampering | Command text is model output: it is read to find Git steps, never executed or rewritten. Repository paths and diff text are data. When `commit --mine` finds no running session, the `--state-dir` a LangSpan hook in the checkout's settings names is only suggested in the error, quoted, never used, and dropped if it holds a control character. The guard's Git runs read-only with `--no-optional-locks` and bounded output. `commit --mine` builds the commit in a private index under the Git directory, runs the owner's commit hooks, and moves the branch with a compare-and-swap `git update-ref` from the `HEAD` it read, so a commit another session made meanwhile is never undone (it plans again on top once, or refuses); and writes the shared index only for the files it committed, applying exactly the hunks it attributed (`git apply --cached`, which checks the preimage). A same-user process can edit journal files (`0700`/`0600`, no-follow opens, size-capped reads, blob contents checked against their digests). Entries sit in one directory per path, named by a digest of the path; an entry is used only for the path it names, so one moved into another path's directory is ignored there, and one moved out of its own is missed, as a deleted one would be. Entries an earlier version kept flat are moved into those directories on first access; a file there that is not a readable entry is deleted. |
+| Repudiation | A held command is a hook deny with coverage `denied_commit` and the named sessions in its reason; it is not an event. `commit --mine` makes an ordinary Git commit under the owner's identity and prints or returns which files it took and which it left. Nothing is attributed by guess: an unattributable hunk refuses the whole commit. |
+| Information disclosure | The journal keeps copies of uncommitted file versions up to 512 KiB, line digests and paths, owner-only, for up to a week, on this machine only: not sent to the coordinator, briefings or publication. The deny reason names other sessions' IDs, paths and line numbers, not content. Git stderr is not relayed by the guard; `git commit`'s own output goes to the command's stderr, as it would if the agent ran it. |
+| Denial of service | Commands over 64 KiB are not read. The guard reads at most 16 MiB of diff and 1,024 untracked files, inside two thirds of the hook's remaining budget, and gives no decision past a bound. Journal entries are capped at 4,096 per workspace and kept file versions at 4,096, both expiring after a week. A forged entry can hold a command once. |
+| Elevation of privilege | The only new decision is `deny`, once per command and foreign change set; the same command again proceeds, so the capability stays with the agent. A parse it cannot be sure of, an unreachable coordinator or a failed listing gives no decision. `commit --mine` runs as the owner with the owner's Git configuration and hooks (none is skipped), and never pushes. |
+| Isolation claim | The guard is cooperative and reads only commands in the `Bash` tool's text: Git run by scripts, aliases or other programs is not seen. Line ownership is by content; see the ADR's "Never covered". |
+
+## Gemini CLI
+
+[ADR 0033](../adr/0033-gemini-cli-adapter.md) adds a third host. Its hook is a
+new command in `.gemini/settings.json` or `~/.gemini/settings.json`, and its
+events are a new input. The other boundaries (socket, store, shell
+comparison) are unchanged.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Gemini's events carry no tool-call ID. The adapter makes one from the session, the tool, the file or command, a count and a per-call nonce kept as marker files under `STATE/gemini-calls/<digest of the session ID>/` (a digest because the ID grammar admits `.` and `..`) (`0700`/`0600`, exclusive creation, linked into place). The nonce stops a resumed session, which keeps its session ID, from repeating an earlier call's ID. A same-user process can forge an event or create markers, as with every hook event: it can shift which number a call gets, and so make one call's report count as another's. It cannot write files or admit another session's paths. The session ID is the one Gemini sends; nothing authenticates it. |
+| Tampering | Tool input and the prompt are model or user text: data, parsed into typed fields, never run. A deny's reason is the same labelled, capped text the other hosts get. Gemini replaces `<` and `>` in context it adds, so LangSpan's text cannot close the tags Gemini wraps around it. The installer refuses a path containing `$`, because Gemini expands `$NAME` in settings strings and in hook commands, which would run a different command than the one shown. |
+| Repudiation | Gemini events produce the same events and receipts as the other hosts, under sessions named `gemini.<id>`. Each installed hook is named `langspan`, so Gemini's `/hooks` lists it under that name and `hooksConfig.disabled` can switch it off. |
+| Information disclosure | Gemini keeps hooks and MCP servers in one user file, which may hold the owner's MCP server credentials in an `env` block. The dry run of `install` shows only LangSpan's hook and MCP entry, not the rest of the file. LangSpan reads that file only to plan its own entries. The marker files are named by a digest of the tool and its target and hold a random-looking nonce, no content. The hook does not read the transcript that `transcript_path` names. |
+| Denial of service | The same 8 MiB event bound and 1.5 s budget; the installed timeout is 5,000 ms. At most 4,096 calls on the same target are numbered per session; the next gets no decision. A session's markers are removed at `SessionEnd`, and directories older than a week when another session first makes a call. |
+| Elevation of privilege | The hook never answers `allow` and never exits 2. Every outcome other than a deny prints `{}`, including a hook that cannot start or panics: empty stdout would make Gemini parse the stderr log as the answer, and it reads plain text there as `allow`. The MCP entry does not set `trust`, so it bypasses none of Gemini's confirmations. With folder trust on, project hooks load only in a folder Gemini trusts; Gemini's documentation says it warns before a new or changed project hook first runs. |
+
+## Cross-machine publication
+
+[ADR 0006](../adr/0006-remote-awareness-through-git-refs.md) is the first flow
+in which data leaves the machine and data from another machine enters. It is
+off until the owner runs `langspan remote enable` for a workspace.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Participation is whatever the Git remote authorizes; LangSpan adds no authentication of its own and handles no credential. A payload naming a participant other than its ref is discarded. Anyone with push access can publish under a new participant ID with any display name, including a teammate's name. A briefing shows the name as data and cannot vouch for it. |
+| Tampering | A received `state.json` is at most 16 KiB (read bounded before parsing), typed, and validated whole by the core. Fields this build does not know are ignored and never kept, so a newer peer is still heard ([ADR 0015](../adr/0015-version-tolerance.md)); everything that is kept is validated: IDs, 64-byte single-line names, repository-relative paths without traversal, single-line task text, branch names. One invalid field rejects the publication. Rendering then applies the same cleaning, quoting and caps as local peer text. With push access, a peer's ref can be deleted or replaced. Refs under the namespace that are not participant refs are ignored and do not count against the 64-participant limit; a remote holding more than about 10,000 such refs makes the listing exceed its bound and stops receipt for that workspace. The remote name is validated so it cannot be read as a Git option. |
+| Repudiation | Every publication that left is a local `remote_published` event with its sequence, content fingerprint, the exact `state.json` pushed and the time of the push; every accepted one is `remote_observed`. `langspan remote outbox` shows what would leave next, and `langspan remote sent` lists what did leave, payload for payload. Records from before payloads were kept are listed without one. |
+| Information disclosure | Readable by everyone with read access to the repository: the chosen name, participant ID, host kinds, session ID prefixes, branch names, and paths being or recently edited. Task lines only with `--share-task on`, and only after redaction at the hook. Never file content, digests, other repositories' work or credentials. There is no MCP tool to enable publication. An agent with shell access can run the CLI command as the owner can; the host's permission prompt for that command is the control, and `langspan status` shows what is published. The ref has no history, so a task line the owner stops sharing is no longer reachable from it once replaced. |
+| Denial of service | Network work runs on its own thread with a 20 s deadline per pass and never blocks the state owner. Every Git child runs in its own process group, and at a deadline the whole group is killed, so a hanging credential helper, SSH or remote helper cannot outlive it. After repeated failures of the same network operation (fetch, publish, withdraw) the workspace's passes wait 5 s, 30 s, 2 min, then every 10 min, reset by a success and logged once per change. At most 64 peers are read per pass. A peer can publish often; each accepted publication is one event, and retention is still open. |
+| Elevation of privilege | Received data is advisory only. It cannot admit, deny, hold or release, and no remote input reaches a shell or a path on disk. |
+| The owner's repository | Writes are limited to objects and refs under `refs/langspan/`, through a private index. Pushing that ref skips the owner's pre-push hooks. Network Git never waits for a person: `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=/usr/bin/false`, and `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` unless the owner set `GIT_SSH_COMMAND`, `GIT_SSH` or `core.sshCommand`, which then stays in charge and must not prompt itself. Credential helpers and an SSH agent still answer; LangSpan never sees what they return. Fetches pass an empty `--refmap`, so the owner's remote-tracking branches are not updated by them; when a branch publication's push makes Git create the owner's remote-tracking ref for it, that ref is deleted again (one the owner already had is left, updated by Git as for any push). |
+| Branch namespace (`--publish-as-branch`) | Owner-chosen per workspace, never automatic. The publication becomes the branch `langspan/peers/ID`, visible in the branch list to everyone with read access and fetched by their plain `git fetch`. Its tree holds only `state.json`, so CI that reads its configuration from the pushed commit finds none; a host whose CI is configured elsewhere may run a pipeline for it. A hosting rule on branches (protection, required reviews, naming) applies to it. Readers accept both namespaces with the same validation; a participant in both is taken at the higher sequence. |
+| Git's refusal text | A failed fetch or push now keeps the end of Git's standard error: at most 1 KiB of its last six lines, control characters removed, then passed through the same secret redaction as every recorded text (`src/hook/redact.rs`: a URL's `user:pass`, provider key shapes, JWTs, PEM blocks, secret-named assignments, high-entropy tokens). It is the server's text: it goes only into the error and the daemon's stderr log, labelled `Git said:`, and it decides nothing except whether a refusal counts as permanent (HTTP 401/403, "refusing", "denied", "protected"), which sets that one push's backoff to its longest wait (10 minutes). |
+| Refused withdrawal | Where the host refuses deletes, the ref stays readable; LangSpan replaces it once with a publication marked withdrawn (no work listed) and tells the owner the exact ref to delete by hand. A receiver treats a withdrawn publication as the sender having left. A receiver running an older LangSpan rejects the unknown field and keeps the last publication until it goes stale (ten minutes). With push access anyone could publish a withdrawal for another participant's ref, as they could already delete or replace it. |
+
+Guarded by tests: nothing is on the remote before enabling; another
+repository's work is never in a publication; task lines are absent unless
+shared; a secret on the first line of a shared prompt reaches neither the
+event log, a teammate's briefing, the published `state.json` nor any file of
+either daemon; replayed and out-of-order publications are ignored; eleven malformed
+or hostile publications are rejected whole; an unreachable remote and a daemon
+restart leave local coordination working; disabling removes the ref and the
+teammate's view; branches, index and working tree are untouched; a hanging
+credential helper is killed with its process group at the deadline while
+local coordination goes on; `remote sent` lists exactly the bytes on the
+remote. Against a hub
+whose `update` hook refuses everything outside `refs/heads/`, every deletion
+and every forced update: a branch publication is received by a default reader;
+the default publisher's error carries Git's refusal and suggests
+`--publish-as-branch`, and is not repeated every pass; a refused withdrawal is
+reported with its ref, replaced by a withdrawn publication, and the teammate
+stops showing the work. Against an unrestricted hub: branch and default
+publishers see each other, a move between namespaces leaves one ref, and the
+owner's remote-tracking branches stay untouched.
+
+## Checks, combining and landing
+
+[ADR 0007](../adr/0007-check-evidence-integration-and-landing.md) adds
+commands that run an owner-supplied program and that push to a branch, from
+the CLI and, through `langspan_integrate_check` and `langspan_land`, from an
+agent over MCP. Both interfaces run the same operations in `src/landing.rs`, in
+the calling process.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | A check record is whatever a client of the owner-only socket submits. A same-user process can record a pass it never ran, and `land` would accept it. The record is evidence for an honest owner, not a control against a hostile local process. The push turn's holder (`session_id`) is a cooperative label, as for every session ID: any local process can take a turn under any name, or release one whose turn ID it has read from `status`. The same holds for the line of landings waiting for a turn: a waiting landing's ticket is its request ID, visible in `status`, `land-queue` and the dashboard, and any local client can cancel it (`land-cancel`, `langspan_land_cancel`) or join the line under any session name. A cancelled landing pushes nothing; it is not a way to push. |
+| Tampering | Branch, remote and target names are passed to Git as arguments, never through a shell, and are refused if they could be read as an option or a revision expression (leading `-`, `..`, `^`, `~`, `:` and glob characters). The check command is executed directly from its argument list; an MCP caller supplies it as a JSON array of 1 to 64 arguments, never as a shell string. Nothing is forced: a lost race is a refusal, and a retry combines the new target again and lands only a tree with its own passing check. **Conflict hunks are repository text relayed to an agent** (prompt injection): a branch can put any line into a conflicting region. The lines are returned as data in labelled fields (`target`, `branch`), at most 4 hunks for each of the first 8 files, 6 lines per side and 200 characters per line, with control characters replaced so a terminal escape is not passed to a terminal or a model verbatim; files over 1 MiB and binary files are named, not read; the CLI prints them under "repository text, shown as data" and the MCP tool descriptions say the same. Git's conflict type per file is Git's own wording, cut to 40 characters. Combining sets `merge.renames`, `merge.renameLimit`, `diff.renameLimit` and `merge.conflictStyle` itself, so the owner's configuration cannot change what tree is combined (and checked), and conflict markers are parsed in one known style; a repository's `conflict-marker-size` attribute can still make markers unreadable, and then no hunks are shown, only paths and kinds. |
+| Repudiation | Every check, with its tree, command line, result and input commits, and every landing, with the check it relied on, is an event. So is every push turn taken, renewed, released or expired, and each release records how each attempt ended. |
+| Information disclosure | The first 120 characters of the check command line are stored. A secret typed on that command line is stored with it. The check's output goes to the calling process's standard error (for MCP, the adapter's log), never into the tool result or the event log. Conflict hunks put a few lines of the conflicting files into the result (never into the event log); a secret committed to one of those lines would be shown to whoever ran the combine, who could already read the branch. |
+| Denial of service | Git steps have a 120 s deadline each; the check command has its own limit (30 minutes by default on the CLI, at most 3600 s) and is killed at it with its whole process group. A temporary worktree is removed on every path, including failure. A push turn lasts one attempt's budget (Git steps, snapshots, the check limit, and 60 s) and is renewed before every attempt and every push, so a crashed landing blocks its target only until that deadline, and a daemon restart ends every turn. A same-user process can hold a turn and renew it indefinitely; that blocks landing through LangSpan, never a plain `git push`. A landing that finds the turn taken waits in line for at most its `--wait-s` (default 240 s, at most 3600 s; `wait_s` for MCP) and then exits 7, having fetched and pushed nothing; `--wait-s 0` returns at once. The line holds at most 8 landings per target (a ninth is told the line is full, exit 7), each asks every 0.5 s and writes one event about every 7.5 s while it waits, and one that stops asking for 15 s (killed, suspended) is dropped, so a dead waiter holds up the line for at most 15 s. A daemon restart empties every line. A same-user process can fill the line or stay at its head by asking; as with holding the turn, that blocks landing through LangSpan, never a plain `git push`. Each ask is a request with a receipt, so a long wait adds up to two small receipt rows a second to the store. Rename detection is bounded at 1000 files per side; conflict detail reads at most 8 files of at most 1 MiB, within the same 120 s Git deadline. |
+| Elevation of privilege | The check command runs with the owner's privileges, because the owner ran it, or because an agent the owner runs called `langspan_integrate_check`. **That MCP tool is a new trust boundary:** whatever can call LangSpan's MCP tools can run any program as the owner, with the owner's environment, in a temporary checkout. This grants nothing an agent with a shell tool lacks, but it is a second way to run commands, and a host's permission prompt for MCP tools is the only gate on it; an owner who does not want agents to run commands this way should deny `langspan_integrate_check` in the host's settings. `langspan_land` with `apply` pushes, as the owner, with the owner's Git credentials and pre-push hooks, only what the remote accepts without force and only a tree with a passing check; an agent can therefore publish combined work to the target branch without asking, and the host's permission prompt is again the gate. Neither tool rewrites or intercepts the owner's own `git push`. Repository content in a combined checkout is the branches' own code: running a check on a teammate's branch runs that branch's code, as running its tests always does. Tool results contain repository text (paths, branch names) as data. |
+
+## Automatic checks after a session's writes
+
+[ADR 0030](../adr/0030-automatic-checks-after-write-batches.md) makes the
+daemon start a child process by itself: the owner's configured check command,
+after a session's batch of writes. The new boundaries are that automatic run
+and the command's output, which now reaches the event log and the agent's
+model.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | A trigger is a `wrote` answer to a tool batch or stop, which any client of the owner-only socket can cause by reporting a write and a batch for some session; it can only make the configured command run sooner or more often, bounded by the debounce and one run per workspace. A check report (`record_check` with `report`) is accepted from any such client, like every check record: a same-user process can record a false result and have it delivered as the check's. |
+| Tampering (prompt injection) | The command's output is repository-controlled text (test names, assertion messages, build script output) placed in the model's context. Only its last 20 lines and 1,500 bytes are kept (the core refuses a tail over 2,048 bytes); deceptive characters become spaces, each line is capped at 300 bytes and prefixed with `\| `, one result per briefing, the section capped at 1,200 bytes under a label saying the lines are the check command's own text, data, not instructions. This reduces, and cannot remove, the chance that a model follows text in it. The delivery never carries a permission decision and stop hooks still print nothing. |
+| Repudiation | Turning the check on or off, every result (`check_recorded`, then `check_reported` naming the sessions) and every delivery (`check_delivered`) are events. A run cancelled for a newer tree or by `--off` records nothing; its cancellation is not logged. |
+| Information disclosure | The output tail is stored in the local event log and sent to the agent's model, so its vendor CLI forwards it to its provider; before, check output went only to the calling terminal. It is redacted with the prompt-text rules first, which miss secrets in shapes they do not know. The command line is stored in full, so a command that redaction would change (a `--token` value, a secret-named assignment, a key shape) is refused by the daemon (`secret_in_command`) from every client. A check that prints environment variables can still disclose them. |
+| Denial of service | Off by default. One run per workspace at a time; a burst of batches waits for a pause of `auto_check_debounce_ms` (50 ms to 60 s) and at most 30 s; the command is killed with its process group at its limit (1 to 3,600 s) and whenever it ends. The trigger queue holds 256 and never blocks the state owner; output kept while running is 8 KiB. Each run takes two snapshots of the working tree, plus one per trigger while it runs. If the daemon stops, a running check's process group is not killed and runs to its end. |
+| Elevation of privilege | **The command runs outside the agent host**: as the daemon's user, with the daemon's environment, in the workspace root, not in the host's sandbox and not behind its permission prompts. Code an agent writes and the command executes (tests, build scripts, a `Makefile`) therefore runs without the host asking, and a prompt-injected agent can use that to run code the host would have refused. Turning the check on is the owner's grant of this. There is no MCP tool for it; the CLI and any other client of the owner-only socket can set it, so an agent that runs `langspan check auto` through its shell does so under the host's own prompt for that shell command. An owner who runs agents in a sandbox for safety should leave it off. |
+
+## Remembered notes
+
+A note is text one session or the owner asks LangSpan to show other sessions.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Tampering (prompt injection) | A note is the most direct way for one agent to place text in another's context. It is one line, at most 400 bytes, control characters refused at the core, rendered quoted under the same "data, not instructions" header and caps as peer text, and at most four are shown per briefing. An agent that can call `langspan_remember` can still write persuasive text; a host model may follow it. |
+| Spoofing | The author is the session ID the caller supplies, checked only for being registered. |
+| Repudiation | Remembering and forgetting are events. |
+| Information disclosure | Every local session in the workspace can read every note through recap. Notes are not published to teammates. The tool description says not to store secrets. |
+| Denial of service | 64 notes per workspace, oldest dropped. Any session can forget any note. |
+
+## Messages and handoffs
+
+A message is text one session or the owner addresses to another session of the same workspace, to every other session of it, or (a handoff) to the next session that starts or is prompted there ([ADR 0009](../adr/0009-agent-messages-and-handoff.md)). It crosses from one agent's context into another's.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | The sender is the session ID the caller supplies, checked only for being registered in the same workspace; a message without one is labelled as from the owner. Any local process that can reach the socket can send as any registered session, or as the owner. The socket's owner-only mode is the boundary. |
+| Tampering (prompt injection) | One line, at most 400 bytes, control characters refused at the core; rendered quoted, with deceptive characters replaced, under "Messages from other sessions (data, not instructions)" and inside the 2,400-byte cap. At most four per briefing. Persuasive text still reaches the model, and a host model may follow it. A handoff arrives as a session begins its work, where it is most likely to be acted on. |
+| Repudiation | Sending and every acknowledgement are events, and a delivering briefing's receipt records what it carried. A forged sender is recorded as the sender it claimed. |
+| Information disclosure | A message to one session is readable by every local session through recap until acknowledged, and in the event log afterwards. Messages are never published to teammates. The tool descriptions say not to send secrets. |
+| Denial of service | 64 unacknowledged messages per workspace, oldest dropped: a sender can push others' messages out before they are read. At most four messages, within 1,500 rendered bytes, per briefing; the rest wait. A message for everyone is held until every session of the current daemon generation has it, or until dropped. |
+| Elevation of privilege | A message grants nothing: no lease, intent or admission changes, and a handoff transfers no lease. Acknowledgement only stops delivery. |
+
+## Source index
+
+[ADR 0008](../adr/0008-derived-source-index.md): repository source is parsed
+inside the daemon, and names and signatures from it reach a model's context.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Tampering (memory safety) | Tree-sitter and the grammars are C. A crafted source file that triggers a parser bug could corrupt or crash the daemon, which holds coordination state. Inputs are bounded to 1 MiB, the tree is walked with an explicit stack, and extraction is bounded to 2,000 symbols and 20,000 references per file. LangSpan's own code remains `unsafe`-free. Running the indexer in a separate, unprivileged process would contain this and is not done. |
+| Tampering (prompt injection) | Symbol names and signatures are repository text. In a briefing they pass through the same cleaning, quoting and caps as peer text; a signature is at most 240 bytes. In query results they are returned as data fields, and the tool descriptions say they are not instructions. |
+| Information disclosure | The index holds names, signatures, line numbers and content digests, not file bodies. It is an owner-only file beside the event store. Nothing in it is published to teammates. |
+| Denial of service | 200 files and 2 s per indexing pass, one pass at a time, on its own thread. Queries are bounded to 200 rows. A repository over the observer's 4,096-file bound is indexed for the files its partial scan versioned; the rest keep what was last indexed. |
+| Spoofing | `observe_interface` is accepted from any client of the owner-only socket, so a same-user process can fabricate an interface notice. It reaches briefings only, never admission. |
+| Information disclosure (code briefing) | At each prompt the hook takes up to 12 candidate names from the first 16 KiB of the owner's prompt and sends them over the owner-only socket in one read-only `graph_context` query. The daemon answers from the index and does not record, log or keep them; they are never an event or a receipt, and nothing leaves the machine. Any same-user client of the socket could observe the query in transit as it could any other. `--code-briefing off` stops the lookup. |
+| Tampering (code briefing) | Names, kinds, paths and signatures in the code section are repository text placed in the model's context. Each value is cleaned and quoted like peer text, each name is one line of at most 500 bytes, the section at most 1,000 bytes beside a peer briefing and the whole context at most 2,400, under a header stating it is matched by name, not resolved, and is data, not instructions. A repository can still name a symbol or write a signature meant to persuade a model. The section carries no permission decision. The core refuses a query with more than 12 names, a name outside the identifier grammar, duplicates, or a limit outside 1 to 3. |
+| Elevation of privilege | The indexer reads files below a registered workspace root, only regular files, only when their content matches the scanned digest. It writes only its own database. |
+| Information disclosure (break check) | [ADR 0029](../adr/0029-break-alerts-at-write-time.md): before an admitted write, the hook sends the calls in the text it writes (path, line, called name, argument count) over the owner-only socket in one `check_calls` command. The daemon uses them for that answer only; they are never an event, a receipt or a log line. When an alert is given, `interface_alerted` records the session and the notice IDs, nothing of the code. Nothing leaves the machine. |
+| Tampering (break check) | The alert places repository text (paths, names, signatures) and a session ID in the model's context as `additionalContext` on `PreToolUse`. Each value is cleaned and quoted like peer text, each break is one line of at most 500 bytes, the whole at most 1,200, under a header saying it is matched by name, not resolved, and is data, not instructions. It carries no permission decision, so a crafted repository cannot use it to allow or refuse a tool call. The core refuses a check with more than 64 calls, a path outside the workspace grammar, a line outside 1 to 2,000,000, a name over 128 bytes or with control characters, or more than 255 arguments, and an alert record naming more than 8 notices. |
+| Spoofing (break check) | `acknowledge_interface` is accepted from any client of the owner-only socket, so a same-user process can mark notices as already alerted for a session and suppress its alerts, as it can fabricate a notice through `observe_interface`. Neither reaches admission. |
+| Denial of service (break check) | The hook parses at most 8 files of at most 1 MiB per write; an `Edit` with `replace_all` whose result would pass 1 MiB is not applied, as its size is worked out before each replacement, so a bounded hook input cannot build a larger text. The check starts only while a quarter of its budget remains; the daemon call shares the hook's deadline. The daemon looks up only names present in both the write and an eligible notice, at most 64 calls against at most 32 notices. A parser failure or a timeout is a diagnostic note; the write proceeds. Parsing the written text runs the C grammars in the hook process, under the same memory-safety caveat as the indexer. |
+
+## Dashboard
+
+`langspan dashboard` ([ADR 0013](../adr/0013-dashboard.md)) is LangSpan's first
+TCP listener. It serves one page and one read-only JSON view of every local
+session and every teammate's published session, with task lines, file paths,
+messages, notes and workspace roots.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Each run makes a 256-bit token from `/dev/urandom` and refuses any request without it (401) or with another (403), compared in constant time. The token travels in the URL's query or an `X-LangSpan-Token` header. Anyone who learns it can read the view until the server stops: it is printed to the owner's terminal, and with `--open` written to an owner-only file in the state directory, removed after 30 seconds, rather than passed in a process's arguments, which other users can list. A same-user process can read either, and the URL stays in the browser's history; a new run makes a new token. |
+| Spoofing (DNS rebinding, other origins) | The `Host` header must name the address the connection arrived at, or `localhost` with its port on loopback; a hostile name that resolves to 127.0.0.1 is refused (421). No CORS headers are sent, so another origin's script cannot read a response even with a guessed URL. |
+| Tampering | There is nothing to tamper with: only `GET /` and `GET /api/state` are served, any other method gets 405, any request with a body 413, and the server sends only `Command::Dashboard`, which records nothing. |
+| Tampering (script injection) | Task lines, paths, branch names, messages and notes are other agents' and the repository's text. The page is static; values reach it only as JSON, with `<`, `>` and `&` escaped even inside strings, and are placed with `textContent`, never parsed as markup. The content security policy is `default-src 'none'` with the page's one script and one style allowed by SHA-256 hash, `connect-src 'self'`, no framing, no base URI and no form targets. A real-process test sends `<script>` and quotes through a real prompt and checks the JSON and the page. |
+| Repudiation | Reads are not recorded: the dashboard leaves no trace in the event log. The server logs its start and address to stderr, not who read it. |
+| Information disclosure | Loopback only unless `--allow-network` is given, which warns; a non-loopback address is refused otherwise, and an IPv4-mapped loopback address counts as non-loopback. Plain HTTP: off the machine, the token and view are only as private as the channel, so the documented way from a phone is an SSH tunnel or a VPN to the Mac. Responses are `no-store`, `no-referrer`, `nosniff` and not frameable. A teammate's work is shown as it was published to this machine; nothing new leaves the machine. |
+| Denial of service | At most 16 connections at once, the rest closed unanswered; one thread each. A request head of at most 8 KiB and 64 headers, 2 s per read and 5 s in total, then 408 or 431. Each view is one socket request to the coordinator, under its own 64 KiB frame and deadlines; the denial search reads at most the newest 5,000 receipts and events. A page polls every 2 s; many open pages multiply that load. |
+| Elevation of privilege | The server runs as the owner and can only read. It has no route that changes state, runs a command or reads a file other than through the coordinator's view. |
+
+## Region admission
+
+[ADR 0012](../adr/0012-region-admission.md): the hook reads and parses the file
+being edited, and the regions it computes decide whether a second edit of the
+same file is admitted while another is in progress.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Elevation of privilege (a wrong region) | A region computed wrongly could admit an edit that overlaps another in progress. The rules fall back to the whole file, the behaviour before regions, whenever the edit cannot be placed in exactly one way: no match or more than one, `replace_all`, a MultiEdit step matching text an earlier step wrote, an addition-only hunk, an added, deleted or moved file, a touched non-blank line in no definition, a file that parsed only partly, a file over 1 MiB or not UTF-8, or less than half the hook budget left. The host's own edit matching still applies when it writes: Claude Code replaces only a unique `old_string`, and Codex refuses a hunk whose context no longer matches. Keys match by name, so a mistaken key can only serialize more. |
+| Spoofing / tampering | Regions are supplied by clients of the owner-only socket, like base versions. A same-user process can claim a region for its own session's admission and so be admitted beside another session's edit of the same file. It cannot change another session's lease. Admission was already cooperative, not a fence. The daemon maps each region's path through the same file-key checks as the admission, and the core keeps regions only for a path whose base in the same request is the version they name. |
+| Tampering (memory safety) | The Tree-sitter parser of ADR 0008 now also runs in the hook process, on the file being edited, bounded to 1 MiB and to the index's symbol bounds. A parser bug triggered by a crafted file would affect the short-lived hook process, whose failure gives no decision. |
+| Tampering (prompt injection) | Symbol names from repository text reach the model in a denial reason. They are cleaned, quoted and inside the existing 600-byte reason cap, labelled as coordination data, not instructions. The core refuses names with control characters or over 128 bytes. |
+| Information disclosure | Leases store symbol names, line numbers and SHA-256 digests of files and definitions, not content, in the owner-only event store. A definition digest confirms a guess of that definition's text. |
+| Denial of service | At most 64 regions per admission and 8 names per key, checked by the core on decision and on replay. Locating work is bounded (hunk lines times file lines, and touched lines times definitions, at most 4,000,000 each); beyond that the file is held whole. |
+
+## Line ownership
+
+[ADR 0028](../adr/0028-line-ownership.md): the hook compares the file being
+edited with the edit applied in memory, looks the changed lines up in the line
+journal of ADR 0026, and sends the core which other sessions wrote them. No new
+boundary: the same hook reads the same file it already hashes and parses, the
+journal it reads is the owner-only one the commit guard keeps, and it talks to
+the same owner-only socket.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Elevation of privilege (wrong lines) | Lines computed wrongly could admit an unread edit over another session's lines, or refuse one that touches none. An edit that does not apply exactly as stated (an `old_string` missing or not unique, a hunk with no single match, a file over 1 MiB or not UTF-8, less than half the hook budget left) is not located and counts as changing any line. Lines are matched by content, so identical lines elsewhere can cause a refusal too many; lines of fewer than three letters or digits name nobody. The worst case of a wrong answer is one refusal too many or one write admitted as before this rule. |
+| Spoofing / tampering | Written lines are supplied by clients of the owner-only socket, like base versions and regions, and read from the owner-only journal. A same-user process can claim false written lines for its own admission (causing its own refusal) or leave them out (avoiding one), or write journal entries. It cannot admit anything for another session. The core applies the rule only to the asking session, only for registered, live writers. |
+| Tampering (prompt injection) | The denial relays paths (cleaned and quoted), session IDs, line numbers and ages, labelled as coordination data inside the 600-byte reason cap. No line text from the repository is relayed. |
+| Information disclosure | Nothing new is stored: the journal's truncated line keys are ADR 0026's. Requests carry line numbers and ages only. |
+| Denial of service | At most 64 written-lines entries of 32 ranges per admission, checked by the core. The comparison is bounded to 1 MiB, 4,000,000 line comparisons and 64 MiB of compared bytes, past which the changed middle is one change; the journal read is bounded by the journal's own entry limits. A refusal is once per change, so a false one costs one retry. |
+| Repudiation | Each refusal is an appended `source_observed` event with origin `refused`; the writes it protects are in the journal. |
+
+## Observation spool
+
+[ADR 0014](../adr/0014-observation-spool.md): a completed tool call's report
+that does not reach the coordinator is kept under `STATE/spool/` and sent again
+by the next hook run that can connect.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Entries are read only from the owner-only state directory, through no-follow, owner-checked opens. A same-user process can write an entry naming any session and file, and so have an observation recorded for it; it could already send the same request over the socket. |
+| Tampering | An entry is a typed record with unknown fields rejected; one that does not parse, is over 64 KiB, or is not named by its own request ID is deleted unread. A forged entry can only make a report the hook could have made: it reaches the core through the same commands and validation. |
+| Repudiation | A resent report is an ordinary event in the append-only log under the request ID of the original report, so a resend and the original are one record. |
+| Information disclosure | An entry holds IDs, a workspace root, file paths, SHA-256 digests and the tool input's digest: what the event store already records. No file content, command text, prompt or other free text is kept, so there is nothing further to redact. Directory `0700`, files `0600`. |
+| Denial of service | At most 200 entries and 512 KiB, 3 tries each, an hour old at most; at most 20 sends per hook run, within half of the run's remaining budget, stopping at the first failure; a plainly down daemon costs one connection attempt. At most 800 directory entries are looked at per run. |
+| Elevation of privilege | A resend makes no admission and no decision: it only records observations, versions and completions, as the original run would have. Against a restarted daemon it does not register the session again. |
+
+## Worktrees, processes and passive observations
+
+**Worktree separation.** Ordinary overlapping roots and same-root aliases remain
+rejected. Only the daemon may prepare a verified nested linked-worktree
+registration after checking distinct Git toplevels and their common directory.
+The wire command cannot assert that verification. An active parent lease over
+child files blocks a new child registration. Once registered, descendant paths
+remain excluded from parent admissions even if the `.git` marker disappears.
+Separate worktrees share repository lineage, not writable file identity.
+
+**Process observations.** Linux PID, boot identity and process start metadata
+identify an incarnation. A missing or reused PID is exited; an uncertain probe
+is unknown. A different binding in the current generation is rejected. Restart
+makes previously projected liveness unknown until re-observed. The one-second
+poll visits at most 64 bindings; unchanged non-exited observations are coalesced
+for 15 seconds. These intervals do not promise instantaneous liveness, and
+neither a dead process nor a live process releases or extends any lease.
+
+**Git observations.** Scans have a two-second budget and rotate across workspaces
+on two-second opportunities. They bound file counts, content bytes, branches and
+output; a warning, missing required data, metadata movement or exceeded bound
+leaves the scan incomplete. File reads use workspace-relative no-follow access,
+and regular files and symlinks have distinct content identities. All snapshot
+paths and digests are validated, including a clean initial baseline. A failed
+scan retains the previous complete snapshot and emits a diagnostic, not a
+fabricated deletion or a fresh coverage claim.
+
+Git runs with `GIT_NO_LAZY_FETCH=1`: a missing promisor object fails locally
+instead of invoking a remote fetch or credential flow. A real partial-clone
+regression checks that an owned test remote helper is not launched by this path.
+
+Per-file reads are samples, not one atomic source snapshot. The first dirty
+observation has an unknown prior version. Write-then-revert sequences can be
+missed between scans. Branch-head commit/tree observations are not complete
+change records, and content digests are not evidence of authorship. Local
+monotonic observation times require their daemon generation; a prior-generation
+record must not be presented as a current observation.
+
+## Release pipeline
+
+[ADR 0031](../adr/0031-releases.md) adds a new boundary: binaries built by
+GitHub Actions and downloaded by users. It runs only in
+`Langspan/LangSpan.dev`; no release has been made yet, so none of the controls
+below has been observed in a real run.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: an archive that did not come from this repository's workflow | A build provenance attestation over every file in `SHA256SUMS`, signed with the run's OIDC identity through Sigstore, and checked with `gh attestation verify -R Langspan/LangSpan.dev`. | A user who skips the check gets no protection. macOS archives are not Developer ID signed. |
+| **Tampering**: a dependency or action changes what is built | `--locked` builds on the pinned toolchain with no cache; every action pinned by commit SHA; `cargo deny` on every pull request; release jobs build from the tag release-please created. | A compromised crate already in `Cargo.lock`, or a compromised runner image, is built and attested like any other; the attestation proves where a file was built, not that its inputs were sound. |
+| **Tampering**: a release changed after publication | Assets are attached to a draft and only then published, so the release can be immutable (a repository setting). | Until immutable releases are switched on, a maintainer can replace assets; the attestations would then no longer match. |
+| **Repudiation** | The provenance names the workflow, commit and run; the run log is kept by GitHub. | Log retention is GitHub's. |
+| **Information disclosure**: build paths or tokens in the binary or logs | Paths remapped with `--remap-path-prefix`; checkouts do not persist credentials; no secret is used. | None known. |
+| **Elevation of privilege**: a pull request or a dependency gains write access | `permissions: {}` at the top of each workflow; each job names its own. Release jobs never run on `pull_request`. Signing permissions are only in jobs that compile nothing. | A maintainer merging the release pull request publishes whatever `main` holds. |
+
+## Failure cases guarded by tests
+
+Whole-set admission cannot partially hold free files after a conflict. A missing
+reply cannot make an identical retry obtain a new grant. Reusing an ID for a
+different command or semantic tool input is rejected. Restart advances generation
+and invalidates old authority. Expired, invalidated and mismatched observations
+cannot revive or complete leases. Another current lease from the same session
+must remain visible as a concurrent holder.
+
+A transaction failure must leave event history and published state unchanged.
+A scan failure must not publish a partial snapshot, and a file-kind change must
+remain visible even with the same content digest. Clean snapshot paths must pass
+the same path grammar as later disk events. Process observations may not release,
+renew or grant admissions. Verified workspace metadata must not be supplied over
+the wire, and nested registration may not duplicate an active physical claim.
+Installer regressions cover stable ownership and refusal to replace symlinks.
+A message reaches each recipient once and never its sender, a look from outside
+acknowledges nothing, a handoff goes to exactly one other session, and a
+message whose rendered line could not fit is not selected for that briefing.
+
+These tests establish specific component properties. Full current socket CI and
+real native-host M3 acceptance remain separate checks in
+[implementation status](../IMPLEMENTATION_STATUS.md).
+
+## Deliberately uncovered guarantees
+
+A path can be replaced after checking. Hard links are rejected when observed,
+but filesystem races, mount aliases, independent coordinators, external editors
+and delayed native tool actions can bypass admission. Cooperative leases do not
+provide filesystem fencing.
+
+The semantic input digest does not validate the source version previously read
+by an agent. Once an earlier holder finishes, a stale whole-file replacement can
+be admitted. Nor do queryable intents and changes prove the receiving model saw
+them before choosing an edit. Source-base validation and verified context
+delivery need their own host contracts and acceptance evidence.
+
+`lease_valid` is a point-in-time result. An old `admitted` payload alone is not
+current authority. Retry the same request ID to recover the original outcome;
+use a new ID for a new operation. A transport error remains unknown/unavailable.
+Status pagination, coverage aggregation and retention are unfinished. macOS path,
+transport, sleep/resume and signing behavior, and Windows transport, need their
+own validation. Remote publication requires a separate concrete owner-approved
+data flow and threat-model update.

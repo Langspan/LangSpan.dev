@@ -1,0 +1,6 @@
+LangSpan Brand Palette (Swarm Weave)
+====================================
+Warm White (Surface):     #F4F3EF
+Near-Black (Primary):     #151513
+Slate (Secondary Track):  #3F3E44  (Dark mode: #A1A1AA)
+Restrained Coral (Accent):#D87859

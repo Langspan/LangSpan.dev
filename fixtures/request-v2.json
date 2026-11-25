@@ -1,0 +1,1 @@
+{"version":2,"request_id":"admit-tool-1","command":{"op":"admit_tool","session_id":"alice","paths":["src/api.rs"],"ttl_ms":5000,"operation":{"operation_id":"op-1","source":"claude-code","tool":"Write","input_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}

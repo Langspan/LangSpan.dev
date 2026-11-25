@@ -1,0 +1,578 @@
+[
+ {
+  "seq": 1,
+  "event": {
+   "type": "booted",
+   "generation": 1
+  }
+ },
+ {
+  "seq": 2,
+  "event": {
+   "type": "workspace_registered",
+   "workspace": {
+    "workspace_id": "demo",
+    "root": "/work/demo"
+   }
+  }
+ },
+ {
+  "seq": 3,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+    "workspace_id": "demo",
+    "generation": 1,
+    "headless": true
+   }
+  }
+ },
+ {
+  "seq": 4,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-3-0",
+    "workspace_id": "demo",
+    "path": ".claude/settings.local.json",
+    "before": null,
+    "after": {
+     "type": "present",
+     "digest": "41447f948985833b9b76b153844436339ee7fb40f8d12b7eb791b83749668c08"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 1934193508,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 5,
+  "event": {
+   "type": "branch_observed",
+   "observation": {
+    "observation_id": "scan-1-3-1",
+    "workspace_id": "demo",
+    "branch_ref": "HEAD",
+    "head_oid": "c3c1b0215a54ad562c9d4ad2fda6775a5819a326",
+    "tree_oid": "b0bb2249a7cb099ece0173f76da560ee996daa28",
+    "observed_at_ms": 1934193508,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 6,
+  "event": {
+   "type": "branch_observed",
+   "observation": {
+    "observation_id": "scan-1-3-2",
+    "workspace_id": "demo",
+    "branch_ref": "refs/heads/main",
+    "head_oid": "c3c1b0215a54ad562c9d4ad2fda6775a5819a326",
+    "tree_oid": "b0bb2249a7cb099ece0173f76da560ee996daa28",
+    "observed_at_ms": 1934193508,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 7,
+  "event": {
+   "type": "workspace_git_observed",
+   "git": {
+    "workspace_id": "demo",
+    "repository_id": "local-c98b2c2c4f6114d6540cea4769c0f72e",
+    "branch_ref": "refs/heads/main"
+   }
+  }
+ },
+ {
+  "seq": 8,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+   "summary": "LangSpan hook test. Step 1: run exactly this Bash command once: printf \"x\\n\" > notes.txt (if it is refused, do not retry and do not use another tool for it). Step 2: Read src/lib.rs, then Edit it t…",
+   "at_ms": 1934195398,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 9,
+  "event": {
+   "type": "operation_observed",
+   "observation": {
+    "observation_id": "lsh1-observe-shell-28e555588afab69848f600af30a00bec",
+    "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+    "workspace_id": "demo",
+    "operation_id": "lsh1-op-f4557a601dad9111d905c219b20e4ac5",
+    "source": "claude-code",
+    "tool": "Bash",
+    "paths": [
+     "notes.txt"
+    ],
+    "result": "succeeded",
+    "lease_id": "lsh1-admit-3f52ed1e68e436829ebf1b0fd8b7644e",
+    "lease_relation": "not_admitted",
+    "concurrent_holders": [],
+    "observed_at_ms": 1934197652,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 10,
+  "event": {
+   "type": "source_observed",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+   "files": [
+    {
+     "path": "notes.txt",
+     "state": {
+      "type": "present",
+      "digest": "73cb3858a687a8494ca3323053016282f3dad39d42cf62ca4e79dda2aac7d9ac"
+     }
+    }
+   ],
+   "origin": "write",
+   "at_ms": 1934197653,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 11,
+  "event": {
+   "type": "tool_batch_observed",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+   "operation_ids": [
+    "lsh1-op-f4557a601dad9111d905c219b20e4ac5"
+   ],
+   "calls": 1,
+   "at_ms": 1934197666,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 12,
+  "event": {
+   "type": "source_observed",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+   "files": [
+    {
+     "path": "src/lib.rs",
+     "state": {
+      "type": "present",
+      "digest": "4f6974d912c7678cecb135c900a1287e41e8aeef8963eb78b6660a4a9d08baa2"
+     }
+    }
+   ],
+   "origin": "read",
+   "at_ms": 1934199095,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 13,
+  "event": {
+   "type": "tool_batch_observed",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+   "operation_ids": [
+    "lsh1-op-12bd4d55e12fca22fa244dfe64c8f1bb"
+   ],
+   "calls": 1,
+   "at_ms": 1934199124,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 14,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-13-0",
+    "workspace_id": "demo",
+    "path": "notes.txt",
+    "before": {
+     "type": "missing"
+    },
+    "after": {
+     "type": "present",
+     "digest": "73cb3858a687a8494ca3323053016282f3dad39d42cf62ca4e79dda2aac7d9ac"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 1934199533,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 15,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-45a087e996c66a632090fd4c3eee0a2e",
+    "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+    "workspace_id": "demo",
+    "paths": [
+     "src/lib.rs"
+    ],
+    "generation": 1,
+    "expires_at_ms": 1934230387,
+    "status": "active",
+    "operation": {
+     "operation_id": "lsh1-op-ec659a679217e29a356d7d7ccfa99972",
+     "source": "claude-code",
+     "tool": "Edit",
+     "input_digest": "504c72d573341361870563b34bff701f62f6712a0acbb85ff51224b3df4e6116"
+    },
+    "regions": [
+     {
+      "path": "src/lib.rs",
+      "digest": "4f6974d912c7678cecb135c900a1287e41e8aeef8963eb78b6660a4a9d08baa2",
+      "regions": [
+       {
+        "type": "symbol",
+        "key": [
+         "greet"
+        ],
+        "digest": "1e2848a3f3f6a70fb35019b262b2e750fa09785e3eebf05389cd4cb1d1795f4e",
+        "start_line": 1,
+        "end_line": 3
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "seq": 16,
+  "event": {
+   "type": "operation_observed",
+   "observation": {
+    "observation_id": "lsh1-observe-post_tool_use-e75c4f32871487bf0ea9ef0941066068",
+    "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+    "workspace_id": "demo",
+    "operation_id": "lsh1-op-ec659a679217e29a356d7d7ccfa99972",
+    "source": "claude-code",
+    "tool": "Edit",
+    "paths": [
+     "src/lib.rs"
+    ],
+    "result": "succeeded",
+    "lease_id": "lsh1-admit-45a087e996c66a632090fd4c3eee0a2e",
+    "lease_relation": "current",
+    "concurrent_holders": [],
+    "observed_at_ms": 1934200442,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 17,
+  "event": {
+   "type": "source_observed",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+   "files": [
+    {
+     "path": "src/lib.rs",
+     "state": {
+      "type": "present",
+      "digest": "ae7339d768ce7b40cefb583c8d9863f16de8e6dc9aa9b0f0fe20d0f7f41e6ada"
+     }
+    }
+   ],
+   "origin": "write",
+   "at_ms": 1934200445,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 18,
+  "event": {
+   "type": "lease_completed",
+   "lease_id": "lsh1-admit-45a087e996c66a632090fd4c3eee0a2e"
+  }
+ },
+ {
+  "seq": 19,
+  "event": {
+   "type": "tool_batch_observed",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+   "operation_ids": [
+    "lsh1-op-ec659a679217e29a356d7d7ccfa99972"
+   ],
+   "calls": 1,
+   "at_ms": 1934200489,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 20,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-19-0",
+    "workspace_id": "demo",
+    "path": "src/lib.rs",
+    "before": {
+     "type": "present",
+     "digest": "4f6974d912c7678cecb135c900a1287e41e8aeef8963eb78b6660a4a9d08baa2"
+    },
+    "after": {
+     "type": "present",
+     "digest": "ae7339d768ce7b40cefb583c8d9863f16de8e6dc9aa9b0f0fe20d0f7f41e6ada"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 1934201554,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 21,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb.ad5628530cd121f01",
+    "workspace_id": "demo",
+    "generation": 1,
+    "parent": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+    "headless": true
+   }
+  }
+ },
+ {
+  "seq": 22,
+  "event": {
+   "type": "source_observed",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb.ad5628530cd121f01",
+   "files": [
+    {
+     "path": "README.md",
+     "state": {
+      "type": "present",
+      "digest": "bc70e26f40b8816eb177813dda1f5f529a27a4641d45aa19cae2348a8c6a5fe9"
+     }
+    }
+   ],
+   "origin": "read",
+   "at_ms": 1934203657,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 23,
+  "event": {
+   "type": "briefing_delivered",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb.ad5628530cd121f01",
+   "signature": "fdfe91ab4f7bc830"
+  }
+ },
+ {
+  "seq": 24,
+  "event": {
+   "type": "tool_batch_observed",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb.ad5628530cd121f01",
+   "operation_ids": [
+    "lsh1-op-329db4c02e4bca0962caeb76a2050e94"
+   ],
+   "calls": 1,
+   "at_ms": 1934203692,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 25,
+  "event": {
+   "type": "session_stopped",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb.ad5628530cd121f01",
+   "released": [],
+   "failure": null,
+   "at_ms": 1934205505,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 26,
+  "event": {
+   "type": "session_ended",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb.ad5628530cd121f01"
+  }
+ },
+ {
+  "seq": 27,
+  "event": {
+   "type": "tool_batch_observed",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+   "operation_ids": [
+    "lsh1-op-f26c4f325e61ba00ed06bb05441382e9"
+   ],
+   "calls": 1,
+   "at_ms": 1934205547,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 28,
+  "event": {
+   "type": "session_stopped",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb",
+   "released": [],
+   "failure": null,
+   "at_ms": 1934207885,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 29,
+  "event": {
+   "type": "session_ended",
+   "session_id": "claude-code.26b227f9-f969-442d-8e2e-5431a8d361cb"
+  }
+ },
+ {
+  "seq": 30,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.ad6a14f5-0d27-4f2a-aa47-722da5897c70",
+    "workspace_id": "demo",
+    "generation": 1,
+    "headless": true
+   }
+  }
+ },
+ {
+  "seq": 31,
+  "event": {
+   "type": "briefing_delivered",
+   "session_id": "claude-code.ad6a14f5-0d27-4f2a-aa47-722da5897c70",
+   "signature": "87f2f0f0641239e0"
+  }
+ },
+ {
+  "seq": 32,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "claude-code.ad6a14f5-0d27-4f2a-aa47-722da5897c70",
+   "summary": "LangSpan hook test. Use the Edit tool once to change \"hello\" to \"hey\" in src/lib.rs. If it is refused, do not retry and do not use any other tool. Reply with one word.",
+   "at_ms": 1934235774,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 33,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-32-0",
+    "workspace_id": "demo",
+    "path": "src/lib.rs",
+    "before": {
+     "type": "present",
+     "digest": "ae7339d768ce7b40cefb583c8d9863f16de8e6dc9aa9b0f0fe20d0f7f41e6ada"
+    },
+    "after": {
+     "type": "present",
+     "digest": "4f6974d912c7678cecb135c900a1287e41e8aeef8963eb78b6660a4a9d08baa2"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 1934236406,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 34,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-06688849a6dfb7f9d3ae8756bdc326a4",
+    "session_id": "claude-code.ad6a14f5-0d27-4f2a-aa47-722da5897c70",
+    "workspace_id": "demo",
+    "paths": [
+     "src/lib.rs"
+    ],
+    "generation": 1,
+    "expires_at_ms": 1934268739,
+    "status": "active",
+    "operation": {
+     "operation_id": "lsh1-op-e55fb5a32c4fd44e3169ed1537a87d66",
+     "source": "claude-code",
+     "tool": "Edit",
+     "input_digest": "37d3bff9622058c4174fee685c1ed72d4079e5fc2a84fdcd9bd3e2bb3c84c1fa"
+    },
+    "base_unknown": [
+     "src/lib.rs"
+    ],
+    "regions": [
+     {
+      "path": "src/lib.rs",
+      "digest": "4f6974d912c7678cecb135c900a1287e41e8aeef8963eb78b6660a4a9d08baa2",
+      "regions": [
+       {
+        "type": "symbol",
+        "key": [
+         "greet"
+        ],
+        "digest": "1e2848a3f3f6a70fb35019b262b2e750fa09785e3eebf05389cd4cb1d1795f4e",
+        "start_line": 1,
+        "end_line": 3
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "seq": 35,
+  "event": {
+   "type": "tool_batch_observed",
+   "session_id": "claude-code.ad6a14f5-0d27-4f2a-aa47-722da5897c70",
+   "operation_ids": [
+    "lsh1-op-e55fb5a32c4fd44e3169ed1537a87d66"
+   ],
+   "calls": 1,
+   "at_ms": 1934238786,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 36,
+  "event": {
+   "type": "briefing_delivered",
+   "session_id": "claude-code.ad6a14f5-0d27-4f2a-aa47-722da5897c70",
+   "signature": "14e581fbe5b90065"
+  }
+ },
+ {
+  "seq": 37,
+  "event": {
+   "type": "lease_completed",
+   "lease_id": "lsh1-admit-06688849a6dfb7f9d3ae8756bdc326a4"
+  }
+ },
+ {
+  "seq": 38,
+  "event": {
+   "type": "session_stopped",
+   "session_id": "claude-code.ad6a14f5-0d27-4f2a-aa47-722da5897c70",
+   "released": [
+    "lsh1-admit-06688849a6dfb7f9d3ae8756bdc326a4"
+   ],
+   "failure": null,
+   "at_ms": 1934240103,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 39,
+  "event": {
+   "type": "session_ended",
+   "session_id": "claude-code.ad6a14f5-0d27-4f2a-aa47-722da5897c70"
+  }
+ }
+]

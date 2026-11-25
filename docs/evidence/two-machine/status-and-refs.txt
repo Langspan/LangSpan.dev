@@ -1,0 +1,257 @@
+===== cloud 7adda971: remote enable
+Workspace twom publishes to Git remote "origin" as "Cloud" (participant 7adda9714d9accb65f7413c262e328e1) at refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1, a branch everyone in the repository can see; task lines shared; last publication 0.
+
+===== cloud 7adda971: git ls-remote after enable
+b28c6afe86cd8faee8daeb074e9994674a905b27	refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1
+dbb15ff4b9f03e536fbe979d6f46443cdd3565d5	refs/langspan/peers/617e08a44fcb7ebf225f8f2bbbaaefbb
+03ba2f0e5ac3410e2a540f6adaa909b6f26cb9af	refs/langspan/peers/dcfb4a08a7bd04041ffd4207030798d1
+
+===== cloud 7adda971: status before its sessions (A)
+LangSpan generation 1
+Workspace twom: "/cloud/twom-test"
+0 active admission(s). Session registration is not a process-liveness signal.
+Publishing twom to "origin" at refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1 as "Cloud"; last publication 1.
+Teammate "Mac mini (Codex)" (617e08a44fcb7ebf225f8f2bbbaaefbb): publication 9, 0 session(s), received in generation 1 at 157174 ms.
+Teammate "Mac mini" (dcfb4a08a7bd04041ffd4207030798d1): publication 16, 0 session(s), received in generation 1 at 157175 ms.
+
+===== cloud 7adda971: status after its sessions (E)
+LangSpan generation 1
+Workspace twom: "/cloud/twom-test"
+Session claude-code.00f07596-3cbb-4df5-be37-d5fb8b758684 in twom: registered in this generation
+  Process 3072: Exited (observation generation 1, 220391 ms).
+Session claude-code.84073abc-c89a-4b67-972b-29e8a3142f2a in twom: registered in this generation
+  Process 2878: Exited (observation generation 1, 206005 ms).
+Session claude-code.890d64ed-02fa-4736-9bfc-f75d2e7dc4de in twom: registered in this generation
+  Process 2641: Exited (observation generation 1, 185471 ms).
+Admission lsh1-admit-5b89d2e8bb6e402f7a9cb0019131360a: claude-code.84073abc-c89a-4b67-972b-29e8a3142f2a Completed ["src/upload.rs"]
+Admission lsh1-admit-8a0b559853a64b8370f537740ee7e96f: claude-code.00f07596-3cbb-4df5-be37-d5fb8b758684 Completed ["GUIDE.md"]
+0 active admission(s). Session registration is not a process-liveness signal.
+Publishing twom to "origin" at refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1 as "Cloud"; last publication 7.
+Teammate "Mac mini (Codex)" (617e08a44fcb7ebf225f8f2bbbaaefbb): publication 9, 0 session(s), received in generation 1 at 157174 ms.
+Teammate "Mac mini" (dcfb4a08a7bd04041ffd4207030798d1): publication 16, 0 session(s), received in generation 1 at 157175 ms.
+
+===== cloud 7adda971: git ls-remote after its sessions (E)
+f1ef77261e1977ed9681d7f286e73094f35895fd	refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1
+dbb15ff4b9f03e536fbe979d6f46443cdd3565d5	refs/langspan/peers/617e08a44fcb7ebf225f8f2bbbaaefbb
+03ba2f0e5ac3410e2a540f6adaa909b6f26cb9af	refs/langspan/peers/dcfb4a08a7bd04041ffd4207030798d1
+
+===== cloud 7adda971: outbox after its sessions (E)
+Not yet published. This is everything that leaves the machine for this workspace:
+{
+  "participant": "7adda9714d9accb65f7413c262e328e1",
+  "name": "Cloud",
+  "sequence": 8,
+  "work": []
+}
+
+===== cloud 7adda971: status snapshot F/status-00 (16 snapshots, 2 minutes apart)
+2026-11-25T05:12:54Z
+LangSpan generation 1
+Workspace twom: "/cloud/twom-test"
+Session claude-code.00f07596-3cbb-4df5-be37-d5fb8b758684 in twom: registered in this generation
+  Process 3072: Exited (observation generation 1, 220391 ms).
+Session claude-code.84073abc-c89a-4b67-972b-29e8a3142f2a in twom: registered in this generation
+  Process 2878: Exited (observation generation 1, 206005 ms).
+Session claude-code.890d64ed-02fa-4736-9bfc-f75d2e7dc4de in twom: registered in this generation
+  Process 2641: Exited (observation generation 1, 185471 ms).
+Admission lsh1-admit-5b89d2e8bb6e402f7a9cb0019131360a: claude-code.84073abc-c89a-4b67-972b-29e8a3142f2a Completed ["src/upload.rs"]
+Admission lsh1-admit-8a0b559853a64b8370f537740ee7e96f: claude-code.00f07596-3cbb-4df5-be37-d5fb8b758684 Completed ["GUIDE.md"]
+0 active admission(s). Session registration is not a process-liveness signal.
+Publishing twom to "origin" at refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1 as "Cloud"; last publication 8.
+Teammate "Mac mini (Codex)" (617e08a44fcb7ebf225f8f2bbbaaefbb): publication 9, 0 session(s), received in generation 1 at 157174 ms.
+Teammate "Mac mini" (dcfb4a08a7bd04041ffd4207030798d1): publication 16, 0 session(s), received in generation 1 at 157175 ms.
+
+===== cloud 7adda971: status snapshot F/status-02 (16 snapshots, 2 minutes apart)
+2026-11-25T05:16:54Z
+LangSpan generation 1
+Workspace twom: "/cloud/twom-test"
+Session claude-code.00f07596-3cbb-4df5-be37-d5fb8b758684 in twom: registered in this generation
+  Process 3072: Exited (observation generation 1, 220391 ms).
+Session claude-code.84073abc-c89a-4b67-972b-29e8a3142f2a in twom: registered in this generation
+  Process 2878: Exited (observation generation 1, 206005 ms).
+Session claude-code.890d64ed-02fa-4736-9bfc-f75d2e7dc4de in twom: registered in this generation
+  Process 2641: Exited (observation generation 1, 185471 ms).
+Admission lsh1-admit-5b89d2e8bb6e402f7a9cb0019131360a: claude-code.84073abc-c89a-4b67-972b-29e8a3142f2a Completed ["src/upload.rs"]
+Admission lsh1-admit-8a0b559853a64b8370f537740ee7e96f: claude-code.00f07596-3cbb-4df5-be37-d5fb8b758684 Completed ["GUIDE.md"]
+0 active admission(s). Session registration is not a process-liveness signal.
+Publishing twom to "origin" at refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1 as "Cloud"; last publication 8.
+Teammate "Cloud" (5c470cafbc1fcf2641066dc8a8b8a507): publication 6, 0 session(s), received in generation 1 at 460995 ms.
+Teammate "Mac mini (Codex)" (617e08a44fcb7ebf225f8f2bbbaaefbb): publication 10, 1 session(s), received in generation 1 at 438309 ms.
+Teammate "Mac mini" (dcfb4a08a7bd04041ffd4207030798d1): publication 18, 1 session(s), received in generation 1 at 432592 ms.
+
+===== cloud 7adda971: status snapshot F/status-15 (16 snapshots, 2 minutes apart)
+2026-11-25T05:42:54Z
+LangSpan generation 1
+Workspace twom: "/cloud/twom-test"
+Session claude-code.00f07596-3cbb-4df5-be37-d5fb8b758684 in twom: registered in this generation
+  Process 3072: Exited (observation generation 1, 220391 ms).
+Session claude-code.84073abc-c89a-4b67-972b-29e8a3142f2a in twom: registered in this generation
+  Process 2878: Exited (observation generation 1, 206005 ms).
+Session claude-code.890d64ed-02fa-4736-9bfc-f75d2e7dc4de in twom: registered in this generation
+  Process 2641: Exited (observation generation 1, 185471 ms).
+Admission lsh1-admit-5b89d2e8bb6e402f7a9cb0019131360a: claude-code.84073abc-c89a-4b67-972b-29e8a3142f2a Completed ["src/upload.rs"]
+Admission lsh1-admit-8a0b559853a64b8370f537740ee7e96f: claude-code.00f07596-3cbb-4df5-be37-d5fb8b758684 Completed ["GUIDE.md"]
+0 active admission(s). Session registration is not a process-liveness signal.
+Publishing twom to "origin" at refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1 as "Cloud"; last publication 8.
+Teammate "Cloud" (5c470cafbc1fcf2641066dc8a8b8a507): publication 6, 0 session(s), received in generation 1 at 460995 ms.
+Teammate "Mac mini (Codex)" (617e08a44fcb7ebf225f8f2bbbaaefbb): publication 22, 1 session(s), received in generation 1 at 1926555 ms.
+Teammate "Mac mini" (dcfb4a08a7bd04041ffd4207030798d1): publication 30, 1 session(s), received in generation 1 at 1920846 ms.
+
+===== cloud 7adda971: recap
+Workspace twom at "/cloud/twom-test" on refs/heads/main.
+Session claude-code.216c74e8-38c8-41ae-875b-a4e1592d76b7 (ended): task "Do not use any tools. Has anything in your context told you about other agent sessions or teammates working in this repository? If yes, quote it exactly. If no, answer NONE."
+Session claude-code.00f07596-3cbb-4df5-be37-d5fb8b758684 (ended): edited ["GUIDE.md"]; task "Rewrite GUIDE.md to a title line \"# Guide\" plus two sentences. Edit only that file."
+Session claude-code.84073abc-c89a-4b67-972b-29e8a3142f2a (ended): edited ["src/upload.rs"]; task "In src/upload.rs, change upload so it also rejects paths that contain \"..\". Edit only that file. Before editing, say whether anything told you another session or teammate changed this file."
+Session claude-code.890d64ed-02fa-4736-9bfc-f75d2e7dc4de (ended): task "Do not use any tools. Has anything in your context told you about other agent sessions or teammates working in this repository? If yes, quote it exactly. If no, answer NONE."
+
+===== cloud 7adda971: remote disable
+Workspace twom no longer publishes. The daemon removes its ref from the remote on its next pass; `langspan doctor` shows whether the remote has let it.
+
+===== cloud 7adda971: daemon log after disable
+{"level":"warn","event":"remote_unavailable","workspace_id":"twom","detail":"Git remote \"origin\" refused to delete refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1. Git said: \"fatal: --negotiate-only needs one or more --negotiation-tip=* | warning: push negotiation failed; proceeding anyway with push | error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403 | send-pack: unexpected disconnect while reading sideband packet | fatal: the remote end hung up unexpectedly\". LangSpan has stopped publishing, and the ref now holds a final publication saying so, so teammates no longer show your work. The ref itself is still on the remote: delete it by hand where the host allows, for example in the hosting site's branch list or with `git push origin --delete refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1` from a machine that may delete refs there. LangSpan checks again on later passes.","retry_in_ms":0}
+
+===== cloud 7adda971: doctor after disable
+ok Coordinator reachable, generation 1, protocol 3.
+ok 4 session(s) registered since it started; 0 from before it restarted are not coordinated until they act again.
+ok Workspace twom: scanned; repository and branch known; every file versioned.
+ok Workspace twom: index holds 2 of 2 supported source files at their current content.
+FIX Workspace twom: publication is off but its ref refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1 has not yet been removed from "origin". The coordinator keeps trying; if the host refuses deletions (see its log), delete the ref there by hand.
+ok claude-code: no user-level install under /cloud/home; repositories need a project install, or run `langspan install --hosts claude-code --apply`.
+1 thing(s) need attention.
+
+===== cloud 7adda971: git ls-remote after disable
+4ec93b25518220b5cd6d8d709466a5dabaa82096	refs/heads/langspan/peers/5c470cafbc1fcf2641066dc8a8b8a507
+989f6f9cc7d27ae9e74b4746c2c15f3995980c38	refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1
+3b7e216c786e42a5994bd5a75779c9358b4eff56	refs/langspan/peers/617e08a44fcb7ebf225f8f2bbbaaefbb
+f63c1f02ca8193beff2bd649d793ba2e211d2da0	refs/langspan/peers/dcfb4a08a7bd04041ffd4207030798d1
+
+===== cloud 7adda971: content of its ref after disable
+{"v":1,"publication":{"participant":"7adda9714d9accb65f7413c262e328e1","name":"Cloud","sequence":11,"work":[],"withdrawn":true}}
+
+===== cloud 5c470caf: remote enable
+Workspace twom publishes to Git remote "origin" as "Cloud" (participant 5c470cafbc1fcf2641066dc8a8b8a507) at refs/heads/langspan/peers/5c470cafbc1fcf2641066dc8a8b8a507, a branch everyone in the repository can see; task lines shared; last publication 0.
+
+===== cloud 5c470caf: git ls-remote after enable
+4e9f97c5816e9c4b211c450d897d4ab17d0c488e	refs/heads/langspan/peers/5c470cafbc1fcf2641066dc8a8b8a507
+cc5cd08b0a848621bf4d3c05dc2c462895542894	refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1
+dbb15ff4b9f03e536fbe979d6f46443cdd3565d5	refs/langspan/peers/617e08a44fcb7ebf225f8f2bbbaaefbb
+03ba2f0e5ac3410e2a540f6adaa909b6f26cb9af	refs/langspan/peers/dcfb4a08a7bd04041ffd4207030798d1
+
+===== cloud 5c470caf: status before its sessions (A)
+LangSpan generation 1
+Workspace twom: "/cloud/twom-test"
+0 active admission(s). Session registration is not a process-liveness signal.
+Publishing twom to "origin" at refs/heads/langspan/peers/5c470cafbc1fcf2641066dc8a8b8a507 as "Cloud"; last publication 1.
+Teammate "Mac mini (Codex)" (617e08a44fcb7ebf225f8f2bbbaaefbb): publication 9, 0 session(s), received in generation 1 at 174498 ms.
+Teammate "Cloud" (7adda9714d9accb65f7413c262e328e1): publication 8, 0 session(s), received in generation 1 at 174501 ms.
+Teammate "Mac mini" (dcfb4a08a7bd04041ffd4207030798d1): publication 16, 0 session(s), received in generation 1 at 174502 ms.
+
+===== cloud 5c470caf: git ls-remote after its sessions (E)
+4ec93b25518220b5cd6d8d709466a5dabaa82096	refs/heads/langspan/peers/5c470cafbc1fcf2641066dc8a8b8a507
+cc5cd08b0a848621bf4d3c05dc2c462895542894	refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1
+c796eaf7841d6729dd2f83e15dbc089949fc88d9	refs/langspan/peers/617e08a44fcb7ebf225f8f2bbbaaefbb
+92dd231cdd99184e09a7973cc015e414f6126e7e	refs/langspan/peers/dcfb4a08a7bd04041ffd4207030798d1
+
+===== cloud 5c470caf: status snapshot F-status/status-00
+Wed Nov 25 05:16:55 UTC 2026
+LangSpan generation 1
+Workspace twom: "/cloud/twom-test"
+Session claude-code.2a66fd6c-e8a4-4955-8255-18e1482044e7 in twom: registered in this generation
+  Process 3230: Exited (observation generation 1, 243494 ms).
+Session claude-code.bf05d689-d688-4a9b-8da5-041f85a71bfc in twom: registered in this generation
+  Process 2819: Exited (observation generation 1, 220896 ms).
+Session claude-code.f8e2785e-4a25-46c4-87d2-8cdeb1927092 in twom: registered in this generation
+  Process 2654: Exited (observation generation 1, 199366 ms).
+Admission lsh1-admit-a5886f21e4534eec27af2596cbb345b3: claude-code.bf05d689-d688-4a9b-8da5-041f85a71bfc Completed ["src/upload.rs"]
+Admission lsh1-admit-c2b2580a6a5f54ec4423564f4bfb88d4: claude-code.2a66fd6c-e8a4-4955-8255-18e1482044e7 Completed ["GUIDE.md"]
+0 active admission(s). Session registration is not a process-liveness signal.
+Publishing twom to "origin" at refs/heads/langspan/peers/5c470cafbc1fcf2641066dc8a8b8a507 as "Cloud"; last publication 6.
+Teammate "Mac mini (Codex)" (617e08a44fcb7ebf225f8f2bbbaaefbb): publication 10, 1 session(s), received in generation 1 at 224453 ms.
+Teammate "Cloud" (7adda9714d9accb65f7413c262e328e1): publication 8, 0 session(s), received in generation 1 at 174501 ms.
+Teammate "Mac mini" (dcfb4a08a7bd04041ffd4207030798d1): publication 18, 1 session(s), received in generation 1 at 216831 ms.
+
+===== cloud 5c470caf: status snapshot F-status/status-15
+Wed Nov 25 05:46:56 UTC 2026
+LangSpan generation 1
+Workspace twom: "/cloud/twom-test"
+Session claude-code.2a66fd6c-e8a4-4955-8255-18e1482044e7 in twom: registered in this generation
+  Process 3230: Exited (observation generation 1, 243494 ms).
+Session claude-code.bf05d689-d688-4a9b-8da5-041f85a71bfc in twom: registered in this generation
+  Process 2819: Exited (observation generation 1, 220896 ms).
+Session claude-code.f8e2785e-4a25-46c4-87d2-8cdeb1927092 in twom: registered in this generation
+  Process 2654: Exited (observation generation 1, 199366 ms).
+Admission lsh1-admit-a5886f21e4534eec27af2596cbb345b3: claude-code.bf05d689-d688-4a9b-8da5-041f85a71bfc Completed ["src/upload.rs"]
+Admission lsh1-admit-c2b2580a6a5f54ec4423564f4bfb88d4: claude-code.2a66fd6c-e8a4-4955-8255-18e1482044e7 Completed ["GUIDE.md"]
+0 active admission(s). Session registration is not a process-liveness signal.
+Publishing twom to "origin" at refs/heads/langspan/peers/5c470cafbc1fcf2641066dc8a8b8a507 as "Cloud"; last publication 6.
+Teammate "Mac mini (Codex)" (617e08a44fcb7ebf225f8f2bbbaaefbb): publication 25, 0 session(s), received in generation 1 at 2025176 ms.
+Teammate "Mac mini" (dcfb4a08a7bd04041ffd4207030798d1): publication 33, 0 session(s), received in generation 1 at 2013904 ms.
+
+===== cloud 5c470caf: recap
+Workspace twom at "/cloud/twom-test" on refs/heads/main.
+Session claude-code.58b7cb74-72de-44db-950f-053cb44e88e6 (ended): task "Do not use any tools. Has anything in your context told you about other agent sessions or teammates working in this repository? If yes, quote it exactly. If no, answer NONE."
+Session claude-code.2a66fd6c-e8a4-4955-8255-18e1482044e7 (ended): edited ["GUIDE.md"]; task "Rewrite GUIDE.md to a title line \"# Guide\" plus two sentences. Edit only that file."
+Session claude-code.bf05d689-d688-4a9b-8da5-041f85a71bfc (ended): edited ["src/upload.rs"]; task "In src/upload.rs, change upload so it also rejects paths that contain \"..\". Edit only that file. Before editing, say whether anything told you another session or teammate changed this file."
+Session claude-code.f8e2785e-4a25-46c4-87d2-8cdeb1927092 (ended): task "Do not use any tools. Has anything in your context told you about other agent sessions or teammates working in this repository? If yes, quote it exactly. If no, answer NONE."
+
+===== cloud 5c470caf: daemon log after disable
+{"level":"warn","event":"remote_unavailable","workspace_id":"twom","detail":"Git remote \"origin\" refused to delete refs/heads/langspan/peers/5c470cafbc1fcf2641066dc8a8b8a507. Git said: \"fatal: --negotiate-only needs one or more --negotiation-tip=* | warning: push negotiation failed; proceeding anyway with push | error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403 | send-pack: unexpected disconnect while reading sideband packet | fatal: the remote end hung up unexpectedly\". LangSpan has stopped publishing, and the ref now holds a final publication saying so, so teammates no longer show your work. The ref itself is still on the remote: delete it by hand where the host allows, for example in the hosting site's branch list or with `git push origin --delete refs/heads/langspan/peers/5c470cafbc1fcf2641066dc8a8b8a507` from a machine that may delete refs there. LangSpan checks again on later passes.","retry_in_ms":0}
+
+===== cloud 5c470caf: doctor after disable
+ok Coordinator reachable, generation 1, protocol 3.
+ok 4 session(s) registered since it started; 0 from before it restarted are not coordinated until they act again.
+ok Workspace twom: scanned; repository and branch known; every file versioned.
+ok Workspace twom: index holds 2 of 2 supported source files at their current content.
+FIX Workspace twom: publication is off but its ref refs/heads/langspan/peers/5c470cafbc1fcf2641066dc8a8b8a507 has not yet been removed from "origin". The coordinator keeps trying; if the host refuses deletions (see its log), delete the ref there by hand.
+ok claude-code: no user-level install under /cloud/root; repositories need a project install, or run `langspan install --hosts claude-code --apply`.
+1 thing(s) need attention.
+
+===== cloud 5c470caf: git ls-remote after disable
+88d4f9fedf6cc31016c25c3c79b5e5517a8ea4b4	refs/heads/langspan/peers/5c470cafbc1fcf2641066dc8a8b8a507
+989f6f9cc7d27ae9e74b4746c2c15f3995980c38	refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1
+6a7e5606b15a324ef07e92fcb11964a8c697c5f3	refs/langspan/peers/617e08a44fcb7ebf225f8f2bbbaaefbb
+a9b602a7565a04553f53118e4c861297fee455cc	refs/langspan/peers/dcfb4a08a7bd04041ffd4207030798d1
+
+===== cloud 5c470caf: content of its ref after disable
+{"v":1,"publication":{"participant":"5c470cafbc1fcf2641066dc8a8b8a507","name":"Cloud","sequence":9,"work":[],"withdrawn":true}}
+
+===== mac: git ls-remote (taken before the Mac sessions)
+4e9f97c5816e9c4b211c450d897d4ab17d0c488e	refs/heads/langspan/peers/5c470cafbc1fcf2641066dc8a8b8a507
+cc5cd08b0a848621bf4d3c05dc2c462895542894	refs/heads/langspan/peers/7adda9714d9accb65f7413c262e328e1
+dbb15ff4b9f03e536fbe979d6f46443cdd3565d5	refs/langspan/peers/617e08a44fcb7ebf225f8f2bbbaaefbb
+03ba2f0e5ac3410e2a540f6adaa909b6f26cb9af	refs/langspan/peers/dcfb4a08a7bd04041ffd4207030798d1
+
+===== mac Mac mini (Claude Code coordinator): status (taken before the Mac sessions)
+LangSpan generation 4
+Workspace twom: "/mac/langspan-2m-mac"
+Session claude-code.e9d10778-ffea-4912-8340-63f059f017d6 in twom: stale; reattach with a new request ID
+  Process liveness: unknown; registration is not a heartbeat.
+Admission lsh1-admit-d7c528d968a79acdf7a636c398193320: claude-code.e9d10778-ffea-4912-8340-63f059f017d6 Completed ["src/upload.rs"]
+0 active admission(s). Session registration is not a process-liveness signal.
+Publishing twom to "origin" at refs/langspan/peers/dcfb4a08a7bd04041ffd4207030798d1 as "Mac mini"; last publication 16.
+Teammate "Cloud" (5c470cafbc1fcf2641066dc8a8b8a507): publication 1, 0 session(s), received in generation 4 at 1933075702 ms.
+Teammate "Mac mini (Codex)" (617e08a44fcb7ebf225f8f2bbbaaefbb): publication 9, 0 session(s), received in generation 4 at 1932642730 ms.
+Teammate "Cloud" (7adda9714d9accb65f7413c262e328e1): publication 8, 0 session(s), received in generation 4 at 1932907830 ms.
+
+===== mac Mac mini (Codex) coordinator: status (taken before the Mac sessions)
+LangSpan generation 4
+Workspace demo: "/mac/langspan-accept-demo"
+Session claude-code.70da77e0-1719-4fca-9497-a61c519fd3c6 in demo: stale; reattach with a new request ID
+  Process liveness: unknown; registration is not a heartbeat.
+Session claude-code.ed548c6a-769e-4883-94d8-02ba3c083928 in demo: stale; reattach with a new request ID
+  Process liveness: unknown; registration is not a heartbeat.
+Session codex.01a2104f-4726-7851-8f38-cda6a591eb0b in demo: stale; reattach with a new request ID
+  Process liveness: unknown; registration is not a heartbeat.
+Session codex.01a21050-2d3e-7243-a3ca-bf8517eca23c in demo: stale; reattach with a new request ID
+  Process liveness: unknown; registration is not a heartbeat.
+Session codex.01a21051-bfab-7ea2-88d9-351ff4faa51a in demo: stale; reattach with a new request ID
+  Process liveness: unknown; registration is not a heartbeat.
+Admission lsh1-admit-3ab9dd78bba12b84835ca51d4f0f238e: codex.01a2104f-4726-7851-8f38-cda6a591eb0b Expired ["README.md"]
+Admission lsh1-admit-70846504efa89894ed8f55d08955a010: codex.01a21050-2d3e-7243-a3ca-bf8517eca23c Expired ["README.md"]
+Admission lsh1-admit-84c3b06250f48e20f5b7446b00dccb33: codex.01a21051-bfab-7ea2-88d9-351ff4faa51a Completed ["src/upload.rs"]
+Admission lsh1-admit-d1b916458dabb52237028bb3251252bd: claude-code.ed548c6a-769e-4883-94d8-02ba3c083928 Completed ["src/upload.rs"]
+0 active admission(s). Session registration is not a process-liveness signal.
+Publishing demo to "origin" at refs/langspan/peers/617e08a44fcb7ebf225f8f2bbbaaefbb as "Mac mini (Codex)"; last publication 9.
+Teammate "Cloud" (5c470cafbc1fcf2641066dc8a8b8a507): publication 1, 0 session(s), received in generation 4 at 1933075713 ms.
+Teammate "Cloud" (7adda9714d9accb65f7413c262e328e1): publication 8, 0 session(s), received in generation 4 at 1932907828 ms.
+Teammate "Mac mini" (dcfb4a08a7bd04041ffd4207030798d1): publication 16, 0 session(s), received in generation 4 at 1932642821 ms.

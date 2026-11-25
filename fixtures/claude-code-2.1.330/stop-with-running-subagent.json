@@ -1,0 +1,23 @@
+{
+ "session_id": "f07c8058-f448-4429-afd5-303f4a458c6e",
+ "transcript_path": "/home/user/.claude/projects/-work-demo/f07c8058-f448-4429-afd5-303f4a458c6e.jsonl",
+ "cwd": "/work/demo",
+ "prompt_id": "7250fc85-f9d5-44ae-8611-ff88e2a9a574",
+ "permission_mode": "acceptEdits",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "Stop",
+ "stop_hook_active": false,
+ "last_assistant_message": "done",
+ "background_tasks": [
+  {
+   "id": "a8830b110c1d1bfdf",
+   "type": "subagent",
+   "status": "running",
+   "description": "Read README first line",
+   "agent_type": "Explore"
+  }
+ ],
+ "session_crons": []
+}

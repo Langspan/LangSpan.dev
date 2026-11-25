@@ -1,0 +1,50 @@
+# Template for Formula/langspan.rb in the tap Langspan/homebrew-tap, which
+# does not exist yet. render-formula.sh fills @VERSION@ and the four
+# @SHA256_<target>@ values from a release's SHA256SUMS.
+class Langspan < Formula
+  desc "Shared view of work in progress for AI coding agents"
+  homepage "https://langspan.dev"
+  version "@VERSION@"
+  license "Apache-2.0"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/Langspan/LangSpan.dev/releases/download/v@VERSION@/langspan-v@VERSION@-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA256_aarch64-apple-darwin@"
+    end
+    on_intel do
+      url "https://github.com/Langspan/LangSpan.dev/releases/download/v@VERSION@/langspan-v@VERSION@-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA256_x86_64-apple-darwin@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/Langspan/LangSpan.dev/releases/download/v@VERSION@/langspan-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA256_aarch64-unknown-linux-gnu@"
+    end
+    on_intel do
+      url "https://github.com/Langspan/LangSpan.dev/releases/download/v@VERSION@/langspan-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA256_x86_64-unknown-linux-gnu@"
+    end
+  end
+
+  def install
+    bin.install "langspan"
+    doc.install "README.md", "CHANGELOG.md", "NOTICE", "THIRD-PARTY-LICENSES.html"
+  end
+
+  def caveats
+    <<~EOS
+      To add LangSpan's hooks and MCP server to Claude Code and Codex, run:
+        langspan install --apply
+      The hooks name #{opt_bin}/langspan, so they keep working after
+      `brew upgrade`. After an upgrade, restart a running coordinator
+      (`langspan daemon`); `langspan doctor` reports what needs attention.
+    EOS
+  end
+
+  test do
+    assert_match "langspan #{version}", shell_output("#{bin}/langspan --version")
+  end
+end

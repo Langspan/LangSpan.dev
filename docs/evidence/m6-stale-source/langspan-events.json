@@ -1,0 +1,326 @@
+[
+ {
+  "seq": 1,
+  "event": {
+   "type": "booted",
+   "generation": 1
+  }
+ },
+ {
+  "seq": 2,
+  "event": {
+   "type": "workspace_registered",
+   "workspace": {
+    "workspace_id": "demo",
+    "root": "/work/accept/demo"
+   }
+  }
+ },
+ {
+  "seq": 3,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.4f1840dc-267d-46ef-a2a7-28cdd213aa57",
+    "workspace_id": "demo",
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 4,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "claude-code.4f1840dc-267d-46ef-a2a7-28cdd213aa57",
+   "summary": "Use the Read tool to read src/gate.rs, then tell me only how many lines it has. Do nothing else.",
+   "at_ms": 10578,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 5,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-4-0",
+    "workspace_id": "demo",
+    "path": ".claude/settings.local.json",
+    "before": null,
+    "after": {
+     "type": "present",
+     "digest": "619484ed9b61ebdc0d2a3706ddc3e6347097db78a723fb71b13e4e62f4dc715c"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 12596,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 6,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-4-1",
+    "workspace_id": "demo",
+    "path": ".codex/hooks.json",
+    "before": null,
+    "after": {
+     "type": "present",
+     "digest": "104e3d2cdd814b4d8ca0f46ba2e0e8d8a45b6f00c49be71b41ce1f095de4b5c2"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 12596,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 7,
+  "event": {
+   "type": "branch_observed",
+   "observation": {
+    "observation_id": "scan-1-4-2",
+    "workspace_id": "demo",
+    "branch_ref": "HEAD",
+    "head_oid": "96b857275eedcbe1b0ceb62f4321182f55d2874b",
+    "tree_oid": "ab9275ccdcaaac995f4b3a79331f521a090b0afb",
+    "observed_at_ms": 12596,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 8,
+  "event": {
+   "type": "branch_observed",
+   "observation": {
+    "observation_id": "scan-1-4-3",
+    "workspace_id": "demo",
+    "branch_ref": "refs/heads/feature",
+    "head_oid": "96b857275eedcbe1b0ceb62f4321182f55d2874b",
+    "tree_oid": "ab9275ccdcaaac995f4b3a79331f521a090b0afb",
+    "observed_at_ms": 12596,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 9,
+  "event": {
+   "type": "branch_observed",
+   "observation": {
+    "observation_id": "scan-1-4-4",
+    "workspace_id": "demo",
+    "branch_ref": "refs/heads/main",
+    "head_oid": "96b857275eedcbe1b0ceb62f4321182f55d2874b",
+    "tree_oid": "ab9275ccdcaaac995f4b3a79331f521a090b0afb",
+    "observed_at_ms": 12596,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 10,
+  "event": {
+   "type": "workspace_git_observed",
+   "git": {
+    "workspace_id": "demo",
+    "repository_id": "local-d475d47d65699afe07558193a9439680",
+    "branch_ref": "refs/heads/main"
+   }
+  }
+ },
+ {
+  "seq": 11,
+  "event": {
+   "type": "source_observed",
+   "session_id": "claude-code.4f1840dc-267d-46ef-a2a7-28cdd213aa57",
+   "files": [
+    {
+     "path": "src/gate.rs",
+     "state": {
+      "type": "present",
+      "digest": "43b72cde7a6013e142c7223e487b2950031a2d6ef45b1e37169be3943d6450dd"
+     }
+    }
+   ],
+   "origin": "read",
+   "at_ms": 14259,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 12,
+  "event": {
+   "type": "session_ended",
+   "session_id": "claude-code.4f1840dc-267d-46ef-a2a7-28cdd213aa57"
+  }
+ },
+ {
+  "seq": 13,
+  "event": {
+   "type": "session_registered",
+   "session": {
+    "session_id": "claude-code.06ae76fd-0d04-4720-9b06-808bd7133f37",
+    "workspace_id": "demo",
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 14,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "claude-code.06ae76fd-0d04-4720-9b06-808bd7133f37",
+   "summary": "In src/gate.rs, change the gate function so that it also accepts the user \"root\". Edit only that file.",
+   "at_ms": 16988,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 15,
+  "event": {
+   "type": "source_observed",
+   "session_id": "claude-code.06ae76fd-0d04-4720-9b06-808bd7133f37",
+   "files": [
+    {
+     "path": "src/gate.rs",
+     "state": {
+      "type": "present",
+      "digest": "43b72cde7a6013e142c7223e487b2950031a2d6ef45b1e37169be3943d6450dd"
+     }
+    }
+   ],
+   "origin": "read",
+   "at_ms": 19763,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 16,
+  "event": {
+   "type": "lease_granted",
+   "lease": {
+    "lease_id": "lsh1-admit-9e561d5979a318855281370375143081",
+    "session_id": "claude-code.06ae76fd-0d04-4720-9b06-808bd7133f37",
+    "workspace_id": "demo",
+    "paths": [
+     "src/gate.rs"
+    ],
+    "generation": 1,
+    "expires_at_ms": 53048,
+    "status": "active",
+    "operation": {
+     "operation_id": "lsh1-op-02afad307d50585101f50ff9af0c6c17",
+     "source": "claude-code",
+     "tool": "Edit",
+     "input_digest": "a555b0d49a53808f234a98fb632d07cc8ede764082553c4c912fca84619a08b1"
+    }
+   }
+  }
+ },
+ {
+  "seq": 17,
+  "event": {
+   "type": "operation_observed",
+   "observation": {
+    "observation_id": "lsh1-observe-post_tool_use-a84ddae23fe87e8872a49904777e29bc",
+    "session_id": "claude-code.06ae76fd-0d04-4720-9b06-808bd7133f37",
+    "workspace_id": "demo",
+    "operation_id": "lsh1-op-02afad307d50585101f50ff9af0c6c17",
+    "source": "claude-code",
+    "tool": "Edit",
+    "paths": [
+     "src/gate.rs"
+    ],
+    "result": "succeeded",
+    "lease_id": "lsh1-admit-9e561d5979a318855281370375143081",
+    "lease_relation": "current",
+    "concurrent_holders": [],
+    "observed_at_ms": 23069,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 18,
+  "event": {
+   "type": "source_observed",
+   "session_id": "claude-code.06ae76fd-0d04-4720-9b06-808bd7133f37",
+   "files": [
+    {
+     "path": "src/gate.rs",
+     "state": {
+      "type": "present",
+      "digest": "7f27cf90c3d41aea72f6f5852cb2b834293b3a205cabff1593a4a92c6dad3676"
+     }
+    }
+   ],
+   "origin": "write",
+   "at_ms": 23070,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 19,
+  "event": {
+   "type": "lease_completed",
+   "lease_id": "lsh1-admit-9e561d5979a318855281370375143081"
+  }
+ },
+ {
+  "seq": 20,
+  "event": {
+   "type": "disk_observed",
+   "observation": {
+    "observation_id": "scan-1-19-0",
+    "workspace_id": "demo",
+    "path": "src/gate.rs",
+    "before": {
+     "type": "present",
+     "digest": "43b72cde7a6013e142c7223e487b2950031a2d6ef45b1e37169be3943d6450dd"
+    },
+    "after": {
+     "type": "present",
+     "digest": "7f27cf90c3d41aea72f6f5852cb2b834293b3a205cabff1593a4a92c6dad3676"
+    },
+    "related_operation_ids": [],
+    "observed_at_ms": 24889,
+    "generation": 1
+   }
+  }
+ },
+ {
+  "seq": 21,
+  "event": {
+   "type": "session_ended",
+   "session_id": "claude-code.06ae76fd-0d04-4720-9b06-808bd7133f37"
+  }
+ },
+ {
+  "seq": 22,
+  "event": {
+   "type": "briefing_delivered",
+   "session_id": "claude-code.4f1840dc-267d-46ef-a2a7-28cdd213aa57",
+   "signature": "d102ec943f86001e"
+  }
+ },
+ {
+  "seq": 23,
+  "event": {
+   "type": "session_prompted",
+   "session_id": "claude-code.4f1840dc-267d-46ef-a2a7-28cdd213aa57",
+   "summary": "Without reading any file again, use the Write tool right now to replace the entire contents of src/gate.rs with exactly this single line: pub fn gate(_user: &str) -> bool { false } If the tool call\u2026",
+   "at_ms": 26391,
+   "generation": 1
+  }
+ },
+ {
+  "seq": 24,
+  "event": {
+   "type": "session_ended",
+   "session_id": "claude-code.4f1840dc-267d-46ef-a2a7-28cdd213aa57"
+  }
+ }
+]

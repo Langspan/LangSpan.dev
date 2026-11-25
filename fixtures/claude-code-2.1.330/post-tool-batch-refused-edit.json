@@ -1,0 +1,24 @@
+{
+ "session_id": "ad6a14f5-0d27-4f2a-aa47-722da5897c70",
+ "transcript_path": "/home/user/.claude/projects/-work-demo/ad6a14f5-0d27-4f2a-aa47-722da5897c70.jsonl",
+ "cwd": "/work/demo",
+ "prompt_id": "a5d64fc4-868f-4c34-9fa6-baef98ebeb65",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolBatch",
+ "tool_calls": [
+  {
+   "tool_name": "Edit",
+   "tool_input": {
+    "replace_all": false,
+    "file_path": "/work/demo/src/lib.rs",
+    "old_string": "hello",
+    "new_string": "hey"
+   },
+   "tool_use_id": "toolu_01HEF5f2hRrE7wCQ2ybhQZ25",
+   "tool_response": "Claude requested permissions to write to /work/demo/src/lib.rs, but you haven't granted it yet."
+  }
+ ]
+}
