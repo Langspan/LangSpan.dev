@@ -3252,7 +3252,7 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             "Workspace {} is in repository {} on {:?}.",
             git.workspace_id, git.repository_id, git.branch_ref
         ),
-        Outcome::SessionPrompted { session_id } => {
+        Outcome::SessionPrompted { session_id, .. } => {
             println!("Task summary recorded for {session_id}.")
         }
         Outcome::PromptTargets { session_id, paths } => println!(

@@ -98,6 +98,7 @@ impl Log {
             Command::SessionPrompt {
                 session_id: session.into(),
                 summary: "work on the parser".into(),
+                line_digests: Vec::new(),
             },
             now,
         );

@@ -500,7 +500,17 @@ pub struct SessionActivity {
     /// the source index (roadmap C8). Paths only; never the prompt's words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_targets: Option<PromptTargets>,
+    /// Digests of the leading non-empty lines of the session's last prompt,
+    /// at most `MAX_PROMPT_LINES`: compared with live peers' to tell prompts
+    /// started from one template apart (issue #114). Never the words.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub line_digests: Vec<String>,
 }
+
+/// At most this many leading prompt lines are compared by digest.
+pub const MAX_PROMPT_LINES: usize = 32;
+/// Hex characters in one prompt line digest, at most.
+pub const MAX_PROMPT_LINE_DIGEST: usize = 64;
 
 /// The definition paths a prompt's code briefing found, and when. Compared
 /// with other sessions' targets and work while within `BRIEF_HORIZON_MS`;
@@ -1625,6 +1635,8 @@ pub enum Event {
     SessionPrompted {
         session_id: String,
         summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        line_digests: Vec<String>,
         at_ms: u64,
         generation: u64,
     },
@@ -2263,6 +2275,8 @@ pub enum Command {
     SessionPrompt {
         session_id: String,
         summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        line_digests: Vec<String>,
     },
     /// Where the definitions the session's prompt named are, from the
     /// source index: replaces the session's earlier prompt targets. Paths
@@ -2720,6 +2734,8 @@ enum CommandWire {
     SessionPrompt {
         session_id: String,
         summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        line_digests: Vec<String>,
     },
     /// Where the definitions the session's prompt named are, from the
     /// source index: replaces the session's earlier prompt targets. Paths
@@ -2843,6 +2859,10 @@ pub enum Outcome {
     },
     SessionPrompted {
         session_id: String,
+        /// Leading prompt lines a live peer's latest prompt in the same
+        /// repository shares with this one, by digest.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        shared_lines: u32,
     },
     PromptTargets {
         session_id: String,
@@ -3594,21 +3614,28 @@ fn decide_checked(
                 outcome: Outcome::WorkspaceGit { git },
             })
         }
+        // The summary is the adapter's one line; the digests let it learn,
+        // without any peer's words, whether a live peer's prompt began the
+        // same way, so that it can name this prompt by where it differs.
         Command::SessionPrompt {
             session_id,
             summary,
+            line_digests,
         } => {
             current_session(state, session_id)?;
             validate_prompt_summary(summary)?;
+            validate_line_digests(line_digests)?;
             Ok(Decision {
                 events: vec![Event::SessionPrompted {
                     session_id: session_id.clone(),
                     summary: summary.clone(),
+                    line_digests: line_digests.clone(),
                     at_ms: now_ms,
                     generation: state.generation,
                 }],
                 outcome: Outcome::SessionPrompted {
                     session_id: session_id.clone(),
+                    shared_lines: shared_prompt_lines(state, session_id, line_digests),
                 },
             })
         }
@@ -5954,8 +5981,11 @@ fn brief(
                 branch_ref: peer_git.and_then(|git| git.branch_ref.clone()),
                 liveness,
                 ended: activity.is_some_and(|activity| activity.ended),
+                // A declared intent is the session's own account of its
+                // task: it replaces the line taken from the prompt.
                 summary: activity
                     .filter(|activity| fresh && !activity.ended && !task_known)
+                    .filter(|_| intent.is_none_or(|intent| intent.summary.is_empty()))
                     .and_then(|activity| activity.summary.clone()),
                 intent: intent
                     .filter(|_| !task_known)
@@ -6351,6 +6381,68 @@ fn validate_prompt_summary(summary: &str) -> Result<(), CoreError> {
         ));
     }
     Ok(())
+}
+
+fn validate_line_digests(digests: &[String]) -> Result<(), CoreError> {
+    if digests.len() > MAX_PROMPT_LINES
+        || digests.iter().any(|digest| {
+            digest.is_empty()
+                || digest.len() > MAX_PROMPT_LINE_DIGEST
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err(error(
+            "invalid_line_digests",
+            &format!(
+                "Prompt line digests are at most {MAX_PROMPT_LINES} lower-case hex strings of 1 to {MAX_PROMPT_LINE_DIGEST} characters"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// How many leading lines of `digests` the latest prompt of another live
+/// session in `session_id`'s checkout or repository begins with, at most:
+/// a session registered in this generation, not ended and not known to have
+/// exited. Zero when the session is unknown or nobody shares a line.
+fn shared_prompt_lines(state: &State, session_id: &str, digests: &[String]) -> u32 {
+    let Some(me) = state.sessions.get(session_id) else {
+        return 0;
+    };
+    let repository = |workspace_id: &str| {
+        state
+            .workspace_git
+            .get(workspace_id)
+            .map(|git| git.repository_id.as_str())
+    };
+    let mine = repository(&me.workspace_id);
+    state
+        .sessions
+        .values()
+        .filter(|peer| peer.session_id != session_id && peer.generation == state.generation)
+        .filter(|peer| {
+            peer.workspace_id == me.workspace_id
+                || (mine.is_some() && repository(&peer.workspace_id) == mine)
+        })
+        .filter(|peer| {
+            state
+                .session_liveness
+                .get(&peer.session_id)
+                .is_none_or(|liveness| liveness.status != LivenessStatus::Exited)
+        })
+        .filter_map(|peer| state.activity.get(&peer.session_id))
+        .filter(|activity| activity.generation == state.generation && !activity.ended)
+        .map(|activity| {
+            digests
+                .iter()
+                .zip(&activity.line_digests)
+                .take_while(|(mine, theirs)| mine == theirs)
+                .count()
+        })
+        .max()
+        .unwrap_or(0) as u32
 }
 
 fn validate_workspace_git(state: &State, git: &WorkspaceGit) -> Result<(), CoreError> {
@@ -6873,11 +6965,13 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::SessionPrompted {
             session_id,
             summary,
+            line_digests,
             at_ms,
             generation,
         } => {
             current_session(state, session_id)?;
             validate_prompt_summary(summary)?;
+            validate_line_digests(line_digests)?;
             if *generation != state.generation {
                 return Err(error(
                     "invalid_event",
@@ -6886,6 +6980,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             }
             let activity = activity_mut(state, session_id);
             activity.summary = Some(summary.clone());
+            activity.line_digests = line_digests.clone();
             activity.last_ms = activity.last_ms.max(*at_ms);
         }
         Event::PromptTargetsSet {
