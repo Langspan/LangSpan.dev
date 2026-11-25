@@ -115,6 +115,40 @@ what the remote setup publishes. The comparison is by file, not by meaning or
 symbol: two tasks naming different functions in one file are told, and a name
 defined in several files points at each of them.
 
+**Presence (added later, roadmap A13).** Where a session is looking is shown
+to its peers before it writes. Reads come from the existing `source_observed`
+records with origin `read` (Claude Code `Read`, Cursor `Read`, Gemini CLI
+`read_file`). Searches and shell commands are recorded by a new command,
+`observe_presence` (event `presence_observed`): the session, `kind` `search` or
+`shell`, 1 to 4 sorted relative paths and the time, never a pattern or command
+text. The issue proposed a `search_observed` event; one event with a kind
+serves both. A search is Claude Code's or Cursor's completed `Grep`, recorded
+as the path it was scoped to; a shell command's paths are the existing paths
+its reading programs name (`shell::looked_at`), which skips a search
+program's pattern and gives nothing when an option might take a value. Each
+session keeps its 16 most recent looked-at paths, newest first, one entry per
+path, in `SessionActivity::looking`. For each peer, `PeerWork::looking` lists
+at most 4, within the asking session's presence window (10 minutes by
+default), leaving out every path the peer holds or edited within the
+briefing horizon. A peer known only by where it looked is a peer, ranked after
+every peer with work. The hook adds `looking at ...` at the end of the line,
+whole or not at all, and only after every peer's line, local and remote, has
+been placed without it. Presence has a signature part of its own, appended to
+the delivery signature as `+` and a second fingerprint only when present, so
+earlier signatures are unchanged, and a peer listed only for where it looked
+is left out of the work part. A briefing whose work part is unchanged is news
+only at a session start or prompt, only while some presence is shown, and
+only when it differs from what was delivered: never mid-turn, and not when
+presence merely ages out. `set_presence` (event `presence_set`) holds a session's
+own setting when it is not the default: `shown` false (`--presence off`) keeps
+every read, search and shell path of that session out of peers' briefings and
+forgets what was recorded, and `window_ms` (1 to 30 minutes,
+`--presence-minutes`) is how old a peer's presence that session is shown. The
+hook sends a setting other than the default at every attachment, before
+anything it records, and the setting at every session event. Presence never
+holds or refuses a call, is local, and is not part of what the remote setup
+publishes.
+
 **Tools covered (added later).** Claude Code `MultiEdit` and `NotebookEdit`
 (`notebook_path`) are admitted, denied and observed like `Edit` and `Write`.
 Shell writes are still not covered.

@@ -496,7 +496,65 @@ pub struct SessionActivity {
     /// the source index (roadmap C8). Paths only; never the prompt's words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_targets: Option<PromptTargets>,
+    /// Where the session was last seen looking: files it read, the path
+    /// scope of its searches, and paths its shell commands named. Newest
+    /// first, one entry per path, at most `MAX_LOOKING` (roadmap A13). Paths
+    /// only: never a search pattern or a command's text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub looking: Vec<LookedPath>,
 }
+
+/// How a session came to look at a path, for presence (roadmap A13).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceKind {
+    /// The host reported a completed read of the file.
+    Read,
+    /// A search (Claude Code's or Cursor's `Grep`) scoped to this path.
+    Search,
+    /// A shell command named this existing path as an operand.
+    Shell,
+}
+
+/// One path a session looked at, and when.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LookedPath {
+    pub path: String,
+    pub kind: PresenceKind,
+    pub at_ms: u64,
+}
+
+/// One path a peer was looking at, as a briefing shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PresencePath {
+    pub path: String,
+    pub kind: PresenceKind,
+    pub age_s: u64,
+}
+
+/// A session's own presence setting, kept only when it differs from the
+/// default (shown, `PRESENCE_WINDOW_MS`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PresenceSetting {
+    /// False: this session's reads, searches and shell paths are never
+    /// shown to peers (`--presence off`).
+    pub shown: bool,
+    /// How old a peer's presence this session is still shown.
+    pub window_ms: u64,
+}
+
+/// Looked-at paths kept per session.
+pub const MAX_LOOKING: usize = 16;
+/// Looked-at paths shown per peer, and named by one presence observation.
+pub const PRESENCE_PATHS: usize = 4;
+/// Presence older than this is not shown, unless the asking session chose
+/// another window (at most `BRIEF_HORIZON_MS`).
+pub const PRESENCE_WINDOW_MS: u64 = 10 * 60 * 1000;
+/// The shortest presence window a session can choose.
+pub const MIN_PRESENCE_WINDOW_MS: u64 = 60 * 1000;
 
 /// The definition paths a prompt's code briefing found, and when. Compared
 /// with other sessions' targets and work while within `BRIEF_HORIZON_MS`;
@@ -584,6 +642,12 @@ pub struct PeerWork {
     /// subagent; absent for an unrelated session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relation: Option<PeerRelation>,
+    /// Where this peer was recently looking (presence, roadmap A13): at most
+    /// `PRESENCE_PATHS`, newest first, none it is editing or edited, within
+    /// the asking session's presence window. Advisory: it never holds,
+    /// refuses or delays anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub looking: Vec<PresencePath>,
 }
 
 /// A peer that belongs to the same host conversation as the asking session.
@@ -1478,6 +1542,9 @@ pub struct State {
     /// Automatic check results not yet delivered, per session, newest first.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub check_notices: BTreeMap<String, Vec<CheckNotice>>,
+    /// Sessions whose presence setting is not the default, by session ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub presence: BTreeMap<String, PresenceSetting>,
     /// The current generation's clock anchor, once recorded. Derived from
     /// the events on replay; not part of the status reply.
     #[serde(skip)]
@@ -1597,6 +1664,21 @@ pub enum Event {
         paths: Vec<String>,
         at_ms: u64,
         generation: u64,
+    },
+    /// Paths a session's search or shell command looked at (roadmap A13).
+    /// Paths only, never a pattern or command text. Local only: never
+    /// published. Reads are presence through `SourceObserved`.
+    PresenceObserved {
+        session_id: String,
+        kind: PresenceKind,
+        paths: Vec<String>,
+        at_ms: u64,
+        generation: u64,
+    },
+    /// The session's presence setting; the default removes its record.
+    PresenceSet {
+        session_id: String,
+        setting: PresenceSetting,
     },
     SessionEnded {
         session_id: String,
@@ -2206,6 +2288,22 @@ pub enum Command {
         session_id: String,
         paths: Vec<String>,
     },
+    /// Paths a search or shell command looked at: 1 to `PRESENCE_PATHS`
+    /// relative paths, never the pattern or the command. `kind` is `search`
+    /// or `shell`; reads arrive as `observe_source`.
+    ObservePresence {
+        session_id: String,
+        kind: PresenceKind,
+        paths: Vec<String>,
+    },
+    /// Whether peers are shown where this session looks, and how old a
+    /// peer's presence this session is shown (`window_ms`,
+    /// `MIN_PRESENCE_WINDOW_MS` to `BRIEF_HORIZON_MS`).
+    SetPresence {
+        session_id: String,
+        shown: bool,
+        window_ms: u64,
+    },
     SessionEnd {
         session_id: String,
     },
@@ -2647,6 +2745,22 @@ enum CommandWire {
         session_id: String,
         paths: Vec<String>,
     },
+    /// Paths a search or shell command looked at: 1 to `PRESENCE_PATHS`
+    /// relative paths, never the pattern or the command. `kind` is `search`
+    /// or `shell`; reads arrive as `observe_source`.
+    ObservePresence {
+        session_id: String,
+        kind: PresenceKind,
+        paths: Vec<String>,
+    },
+    /// Whether peers are shown where this session looks, and how old a
+    /// peer's presence this session is shown (`window_ms`,
+    /// `MIN_PRESENCE_WINDOW_MS` to `BRIEF_HORIZON_MS`).
+    SetPresence {
+        session_id: String,
+        shown: bool,
+        window_ms: u64,
+    },
     SessionEnd {
         session_id: String,
     },
@@ -2766,6 +2880,14 @@ pub enum Outcome {
     PromptTargets {
         session_id: String,
         paths: Vec<String>,
+    },
+    PresenceObserved {
+        session_id: String,
+        paths: u32,
+    },
+    Presence {
+        session_id: String,
+        setting: PresenceSetting,
     },
     SessionEnded {
         session_id: String,
@@ -3542,6 +3664,60 @@ fn decide_checked(
                 },
             })
         }
+        Command::ObservePresence {
+            session_id,
+            kind,
+            paths,
+        } => {
+            current_session(state, session_id)?;
+            let paths = presence_paths(*kind, paths)?;
+            if !presence_setting(state, session_id).shown {
+                return Err(error(
+                    "presence_off",
+                    "This session's presence is off; nothing it looks at is recorded",
+                ));
+            }
+            Ok(Decision {
+                events: vec![Event::PresenceObserved {
+                    session_id: session_id.clone(),
+                    kind: *kind,
+                    paths: paths.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }],
+                outcome: Outcome::PresenceObserved {
+                    session_id: session_id.clone(),
+                    paths: u32::try_from(paths.len()).unwrap_or(u32::MAX),
+                },
+            })
+        }
+        Command::SetPresence {
+            session_id,
+            shown,
+            window_ms,
+        } => {
+            known_session(state, session_id)?;
+            let setting = PresenceSetting {
+                shown: *shown,
+                window_ms: *window_ms,
+            };
+            validate_presence_setting(&setting)?;
+            let events = if presence_setting(state, session_id) == setting {
+                Vec::new()
+            } else {
+                vec![Event::PresenceSet {
+                    session_id: session_id.clone(),
+                    setting,
+                }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::Presence {
+                    session_id: session_id.clone(),
+                    setting,
+                },
+            })
+        }
         Command::SessionEnd { session_id } => {
             known_session(state, session_id)?;
             let events = if state
@@ -4306,12 +4482,16 @@ fn decide_checked(
             // Delivered messages are acknowledged below and so are absent
             // from the next briefing: the remembered signature leaves them
             // out, and any message at all makes this briefing new.
-            briefing.changed = signature != previous
-                || !briefing.messages.is_empty()
-                || !briefing.checks.is_empty();
+            // Presence is news only at a session start or prompt, and only
+            // while there is some: where peers look, newly or differently.
+            // Mid-turn, or when it merely aged out, it is not (see `brief`).
+            let differs = without_presence(&signature) != without_presence(previous)
+                || (!*mid_turn && signature.contains('+') && signature != previous);
+            briefing.changed =
+                differs || !briefing.messages.is_empty() || !briefing.checks.is_empty();
             let mut events = Vec::new();
             if *deliver {
-                if signature != previous {
+                if signature != previous && briefing.changed {
                     events.push(Event::BriefingDelivered {
                         session_id: session_id.clone(),
                         signature,
@@ -5689,6 +5869,35 @@ fn brief(
             .map(|targets| targets.paths.iter().cloned().collect())
             .unwrap_or_default()
     };
+    // Where a running peer that shows its presence was recently looking,
+    // within this session's window: newest first, none it edits or edited.
+    let window_ms = presence_setting(state, session_id).window_ms;
+    let looking = |id: &str, edited: &BTreeSet<String>| -> Vec<PresencePath> {
+        if !presence_setting(state, id).shown {
+            return Vec::new();
+        }
+        state
+            .activity
+            .get(id)
+            .filter(|activity| activity.generation == state.generation && !activity.ended)
+            .map(|activity| {
+                activity
+                    .looking
+                    .iter()
+                    .filter(|looked| {
+                        now_ms.saturating_sub(looked.at_ms) <= window_ms
+                            && !edited.contains(&looked.path)
+                    })
+                    .take(PRESENCE_PATHS)
+                    .map(|looked| PresencePath {
+                        path: looked.path.clone(),
+                        kind: looked.kind,
+                        age_s: now_ms.saturating_sub(looked.at_ms) / 1000,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     let (_, _, mine) = work_paths(session_id);
     // What a peer's work or task is compared with: this session's work and
     // the files its own task points at.
@@ -5736,7 +5945,23 @@ fn brief(
             .get(&peer.session_id)
             .filter(|intent| intent.generation == state.generation);
         let targets = prompt_targets(&peer.session_id);
-        if editing.is_empty() && intent.is_none() && !fresh && targets.is_empty() {
+        // Every file the peer holds or edited within the horizon, not only
+        // those listed: such a file is shown as edited, never as looked at.
+        let mut edited: BTreeSet<String> = editing.iter().cloned().collect();
+        edited.extend(activity.into_iter().flat_map(|activity| {
+            activity
+                .touched
+                .iter()
+                .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
+                .map(|touch| touch.path.clone())
+        }));
+        let looking = looking(&peer.session_id, &edited);
+        if editing.is_empty()
+            && intent.is_none()
+            && !fresh
+            && targets.is_empty()
+            && looking.is_empty()
+        {
             continue;
         }
         // A finished session matters only for the edits it left behind.
@@ -5774,10 +5999,16 @@ fn brief(
                 .cloned()
                 .collect()
         };
+        // A peer without admissions, edits, intent or targets (one known by
+        // its task line or by where it looked) ranks after every peer with
+        // them, so presence never takes such a peer's place.
+        let no_work =
+            editing.is_empty() && recent.is_empty() && intent.is_none() && targets.is_empty();
         peers.push((
             (
                 overlap.is_empty() && target_overlap.is_empty(),
                 editing.is_empty(),
+                no_work,
                 u64::MAX - last_ms,
             ),
             PeerWork {
@@ -5799,6 +6030,7 @@ fn brief(
                 overlap,
                 target_overlap,
                 relation,
+                looking,
             },
         ));
     }
@@ -5823,6 +6055,7 @@ fn brief(
                     .chain(&peer.overlap)
                     .chain(&peer.target_overlap)
                     .chain(peer.recent.iter().map(|recent| &recent.path))
+                    .chain(peer.looking.iter().map(|looked| &looked.path))
                     .map(|path| path.len() + 32)
                     .sum::<usize>();
             bytes <= BRIEF_BYTES
@@ -6042,7 +6275,8 @@ fn brief(
     for stale in &stale_reads {
         signature.push_str(&format!("stale|{}|{}\n", stale.path, stale.session_id));
     }
-    for peer in &peers {
+    // A peer listed only for where it looked is presence, not work.
+    for peer in peers.iter().filter(|peer| !presence_only(peer)) {
         signature.push_str(&peer.session_id);
         for part in [&peer.editing, &peer.overlap] {
             signature.push('|');
@@ -6069,6 +6303,33 @@ fn brief(
         }
         signature.push_str(if peer.ended { "|ended\n" } else { "\n" });
     }
+    // Presence has a signature part of its own: alone it makes a briefing
+    // new only at a session start or prompt, never mid-turn, so a peer's
+    // reads do not interrupt a turn. The paths are sorted: reading the same
+    // files in another order is not news.
+    let mut presence = String::new();
+    for peer in &peers {
+        if peer.looking.is_empty() {
+            continue;
+        }
+        let paths: BTreeSet<&str> = peer
+            .looking
+            .iter()
+            .map(|looked| looked.path.as_str())
+            .collect();
+        presence.push_str(&format!(
+            "{}|{}\n",
+            peer.session_id,
+            paths.into_iter().collect::<Vec<_>>().join(",")
+        ));
+    }
+    // Without presence the signature is as it was before presence existed,
+    // so a briefing stored then is not delivered again.
+    let mut signature = fingerprint(&signature);
+    if !presence.is_empty() {
+        signature.push('+');
+        signature.push_str(&fingerprint(&presence));
+    }
     Ok((
         Briefing {
             session_id: session_id.into(),
@@ -6092,8 +6353,26 @@ fn brief(
                 .into_iter()
                 .collect(),
         },
-        fingerprint(&signature),
+        signature,
     ))
+}
+
+/// A briefing signature without its presence part.
+fn without_presence(signature: &str) -> &str {
+    signature
+        .split_once('+')
+        .map_or(signature, |(work, _)| work)
+}
+
+/// A peer in a briefing only for where it looked.
+fn presence_only(peer: &PeerWork) -> bool {
+    !peer.looking.is_empty()
+        && peer.editing.is_empty()
+        && peer.recent.is_empty()
+        && peer.overlap.is_empty()
+        && peer.target_overlap.is_empty()
+        && peer.summary.is_none()
+        && peer.intent.is_none()
 }
 
 /// Whether the session wrote a file since its last tool batch or stop.
@@ -6748,6 +7027,45 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             });
             activity.last_ms = activity.last_ms.max(*at_ms);
         }
+        Event::PresenceObserved {
+            session_id,
+            kind,
+            paths,
+            at_ms,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            if presence_paths(*kind, paths)? != *paths || *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A presence record names sorted, unique paths in the current generation",
+                ));
+            }
+            // Recorded only while shown; a record kept from before the
+            // session turned presence off adds nothing.
+            if presence_setting(state, session_id).shown {
+                look(activity_mut(state, session_id), *kind, paths, *at_ms);
+            }
+        }
+        Event::PresenceSet {
+            session_id,
+            setting,
+        } => {
+            known_session(state, session_id)?;
+            validate_presence_setting(setting)?;
+            if !setting.shown {
+                // Off forgets what was recorded: turning it on again later
+                // never shows a path looked at while it was off or before.
+                if let Some(activity) = state.activity.get_mut(session_id) {
+                    activity.looking.clear();
+                }
+            }
+            if *setting == PresenceSetting::default() {
+                state.presence.remove(session_id);
+            } else {
+                state.presence.insert(session_id.clone(), *setting);
+            }
+        }
         Event::SessionEnded { session_id } => {
             known_session(state, session_id)?;
             activity_mut(state, session_id).ended = true;
@@ -6801,9 +7119,9 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::SourceObserved {
             session_id,
             files,
+            origin,
             at_ms,
             generation,
-            ..
         } => {
             current_session(state, session_id)?;
             if *generation != state.generation
@@ -6828,6 +7146,17 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 );
             }
             activity.known.truncate(MAX_KNOWN);
+            // A reported read is also where the session is looking
+            // (roadmap A13), unless its presence is off.
+            if *origin == SourceOrigin::Read && presence_setting(state, session_id).shown {
+                let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+                look(
+                    activity_mut(state, session_id),
+                    PresenceKind::Read,
+                    &paths,
+                    *at_ms,
+                );
+            }
         }
         Event::RemoteEnabled { link } => {
             validate_remote_link(state, link)?;
@@ -7680,6 +8009,65 @@ fn prompt_target_paths(paths: &[String]) -> Result<Vec<String>, CoreError> {
         ));
     }
     Ok(paths)
+}
+
+/// Presence paths, sorted and without repeats: 1 to `PRESENCE_PATHS`
+/// normalized relative paths, for a search or a shell command.
+fn presence_paths(kind: PresenceKind, paths: &[String]) -> Result<Vec<String>, CoreError> {
+    if kind == PresenceKind::Read {
+        return Err(error(
+            "invalid_presence",
+            "A read is recorded as an observed source version, not as presence",
+        ));
+    }
+    let paths = normalized_paths(paths)?;
+    if paths.len() > PRESENCE_PATHS {
+        return Err(error(
+            "too_many_paths",
+            &format!("A presence record names at most {PRESENCE_PATHS} paths"),
+        ));
+    }
+    Ok(paths)
+}
+
+impl Default for PresenceSetting {
+    fn default() -> Self {
+        Self {
+            shown: true,
+            window_ms: PRESENCE_WINDOW_MS,
+        }
+    }
+}
+
+/// A session's presence setting: its own, or the default.
+fn presence_setting(state: &State, session_id: &str) -> PresenceSetting {
+    state.presence.get(session_id).copied().unwrap_or_default()
+}
+
+fn validate_presence_setting(setting: &PresenceSetting) -> Result<(), CoreError> {
+    if !(MIN_PRESENCE_WINDOW_MS..=BRIEF_HORIZON_MS).contains(&setting.window_ms) {
+        return Err(error(
+            "invalid_limit",
+            "A presence window is between 1 and 30 minutes",
+        ));
+    }
+    Ok(())
+}
+
+/// Record that a session looked at `paths`: newest first, one entry per path.
+fn look(activity: &mut SessionActivity, kind: PresenceKind, paths: &[String], at_ms: u64) {
+    for path in paths.iter().rev() {
+        activity.looking.retain(|looked| looked.path != *path);
+        activity.looking.insert(
+            0,
+            LookedPath {
+                path: path.clone(),
+                kind,
+                at_ms,
+            },
+        );
+    }
+    activity.looking.truncate(MAX_LOOKING);
 }
 
 fn normalized_related_ids(ids: &[String]) -> Result<Vec<String>, CoreError> {

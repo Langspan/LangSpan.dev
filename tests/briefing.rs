@@ -928,3 +928,262 @@ fn a_worktree_installs_prompt_opt_outs_hold_when_the_main_checkouts_hook_decides
         assert!(!run.stdout.contains(HEADER), "{vendor}: {}", run.stdout);
     }
 }
+
+// Presence (roadmap A13): where peers are looking, from recorded Read and
+// Grep events and shell calls, through the real hook binary and daemon.
+
+/// A pattern that must never be recorded, briefed or shown anywhere.
+const PATTERN: &str = "zq_private_pattern_77";
+
+fn presence_repository(f: &Fixture) {
+    let root = f.root();
+    for file in ["src/auth.rs", "src/session.rs", "src/token.rs"] {
+        fs::write(root.join(file), "fn auth() {}\n").unwrap();
+    }
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "presence"]);
+}
+
+/// What `langspan` prints for `args` against the fixture's coordinator.
+fn cli(f: &Fixture, args: &[&str]) -> String {
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .arg("--state-dir")
+        .arg(f.state_dir())
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// `langspan brief SESSION --json`: a look from outside, not a delivery.
+fn brief_json(f: &Fixture, session: &str) -> String {
+    let id = format!("brief-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    cli(f, &["brief", session, "--json", "--request-id", &id])
+}
+
+fn claude_post(
+    f: &Fixture,
+    extra: &[&str],
+    tool: &str,
+    session: &str,
+    call: &str,
+    input: Value,
+) -> Run {
+    f.run(
+        "claude-code",
+        &f.root(),
+        extra,
+        &json!({
+            "session_id": session, "cwd": f.root(), "hook_event_name": "PostToolUse",
+            "tool_name": tool, "tool_use_id": call, "tool_input": input,
+            "tool_response": {"stdout": "", "stderr": "", "interrupted": false},
+        }),
+    )
+}
+
+#[test]
+fn a_peers_reads_and_searches_reach_the_next_briefing_as_where_it_is_looking() {
+    let mut f = Fixture::new();
+    presence_repository(&f);
+    f.start();
+    let root = f.root();
+    f.prompt("claude-code", ALICE, "Rework token refresh", &[]);
+    f.prompt("codex", BOB, "Rewrite the auth module", &[]);
+    // The branch is part of the line; learn it before the first briefing.
+    f.wait_for_repositories(1);
+
+    // Alice reads two files and searches one directory; she writes nothing.
+    for (call, file) in [("r1", "src/auth.rs"), ("r2", "src/session.rs")] {
+        let read = claude_post(
+            &f,
+            &[],
+            "Read",
+            ALICE,
+            call,
+            json!({"file_path": root.join(file)}),
+        );
+        assert_eq!(read.coverage, "read_recorded");
+    }
+    let grep = claude_post(
+        &f,
+        &[],
+        "Grep",
+        ALICE,
+        "g1",
+        json!({"pattern": PATTERN, "path": root.join("src"), "glob": "*.rs", "output_mode": "content"}),
+    );
+    assert_eq!(grep.coverage, "presence_recorded", "{}", grep.stdout);
+    assert_eq!(grep.stdout, "", "a search is never answered or held");
+
+    // Bob, a Codex session, is told at his next prompt.
+    let context = f
+        .prompt("codex", BOB, "carry on", &[])
+        .context
+        .expect("presence is news at a prompt");
+    let line = context
+        .lines()
+        .find(|line| line.contains("claude-code session 00000000"))
+        .unwrap_or_else(|| panic!("{context}"));
+    assert!(line.contains(r#"task: "Rework token refresh""#), "{line}");
+    assert!(
+        line.contains(r#"looking at "src", "src/session.rs", "src/auth.rs""#),
+        "{line}"
+    );
+    assert!(line.len() <= 700, "{line}");
+    assert!(context.len() <= langspan::hook::BRIEFING_LIMIT);
+
+    // The same in `langspan brief --json`, with each path's kind and age.
+    let brief: Value = serde_json::from_str(&brief_json(&f, &format!("codex.{BOB}"))).unwrap();
+    let looking = &brief["outcome"]["briefing"]["peers"][0]["looking"];
+    assert_eq!(looking[0]["path"], "src");
+    assert_eq!(looking[0]["kind"], "search");
+    assert_eq!(looking[2]["kind"], "read");
+    assert!(looking[0]["age_s"].as_u64().unwrap() < 600, "{looking}");
+    // And in the status, under the session's activity, with its times.
+    let status: Value = serde_json::from_str(&cli(&f, &["status", "--json"])).unwrap();
+    let recorded =
+        &status["outcome"]["state"]["activity"][format!("claude-code.{ALICE}")]["looking"];
+    assert_eq!(recorded.as_array().map(Vec::len), Some(3), "{recorded}");
+    assert_eq!(recorded[0]["kind"], "search");
+
+    // A file Alice then edits is shown as edited only.
+    let write = json!({"file_path": root.join("src/auth.rs"), "content": "fn auth2() {}\n"});
+    assert_eq!(
+        claude_tool(&f, "PreToolUse", "Write", ALICE, "w1", write.clone()).coverage,
+        "admitted"
+    );
+    fs::write(root.join("src/auth.rs"), "fn auth2() {}\n").unwrap();
+    assert_eq!(
+        claude_tool(&f, "PostToolUse", "Write", ALICE, "w1", write).coverage,
+        "observed"
+    );
+    let context = f.prompt("codex", BOB, "carry on", &[]).context.unwrap();
+    assert!(context.contains(r#"edited: "src/auth.rs""#), "{context}");
+    assert!(
+        context.contains(r#"looking at "src", "src/session.rs";"#),
+        "{context}"
+    );
+    // (It may also be listed as shared: Bob's prompt names `auth`, which the
+    // source index can find there. Never as looked at.)
+    let clause = context.split("looking at").nth(1).unwrap();
+    assert!(
+        !clause.lines().next().unwrap().contains("auth.rs"),
+        "{context}"
+    );
+    assert_eq!(context.matches("looking at").count(), 1, "{context}");
+
+    // The pattern is nowhere: not in an event, the status or a briefing.
+    for output in [
+        cli(&f, &["events", "--limit", "1000", "--json"]),
+        cli(&f, &["status", "--json"]),
+        cli(&f, &["status", "--all", "--json"]),
+        brief_json(&f, &format!("codex.{BOB}")),
+        context,
+    ] {
+        assert!(!output.contains(PATTERN), "{output}");
+        assert!(!output.contains("*.rs"), "{output}");
+    }
+}
+
+#[test]
+fn presence_off_keeps_a_sessions_reads_searches_and_shell_paths_from_peers() {
+    let mut f = Fixture::new();
+    presence_repository(&f);
+    f.start();
+    let root = f.root();
+    let off = ["--presence", "off"];
+    f.prompt("claude-code", CAROL, "Quiet work", &off);
+    let read = claude_post(
+        &f,
+        &off,
+        "Read",
+        CAROL,
+        "r1",
+        json!({"file_path": root.join("src/auth.rs")}),
+    );
+    assert_eq!(
+        read.coverage, "read_recorded",
+        "the version is still recorded"
+    );
+    let grep = claude_post(
+        &f,
+        &off,
+        "Grep",
+        CAROL,
+        "g1",
+        json!({"pattern": PATTERN, "path": root.join("src")}),
+    );
+    assert_eq!(grep.coverage, "presence_off");
+    let shell = claude_post(
+        &f,
+        &off,
+        "Bash",
+        CAROL,
+        "s1",
+        json!({"command": "cat src/token.rs"}),
+    );
+    assert_ne!(shell.coverage, "unsupported");
+
+    let context = f
+        .prompt("codex", BOB, "work", &[])
+        .context
+        .unwrap_or_default();
+    for path in ["src/auth.rs", "src/token.rs", "looking at"] {
+        assert!(!context.contains(path), "{context}");
+    }
+    let state = f.state();
+    let carol = format!("claude-code.{CAROL}");
+    assert!(state.activity[&carol].looking.is_empty());
+    assert!(!state.presence[&carol].shown);
+    // Its own read is still a version for its stale checks.
+    assert!(
+        state.activity[&carol]
+            .known
+            .iter()
+            .any(|k| k.path == "src/auth.rs")
+    );
+    assert!(!cli(&f, &["events", "--limit", "1000", "--json"]).contains("presence_observed"));
+}
+
+#[test]
+fn a_shell_command_that_reads_files_is_presence_on_every_host() {
+    let mut f = Fixture::new();
+    presence_repository(&f);
+    f.start();
+    f.prompt("claude-code", ALICE, "Look around", &[]);
+    // A Codex session's shell call: Codex reports no reads, but its shell
+    // commands name what they read.
+    let command = format!("grep -n {PATTERN} src/auth.rs && cat src/token.rs missing.rs");
+    for phase in ["PreToolUse", "PostToolUse"] {
+        let event = json!({
+            "session_id": BOB, "turn_id": "turn", "transcript_path": null, "cwd": f.root(),
+            "hook_event_name": phase, "model": "example", "permission_mode": "default",
+            "tool_name": "Bash", "tool_use_id": "s1",
+            "tool_input": {"command": command},
+            "tool_response": "",
+        });
+        f.run("codex", &f.root(), &[], &event);
+    }
+    let context = f
+        .prompt("claude-code", ALICE, "carry on", &[])
+        .context
+        .unwrap();
+    assert!(
+        context.contains(r#"looking at "src/auth.rs", "src/token.rs""#),
+        "{context}"
+    );
+    let brief = brief_json(&f, &format!("claude-code.{ALICE}"));
+    assert!(brief.contains(r#""kind":"shell""#), "{brief}");
+    assert!(
+        !brief.contains("missing.rs"),
+        "only existing paths: {brief}"
+    );
+    for output in [
+        brief,
+        cli(&f, &["events", "--limit", "1000", "--json"]),
+        context,
+    ] {
+        assert!(!output.contains(PATTERN), "{output}");
+    }
+}

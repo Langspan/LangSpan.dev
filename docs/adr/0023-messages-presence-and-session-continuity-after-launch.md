@@ -21,7 +21,7 @@ events and can follow them.
 
 | Row | Capability | LangSpan today | Decision and reason |
 | --- | --- | --- | --- |
-| A13 | Reads, greps and shell calls shown to peers as presence | Reads recorded as versions only | Not now. Adds briefing volume without evidence it changes decisions |
+| A13 | Reads, greps and shell calls shown to peers as presence | Reads recorded as versions only | Built 25 November 2026 ([issue #18](https://github.com/Langspan/LangSpan.dev/issues/18)), ahead of the condition below: presence, see [ADR 0004](0004-automatic-peer-briefing.md). To limit the volume, it is at most 4 paths per peer, dropped first at the cap, and never news mid-turn. Not yet run on a host |
 | A14 | Briefing for a repository first reached mid-session | Workspace from the event's working directory | Not now |
 | A15 | Mid-turn delivery on Codex | Next prompt only | Not now. Waits for confirmation that Codex honours added context on PostToolUse |
 | A16 | Instant message push into an open session | Next hook | Not now. Uses a host messaging socket: a new trust boundary |

@@ -58,6 +58,87 @@ pub fn write_targets(command: &str) -> Result<Vec<String>, &'static str> {
     Ok(targets.into_iter().collect())
 }
 
+/// At most this many words of one command are taken as paths it looked at.
+pub const MAX_LOOKED_WORDS: usize = 16;
+
+/// The words of a command that name what it reads, for presence (roadmap
+/// A13): every operand of a program that only reads or lists the files it
+/// is given (`cat`, `head`, `ls`, ...), and the operands after the pattern
+/// of a search (`grep`, `rg`) whose options are all known flags without a
+/// value, so the pattern is never among them. Options are not operands.
+/// Anything the parser does not take, or any other program, gives nothing.
+/// The words are as written; the caller keeps only those that name an
+/// existing path in the checkout.
+pub fn looked_at(command: &str) -> Vec<String> {
+    const READERS: [&str; 13] = [
+        "cat", "head", "tail", "less", "more", "wc", "nl", "ls", "stat", "file", "diff", "tree",
+        "du",
+    ];
+    const SEARCHERS: [&str; 4] = ["grep", "egrep", "fgrep", "rg"];
+    if command.len() > MAX_COMMAND_BYTES {
+        return Vec::new();
+    }
+    let Ok(tokens) = tokenize(command) else {
+        return Vec::new();
+    };
+    let mut looked = Vec::new();
+    for part in tokens.split(|token| *token == Token::Separator) {
+        let mut words = Vec::new();
+        let mut tokens = part.iter();
+        while let Some(token) = tokens.next() {
+            match token {
+                Token::Word(word) => words.push(word.as_str()),
+                // A redirection's file is written, not read.
+                Token::Redirect(_) => {
+                    tokens.next();
+                }
+                Token::Duplicate | Token::Separator => {}
+            }
+        }
+        let Some((&program, args)) = words.split_first() else {
+            continue;
+        };
+        let name = program.rsplit('/').next().unwrap_or(program);
+        let operands: Vec<&str> = if READERS.contains(&name) {
+            args.iter()
+                .copied()
+                .filter(|arg| !arg.starts_with('-'))
+                .collect()
+        } else if SEARCHERS.contains(&name) {
+            match operands(
+                args,
+                "nrRilLcHhsFEwvoxqIuS",
+                &[
+                    "--line-number",
+                    "--ignore-case",
+                    "--recursive",
+                    "--files-with-matches",
+                    "--count",
+                    "--fixed-strings",
+                    "--word-regexp",
+                    "--invert-match",
+                    "--hidden",
+                    "--no-heading",
+                ],
+            ) {
+                // The first operand is the pattern.
+                Ok(operands) => operands.into_iter().skip(1).collect(),
+                Err(_) => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        for operand in operands {
+            let operand = operand.trim_start_matches("./");
+            if !operand.is_empty() && !looked.iter().any(|seen| seen == operand) {
+                looked.push(operand.to_owned());
+            }
+        }
+    }
+    looked.truncate(MAX_LOOKED_WORDS);
+    looked
+}
+
 fn tokenize(command: &str) -> Result<Vec<Token>, &'static str> {
     let mut tokens = Vec::new();
     let mut word = String::new();
@@ -1533,6 +1614,55 @@ mod parser {
             "{command} should be unknown, got {:?}",
             write_targets(command)
         );
+    }
+
+    #[test]
+    fn a_reading_command_names_its_operands_and_a_search_never_its_pattern() {
+        let words = |command: &str| looked_at(command);
+        assert_eq!(words("cat src/auth.rs"), ["src/auth.rs"]);
+        assert_eq!(
+            words("sed -n 1,80p x; head -n 20 ./src/a.rs src/b.rs && ls -la src"),
+            ["20", "src/a.rs", "src/b.rs", "src"],
+            "options are dropped; a value word stays and is kept only if it is a path"
+        );
+        assert_eq!(words("/usr/bin/wc -l a.txt | tail -1"), ["a.txt"]);
+        assert_eq!(
+            words("cat a.txt > out.txt"),
+            ["a.txt"],
+            "a redirection is written"
+        );
+        // The pattern of a search is skipped, whatever it looks like.
+        assert_eq!(words("grep -rn 'src/secret.rs' src"), ["src"]);
+        assert_eq!(
+            words("rg --hidden token_refresh -- src lib"),
+            ["src", "lib"]
+        );
+        assert_eq!(words("grep pattern"), Vec::<String>::new());
+        // An option that may take a value could hide which word is the
+        // pattern: nothing is taken.
+        for command in [
+            "grep -e foo src",
+            "rg -g '*.rs' foo src",
+            "grep -A 3 foo src",
+            "rg --type rust foo src",
+            "grep --regexp=foo src",
+        ] {
+            assert!(words(command).is_empty(), "{command}");
+        }
+        // Other programs, and what the parser does not take, give nothing.
+        for command in [
+            "cargo test",
+            "python3 src/a.py",
+            "git show HEAD:src/a.rs",
+            "cat $(ls)",
+            "cat src/*.rs",
+            "cat 'unterminated",
+        ] {
+            assert!(words(command).is_empty(), "{command}");
+        }
+        let many: String = (0..40).map(|i| format!("f{i} ")).collect();
+        assert_eq!(words(&format!("cat {many}")).len(), MAX_LOOKED_WORDS);
+        assert!(words(&format!("cat {}", "a".repeat(MAX_COMMAND_BYTES))).is_empty());
     }
 
     #[test]

@@ -210,6 +210,51 @@ fn prompt_targets_are_never_published() {
     );
 }
 
+/// Presence (roadmap A13) is local only: reads, searches and shell paths
+/// never leave the machine.
+#[test]
+fn presence_is_never_published() {
+    use langspan_core::{FileState, ObservedFile, PresenceKind, SourceOrigin};
+    let mut state = ready(true);
+    let session = "claude-code.alice-session";
+    works(&mut state, session, "src/api.rs", "Add retry", 10);
+    let (before, signature, _) = outbox(&mut state, 20);
+    ok(run(
+        &mut state,
+        "read",
+        Command::ObserveSource {
+            session_id: session.into(),
+            files: vec![ObservedFile {
+                path: "src/read-only.rs".into(),
+                state: FileState::Present {
+                    digest: "1".repeat(64),
+                    kind: Default::default(),
+                },
+            }],
+            origin: SourceOrigin::Read,
+        },
+        30,
+    ));
+    ok(run(
+        &mut state,
+        "search",
+        Command::ObservePresence {
+            session_id: session.into(),
+            kind: PresenceKind::Search,
+            paths: vec!["src/searched-only".into()],
+        },
+        31,
+    ));
+    let (after, unchanged, _) = outbox(&mut state, 40);
+    assert_eq!(after, before);
+    assert_eq!(unchanged, signature, "presence is not part of what leaves");
+    let text = serde_json::to_string(&after).unwrap();
+    assert!(
+        !text.contains("read-only") && !text.contains("searched-only"),
+        "{text}"
+    );
+}
+
 #[test]
 fn a_publication_carries_this_repositorys_work_and_no_task_line_unless_shared() {
     let mut state = ready(false);
