@@ -291,6 +291,66 @@ fn doctor_names_the_events_an_earlier_install_left_out_and_a_reinstall_adds_them
     );
 }
 
+/// Issue #130: hooks installed with a state directory named through a
+/// symbolic link use the same coordinator as `doctor` run with its real
+/// path, and the other way round; a genuinely different one still warns.
+#[test]
+fn doctor_takes_a_state_directory_named_through_a_link_for_the_same_one() {
+    let w = World::new();
+    let work = w.work();
+    let state = w.base.join("state");
+    let link = w.base.join("state-link");
+    std::os::unix::fs::symlink(&state, &link).unwrap();
+    let other = w.base.join("other");
+    fs::create_dir(&other).unwrap();
+    let run = |state_dir: &std::path::Path, args: &[&str]| -> String {
+        let output = w
+            .langspan()
+            .arg("--state-dir")
+            .arg(state_dir)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let install = |state_dir: &std::path::Path| {
+        run(
+            state_dir,
+            &[
+                "hooks",
+                "install",
+                "claude-code",
+                "--workspace",
+                "app",
+                "--root",
+                work.to_str().unwrap(),
+                "--apply",
+            ],
+        )
+    };
+    let doctor =
+        |state_dir: &std::path::Path| run(state_dir, &["doctor", "--root", work.to_str().unwrap()]);
+    let warning = "different state directory";
+
+    install(&link);
+    let text = doctor(&state);
+    assert!(
+        text.contains("ok claude-code hooks installed for 10 event(s).") && !text.contains(warning),
+        "{text}"
+    );
+    let text = doctor(&other);
+    assert!(text.contains(warning), "{text}");
+
+    install(&state);
+    let text = doctor(&link);
+    assert!(
+        text.contains("ok claude-code hooks installed for 10 event(s).") && !text.contains(warning),
+        "{text}"
+    );
+    let text = doctor(&other);
+    assert!(text.contains(warning), "{text}");
+}
+
 #[test]
 fn a_remembered_note_reaches_the_next_session_on_that_file_and_a_recap_catches_up() {
     let mut w = World::new();

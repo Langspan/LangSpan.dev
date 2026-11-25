@@ -78,6 +78,15 @@ get `--state-dir`. The task asked for it only when non-default; it is always
 written because a host may start the MCP server with a different environment
 than the one `install` ran in, and a `LANGSPAN_STATE_DIR` or `XDG_STATE_HOME`
 there would point the MCP server at a different coordinator than the hooks.
+It is written as given, not resolved: an install made before this rule is
+judged the same way as one made after it. Every check that compares an
+installed state directory with the one in use (`doctor`, `hosts`, the
+daemon's host check, a project hook finding a linked worktree's own install)
+compares canonical forms
+through `install::same_directory`, resolving a directory that does not exist
+yet through its nearest existing ancestor. A path through a symbolic link
+(`/tmp` and `/private/tmp` on macOS) is therefore the same coordinator; only a
+genuinely different directory is reported as one (issue #130).
 
 **Claude Code's `~/.claude.json` is never created.** Claude Code writes it for
 itself and keeps account and per-project state in it. When it is missing,
@@ -149,5 +158,19 @@ or the reverse, or a `langspan` server LangSpan did not write, need attention.
   LangSpan-shaped project hook. The user-level hook then defers to that hook,
   which runs only if the host trusts the repository. That is the same outcome
   as the repository opting out of coordination.
-- Uninstall leaves a file that LangSpan created (for example a new
-  `hooks.json`) in place as `{}` or empty text, rather than deleting files.
+- Uninstall removes a file LangSpan may have created once nothing but
+  LangSpan's entries was in it, rather than leave it as `{}` or empty text:
+  each host's hooks file (`settings.json`, `hooks.json`; for Cursor, a file
+  left holding only `version: 1`), Cursor's `mcp.json` and Codex's
+  `config.toml`. LangSpan keeps no record of which files it created, so the
+  rule is the content: a file left holding nothing changes nothing for its
+  host, whoever made it. A file with anything else in it, including a key the
+  owner or the host added after the install, is kept with only LangSpan's
+  entries taken out. `~/.claude.json` is never removed. The removal has the
+  same guard as a write: the file is removed only while it still holds the
+  bytes the plan was made from, planned once more after a change, and kept
+  with an error after a second change. Directories install created are left
+  in place. Project-level `hooks remove` still leaves such a file in place.
+  A file an earlier version's uninstall already left holding nothing is
+  removed the same way when uninstall runs again; a file that is absent is
+  not listed.

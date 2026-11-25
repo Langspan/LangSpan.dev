@@ -81,7 +81,7 @@ Both reuse the existing guarded writer:
 - a change made meanwhile is planned against once more, and never overwritten;
 - the file's mode is kept, new files are `0600`;
 - idempotent;
-- removal takes out only LangSpan's entries. `version` stays, because LangSpan cannot tell whether it added it. A file that held only `version` round-trips exactly. A file that lacked it, which Cursor documents as required, keeps the added `version: 1`.
+- removal takes out only LangSpan's entries. `version` stays, because LangSpan cannot tell whether it added it. A project file that held only `version` round-trips exactly; at user level, `uninstall` removes a `hooks.json` left holding only `version`, since that changes nothing for Cursor and LangSpan may have created it (ADR 0010). A file that lacked it, which Cursor documents as required, keeps the added `version: 1`.
 - the two project files are written one after the other. If the second write fails, the first stays written and the error names the file. Rerunning the command completes the install.
 
 The ownership marker is a leading `LANGSPAN_MANAGED=cursor:v1 ` variable assignment, not the trailing `# langspan-managed:…` comment the other hosts use. Cursor appends the event to the command as a heredoc, and a trailing comment would swallow that redirection: the event's JSON, which includes a Write's file content, would then run as shell code. A test runs the installed command the way the CLI does, under `sh`, `bash` and `zsh`, with `$(touch …)` in the content, and checks that it is read as data.
