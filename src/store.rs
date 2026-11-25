@@ -87,6 +87,27 @@ const HISTORY_FOLLOWING: &str = concat!(
      ORDER BY seq LIMIT ?2"
 );
 
+/// The forgettings, one row per forgotten note.
+macro_rules! forgotten_kind {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END = 'forgotten'"
+    };
+}
+
+/// A partial index of the forgettings by note, so a history finds whether a
+/// note it would show was forgotten however far after it that happened.
+const FORGOTTEN_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_forgotten ON events(json_extract(event_json, '$.note_id')) WHERE ",
+    forgotten_kind!()
+);
+
+/// The forgettings of one note.
+const FORGETTING_LOOKUP: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE ",
+    forgotten_kind!(),
+    " AND json_extract(event_json, '$.note_id') = ?1"
+);
+
 /// Every generation's clock anchor.
 const ANCHORS: &str = concat!(
     "SELECT event_json FROM events WHERE ",
@@ -254,6 +275,7 @@ impl Store {
         // reads and writes the same rows.
         connection.execute_batch(GENERATION_MARKER_INDEX)?;
         connection.execute_batch(HISTORY_INDEX)?;
+        connection.execute_batch(FORGOTTEN_INDEX)?;
 
         let state = Self::recover(&connection)?;
         let generation = state
@@ -1004,8 +1026,9 @@ impl Store {
     /// A definition's history (roadmap D4): the newest `HISTORY_EVENTS`
     /// events of the kinds it reads before `before_seq`, the notes and
     /// messages after that point, and every generation's anchor, decided by
-    /// the core. Reads only, through the `events_history` index; it writes
-    /// nothing and delivers nothing. When the log holds older events than
+    /// the core. Reads only, through the `events_history` index, and the
+    /// forgettings of the notes read through `events_forgotten`, by note and
+    /// not within a capped window; it writes nothing and delivers nothing. When the log holds older events than
     /// those read, the answer says `truncated` with a `next_seq` that reads
     /// on from there.
     pub fn history(
@@ -1015,9 +1038,7 @@ impl Store {
         before_seq: Option<u64>,
         now_ms: u64,
     ) -> StoreResult<Outcome> {
-        let read = |sql: &str, from: i64, count: usize| -> StoreResult<Vec<RecordedEvent>> {
-            let mut statement = self.connection.prepare_cached(sql)?;
-            let mut rows = statement.query(params![from, i64::try_from(count)?])?;
+        let rows_of = |mut rows: rusqlite::Rows<'_>| -> StoreResult<Vec<RecordedEvent>> {
             let mut events = Vec::new();
             while let Some(row) = rows.next()? {
                 let seq: i64 = row.get(0)?;
@@ -1029,6 +1050,10 @@ impl Store {
             }
             Ok(events)
         };
+        let read = |sql: &str, from: i64, count: usize| -> StoreResult<Vec<RecordedEvent>> {
+            let mut statement = self.connection.prepare_cached(sql)?;
+            rows_of(statement.query(params![from, i64::try_from(count)?])?)
+        };
         let before = before_seq.map_or(i64::MAX, |seq| i64::try_from(seq).unwrap_or(i64::MAX));
         let mut events = read(HISTORY_BEFORE, before, HISTORY_EVENTS)?;
         // The oldest event read, when the log may hold older ones.
@@ -1038,6 +1063,30 @@ impl Store {
         if before_seq.is_some() {
             events.extend(read(HISTORY_FOLLOWING, before, HISTORY_EVENTS)?);
         }
+        // A note read here may have been forgotten after every event read:
+        // its forgetting is looked up by note, never within a capped window,
+        // so a forgotten note's text cannot come back.
+        let read_seqs: std::collections::BTreeSet<u64> =
+            events.iter().map(|recorded| recorded.seq).collect();
+        let notes: std::collections::BTreeSet<String> = events
+            .iter()
+            .filter_map(|recorded| match &recorded.event {
+                Event::Remembered { note, .. } if note.workspace_id == workspace_id => {
+                    Some(note.note_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut statement = self.connection.prepare_cached(FORGETTING_LOOKUP)?;
+        for note_id in &notes {
+            let forgettings = rows_of(statement.query([note_id])?)?;
+            events.extend(
+                forgettings
+                    .into_iter()
+                    .filter(|recorded| !read_seqs.contains(&recorded.seq)),
+            );
+        }
+        drop(statement);
         let mut anchors = Vec::new();
         let mut statement = self.connection.prepare_cached(ANCHORS)?;
         let mut rows = statement.query([])?;
@@ -1399,6 +1448,15 @@ mod tests {
             (plan(HISTORY_FOLLOWING, &[1, 10]), "events_history"),
             (plan(ANCHORS, &[]), "events_generation_marker"),
         ];
+        let forgetting: Vec<String> = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {FORGETTING_LOOKUP}"))
+            .unwrap()
+            .query_map(["note-1"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let plans = plans.into_iter().chain([(forgetting, "events_forgotten")]);
         drop(store);
         std::fs::remove_dir_all(&directory).unwrap();
         for (steps, index) in plans {
@@ -1407,5 +1465,114 @@ mod tests {
                 "{index}: {steps:?}"
             );
         }
+    }
+
+    /// A forgotten note's text never comes back in a history, even when
+    /// paging into old changes puts its forgetting behind more following
+    /// events than one answer reads.
+    #[test]
+    fn paging_into_old_history_never_shows_a_forgotten_note() {
+        use langspan_core::{InterfaceChange, InterfaceNotice, Message, Note, Recipient, Stamp};
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-history-forgotten-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let register = Command::WorkspaceRegister {
+            workspace_id: "work".into(),
+            root: directory.to_string_lossy().into_owned(),
+        };
+        store.execute("w", &register, &register, 0).unwrap();
+        let at = Stamp {
+            at_ms: 1_000,
+            generation: store.state.generation,
+        };
+        let text = "the retry loop deadlocks under load";
+        store
+            .commit(
+                &[
+                    Event::Remembered {
+                        note: Note {
+                            note_id: "note-1".into(),
+                            workspace_id: "work".into(),
+                            author: None,
+                            text: text.into(),
+                            paths: vec!["src/save.rs".into()],
+                        },
+                        at: Some(at),
+                    },
+                    Event::InterfaceChanged {
+                        notice: InterfaceNotice {
+                            notice_id: "n-1".into(),
+                            workspace_id: "work".into(),
+                            path: "src/save.rs".into(),
+                            changes: vec![InterfaceChange {
+                                name: "save".into(),
+                                kind: "function".into(),
+                                change: "signature_changed".into(),
+                                before: Some("fn save()".into()),
+                                after: Some("fn save(retries: u32)".into()),
+                                before_arity: None,
+                                after_arity: None,
+                                before_count: None,
+                                after_count: None,
+                            }],
+                            dependents: Vec::new(),
+                            by_session: None,
+                            at_ms: at.at_ms,
+                            generation: at.generation,
+                        },
+                    },
+                ],
+                None,
+            )
+            .unwrap();
+        let changed: i64 = store
+            .connection
+            .query_row("SELECT max(seq) FROM events", [], |row| row.get(0))
+            .unwrap();
+        // More following messages than one answer reads, then the forget.
+        let messages: Vec<Event> = (0..HISTORY_EVENTS)
+            .map(|index| Event::MessageSent {
+                message: Message {
+                    message_id: format!("m-{index}"),
+                    workspace_id: "work".into(),
+                    from: None,
+                    to: Recipient::Everyone {},
+                    text: "unrelated".into(),
+                    paths: Vec::new(),
+                    acknowledged: Vec::new(),
+                },
+                at: Some(at),
+            })
+            .collect();
+        store.commit(&messages, None).unwrap();
+        store
+            .commit(
+                &[Event::Forgotten {
+                    workspace_id: "work".into(),
+                    note_id: "note-1".into(),
+                }],
+                None,
+            )
+            .unwrap();
+
+        let before = u64::try_from(changed).unwrap() + 1;
+        let outcome = store
+            .history(("work", "save", None), 10, Some(before), at.at_ms)
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let Outcome::History { history } = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(history.entries.len(), 1, "{history:?}");
+        assert!(history.entries[0].notes.is_empty(), "{history:?}");
+        assert!(
+            !serde_json::to_string(&history).unwrap().contains(text),
+            "{history:?}"
+        );
     }
 }

@@ -291,7 +291,10 @@ at version 3.
 The store reads the newest 20,000 events of the five kinds a history uses
 before `before_seq` through a partial index, `events_history` (created when
 a store opens, like the generation-marker index), the notes, forgettings and
-messages after that point when paging, and every clock anchor. An answer is
+messages after that point when paging, and every clock anchor. Whether a note
+it read was forgotten is looked up by the note's ID through a second partial
+index, `events_forgotten`, never within those capped reads, so a forgotten
+note's text does not come back however many events follow it. An answer is
 cut, a whole event's entries at a time and oldest first, with `truncated`
 and a `next_seq` to pass as `before_seq`: past the limit, past 28 KiB (the
 MCP result carries it twice, and the adapter trims again against one frame,
@@ -305,7 +308,10 @@ of `crates/langspan-core/tests/recap.rs` over constructed logs, and
 (`fixtures/history-request-v3.json`) in `tests/graph.rs`, with a real daemon,
 index and repository changed across several scans, the CLI and the MCP tool;
 `history_reads_only_the_events_it_uses` in `src/store.rs` checks that the
-query plans use the partial index. Not yet called on a native host.
+query plans use the partial indexes, and
+`paging_into_old_history_never_shows_a_forgotten_note` there pages into a
+change whose note is forgotten after 20,000 following messages. Not yet called
+on a native host.
 
 **Code briefing at a prompt (added later).** At `UserPromptSubmit`, for both
 hosts, the hook process takes candidate names from the prompt: ASCII words of
