@@ -62,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           branch=$(jq -r '.headBranchName // empty' <<< "$PR")
-          if [ "$branch" != "release-please--branches--main" ]; then
+          if [ "$branch" != "release-please--branches--main--components--langspan" ]; then
             echo "Unexpected release branch '$branch'; not starting checks." >&2
             exit 1
           fi
