@@ -94,6 +94,49 @@ precedence. `langspan doctor --root /path/to/checkout` reports both setups;
 `langspan uninstall --apply` removes the user-level entries it recognizes and
 leaves the coordination state directory in place.
 
+#### A status line in Claude Code
+
+`langspan install --statusline on` also sets Claude Code's `statusLine` in
+`~/.claude/settings.json`, so the person sees, under the prompt after each
+message:
+
+```text
+langspan · 3 sessions here · 1 refusal today
+```
+
+"Sessions here" counts the conversations (not host subagents) of this
+checkout's repository, including its linked worktrees, that are of the
+running coordinator, not ended and active within the last 30 minutes, this
+one included. "Refusals today" counts what LangSpan refused in that
+repository since local midnight: a write held by another session, a stale or
+unread edit, and a held commit. Each refusal counts once; a retry of the same
+call adds none. Refusals recorded by a build without this feature, or before
+the coordinator first started with it, are not counted. The line shows counts,
+never paths, and nothing of it reaches the model.
+
+The setting is written only where no `statusLine` is set: a status line of
+your own is never replaced, and the dry run says so. `install` without
+`--statusline` leaves the setting as it is; `--statusline off` and
+`uninstall --apply` remove LangSpan's line and nothing else. Other hosts have
+no status-line command; a shell prompt or terminal multiplexer can show the
+same line with:
+
+```sh
+langspan statusline --root /path/to/checkout
+langspan statusline --root /path/to/checkout --json
+# {"workspace_id":"...","sessions_here":3,"refusals_today":1,"coordinator":"running"}
+```
+
+Without `--root` it takes the directory from the status-line input Claude Code
+sends on stdin (`workspace.current_dir`, then `cwd`), or else the current
+directory. It asks the coordinator once with a 200 ms deadline
+(`--deadline-ms`, 100 to 5000). When the coordinator is not running or does
+not answer in time it prints `langspan · coordinator not running` and exits 0;
+it never starts the coordinator, never uses the network, and writes nothing.
+"Local midnight" is read from `date +%z` (the system's time zone, honouring
+`TZ`); if that fails, midnight UTC is used. A day of more than 1024 refusals
+shows 1024.
+
 User-level installation has been tested with a temporary home and real daemon,
 Git and hook executable. It has not been observed in a native Claude Code or
 Codex session. Claude's user-scope MCP key remains inferred from its documentation;

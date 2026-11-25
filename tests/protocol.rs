@@ -381,3 +381,66 @@ fn v3_region_admission_matches_the_committed_golden_vector() {
         String::from_utf8_lossy(wire).replace(r#""end_line":13"#, r#""end_line":13,"allow":true"#);
     assert!(serde_json::from_str::<Request>(&unknown).is_err());
 }
+
+#[test]
+fn v3_status_line_request_and_response_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/status-line-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::StatusLine {
+            root: "/repos/app".into(),
+            from_ms: 1_795_564_800_000,
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+
+    let wire = include_bytes!("../fixtures/status-line-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::StatusLine { line } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(line.text(), "langspan · 3 sessions here · 2 refusals today");
+    assert_eq!(response.lease_valid, None, "a read grants nothing");
+    assert_eq!(encode(&response).unwrap(), wire);
+    // Counts only: a path has no field to travel in.
+    let pathed = String::from_utf8_lossy(wire).replace(
+        r#""refusals_today":2"#,
+        r#""refusals_today":2,"paths":["src/api.rs"]"#,
+    );
+    assert!(serde_json::from_str::<Response>(&pathed).is_err());
+}
+
+#[test]
+fn v3_held_commit_report_and_refusal_event_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/record-refusal-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::RecordRefusal {
+            session_id: "claude-code.alice".into(),
+            kind: langspan_core::RefusalKind::CommitHeld,
+            paths: vec!["src/api.rs".into()],
+            peer_session_id: Some("codex.bob".into()),
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+
+    let wire = include_str!("../fixtures/write-refused-event-v3.json");
+    let event: langspan_core::Event = serde_json::from_str(wire).unwrap();
+    assert!(matches!(
+        &event,
+        langspan_core::Event::WriteRefused {
+            kind: langspan_core::RefusalKind::Conflict,
+            at_ms: 5000,
+            ..
+        }
+    ));
+    assert_eq!(
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+        wire
+    );
+    // An event without a peer omits it, and still reads.
+    let alone = wire.replace(r#""peer_session_id":"codex.bob","#, "");
+    assert!(serde_json::from_str::<langspan_core::Event>(&alone).is_ok());
+}

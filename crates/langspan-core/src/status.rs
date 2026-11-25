@@ -77,6 +77,9 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         checkouts,
         auto_checks,
         check_notices,
+        // Derived for the status line; never part of the status reply.
+        clock_anchor: _,
+        refusals: _,
     } = state;
     let mut summary = StatusSummary::default();
     let mut open = BTreeMap::new();
@@ -132,6 +135,8 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         auto_checks: auto_checks.clone(),
         check_notices: keep(check_notices, of_shown),
         sessions: shown_sessions.clone(),
+        clock_anchor: None,
+        refusals: Vec::new(),
     };
     (view, summary)
 }
