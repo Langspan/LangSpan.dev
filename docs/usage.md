@@ -356,6 +356,22 @@ Inspect the dry run and add `--apply` to write it. The option also applies to th
 Codex installer. File activity and admission information remain available when
 prompt summaries are off.
 
+Two tasks aimed at the same code are flagged before either session edits it.
+At each recorded prompt the files where the code briefing found the prompt's
+names defined (at most 12 names and 3 definitions each) become the session's
+prompt targets: paths only, never the prompt's words, replaced at its next
+prompt that finds a definition and ignored after 30 minutes or once the session
+ends. When another session's targets share a file with your targets, admissions,
+recent edits or declared intent, its peer line says
+`task points at your files: "src/http.rs";`, and your own targets count as your
+work for `shares files with your work`. The prompting session is told in that
+prompt's briefing, the other at its next delivery point (after a tool batch on
+Claude Code, otherwise its next prompt), once. A target never holds a write,
+never counts as an admission and is never published through the remote setup.
+Nothing is recorded with `--prompt-summary off` or `--code-briefing off`, or
+while the source index has no complete scan. `langspan status --json` shows
+each session's `prompt_targets` under its activity.
+
 Relevant peers share the same checkout or a Git repository identified by the
 observer. Linked worktrees can share briefings while keeping separate physical
 admission domains. Another worktree's file is reported as a logical overlap,

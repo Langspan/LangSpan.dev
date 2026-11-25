@@ -982,7 +982,7 @@ fn lifecycle(
     let step = |kind: &str, command: Command| {
         session.call(wire_id(kind, &[source, &ids.operation_id]), command)
     };
-    let names = match kind {
+    let (names, prompt_recorded) = match kind {
         LifecycleKind::End => {
             return match step(
                 "session-end",
@@ -996,6 +996,7 @@ fn lifecycle(
         }
         LifecycleKind::Prompt { prompt } => {
             let (summary, names) = prompt_parts(prompt.as_deref(), config);
+            let recorded = summary.is_some();
             if let Some(summary) = summary
                 && let Err(failure) = step(
                     "prompt",
@@ -1007,10 +1008,38 @@ fn lifecycle(
             {
                 return failure_reply(failure);
             }
-            names
+            (names, recorded)
         }
-        LifecycleKind::Start => Vec::new(),
+        LifecycleKind::Start => (Vec::new(), false),
     };
+    // The code section is looked up before the briefing, so that the files
+    // this prompt points at are compared with other sessions' in it.
+    let code = session.code_context(&ids, names);
+    // Prompt targets (roadmap C8) go with a recorded prompt: only with the
+    // prompt summary and the code briefing on, and only from an index with
+    // a complete scan. Paths only; a failure to record them is noted and
+    // leaves the briefing as it would have been.
+    let mut targets_note = String::new();
+    if prompt_recorded
+        && let Some((matches, coverage)) = code.as_ref()
+        && coverage.scanned
+    {
+        let paths = prompt_target_paths(matches);
+        if !paths.is_empty()
+            && let Err(failure) = step(
+                "prompt-targets",
+                Command::SetPromptTargets {
+                    session_id: ids.session_id.clone(),
+                    paths,
+                },
+            )
+        {
+            targets_note = format!(
+                "; prompt targets not recorded: {}",
+                failure_reply(failure).detail
+            );
+        }
+    }
     let briefing = match step(
         "brief",
         Command::Brief {
@@ -1032,13 +1061,15 @@ fn lifecycle(
     let deliver = has_content(&briefing) && (starting || briefing.changed);
     // The code section is about this prompt, so it is sent whether or not
     // the peer briefing changed. It is never remembered as delivered.
-    let code = session.code_context(&ids, names);
     let Some(context) = compose_context(
         deliver.then_some(&briefing),
         code.as_ref()
             .map(|(matches, coverage)| (matches.as_slice(), coverage)),
     ) else {
-        return Reply::none("no_briefing", "no new relevant peer work");
+        return Reply::none(
+            "no_briefing",
+            format!("no new relevant peer work{targets_note}"),
+        );
     };
     let stdout = json!({
         "hookSpecificOutput": {
@@ -1052,10 +1083,23 @@ fn lifecycle(
         stdout,
         coverage: if deliver { "briefed" } else { "code_briefed" },
         detail: format!(
-            "{} peer session(s); {matched} prompt name(s) found in the source index",
+            "{} peer session(s); {matched} prompt name(s) found in the source index{targets_note}",
             if deliver { briefing.peers.len() } else { 0 }
         ),
     }
+}
+
+/// The distinct files the code briefing found definitions in, in the order
+/// found, at most `MAX_PROMPT_TARGETS`: a prompt's targets. Paths only.
+pub fn prompt_target_paths(matches: &[langspan_core::NameContext]) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for symbol in matches.iter().flat_map(|context| &context.definitions) {
+        if !paths.contains(&symbol.path) {
+            paths.push(symbol.path.clone());
+        }
+    }
+    paths.truncate(langspan_core::MAX_PROMPT_TARGETS);
+    paths
 }
 
 /// The LangSpan host identity an event belongs to, and the parent's
@@ -1681,6 +1725,12 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
             line.push_str(&format!(
                 " shares files with your work: {};",
                 list(&peer.overlap)
+            ));
+        }
+        if !peer.target_overlap.is_empty() {
+            line.push_str(&format!(
+                " task points at your files: {};",
+                list(&peer.target_overlap)
             ));
         }
         if !peer.editing.is_empty() {
@@ -3414,11 +3464,12 @@ fn overlap(
     text
 }
 
+/// `text` in at most `limit` bytes, the ellipsis that marks a cut included.
 pub(crate) fn truncate(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.into();
     }
-    let mut end = limit;
+    let mut end = limit.saturating_sub('…'.len_utf8());
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -3504,8 +3555,44 @@ mod briefing_text {
                 8
             ],
             overlap: vec![path.into(); 8],
+            target_overlap: Vec::new(),
             relation: None,
         }
+    }
+
+    /// A peer whose task only points at files: nothing edited, nothing held.
+    fn targeting(id: &str, path: &str) -> PeerWork {
+        PeerWork {
+            editing: Vec::new(),
+            recent: Vec::new(),
+            overlap: Vec::new(),
+            target_overlap: vec![path.into(); 8],
+            summary: Some("t".repeat(langspan_core::MAX_PROMPT_SUMMARY_BYTES)),
+            ..peer(id, path)
+        }
+    }
+
+    #[test]
+    fn a_task_pointing_at_your_files_is_said_first_and_within_the_caps() {
+        let text = render_briefing(&briefing(vec![targeting("bob", "src/http.rs")]));
+        assert!(
+            text.contains(
+                r#"- codex session bob in this checkout on branch "main": task points at your files: "src/http.rs""#
+            ),
+            "{text}"
+        );
+        let long = format!("src/{}", "x".repeat(500));
+        let text = render_briefing(&briefing(
+            (0..16)
+                .map(|n| targeting(&format!("peer{n}"), &long))
+                .collect(),
+        ));
+        assert!(text.len() <= BRIEFING_LIMIT, "{}", text.len());
+        for line in text.lines() {
+            assert!(line.len() <= PEER_LINE_LIMIT, "{}: {line}", line.len());
+        }
+        assert!(text.contains("task points at your files"), "{text}");
+        assert!(text.contains("more session(s) not shown"), "{text}");
     }
 
     fn briefing(peers: Vec<PeerWork>) -> Briefing {
@@ -3972,6 +4059,7 @@ mod code_briefing_text {
                         2
                     ],
                     overlap: Vec::new(),
+                    target_overlap: Vec::new(),
                     relation: None,
                 })
                 .collect(),

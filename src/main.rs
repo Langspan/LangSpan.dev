@@ -2991,6 +2991,10 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
         Outcome::SessionPrompted { session_id } => {
             println!("Task summary recorded for {session_id}.")
         }
+        Outcome::PromptTargets { session_id, paths } => println!(
+            "Prompt targets recorded for {session_id}: {} file(s).",
+            paths.len()
+        ),
         Outcome::SessionEnded { session_id } => {
             println!("Session {session_id} marked ended.")
         }

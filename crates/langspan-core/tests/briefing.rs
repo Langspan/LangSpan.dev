@@ -681,3 +681,313 @@ fn a_parent_relation_in_a_briefing_stored_by_an_older_version_still_reads() {
         serde_json::from_str("\"parent\"").expect("an older stored relation reads");
     assert_eq!(relation, langspan_core::PeerRelation::Parent);
 }
+
+// Prompt targets (roadmap C8, ADR 0023): the definition paths a prompt's
+// code briefing found, compared with other sessions' targets and work.
+
+fn targets(state: &mut State, session: &str, paths: &[&str], now: u64) {
+    match ok(run(
+        state,
+        &format!("t-{session}-{now}"),
+        Command::SetPromptTargets {
+            session_id: session.into(),
+            paths: paths.iter().map(|path| (*path).into()).collect(),
+        },
+        now,
+    )) {
+        Outcome::PromptTargets {
+            session_id,
+            paths: recorded,
+        } => {
+            assert_eq!(session_id, session);
+            assert_eq!(recorded, paths);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+fn brief_mid_turn(state: &mut State, session: &str, id: &str, now: u64) -> Briefing {
+    match ok(run(
+        state,
+        id,
+        Command::Brief {
+            session_id: session.into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: true,
+        },
+        now,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn peer<'a>(briefing: &'a Briefing, session: &str) -> &'a langspan_core::PeerWork {
+    briefing
+        .peers
+        .iter()
+        .find(|peer| peer.session_id == session)
+        .unwrap_or_else(|| panic!("{session} not in {briefing:?}"))
+}
+
+#[test]
+fn two_sessions_whose_tasks_point_at_one_file_are_each_told_before_either_writes() {
+    let mut state = ready();
+    prompted(
+        &mut state,
+        "alice",
+        "make parse_header accept folded lines",
+        1_000,
+    );
+    targets(&mut state, "alice", &["src/http.rs"], 1_000);
+    // Alice is first: nobody else's task points anywhere yet.
+    assert!(brief(&mut state, "alice", "a1", 1_000).peers.is_empty());
+
+    prompted(
+        &mut state,
+        "bob",
+        "fix the 400 from parse_header on empty values",
+        61_000,
+    );
+    targets(&mut state, "bob", &["src/http.rs"], 61_000);
+    // Bob is told in his prompt's briefing.
+    let bobs = brief(&mut state, "bob", "b1", 61_000);
+    assert!(bobs.changed);
+    let alice = peer(&bobs, "alice");
+    assert_eq!(alice.target_overlap, ["src/http.rs"]);
+    assert!(alice.overlap.is_empty(), "nobody has edited anything");
+    assert!(alice.editing.is_empty() && alice.recent.is_empty());
+
+    // Alice is told at her next delivery point, once.
+    let alices = brief_mid_turn(&mut state, "alice", "a2", 62_000);
+    assert!(alices.changed);
+    assert_eq!(peer(&alices, "bob").target_overlap, ["src/http.rs"]);
+    assert!(!brief_mid_turn(&mut state, "alice", "a3", 63_000).changed);
+    // Naming the same function again renews the targets without a repeat.
+    targets(&mut state, "bob", &["src/http.rs"], 64_000);
+    assert!(!brief_mid_turn(&mut state, "alice", "a4", 65_000).changed);
+    // No write is held because of it: targets are not admissions.
+    assert!(matches!(
+        ok(run(
+            &mut state,
+            "admit",
+            Command::Admit {
+                session_id: "alice".into(),
+                paths: vec!["src/http.rs".into()],
+                ttl_ms: 1_000,
+            },
+            66_000,
+        )),
+        Outcome::Admitted { .. }
+    ));
+}
+
+#[test]
+fn a_task_pointing_at_a_peers_edits_admissions_or_intent_is_told_to_both() {
+    let mut state = ready();
+    edited(&mut state, "alice", "src/edited.rs", 100);
+    ok(run(
+        &mut state,
+        "lease",
+        Command::Admit {
+            session_id: "alice".into(),
+            paths: vec!["src/held.rs".into()],
+            ttl_ms: 60_000,
+        },
+        100,
+    ));
+    ok(run(
+        &mut state,
+        "intent",
+        Command::IntentSet {
+            session_id: "alice".into(),
+            paths: vec!["src/declared.rs".into()],
+            summary: "plan".into(),
+        },
+        100,
+    ));
+    // Carol is in a linked worktree of the same repository.
+    prompted(&mut state, "carol", "rework three things", 200);
+    targets(
+        &mut state,
+        "carol",
+        &[
+            "src/declared.rs",
+            "src/edited.rs",
+            "src/elsewhere.rs",
+            "src/held.rs",
+        ],
+        200,
+    );
+    // Carol's task points at files alice works on: for carol that is the
+    // ordinary overlap of alice's work with her own.
+    let carols = brief(&mut state, "carol", "c1", 300);
+    let alice = peer(&carols, "alice");
+    assert_eq!(
+        alice.overlap,
+        ["src/declared.rs", "src/edited.rs", "src/held.rs"]
+    );
+    assert!(alice.target_overlap.is_empty());
+    // Alice is told carol's task points at her files.
+    let alices = brief(&mut state, "alice", "a1", 300);
+    let carol = peer(&alices, "carol");
+    assert_eq!(
+        carol.target_overlap,
+        ["src/declared.rs", "src/edited.rs", "src/held.rs"]
+    );
+    assert!(carol.overlap.is_empty(), "carol has not edited anything");
+    // Dave works in another repository: never compared.
+    prompted(&mut state, "dave", "same names elsewhere", 400);
+    targets(&mut state, "dave", &["src/edited.rs"], 400);
+    assert!(
+        !brief(&mut state, "alice", "a2", 500)
+            .peers
+            .iter()
+            .any(|peer| peer.session_id == "dave")
+    );
+}
+
+#[test]
+fn old_targets_and_an_ended_sessions_targets_cause_no_notice() {
+    let mut state = ready();
+    prompted(&mut state, "alice", "parse_header", 1_000);
+    targets(&mut state, "alice", &["src/http.rs"], 1_000);
+    let late = 1_000 + BRIEF_HORIZON_MS + 1;
+    prompted(&mut state, "bob", "parse_header", late);
+    targets(&mut state, "bob", &["src/http.rs"], late);
+    let bobs = brief(&mut state, "bob", "b1", late);
+    assert!(
+        bobs.peers.iter().all(|peer| peer.target_overlap.is_empty()),
+        "alice's targets are past the horizon: {bobs:?}"
+    );
+    // Alice is not told either: her own targets are past it.
+    let alices = brief(&mut state, "alice", "a1", late);
+    assert!(
+        alices
+            .peers
+            .iter()
+            .all(|peer| peer.target_overlap.is_empty()),
+        "{alices:?}"
+    );
+    // Carol's are fresh, but her session ended.
+    prompted(&mut state, "carol", "parse_header", late);
+    targets(&mut state, "carol", &["src/http.rs"], late);
+    ok(run(
+        &mut state,
+        "end",
+        Command::SessionEnd {
+            session_id: "carol".into(),
+        },
+        late + 1,
+    ));
+    let bobs = brief(&mut state, "bob", "b2", late + 2);
+    assert!(
+        bobs.peers.iter().all(|peer| peer.session_id != "carol"),
+        "an ended session with no edits is not news: {bobs:?}"
+    );
+}
+
+#[test]
+fn the_next_prompts_targets_supersede_the_last() {
+    let mut state = ready();
+    prompted(&mut state, "alice", "parse_header", 100);
+    targets(&mut state, "alice", &["src/http.rs"], 100);
+    prompted(&mut state, "bob", "parse_header", 200);
+    targets(&mut state, "bob", &["src/http.rs"], 200);
+    assert_eq!(
+        peer(&brief(&mut state, "bob", "b1", 300), "alice").target_overlap,
+        ["src/http.rs"]
+    );
+    targets(&mut state, "alice", &["src/other.rs"], 400);
+    let after = brief(&mut state, "bob", "b2", 500);
+    assert!(after.changed, "the overlap ended");
+    assert!(peer(&after, "alice").target_overlap.is_empty());
+    let recorded = state.activity["alice"].prompt_targets.as_ref().unwrap();
+    assert_eq!(recorded.paths, ["src/other.rs"]);
+    assert_eq!(recorded.at_ms, 400);
+    // The whole state, as `langspan status --json` shows it, carries them.
+    let json = serde_json::to_value(&state).unwrap();
+    assert_eq!(
+        json["activity"]["alice"]["prompt_targets"]["paths"][0],
+        "src/other.rs"
+    );
+}
+
+#[test]
+fn invalid_prompt_targets_are_rejected_without_events() {
+    let state = ready();
+    let many: Vec<String> = (0..=langspan_core::MAX_PROMPT_TARGETS)
+        .map(|n| format!("src/f{n}.rs"))
+        .collect();
+    for (session, paths) in [
+        ("alice", Vec::new()),
+        ("alice", many),
+        ("alice", vec!["../outside.rs".to_owned()]),
+        ("alice", vec!["/abs/path.rs".to_owned()]),
+        ("nobody", vec!["src/http.rs".to_owned()]),
+    ] {
+        let command = Command::SetPromptTargets {
+            session_id: session.into(),
+            paths,
+        };
+        let decision = decide(&state, &command, "bad", 1);
+        assert!(
+            matches!(decision.outcome, Outcome::Error { .. }),
+            "{command:?}"
+        );
+        assert!(decision.events.is_empty());
+    }
+    // At the limit is accepted, and a repeated path counts once.
+    let full: Vec<String> = (0..langspan_core::MAX_PROMPT_TARGETS)
+        .flat_map(|n| [format!("src/f{n}.rs"), format!("src/f{n}.rs")])
+        .collect();
+    let decision = decide(
+        &state,
+        &Command::SetPromptTargets {
+            session_id: "alice".into(),
+            paths: full,
+        },
+        "full",
+        1,
+    );
+    assert!(
+        matches!(
+            decision.outcome,
+            Outcome::PromptTargets { ref paths, .. }
+                if paths.len() == langspan_core::MAX_PROMPT_TARGETS
+        ),
+        "{:?}",
+        decision.outcome
+    );
+}
+
+#[test]
+fn a_targets_event_holds_paths_only_and_from_an_older_generation_is_refused() {
+    let mut state = ready();
+    let decision = decide(
+        &state,
+        &Command::SetPromptTargets {
+            session_id: "alice".into(),
+            paths: vec!["src/http.rs".into()],
+        },
+        "t",
+        5,
+    );
+    let [event] = decision.events.as_slice() else {
+        panic!("{decision:?}")
+    };
+    assert_eq!(
+        serde_json::to_value(event).unwrap(),
+        serde_json::json!({
+            "type": "prompt_targets_set",
+            "session_id": "alice",
+            "paths": ["src/http.rs"],
+            "at_ms": 5,
+            "generation": 1,
+        })
+    );
+    apply(&mut state, event).unwrap();
+    apply(&mut state, &Event::Booted { generation: 2 }).unwrap();
+    assert!(apply(&mut state, event).is_err(), "a stale generation");
+}

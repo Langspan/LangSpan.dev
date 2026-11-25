@@ -180,6 +180,37 @@ fn briefed(state: &mut State, id: &str, now: u64) -> langspan_core::Briefing {
 }
 
 #[test]
+fn prompt_targets_are_never_published() {
+    let mut state = ready(true);
+    works(
+        &mut state,
+        "claude-code.alice-session",
+        "src/api.rs",
+        "Add retry",
+        10,
+    );
+    let (before, signature, _) = outbox(&mut state, 20);
+    ok(run(
+        &mut state,
+        "targets",
+        Command::SetPromptTargets {
+            session_id: "claude-code.alice-session".into(),
+            paths: vec!["src/targeted-only.rs".into()],
+        },
+        30,
+    ));
+    let (after, unchanged, _) = outbox(&mut state, 40);
+    assert_eq!(after, before);
+    assert_eq!(unchanged, signature, "targets are not part of what leaves");
+    assert!(
+        !serde_json::to_string(&after)
+            .unwrap()
+            .contains("targeted-only"),
+        "{after:?}"
+    );
+}
+
+#[test]
 fn a_publication_carries_this_repositorys_work_and_no_task_line_unless_shared() {
     let mut state = ready(false);
     works(
