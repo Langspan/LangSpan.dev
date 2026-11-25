@@ -639,6 +639,7 @@ pub fn lifecycle_event(
         (&event.hook_event_name, event_id.as_deref()),
         &config,
         deadline,
+        BRIEFING_LIMIT,
     ))
 }
 
@@ -681,6 +682,7 @@ pub fn lifecycle_parsed(
             (event_name, event_id),
             &config,
             deadline,
+            BRIEFING_LIMIT,
         ),
         Err(reply) => reply,
     }
@@ -688,6 +690,11 @@ pub fn lifecycle_parsed(
 
 /// `lifecycle_parsed` for a workspace the adapter has already resolved
 /// (`resolve_workspace`), for a host whose session identity depends on it.
+/// `room` is what is left of the briefing limit for this workspace's
+/// context when one reply joins several (at most `BRIEFING_LIMIT`). With
+/// less than the whole limit, the briefing is first looked at without
+/// delivery and delivered only if it fits `room`; otherwise nothing is
+/// delivered, and its messages and check results wait for the next event.
 pub fn lifecycle_resolved(
     source: &str,
     host_session: &str,
@@ -695,6 +702,7 @@ pub fn lifecycle_resolved(
     (event_name, event_id): (&str, Option<&str>),
     config: &Config,
     deadline: Instant,
+    room: usize,
 ) -> Reply {
     if !valid_host_id(host_session) {
         return no_session_identity();
@@ -709,6 +717,7 @@ pub fn lifecycle_resolved(
         (event_name, event_id),
         config,
         deadline,
+        room.min(BRIEFING_LIMIT),
     )
 }
 
@@ -960,6 +969,7 @@ fn lifecycle(
     (event_name, event_id): (&str, Option<&str>),
     config: &Config,
     deadline: Instant,
+    room: usize,
 ) -> Reply {
     if Instant::now() >= deadline {
         return Reply::none("timeout", "hook deadline elapsed before coordination");
@@ -1066,32 +1076,62 @@ fn lifecycle(
             );
         }
     }
-    let briefing = match step(
-        "brief",
+    let code_part = || {
+        code.as_ref()
+            .map(|(matches, coverage)| (matches.as_slice(), coverage))
+    };
+    let brief = |kind: &str, deliver: bool| match step(
+        kind,
         Command::Brief {
             session_id: ids.session_id.clone(),
             max_peers: BRIEF_PEERS,
-            deliver: true,
+            deliver,
             mid_turn: false,
         },
     ) {
+        // A new or resumed context has lost any earlier briefing; a prompt
+        // in a continuing context gets one only when the situation changed.
         Ok(Response {
             outcome: Outcome::Briefing { briefing },
             ..
-        }) => briefing,
-        Ok(other) => return Reply::none("unknown", format!("unexpected outcome {other:?}")),
-        Err(failure) => return failure_reply(failure),
+        }) => Ok((has_content(&briefing) && (starting || briefing.changed)).then_some(briefing)),
+        Ok(other) => Err(Reply::none(
+            "unknown",
+            format!("unexpected outcome {other:?}"),
+        )),
+        Err(failure) => Err(failure_reply(failure)),
     };
-    // A new or resumed context has lost any earlier briefing; a prompt in a
-    // continuing context gets one only when the situation changed.
-    let deliver = has_content(&briefing) && (starting || briefing.changed);
+    // Delivering a briefing acknowledges its messages and check results, so
+    // with less than the whole limit left (a reply joining several
+    // workspaces) it is first looked at without delivery, and delivered
+    // only if it fits the room. Otherwise it waits for the next event.
+    // A delivered briefing that has grown since its preview is shown whole.
+    let preview = if room >= BRIEFING_LIMIT {
+        None
+    } else {
+        match brief("brief-preview", false) {
+            Ok(preview) => Some(preview),
+            Err(reply) => return reply,
+        }
+    };
+    let briefing = match preview {
+        Some(None) => None,
+        Some(Some(preview))
+            if compose_context_within(Some(&preview), code_part(), room)
+                .is_none_or(|text| text.len() > room) =>
+        {
+            targets_note.push_str("; peer briefing deferred: no room left in this reply");
+            None
+        }
+        _ => match brief("brief", true) {
+            Ok(briefing) => briefing,
+            Err(reply) => return reply,
+        },
+    };
+    let deliver = briefing.is_some();
     // The code section is about this prompt, so it is sent whether or not
     // the peer briefing changed. It is never remembered as delivered.
-    let Some(context) = compose_context(
-        deliver.then_some(&briefing),
-        code.as_ref()
-            .map(|(matches, coverage)| (matches.as_slice(), coverage)),
-    ) else {
+    let Some(context) = compose_context_within(briefing.as_ref(), code_part(), room) else {
         return Reply::none(
             "no_briefing",
             format!("no new relevant peer work{targets_note}"),
@@ -1110,7 +1150,7 @@ fn lifecycle(
         coverage: if deliver { "briefed" } else { "code_briefed" },
         detail: format!(
             "{} peer session(s); {matched} prompt name(s) found in the source index{targets_note}",
-            if deliver { briefing.peers.len() } else { 0 }
+            briefing.as_ref().map_or(0, |b| b.peers.len())
         ),
     }
 }
@@ -1962,21 +2002,32 @@ pub fn compose_context(
     peers: Option<&langspan_core::Briefing>,
     code: Option<(&[langspan_core::NameContext], &langspan_core::GraphCoverage)>,
 ) -> Option<String> {
+    compose_context_within(peers, code, BRIEFING_LIMIT)
+}
+
+/// `compose_context` within `limit` bytes, for one part of a reply that
+/// joins several. Messages and check results are shown in full even past
+/// it: a delivered one is acknowledged.
+fn compose_context_within(
+    peers: Option<&langspan_core::Briefing>,
+    code: Option<(&[langspan_core::NameContext], &langspan_core::GraphCoverage)>,
+    limit: usize,
+) -> Option<String> {
     let render_code = |limit: usize| {
         code.and_then(|(matches, coverage)| render_code_briefing(matches, coverage, limit))
     };
     let Some(peers) = peers else {
-        return render_code(BRIEFING_LIMIT);
+        return render_code(limit);
     };
-    let Some(share) = render_code(CODE_SHARE).map(|text| text.len() + 2) else {
-        return Some(render_briefing(peers));
+    let Some(share) = render_code(CODE_SHARE.min(limit)).map(|text| text.len() + 2) else {
+        return Some(render_briefing_within(peers, limit));
     };
     // Peer lines yield to the code section's reservation. Messages do not:
     // a delivered message is acknowledged, so it is always shown in full
     // (the core bounds them to fit), and the code section, rebuilt at every
     // prompt, takes whatever room is left. If none is left it says so.
-    let peer_text = render_briefing_within(peers, BRIEFING_LIMIT - share);
-    let room = BRIEFING_LIMIT.saturating_sub(peer_text.len() + 2);
+    let peer_text = render_briefing_within(peers, limit.saturating_sub(share));
+    let room = limit.saturating_sub(peer_text.len() + 2);
     match render_code(room) {
         Some(code_text) => Some(format!("{peer_text}\n\n{code_text}")),
         None if room > CODE_SKIPPED.len() => Some(format!("{peer_text}\n\n{CODE_SKIPPED}")),

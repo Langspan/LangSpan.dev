@@ -91,7 +91,11 @@ resolve to, and `SessionStart` and `PreInvocation` run in each folder in
 `workspacePaths` (at most 8; a later folder's session starts at its first
 tool call), once per workspace, so two folders in one repository share one
 session. Their briefings are joined, in folder order, within the one briefing
-limit. Linking one conversation's sessions as a single participant was
+limit, and the joined text is never cut: a delivered briefing acknowledges its
+messages and check results. So each workspace is briefed within the room the
+ones before it left. With less than the whole limit left, its briefing is first
+looked at without delivery and delivered only if it fits; otherwise it waits,
+undelivered, for the next `PreInvocation`. Linking one conversation's sessions as a single participant was
 rejected: the core binds a session to one workspace on purpose, and peers in
 each repository only need the session working there. A peer therefore sees
 one session per workspace, each with the same conversation ID at its start.

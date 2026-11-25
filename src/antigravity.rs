@@ -207,6 +207,10 @@ fn lifecycle(
     }
     let mut workspaces = Vec::new();
     let mut replies = Vec::new();
+    // What the contexts so far take of the one briefing limit, separators
+    // included. Each workspace is briefed within the rest, so nothing is
+    // delivered that the join would then cut.
+    let mut used = 0_usize;
     for folder in folders {
         let resolved = match hook::resolve_workspace(config, folder, deadline) {
             Ok(resolved) => resolved,
@@ -218,22 +222,40 @@ fn lifecycle(
         if workspaces.contains(&resolved.workspace_id) {
             continue;
         }
-        replies.push(hook::lifecycle_resolved(
+        let separator = if used == 0 { 0 } else { 2 };
+        let reply = hook::lifecycle_resolved(
             SOURCE,
             &scoped_session(conversation, &resolved.workspace_id),
             kind.clone(),
             (event_name, None),
             &resolved,
             deadline,
-        ));
+            hook::BRIEFING_LIMIT.saturating_sub(used + separator),
+        );
+        if let Some(text) = context(&reply) {
+            used += separator + text.len();
+        }
+        replies.push(reply);
         workspaces.push(resolved.workspace_id);
     }
     joined(replies)
 }
 
+/// The context a reply in the shape `hook::lifecycle_resolved` writes holds.
+fn context(reply: &Reply) -> Option<String> {
+    serde_json::from_str::<Value>(&reply.stdout)
+        .ok()?
+        .get("hookSpecificOutput")?
+        .get("additionalContext")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 /// One reply for a lifecycle event handled in several workspaces: their
-/// contexts in folder order, cut to the briefing limit, under the coverage
-/// of the first that briefed, else the first that did not fail.
+/// contexts in folder order, under the coverage of the first that briefed,
+/// else the first that did not fail. Each was briefed within what the ones
+/// before it left of the briefing limit, so the join is never cut: what was
+/// delivered is shown.
 fn joined(replies: Vec<Reply>) -> Reply {
     if replies.len() == 1 {
         return replies
@@ -241,14 +263,6 @@ fn joined(replies: Vec<Reply>) -> Reply {
             .next()
             .unwrap_or_else(|| Reply::none("unknown", ""));
     }
-    let context = |reply: &Reply| {
-        serde_json::from_str::<Value>(&reply.stdout)
-            .ok()?
-            .get("hookSpecificOutput")?
-            .get("additionalContext")?
-            .as_str()
-            .map(str::to_owned)
-    };
     let contexts: Vec<String> = replies.iter().filter_map(context).collect();
     let failed = |reply: &&Reply| {
         matches!(reply.coverage, "unsupported" | "unknown" | "timeout")
@@ -269,7 +283,7 @@ fn joined(replies: Vec<Reply>) -> Reply {
         String::new()
     } else {
         json!({ "hookSpecificOutput": {
-            "additionalContext": hook::truncate(&contexts.join("\n\n"), hook::BRIEFING_LIMIT)
+            "additionalContext": contexts.join("\n\n")
         }})
         .to_string()
     };
@@ -768,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn briefings_from_several_workspaces_are_joined_within_the_limit() {
+    fn briefings_from_several_workspaces_are_joined_whole() {
         let briefed = |context: &str| Reply {
             stdout: json!({"hookSpecificOutput": {"additionalContext": context}}).to_string(),
             coverage: "briefed",
@@ -786,6 +800,8 @@ mod tests {
             "first\n\nsecond"
         );
         assert!(both.detail.contains("deferred"), "{}", both.detail);
+        // Each part was briefed within the room the ones before it left, and
+        // what it delivered is acknowledged: the join never cuts it.
         let long = joined(vec![
             briefed(&"x".repeat(hook::BRIEFING_LIMIT)),
             briefed("tail"),
@@ -794,7 +810,7 @@ mod tests {
         let text = value["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap();
-        assert!(text.len() <= hook::BRIEFING_LIMIT, "{}", text.len());
+        assert!(text.ends_with("\n\ntail"), "{}", text.len());
         // Nothing to say: the coverage of the workspace that did not fail.
         let quiet = joined(vec![
             Reply::none("unsupported", "not a repository"),

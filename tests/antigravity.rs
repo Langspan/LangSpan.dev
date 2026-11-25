@@ -792,6 +792,81 @@ fn a_user_level_conversation_is_coordinated_in_each_of_its_workspace_folders() {
     assert!(stdout.contains("antigravity"), "{stdout}");
 }
 
+/// The text an Antigravity answer places in the model's context.
+fn injected(stdout: &str) -> String {
+    let reply: Value = serde_json::from_str(stdout).unwrap_or(Value::Null);
+    reply["injectSteps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|step| step["systemMessage"]["systemMessage"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn messages_a_joined_briefing_has_no_room_for_still_reach_the_model_later() {
+    let f = Fixture::new();
+    let state = f.base.join("state");
+    let second = f.base.join("second");
+    repository(&second);
+    let folders = json!([f.root(), second]);
+    let with_folders = |name: &str, invocation: u64| {
+        let mut body = event(name, &f.root());
+        body["workspacePaths"] = folders.clone();
+        body["invocationNum"] = json!(invocation);
+        body
+    };
+    let (coverage, _) = user_hook(
+        &state,
+        "SessionStart",
+        &with_folders("session-start.json", 0),
+    );
+    assert!(!coverage.starts_with("unsupported:"), "{coverage}");
+
+    // Enough messages in each repository that the two briefings together
+    // overflow the one limit: the first repository's take most of it.
+    let mut sent = Vec::new();
+    for (root, tag) in [(f.root(), "first"), (second.clone(), "second")] {
+        let workspace = langspan::hook::user_workspace_id(&fs::canonicalize(&root).unwrap());
+        for n in 0..3 {
+            let marker = format!("{tag}-message-{n}");
+            // Quotes double when quoted: each message line nears its cap.
+            let text = format!("{marker} {}", "\"".repeat(300));
+            let id = format!("{tag}-{n}");
+            langspan(&state, &["message", &workspace, &text, "--request-id", &id]);
+            sent.push(marker);
+        }
+    }
+
+    // Two such messages fill one briefing, so the six take a few model
+    // calls; a repository's that do not fit wait for a later one.
+    let mut seen = String::new();
+    for invocation in 0..6 {
+        let (coverage, stdout) = user_hook(
+            &state,
+            "PreInvocation",
+            &with_folders("pre-invocation.json", invocation),
+        );
+        assert!(!coverage.starts_with("unsupported:"), "{coverage}");
+        let text = injected(&stdout);
+        assert!(
+            text.len() <= langspan::hook::BRIEFING_LIMIT,
+            "{}",
+            text.len()
+        );
+        seen.push_str(&text);
+    }
+    // Every message acknowledged was shown, once: none is lost to a cut.
+    for marker in &sent {
+        assert_eq!(
+            seen.matches(marker.as_str()).count(),
+            1,
+            "{marker} did not reach the model exactly once: {seen}"
+        );
+    }
+}
+
 #[test]
 fn user_install_round_trips_the_global_files_and_doctor_reports_them() {
     let base = scratch("user");
