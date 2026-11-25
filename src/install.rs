@@ -731,8 +731,9 @@ fn remove_managed(
         }
     }
     if prune_empty && removed > 0 && hooks.is_empty() {
-        // Cursor's `version` stays: LangSpan cannot tell whether it added it,
-        // and a file holding only it changes nothing for Cursor.
+        // Cursor's `version` stays: LangSpan cannot tell whether it added it.
+        // A user-level file left holding only it is removed by `uninstall`
+        // (`json_left_empty`).
         settings.shift_remove(vendor.table());
     }
     removed
@@ -986,6 +987,82 @@ fn write_planned_with(
     }
 }
 
+/// Whether a JSON file LangSpan may create holds nothing once LangSpan's
+/// entries are removed: an empty object, or for Cursor's `hooks.json` only
+/// the `version` install puts in a new one. Such a file changes nothing for
+/// its host, so `uninstall` removes it rather than leave `{}` behind.
+pub fn json_left_empty(vendor: Vendor, bytes: &[u8]) -> bool {
+    let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(bytes) else {
+        return false;
+    };
+    map.is_empty()
+        || vendor == Vendor::Cursor
+            && map.len() == 1
+            && map.get("version") == Some(&json!(CURSOR_CONFIG_VERSION))
+}
+
+/// Which planned bytes leave a file holding nothing, so it is removed.
+pub type LeftEmpty<'a> = dyn Fn(&[u8]) -> bool + 'a;
+
+/// What `write_or_remove_planned` did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Applied {
+    Written,
+    Removed,
+    /// The file already held the planned content (or was already absent).
+    Unchanged,
+}
+
+/// `write_planned`, except that a planned content for which `empty` holds
+/// removes the file instead of writing it. The file is removed only while
+/// it still holds the bytes the plan was made from; if it changed, the plan
+/// is made again against the change, and a second change refuses with
+/// nothing removed. As with the rename, the moment between the last read
+/// and the removal can be made short but not closed.
+pub fn write_or_remove_planned(
+    path: &Path,
+    from: Option<&[u8]>,
+    plan: &Planner,
+    empty: &LeftEmpty,
+) -> Result<Applied, crate::Error> {
+    write_or_remove_with(path, from, plan, empty, &mut || {})
+}
+
+fn write_or_remove_with(
+    path: &Path,
+    from: Option<&[u8]>,
+    plan: &Planner,
+    empty: &LeftEmpty,
+    before_change: &mut dyn FnMut(),
+) -> Result<Applied, crate::Error> {
+    let mut from = from.map(<[u8]>::to_vec);
+    for _ in 0..2 {
+        if !empty(&plan(from.as_deref())?) {
+            return Ok(
+                match write_planned_with(path, from.as_deref(), plan, before_change)? {
+                    true => Applied::Written,
+                    false => Applied::Unchanged,
+                },
+            );
+        }
+        before_change();
+        let now = read_bytes(path)?;
+        if now == from {
+            if now.is_none() {
+                return Ok(Applied::Unchanged);
+            }
+            fs::remove_file(path).map_err(|e| format!("remove {}: {e}", path.display()))?;
+            return Ok(Applied::Removed);
+        }
+        from = now;
+    }
+    Err(format!(
+        "{} changed while LangSpan was removing it, twice; nothing was removed. Close the program that keeps changing it and run this again",
+        path.display()
+    )
+    .into())
+}
+
 enum Written {
     Replaced,
     /// The file no longer held what was expected; this is what it holds.
@@ -1149,6 +1226,100 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"{\"n\":2}\n");
         let leftovers: Vec<_> = fs::read_dir(&scratch.0).unwrap().flatten().collect();
         assert_eq!(leftovers.len(), 1, "no temporary file is left behind");
+    }
+
+    /// Removes `"ours"` from whatever the file holds, as uninstall would.
+    fn remove_ours(now: Option<&[u8]>) -> Result<Vec<u8>, crate::Error> {
+        let mut value: Value = serde_json::from_slice(now.ok_or("missing")?)?;
+        value.as_object_mut().ok_or("object")?.shift_remove("ours");
+        json_bytes(&value)
+    }
+
+    fn left_empty(bytes: &[u8]) -> bool {
+        json_left_empty(Vendor::Codex, bytes)
+    }
+
+    #[test]
+    fn a_file_left_holding_nothing_is_removed_and_one_with_more_is_written() {
+        let scratch = Scratch::new("remove");
+        let path = scratch.0.join("hooks.json");
+        fs::write(&path, b"{\"ours\":true}\n").unwrap();
+        let from = read_bytes(&path).unwrap();
+        let applied =
+            write_or_remove_planned(&path, from.as_deref(), &remove_ours, &left_empty).unwrap();
+        assert_eq!(applied, Applied::Removed);
+        assert!(!path.exists());
+
+        fs::write(&path, b"{\"ours\":true,\"mine\":1}\n").unwrap();
+        let from = read_bytes(&path).unwrap();
+        let applied =
+            write_or_remove_planned(&path, from.as_deref(), &remove_ours, &left_empty).unwrap();
+        assert_eq!(applied, Applied::Written);
+        assert_eq!(fs::read(&path).unwrap(), b"{\n  \"mine\": 1\n}\n");
+    }
+
+    #[test]
+    fn a_file_changed_before_removal_is_planned_again_and_the_change_kept() {
+        let scratch = Scratch::new("remove-replan");
+        let path = scratch.0.join("hooks.json");
+        fs::write(&path, b"{\"ours\":true}\n").unwrap();
+        let from = read_bytes(&path).unwrap();
+        let mut changes = 0;
+        let applied = write_or_remove_with(
+            &path,
+            from.as_deref(),
+            &remove_ours,
+            &left_empty,
+            &mut || {
+                // The host writes a setting of its own after LangSpan planned.
+                if changes == 0 {
+                    fs::write(&path, b"{\"ours\":true,\"theirs\":1}\n").unwrap();
+                }
+                changes += 1;
+            },
+        )
+        .unwrap();
+        assert_eq!(applied, Applied::Written);
+        let result: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(result, json!({"theirs": 1}));
+    }
+
+    #[test]
+    fn a_file_that_keeps_changing_is_not_removed() {
+        let scratch = Scratch::new("remove-refuse");
+        let path = scratch.0.join("hooks.json");
+        fs::write(&path, b"{\"ours\":true}\n").unwrap();
+        let from = read_bytes(&path).unwrap();
+        let mut n = 0;
+        let error = write_or_remove_with(
+            &path,
+            from.as_deref(),
+            &remove_ours,
+            &left_empty,
+            &mut || {
+                // Still nothing but LangSpan's entry, yet different bytes.
+                n += 1;
+                fs::write(&path, format!("{{\"ours\":true}}{}\n", " ".repeat(n))).unwrap();
+            },
+        )
+        .expect_err("a file that changes under every attempt is not removed");
+        assert!(error.to_string().contains("changed while"), "{error}");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn only_an_empty_object_or_cursors_bare_version_counts_as_left_empty() {
+        assert!(json_left_empty(Vendor::Codex, b"{}\n"));
+        assert!(json_left_empty(Vendor::Cursor, b"{\n  \"version\": 1\n}\n"));
+        assert!(!json_left_empty(Vendor::ClaudeCode, b"{\"version\":1}"));
+        assert!(!json_left_empty(Vendor::Cursor, b"{\"version\":2}"));
+        assert!(!json_left_empty(
+            Vendor::Cursor,
+            b"{\"version\":1,\"hooks\":{}}"
+        ));
+        assert!(!json_left_empty(Vendor::Gemini, b"{\"hooks\":{}}"));
+        assert!(!json_left_empty(Vendor::Codex, b"[]"));
+        assert!(!json_left_empty(Vendor::Codex, b""));
     }
 
     #[test]

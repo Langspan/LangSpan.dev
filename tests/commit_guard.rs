@@ -531,6 +531,71 @@ fn a_hunk_that_mixes_another_live_sessions_lines_with_its_own_is_held_and_split_
     assert_eq!(f.status(), "");
 }
 
+/// Two sessions each add a block to one file with the edit tool, each set
+/// off by a blank line and closed by the same line. Those two lines are both
+/// sessions' by the journal; at the edge of the other session's hunk they
+/// are taken as that session's, so each `commit --mine` commits its own
+/// block and refuses nothing (issue #141's acceptance run).
+#[test]
+fn lines_both_sessions_wrote_go_with_the_hunk_around_them() {
+    let f = Fixture::new();
+    f.edit(
+        ALICE,
+        "alice-1",
+        "shared.txt",
+        "line 2\n",
+        "line 2\n\nalice {\n  one\n}\n",
+    );
+    f.edit(
+        BOB,
+        "bob-1",
+        "shared.txt",
+        "line 18\n",
+        "line 18\n\nbob {\n  two\n}\n",
+    );
+    let both = f.read("shared.txt");
+
+    let (_, ran) = f.bash_call(ALICE, "alice-2", &f.commit_mine_command("Alice"));
+    let ran = ran.unwrap();
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:shared.txt"]),
+        numbered().replace("line 2\n", "line 2\n\nalice {\n  one\n}\n")
+    );
+    assert_eq!(f.read("shared.txt"), both);
+    let (_, ran) = f.bash_call(BOB, "bob-2", &f.commit_mine_command("Bob"));
+    let ran = ran.unwrap();
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(git(&f.work(), &["show", "HEAD:shared.txt"]), both);
+    assert_eq!(f.status(), "");
+}
+
+/// A line both sessions wrote is only given to the other session's hunk
+/// when this session's own copy is elsewhere in the diff: here Alice's only
+/// `}` is the one at the edge of Bob's lines, so her `commit --mine` refuses
+/// that hunk rather than commit her block without it.
+#[test]
+fn a_line_both_wrote_stays_this_sessions_when_its_only_copy_is_by_the_others() {
+    let f = Fixture::new();
+    f.edit(
+        BOB,
+        "bob-1",
+        "shared.txt",
+        "line 18\n",
+        "line 18\nbob {\n  two\n",
+    );
+    f.reread_and_edit(ALICE, "alice-1", "shared.txt", "  two\n", "  two\n}\n");
+    // Bob also wrote a `}`, elsewhere and since removed.
+    f.reread_and_edit(BOB, "bob-2", "shared.txt", "line 2\n", "line 2\n}\n");
+    f.reread_and_edit(BOB, "bob-3", "shared.txt", "line 2\n}\n", "line 2\n");
+
+    let (_, ran) = f.bash_call(ALICE, "alice-2", &f.commit_mine_command("Alice"));
+    let ran = ran.unwrap();
+    assert!(!ran.status.success(), "{}", said(&ran));
+    assert!(said(&ran).contains("shared.txt"), "{}", said(&ran));
+    assert_eq!(git(&f.work(), &["log", "--format=%s"]), "start\n");
+}
+
 impl Fixture {
     /// Install `hooks` (name, script body) in a hooks directory outside the
     /// checkout, named by `core.hooksPath`.

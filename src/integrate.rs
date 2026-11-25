@@ -782,19 +782,66 @@ pub enum Ran {
 /// Run the owner's check command in `dir`, without a shell. Its output goes
 /// to standard error, because standard output is reserved for results.
 pub fn run_command(dir: &Path, argv: &[String], limit: Duration) -> Result<(Ran, u64), String> {
+    run_command_reading(dir, argv, limit).map(|(ran, duration_ms, _)| (ran, duration_ms))
+}
+
+/// As [`run_command`], and its combined output as well, passed on to
+/// standard error as it comes: `None` when it was longer than
+/// `test_output::MAX_OUTPUT_BYTES`, or did not end within a second of the
+/// command's process group.
+pub fn run_command_reading(
+    dir: &Path,
+    argv: &[String],
+    limit: Duration,
+) -> Result<(Ran, u64, Option<Vec<u8>>), String> {
+    use std::io::{Read, Write};
     let (program, args) = argv.split_first().ok_or("give a command after --")?;
     use std::os::unix::process::CommandExt;
+    let (mut reader, writer) =
+        std::io::pipe().map_err(|e| format!("cannot create a pipe for the check's output: {e}"))?;
+    let error_writer = writer
+        .try_clone()
+        .map_err(|e| format!("cannot create a pipe for the check's output: {e}"))?;
     let started = Instant::now();
     // Its own process group, so everything it starts can be stopped with it.
     let mut child = Command::new(program)
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
-        .stdout(std::io::stderr())
+        .stdout(writer)
+        .stderr(error_writer)
         .process_group(0)
         .spawn()
         .map_err(|e| format!("cannot start {program:?}: {e}"))?;
     let group = rustix::process::Pid::from_child(&child);
+    let (done, read) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
+    // Passed on to standard error as it comes, as before; kept while it fits.
+    let reading = std::thread::Builder::new()
+        .name("langspan-check-output".into())
+        .spawn(move || {
+            let mut kept = Some(Vec::new());
+            let mut buffer = [0_u8; 8192];
+            let mut stderr = std::io::stderr();
+            while let Ok(count) = reader.read(&mut buffer) {
+                if count == 0 {
+                    break;
+                }
+                let _ = stderr.write_all(&buffer[..count]);
+                if let Some(bytes) = &mut kept {
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if bytes.len() > crate::test_output::MAX_OUTPUT_BYTES {
+                        kept = None;
+                    }
+                }
+            }
+            let _ = done.send(kept);
+        });
+    if let Err(error) = reading {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        return Err(format!("cannot read the check's output: {error}"));
+    }
     let ran = loop {
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(status) => break status.code().map(Ran::Exited).unwrap_or(Ran::Unfinished),
@@ -809,10 +856,11 @@ pub fn run_command(dir: &Path, argv: &[String], limit: Duration) -> Result<(Ran,
     // Whatever it left running, on time-out or after a normal exit, would
     // go on changing the tree after its result was taken. Stop all of it.
     let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-    Ok((
-        ran,
-        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-    ))
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // A process that left the group can hold the pipe open: its output is
+    // not waited for beyond a second.
+    let output = read.recv_timeout(Duration::from_secs(1)).ok().flatten();
+    Ok((ran, duration_ms, output))
 }
 
 /// Check out `commit` into a temporary detached worktree, run `body` there,
