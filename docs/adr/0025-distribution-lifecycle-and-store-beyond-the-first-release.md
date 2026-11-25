@@ -51,7 +51,9 @@ built ([issue #94](https://github.com/Langspan/LangSpan.dev/issues/94)):
   time and accounting name, never arguments or environment. The start token
   hashes the PID with the start time (one-second resolution; macOS hands out
   PIDs in sequence, so a PID is not reused within a second). A process of
-  another user is refused and recorded `unknown`; a failed listing records
+  another user is refused and recorded `unknown`; a failed listing (one that
+  times out, is killed, or exits unsuccessfully, except `ps`'s own exit 1
+  with nothing listed when none of the asked-for processes exists) records
   `unknown`, never `exited`. The hook's ancestor walk lists only this user's
   processes in one run; the daemon's poll probes each page of up to 64
   bindings in one run, and does not re-probe a binding a hook reports that it

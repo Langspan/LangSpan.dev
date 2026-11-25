@@ -96,9 +96,15 @@ mod macos {
     const PS_TIMEOUT: Duration = Duration::from_secs(2);
 
     fn ps(select: &[&str]) -> io::Result<String> {
-        let mut child = Command::new("/bin/ps")
-            .args(select)
-            .args(["-o", "pid=,ppid=,uid=,state=,lstart=,ucomm="])
+        let mut args = select.to_vec();
+        args.extend(["-o", "pid=,ppid=,uid=,state=,lstart=,ucomm="]);
+        listing("/bin/ps", &args)
+    }
+
+    /// Runs one listing program and returns its whole output.
+    pub(super) fn listing(program: &str, args: &[&str]) -> io::Result<String> {
+        let mut child = Command::new(program)
+            .args(args)
             .env_clear()
             .env("LC_ALL", "C")
             .stdin(Stdio::null())
@@ -119,27 +125,36 @@ mod macos {
                 .map(|_| bytes)
         });
         let deadline = Instant::now() + PS_TIMEOUT;
-        let finished = loop {
-            if child.try_wait()?.is_some() {
-                break true;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break Some(status);
             }
             if Instant::now() >= deadline {
-                break false;
+                break None;
             }
             std::thread::sleep(Duration::from_millis(1));
         };
-        if !finished {
+        if status.is_none() {
             let _ = child.kill();
         }
         let _ = child.wait();
         let bytes = reader
             .join()
             .map_err(|_| io::Error::other("ps output reader failed"))??;
-        if !finished {
+        let Some(status) = status else {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "process listing timed out",
             ));
+        };
+        // `ps -p` exits 1, listing nothing, when none of the processes
+        // exists; any other failure, or a signal, leaves the table
+        // incomplete, and a process missing from it would read as exited.
+        let none_found = status.code() == Some(1) && bytes.is_empty();
+        if !status.success() && !none_found {
+            return Err(io::Error::other(format!(
+                "process listing failed ({status})"
+            )));
         }
         if bytes.len() > OUTPUT_LIMIT {
             return Err(io::Error::new(
@@ -393,6 +408,38 @@ mod macos_tests {
         ] {
             assert!(macos::parse(bad).is_none(), "{bad:?}");
         }
+    }
+
+    const LINE: &str = "4242 1 501 S Wed Nov 25 09:12:01 2026 sh";
+
+    /// A listing that fails or is killed part-way is no listing: its
+    /// partial output must never read as "these processes are gone".
+    #[test]
+    fn a_failed_or_killed_listing_is_an_error_not_an_empty_table() {
+        for script in [
+            format!("printf '{LINE}\\n'; kill -9 $$"),
+            format!("printf '{LINE}\\n'; exit 2"),
+            format!("printf '{LINE}\\n'; exit 1"),
+            "kill -9 $$".to_string(),
+            "exit 2".to_string(),
+        ] {
+            let result = macos::listing("/bin/sh", &["-c", &script]);
+            assert!(result.is_err(), "{script:?} gave {result:?}");
+        }
+        assert_eq!(
+            macos::listing("/bin/sh", &["-c", &format!("printf '{LINE}\\n'")]).unwrap(),
+            format!("{LINE}\n")
+        );
+        // `ps -p` exits 1 with nothing listed when none of the processes
+        // exists: that is a complete, empty table.
+        assert_eq!(macos::listing("/bin/sh", &["-c", "exit 1"]).unwrap(), "");
+    }
+
+    /// The real `ps` really does exit 1 for a process that is not there,
+    /// and that probe still says `exited`.
+    #[test]
+    fn a_listing_of_only_missing_processes_is_empty() {
+        assert!(macos::samples(&[u32::MAX - 1]).unwrap().is_empty());
     }
 }
 
