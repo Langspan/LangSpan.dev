@@ -394,3 +394,56 @@ fn commit_mine_after_a_long_command_commits_its_own_lines_and_leaves_the_editors
         "Bob's line\n"
     );
 }
+
+/// A shell write that lands while an edit's post hook waits on the daemon
+/// is not part of that edit: the edit's mark keeps the version the post hook
+/// found on entry, so the file is not taken for the editor's alone.
+#[test]
+fn a_shell_write_during_an_edits_post_hook_is_not_taken_for_the_edits() {
+    let mut f = Fixture::new();
+    let (held, command) = f.start_held(ALICE, "alice-1", "true");
+    let pre = f.write_event(BOB, "PreToolUse", "bob-1", "a.txt", "Bob's line\n");
+    assert_eq!(pre.coverage, "admitted", "{pre:?}");
+    fs::write(f.work().join("a.txt"), "Bob's line\n").unwrap();
+
+    // Hold Bob's post hook at its first daemon call, and write as Alice's
+    // command would in that moment.
+    let mut daemon = f.daemon.take().unwrap();
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    let socket = f.state().join("daemon.sock");
+    let _ = fs::remove_file(&socket);
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let work = f.work();
+    let holder = std::thread::spawn(move || {
+        let (connection, _) = listener.accept().unwrap();
+        fs::write(work.join("a.txt"), "Bob's line\nshell\n").unwrap();
+        drop(connection);
+    });
+    f.write_event(BOB, "PostToolUse", "bob-1", "a.txt", "Bob's line\n");
+    holder.join().unwrap();
+    let _ = fs::remove_file(&socket);
+    f.daemon = Some(
+        Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .args(["daemon", "--state-dir"])
+            .arg(f.state())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        assert!(Instant::now() < deadline, "daemon did not become ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    held.release();
+
+    let post = f.bash(ALICE, "PostToolUse", "alice-1", &command);
+    assert!(
+        !post.detail.contains("to another session's edit"),
+        "{post:?}"
+    );
+    assert_eq!(post.coverage, "contested", "{post:?}");
+}

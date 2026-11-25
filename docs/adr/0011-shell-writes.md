@@ -147,7 +147,12 @@ while the other session's real hooks edit), and
 The window between an edit's pre-tool hook and the tool's own write is not
 seen: a command that writes the file inside it, before the tool reads and
 replaces it, is taken as part of the edit. That window is the time the host
-takes to run the tool after its hook returns.
+takes to run the tool after its hook returns. The window after the tool is
+closed: the post-tool hook reads the edit's files on entry, before any
+daemon call, and the mark keeps those versions. A command's write that lands
+while the hook waits on the daemon is then a change the edit does not
+explain, so the file is `contested` rather than the editor's. Test:
+`a_shell_write_during_an_edits_post_hook_is_not_taken_for_the_edits`.
 
 **Recorded once, even when the daemon fails.** The post-tool hook first keeps
 the comparison's outcome (the changed and contested paths, or why the change

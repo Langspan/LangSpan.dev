@@ -219,6 +219,20 @@ pub fn execute(operation: Operation, config: &Config, deadline: Instant) -> Repl
         tool: operation.tool,
         input_digest: operation.input_fingerprint,
     };
+    // An edit's files, for a shell run of another session going at the same
+    // time (ADR 0011): before a call, the versions it starts from; after
+    // one, what it left. Both are read here, on entry and before any daemon
+    // call, so that a shell write landing while this hook waits on the
+    // daemon is not taken for the edit's result.
+    let versions = |paths: &[String]| -> std::collections::BTreeMap<_, _> {
+        paths
+            .iter()
+            .map(|path| (path.clone(), file_state(&config.root, path)))
+            .collect()
+    };
+    let marked_before = matches!(operation.phase, Phase::Pre).then(|| versions(&operation.paths));
+    let marked_after =
+        matches!(operation.phase, Phase::Post(_)).then(|| versions(&operation.paths));
     // The versions a completed edit or read left on disk, read now: they are
     // what is recorded, now or when a report that fails is sent again.
     let files = match operation.phase {
@@ -268,16 +282,6 @@ pub fn execute(operation: Operation, config: &Config, deadline: Instant) -> Repl
     // The line journal (ADR 0026): the files an edit starts from, and what
     // it changed in them. Kept on this machine whatever the daemon answers.
     let mut journaled = None;
-    // The edit's files as they are before it runs, for a shell run of
-    // another session going at the same time (ADR 0011).
-    let versions = |paths: &[String]| -> std::collections::BTreeMap<_, _> {
-        paths
-            .iter()
-            .map(|path| (path.clone(), file_state(&config.root, path)))
-            .collect()
-    };
-    let marked_before = matches!(operation.phase, Phase::Pre).then(|| versions(&operation.paths));
-    let marked_paths = operation.paths.clone();
     match operation.phase {
         Phase::Pre => crate::journal::before_edit(
             &config.state_dir,
@@ -326,8 +330,8 @@ pub fn execute(operation: Operation, config: &Config, deadline: Instant) -> Repl
         reply.detail = format!("{}; line journal: {error}", reply.detail);
     }
     // An edit that is refused does not run, so it is not marked.
-    let marked = match (operation.phase, marked_before) {
-        (Phase::Pre, Some(before)) if !reply.coverage.starts_with("denied") => {
+    let marked = match (operation.phase, marked_before, marked_after) {
+        (Phase::Pre, Some(before), _) if !reply.coverage.starts_with("denied") => {
             Some(crate::shell::edit_started(
                 &config.state_dir,
                 &ids.operation_id,
@@ -336,12 +340,12 @@ pub fn execute(operation: Operation, config: &Config, deadline: Instant) -> Repl
                 before,
             ))
         }
-        (Phase::Post(_), _) => Some(crate::shell::edit_finished(
+        (Phase::Post(_), _, Some(after)) => Some(crate::shell::edit_finished(
             &config.state_dir,
             &ids.operation_id,
             &ids.session_id,
             &config.root,
-            versions(&marked_paths),
+            after,
         )),
         _ => None,
     };
