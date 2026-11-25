@@ -287,9 +287,10 @@ command held open by a signal file, a real `sed` rewrite and `commit
 --mine`), and the unit tests of `src/reformat.rs`.
 
 **A notice before a formatter reaches another session's files** (added 25
-November 2026, issue #126). Crediting a rewrite to no one keeps attribution
-right, but the other session's work still changes under it and its next edit
-of the file is refused as stale. Before a shell command, the pre-tool hook
+November 2026, issue #126). Keeping the author of each line a formatter only
+reformats (#141), and crediting a change of tokens to no one, keeps
+attribution right, but the other session's work still changes under it and
+its next edit of the file is refused as stale. Before a shell command, the pre-tool hook
 reads which recognised formatters it runs (`src/shell/formatters.rs`, a
 lenient reader built on the commit guard's lexer) and how far each reaches:
 
