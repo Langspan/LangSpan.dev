@@ -116,12 +116,17 @@ impl Developer {
         }
     }
     fn cli(&self, args: &[&str]) -> (i32, String) {
-        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
-            .arg("--state-dir")
-            .arg(&self.state)
-            .args(args)
-            .output()
-            .unwrap();
+        // `doctor` reads the user-level install: this developer's own home,
+        // never the machine's.
+        let output = support::in_home(
+            &mut Process::new(env!("CARGO_BIN_EXE_langspan")),
+            &self.state.with_extension("home"),
+        )
+        .arg("--state-dir")
+        .arg(&self.state)
+        .args(args)
+        .output()
+        .unwrap();
         (
             output.status.code().unwrap(),
             String::from_utf8(output.stdout).unwrap(),

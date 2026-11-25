@@ -1,5 +1,5 @@
-//! Shared by the integration tests that need a remote which asks for
-//! credentials. Loopback only.
+//! Shared by the integration tests: a remote which asks for credentials
+//! (loopback only), process checks, and a home of the test's own.
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -9,6 +9,7 @@ use std::{
 /// A loopback HTTP server that asks for Basic authentication on every
 /// request, so Git consults its credential helpers. It records whether a
 /// request carried credentials, never their value.
+#[allow(dead_code)]
 pub fn asks_for_credentials() -> (String, std::sync::mpsc::Receiver<bool>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -32,6 +33,28 @@ pub fn asks_for_credentials() -> (String, std::sync::mpsc::Receiver<bool>) {
     (format!("http://{address}/repo.git"), seen)
 }
 
+/// Points `command` at `home` as its user home, with every host location
+/// LangSpan reads inside it (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+/// `GEMINI_CLI_HOME`) and no state-directory default from the environment.
+/// Cursor's location follows `HOME`. A test that runs `doctor` or a
+/// user-level command through this sees only what it put in `home`, never
+/// the machine's own install (issue #108). `home` need not exist.
+#[allow(dead_code)] // Not every test that includes this module runs `doctor`.
+pub fn in_home<'a>(
+    command: &'a mut std::process::Command,
+    home: &std::path::Path,
+) -> &'a mut std::process::Command {
+    command
+        .env("HOME", home)
+        .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("GEMINI_CLI_HOME", home)
+        .env_remove("LANGSPAN_STATE_DIR")
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("CLAUDE_PROJECT_DIR")
+}
+
+#[allow(dead_code)] // Not every test that includes this module checks a process.
 pub fn alive(pid: i32) -> bool {
     rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
 }
