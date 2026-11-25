@@ -146,7 +146,10 @@ impl Program {
     }
     /// Its arguments. The title and body are passed as arguments, never
     /// spliced into a script, so no path can change what runs. A sound is
-    /// part of the same call: nothing else is started for it.
+    /// part of the same call: nothing else is started for it. With sound
+    /// off, `notify-send` passes the freedesktop `suppress-sound` hint, so a
+    /// desktop set to play a default sound stays quiet; `display
+    /// notification` without a `sound name` plays no sound on macOS.
     pub fn args(self, body: &str, sound: bool) -> Vec<String> {
         match self {
             Program::Osascript => {
@@ -172,9 +175,11 @@ impl Program {
             }
             Program::NotifySend => {
                 let mut args = vec![format!("--app-name={TITLE}")];
-                if sound {
-                    args.push("--hint=string:sound-name:message-new-instant".into());
-                }
+                args.push(if sound {
+                    "--hint=string:sound-name:message-new-instant".into()
+                } else {
+                    "--hint=boolean:suppress-sound:true".into()
+                });
                 args.extend(["--".into(), TITLE.into(), body.into()]);
                 args
             }
@@ -711,9 +716,19 @@ mod tests {
 
     #[test]
     fn the_title_comes_before_the_body_and_sound_is_only_an_argument() {
+        let suppress = "--hint=boolean:suppress-sound:true";
+        let quiet = Program::Osascript.args("-body", false);
+        assert!(!quiet.iter().any(|arg| arg.contains("sound")), "{quiet:?}");
+        let quiet = Program::NotifySend.args("-body", false);
+        assert!(quiet.iter().any(|arg| arg == suppress), "{quiet:?}");
+        assert!(
+            !quiet.iter().any(|arg| arg.contains("sound-name")),
+            "{quiet:?}"
+        );
+        let loud = Program::NotifySend.args("-body", true);
+        assert!(!loud.iter().any(|arg| arg == suppress), "{loud:?}");
         for program in [Program::Osascript, Program::NotifySend] {
             let quiet = program.args("-body", false);
-            assert!(!quiet.iter().any(|arg| arg.contains("sound")), "{quiet:?}");
             let title = quiet.iter().position(|arg| arg == TITLE).unwrap();
             assert_eq!(quiet[title + 1], "-body");
             assert_eq!(quiet.len(), title + 2);

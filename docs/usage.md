@@ -787,7 +787,12 @@ output or file content.
 
 The notice is shown by `osascript` on macOS and `notify-send` on other
 systems, the first one found on the coordinator's `PATH`, as a child process
-the coordinator kills after 2 seconds. It runs on a thread of its own, so no
+the coordinator kills after 2 seconds. With sound on, `notify-send` asks for
+the `message-new-instant` sound and `osascript` for `Glass`. With sound off,
+`notify-send` passes the `suppress-sound` hint, so a desktop set to play a
+default sound for every notice stays quiet for these (a notification server
+that ignores the hint may still play one), and `osascript` names no sound,
+which macOS shows silently. It runs on a thread of its own, so no
 hook or request waits for it, and nothing about it reaches the model, holds or
 refuses anything, or uses the network. Where neither program is found,
 nothing is shown, and `notify status` says so (it looks on its own `PATH`,

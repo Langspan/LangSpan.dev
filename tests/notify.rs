@@ -32,6 +32,25 @@ const CAROL: &str = "ca201000-0000-4000-8000-000000000003";
 const PROMPT: &str = "secret plan for the api";
 const HANDOFF_TEXT: &str = "private handoff words";
 
+/// The argument that asks a freedesktop notification server for silence.
+const SUPPRESS_SOUND: &str = "--hint=boolean:suppress-sound:true";
+
+/// The call asks for silence where it can: `notify-send` passes the
+/// `suppress-sound` hint, so a desktop with a default sound stays quiet;
+/// `osascript` with no `sound name` plays none, so it carries no sound
+/// argument at all.
+fn assert_silent(call: &[String]) {
+    if cfg!(target_os = "macos") {
+        assert!(!call.iter().any(|arg| arg.contains("sound")), "{call:?}");
+    } else {
+        assert!(call.iter().any(|arg| arg == SUPPRESS_SOUND), "{call:?}");
+        assert!(
+            !call.iter().any(|arg| arg.contains("sound-name")),
+            "{call:?}"
+        );
+    }
+}
+
 fn program() -> &'static str {
     if cfg!(target_os = "macos") {
         "osascript"
@@ -284,7 +303,7 @@ fn a_refusal_starts_one_notifier_and_a_second_within_five_minutes_none() {
         "work: claude-code.a11ce000… refused on a.txt (held by claude-code.b0b00000…)"
     );
     assert!(body.len() <= 200);
-    assert!(!call.iter().any(|arg| arg.contains("sound")), "{call:?}");
+    assert_silent(call);
     assert!(!call.iter().any(|arg| arg.contains(PROMPT)), "{call:?}");
     assert_eq!(fixture.logged("notice_sent").len(), 1);
 
@@ -328,6 +347,21 @@ fn sound_is_an_argument_of_the_one_call_only_when_switched_on() {
         calls[0].iter().any(|arg| arg.contains("sound")),
         "{calls:?}"
     );
+    assert!(
+        !calls[0].iter().any(|arg| arg == SUPPRESS_SOUND),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn with_sound_off_a_linux_notice_asks_the_desktop_for_silence() {
+    let fixture = Fixture::new(None);
+    let status = fixture.notify(&["on", "--sound", "off"]);
+    assert!(status.contains("sound: off"), "{status}");
+    fixture.refuse(&[ALICE]);
+    let calls = fixture.wait_for(1, "notifier_failed");
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_silent(&calls[0]);
 }
 
 #[test]
