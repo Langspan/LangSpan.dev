@@ -180,7 +180,165 @@ tests in `tests/shell_concurrent_edits.rs` (a real `sed` rewrite of two files
 between two sessions' real hooks, followed by `commit --mine`). An
 overlapping shell run of another session whose changes are unknown still
 contests every file the command changed, as above: its writes cannot be told
-from the command's.
+from the command's, with the exceptions below.
+
+**A reformat keeps each line's author** (added 25 November 2026, issue
+#141; it widens #124's rule below from the command's own lines to every
+session's). A formatter run in a shared checkout used to make
+`commit --mine` refuse for every session: overlapping another session's
+command, or rewriting another session's uncommitted lines, made each file it
+touched no session's, new files one session alone had written included. Now,
+in a file contested only because another session's shell run overlapped, or
+only because the command rewrote another session's uncommitted lines (no
+overlapping edit contests it, in either case), each run of changed lines is
+split into groups that keep their tokens, as #124 describes. Each line a
+group leaves keeps the author of the lines it removed: a line of the file
+before the command is a session's when every copy of it there was gained
+since `HEAD` and the journaled writes of that one session (a subagent's
+count as its parent's) added it; it is committed when no copy was. A group
+of one session's lines is that session's, whoever ran the command; of
+committed lines, the command's session's when nothing overlapped and no
+session's when something did; of several sessions' lines, or of a line not
+known to be one session's, no session's. Lines without tokens (blank lines)
+join the group next to them and do not decide it, and changes the line
+comparison separated only by blank lines are compared as one. The rest of a
+change, which alters tokens, keeps today's rules: the command's session's
+when nothing overlapped and every line it removes is committed or that
+session's own (#98), otherwise no session's (#124). The journal keeps a
+partial entry per credited session with just its lines; when every line is
+the command's session's, the file is attributed to it as usual. A file
+whose lines all go to another session stays `contested` for the command's
+session: it is not credited with it and gets no version of it, so the
+other session's next edit is refused once as stale, naming the command
+(#107). Two overlapping runs that both saw the change credit it once: an
+entry with the same version and lines as one the session was given since
+the command started is not written again. An earlier entry with the same
+lines is an earlier write (one a revert may have undone since), so it does
+not count.
+
+Tokens depend on the file's extension. Rust, TypeScript and JavaScript
+(`.rs`, `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs`): words
+and single punctuation bytes, with a comma just before a closing `)`, `]`
+or `}` dropped, since `rustfmt` and Prettier add or remove it when they wrap
+a list (so `(x,)` and `(x)` compare equal). Markdown (`.md`, `.markdown`,
+`.mdx`): words and punctuation, commas kept, so a re-wrapped paragraph keeps
+its author. Any other file: its text with all whitespace removed, so words
+that come to touch, or a change of indentation that matters (YAML, Python),
+are taken as formatting. Whitespace inside a string literal is taken as
+formatting in every language.
+
+Cost and bound: the comparison runs only for the files above, each at most
+512 KiB (the journal's version bound), at most 64 per command, within the
+hook's deadline. Per file it reuses the line comparison of ADR 0028
+(Myers, at most 256 edits, 4 million line comparisons and 64 MiB of compared
+bytes; past that the differing middle is one change), tokenizes each changed
+line once and then examines at most 4,000,000 tokens (`MAX_WORK` in
+[`src/reformat.rs`](../../src/reformat.rs)). Past that, or past the
+journal's 8,192 lines per side of one entry, nothing in the file is
+credited by this rule and it stays `contested`. Measured in a debug test
+build on an arm64 macOS machine, one run, toolchain 1.100.0: 8,000 lines
+(170 KiB), every one re-indented, took 149 ms
+(`a_large_reformat_is_compared_within_the_bound`); a release build is
+faster.
+
+Tests (two sessions' real hooks, a real daemon, a real Git repository, a
+real `cargo fmt --all` running `rustfmt`, and `commit --mine` for each
+session):
+`cargo_fmt_during_another_sessions_command_keeps_each_sessions_lines_its_own`,
+`a_new_file_another_sessions_formatter_reformats_stays_its_writers` and
+`a_token_change_during_another_sessions_command_is_credited_to_no_session`
+in `tests/shell_concurrent_edits.rs`, and the unit tests of
+`src/reformat.rs` (Rust, Markdown and other files; trailing commas; several
+sessions' lines in one group; the work bound).
+
+**A reformat of the session's own lines during another session's command**
+(added 25 November 2026, issue #124; widened by #141 above). A formatter keeps every token of the
+lines it rewrites and changes only whitespace and line breaks. In a file
+contested only because another session's shell run overlapped (no
+overlapping edit contests it, and the command rewrote no other session's
+lines), the command's change is compared line by line with the file before
+it. Each run of changed lines is split into groups whose removed and added
+lines have the same tokens, in order (a token is a run of letters, digits,
+`_` and non-ASCII bytes, or one other non-whitespace byte); a joined or split
+line is one group. A group is the command's session's when every line it
+removes is one of that session's own uncommitted lines: a line the file
+gained since `HEAD` that its journaled writes added and no other session's
+did, counted per copy. Where tokens differ, one removed and one added line are
+left out and grouping resumes after them. When every changed line is in such
+a group, the file is attributed to the session as usual. When only some are,
+the file stays `contested` (the reply says how many are partly the
+session's) and the journal keeps a partial entry with just those lines: its
+lines count for `commit --mine` and the commit guard, but the version it left
+is not the session's alone, so it never makes a whole-file attribution the
+session's. A line left out is credited to no session, so a hunk holding it is
+refused; so is a credited line whose content the uncredited part also adds
+or removes, since the journal matches lines by content. Nothing is credited
+when the file has a write whose lines are not known, is not UTF-8, or its
+content before the command, now or in `HEAD` is not known; nor on the paths
+that contest every file (past a call's lifetime, an edit mark overflow).
+A change that keeps tokens but changes whitespace inside a string literal is
+taken as a reformat; another session's command that only did that to the
+session's own line is indistinguishable from the formatter. Tests:
+`a_formatter_reformatting_only_its_sessions_lines_during_another_sessions_command_is_credited`,
+`a_line_the_other_sessions_command_also_changed_is_credited_to_no_session` and
+`a_formatter_during_another_sessions_command_still_takes_none_of_its_lines`
+in `tests/shell_concurrent_edits.rs` (two sessions' real hooks, a real
+command held open by a signal file, a real `sed` rewrite and `commit
+--mine`), and the unit tests of `src/reformat.rs`.
+
+**A notice before a formatter reaches another session's files** (added 25
+November 2026, issue #126). Keeping the author of each line a formatter only
+reformats (#141), and crediting a change of tokens to no one, keeps
+attribution right, but the other session's work still changes under it and
+its next edit of the file is refused as stale. Before a shell command, the pre-tool hook
+reads which recognised formatters it runs (`src/shell/formatters.rs`, a
+lenient reader built on the commit guard's lexer) and how far each reaches:
+
+- `cargo fmt` in any form: every `.rs` file of the workspace. Files given
+  after `--` are added to its targets, not put in their place (observed with
+  rustfmt 1.11.0: `cargo fmt -- src/a.rs` also reformatted the crate root).
+- `rustfmt FILE...`: those files and the modules they declare (the directory
+  beside a crate root or `mod.rs`, otherwise the one named after the file).
+- `prettier --write PATH...` (also through `npx`, `pnpm exec`, `yarn`, a
+  path, or `prettier@N`): the files named, and every file of the languages
+  Prettier formats without a plugin under a directory or a glob's literal
+  directory.
+- A check (`--check`), a run that prints (`rustfmt --emit stdout`, no file),
+  or a Prettier run without `--write` reaches nothing. An operand that is an
+  expansion, or a `cd` the reader cannot follow, reaches the whole workspace.
+
+A file is named when another session's journaled write
+([ADR 0026](0026-commit-guard-and-commit-mine.md)) changed it, it still
+differs from `HEAD` in the command's own snapshot, it is in the reach, that
+session is live (registered, not ended and not known to have exited, the
+commit guard's rule), and its journaled lines are still among the file's
+changes from `HEAD`. The journal keeps a write for a week whatever commits
+it, and only `commit --mine` forgets one, so a write committed through plain
+Git would otherwise be named for as long as anyone else's change kept the
+file dirty, and spend the once-only notice. A line the other session added
+(or removed) counts while the file adds (or removes) more copies of it than
+the formatting session's own writes account for, so a `}` both wrote is not
+enough. A write of unknown lines, or a file whose versions cannot be read
+within the journal's bound and the hook's budget, still names the session:
+the notice errs toward telling. The reply carries the notice as
+`hookSpecificOutput.additionalContext` with no permission decision, so the
+command runs as it would without LangSpan. It names each session and at most
+eight files in all, then counts the rest; paths are cleaned and the list is
+capped like a refusal's. It is given once per session for each set of
+session and file pairs (the commit guard's "told" record): the same files are
+not named again whichever formatter runs, and a new file in the reach makes a
+new notice. Only hosts that show pre-tool context to the model get it
+(Claude Code and Codex); for Cursor and Gemini CLI nothing is computed, so a
+notice is not spent unread. Claude Code shows the context next to the tool
+result ([ADR 0029](0029-break-alerts-at-write-time.md)), so the model reads it
+after the formatter ran: it says whom to tell and how to format only one's
+own files next time. The skill gives the same advice beforehand. A failure
+to reach the daemon for liveness gives no notice and says so in the hook's
+detail. Other formatters (`gofmt`, `black`, `ruff format`) and a formatter run
+by a script or `npm run` are not recognised. Tests: `tests/formatter_notice.rs`
+(two sessions' real hooks, a real daemon and Git repository), the unit tests
+of `src/shell/formatters.rs` and `src/formatter.rs`, and
+`the_formatter_commands_the_skill_names_are_read_as_it_says`.
 
 The cap holds on every path that creates a mark: an edit's pre-tool hook, and
 its post-tool hook when the start was not kept. An edit call refused a mark at
@@ -279,6 +437,18 @@ Coverage values: `admitted`, `denied`, `denied_stale` (before, literal forms);
   one for at most a day; at most 4,096 are kept. `STATE/shell/edits/` holds
   one small owner-only file per recent edit tool call, pruned the same way,
   so each edit tool call's hooks write one more file.
+- `STATE/shell-changes/` holds, per workspace and file, a change note: the
+  last shell command known to have changed the file, its session, its command
+  line (redacted and capped at 120 bytes, as the run record now keeps it) and
+  the version it left (issue #107). A file the command is credited with, or
+  one it is withheld from only because it rewrote another session's
+  uncommitted lines, is noted; a file another session's overlapping run or
+  edit could have written is not. When another session's next edit of the
+  file is refused as stale and the version on disk is still the one the note
+  records, the refusal says "changed by a shell command of `<host>` session
+  `<id>`: `<command>`" instead of "changed outside any reported edit"; a
+  later reported edit by a different session is named instead. Notes expire
+  after a week, at most 256 are written per run and 4,096 kept per workspace.
 - The parser is a second grammar to keep conservative. A form is added only
   with a test that names its targets and the disqualifiers that go with it.
 

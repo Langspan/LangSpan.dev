@@ -93,6 +93,24 @@ fn copy(from: &Path, to: &Path) {
 
 /// Compare two states field by field, naming the first field that differs.
 fn assert_same_state(left: &State, right: &State) {
+    // Fields left out of every reply too. Each start anchors its own
+    // generation on the real clocks, so two starts agree on its generation.
+    let generation = |state: &State| state.clock_anchor.map(|anchor| anchor.generation);
+    assert_eq!(
+        generation(left),
+        generation(right),
+        "state field clock_anchor differs"
+    );
+    assert_eq!(
+        left.refusals, right.refusals,
+        "state field refusals differs"
+    );
+    let mut unanchored = right.clone();
+    unanchored.clock_anchor = left.clock_anchor;
+    assert!(
+        *left == unanchored,
+        "the states differ in a field that is not serialised"
+    );
     let (serde_json::Value::Object(left), serde_json::Value::Object(right)) = (
         serde_json::to_value(left).unwrap(),
         serde_json::to_value(right).unwrap(),
@@ -804,7 +822,9 @@ fn records_from_before_the_upgrade_count_from_the_upgrade() {
     assert_eq!(report(store.compact(30, true).unwrap()).events, 0);
     wall.set(START_MS + 31 * DAY_MS);
     let compaction = report(store.compact(30, true).unwrap());
-    assert_eq!(compaction.events, 2, "the old boot and the upgrade's boot");
+    // The upgrade's start (`booted`, `clock_anchored`) dates this
+    // generation's events, so it stays.
+    assert_eq!(compaction.events, 1, "the old boot");
     drop(store);
     assert_eq!(wall.open(&path).state().generation, 3);
 }
@@ -1080,4 +1100,58 @@ mod daemon {
         assert!(String::from_utf8_lossy(&applied.stdout).starts_with("deleted "));
         assert_eq!(count(&daemon.database(), "snapshots"), 1);
     }
+}
+
+/// The events `today` reads that it cannot place on a wall-clock day.
+fn undated_today(store: &Store) -> u32 {
+    match store.today(None, 0, u64::MAX / 2, 0).unwrap() {
+        Outcome::Today { today } => today.undated,
+        other => panic!("expected today's account, got {other:?}"),
+    }
+}
+
+/// `today` places events on a day by their generation's clock anchor, the
+/// `booted` and `clock_anchored` events of that daemon start. A compaction
+/// must keep the anchor of the oldest event it leaves, even when the start
+/// itself is older than the window, as it is for a daemon running for
+/// longer than the window or one whose last start was before it.
+#[test]
+fn a_compaction_keeps_the_clock_anchor_of_the_events_it_leaves() {
+    let directory = Directory::new();
+    let path = directory.file("state.sqlite3");
+    let wall = Wall::at(START_MS);
+    let mut store = wall.open(&path);
+    History::setup(&mut store);
+    History::new(11).days(&mut store, &wall, 40, 10);
+    assert_eq!(undated_today(&store), 0, "every event is anchored before");
+
+    let applied = report(store.compact(7, true).unwrap());
+    assert!(applied.applied && applied.events > 0, "{applied:?}");
+    assert_eq!(
+        undated_today(&store),
+        0,
+        "the compaction removed the anchor of the events it left"
+    );
+    // The anchor stays across a restart, and an old start's markers go once
+    // a newer start anchors everything that is left.
+    drop(store);
+    let mut store = wall.open(&path);
+    assert_eq!(undated_today(&store), 0);
+    History::new(12).days(&mut store, &wall, 10, 10);
+    let again = report(store.compact(7, true).unwrap());
+    assert!(again.events > 0, "{again:?}");
+    assert_eq!(undated_today(&store), 0);
+    // No start older than the one dating the oldest event left is kept.
+    let older_starts: i64 = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE json_extract(event_json, '$.type') = 'booted'
+               AND seq < (SELECT max(seq) FROM events WHERE seq < (SELECT min(seq) FROM events
+                 WHERE json_extract(event_json, '$.type') NOT IN ('booted', 'clock_anchored'))
+               AND json_extract(event_json, '$.type') = 'booted')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(older_starts, 0, "an older start than needed was kept");
 }

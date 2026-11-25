@@ -10,14 +10,46 @@
 
 use super::{Store, StoreResult, redact_event};
 use langspan_core::{
-    CompactionReport, Event, LeaseStatus, MAX_RETENTION_DAYS, MIN_RETENTION_DAYS, Outcome, State,
-    apply,
+    ClockAnchor, CompactionReport, Event, LeaseStatus, MAX_RETENTION_DAYS, MIN_RETENTION_DAYS,
+    Outcome, RecentRefusal, State, apply,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 const DAY_MS: u64 = 86_400_000;
+
+/// A snapshot as stored: the state, and the derived fields the state leaves
+/// out of every reply (`#[serde(skip)]`), which a start from the snapshot
+/// must still have. A field skipped in the state and missing here makes the
+/// snapshot check refuse the compaction.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotRecord {
+    state: State,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clock_anchor: Option<ClockAnchor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    refusals: Vec<RecentRefusal>,
+}
+
+impl SnapshotRecord {
+    fn of(state: &State) -> Self {
+        Self {
+            state: state.clone(),
+            clock_anchor: state.clock_anchor,
+            refusals: state.refusals.clone(),
+        }
+    }
+    fn into_state(self) -> State {
+        let mut state = self.state;
+        state.clock_anchor = self.clock_anchor;
+        state.refusals = self.refusals;
+        state
+    }
+}
+
 /// The newest snapshot and its sequence, or the empty state at zero.
 pub(super) fn snapshot(connection: &Connection) -> StoreResult<(State, u64)> {
     let newest: Option<(i64, String)> = connection
@@ -30,10 +62,10 @@ pub(super) fn snapshot(connection: &Connection) -> StoreResult<(State, u64)> {
     let Some((sequence, json)) = newest else {
         return Ok((State::default(), 0));
     };
-    let state = serde_json::from_str(&json).map_err(|error| {
+    let record: SnapshotRecord = serde_json::from_str(&json).map_err(|error| {
         format!("the state snapshot at event {sequence} cannot be read by this build: {error}")
     })?;
-    Ok((state, u64::try_from(sequence)?))
+    Ok((record.into_state(), u64::try_from(sequence)?))
 }
 
 /// Apply the events after `from` to `state` in order, calling `before` with
@@ -124,23 +156,69 @@ fn opening(event: &Event) -> Option<(&'static str, String)> {
 /// `state` written as a snapshot and read back, so that what is checked is
 /// what a later start would load.
 fn restored(state: &mut State) -> StoreResult<String> {
-    let json = serde_json::to_string(state)?;
-    *state = serde_json::from_str(&json)?;
+    let json = serde_json::to_string(&SnapshotRecord::of(state))?;
+    *state = serde_json::from_str::<SnapshotRecord>(&json)?.into_state();
     Ok(json)
 }
 
-/// The top-level state fields in which `left` and `right` differ.
+/// The top-level state fields in which `left` and `right` differ, as a
+/// snapshot records them; a field no snapshot records is named as such.
 fn differences(left: &State, right: &State) -> Vec<String> {
-    let (Ok(serde_json::Value::Object(left)), Ok(serde_json::Value::Object(right))) =
-        (serde_json::to_value(left), serde_json::to_value(right))
-    else {
+    let fields = |state: &State| {
+        let Ok(serde_json::Value::Object(mut record)) =
+            serde_json::to_value(SnapshotRecord::of(state))
+        else {
+            return None;
+        };
+        let Some(serde_json::Value::Object(mut fields)) = record.remove("state") else {
+            return None;
+        };
+        fields.extend(record);
+        Some(fields)
+    };
+    let (Some(left), Some(right)) = (fields(left), fields(right)) else {
         return vec!["state".into()];
     };
-    left.keys()
+    let named: Vec<String> = left
+        .keys()
         .chain(right.keys().filter(|key| !left.contains_key(*key)))
         .filter(|key| left.get(*key) != right.get(*key))
         .cloned()
-        .collect()
+        .collect();
+    if named.is_empty() {
+        vec!["a field no snapshot records".into()]
+    } else {
+        named
+    }
+}
+
+/// Which events a compaction deletes: those at or below the snapshot
+/// sequence `?1` recorded before the cutoff `?2`, except the generation
+/// markers from `?3` on, which date the events left (see `anchor_from`).
+const REMOVED: &str = concat!(
+    "seq <= ?1 AND recorded_at_ms < ?2 AND NOT (seq >= ?3 AND ",
+    generation_marker!(),
+    ")"
+);
+
+/// The first generation marker a compaction keeps: the start of the
+/// generation of the oldest event it leaves, or of the newest generation
+/// when it leaves none. `today` places an event on a day by the clock anchor
+/// of its generation, so that start and every later one stay; older starts
+/// go. `i64::MAX` when there is no start to keep.
+fn anchor_from(connection: &Connection, target: i64, cutoff: i64) -> StoreResult<i64> {
+    let first_left: Option<i64> = connection.query_row(
+        "SELECT min(seq) FROM events WHERE seq > ?1 OR recorded_at_ms >= ?2",
+        params![target, cutoff],
+        |row| row.get(0),
+    )?;
+    let start: Option<i64> = connection.query_row(
+        "SELECT max(seq) FROM events WHERE seq < ?1
+           AND json_valid(event_json) AND json_extract(event_json, '$.type') = 'booted'",
+        [first_left.unwrap_or(i64::MAX)],
+        |row| row.get(0),
+    )?;
+    Ok(start.unwrap_or(i64::MAX))
 }
 
 impl Store {
@@ -223,11 +301,14 @@ impl Store {
             None
         };
         let target_sql = i64::try_from(target)?;
+        let anchor_sql = anchor_from(&self.connection, target_sql, cutoff_sql)?;
         let (events, event_bytes, first_seq, last_seq): (i64, i64, Option<i64>, Option<i64>) =
             self.connection.query_row(
-                "SELECT count(*), coalesce(sum(length(event_json)), 0), min(seq), max(seq)
-                 FROM events WHERE seq <= ?1 AND recorded_at_ms < ?2",
-                params![target_sql, cutoff_sql],
+                &format!(
+                    "SELECT count(*), coalesce(sum(length(event_json)), 0), min(seq), max(seq)
+                     FROM events WHERE {REMOVED}"
+                ),
+                params![target_sql, cutoff_sql, anchor_sql],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
         let (receipts, receipt_bytes): (i64, i64) = self.connection.query_row(
@@ -275,8 +356,8 @@ impl Store {
             )?;
         }
         transaction.execute(
-            "DELETE FROM events WHERE seq <= ?1 AND recorded_at_ms < ?2",
-            params![target_sql, cutoff_sql],
+            &format!("DELETE FROM events WHERE {REMOVED}"),
+            params![target_sql, cutoff_sql, anchor_sql],
         )?;
         transaction.execute(
             "DELETE FROM receipts WHERE recorded_at_ms < ?1",

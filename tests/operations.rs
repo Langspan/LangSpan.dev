@@ -13,6 +13,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct World {
@@ -39,9 +41,16 @@ impl World {
     fn work(&self) -> PathBuf {
         self.base.join("work")
     }
+    /// The langspan executable with this world's own home, so nothing
+    /// installed on the machine changes what it reports.
+    fn langspan(&self) -> Process {
+        let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
+        support::in_home(&mut command, &self.base.join("home"));
+        command
+    }
     fn start(&mut self) {
         self.daemon = Some(
-            Process::new(env!("CARGO_BIN_EXE_langspan"))
+            self.langspan()
                 .args(["daemon", "--state-dir"])
                 .arg(self.base.join("state"))
                 .stdout(Stdio::null())
@@ -56,7 +65,8 @@ impl World {
         }
     }
     fn cli(&self, args: &[&str]) -> (i32, String) {
-        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        let output = self
+            .langspan()
             .arg("--state-dir")
             .arg(self.base.join("state"))
             .args(args)
@@ -82,7 +92,8 @@ impl World {
         );
     }
     fn hook(&self, event: Value) -> Option<String> {
-        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        let mut child = self
+            .langspan()
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.base.join("state"))
             .args(["--workspace", "app", "--root"])
@@ -189,6 +200,12 @@ fn doctor_names_each_thing_that_is_not_working_and_stops_when_it_is_fixed() {
         code == 0 && text.contains("index holds 1 of 1")
     });
     assert!(text.contains("Nothing needs attention"), "{text}");
+    // Its home is the world's own and empty: no user-level install, the
+    // machine's included, is reported.
+    assert!(
+        !text.contains("user-level") && !text.contains("LangSpan skill"),
+        "{text}"
+    );
 
     // Hooks: installed, then pointing at an executable that is gone.
     let work = w.work();
@@ -272,6 +289,66 @@ fn doctor_names_the_events_an_earlier_install_left_out_and_a_reinstall_adds_them
         text.contains("ok claude-code hooks installed for 10 event(s)."),
         "{text}"
     );
+}
+
+/// Issue #130: hooks installed with a state directory named through a
+/// symbolic link use the same coordinator as `doctor` run with its real
+/// path, and the other way round; a genuinely different one still warns.
+#[test]
+fn doctor_takes_a_state_directory_named_through_a_link_for_the_same_one() {
+    let w = World::new();
+    let work = w.work();
+    let state = w.base.join("state");
+    let link = w.base.join("state-link");
+    std::os::unix::fs::symlink(&state, &link).unwrap();
+    let other = w.base.join("other");
+    fs::create_dir(&other).unwrap();
+    let run = |state_dir: &std::path::Path, args: &[&str]| -> String {
+        let output = w
+            .langspan()
+            .arg("--state-dir")
+            .arg(state_dir)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let install = |state_dir: &std::path::Path| {
+        run(
+            state_dir,
+            &[
+                "hooks",
+                "install",
+                "claude-code",
+                "--workspace",
+                "app",
+                "--root",
+                work.to_str().unwrap(),
+                "--apply",
+            ],
+        )
+    };
+    let doctor =
+        |state_dir: &std::path::Path| run(state_dir, &["doctor", "--root", work.to_str().unwrap()]);
+    let warning = "different state directory";
+
+    install(&link);
+    let text = doctor(&state);
+    assert!(
+        text.contains("ok claude-code hooks installed for 10 event(s).") && !text.contains(warning),
+        "{text}"
+    );
+    let text = doctor(&other);
+    assert!(text.contains(warning), "{text}");
+
+    install(&state);
+    let text = doctor(&link);
+    assert!(
+        text.contains("ok claude-code hooks installed for 10 event(s).") && !text.contains(warning),
+        "{text}"
+    );
+    let text = doctor(&other);
+    assert!(text.contains(warning), "{text}");
 }
 
 #[test]

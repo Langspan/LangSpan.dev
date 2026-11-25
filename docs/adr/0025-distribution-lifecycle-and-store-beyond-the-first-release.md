@@ -62,6 +62,13 @@ Decided and built 25 November 2026.
   any admission, push turn, waiting landing or unacknowledged message still
   open; the report names it (`held_by`). An unacknowledged message therefore
   holds retention until it is acknowledged or leaves the workspace's 64.
+- **The clock anchor of what is left stays.** A daemon start writes
+  `booted` and `clock_anchored`, by which `today` places a generation's
+  events on a day. A compaction keeps the start of the generation of the
+  oldest event it leaves (or the newest start, if it leaves none) and every
+  start after it, even when they are older than the window; older starts go.
+  The snapshot also records the derived fields the state leaves out of every
+  reply (the clock anchor and the recent refusals of the status line).
 - **Retries and publications.** A retry whose receipt was removed is a new
   request, which is why the window is at least 7 days. `remote sent` keeps
   every `remote_published` record within the window and says from which date

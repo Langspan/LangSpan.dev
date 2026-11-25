@@ -10,7 +10,9 @@
 use langspan_core::FileState;
 use serde::{Deserialize, Serialize};
 
+mod formatters;
 mod git_commands;
+pub use formatters::{Formatting, Reach, formatters};
 pub use git_commands::{GitStep, git_steps};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -705,8 +707,9 @@ pub struct Record {
     /// as a running command does.
     #[serde(default)]
     pub background: bool,
-    /// The command runs `langspan commit --mine`: while it runs, that
-    /// command may take its session from this record (ADR 0026).
+    /// The command runs `langspan commit --mine` or `langspan status
+    /// --mine`: while it runs, that command may take its session from this
+    /// record (ADR 0026).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub commit_mine: bool,
     /// Once finished: of `changed`, the paths another session's hooked edit
@@ -714,6 +717,15 @@ pub struct Record {
     /// session's (its own hooks recorded them), not this run's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edited_elsewhere: Vec<String>,
+    /// Once finished: of `contested`, the paths part of whose change only
+    /// reformatted lines, journaled as the sessions' that wrote them
+    /// (issues #124 and #141).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reformatted: Vec<String>,
+    /// The command line, redacted and capped (`kept_command`), for a later
+    /// refusal to name. `None` in a record written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 impl Record {
@@ -735,13 +747,17 @@ impl Record {
     }
 }
 
-/// Whether a shell command runs `langspan commit --mine`.
+/// Whether a shell command runs `langspan commit --mine` or `langspan status
+/// --mine`, which take their session from the running call.
 pub fn runs_commit_mine(command: &str) -> bool {
-    command.contains("langspan") && command.contains("commit") && command.contains("--mine")
+    command.contains("langspan")
+        && (command.contains("commit") || command.contains("status"))
+        && command.contains("--mine")
 }
 
-/// The sessions with a `langspan commit --mine` command running now in the
-/// physical workspace `workspace`, from their run records. A session's open
+/// The sessions with a `langspan commit --mine` (or `status --mine`)
+/// command running now in the physical workspace `workspace`, from their
+/// run records. A session's open
 /// records are closed when its reply or the session ends (`close_session`),
 /// so an ended session is not among them.
 pub fn committing_sessions(state_dir: &Path, workspace: &Path) -> BTreeSet<String> {
@@ -997,6 +1013,148 @@ pub fn contested(
         }
     }
     contested.into_iter().collect()
+}
+
+// ---------------------------------------------------------------------------
+// Change notes: the last shell command that changed each file (issue #107)
+// ---------------------------------------------------------------------------
+
+/// The command text a run record and a change note keep, at most, in bytes,
+/// after redaction.
+pub const NOTE_COMMAND_BYTES: usize = 120;
+/// Change notes kept per workspace, and files noted per run, at most.
+const MAX_NOTES: usize = 4096;
+pub const MAX_NOTED_PER_RUN: usize = 256;
+const NOTE_LIMIT_BYTES: u64 = 4096;
+const NOTE_LIFETIME_MS: u64 = 7 * DAY_MS;
+
+/// The last shell command known to have changed one file: whose it was,
+/// its command line (redacted and capped), and the version it left. A
+/// refusal names it only while that version is still the one on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeNote {
+    pub session_id: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    pub after: FileState,
+    pub at_ms: u64,
+}
+
+/// A shell command line as a run record and change note keep it: likely
+/// secrets redacted, deceptive characters replaced, at most
+/// `NOTE_COMMAND_BYTES` bytes.
+pub fn kept_command(command: &str) -> String {
+    crate::hook::clean(&crate::hook::redact(command), NOTE_COMMAND_BYTES)
+}
+
+fn notes_dir(state_dir: &Path, root: &Path) -> PathBuf {
+    let workspace = workspace_identity(root);
+    state_dir.join("shell-changes").join(crate::hook::wire_id(
+        "shell-changes",
+        &[&workspace.to_string_lossy()],
+    ))
+}
+
+fn note_path(directory: &Path, path: &str) -> PathBuf {
+    directory.join(crate::hook::wire_id("shell-change", &[path]))
+}
+
+/// Note that `session_id`'s command changed each of `files` to the version
+/// given, replacing any earlier note of the file. At most
+/// `MAX_NOTED_PER_RUN` files are noted; the oldest notes beyond
+/// `MAX_NOTES`, and any older than a week, are removed.
+#[cfg(unix)]
+pub fn note_changes(
+    state_dir: &Path,
+    root: &Path,
+    session_id: &str,
+    command: Option<&str>,
+    files: &[(String, FileState)],
+) -> Result<(), String> {
+    use std::io::Write;
+    if files.is_empty() {
+        return Ok(());
+    }
+    let directory = notes_dir(state_dir, root);
+    crate::local::private_directory(&state_dir.join("shell-changes"))
+        .and_then(|()| crate::local::private_directory(&directory))
+        .map_err(|e| format!("change notes: {e}"))?;
+    let now = now_ms();
+    for (path, after) in files.iter().take(MAX_NOTED_PER_RUN) {
+        let note = ChangeNote {
+            session_id: session_id.to_owned(),
+            command: command.map(kept_command),
+            after: after.clone(),
+            at_ms: now,
+        };
+        let bytes = serde_json::to_vec(&note).map_err(|e| e.to_string())?;
+        let target = note_path(&directory, path);
+        let temporary = target.with_extension(format!("tmp-{}", std::process::id()));
+        let _ = fs::remove_file(&temporary);
+        let mut file = crate::local::private_file(&temporary, true)
+            .map_err(|e| format!("change note: {e}"))?;
+        file.write_all(&bytes)
+            .map_err(|e| format!("change note: {e}"))?;
+        fs::rename(&temporary, &target).map_err(|e| format!("change note: {e}"))?;
+    }
+    prune_notes(&directory, now);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn note_changes(
+    _: &Path,
+    _: &Path,
+    _: &str,
+    _: Option<&str>,
+    _: &[(String, FileState)],
+) -> Result<(), String> {
+    Err("shell observation requires Unix".into())
+}
+
+fn prune_notes(directory: &Path, now: u64) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut notes: Vec<(u64, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .take(MAX_NOTES * 2)
+        .filter_map(|entry| {
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            let at = modified.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
+            Some((at, entry.path()))
+        })
+        .collect();
+    notes.sort();
+    let excess = notes.len().saturating_sub(MAX_NOTES);
+    for (index, (at, path)) in notes.into_iter().enumerate() {
+        if index < excess || now.saturating_sub(at) > NOTE_LIFETIME_MS {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// The last shell command noted as changing `path` in the workspace at
+/// `root`, when it is noted, readable and less than a week old.
+pub fn change_note(state_dir: &Path, root: &Path, path: &str) -> Option<ChangeNote> {
+    let file = note_path(&notes_dir(state_dir, root), path);
+    #[cfg(unix)]
+    let bytes = {
+        use std::io::Read;
+        let file = crate::local::private_file(&file, false).ok()?;
+        let mut bytes = Vec::new();
+        file.take(NOTE_LIMIT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() as u64 <= NOTE_LIMIT_BYTES).then_some(bytes)?
+    };
+    #[cfg(not(unix))]
+    let bytes: Vec<u8> = {
+        let _ = file;
+        return None;
+    };
+    let note: ChangeNote = serde_json::from_slice(&bytes).ok()?;
+    (now_ms().saturating_sub(note.at_ms) <= NOTE_LIFETIME_MS).then_some(note)
 }
 
 // ---------------------------------------------------------------------------
@@ -1510,6 +1668,95 @@ mod parser {
     }
 }
 
+#[cfg(all(test, unix))]
+mod change_notes {
+    use super::*;
+
+    fn present(digest: &str) -> FileState {
+        FileState::Present {
+            digest: digest.repeat(64),
+            kind: langspan_core::FileKind::Regular,
+        }
+    }
+
+    fn temporary() -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "ls-change-notes-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    /// A note is kept per workspace and file, the latest replaces the
+    /// last, its command is redacted and capped, and a week-old note is
+    /// neither read nor kept.
+    #[test]
+    fn a_note_is_the_latest_per_file_and_workspace_redacted_and_expires() {
+        let base = temporary();
+        let (state, one, two) = (base.join("state"), base.join("one"), base.join("two"));
+        fs::create_dir_all(&one).unwrap();
+        fs::create_dir_all(&two).unwrap();
+        let long = format!(
+            "TOKEN=ghp_0123456789abcdefghijABCDEFGHIJ012345 {}",
+            "y".repeat(300)
+        );
+        note_changes(
+            &state,
+            &one,
+            "s.a",
+            Some("first"),
+            &[("f".into(), present("a"))],
+        )
+        .unwrap();
+        note_changes(
+            &state,
+            &one,
+            "s.b",
+            Some(&long),
+            &[("f".into(), present("b"))],
+        )
+        .unwrap();
+        let note = change_note(&state, &one, "f").unwrap();
+        assert_eq!(
+            (note.session_id.as_str(), &note.after),
+            ("s.b", &present("b"))
+        );
+        let command = note.command.unwrap();
+        assert!(command.starts_with("TOKEN=[redacted] y"), "{command}");
+        assert!(command.len() <= NOTE_COMMAND_BYTES && command.ends_with('…'));
+        assert!(
+            change_note(&state, &two, "f").is_none(),
+            "another workspace"
+        );
+        assert!(change_note(&state, &one, "g").is_none(), "another file");
+
+        // An expired note is not read, and the next write removes it.
+        let directory = notes_dir(&state, &one);
+        let path = note_path(&directory, "f");
+        let old = ChangeNote {
+            at_ms: now_ms() - NOTE_LIFETIME_MS - 1,
+            ..change_note(&state, &one, "f").unwrap()
+        };
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(change_note(&state, &one, "f").is_none());
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(
+                SystemTime::now() - std::time::Duration::from_millis(NOTE_LIFETIME_MS + 60_000),
+            )
+            .unwrap();
+        note_changes(&state, &one, "s.a", None, &[("g".into(), present("c"))]).unwrap();
+        assert!(!path.exists());
+        assert_eq!(change_note(&state, &one, "g").unwrap().command, None);
+        let _ = fs::remove_dir_all(&base);
+    }
+}
+
 #[cfg(test)]
 mod diff {
     use super::*;
@@ -1731,6 +1978,8 @@ mod diff {
             background: false,
             commit_mine: false,
             edited_elsewhere: Vec::new(),
+            reformatted: Vec::new(),
+            command: None,
         };
         let note = marks(&state).join(OVERFLOW);
         assert!(!overlapping_edits(&state, &run).incomplete);

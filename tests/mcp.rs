@@ -166,34 +166,10 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
         .expect("tools/list timed out")
         .expect("tools/list failed");
     let names: BTreeSet<_> = tools.iter().map(|tool| tool.name.as_ref()).collect();
-    assert_eq!(
-        names,
-        BTreeSet::from([
-            "langspan_admit",
-            "langspan_brief",
-            "langspan_changes",
-            "langspan_commit_mine",
-            "langspan_complete",
-            "langspan_events",
-            "langspan_forget",
-            "langspan_handoff",
-            "langspan_impact",
-            "langspan_integrate_check",
-            "langspan_intent_end",
-            "langspan_land",
-            "langspan_land_cancel",
-            "langspan_land_queue",
-            "langspan_intent_set",
-            "langspan_recap",
-            "langspan_references",
-            "langspan_remember",
-            "langspan_send_message",
-            "langspan_session_register",
-            "langspan_status",
-            "langspan_symbol",
-            "langspan_workspace_register",
-        ])
-    );
+    // The server lists exactly the tools in the one list, `TOOL_NAMES`.
+    if let Err(problem) = langspan::mcp::compare_tool_names(names.iter().copied()) {
+        panic!("{problem}");
+    }
     // Every tool the LangSpan skill names is one this server lists.
     let named = langspan::skill::tools();
     assert!(!named.is_empty());
@@ -218,8 +194,12 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_symbol"
                 | "langspan_references"
                 | "langspan_impact"
+                | "langspan_blind_spots"
                 | "langspan_recap"
+                | "langspan_recall"
+                | "langspan_today"
                 | "langspan_land_queue"
+                | "langspan_flaky_tests"
         ) {
             assert!(
                 tool.input_schema["required"]
@@ -299,13 +279,80 @@ async fn stdio_supports_current_discovery_lifecycle() {
         .await
         .expect("discovery-lifecycle tools/list timed out")
         .expect("discovery-lifecycle tools/list failed");
-    assert_eq!(tools.len(), 23);
+    if let Err(problem) =
+        langspan::mcp::compare_tool_names(tools.iter().map(|tool| tool.name.as_ref()))
+    {
+        panic!("tools/list over stdio: {problem}");
+    }
     let result = call_tool(&client, "langspan_status", json!({})).await;
     assert_eq!(result.is_error, Some(true));
     assert_eq!(
         result.structured_content.expect("adapter error")["code"],
         "daemon_request_failed"
     );
+    disconnect(client).await;
+}
+
+#[tokio::test]
+async fn stdio_blind_spots_names_a_partial_file_through_the_daemon() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let workspace = fs::canonicalize(directory.workspace()).expect("resolve workspace");
+    fs::write(workspace.join("src/broken.rs"), "pub fn half( {{{\n").expect("write file");
+    let git = Command::new("git")
+        .arg("-C")
+        .arg(&workspace)
+        .args(["init", "--quiet"])
+        .status()
+        .expect("run git");
+    assert!(git.success());
+    let _daemon = Daemon::start(&state_dir).await;
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"workspace-register", "workspace_id":"workspace", "root":workspace}),
+        )
+        .await,
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let outcome = loop {
+        let answer = response(
+            call_tool(
+                &client,
+                "langspan_blind_spots",
+                json!({"workspace_id":"workspace", "limit":10}),
+            )
+            .await,
+        );
+        let Outcome::GraphBlindSpots {
+            blind_spots,
+            coverage,
+            ..
+        } = answer.outcome
+        else {
+            panic!("unexpected outcome: {:?}", answer.outcome);
+        };
+        // Both files indexed: until then the other one is waiting.
+        if !blind_spots.partial.is_empty() && coverage.current_files == 2 {
+            break (blind_spots, coverage);
+        }
+        assert!(Instant::now() < deadline, "the partial file never appeared");
+        sleep(Duration::from_millis(100)).await;
+    };
+    let (blind_spots, coverage) = outcome;
+    assert_eq!(blind_spots.partial[0].path, "src/broken.rs");
+    assert_eq!(blind_spots.never_clean, ["src/broken.rs"]);
+    assert_eq!(coverage.blind_in_scope, 1);
+    let bad = call_tool(
+        &client,
+        "langspan_blind_spots",
+        json!({"workspace_id":"workspace", "limit":0}),
+    )
+    .await;
+    let bad = serde_json::to_string(&bad).expect("serialize");
+    assert!(bad.contains("limit must be between 1 and 200"), "{bad}");
     disconnect(client).await;
 }
 
@@ -825,5 +872,100 @@ async fn stdio_symbol_with_detail_returns_calls_and_callers_by_name() {
     };
     assert_eq!(resolution, None);
     assert_eq!((&symbols[0].body_digest, &symbols[0].calls), (&None, &None));
+    disconnect(client).await;
+}
+
+/// `langspan_impact` with `depth` through a real MCP client, daemon,
+/// indexer and Git repository (roadmap D2).
+#[tokio::test]
+async fn stdio_impact_with_depth_returns_levels_by_name() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let workspace = directory.workspace();
+    for (path, text) in [
+        ("src/a.rs", "pub fn alpha() {}\n"),
+        ("src/b.rs", "pub fn beta() { alpha(); }\n"),
+        ("src/c.rs", "fn main() { beta(); }\n"),
+    ] {
+        fs::write(workspace.join(path), text).expect("write source");
+    }
+    for args in [
+        &["init", "--quiet", "--initial-branch=main"][..],
+        &["add", "."],
+        &["commit", "--quiet", "-m", "init"],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?}");
+    }
+    let _daemon = Daemon::start(&state_dir).await;
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"workspace-register", "workspace_id":"workspace", "root":workspace}),
+        )
+        .await,
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let outcome = loop {
+        let answer = call_tool(
+            &client,
+            "langspan_impact",
+            json!({"workspace_id":"workspace", "path":"src/a.rs", "limit":10, "depth":2}),
+        )
+        .await;
+        let outcome = answer.structured_content.unwrap_or_default()["outcome"].clone();
+        // The test workspace holds a source file of its own besides these.
+        let coverage = &outcome["coverage"];
+        if coverage["scanned"] == true
+            && coverage["indexable_files"].as_u64() >= Some(3)
+            && coverage["current_files"] == coverage["indexable_files"]
+        {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "never indexed: {outcome:#}");
+        sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        outcome["levels"],
+        json!([
+            {"level": 1, "truncated": false,
+             "files": [{"path": "src/b.rs", "via": "alpha", "from": "src/a.rs"}]},
+            {"level": 2, "truncated": false,
+             "files": [{"path": "src/c.rs", "via": "beta", "from": "src/b.rs"}]},
+        ]),
+        "{outcome:#}"
+    );
+    assert_eq!(outcome["resolution"], "name");
+
+    // Without `depth`, the answer earlier builds give: no levels.
+    let plain = response(
+        call_tool(
+            &client,
+            "langspan_impact",
+            json!({"workspace_id":"workspace", "path":"src/a.rs", "limit":10}),
+        )
+        .await,
+    );
+    let Outcome::Graph { levels, .. } = plain.outcome else {
+        panic!("{:?}", plain.outcome);
+    };
+    assert_eq!(levels, None);
+
+    let refused = call_tool(
+        &client,
+        "langspan_impact",
+        json!({"workspace_id":"workspace", "path":"src/a.rs", "limit":10, "depth":4}),
+    )
+    .await;
+    let text = serde_json::to_string(&refused.structured_content).unwrap();
+    assert!(text.contains("depth must be between 1 and 3"), "{text}");
     disconnect(client).await;
 }

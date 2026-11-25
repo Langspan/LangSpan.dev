@@ -21,13 +21,17 @@ documentation and not yet verified on a real Cursor or a live Gemini CLI session
 <a href="https://langspan.dev/#demo">
   <picture>
     <source media="(max-width: 600px)" srcset="https://langspan.dev/assets/product/langspan-overview-compact.svg">
-    <img src="https://langspan.dev/assets/product/langspan-overview.svg" alt="LangSpan holds a file for Agent A, denies Agent B’s overlapping edit, and leaves an unrelated test file available." width="1400">
+    <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="https://langspan.dev/assets/product/langspan-card-dark-still.svg">
+    <source media="(prefers-reduced-motion: reduce)" srcset="https://langspan.dev/assets/product/langspan-card-light-still.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="https://langspan.dev/assets/product/langspan-card-dark.svg">
+    <img src="https://langspan.dev/assets/product/langspan-card-light.svg" alt="LangSpan: in a shared checkout Agent A holds src/auth/session.ts, Agent B’s overlapping request is refused, and B independently chooses tests/session.test.ts." width="1300">
   </picture>
 </a>
 
-*An authored illustration of local coordination. The brief animation settles into
-the complete picture; reduced motion shows that picture immediately.
-[Explore each step](https://langspan.dev/#demo) with Play, Pause and Replay.*
+*An authored 12-second illustration of local coordination, not a session recording.
+[Explore each step](https://langspan.dev/#demo) with Play, Pause and Replay, or open
+the motionless [light](https://langspan.dev/assets/product/langspan-card-light-still.svg) or
+[dark](https://langspan.dev/assets/product/langspan-card-dark-still.svg) version.*
 
 ## Why we're building LangSpan
 
@@ -264,28 +268,28 @@ without rereading the changed file.
 | Feature or platform | Current evidence |
 | --- | --- |
 | Claude Code | `Edit` / `Write` coordination, completed `Read` tracking and peer briefing. [M2 edit evidence](docs/evidence/m2-claude-code/README.md); [native SessionStart briefing receipt](docs/evidence/m4-briefing/README.md). The end of a reply (`Stop`, `StopFailure`, `SubagentStop`) releases the reply's open holds, and each tool batch (`PostToolBatch`) is recorded and can carry news; these events were [observed on Claude Code 2.1.330](docs/evidence/turn-events/README.md). |
-| Codex | A [native mixed-host run](docs/evidence/mixed-hosts/README.md) records a completed `apply_patch` edit and a response to peer context. Simultaneous mixed-host conflicts remain unverified. Codex reports no reads, so its first edit of a file is not compared; that session's later edits are compared with the version recorded at the first. `Stop` and `SessionEnd` are hooked and tested in their documented shape, not yet seen on Codex. [ADR 0027](docs/adr/0027-turn-and-batch-events.md). |
+| Codex | Verified on a real Codex (codex-cli 0.171.0) on 25 November 2026: its hooks fire; an `apply_patch` over a function another session holds is refused, naming that session and function; LangSpan's own stale-source refusal fires and the retry after a re-read is admitted; a linked worktree with its own install is coordinated; the skill's `AGENTS.md` section is read; `langspan commit --mine` from Codex's shell commits only its hunks once Codex's sandbox may write `.git`. [Codex real-host evidence](docs/evidence/codex-real-host/README.md). Codex reports no reads, so its first edit of a file is not compared. Codex ties hook trust to the exact path: a session resumed under another path to the same folder runs no LangSpan hook (#129). |
 | Cursor | Built from documentation, not yet verified on a real Cursor. `Write`, `Delete` and `Shell` are admitted, completed `Read`s recorded, and sessions briefed, all through `.cursor/hooks.json`. Tested with constructed events, the real daemon and Git, and the installed command run the way Cursor CLI 2026.11.22 runs it. No Cursor run has been captured. [Scope, sources and capture steps](docs/adr/0032-cursor-adapter.md). |
-| Gemini CLI | Built from documentation, not yet verified on a real Gemini CLI. `write_file` / `replace` admission, completed `read_file` tracking, shell commands and briefings, from Gemini CLI 0.70.0's documentation and source. Tested with source-derived events through the real hook, daemon and Git; no live Gemini session yet. [Scope and limits](docs/adr/0033-gemini-cli-adapter.md). |
+| Gemini CLI | Built from documentation, not yet verified on a real Gemini CLI. Gemini CLI's free personal Google sign-in has been withdrawn; it still runs with an API key or through Vertex AI. `write_file` / `replace` admission, completed `read_file` tracking, shell commands and briefings, from Gemini CLI 0.70.0's documentation and source. Tested with source-derived events through the real hook, daemon and Git; no live Gemini session yet. [Scope and limits](docs/adr/0033-gemini-cli-adapter.md). |
 | Shell commands | Each host's shell tool (`Bash`; Cursor's `Shell`; Gemini CLI's `run_shell_command`), partly: literal writes (`> file`, `sed -i`, `mv`, `rm`, …) are held or refused like an edit before they run; other commands' changes are found afterwards by comparing Git status and recorded as the session's edits, or reported as not observed. A heredoc that rewrites a file (`cat > file <<'EOF'`) is not held yet, so it can overwrite another session's change from an old read; a fix is planned. Tested with the real daemon and Git; not yet on a host. [Scope and limits](docs/adr/0011-shell-writes.md). |
 | Regions within one file | Supported edits can hold separate symbols or line ranges, with whole-file fallback. Tested with the real daemon and hooks; live-host region acceptance remains unverified. [Placement and limits](docs/adr/0012-region-admission.md). |
-| Source versions | Comparisons pass real-daemon tests. [The live Claude run](docs/evidence/m6-stale-source/README.md) was stopped by Claude's own check; LangSpan's stale denial still needs a live host test. |
-| Linked worktrees | Separate file holds and shared briefings, tested with real Git. The two-worktree test with live agents remains open. |
+| Source versions | Comparisons pass real-daemon tests. LangSpan's own stale-source refusal has fired on a real Codex, with the retry after a re-read admitted ([Codex real-host evidence](docs/evidence/codex-real-host/README.md)). [An earlier Claude run](docs/evidence/m6-stale-source/README.md) was stopped by Claude's own check first. |
+| Linked worktrees | Separate file holds and shared briefings, tested with real Git. A real Codex in a linked worktree with its own install was coordinated and refused a conflicting edit ([Codex real-host evidence](docs/evidence/codex-real-host/README.md)). |
 | Remote briefings | Opt-in sharing through Git refs, tested with two daemons and two clones on one machine. [One run between a Mac and a cloud machine through GitHub](docs/evidence/two-machine/README.md) briefed real sessions in both directions; no session changed its edit because of it, and only GitHub has been used. [Transport and limits](docs/adr/0006-remote-awareness-through-git-refs.md). |
 | Lines another session wrote | An edit with no recorded read that replaces or removes lines another live session added in the last 30 minutes is refused once, naming the writer. Tested with the real daemon and hooks; not yet on a host. [Rules and limits](docs/adr/0028-line-ownership.md). |
-| Commits in a shared checkout | A `git add -A`, `git commit -a` or similar that would take another live session's uncommitted lines is held once, naming the session and files; `langspan commit --mine` commits only the session's own files and hunks, with your identity and hooks. Tested with the real daemon, hooks and Git; not yet on a host. [Rules and limits](docs/adr/0026-commit-guard-and-commit-mine.md). |
+| Commits in a shared checkout | A `git add -A`, `git commit -a` or similar that would take another live session's uncommitted lines is held once, naming the session and files; `langspan commit --mine` commits only the session's own files and hunks, with your identity and hooks. Tested with the real daemon, hooks and Git; `commit --mine` committed only Codex's hunks on a real Codex ([Codex real-host evidence](docs/evidence/codex-real-host/README.md)). [Rules and limits](docs/adr/0026-commit-guard-and-commit-mine.md). |
 | Checks and landing | Check records name a Git tree; combined branches are tested in a temporary checkout. Landing requires a matching pass and `--apply`; landings wait in a bounded line for the push turn, report conflict hunks and follow file renames that landed. Tested with local file remotes. [Scope and limits](docs/adr/0007-check-evidence-integration-and-landing.md). |
 | Automatic checks | Off by default. `langspan check auto` runs the owner's command after a Claude Code or Codex session's write batch or reply, on the exact tree, and tells the session the result once at its next briefing: passed, failed with the exit code, stopped at its time limit, or inconclusive, with the output's last lines. Failures are not classified. The command runs as you, outside the agent host's sandbox. Tested with the real hook and daemon; not yet observed on a host. [ADR 0030](docs/adr/0030-automatic-checks-after-write-batches.md). |
 | Break alerts at write time | A Claude Code or Codex write whose calls no longer fit a peer's new signature is told the file, line and old and new argument counts with that write's result, once per change. Argument counts only; never a refusal. Tested with the real hook and daemon; not yet on a host. [ADR 0029](docs/adr/0029-break-alerts-at-write-time.md). |
 | Source context | Definitions, name mentions and one-level exported-name impact queries are implemented. Interface notices stay within one physical workspace. Extraction and real-daemon tests pass; a native-agent run remains unverified. [Scope and limits](docs/adr/0008-derived-source-index.md). |
 | Recap, notes and messages | Workspace recaps, persistent local notes, messages and handoffs are implemented. Delivery and acknowledgement have real-daemon tests; native-host delivery remains unverified. Messages stay in one workspace and do not wake idle sessions. [Message scope](docs/adr/0009-agent-messages-and-handoff.md). |
 | User-level installation | Hooks and MCP registration have temporary-home integration tests. The complete user-level setup still needs a live Claude Code or Codex run. [Install scope and limits](docs/adr/0010-user-level-install.md). |
-| CLI + MCP | Twenty-three MCP tools, with CLI access to the same operations. [Command reference](docs/usage.md#mcp). |
+| CLI + MCP | MCP tools (`TOOL_NAMES` in `src/mcp.rs` lists them), with CLI access to the same operations. [Command reference](docs/usage.md#mcp). |
 | Linux | Full check passed in CI for the local implementation. Process probing is Linux-only. |
 | macOS arm64 | Build, formatting, Clippy and test-suite passes are recorded. Native Claude briefing evidence is retained. |
 
 The retained mixed-host run does not cover simultaneous overlapping edits or
-live agents in linked worktrees, and the two-machine run did not show an agent
+live Claude Code agents in linked worktrees, and the two-machine run did not show an agent
 changing its approach. Comparative evidence of less
 rework and manual relay remains open. Windows transport and signed releases
 are not available. Source context matches names without resolving types, scopes

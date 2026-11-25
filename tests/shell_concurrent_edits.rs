@@ -30,6 +30,8 @@ struct Fixture {
 struct Run {
     coverage: String,
     detail: String,
+    /// A refusal's reason, as the host shows it to the agent.
+    reason: String,
 }
 
 fn git(root: &Path, arguments: &[&str]) -> String {
@@ -149,9 +151,14 @@ impl Fixture {
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!(output.status.code(), Some(0), "{stderr}");
         let diagnostic: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+        let stdout: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
         Run {
             coverage: diagnostic["coverage"].as_str().unwrap().into(),
             detail: diagnostic["detail"].as_str().unwrap_or_default().into(),
+            reason: stdout["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
         }
     }
 
@@ -186,7 +193,10 @@ impl Fixture {
     fn write(&self, session: &str, call: &str, file: &str, content: &str) {
         let pre = self.write_event(session, "PreToolUse", call, file, content);
         assert_eq!(pre.coverage, "admitted", "{pre:?}");
-        fs::write(self.work().join(file), content).unwrap();
+        // The host makes a new file's directories, as Claude Code's does.
+        let path = self.work().join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
         let post = self.write_event(session, "PostToolUse", call, file, content);
         assert_eq!(post.coverage, "observed", "{post:?}");
     }
@@ -308,6 +318,30 @@ impl Fixture {
         self.bash(session, "PostToolUse", call, command)
     }
 
+    /// A whole Claude Code `Edit` of `file`, returning its pre hook's run.
+    /// The edit is made, and its post hook sent, only when it was admitted.
+    fn edit(&self, session: &str, call: &str, file: &str, old: &str, new: &str) -> Run {
+        let path = self.work().join(file);
+        let input = json!({"file_path": path, "old_string": old, "new_string": new});
+        let pre = self.hook(json!({
+            "session_id": session, "cwd": self.work(), "hook_event_name": "PreToolUse",
+            "tool_name": "Edit", "tool_use_id": call, "tool_input": input,
+        }));
+        if pre.coverage != "admitted" {
+            return pre;
+        }
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains(old), "{file} lacks {old:?}");
+        fs::write(&path, content.replacen(old, new, 1)).unwrap();
+        let post = self.hook(json!({
+            "session_id": session, "cwd": self.work(), "hook_event_name": "PostToolUse",
+            "tool_name": "Edit", "tool_use_id": call, "tool_input": input,
+            "tool_response": {"filePath": path},
+        }));
+        assert_eq!(post.coverage, "observed", "{post:?}");
+        pre
+    }
+
     fn head_files(&self) -> String {
         git(
             &self.work(),
@@ -393,6 +427,10 @@ fn a_file_changed_by_both_the_command_and_another_sessions_edit_is_unknown() {
     assert_eq!(alice.coverage, "denied_stale", "{alice:?}");
     let bob = f.write_event(BOB, "PreToolUse", "bob-2", "a.txt", "y\n");
     assert_eq!(bob.coverage, "denied_stale", "{bob:?}");
+    // Which of the two made a.txt what it is cannot be told, so neither
+    // refusal puts it down to the command (issue #107).
+    assert!(!alice.reason.contains("shell command"), "{alice:?}");
+    assert!(!bob.reason.contains("shell command"), "{bob:?}");
 }
 
 /// An edit still under way when the command finishes: whether it or the
@@ -530,6 +568,135 @@ fn a_formatter_rewriting_another_sessions_uncommitted_lines_does_not_take_them()
     );
 }
 
+/// The commit output, for an assertion's message.
+fn said(ran: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    )
+}
+
+/// Issue #124: Alice's formatter runs while Bob's long command (a test run,
+/// say) is still going, and only reformats lines Alice wrote. Bob's command
+/// could have written anything, yet a change that keeps every token of
+/// Alice's own lines and changes only their whitespace is hers: the file is
+/// credited to her and her `commit --mine` takes it.
+#[test]
+fn a_formatter_reformatting_only_its_sessions_lines_during_another_sessions_command_is_credited() {
+    let f = Fixture::new();
+    f.write(
+        ALICE,
+        "alice-1",
+        "a.txt",
+        "a line\nfn alice(x,y) {}\nfn more(p,q,r) {}\n",
+    );
+    let (bob, bob_command) = f.start_held(BOB, "bob-1", "true");
+
+    let post = f.run_shell(ALICE, "alice-2", &f.formatter(&["a.txt"]));
+    assert_eq!(post.coverage, "shell_observed", "{post:?}");
+    assert_eq!(f.credited(ALICE, "Bash"), ["a.txt"]);
+
+    let ran = f.commit_mine(ALICE, "alice-3", "Alice: formatted");
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:a.txt"]),
+        "a line\nfn alice(x, y) {}\nfn more(p, q, r) {}\n"
+    );
+    assert_eq!(f.status(), "");
+    bob.release();
+    f.bash(BOB, "PostToolUse", "bob-1", &bob_command);
+}
+
+/// Issue #124: as above, but Bob's command also changed one of Alice's lines
+/// while her formatter ran. That line is credited to no session; her other
+/// reformatted line is still hers, and `commit --mine` commits it alone.
+#[test]
+fn a_line_the_other_sessions_command_also_changed_is_credited_to_no_session() {
+    let f = Fixture::new();
+    fs::write(f.work().join("a.txt"), "one\ntwo\nthree\nfour\nfive\n").unwrap();
+    git(&f.work(), &["commit", "-q", "-am", "five lines"]);
+    f.write(
+        ALICE,
+        "alice-1",
+        "a.txt",
+        "fn alice(x,y) {}\ntwo\nthree\nfour\nfn other(x,y) {}\n",
+    );
+    // Bob's command changes Alice's last line, after Alice's formatter has
+    // started and before it rewrites the file.
+    let scratch = f.base.join("bob-scratch");
+    let (bob, bob_command) = f.start_held(
+        BOB,
+        "bob-1",
+        &format!(
+            "sed '5s/(x,y)/(x,z)/' a.txt > '{0}' && cat '{0}' > a.txt",
+            scratch.display()
+        ),
+    );
+    let (alice, alice_command) = f.start_held(ALICE, "alice-2", &f.formatter(&["a.txt"]));
+    bob.release();
+    alice.release();
+    assert_eq!(
+        fs::read_to_string(f.work().join("a.txt")).unwrap(),
+        "fn alice(x, y) {}\ntwo\nthree\nfour\nfn other(x, z) {}\n"
+    );
+
+    let post = f.bash(ALICE, "PostToolUse", "alice-2", &alice_command);
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert!(
+        post.detail
+            .contains("1 of them keep the authors of the lines the command only reformatted"),
+        "{post:?}"
+    );
+    assert!(f.credited(ALICE, "Bash").is_empty());
+    f.bash(BOB, "PostToolUse", "bob-1", &bob_command);
+
+    // `commit --mine` commits nothing while a hunk's owner is not known, and
+    // names that hunk: line 5 alone, so line 1 is Alice's.
+    let ran = f.commit_mine(ALICE, "alice-3", "Alice: formatted");
+    assert!(!ran.status.success(), "{}", said(&ran));
+    let refused = said(&ran);
+    assert!(
+        refused.contains("a.txt (line 5): part of it was written by this session and part by another session or by none")
+            && !refused.contains("line 1"),
+        "{refused}"
+    );
+    assert_eq!(f.head_files(), "five lines\n\na.txt\n");
+    assert_eq!(
+        fs::read_to_string(f.work().join("a.txt")).unwrap(),
+        "fn alice(x, y) {}\ntwo\nthree\nfour\nfn other(x, z) {}\n"
+    );
+}
+
+/// Issue #124: a formatter that reformats another session's uncommitted
+/// lines while that session's command runs takes none of them: Alice's own
+/// file is hers, Bob's stays nobody's and out of her `commit --mine`.
+#[test]
+fn a_formatter_during_another_sessions_command_still_takes_none_of_its_lines() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "a.txt", "a line\nfn alice(x,y) {}\n");
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+    let (bob, bob_command) = f.start_held(BOB, "bob-2", "true");
+
+    let post = f.run_shell(ALICE, "alice-2", &f.formatter(&["a.txt", "b.txt"]));
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert!(
+        post.detail
+            .contains("1 changed file(s) attributed to this session")
+            && post.detail.contains("1 attributed to no session"),
+        "{post:?}"
+    );
+    assert_eq!(f.credited(ALICE, "Bash"), ["a.txt"]);
+    bob.release();
+    f.bash(BOB, "PostToolUse", "bob-2", &bob_command);
+
+    let ran = f.commit_mine(ALICE, "alice-3", "Alice: formatted");
+    assert!(ran.status.success(), "{}", said(&ran));
+    let head = f.head_files();
+    assert!(head.contains("a.txt") && !head.contains("b.txt"), "{head}");
+    assert_eq!(f.status(), " M b.txt\n");
+}
+
 /// Once another session's lines are committed, rewriting them is a change
 /// of committed lines like any other: the command's session is credited.
 #[test]
@@ -555,6 +722,89 @@ fn a_command_adding_to_another_sessions_file_without_rewriting_its_lines_is_cred
     );
     assert_eq!(post.coverage, "shell_observed", "{post:?}");
     assert_eq!(f.credited(ALICE, "Bash"), ["b.txt"]);
+}
+
+/// Issue #107: Alice's formatter rewrites the lines Bob just wrote. Bob's
+/// next edit from his own version is refused once, and the refusal names
+/// Alice's session and her shell command, not a change outside LangSpan.
+#[test]
+fn a_refusal_after_another_sessions_formatter_names_its_session_and_command() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "a.txt", "a line\nfn alice(x,y) {}\n");
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+    let post = f.run_shell(ALICE, "alice-2", &f.formatter(&["a.txt", "b.txt"]));
+    // Rewriting Bob's uncommitted lines credits b.txt to no session...
+    assert_eq!(post.coverage, "contested", "{post:?}");
+
+    // ...but the refusal still knows whose command changed it.
+    let bob = f.write_event(BOB, "PreToolUse", "bob-2", "b.txt", "y\n");
+    assert_eq!(bob.coverage, "denied_stale", "{bob:?}");
+    assert!(
+        bob.reason.contains(&format!(
+            "\"b.txt\" (changed by a shell command of claude-code session {ALICE}: sed "
+        )),
+        "{bob:?}"
+    );
+    assert!(!bob.reason.contains("outside any reported edit"), "{bob:?}");
+}
+
+/// A shell command credited with the file (it rewrote committed lines) is
+/// named as a shell command too, not only as the last reported edit.
+#[test]
+fn a_refusal_after_another_sessions_credited_shell_command_says_it_was_a_command() {
+    let f = Fixture::new();
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+    git(&f.work(), &["commit", "-q", "-am", "Bob: committed"]);
+    let post = f.run_shell(ALICE, "alice-1", &f.formatter(&["b.txt"]));
+    assert_eq!(post.coverage, "shell_observed", "{post:?}");
+
+    let bob = f.write_event(BOB, "PreToolUse", "bob-2", "b.txt", "y\n");
+    assert_eq!(bob.coverage, "denied_stale", "{bob:?}");
+    assert!(
+        bob.reason.contains(&format!(
+            "(changed by a shell command of claude-code session {ALICE}: sed "
+        )),
+        "{bob:?}"
+    );
+}
+
+/// The command shown is redacted and capped, like other recorded command
+/// text, and a file changed again outside any hook after the command is
+/// not put down to it.
+#[test]
+fn the_command_named_in_a_refusal_is_redacted_and_capped_and_must_match_the_file() {
+    let f = Fixture::new();
+    f.write(BOB, "bob-1", "b.txt", "b line\n");
+    f.write(BOB, "bob-2", "a.txt", "a line\nBob's\n");
+    let secret = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
+    let padding = "x".repeat(400);
+    let command = format!(
+        "GITHUB_TOKEN={secret} true; for f in b.txt a.txt; do printf 'more\\n' >> $f; done; : {padding}"
+    );
+    f.run_shell(ALICE, "alice-1", &command);
+
+    let bob = f.write_event(BOB, "PreToolUse", "bob-3", "b.txt", "y\n");
+    assert_eq!(bob.coverage, "denied_stale", "{bob:?}");
+    assert!(
+        bob.reason.contains(&format!(
+            "(changed by a shell command of claude-code session {ALICE}: GITHUB_TOKEN=[redacted] true;"
+        )),
+        "{bob:?}"
+    );
+    assert!(!bob.reason.contains(secret), "{bob:?}");
+    assert!(!bob.reason.contains(&padding), "{bob:?}");
+    assert!(bob.reason.contains('…'), "{bob:?}");
+
+    // a.txt changed again with no hook after the command: nobody reported
+    // the version on disk now.
+    fs::write(f.work().join("a.txt"), "rewritten by hand\n").unwrap();
+    let again = f.write_event(BOB, "PreToolUse", "bob-4", "a.txt", "z\n");
+    assert_eq!(again.coverage, "denied_stale", "{again:?}");
+    assert!(
+        again.reason.contains("changed outside any reported edit"),
+        "{again:?}"
+    );
+    assert!(!again.reason.contains("shell command"), "{again:?}");
 }
 
 /// Set `path`'s modification time to `age` ago.
@@ -726,4 +976,353 @@ fn a_full_edit_mark_directory_stays_bounded_and_credits_the_command_nothing() {
     assert_eq!(post.coverage, "contested", "{post:?}");
     assert!(f.credited(ALICE, "Bash").is_empty());
     assert_eq!(f.credited(BOB, "Write"), ["b.txt"]);
+}
+
+/// Issue #101: a file a session creates with a whole-file write is that
+/// session's version of it. With another session editing in the same
+/// checkout, a later edit of it from that version is admitted, not refused
+/// as changed outside any reported edit, and `commit --mine` commits the new
+/// file as the session's own.
+#[test]
+fn a_file_a_session_creates_is_its_own_to_edit_again_and_commit() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "tests/created.rs", "fn alice() {}\n");
+    f.write(BOB, "bob-1", "b.txt", "b line\nBob's line\n");
+
+    let edit = f.edit(
+        ALICE,
+        "alice-2",
+        "tests/created.rs",
+        "fn alice() {}",
+        "fn alice() { 1 }",
+    );
+    assert_eq!(edit.coverage, "admitted", "{edit:?}");
+    // Compared with the version the session wrote, not admitted as unknown.
+    assert!(edit.detail.contains("source version current"), "{edit:?}");
+
+    let ran = f.commit_mine(ALICE, "alice-3", "Alice: created");
+    assert!(
+        ran.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let head = f.head_files();
+    assert!(head.starts_with("Alice: created\n"), "{head}");
+    assert!(
+        head.contains("tests/created.rs") && !head.contains("b.txt"),
+        "{head}"
+    );
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:tests/created.rs"]),
+        "fn alice() { 1 }\n"
+    );
+    assert_eq!(f.status(), " M b.txt\n");
+}
+
+/// Issue #101, with a formatter: the session creates a file, reformats it
+/// from its shell with a command that also rewrites the other session's
+/// file, edits it again and commits it with `commit --mine`. The created
+/// file stays the session's throughout; the other session's file is left.
+#[test]
+fn a_file_a_session_creates_and_reformats_is_its_own_to_edit_again_and_commit() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "tests/created.rs", "fn alice(x,y) {}\n");
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+
+    let post = f.run_shell(
+        ALICE,
+        "alice-2",
+        &f.formatter(&["tests/created.rs", "b.txt"]),
+    );
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert_eq!(f.credited(ALICE, "Bash"), ["tests/created.rs"]);
+
+    let edit = f.edit(
+        ALICE,
+        "alice-3",
+        "tests/created.rs",
+        "fn alice(x, y) {}",
+        "fn alice(x, y) { x }",
+    );
+    assert_eq!(edit.coverage, "admitted", "{edit:?}");
+    // Compared with the version the session wrote, not admitted as unknown.
+    assert!(edit.detail.contains("source version current"), "{edit:?}");
+
+    let ran = f.commit_mine(ALICE, "alice-4", "Alice: created");
+    assert!(
+        ran.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let head = f.head_files();
+    assert!(
+        head.contains("tests/created.rs") && !head.contains("b.txt"),
+        "{head}"
+    );
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:tests/created.rs"]),
+        "fn alice(x, y) { x }\n"
+    );
+    assert_eq!(f.status(), " M b.txt\n");
+}
+
+/// Issue #101, with the other session editing while the formatter runs: its
+/// file is contested, and the file this session created stays its own.
+#[test]
+fn a_file_a_session_creates_stays_its_own_when_its_formatter_overlaps_another_edit() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "tests/created.rs", "fn alice(x,y) {}\n");
+    let (held, command) = f.start_held(
+        ALICE,
+        "alice-2",
+        &f.formatter(&["tests/created.rs", "b.txt"]),
+    );
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+    held.release();
+    let post = f.bash(ALICE, "PostToolUse", "alice-2", &command);
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert_eq!(f.credited(ALICE, "Bash"), ["tests/created.rs"]);
+
+    let edit = f.edit(
+        ALICE,
+        "alice-3",
+        "tests/created.rs",
+        "fn alice(x, y) {}",
+        "fn alice(x, y) { x }",
+    );
+    assert_eq!(edit.coverage, "admitted", "{edit:?}");
+    // Compared with the version the session wrote, not admitted as unknown.
+    assert!(edit.detail.contains("source version current"), "{edit:?}");
+
+    let ran = f.commit_mine(ALICE, "alice-4", "Alice: created");
+    assert!(
+        ran.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let head = f.head_files();
+    assert!(
+        head.contains("tests/created.rs") && !head.contains("b.txt"),
+        "{head}"
+    );
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:tests/created.rs"]),
+        "fn alice(x, y) { x }\n"
+    );
+    assert_eq!(f.status(), " M b.txt\n");
+}
+
+/// The committed, formatted library both sessions add to in the issue #141
+/// tests.
+const LIB: &str = "pub fn shared() -> u32 {\n    1\n}\n\npub fn middle() -> u32 {\n    2\n}\n\npub fn end() -> u32 {\n    3\n}\n";
+
+/// A Cargo package with `LIB` as its library, committed: what `cargo fmt
+/// --all` formats.
+fn cargo_package(f: &Fixture) {
+    let work = f.work();
+    fs::write(
+        work.join("Cargo.toml"),
+        "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    fs::write(work.join(".gitignore"), "/target\nCargo.lock\n").unwrap();
+    fs::create_dir_all(work.join("src")).unwrap();
+    fs::write(work.join("src/lib.rs"), LIB).unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-q", "-m", "package"]);
+}
+
+/// `cargo fmt --all`, as the test's own toolchain runs it.
+fn cargo_fmt() -> String {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    format!("'{cargo}' fmt --all")
+}
+
+/// Issue #141, the acceptance run's case: two sessions in one checkout each
+/// write code with the edit tool, in a shared file and in a new file of
+/// their own. Alice runs `cargo fmt --all` while Bob's shell command is
+/// running, and the real rustfmt re-indents and re-wraps both sessions'
+/// code. Each reformatted line keeps the author it had: Bob's new file stays
+/// his and is not Alice's, and each session's `commit --mine` commits its
+/// own hunks and refuses none.
+#[test]
+fn cargo_fmt_during_another_sessions_command_keeps_each_sessions_lines_its_own() {
+    let f = Fixture::new();
+    cargo_package(&f);
+    f.read(ALICE, "alice-read", "src/lib.rs");
+    let edit = f.edit(
+        ALICE,
+        "alice-1",
+        "src/lib.rs",
+        "    1\n}\n",
+        "    1\n}\n\npub fn alice(x:u32,y:u32)->u32{x+y}\n",
+    );
+    assert_eq!(edit.coverage, "admitted", "{edit:?}");
+    f.read(BOB, "bob-read", "src/lib.rs");
+    let edit = f.edit(
+        BOB,
+        "bob-1",
+        "src/lib.rs",
+        "    3\n}\n",
+        "    3\n}\n\npub fn bob(first_argument: u32, second_argument: u32, third_argument: u32, fourth_argument: u32) -> u32 {\nlet z = first_argument;\n      z\n}\n",
+    );
+    assert_eq!(edit.coverage, "admitted", "{edit:?}");
+    f.write(
+        ALICE,
+        "alice-2",
+        "tests/alice.rs",
+        "#[test]\nfn alice_test(){assert_eq!(1,1);}\n",
+    );
+    f.write(
+        BOB,
+        "bob-2",
+        "tests/bob.rs",
+        "#[test]\nfn bob_test(){\nlet first = 1; let second = 2;\n        assert_eq!(first,second-1);}\n",
+    );
+
+    // Bob's command (a test run, say) is still going while Alice formats.
+    let (bob, bob_command) = f.start_held(BOB, "bob-3", "true");
+    let post = f.run_shell(ALICE, "alice-3", &cargo_fmt());
+    let lib = fs::read_to_string(f.work().join("src/lib.rs")).unwrap();
+    let alice_fn = "pub fn alice(x: u32, y: u32) -> u32 {\n    x + y\n}\n";
+    let bob_fn = "pub fn bob(\n    first_argument: u32,\n    second_argument: u32,\n    third_argument: u32,\n    fourth_argument: u32,\n) -> u32 {\n    let z = first_argument;\n    z\n}\n";
+    assert!(lib.contains(alice_fn) && lib.contains(bob_fn), "{lib}");
+    let bob_test = "#[test]\nfn bob_test() {\n    let first = 1;\n    let second = 2;\n    assert_eq!(first, second - 1);\n}\n";
+    assert_eq!(
+        fs::read_to_string(f.work().join("tests/bob.rs")).unwrap(),
+        bob_test
+    );
+    // Only Alice's own new file is her command's change; the shared file
+    // and Bob's file are not hers.
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert_eq!(f.credited(ALICE, "Bash"), ["tests/alice.rs"]);
+    assert!(
+        post.detail
+            .contains("2 of them keep the authors of the lines the command only reformatted"),
+        "{post:?}"
+    );
+    bob.release();
+    f.bash(BOB, "PostToolUse", "bob-3", &bob_command);
+
+    let ran = f.commit_mine(ALICE, "alice-4", "Alice: formatted");
+    assert!(ran.status.success(), "{}", said(&ran));
+    let head = f.head_files();
+    assert!(
+        head.contains("src/lib.rs")
+            && head.contains("tests/alice.rs")
+            && !head.contains("tests/bob.rs"),
+        "{head}"
+    );
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:src/lib.rs"]),
+        LIB.replacen("    1\n}\n", &format!("    1\n}}\n\n{alice_fn}"), 1)
+    );
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:tests/alice.rs"]),
+        "#[test]\nfn alice_test() {\n    assert_eq!(1, 1);\n}\n"
+    );
+
+    let ran = f.commit_mine(BOB, "bob-4", "Bob: formatted");
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(git(&f.work(), &["show", "HEAD:src/lib.rs"]), lib);
+    assert_eq!(git(&f.work(), &["show", "HEAD:tests/bob.rs"]), bob_test);
+    assert_eq!(f.status(), "");
+}
+
+/// Issue #141 without an overlapping command: Alice's formatter only
+/// reformats Bob's uncommitted new file. Its lines stay Bob's, so Alice's
+/// `commit --mine` does not take them and Bob's commits them.
+#[test]
+fn a_new_file_another_sessions_formatter_reformats_stays_its_writers() {
+    let f = Fixture::new();
+    cargo_package(&f);
+    f.write(
+        BOB,
+        "bob-1",
+        "tests/bob.rs",
+        "#[test]\nfn bob_test(){assert_eq!(1,1);}\n",
+    );
+    let post = f.run_shell(ALICE, "alice-1", &cargo_fmt());
+    assert_eq!(
+        fs::read_to_string(f.work().join("tests/bob.rs")).unwrap(),
+        "#[test]\nfn bob_test() {\n    assert_eq!(1, 1);\n}\n"
+    );
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert!(f.credited(ALICE, "Bash").is_empty());
+
+    let ran = f.commit_mine(ALICE, "alice-2", "Alice: nothing of hers");
+    assert!(
+        said(&ran).contains("Nothing of this session's is uncommitted"),
+        "{}",
+        said(&ran)
+    );
+    assert!(f.head_files().starts_with("package\n"));
+    let ran = f.commit_mine(BOB, "bob-2", "Bob: formatted");
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert!(f.head_files().contains("tests/bob.rs"));
+    assert_eq!(f.status(), "");
+}
+
+/// Issue #141 keeps #124's rule for a change of tokens: while Bob's command
+/// runs, Alice's command renames a variable in her own line and adds a line.
+/// Either could be Bob's command's work, so neither is credited to anyone,
+/// and Alice's `commit --mine` refuses the hunk.
+#[test]
+fn a_token_change_during_another_sessions_command_is_credited_to_no_session() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "a.txt", "a line\nlet total = 1;\n");
+    let (bob, bob_command) = f.start_held(BOB, "bob-1", "true");
+    let scratch = f.base.join("renamed");
+    let post = f.run_shell(
+        ALICE,
+        "alice-2",
+        &format!(
+            "for f in a.txt; do sed 's/total/sum/' $f > '{0}' && printf 'sum;\\n' >> '{0}' && cat '{0}' > $f; done",
+            scratch.display()
+        ),
+    );
+    assert_eq!(
+        fs::read_to_string(f.work().join("a.txt")).unwrap(),
+        "a line\nlet sum = 1;\nsum;\n"
+    );
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert!(f.credited(ALICE, "Bash").is_empty());
+    assert!(!post.detail.contains("keep the authors"), "{post:?}");
+    bob.release();
+    f.bash(BOB, "PostToolUse", "bob-1", &bob_command);
+
+    // The renamed and the added line are no session's, so Alice's
+    // `commit --mine` leaves them.
+    let ran = f.commit_mine(ALICE, "alice-3", "Alice: renamed");
+    assert!(
+        said(&ran).contains("a.txt (no session's)"),
+        "{}",
+        said(&ran)
+    );
+    assert_eq!(f.head_files(), "start\n\na.txt\nb.txt\n");
+    assert_eq!(f.status(), " M a.txt\n");
+}
+
+/// A shell change made again after the session reverted it is still the
+/// session's to commit: an overlapping run's credit of the same change is
+/// skipped (issue #141), and this one is not taken for it.
+#[test]
+fn the_same_shell_change_made_again_after_a_revert_is_still_the_sessions() {
+    let f = Fixture::new();
+    let command = "for f in a.txt; do printf 'more\\n' >> $f; done";
+    let post = f.run_shell(ALICE, "alice-1", command);
+    assert_eq!(post.coverage, "shell_observed", "{post:?}");
+    f.read(ALICE, "alice-read", "a.txt");
+    let revert = f.edit(ALICE, "alice-2", "a.txt", "a line\nmore\n", "a line\n");
+    assert_eq!(revert.coverage, "admitted", "{revert:?}");
+    let post = f.run_shell(ALICE, "alice-3", command);
+    assert_eq!(post.coverage, "shell_observed", "{post:?}");
+
+    let ran = f.commit_mine(ALICE, "alice-4", "Alice: more");
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(git(&f.work(), &["show", "HEAD:a.txt"]), "a line\nmore\n");
+    assert_eq!(f.status(), "");
 }

@@ -137,6 +137,20 @@ impl World {
             String::from_utf8(output.stdout).unwrap(),
         )
     }
+    /// One request written to the daemon's socket as it is, as any client
+    /// build would send it.
+    fn raw(&self, request: &Value) -> Value {
+        use std::io::{BufRead, BufReader};
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(self.base.join("state/daemon.sock")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        writeln!(stream, "{request}").unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
     fn graph(&self, query: &str, subject: &str) -> Value {
         let (_, text) = self.cli(&["graph", query, "app", subject, "--json"]);
         serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone()
@@ -328,6 +342,106 @@ fn definitions_mentions_and_impact_are_answered_with_coverage_and_follow_the_fil
     // The index is derived: delete it, restart, and it is rebuilt.
     let human = w.cli(&["graph", "impact", "app", "src/upload.rs"]).1;
     assert!(human.contains("by name, not resolved uses"), "{human}");
+}
+
+/// Roadmap D2: `graph impact --depth N` through a real daemon and indexer,
+/// on a constructed three-level repository with a cycle back to the start.
+#[test]
+fn impact_by_level_reaches_a_caller_of_a_caller_and_depth_one_is_unchanged() {
+    let w = World::new();
+    for (path, text) in [
+        ("src/a.rs", "pub fn alpha() { gamma(); }\n"),
+        ("src/b.rs", "pub fn beta() { alpha(); }\n"),
+        ("src/c.rs", "pub fn gamma() { beta(); }\n"),
+    ] {
+        fs::write(w.work().join(path), text).unwrap();
+    }
+    let impact = |extra: &[&str]| {
+        let mut args = vec!["graph", "impact", "app", "src/a.rs"];
+        args.extend_from_slice(extra);
+        args.push("--json");
+        w.cli(&args)
+    };
+    let deadline = Instant::now() + WAIT;
+    let two = loop {
+        let (_, text) = impact(&["--depth", "2"]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome["levels"][1]["files"]
+            .as_array()
+            .is_some_and(|files| !files.is_empty())
+            && outcome["coverage"]["current_files"] == 6
+        {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "never indexed: {outcome:#}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(
+        two["levels"],
+        json!([
+            {"level": 1, "truncated": false,
+             "files": [{"path": "src/b.rs", "via": "alpha", "from": "src/a.rs"}]},
+            {"level": 2, "truncated": false,
+             "files": [{"path": "src/c.rs", "via": "beta", "from": "src/b.rs"}]},
+        ]),
+        "{two:#}"
+    );
+    assert_eq!(two["resolution"], "name");
+    assert_eq!(two["truncated"], false);
+    assert_eq!(two["coverage"]["indexable_files"], 6);
+
+    // The cycle: `c.rs` exports `gamma`, which `a.rs` mentions. Level 3
+    // does not bring `a.rs` back.
+    let (_, text) = impact(&["--depth", "3"]);
+    let three = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+    assert_eq!(three["levels"][2]["files"], json!([]), "{three:#}");
+
+    // Depth 1, asked for or not, is the answer earlier builds give. The
+    // store's generation can move between two calls; compare two answers
+    // given at the same one.
+    let generation =
+        |text: &str| serde_json::from_str::<Value>(text).unwrap()["generation"].clone();
+    let (plain, one) = loop {
+        let (code, plain) = impact(&[]);
+        assert_eq!(code, 0);
+        let (_, one) = impact(&["--depth", "1"]);
+        if generation(&plain) == generation(&one) {
+            break (plain, one);
+        }
+        assert!(Instant::now() < deadline, "the generation never settled");
+    };
+    assert_eq!(one, plain, "byte-identical");
+    let plain: Value = serde_json::from_str(&plain).unwrap();
+    assert!(plain["outcome"].get("levels").is_none(), "{plain:#}");
+    assert!(plain["outcome"].get("resolution").is_none());
+    let raw = w.raw(&json!({"version": 3, "request_id": "read", "command":
+        {"op": "graph_impact", "workspace_id": "app", "path": "src/a.rs", "limit": 50,
+         "blind_in_scope": true}}));
+    assert_eq!(
+        raw["outcome"], plain["outcome"],
+        "the request without depth gets the same answer"
+    );
+
+    for depth in ["0", "4"] {
+        let (code, text) = impact(&["--depth", depth]);
+        assert_eq!(code, 1, "{text}");
+        assert!(text.contains("depth must be between 1 and 3"), "{text}");
+    }
+
+    let (code, human) = w.cli(&["graph", "impact", "app", "src/a.rs", "--depth", "2"]);
+    assert_eq!(code, 0, "{human}");
+    assert!(
+        human.contains(r#"Level 1 (mentions an export of "src/a.rs"): "src/b.rs" via "alpha""#),
+        "{human}"
+    );
+    assert!(
+        human.contains(r#"Level 2: "src/c.rs" via "beta" from "src/b.rs""#),
+        "{human}"
+    );
+    assert!(
+        human.contains("Found by name, not resolved; each level adds false positives"),
+        "{human}"
+    );
 }
 
 /// The `upload` function of `src/upload.rs` in the detail test: it calls
@@ -554,6 +668,266 @@ fn a_changed_exported_signature_is_reported_to_the_session_whose_files_mention_i
     // that is delivered, nothing has changed and nothing is repeated.
     let _ = w.prompt("alice");
     assert!(w.prompt("alice").is_none());
+}
+
+/// Wait until `session`'s next prompt carries an interface notice holding
+/// `text`.
+fn told(w: &World, session: &str, text: &str) -> String {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(context) = w
+            .prompt(session)
+            .filter(|context| context.contains("Interface change") && context.contains(text))
+        {
+            return context;
+        }
+        assert!(Instant::now() < deadline, "{session} was never told {text}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[test]
+fn a_second_same_named_definition_is_told_as_added_and_losing_it_as_removed() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let upload = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    let one = format!(
+        "{upload}\npub struct A;\npub struct B;\n\nimpl A {{\n    pub fn text(&self) -> String {{\n        String::new()\n    }}\n}}\n"
+    );
+    let two = format!(
+        "{one}\nimpl B {{\n    pub fn text(&self) -> String {{\n        \"b\".into()\n    }}\n}}\n"
+    );
+    // A new name is not news to anyone: there is no notice for it.
+    w.edits("bob", "b1", "src/upload.rs", &one);
+    let main = fs::read_to_string(w.work().join("src/main.rs")).unwrap();
+    w.edits(
+        "alice",
+        "a1",
+        "src/main.rs",
+        &main.replace("fn main() {", "fn main() {\n    let _ = upload::A.text();"),
+    );
+    w.wait_for("one text method", "symbol", "text", |outcome| {
+        outcome["symbols"].as_array().is_some_and(|d| d.len() == 1)
+            && outcome["coverage"]["current_files"] == 3
+    });
+    w.wait_for("alice's mention", "references", "text", |outcome| {
+        paths(&outcome["references"])
+            .iter()
+            .any(|path| path.starts_with("src/main.rs"))
+    });
+
+    // Bob adds a second `text`, on another type, with the same signature.
+    w.edits("bob", "b2", "src/upload.rs", &two);
+    let added = r#"a second method "text" was added: "pub fn text(&self) -> String" (now 2 definitions with that name)"#;
+    let context = told(&w, "alice", added);
+    assert!(!context.contains("changed from"), "{context}");
+
+    // Bob takes it away again.
+    w.edits("bob", "b3", "src/upload.rs", &one);
+    let removed = r#"one of 2 methods "text" was removed: "pub fn text(&self) -> String" (now 1 definition with that name)"#;
+    let context = told(&w, "alice", removed);
+    assert!(!context.contains("changed from"), "{context}");
+
+    // A real change to the one left is still a changed signature.
+    w.edits(
+        "bob",
+        "b4",
+        "src/upload.rs",
+        &one.replace("text(&self)", "text(&self, limit: usize)"),
+    );
+    told(
+        &w,
+        "alice",
+        r#"method "text" changed from "pub fn text(&self) -> String" to "pub fn text(&self, limit: usize) -> String""#,
+    );
+}
+
+#[test]
+fn blind_spots_name_the_files_the_index_cannot_answer_for() {
+    let w = World::new();
+    // The only file mentioning `lonely` does not parse: impact finds the
+    // mention, and says one file in scope is blind.
+    fs::write(w.work().join("src/lonely.rs"), "pub fn lonely() {}\n").unwrap();
+    fs::write(
+        w.work().join("src/broken.rs"),
+        "fn caller() { lonely(); }\nfn half( {{{\n",
+    )
+    .unwrap();
+    let impact = w.wait_for(
+        "the partial file indexed",
+        "impact",
+        "src/lonely.rs",
+        |outcome| outcome["coverage"]["current_files"] == 5,
+    );
+    assert_eq!(
+        paths(&impact["references"]),
+        ["src/broken.rs:1"],
+        "{impact:#}"
+    );
+    assert_eq!(impact["coverage"]["blind_in_scope"], 1, "{impact:#}");
+    assert_eq!(impact["coverage"]["partial_files"], 1);
+
+    // An earlier client (a CLI or a long-running MCP adapter) does not ask
+    // for the count and reads coverage strictly: every answer it can get
+    // keeps the shape it knows, while a file in scope is blind.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct EarlierCoverage {
+        indexable_files: u32,
+        current_files: u32,
+        partial_files: u32,
+        scanned: bool,
+    }
+    for command in [
+        json!({"op": "graph_impact", "workspace_id": "app", "path": "src/lonely.rs", "limit": 10}),
+        json!({"op": "graph_symbol", "workspace_id": "app", "name": "lonely", "limit": 10}),
+        json!({"op": "graph_symbol", "workspace_id": "app", "name": "lonely", "limit": 10, "detail": true}),
+        json!({"op": "graph_references", "workspace_id": "app", "name": "lonely", "limit": 10}),
+        json!({"op": "graph_context", "workspace_id": "app", "names": ["lonely"], "limit": 3}),
+        json!({"op": "dashboard"}),
+    ] {
+        let response = w.raw(&json!({"version": 3, "request_id": "earlier", "command": command}));
+        let outcome = &response["outcome"];
+        let coverages = match outcome.get("dashboard") {
+            Some(dashboard) => dashboard["workspaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|workspace| workspace["coverage"].clone())
+                .collect(),
+            None => vec![outcome["coverage"].clone()],
+        };
+        assert!(!coverages.is_empty(), "{response:#}");
+        for coverage in coverages {
+            serde_json::from_value::<EarlierCoverage>(coverage.clone())
+                .unwrap_or_else(|error| panic!("{command}: {error}: {coverage}"));
+        }
+    }
+    // A client that asks gets the count.
+    let asked = w.raw(&json!({"version": 3, "request_id": "asked", "command": {
+        "op": "graph_impact", "workspace_id": "app", "path": "src/lonely.rs", "limit": 10,
+        "blind_in_scope": true}}));
+    assert_eq!(
+        asked["outcome"]["coverage"]["blind_in_scope"], 1,
+        "{asked:#}"
+    );
+
+    // Over the index's 1 MiB bound, over the scan's 4 MiB bound, and ten
+    // files in a language the index has no grammar for.
+    fs::write(
+        w.work().join("src/big.rs"),
+        format!("// {}\n", "x".repeat(1536 * 1024)),
+    )
+    .unwrap();
+    fs::write(
+        w.work().join("src/huge.rs"),
+        format!("// {}\n", "x".repeat(5 * 1024 * 1024)),
+    )
+    .unwrap();
+    fs::create_dir_all(w.work().join("java")).unwrap();
+    for n in 0..10 {
+        fs::write(
+            w.work().join(format!("java/C{n}.java")),
+            "class C { void lonely() {} }\n",
+        )
+        .unwrap();
+    }
+    let blind = |limit: &str| {
+        let (code, text) = w.cli(&["graph", "blind-spots", "app", "--limit", limit, "--json"]);
+        assert_eq!(code, 0, "{text}");
+        serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone()
+    };
+    let deadline = Instant::now() + WAIT;
+    let spots = loop {
+        let outcome = blind("50");
+        if outcome["blind_spots"]["too_large"].as_array().map(Vec::len) == Some(2)
+            && outcome["blind_spots"]["unsupported_languages"] != json!([])
+        {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "never saw them: {outcome:#}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let lists = &spots["blind_spots"];
+    assert_eq!(lists["partial"][0]["path"], "src/broken.rs", "{spots:#}");
+    assert!(lists["partial"][0]["since_ms"].as_u64().unwrap() > 0);
+    assert_eq!(lists["never_clean"], json!(["src/broken.rs"]));
+    assert_eq!(lists["too_large"], json!(["src/big.rs", "src/huge.rs"]));
+    assert_eq!(lists["waiting"], json!([]), "too large is not waiting");
+    assert_eq!(
+        lists["unsupported_languages"],
+        json!([{"extension": ".java", "files": 10}])
+    );
+    assert_eq!(spots["coverage"]["blind_in_scope"], 3);
+    assert_eq!(spots["truncated"], false);
+    assert!(
+        !spots.to_string().contains("class C"),
+        "no file content is returned"
+    );
+
+    // A capped list is the same on every call, and says it is capped.
+    let first = blind("1");
+    assert_eq!(first["blind_spots"]["too_large"], json!(["src/big.rs"]));
+    assert_eq!(first["blind_spots"]["totals"]["too_large"], 2);
+    assert_eq!(first["truncated"], true);
+    assert_eq!(blind("1")["blind_spots"], first["blind_spots"]);
+
+    let human = w.cli(&["graph", "blind-spots", "app"]).1;
+    assert!(
+        human.contains(r#"partial (1): "src/broken.rs" (since "#),
+        "{human}"
+    );
+    assert!(
+        human.contains(r#"too large (2): "src/big.rs", "src/huge.rs""#),
+        "{human}"
+    );
+    assert!(
+        human.contains("not indexed, other languages: .java 10"),
+        "{human}"
+    );
+    for args in [
+        &["graph", "blind-spots", "app", "--limit", "0"][..],
+        &["graph", "blind-spots", "app", "--limit", "201"][..],
+        &["graph", "blind-spots", "nowhere"][..],
+    ] {
+        let (code, text) = w.cli(args);
+        assert_eq!(code, 1, "{args:?}: {text}");
+    }
+
+    // A workspace no scan can complete in: nothing is known, and the
+    // answer carries the scan failure.
+    let plain = w.base.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    let (code, text) = w.cli(&[
+        "workspace",
+        "add",
+        "plain",
+        plain.to_str().unwrap(),
+        "--request-id",
+        "ws-plain",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let deadline = Instant::now() + WAIT;
+    let failed = loop {
+        let (_, text) = w.cli(&["graph", "blind-spots", "plain", "--json"]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome.get("scan_failure").is_some() {
+            break outcome;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never saw the failure: {outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(failed["coverage"]["scanned"], false, "{failed:#}");
+    assert_eq!(failed["blind_spots"]["partial"], json!([]));
+    let human = w.cli(&["graph", "blind-spots", "plain"]).1;
+    assert!(human.contains("The last scan failed"), "{human}");
+    assert!(human.contains("nothing is known"), "{human}");
 }
 
 #[test]

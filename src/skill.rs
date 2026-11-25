@@ -28,7 +28,7 @@ const END: &str = "<!-- langspan-managed:skill:v1 end -->";
 
 /// The opening words of every message the skill quotes, from the code that
 /// writes them. A test requires the skill to quote exactly these.
-pub const MESSAGES: [&str; 7] = [
+pub const MESSAGES: [&str; 8] = [
     crate::hook::BRIEFING,
     crate::hook::STALE_SOURCE,
     crate::hook::UNREAD_LINES,
@@ -36,6 +36,7 @@ pub const MESSAGES: [&str; 7] = [
     crate::breaks::ALERT,
     crate::hook::CHECK_RESULT,
     crate::commit::HELD,
+    crate::formatter::NOTICE,
 ];
 
 /// The most a host's form may hold. Claude Code's skill documentation and
@@ -470,7 +471,7 @@ mod tests {
     fn the_refusals_the_skill_quotes_begin_with_its_words() {
         use crate::hook::{deny, deny_stale, deny_unread};
         for (reply, words) in [
-            (deny_stale(&[]), crate::hook::STALE_SOURCE),
+            (deny_stale(&[], "", |_| None), crate::hook::STALE_SOURCE),
             (deny_unread(&[]), crate::hook::UNREAD_LINES),
             (deny(&[], &[]), crate::hook::CONFLICT),
         ] {
@@ -479,6 +480,57 @@ mod tests {
                 .as_str()
                 .unwrap();
             assert!(reason.starts_with(words), "{reason}");
+        }
+    }
+
+    /// Every formatter command the skill names is read by the formatter
+    /// notice as the skill describes it: the ones it advises reach only the
+    /// files given, the ones it warns against reach the whole tree, and a
+    /// check rewrites nothing (issue #126).
+    #[test]
+    fn the_formatter_commands_the_skill_names_are_read_as_it_says() {
+        use crate::shell::{Reach, formatters};
+        use std::path::PathBuf;
+        let named: Vec<&str> = code_spans()
+            .filter(|span| {
+                ["cargo fmt", "rustfmt", "prettier"]
+                    .iter()
+                    .any(|tool| span.starts_with(tool))
+            })
+            .collect();
+        // (command, what it reaches with FILE... given as `web/a.ts`):
+        // `None` rewrites nothing.
+        let expected: [(&str, Option<Reach>); 5] = [
+            (
+                "rustfmt FILE...",
+                Some(Reach::Paths(vec!["web/a.ts".into()])),
+            ),
+            (
+                "prettier --write FILE...",
+                Some(Reach::Paths(vec!["web/a.ts".into()])),
+            ),
+            ("cargo fmt", Some(Reach::Workspace)),
+            (
+                "prettier --write .",
+                Some(Reach::Paths(vec![PathBuf::from(".")])),
+            ),
+            ("cargo fmt --check", None),
+        ];
+        let mut listed: Vec<&str> = expected.iter().map(|(command, _)| *command).collect();
+        listed.sort();
+        let mut sorted = named.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted, listed,
+            "a formatter command in the skill is not covered here"
+        );
+        for (command, reach) in expected {
+            let found: Vec<Reach> = formatters(&command.replace("FILE...", "web/a.ts"))
+                .into_iter()
+                .map(|formatting| formatting.reach)
+                .collect();
+            assert_eq!(found, reach.into_iter().collect::<Vec<_>>(), "{command}");
         }
     }
 

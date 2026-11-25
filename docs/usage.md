@@ -91,8 +91,92 @@ then preview and apply the install again.
 User-level hooks find the Git repository from the agent's working directory and
 do nothing outside a repository. An existing LangSpan project install takes
 precedence. `langspan doctor --root /path/to/checkout` reports both setups;
+`install` and `hooks install` write `--state-dir` as given, and `doctor` and
+`hosts` compare state directories by their canonical form, so one reached
+through a symbolic link (`/tmp` and `/private/tmp` on macOS) is the same
+coordinator, and only a genuinely different directory is reported.
 `langspan uninstall --apply` removes the user-level entries it recognizes and
-leaves the coordination state directory in place.
+leaves the coordination state directory in place. A hooks or MCP file left
+holding nothing else (`{}`, or empty text) is removed rather than left behind.
+Running it again after an upgrade also removes such a file an earlier
+version left behind. A file with any of your own settings in it keeps them
+byte for byte.
+`~/.claude.json` is never removed.
+
+#### An agent tool installed later
+
+Install chooses hosts once, when it runs. A host installed afterwards has no
+LangSpan hooks, so its edits are neither checked nor shown to other sessions.
+`langspan hosts [--home DIR] [--json]` lists each host LangSpan knows, with
+`name`, `config_dir`, `present` (its configuration directory exists; `null`
+with an `error` when it could not be looked at), `user_install` (`none`,
+`current`, `outdated`, `other_state_dir` or `unknown`) and `next_step`, the
+install command, where one is proposed. It only reads. Gemini CLI is listed but
+never proposed: install it by naming it, as above.
+
+The coordinator checks the same at start and then every hour
+(`host_check_ms` in `config.json`). A host that is present, has no user-level
+install and has no project install in any registered workspace is recorded once
+as a `host_not_installed` event, with the host name only, and recorded again
+only after it was covered (`host_cleared`). A host whose directory or files
+cannot be read at a check keeps the notice it had; the reason is logged as
+`host_check_failed`, and nothing is recorded until an install or a removal is
+seen. `langspan status` then shows:
+
+```text
+hosts: cursor has a configuration directory but no LangSpan hooks; run `langspan install --hosts cursor --state-dir '/path/to/state'` to preview, then add --apply
+```
+
+The command always names this coordinator's state directory, so the hooks it
+installs talk to the coordinator that reported the host, whatever the shell's
+own default. The dashboard shows the same command under Health. `langspan doctor` marks the host as
+needing attention once sessions of another host use this coordinator. Agents
+are not told. LangSpan never installs or edits a host's configuration by itself;
+after you run the install, the line is gone at the next check.
+
+#### A status line in Claude Code
+
+`langspan install --statusline on` also sets Claude Code's `statusLine` in
+`~/.claude/settings.json`, so the person sees, under the prompt after each
+message:
+
+```text
+langspan · 3 sessions here · 1 refusal today
+```
+
+"Sessions here" counts the conversations (not host subagents) of this
+checkout's repository, including its linked worktrees, that are of the
+running coordinator, not ended and active within the last 30 minutes, this
+one included. "Refusals today" counts what LangSpan refused in that
+repository since local midnight: a write held by another session, a stale or
+unread edit, and a held commit. Each refusal counts once; a retry of the same
+call adds none. Refusals recorded by a build without this feature, or before
+the coordinator first started with it, are not counted. The line shows counts,
+never paths, and nothing of it reaches the model.
+
+The setting is written only where no `statusLine` is set: a status line of
+your own is never replaced, and the dry run says so. `install` without
+`--statusline` leaves the setting as it is; `--statusline off` and
+`uninstall --apply` remove LangSpan's line and nothing else. Other hosts have
+no status-line command; a shell prompt or terminal multiplexer can show the
+same line with:
+
+```sh
+langspan statusline --root /path/to/checkout
+langspan statusline --root /path/to/checkout --json
+# {"workspace_id":"...","sessions_here":3,"refusals_today":1,"coordinator":"running"}
+```
+
+Without `--root` it takes the directory from the status-line input Claude Code
+sends on stdin (`workspace.current_dir`, then `cwd`), or else the current
+directory. It asks the coordinator once with a 200 ms deadline
+(`--deadline-ms`, 100 to 5000). When the coordinator is not running or does
+not answer in time it prints `langspan · coordinator not running` and exits 0;
+it never starts the coordinator, never uses the network, and writes nothing.
+"Local midnight" follows the system's time zone (honouring `TZ`): `date`
+gives the offset at the instants around midnight, so on a day the clocks
+change the count still starts at that day's 00:00. If `date` fails, midnight
+UTC is used. A day of more than 1024 refusals shows 1024.
 
 User-level installation has been tested with a temporary home and real daemon,
 Git and hook executable. It has not been observed in a native Claude Code or
@@ -265,7 +349,7 @@ for current holders, the core compares them with that session's records:
 | Recorded version | Admission result |
 | --- | --- |
 | Matches the current file | The source comparison passes. |
-| Differs from the current file | `stale_base`; no files in the set are admitted. A fresh result makes the hook answer `deny`, naming the changed paths and any known editing peer. |
+| Differs from the current file | `stale_base`; no files in the set are admitted. A fresh result makes the hook answer `deny`, naming the changed paths and, for each, what changed it: a shell command that left the version now on disk ("changed by a shell command of claude-code session `<id>`: cargo fmt --all", its command line redacted and capped), the last peer that reported editing it, or "changed outside any reported edit" when no hook reported the change. |
 | No record for an existing file | Admission can proceed with the path in `base_unknown`; its version was not compared. |
 | No record and the file is missing | Admission can proceed as a new file. |
 
@@ -343,9 +427,26 @@ receives another briefing only when its content has changed; session start can
 restore context in a new or resumed session. Briefings also name files the
 session read before a peer reported editing them in the same checkout.
 
-By default, the first non-empty line of the latest user prompt becomes a bounded
-task line shared with relevant local sessions. To leave prompt text out, install
-with `--prompt-summary off`:
+By default, one line of the latest user prompt becomes a bounded task line
+shared with relevant local sessions:
+
+- A line that starts with `Task:` (in any case, among the prompt's first 32
+  non-empty lines) names the task; the marker is left out. Give each prompt a
+  `Task:` line when several sessions start from one prompt template.
+- Otherwise the first non-empty line is used, unless a live session in the same
+  repository (this checkout or a linked worktree) has a latest prompt that
+  begins with the same lines. Then the prompt's first line that differs is
+  used, so that sessions started from one template are told apart. A one-line
+  prompt is always summarised by that line.
+- A declared intent (`langspan intent set`, MCP `langspan_intent_set`)
+  replaces the task line in briefings while it is set.
+
+To compare prompts, the hook sends the coordinator a digest of each of the
+prompt's first 32 non-empty lines, after redaction. Digests are kept with the
+session's activity, are never shown or published, and say only whether two
+prompts begin with the same lines. The line chosen keeps the same redaction and
+200-byte limit as before. To leave prompt text out, install with
+`--prompt-summary off`:
 
 ```sh
 ./target/release/langspan hooks install claude-code \
@@ -355,6 +456,22 @@ with `--prompt-summary off`:
 Inspect the dry run and add `--apply` to write it. The option also applies to the
 Codex installer. File activity and admission information remain available when
 prompt summaries are off.
+
+Two tasks aimed at the same code are flagged before either session edits it.
+At each recorded prompt the files where the code briefing found the prompt's
+names defined (at most 12 names and 3 definitions each) become the session's
+prompt targets: paths only, never the prompt's words, replaced at its next
+prompt that finds a definition and ignored after 30 minutes or once the session
+ends. When another session's targets share a file with your targets, admissions,
+recent edits or declared intent, its peer line says
+`task points at your files: "src/http.rs";`, and your own targets count as your
+work for `shares files with your work`. The prompting session is told in that
+prompt's briefing, the other at its next delivery point (after a tool batch on
+Claude Code, otherwise its next prompt), once. A target never holds a write,
+never counts as an admission and is never published through the remote setup.
+Nothing is recorded with `--prompt-summary off` or `--code-briefing off`, or
+while the source index has no complete scan. `langspan status --json` shows
+each session's `prompt_targets` under its activity.
 
 Relevant peers share the same checkout or a Git repository identified by the
 observer. Linked worktrees can share briefings while keeping separate physical
@@ -560,6 +677,32 @@ one line of at most 400 bytes and up to eight paths. Each workspace retains at
 most 64 notes and 64 pending messages, dropping the oldest when that limit is
 exceeded. Any local session can read or remove a note.
 
+A briefing carries at most four notes, and only those about the session's own
+files or the whole workspace. `recall` searches all the notes a workspace
+holds, including notes about other files:
+
+```sh
+./target/release/langspan recall demo "upload id" --json
+./target/release/langspan recall demo errors --path src/api.rs --limit 5
+```
+
+The query is 1 to 200 bytes of at most eight words separated by spaces (quoted
+as one argument or given as several). A note is found when every word appears
+in its text or its paths, compared without case and as a substring, so
+`upload id` finds a note saying `Upload_ID`. `--path` keeps only notes about
+that file or about the whole workspace. Notes hit in both text and paths come
+first, then the newest. `--limit` is 1 to 50 (default 10); `truncated: true`
+says more notes matched than were returned, which also happens when the
+answer would pass 28 KiB. The JSON answer is
+`{"workspace_id", "query", "notes": [{"note_id", "author", "text", "paths"}],
+"truncated"}`. A recall is a read: it records nothing, delivers nothing and
+does not change any briefing. Forgotten notes are not found. The MCP tool
+`langspan_recall` takes `workspace_id`, `query` and optional `path` and
+`limit`, and puts a label before the notes saying their text is data, not
+instructions. Its result carries the answer twice, once as escaped JSON
+text, so it can return fewer notes than the CLI (with `truncated: true`) to
+keep the whole reply within one 64 KiB frame.
+
 `message` addresses a registered session in the same workspace. Without `--to`,
 it addresses every other session; without `--from`, its sender label is the
 owner. These labels do not authenticate the sender. Messages arrive through the
@@ -575,6 +718,102 @@ messages stay local; remote Git-ref sharing does not publish them. Treat their
 text as data and leave secrets out. [ADR 0009](adr/0009-agent-messages-and-handoff.md)
 describes delivery, retention and the local identity boundary.
 
+## The day so far
+
+`today` gives a one-screen account of a day: for each session its first and
+last activity, how many files its edits named and how many prompts it had;
+admission refusals by kind; check results; how landings ended; and what is
+still open now (admissions held, intents not ended, messages not acknowledged,
+handoffs not taken up, checks whose latest result failed).
+
+```sh
+./target/release/langspan today demo
+./target/release/langspan today --since 2026-11-25T09:00:00+01:00 --json
+```
+
+Without a workspace it covers every workspace. The window starts at local
+midnight, found from the system's time zone rules for that date (offsets read
+from `date`, so a day the clocks change still starts at its 00:00), or at an
+RFC 3339 `--since` time;
+a time before the first event covers everything. Times in the text are shown
+at the current local offset, so on a day the clocks change, times before the
+change are an hour off. The text is at most 40 lines and lists at most eight
+files per session, with a count of the rest; `--json` carries `window`
+(`from_ms`, `to_ms`, Unix milliseconds), `sessions`, `refusals`, `checks`,
+`landings`, `open`, `truncated` and, when there are any, `undated` and
+`omitted_sessions`. The MCP tool `langspan_today` (`workspace_id` and `since`,
+both optional) returns the same text, labelled as data, within 2,400 bytes.
+
+It is a peek, like `recap`: it writes nothing and acknowledges no message.
+Refusals are counted from `write_refused` events, the status line's, by kind:
+a refused write (conflict, stale base or unread lines) or a held commit the
+hook reported (`commit_held`). Each daemon start records a `clock_anchored` event
+that places that run's times on the wall clock; events recorded by a build
+before this one have no such anchor and are counted only as `undated`. A
+landing is placed at the time it took its turn to land. A
+window with more than 50,000 events is summarised from the newest 50,000 and
+says `truncated: true`; when the oldest of those carries no time of its own,
+the first that does decides whether the window may reach past them. With the
+daemon down it exits 1 with "coordination unavailable".
+
+## Desktop notices
+
+When a session is refused, an automatic check fails or a handoff waits, the
+person is often looking at something else. The coordinator can show a desktop
+notice for these (roadmap H3). It is off until switched on:
+
+```sh
+langspan notify on                 # notices on, sound as it was (off by default)
+langspan notify on --sound on      # with a sound
+langspan notify status             # on or off, and which notifier was found
+langspan notify off
+```
+
+A notice looks like this:
+
+```text
+LangSpan
+demo: codex.7c2e9a1b… refused on src/api.rs (held by claude-code.4f1a0c3d…)
+```
+
+Three things raise one: a refusal (any `write_refused` event: a write held by
+another session, a stale or unread edit, a held commit), an automatic check
+that failed ([ADR 0030](adr/0030-automatic-checks-after-write-batches.md)),
+and a handoff no session has taken up for 10 minutes. The body names the
+workspace's directory, the session (its host and the first eight characters of
+its ID) and at most three paths with a count of the rest, and is at most 200
+bytes. It never carries a prompt, a message's or handoff's text, a check's
+output or file content.
+
+The notice is shown by `osascript` on macOS and `notify-send` on other
+systems, the first one found on the coordinator's `PATH`, as a child process
+the coordinator kills after 2 seconds. With sound on, `notify-send` asks for
+the `message-new-instant` sound and `osascript` for `Glass`. With sound off,
+`notify-send` passes the `suppress-sound` hint, so a desktop set to play a
+default sound for every notice stays quiet for these (a notification server
+that ignores the hint may still play one), and `osascript` names no sound,
+which macOS shows silently. It runs on a thread of its own, so no
+hook or request waits for it, and nothing about it reaches the model, holds or
+refuses anything, or uses the network. Where neither program is found,
+nothing is shown, and `notify status` says so (it looks on its own `PATH`,
+which is normally the coordinator's). A `notify-send` started by a
+coordinator that has no desktop session in its environment (no
+`DBUS_SESSION_BUS_ADDRESS`) fails; the coordinator logs that once and goes
+on.
+
+At most one notice of a kind is shown per 5 minutes and 10 per hour in total;
+the rest are dropped. The coordinator's log (stderr) records each notice as
+`notice_sent` or `notice_dropped` with its kind and reason (`kind_limit`,
+`hourly_limit`, `queue_full`, `notifier_missing`, `notifier_failed`,
+`notifier_timed_out`), and a notifier that is missing, fails or times out is
+also logged once per coordinator run. No event is recorded.
+
+`notify on|off` writes `notify` and, with `--sound`, `notify_sound` into
+`config.json`, keeping every other setting; the coordinator reads them again
+at each notice, so no restart is needed. The limits are set in the same file
+(see [Configuration and limits](#configuration-and-limits)). A handoff that is
+already waiting when the coordinator starts is timed from that start.
+
 ## Look up symbols and affected files
 
 The source index finds definitions and name mentions in Rust, Python,
@@ -585,6 +824,7 @@ scans and can lag changes on disk. Replace `PROJECT` with a registered workspace
 ```sh
 ./target/release/langspan graph symbol PROJECT upload --limit 50 --json
 ./target/release/langspan graph symbol PROJECT upload --detail --json
+./target/release/langspan graph impact PROJECT src/api.rs --depth 2 --json
 ./target/release/langspan graph references PROJECT upload --limit 50 --json
 ./target/release/langspan graph impact PROJECT src/api.rs --limit 50 --json
 ```
@@ -610,7 +850,28 @@ The answer has `resolution: "name"`: calls and callers are matched by name,
 not resolved, so a call of another function with the same name counts. No
 source body is returned. Definitions that would make the answer larger than
 64 KiB are left out and `truncated` is true. `references` finds mentions of the name. `impact` lists the file's
-exports and other files mentioning those names, one level deep. These queries
+exports and other files mentioning those names, one level deep.
+
+With `--depth N` (1 to 3, default 1; MCP: `langspan_impact` with `depth`),
+`impact` also returns `levels`: level 1 is the files mentioning an export of
+the file, and each further level the files mentioning an export of a file on
+the level before. Each file appears once, at its first level, with `via` (the
+name it mentions) and `from` (the file on the previous level). At most 200
+files in all and 50 exported names per level are followed; a level that a
+bound, the 64 KiB answer size or the 500 ms time budget cut has `truncated:
+true`. Levels are found by name, not resolved, and each level adds false
+positives. An empty level is no claim that nothing is affected; check
+`coverage` first. `--depth 1` gives exactly the answer without the flag; a
+depth outside 1 to 3 is refused:
+
+```text
+$ langspan graph impact PROJECT src/store.rs --depth 2
+Level 1 (mentions an export of "src/store.rs"): "src/api.rs" via "save", "src/cli.rs" via "load"
+Level 2: "src/server.rs" via "router" from "src/api.rs", "tests/api.rs" via "router" from "src/api.rs"
+Found by name, not resolved; each level adds false positives. Index: 120 of 120 supported files at their current content.
+```
+
+These queries
 match names without resolving scopes, types, modules or imports. Common names
 can produce unrelated matches; dynamic uses can be missed.
 
@@ -621,11 +882,38 @@ parsed, syntax errors can leave partial results, and other languages are outside
 the index. The observer's 4,096-file limit can prevent a larger repository from
 producing the complete scan needed for indexing.
 
+When `coverage.blind_in_scope` is above zero, that many supported files could
+not be read in full, so an empty or short answer is weak. Ask which ones:
+
+```sh
+./target/release/langspan graph blind-spots PROJECT --limit 50 --json
+```
+
+```text
+partial (2): "src/legacy/parse.rs" (since 3h), "web/src/app.tsx" (since 10m)
+waiting (1): "src/api.rs"
+too large (1): "src/generated/schema.rs"
+not indexed, other languages: .java 10, .rb 3
+```
+
+The lists are `partial` (a syntax error or a bound reached, with since when),
+`never_clean` (never parsed cleanly, so no interface notice can come from it),
+`waiting` (its current content is not indexed yet), `too_large` (over 1 MiB),
+`unscanned` (left out by the scan's bound) and `unsupported_languages` (other
+source files by extension). Each is in path order and holds at most `--limit`
+paths (1 to 200), so a capped list is the same on every call; `totals` has the
+full counts. MCP: `langspan_blind_spots`. Read those files directly when the
+index is silent; nothing guesses what they contain. `langspan doctor` also
+says when a workspace has blind files.
+
 When an indexed export disappears or its signature changes, relevant sessions
 receive an interface notice at their next prompt. The notice names files they
 work on or have read that mention the changed name. Notices stay within one
 physical workspace. Body-only changes produce no notice, and a rename appears
-as a removal. A first indexing produces no change notice.
+as a removal. A first indexing produces no change notice. When a file holds
+several definitions of one name (a method of that name on two types, say), a
+definition added or removed is told as such, with how many there are now:
+"a second method "text" was added … (now 2 definitions with that name)".
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
 Code) or an `apply_patch` (Codex) is admitted, the hook parses the calls in the
@@ -751,11 +1039,51 @@ briefing point (a completed tool call, the next batch, or the next prompt):
 passed, failed with the exit code, stopped at its time limit, or inconclusive,
 with the tree ID and, unless it passed, up to 20 of the last output lines,
 redacted and labelled as the command's own text. Failures are not classified
-(which tests failed is left to the output's lines). The command runs as you, with
+as new or already failing, but when the output is that of `cargo test`,
+`go test -v` or `pytest`, the failing tests it named are listed. The command runs as you, with
 the daemon's environment, outside the agent host's sandbox and permission
 prompts: code an agent writes runs without the host asking. A command that
 looks like it holds a secret is refused; pass secrets through the environment.
 See [ADR 0030](adr/0030-automatic-checks-after-write-batches.md).
+
+#### Tests that flip on unchanged code
+
+Two results of the same check (name and command, compared by its whole
+argument list, not the shortened command line `check status` shows) on the
+same tree, with no write recorded in the workspace between them, that
+disagree about a test are one flip of that test. `check run` learns nothing
+from a command that looks like it holds a secret. A failing automatic check that named a failing test and
+took at most `flaky_rerun_max_s` (`config.json`, default 30, 0 turns it off)
+is run once more on the same tree, stopped after at most that long, to get
+that second result; a longer one is not run again, and a write recorded while
+either run goes, even one undone, means neither is compared. The rerun is
+not a record: the first
+run's failure is the result, in `check status` and to `land`, whatever the
+rerun found. Two `check run`s of one tree with no write between or during
+them are compared too. A test the output names as skipped (`ignored` in
+`cargo test`, `--- SKIP:` in `go test -v`, `SKIPPED`, `XFAIL` or `XPASS` in
+`pytest -v`) neither passed nor failed in that run, even when the run passed,
+and is not compared. A test that flipped at least twice in its last 20 such runs is known to
+flip, until it has gone 50 runs without one. Its failures are then labelled in
+the briefing, and still count as failures:
+
+```text
+1 failure named in its output: net::times_out (known to flip on unchanged code, 2 of 14 runs). Every one is of a test known to flip on unchanged code; the check still failed.
+```
+
+```sh
+langspan check flaky WORKSPACE [--name NAME] [--json]
+tests  "net::times_out"  runs 14  flips 2  last flip 3h ago
+langspan check flaky WORKSPACE --forget net::times_out [--name NAME] --request-id ID
+```
+
+`--forget` clears what was learned about a test, including its last result,
+so its next failure is not labelled. A test or check name that looks like a
+secret is refused (`secret_in_test_name`) before anything is recorded: such a
+name is never learned, so there is nothing to forget. The MCP tool `langspan_flaky_tests` reads the same list. Only test
+names are kept, in the local event log; no output, and nothing is published.
+Names are read from at most 4 MiB of output (at most 100 names and 10 KiB per
+run); a runner LangSpan does not recognise teaches nothing.
 
 ## Commits in a shared checkout
 
@@ -781,9 +1109,17 @@ built in a private index from `HEAD`, so nothing anyone else staged rides
 along, and made with your identity and Git hooks. The branch moves only if no
 other commit landed meanwhile; if one did, the session's changes are planned
 again on top of it once, or the command refuses and nothing is lost. Everything else stays as it
-was, staged or not, and is listed. If a hunk mixes the session's lines with
-another's or with lines no session wrote, nothing is committed (exit 1) and
-the hunk is named. Lines are matched by content, not position, so sessions
+was, staged or not, and is listed. When Git joins the session's lines and
+another session's into one hunk (two entries added one below the other to a
+list), the hunk is split between them and only the session's own lines are
+committed. If a hunk mixes the session's lines with lines no session wrote,
+or one session's line there replaced another's, or the two sessions' lines
+there could be in more than one order (one session changed "A B C" to "B X"
+and the other removed B: X could go above B or below it), nothing is
+committed (exit 1) and the hunk is named, with the reason. Nothing is
+committed either if the partial patch would not keep the session's lines in
+their one place among the other session's, or does not apply exactly to the
+version in the index. Lines are matched by content, not position, so sessions
 editing one file in turn keep their own hunks however their edits shift each
 other's lines. When another session changed the file in a write whose lines
 are not known, the session's hunks are still committed unless one of their
@@ -797,12 +1133,73 @@ it finds no running session, the error names the directory it looked in and,
 if a LangSpan hook installed in the checkout names another one, that one.
 The MCP tool `langspan_commit_mine` does the same.
 
-A formatter or other workspace-wide command (`cargo fmt --all`) run by one
-session keeps that session's own reformatted lines its own, so `commit --mine`
-still takes them. A file in which the command rewrote another session's
-uncommitted lines is credited to neither session and left for its owner,
-as is a file another session edited or a shell run of another session may
-have written while the command ran ([ADR 0011](adr/0011-shell-writes.md)).
+To see first what `commit --mine` would take:
+
+```sh
+langspan status --mine [--session ID] [--root DIR] [--json]
+```
+
+```text
+shared.txt  mixed  lines 10-14 mine, line 22 no session's, lines 40-41 claude-code.…
+src/new.rs  mine   lines 1-30
+3 changed file(s) hold other sessions' lines.
+```
+
+It lists, by path, each changed file that holds this session's lines:
+`mine` (`commit --mine` would commit all of it), `mixed` (only its hunks
+marked mine) or `unknown` (it would refuse, and why), whether some of it is
+`staged` in the shared index, and each hunk's first line, line count and
+owner: `mine`, another session's (`others`, with `sessions`), `none` (no
+session wrote it) or `unknown` (with `reason`). A file attributed as a whole
+(binary, over 512 KiB, a mode change) is `whole`, with no hunks. `others`
+counts the changed files that hold other sessions' lines, also where they
+share an `unknown` hunk with this session's. At most 200 files
+are listed (`truncated` when there are more). It runs the same attribution as
+`commit --mine`, finds its session the same way, and changes nothing: no
+private index, no commit, and Git reads run with `--no-optional-locks`. The
+MCP tool `langspan_my_changes` does the same. Other worktrees and machines
+are not included.
+
+A formatter or other workspace-wide command (`cargo fmt --all`) does not
+change who wrote a line it only reformats. Where the command kept a line's
+tokens in order and changed only whitespace and line breaks (re-indented,
+re-wrapped, joined or split it), each line it left keeps the author of the
+uncommitted lines it came from: the session that ran the formatter, another
+session, or both sessions' own lines in one file. This holds whoever ran the
+command and whether or not another session's command ran at the same time,
+so `cargo fmt --all` during another session's test run leaves each session's
+`commit --mine` able to take its own hunks, and a new file one session wrote
+stays that session's after another session's formatter rewrites it. Tokens
+are compared by language: Rust, TypeScript and JavaScript as words and
+punctuation, with a comma just before a closing `)`, `]` or `}` ignored (a
+formatter adds and drops those when it wraps a list); Markdown as words and
+punctuation; any other file as its text with all whitespace removed.
+Whitespace inside a string literal is not told apart from formatting.
+
+A change that alters tokens (a rename, an added line) is credited as before:
+to the command's session when nothing else could have made it and it
+rewrote no other session's uncommitted line, and otherwise to no session, so
+`commit --mine` leaves or refuses it. The same holds for a file another
+session edited through its edit tool while the command ran
+([ADR 0011](adr/0011-shell-writes.md)). A line two sessions both wrote (a
+blank line, a closing brace) goes with the lines around it in a hunk, so it
+does not stop either session's `commit --mine`
+([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)).
+
+Before such a command runs, the Bash pre-tool hook on Claude Code and Codex
+tells the session, once, which other live sessions have uncommitted changes in
+files it may rewrite: "LangSpan: this command may reformat files that another
+session in this checkout has not committed.", then each session and at most
+eight of its files, then how many more. The command is not refused, and the
+host's own permission prompt is unchanged. The hook recognises `cargo fmt` in
+any form (it formats every file of the workspace, even when files follow
+`--`), `rustfmt FILE...` (those files and the modules they declare) and
+`prettier --write PATH...` (directly or through `npx`, `pnpm exec` or `yarn`).
+A check such as `cargo fmt --check` or `prettier --check .` names nothing.
+The same files are not named again whichever formatter runs; a new file is.
+The hook's log line says why no notice was given (`formatter notice: …`). In a
+shared checkout, format only the files you changed, by name: `rustfmt FILE...`
+or `prettier --write FILE...`. The LangSpan skill says so too.
 
 When a Git step fails, the error names the step, its exit status and what Git
 said (its last lines, at most 1 KiB, redacted as other relayed text is). The
@@ -845,17 +1242,22 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
 | `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check |
 | `langspan_references` | Find name mentions, with coverage and truncation |
-| `langspan_impact` | Find a file's exports and files mentioning those names, one level deep |
+| `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
+| `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |
+| `langspan_flaky_tests` | Read which tests are known to flip on unchanged code, with runs, flips and the age of the last flip |
 | `langspan_land_cancel` | Stop a landing waiting for the push turn, by its `request_id` |
 | `langspan_recap` | Summarize one workspace's recorded activity, checks, notes and pending messages |
+| `langspan_today` | The day so far from the event log: sessions, refusals, checks, landings and what is still open, within 2,400 bytes |
 | `langspan_remember` | Keep a local note about the workspace or named files |
 | `langspan_forget` | Remove a remembered note by ID |
+| `langspan_recall` | Search a workspace's remembered notes: every query word in a note's text or paths, without case; best first, at most 50 |
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |
 | `langspan_handoff` | Leave a message for the next other session to take up |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |
+| `langspan_my_changes` | List this session's own uncommitted files and hunks in a shared checkout, as `langspan_commit_mine` would split them; changes nothing |
 
 Every mutation tool requires a caller-owned `request_id` (for
 `langspan_land_cancel`, it names the waiting landing). Conflicts are normal
@@ -912,14 +1314,37 @@ processes exit `0` and convey denials through their JSON reply.
 Optional `config.json` in the state directory must be owner-only (`0600`):
 
 ```json
-{"io_timeout_ms":2000,"request_timeout_ms":5000,"max_clients":32,"auto_check_debounce_ms":2000}
+{"io_timeout_ms":2000,"request_timeout_ms":5000,"max_clients":32,"auto_check_debounce_ms":2000,
+ "flaky_rerun_max_s":30,"host_check_ms":3600000,"notify":false,"notify_sound":false,
+ "notify_kind_interval_ms":300000,"notify_hourly_limit":10,"notify_handoff_after_ms":600000}
 ```
 
 Timeout values accept 100–5000 ms; client count accepts 1–128;
-`auto_check_debounce_ms` accepts 50–60000; `retention_days` (unset by
-default) accepts 7–3650 and is described under [Retention](#retention). IPC and MCP frames
+`auto_check_debounce_ms` accepts 50–60000; `flaky_rerun_max_s` accepts
+0–3600 (0: a failing automatic check is never run again); `host_check_ms`,
+how often the coordinator looks for agent hosts with no LangSpan install,
+accepts 100–86400000; `retention_days` (unset by default) accepts 7–3650 and
+is described under [Retention](#retention). For [desktop notices](#desktop-notices),
+`notify_kind_interval_ms` and `notify_handoff_after_ms` accept 1000–86400000
+and `notify_hourly_limit` 1–60; `notify`, `notify_sound` and the two notice
+limits are read again at each notice, `notify_handoff_after_ms` when the
+coordinator starts. A build before notices refuses to start with a
+`config.json` that has these keys. IPC and MCP frames
 are limited to 64 KiB. The MCP SDK discards oversized input lines without replying
-to that line. File admission accepts up to 64 distinct normalized keys, 512 bytes
+to that line. An MCP tool result carries each answer twice, as structured
+content and as JSON text that escapes every quotation mark and backslash
+again, so the adapter measures the whole encoded result and keeps it, with
+512 bytes left for the JSON-RPC envelope, within one frame. An MCP page can
+therefore be shorter than the CLI's: a page of `langspan_events`,
+`langspan_changes` or `langspan_status` with `all` that would not fit is cut,
+and the result ends with a text note starting "LangSpan cut this page to fit
+one MCP reply" that names the `after` to call again with for the rest. The
+`status` view and `langspan_recap` leave more out instead, counted as the
+CLI's answer counts it (`summary`, `omitted_items`); every record is in
+`langspan_status` with `all`. A result no rule can cut, such as an oversized
+landing report, is replaced by the error `reply_too_large`, which keeps the
+operation's `exit_code` and outcome; the CLI's `--json` gives the whole
+answer. The CLI's answers are unchanged. File admission accepts up to 64 distinct normalized keys, 512 bytes
 per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit
 and prompt summaries a 512-byte one. Summaries are redacted on receipt, and
 redaction never makes one longer than its limit: a summary that would outgrow
@@ -963,6 +1388,8 @@ logging a `compacted` line.
 - It stops before anything still open: an admission, a push turn, a waiting
   landing or an unacknowledged message. The report says which (`held_by`).
 - A retry whose receipt was removed is answered as a new request.
+- The daemon start that dates the oldest event left is kept, so `today` can
+  still place every remaining event on a day.
 - `remote sent` lists every publication within the window and says from which
   date it is complete.
 - Ages are wall-clock times recorded with each event and receipt; records

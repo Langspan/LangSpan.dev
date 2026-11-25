@@ -60,7 +60,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [A4: Verify the Cursor adapter on a real Cursor](https://github.com/Langspan/LangSpan.dev/issues/12): the Cursor adapter rests on documentation alone, so Cursor cannot yet be relied on to be coordinated.
 - [A5: A plugin adapter for the Hermes agent](https://github.com/Langspan/LangSpan.dev/issues/13): a Hermes agent beside other hosts gets no admission or briefing, and its edits go unrecorded.
 - [A6: Gemini CLI verified on a real session, and guidance for rules-file hosts](https://github.com/Langspan/LangSpan.dev/issues/14): the Gemini CLI adapter has never run live, and editors without hooks get nothing at all.
-- [A7: Notice agent tools added after install](https://github.com/Langspan/LangSpan.dev/issues/15): a host installed after LangSpan has no hooks, so its edits are invisible and nobody is told.
 - [A11: Outline first for whole reads of large files](https://github.com/Langspan/LangSpan.dev/issues/16): whole reads of large files spend context to find one function; nothing offers the file's shape first.
 - [A12: Index answers next to a search result](https://github.com/Langspan/LangSpan.dev/issues/17): a search result does not say where a name is defined, what depends on it or whether a peer is changing it.
 - [A13: Show where peers are looking](https://github.com/Langspan/LangSpan.dev/issues/18): a session that has read and planned but not written yet is missing from peers' briefings.
@@ -96,7 +95,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [C3: Tell a new session what changed recently in the repository](https://github.com/Langspan/LangSpan.dev/issues/42): a new session hears only about active peers, not what changed in the last hours.
 - [C5: Learn which briefed files agents use](https://github.com/Langspan/LangSpan.dev/issues/43): briefing relevance never adjusts to what agents in a repository actually use.
 - [C7: Tell dependents about another worktree's new or changed signatures before they are pushed](https://github.com/Langspan/LangSpan.dev/issues/44): a session cannot see a function another worktree just added, so it duplicates or stalls.
-- [C8: Tell two sessions their tasks point at the same code before either writes](https://github.com/Langspan/LangSpan.dev/issues/45): two tasks aimed at the same function are not flagged before either session edits.
+- [C8: Tell two sessions their tasks point at the same code before either writes](https://github.com/Langspan/LangSpan.dev/issues/45): two tasks aimed at the same function are not flagged before either session edits. Built as prompt targets; a real-host run remains.
 - [C9: Leave a trail and a handoff when a session ends](https://github.com/Langspan/LangSpan.dev/issues/46): what a finished session learned is lost unless someone ran `handoff` by hand.
 - [C10: Brief the owner's next session on what happened since the last one](https://github.com/Langspan/LangSpan.dev/issues/47): overnight landings, failed checks and unread messages are scattered across several commands.
 - [C11: Offer a finished, checked task as a worked example](https://github.com/Langspan/LangSpan.dev/issues/48): agents rediscover the same files and helpers for a recurring kind of task.
@@ -105,20 +104,20 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 ## D. Source graph and queries
 
 - [D1: Look up a symbol with its calls, callers, digest and notes](https://github.com/Langspan/LangSpan.dev/issues/50): a symbol lookup gives its definition but not its calls, callers, changes or notes. Built with `--detail`; a real-host run remains.
-- [D2: Show a change's blast radius level by level](https://github.com/Langspan/LangSpan.dev/issues/51): `graph impact` stops at direct dependents, hiding breaks two steps away.
+- [D2: Show a change's blast radius level by level](https://github.com/Langspan/LangSpan.dev/issues/51): `graph impact` stops at direct dependents, hiding breaks two steps away. Built with `--depth`; a real-host run remains.
 - [D3: Typed edges, paths between symbols and a repository map](https://github.com/Langspan/LangSpan.dev/issues/52): name mentions alone cannot follow a call chain or show how modules relate.
 - [D4: Show the history of a definition](https://github.com/Langspan/LangSpan.dev/issues/53): an agent cannot see who changed a definition recently, why, or who reverted the same change.
 - [D5: Export and import the source index](https://github.com/Langspan/LangSpan.dev/issues/54): a large repository's first indexing takes many passes, and the index cannot be inspected outside LangSpan.
 - [D6: Index more languages, one grammar at a time](https://github.com/Langspan/LangSpan.dev/issues/55): Java, C#, Ruby and C++ repositories get no source-index answers or interface notices.
 - [D7: Track renames so history and notices follow the new name](https://github.com/Langspan/LangSpan.dev/issues/56): a rename is reported as a removal with no new name, and history stays with the old one.
-- [D8: Report where the index is blind](https://github.com/Langspan/LangSpan.dev/issues/57): an empty impact answer does not say which files the index could not read.
+- [D8: Report where the index is blind](https://github.com/Langspan/LangSpan.dev/issues/57): an empty impact answer does not say which files the index could not read. Built as `graph blind-spots` and `coverage.blind_in_scope`; a real-host run remains.
 - [D9: Check a combination at the level of definitions](https://github.com/Langspan/LangSpan.dev/issues/58): a clean Git merge can pair a changed signature with a new call in the old shape.
 - [D10: Offer live activity as an MCP resource](https://github.com/Langspan/LangSpan.dev/issues/59): a live view of who is doing what takes three tool calls, and there is no resource to read.
 
 ## E. Memory and messages
 
 - [E1: Notes anchored to a definition, with staleness and tags](https://github.com/Langspan/LangSpan.dev/issues/60): notes attach only to files, keep being told after their code changes, and cannot be grouped.
-- [E2: Search remembered notes](https://github.com/Langspan/LangSpan.dev/issues/61): a note about another file stays invisible to an agent that needs its decision.
+- [E2: Search remembered notes](https://github.com/Langspan/LangSpan.dev/issues/61): a note about another file stays invisible to an agent that needs its decision. Built as `langspan recall` and `langspan_recall`; a real-host run remains.
 - [E3: Token, model and cost lines in the recap](https://github.com/Langspan/LangSpan.dev/issues/62): the owner cannot see which session used most tokens or which model it ran.
 - [E4: Messages addressed to a file or a definition](https://github.com/Langspan/LangSpan.dev/issues/63): a message can go only to everyone or to one session ID, not to whoever uses some code.
 - [E7: Sender recorded from the running session](https://github.com/Langspan/LangSpan.dev/issues/64): a shell-sent message needs `--from`, and a wrong or missing value misattributes it.
@@ -130,7 +129,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 ## F. Checks and landing
 
 - [F1: Say which tests a write broke](https://github.com/Langspan/LangSpan.dev/issues/69): a failed automatic check does not say whether this write, an earlier state or a peer broke the test.
-- [F2: Learn which tests flip on unchanged code](https://github.com/Langspan/LangSpan.dev/issues/70): every agent that hits a flaky test tries to fix code that is not broken.
 - [F3: Run the wider check when an interface changes](https://github.com/Langspan/LangSpan.dev/issues/71): the fast check misses breaks in packages that call a changed exported function.
 - [F5: Rebase landings and adapt identifier renames](https://github.com/Langspan/LangSpan.dev/issues/72): a landing refused over a rename leaves every use to fix by hand, and there is no linear-history landing.
 - [F8: An integration branch every session lands on](https://github.com/Langspan/LangSpan.dev/issues/73): each agent's own branch leaves the person merging six branches by hand to see the work together.
@@ -142,9 +140,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## H. The person's view
 
-- [H2: A status line in Claude Code](https://github.com/Langspan/LangSpan.dev/issues/76): a person cannot see peers or today's refusals from the agent's own window.
-- [H3: Desktop notices for refusals and handoffs](https://github.com/Langspan/LangSpan.dev/issues/77): refusals and waiting handoffs go unnoticed when the person is not watching that agent.
-- [H4: A daily summary: `langspan today`](https://github.com/Langspan/LangSpan.dev/issues/78): `recap` shows current state, not an account of what the day's sessions did.
 - [H5: A monthly refusal count](https://github.com/Langspan/LangSpan.dev/issues/79): a person deciding whether to keep LangSpan has no count of how often it intervened.
 - [H6: A daily "work saved" line, once measured](https://github.com/Langspan/LangSpan.dev/issues/80): people want a savings figure, which needs measurement rather than assumptions.
 - [H8: A coordination report per session and host](https://github.com/Langspan/LangSpan.dev/issues/81): a person cannot tell whether a new host version or model still follows coordination well.

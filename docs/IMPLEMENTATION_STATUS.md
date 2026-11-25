@@ -48,8 +48,8 @@ partial [shell-write coverage](adr/0011-shell-writes.md);
 [version tolerance](adr/0015-version-tolerance.md); the
 [release pipeline](adr/0031-releases.md); the
 [LangSpan skill](adr/0034-langspan-skill.md) (`install --skill`, off by
-default; tested with a temporary home, not yet observed in use by an agent on
-a real host). The MCP server has 23 tools (`src/mcp.rs`,
+default; tested with a temporary home; a real Codex read its `AGENTS.md` section and
+quoted its stale-source rule, `docs/evidence/codex-real-host/`). The MCP server's tools are listed once, in `TOOL_NAMES` (`src/mcp.rs`,
 asserted in `tests/mcp.rs`). The repository has an Apache-2.0 `LICENSE`.
 
 **Roadmap and the launch bar.** A source-level capability review on
@@ -117,6 +117,35 @@ Fixed on `main` since the validation:
   a worktree install the host will not run. Tested with real linked
   worktrees, a real daemon and constructed events; the real Codex run in a
   linked worktree is pending.
+- Issue #101: a file a session creates with a whole-file write is that
+  session's recorded version and its own lines, including after its own
+  formatter rewrites it while another session edits in the same checkout:
+  the next edit is compared with that version and admitted, and
+  `commit --mine` commits the file. The cause was #98's; these are its
+  regression tests. Tested with two sessions' hooked writes, a
+  formatter-like shell command (after and during the other session's write),
+  real Git and a real daemon (`tests/shell_concurrent_edits.rs`); the
+  dogfood run in a shared checkout is pending. Another session's formatter
+  rewriting this session's uncommitted lines still leaves them credited to
+  neither session (#98), so the next edit is refused once as stale.
+- Issue #124: a session's formatter run while another session's shell
+  command is still running keeps the lines it only reformatted, of the
+  session's own uncommitted lines, that session's; `commit --mine` takes
+  them. A line the other command also changed, and another session's lines
+  the formatter rewrote, are credited to no session
+  ([ADR 0011](adr/0011-shell-writes.md)). Tested with two sessions' real
+  hooks, a real command held open by a signal file, a formatter-like `sed`
+  rewrite, real Git and a real daemon (`tests/shell_concurrent_edits.rs`);
+  the dogfood run in a shared checkout is pending.
+- Issue #126: before `cargo fmt` (any form), `rustfmt FILE...` or
+  `prettier --write PATH...`, the Bash pre-tool hook on Claude Code and Codex
+  names, once, the other live sessions with uncommitted changes in files the
+  formatter may rewrite (at most eight files), and never refuses the command;
+  the skill advises formatting only one's own files by name
+  ([ADR 0011](adr/0011-shell-writes.md)). Tested with two sessions' real
+  hooks, a real daemon and real Git (`tests/formatter_notice.rs`); the
+  formatters themselves are not run there. A real host reading the notice and
+  the dogfood run in a shared checkout are pending.
 - Issue #99: `commit --mine` no longer reports a file as wholly another
   session's because that session made one write whose lines are not known.
   Such a file is still attributed hunk by hunk; a hunk whose lines that
@@ -124,6 +153,24 @@ Fixed on `main` since the validation:
   Tested with two sessions' hooked edits in alternation, each inserting above
   the other's, real Git and a real daemon (`tests/commit_guard.rs`); the
   dogfood run in a shared checkout is pending.
+- Issue #106: `commit --mine` splits a hunk Git joined from this session's
+  lines and another session's at the boundaries between them and commits
+  only its own; a hunk where one session's line replaced another's, or with
+  a line no session wrote, is still refused with the reason, and a partial
+  patch that does not apply exactly to the index commits nothing
+  ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)). Tested with two
+  sessions' real hooks adding adjacent list entries in both orders, real Git
+  and a real daemon (`tests/commit_guard.rs`), and the exactness check
+  against a real temporary repository's index (`src/commit.rs`); the dogfood
+  run in a shared checkout is pending.
+- Issue #40 (B27): `langspan status --mine` and MCP `langspan_my_changes`
+  list this session's uncommitted files and hunks, each `mine`, `mixed` or
+  `unknown`, with the attribution `commit --mine` uses, and change nothing
+  ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md), section 3). Tested
+  with two sessions' hooked edits, changes no session made, a staged file,
+  a `commit --mine` afterwards, real Git and a real daemon
+  (`tests/commit_guard.rs`); the Claude Code run calling it before
+  `commit --mine` is pending.
 
 **Observed on real hosts (retained on `main`):**
 

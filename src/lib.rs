@@ -8,21 +8,30 @@ pub mod clock;
 pub mod commit;
 pub mod daemon;
 pub mod dashboard;
+pub mod formatter;
 pub mod install;
 mod lines;
 mod local;
+pub mod local_day;
 pub mod mcp;
+pub mod notify;
 pub mod protocol;
+mod reformat;
 pub mod regions;
 mod sha1;
 mod sha256;
 pub mod skill;
+pub mod status_line;
 pub mod store;
+pub mod test_output;
+pub mod today;
 pub mod user_install;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 pub mod hook;
+
+pub mod hosts;
 
 pub mod git;
 

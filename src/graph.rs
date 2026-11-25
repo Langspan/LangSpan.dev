@@ -7,11 +7,18 @@
 //! writes; the daemon's request path reads. See ADR 0008.
 
 use langspan_core::{GraphCoverage, InterfaceChange, NameRef, SymbolRef};
+use langspan_graph::MAX_SOURCE_BYTES;
 use langspan_graph::{Change, FileGraph, Language, Symbol, SymbolKind};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use std::{collections::BTreeMap, fs, io::Read, path::Path, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::Read,
+    path::Path,
+    time::Instant,
+};
 
-const SCHEMA: i64 = 3;
+const SCHEMA: i64 = 4;
 /// Files parsed in one pass. The rest wait for the next.
 pub const FILES_PER_PASS: usize = 200;
 pub const MAX_RESULTS: u32 = 200;
@@ -49,11 +56,18 @@ impl Index {
                 "DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS symbols;
                  DROP TABLE IF EXISTS refs; DROP TABLE IF EXISTS imports;
                  DROP TABLE IF EXISTS baselines; DROP TABLE IF EXISTS calls;
+                 DROP TABLE IF EXISTS unread; DROP TABLE IF EXISTS scan_summary;
                  CREATE TABLE files (
                     workspace_id TEXT NOT NULL, path TEXT NOT NULL,
                     scan_digest TEXT NOT NULL, digest TEXT, partial INTEGER NOT NULL DEFAULT 0,
-                    baseline_digest TEXT,
+                    baseline_digest TEXT, partial_since INTEGER, oversize_digest TEXT,
                     PRIMARY KEY (workspace_id, path)) WITHOUT ROWID;
+                 CREATE TABLE unread (
+                    workspace_id TEXT NOT NULL, path TEXT NOT NULL, reason TEXT NOT NULL,
+                    PRIMARY KEY (workspace_id, path)) WITHOUT ROWID;
+                 CREATE TABLE scan_summary (
+                    workspace_id TEXT NOT NULL PRIMARY KEY, too_large INTEGER NOT NULL,
+                    unscanned INTEGER NOT NULL, languages TEXT NOT NULL) WITHOUT ROWID;
                  CREATE TABLE symbols (
                     workspace_id TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL,
                     kind TEXT NOT NULL, line INTEGER NOT NULL, end_line INTEGER NOT NULL,
@@ -79,7 +93,7 @@ impl Index {
                     callee TEXT NOT NULL, line INTEGER NOT NULL, args INTEGER);
                  CREATE INDEX calls_by_callee ON calls(workspace_id, callee, path, line);
                  CREATE INDEX calls_by_path ON calls(workspace_id, path, line);
-                 PRAGMA user_version = 3;",
+                 PRAGMA user_version = 4;",
             )?;
             transaction.commit()?;
         }
@@ -166,19 +180,50 @@ impl Index {
         let changes: Vec<InterfaceChange> = langspan_graph::diff(&before, after)
             .into_iter()
             .filter_map(|change| {
-                let (label, before, after) = match change.change {
-                    Change::Removed => ("removed", None, None),
+                let (label, before, after, number) = match change.change {
+                    Change::Removed => ("removed", None, None, None),
                     Change::SignatureChanged { before, after } => {
-                        ("signature_changed", Some(before), Some(after))
+                        ("signature_changed", Some(before), Some(after), None)
                     }
+                    // Only how many definitions share the name changed: no
+                    // parameter counts, so no break alert (ADR 0029).
+                    Change::DefinitionsAdded {
+                        signatures,
+                        before,
+                        after,
+                    } => (
+                        "definition_added",
+                        None,
+                        Some(signatures),
+                        Some((before, after)),
+                    ),
+                    Change::DefinitionsRemoved {
+                        signatures,
+                        before,
+                        after,
+                    } => (
+                        "definition_removed",
+                        Some(signatures),
+                        None,
+                        Some((before, after)),
+                    ),
                     Change::Added => return None,
+                };
+                let arity = |signature| {
+                    if number.is_some() {
+                        None
+                    } else {
+                        counts(signature)
+                    }
                 };
                 Some(InterfaceChange {
                     name: change.name,
                     kind: change.kind.name().into(),
                     change: label.into(),
-                    before_arity: counts(&before),
-                    after_arity: counts(&after),
+                    before_arity: arity(&before),
+                    after_arity: arity(&after),
+                    before_count: number.map(|(before, _)| before),
+                    after_count: number.map(|(_, after)| after),
                     before,
                     after,
                 })
@@ -223,27 +268,34 @@ impl Index {
             .collect())
     }
 
-    /// Bring one workspace's index up to `files`, the indexable paths of its
-    /// latest complete scan with their content digests. A path in
-    /// `unobserved` was listed but not versioned by that scan (a partial
-    /// scan, a file over the size bound): it keeps what the index already
-    /// holds for it and is not treated as removed. Parses at most
+    /// Bring one workspace's index up to `scan.files`, the indexable paths
+    /// of its latest complete scan with their content digests. A path in
+    /// `scan.unobserved` was listed but not versioned by that scan (a
+    /// partial scan, a file over the size bound): it keeps what the index
+    /// already holds for it and is not treated as removed. Parses at most
     /// `FILES_PER_PASS` files and stops at `deadline`; what is left is picked
-    /// up by the next call. Returns the interface changes it found.
+    /// up by the next call. `now_ms` (wall clock) dates a file that becomes
+    /// partial. Returns the interface changes it found.
     pub fn update(
         &mut self,
         workspace_id: &str,
         root: &Path,
-        files: &BTreeMap<String, String>,
-        unobserved: &std::collections::BTreeSet<String>,
+        scan: &ScanView,
+        now_ms: u64,
         deadline: Instant,
     ) -> Result<Vec<Notice>, Failure> {
-        let indexed: BTreeMap<String, Option<String>> = {
-            let mut statement = self
-                .connection
-                .prepare_cached("SELECT path, digest FROM files WHERE workspace_id = ?1")?;
+        let (files, unobserved) = (&scan.files, &scan.unobserved);
+        // Each path's indexed digest, and the scanned digest at which it was
+        // found too large to parse: that version is not tried again.
+        type Indexed = BTreeMap<String, (Option<String>, Option<String>)>;
+        let indexed: Indexed = {
+            let mut statement = self.connection.prepare_cached(
+                "SELECT path, digest, oversize_digest FROM files WHERE workspace_id = ?1",
+            )?;
             statement
-                .query_map([workspace_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .query_map([workspace_id], |row| {
+                    Ok((row.get(0)?, (row.get(1)?, row.get(2)?)))
+                })?
                 .collect::<Result<_, _>>()?
         };
         // A deleted or renamed file removes everything it exported. Say so,
@@ -276,11 +328,15 @@ impl Index {
                 params![workspace_id, path, digest],
             )?;
         }
+        write_scan_blind(&transaction, workspace_id, &scan.blind)?;
         transaction.commit()?;
 
         let pending: Vec<(&String, &String)> = files
             .iter()
-            .filter(|(path, digest)| indexed.get(*path).and_then(Option::as_ref) != Some(digest))
+            .filter(|(path, digest)| {
+                let (indexed, oversize) = indexed.get(*path).cloned().unwrap_or_default();
+                indexed.as_ref() != Some(digest) && oversize.as_ref() != Some(digest)
+            })
             .take(FILES_PER_PASS)
             .collect();
         for (path, digest) in pending {
@@ -291,10 +347,23 @@ impl Index {
                 continue;
             };
             // The file must still be exactly what the scan saw; otherwise
-            // the next scan brings its new digest.
-            let Some(bytes) = read_exact_version(root, path, digest) else {
+            // the next scan brings its new digest. Read up to the scan's own
+            // bound, so a version the scan digested can be confirmed.
+            let scanned = crate::observer::Limits::default().max_file_bytes;
+            let Some(bytes) = read_exact_version(root, path, digest, scanned) else {
                 continue;
             };
+            // Too large to parse: remembered for this version, so it neither
+            // waits forever nor takes a place in every later pass. Only the
+            // confirmed scanned bytes say so; a file that grew after the
+            // scan says nothing about the scanned version.
+            if bytes.len() > MAX_SOURCE_BYTES {
+                self.connection.execute(
+                    "UPDATE files SET oversize_digest = ?3 WHERE workspace_id = ?1 AND path = ?2",
+                    params![workspace_id, path, digest],
+                )?;
+                continue;
+            }
             let Ok(graph) = langspan_graph::extract(language, &bytes) else {
                 continue;
             };
@@ -344,9 +413,15 @@ impl Index {
                     params![workspace_id, path, import.name, import.line],
                 )?;
             }
+            // A partial file keeps the time it first became partial across
+            // further partial versions; a clean parse clears it.
             transaction.execute(
-                "UPDATE files SET digest = ?3, partial = ?4 WHERE workspace_id = ?1 AND path = ?2",
-                params![workspace_id, path, digest, graph.partial],
+                "UPDATE files SET digest = ?3, partial = ?4, oversize_digest = NULL,
+                    partial_since = CASE WHEN NOT ?4 THEN NULL
+                        WHEN partial = 1 AND partial_since IS NOT NULL THEN partial_since
+                        ELSE ?5 END
+                 WHERE workspace_id = ?1 AND path = ?2",
+                params![workspace_id, path, digest, graph.partial, now_ms as i64],
             )?;
             // Queries see partial results; the interface baseline moves only
             // on a clean parse.
@@ -411,17 +486,136 @@ impl Index {
     }
 
     fn coverage(&self, workspace_id: &str) -> Result<GraphCoverage, Failure> {
-        let (indexable, current, partial): (u32, u32, u32) = self.connection.query_row(
-            "SELECT count(*), coalesce(sum(digest IS scan_digest), 0), coalesce(sum(partial), 0)
-             FROM files WHERE workspace_id = ?1",
+        // Blind: partial, or not indexed at its scanned content (waiting or
+        // too large), or not read by the last scan at all. A file the scan
+        // did not read keeps its earlier row, so it is counted once.
+        let (indexable, current, partial, blind_indexed): (u32, u32, u32, u32) = self
+            .connection
+            .query_row(
+            "SELECT count(*), coalesce(sum(digest IS scan_digest), 0), coalesce(sum(partial), 0),
+                    coalesce(sum((partial = 1 OR digest IS NOT scan_digest) AND NOT EXISTS (
+                        SELECT 1 FROM unread u WHERE u.workspace_id = f.workspace_id
+                        AND u.path = f.path)), 0)
+                 FROM files f WHERE workspace_id = ?1",
             [workspace_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
+        let unread: Option<(u32, u32)> = self
+            .connection
+            .query_row(
+                "SELECT too_large, unscanned FROM scan_summary WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (too_large, unscanned) = unread.unwrap_or_default();
         Ok(GraphCoverage {
             indexable_files: indexable,
             current_files: current,
             partial_files: partial,
-            scanned: indexable > 0,
+            // A complete scan with no supported file is still a scan.
+            scanned: indexable > 0 || unread.is_some(),
+            blind_in_scope: blind_indexed
+                .saturating_add(too_large)
+                .saturating_add(unscanned),
+        })
+    }
+
+    /// Where the index is blind, from the same snapshot as its coverage
+    /// when called inside `with_coverage`. At most `limit` paths per list,
+    /// in path order, so a capped list is the same on every call.
+    pub fn blind_spots(
+        &self,
+        workspace_id: &str,
+        limit: u32,
+    ) -> Result<langspan_core::BlindSpots, Failure> {
+        let connection = &self.connection;
+        let paths = |sql: &str| -> Result<(Vec<String>, u32), Failure> {
+            let listed = connection
+                .prepare_cached(&format!("SELECT path FROM ({sql}) ORDER BY path LIMIT ?2"))?
+                .query_map(params![workspace_id, limit], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            let count = connection
+                .prepare_cached(&format!("SELECT count(*) FROM ({sql})"))?
+                .query_row(params![workspace_id], |row| row.get(0))?;
+            Ok((listed, count))
+        };
+        // Rows the last scan still read; a file it did not read is listed
+        // by why it was not read, not by what its earlier row says.
+        const READ: &str = "workspace_id = ?1 AND path NOT IN
+            (SELECT path FROM unread WHERE workspace_id = ?1)";
+        let (never_clean, never_clean_count) = paths(&format!(
+            "SELECT path FROM files WHERE {READ} AND digest IS NOT NULL AND baseline_digest IS NULL"
+        ))?;
+        let (waiting, waiting_count) = paths(&format!(
+            "SELECT path FROM files WHERE {READ} AND digest IS NOT scan_digest
+             AND oversize_digest IS NOT scan_digest"
+        ))?;
+        let (too_large, too_large_count) = paths(&format!(
+            "SELECT path FROM files WHERE {READ} AND oversize_digest IS scan_digest
+             AND digest IS NOT scan_digest
+             UNION ALL SELECT path FROM unread WHERE workspace_id = ?1 AND reason = 'too_large'"
+        ))?;
+        let (unscanned, _) =
+            paths("SELECT path FROM unread WHERE workspace_id = ?1 AND reason = 'unscanned'")?;
+        let partial: Vec<langspan_core::PartialFile> = connection
+            .prepare_cached(&format!(
+                "SELECT path, partial_since FROM files WHERE {READ} AND partial = 1
+                 ORDER BY path LIMIT ?2"
+            ))?
+            .query_map(params![workspace_id, limit], |row| {
+                Ok(langspan_core::PartialFile {
+                    path: row.get(0)?,
+                    since_ms: row.get::<_, Option<i64>>(1)?.unwrap_or(0).max(0) as u64,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        let partial_count: u32 = connection
+            .prepare_cached(&format!(
+                "SELECT count(*) FROM files WHERE {READ} AND partial = 1"
+            ))?
+            .query_row(params![workspace_id], |row| row.get(0))?;
+        // Past the stored paths, the scan's full counts.
+        let summary: Option<(u32, u32, String)> = connection
+            .query_row(
+                "SELECT too_large, unscanned, languages FROM scan_summary WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let (scan_too_large, scan_unscanned, languages) = summary.unwrap_or_default();
+        let stored_too_large: u32 = connection.query_row(
+            "SELECT count(*) FROM unread WHERE workspace_id = ?1 AND reason = 'too_large'",
+            [workspace_id],
+            |row| row.get(0),
+        )?;
+        let mut unsupported_languages: Vec<langspan_core::LanguageCount> =
+            serde_json::from_str::<BTreeMap<String, u32>>(&languages)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(extension, files)| langspan_core::LanguageCount { extension, files })
+                .collect();
+        unsupported_languages.sort_by(|a, b| {
+            b.files
+                .cmp(&a.files)
+                .then_with(|| a.extension.cmp(&b.extension))
+        });
+        Ok(langspan_core::BlindSpots {
+            partial,
+            never_clean,
+            waiting,
+            too_large,
+            unscanned,
+            unsupported_languages,
+            totals: langspan_core::BlindTotals {
+                partial: partial_count,
+                never_clean: never_clean_count,
+                waiting: waiting_count,
+                too_large: too_large_count
+                    .saturating_sub(stored_too_large)
+                    .saturating_add(scan_too_large),
+                unscanned: scan_unscanned,
+            },
         })
     }
 
@@ -607,7 +801,95 @@ impl Index {
         }
         Ok((symbols, references))
     }
+
+    /// The files reached from `path` level by level, up to `depth` levels
+    /// (roadmap D2). Level n+1 is the files mentioning an exported name of
+    /// a level-n file; each file appears once, at its first level, with the
+    /// name (`via`) and the previous-level file (`from`) that reached it.
+    /// At most `MAX_RESULTS` files in all and `NAMES_PER_LEVEL` names
+    /// expanded per level; a level a bound cut is `truncated`. Past
+    /// `deadline` the levels so far are returned, the last one `truncated`.
+    /// Call it inside `with_coverage` so the levels and the coverage are one
+    /// snapshot.
+    pub fn impact_levels(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        depth: u32,
+        deadline: Instant,
+    ) -> Result<Vec<langspan_core::ImpactLevel>, Failure> {
+        let limit = MAX_RESULTS as usize;
+        let mut seen = BTreeSet::from([path.to_owned()]);
+        let mut frontier = vec![path.to_owned()];
+        let mut levels = Vec::new();
+        for level in 1..=depth {
+            let mut files: Vec<langspan_core::ImpactFile> = Vec::new();
+            let mut truncated = false;
+            let mut late = false;
+            let mut expanded = BTreeSet::new();
+            'level: for from in &frontier {
+                for name in self.exported_names(workspace_id, from)? {
+                    if expanded.contains(&name) {
+                        continue;
+                    }
+                    if expanded.len() == NAMES_PER_LEVEL {
+                        truncated = true;
+                        break 'level;
+                    }
+                    if Instant::now() >= deadline {
+                        (truncated, late) = (true, true);
+                        break 'level;
+                    }
+                    let mentions = self.mentioned_in(workspace_id, &name, MAX_RESULTS)?;
+                    truncated |= mentions.len() > limit;
+                    for mention in mentions.into_iter().take(limit) {
+                        if seen.contains(&mention) {
+                            continue;
+                        }
+                        // `seen` holds the queried file too: `limit` files
+                        // have been reached.
+                        if seen.len() > limit {
+                            truncated = true;
+                            break 'level;
+                        }
+                        seen.insert(mention.clone());
+                        files.push(langspan_core::ImpactFile {
+                            path: mention,
+                            via: name.clone(),
+                            from: from.clone(),
+                        });
+                    }
+                    expanded.insert(name);
+                }
+            }
+            frontier = files.iter().map(|file| file.path.clone()).collect();
+            levels.push(langspan_core::ImpactLevel {
+                level,
+                files,
+                truncated,
+            });
+            if late {
+                break;
+            }
+        }
+        Ok(levels)
+    }
+
+    /// The distinct exported names of `path`, in name order.
+    fn exported_names(&self, workspace_id: &str, path: &str) -> Result<Vec<String>, Failure> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT DISTINCT name FROM symbols WHERE workspace_id = ?1 AND path = ?2
+             AND exported = 1 ORDER BY name",
+        )?;
+        let rows = statement
+            .query_map(params![workspace_id, path], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(rows)
+    }
 }
+
+/// Exported names one `impact_levels` level expands at most.
+pub const NAMES_PER_LEVEL: usize = 50;
 
 /// For each call, in the same order, the name of the innermost definition
 /// whose lines hold its line. Definitions nest, so one sweep in line order
@@ -660,7 +942,7 @@ pub fn last_checks(
         .iter()
         .take_while(|_| Instant::now() < deadline)
         .filter_map(|(path, digest)| {
-            let bytes = read_exact_version(root, path, digest)?;
+            let bytes = read_exact_version(root, path, digest, MAX_SOURCE_BYTES)?;
             let id = |length| crate::observer::blob_id(&bytes, length);
             Some((path.as_str(), [id(40), id(64)]))
         })
@@ -734,8 +1016,9 @@ pub fn last_checks(
     found
 }
 
-/// The file's bytes, only if they are still exactly the scanned version.
-fn read_exact_version(root: &Path, path: &str, digest: &str) -> Option<Vec<u8>> {
+/// The file's bytes, only if they are still exactly the scanned version and
+/// at most `max` long.
+fn read_exact_version(root: &Path, path: &str, digest: &str, max: usize) -> Option<Vec<u8>> {
     let full = root.join(path);
     if !fs::symlink_metadata(&full).ok()?.is_file() {
         return None;
@@ -743,11 +1026,10 @@ fn read_exact_version(root: &Path, path: &str, digest: &str) -> Option<Vec<u8>> 
     let mut bytes = Vec::new();
     fs::File::open(&full)
         .ok()?
-        .take(langspan_graph::MAX_SOURCE_BYTES as u64 + 1)
+        .take(max as u64 + 1)
         .read_to_end(&mut bytes)
         .ok()?;
-    (bytes.len() <= langspan_graph::MAX_SOURCE_BYTES
-        && crate::sha256::hex(&crate::sha256::digest(&bytes)) == digest)
+    (bytes.len() <= max && crate::sha256::hex(&crate::sha256::digest(&bytes)) == digest)
         .then_some(bytes)
 }
 
@@ -762,6 +1044,123 @@ pub fn indexable(snapshot: &crate::observer::Snapshot) -> BTreeMap<String, Strin
         })
         .filter_map(|(path, version)| Some((path.clone(), version.digest.clone()?)))
         .collect()
+}
+
+/// Unread files kept by path, per workspace. Past this the scan's counts
+/// still hold, but those paths are not named.
+pub const MAX_UNREAD: usize = 4096;
+
+/// Extensions of source languages the index has no grammar for. Other
+/// files (documentation, data, images) are not counted.
+const OTHER_SOURCE: &[&str] = &[
+    "c", "cc", "clj", "cljs", "cpp", "cs", "cxx", "dart", "elm", "erl", "ex", "exs", "fs", "fsx",
+    "groovy", "h", "hh", "hpp", "hrl", "hs", "java", "jl", "kt", "kts", "lua", "m", "ml", "mli",
+    "mm", "nim", "php", "pl", "pm", "r", "rb", "scala", "svelte", "swift", "vue", "zig",
+];
+
+/// What the last complete scan listed but the index cannot read. It is kept
+/// in the index file, so one read snapshot answers for it and the rows.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ScanBlind {
+    /// Supported-language files the scan did not read, the first
+    /// `MAX_UNREAD` in path order.
+    pub unread: BTreeMap<String, crate::observer::Unread>,
+    /// All of them, by reason.
+    pub too_large: u32,
+    pub unscanned: u32,
+    /// Other source files the scan listed, by extension.
+    pub languages: BTreeMap<String, u32>,
+}
+
+/// One complete scan as the indexer needs it.
+#[derive(Debug, Default, Clone)]
+pub struct ScanView {
+    pub files: BTreeMap<String, String>,
+    pub unobserved: BTreeSet<String>,
+    pub blind: ScanBlind,
+}
+
+impl ScanView {
+    pub fn of(snapshot: &crate::observer::Snapshot) -> Self {
+        use crate::observer::{FileKind, Unread};
+        let mut blind = ScanBlind::default();
+        for (path, reason) in &snapshot.unread {
+            if Language::for_path(path).is_none() {
+                continue;
+            }
+            match reason {
+                Unread::TooLarge => blind.too_large += 1,
+                Unread::Omitted => blind.unscanned += 1,
+            }
+            if blind.unread.len() < MAX_UNREAD {
+                blind.unread.insert(path.clone(), *reason);
+            }
+        }
+        let listed = snapshot
+            .files
+            .iter()
+            .filter(|(_, version)| version.kind == FileKind::Regular)
+            .map(|(path, _)| path)
+            .chain(snapshot.unread.keys());
+        for path in listed {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            let Some((_, extension)) = name.rsplit_once('.') else {
+                continue;
+            };
+            let extension = extension.to_ascii_lowercase();
+            if OTHER_SOURCE.contains(&extension.as_str()) {
+                *blind.languages.entry(format!(".{extension}")).or_default() += 1;
+            }
+        }
+        Self {
+            files: indexable(snapshot),
+            unobserved: snapshot.unobserved.clone(),
+            blind,
+        }
+    }
+}
+
+/// Replace the workspace's record of its last scan's blind spots. The paths
+/// are rewritten only when they changed, so a steady workspace costs one
+/// read per pass.
+fn write_scan_blind(
+    transaction: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    blind: &ScanBlind,
+) -> Result<(), Failure> {
+    use crate::observer::Unread;
+    let reason = |reason: &Unread| match reason {
+        Unread::TooLarge => "too_large",
+        Unread::Omitted => "unscanned",
+    };
+    let stored: BTreeMap<String, String> = transaction
+        .prepare_cached("SELECT path, reason FROM unread WHERE workspace_id = ?1")?
+        .query_map([workspace_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let same = stored.len() == blind.unread.len()
+        && stored
+            .iter()
+            .zip(&blind.unread)
+            .all(|((a, ra), (b, rb))| a == b && ra == reason(rb));
+    if !same {
+        transaction.execute("DELETE FROM unread WHERE workspace_id = ?1", [workspace_id])?;
+        let mut insert = transaction.prepare_cached("INSERT INTO unread VALUES (?1, ?2, ?3)")?;
+        for (path, why) in &blind.unread {
+            insert.execute(params![workspace_id, path, reason(why)])?;
+        }
+    }
+    transaction.execute(
+        "INSERT INTO scan_summary VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(workspace_id) DO UPDATE SET too_large = excluded.too_large,
+            unscanned = excluded.unscanned, languages = excluded.languages",
+        params![
+            workspace_id,
+            blind.too_large,
+            blind.unscanned,
+            serde_json::to_string(&blind.languages)?
+        ],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -786,6 +1185,16 @@ mod review_regressions {
 
     /// Write files and index the whole set, as a scan would.
     fn pass(dir: &Dir, index: &mut Index, files: &[(&str, &str)]) -> Vec<Notice> {
+        pass_at(dir, index, files, NOW, Duration::from_secs(10))
+    }
+
+    fn pass_at(
+        dir: &Dir,
+        index: &mut Index,
+        files: &[(&str, &str)],
+        now_ms: u64,
+        budget: Duration,
+    ) -> Vec<Notice> {
         let mut digests = BTreeMap::new();
         for (path, text) in files {
             fs::write(dir.0.join(path), text).unwrap();
@@ -794,16 +1203,231 @@ mod review_regressions {
                 crate::sha256::hex(&crate::sha256::digest(text.as_bytes())),
             );
         }
+        let scan = ScanView {
+            files: digests,
+            ..ScanView::default()
+        };
+        index
+            .update("w", &dir.0, &scan, now_ms, Instant::now() + budget)
+            .unwrap()
+    }
+
+    fn blind(index: &Index, limit: u32) -> (langspan_core::BlindSpots, GraphCoverage) {
+        index
+            .with_coverage("w", |index| index.blind_spots("w", limit))
+            .unwrap()
+    }
+
+    const BROKEN: (&str, &str) = ("src/broken.rs", "pub fn half( {{{\n");
+
+    #[test]
+    fn blind_spots_name_partial_never_clean_and_waiting_files() {
+        let (dir, mut index) = setup("blind");
+        let api = ("src/api.rs", "pub fn upload() {}\n");
+        pass(&dir, &mut index, &[api, BROKEN, CALLER]);
+        let (spots, coverage) = blind(&index, 10);
+        assert_eq!(
+            spots.partial,
+            [langspan_core::PartialFile {
+                path: "src/broken.rs".into(),
+                since_ms: NOW
+            }]
+        );
+        assert_eq!(spots.never_clean, ["src/broken.rs"], "no clean parse yet");
+        assert!(spots.waiting.is_empty() && spots.too_large.is_empty());
+        assert_eq!(coverage.blind_in_scope, 1);
+
+        // Still partial at a later version: partial since the first one.
+        let later = ("src/broken.rs", "pub fn half( {{{ x\n");
+        pass_at(
+            &dir,
+            &mut index,
+            &[api, later, CALLER],
+            NOW + 60_000,
+            Duration::from_secs(10),
+        );
+        assert_eq!(blind(&index, 10).0.partial[0].since_ms, NOW);
+
+        // Fixed: in no list, and the count says so.
+        let fixed = ("src/broken.rs", "pub fn half() {}\n");
+        pass(&dir, &mut index, &[api, fixed, CALLER]);
+        let (spots, coverage) = blind(&index, 10);
+        assert_eq!(spots, langspan_core::BlindSpots::default());
+        assert_eq!(coverage.blind_in_scope, 0);
+
+        // Changed since the last pass: waiting until a pass indexes it.
+        let changed = ("src/api.rs", "pub fn upload(x: u8) {}\n");
+        pass_at(
+            &dir,
+            &mut index,
+            &[changed, fixed, CALLER],
+            NOW,
+            Duration::ZERO,
+        );
+        let (spots, coverage) = blind(&index, 10);
+        assert_eq!(spots.waiting, ["src/api.rs"]);
+        assert_eq!((spots.totals.waiting, coverage.blind_in_scope), (1, 1));
+        pass(&dir, &mut index, &[changed, fixed, CALLER]);
+        assert!(blind(&index, 10).0.waiting.is_empty());
+    }
+
+    #[test]
+    fn a_file_over_the_parse_bound_is_too_large_and_not_waiting() {
+        let (dir, mut index) = setup("oversize");
+        let big = format!("// {}\n", "x".repeat(MAX_SOURCE_BYTES));
+        pass(&dir, &mut index, &[("src/big.rs", &big), CALLER]);
+        let (spots, coverage) = blind(&index, 10);
+        assert_eq!(spots.too_large, ["src/big.rs"]);
+        assert!(spots.waiting.is_empty(), "{spots:?}");
+        assert_eq!(coverage.blind_in_scope, 1);
+        // Remembered for that version, so later passes do not read it again.
+        let oversize: Option<String> = index
+            .connection
+            .query_row(
+                "SELECT oversize_digest FROM files WHERE path = 'src/big.rs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(oversize.map(|digest| digest.len()), Some(64));
+        // Small again: indexed, and no longer too large.
+        pass(
+            &dir,
+            &mut index,
+            &[("src/big.rs", "pub fn small() {}\n"), CALLER],
+        );
+        let (spots, coverage) = blind(&index, 10);
+        assert!(spots.too_large.is_empty(), "{spots:?}");
+        assert_eq!(coverage.blind_in_scope, 0);
+    }
+
+    #[test]
+    fn a_small_scanned_version_is_not_marked_too_large_by_a_later_large_file() {
+        let (dir, mut index) = setup("oversize-race");
+        let small = "pub fn small() {}\n";
+        let digest = crate::sha256::hex(&crate::sha256::digest(small.as_bytes()));
+        // Scanned small, then grew past the bound before the index ran.
+        let big = format!("// {}\n", "x".repeat(MAX_SOURCE_BYTES));
+        fs::write(dir.0.join("src/api.rs"), &big).unwrap();
+        let scan = ScanView {
+            files: BTreeMap::from([("src/api.rs".to_owned(), digest.clone())]),
+            ..ScanView::default()
+        };
+        let far = Instant::now() + Duration::from_secs(10);
+        index.update("w", &dir.0, &scan, NOW, far).unwrap();
+        let oversize: Option<String> = index
+            .connection
+            .query_row(
+                "SELECT oversize_digest FROM files WHERE path = 'src/api.rs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            oversize, None,
+            "the large bytes are not the scanned version"
+        );
+        // Back to the scanned content: that version is indexed.
+        fs::write(dir.0.join("src/api.rs"), small).unwrap();
+        let far = Instant::now() + Duration::from_secs(10);
+        index.update("w", &dir.0, &scan, NOW, far).unwrap();
+        let (spots, coverage) = blind(&index, 10);
+        assert_eq!(spots, langspan_core::BlindSpots::default());
+        assert_eq!(coverage.blind_in_scope, 0);
+    }
+
+    #[test]
+    fn a_capped_list_is_the_same_on_every_call() {
+        let (dir, mut index) = setup("cap");
+        let names: Vec<String> = (0..5).map(|n| format!("src/b{n}.rs")).collect();
+        let files: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), BROKEN.1)).collect();
+        pass(&dir, &mut index, &files);
+        let first = blind(&index, 2).0;
+        assert_eq!(first, blind(&index, 2).0);
+        let paths: Vec<&str> = first
+            .partial
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(paths, ["src/b0.rs", "src/b1.rs"]);
+        assert_eq!(first.totals.partial, 5);
+    }
+
+    #[test]
+    fn impact_on_a_file_mentioned_only_by_a_partial_file_counts_one_blind_file() {
+        let (dir, mut index) = setup("scope");
+        let api = ("src/api.rs", "pub fn lonely() {}\n");
+        let user = ("src/user.rs", "fn caller() { lonely(); }\nfn half( {{{\n");
+        pass(&dir, &mut index, &[api, user]);
+        let ((_, references), coverage) = index
+            .with_coverage("w", |index| index.impact("w", "src/api.rs", 10))
+            .unwrap();
+        assert_eq!(coverage.partial_files, 1);
+        assert_eq!(coverage.blind_in_scope, 1);
+        assert!(
+            references
+                .iter()
+                .all(|reference| reference.path == "src/user.rs")
+        );
+    }
+
+    #[test]
+    fn files_the_scan_did_not_read_and_other_languages_come_from_a_real_scan() {
+        let (dir, mut index) = setup("scan");
+        let root = fs::canonicalize(&dir.0).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        // Path order: the large file first, then two read files, then one
+        // past the file bound, then other languages and documentation.
+        fs::write(root.join("src/0huge.rs"), "x".repeat(200)).unwrap();
+        for name in ["a", "b", "c"] {
+            fs::write(root.join(format!("src/{name}.rs")), "pub fn f() {}\n").unwrap();
+        }
+        fs::create_dir_all(root.join("z")).unwrap();
+        for n in 0..10 {
+            fs::write(root.join(format!("z/C{n}.java")), "class C {}\n").unwrap();
+        }
+        fs::write(root.join("z/README.md"), "notes\n").unwrap();
+        let limits = crate::observer::Limits {
+            max_files: 2,
+            max_file_bytes: 100,
+            ..crate::observer::Limits::default()
+        };
+        let snapshot = crate::observer::scan_with_limits(
+            &root,
+            Instant::now() + Duration::from_secs(10),
+            limits,
+        )
+        .unwrap();
+        let scan = ScanView::of(&snapshot);
         index
             .update(
                 "w",
-                &dir.0,
-                &digests,
-                &std::collections::BTreeSet::new(),
+                &root,
+                &scan,
+                NOW,
                 Instant::now() + Duration::from_secs(10),
             )
-            .unwrap()
+            .unwrap();
+        let (spots, coverage) = blind(&index, 10);
+        assert_eq!(spots.too_large, ["src/0huge.rs"]);
+        assert_eq!(spots.unscanned, ["src/c.rs"]);
+        assert_eq!(
+            spots.unsupported_languages,
+            [langspan_core::LanguageCount {
+                extension: ".java".into(),
+                files: 10
+            }]
+        );
+        assert_eq!((spots.totals.too_large, spots.totals.unscanned), (1, 1));
+        assert_eq!(coverage.blind_in_scope, 2);
     }
+
+    const NOW: u64 = 1_700_000_000_000;
 
     const CALLER: (&str, &str) = ("src/main.rs", "fn main() { api::upload(); api::gate(); }\n");
 
@@ -824,6 +1448,162 @@ mod review_regressions {
         let (symbols, references) = index.impact("w", "src/api.rs", 1).unwrap();
         assert_eq!(symbols[0].name, "upload");
         assert_eq!(references[0].path, "src/main.rs");
+    }
+
+    fn levels(index: &Index, path: &str, depth: u32) -> Vec<langspan_core::ImpactLevel> {
+        index
+            .impact_levels("w", path, depth, Instant::now() + Duration::from_secs(10))
+            .unwrap()
+    }
+
+    fn reached(level: &langspan_core::ImpactLevel) -> Vec<(&str, &str, &str)> {
+        level
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.via.as_str(), file.from.as_str()))
+            .collect()
+    }
+
+    /// `a.rs` exports `alpha`, `b.rs` mentions it and exports `beta`,
+    /// `c.rs` mentions `beta` and exports `gamma`, which `a.rs` mentions.
+    const CHAIN: [(&str, &str); 3] = [
+        ("src/a.rs", "pub fn alpha() { gamma(); }\n"),
+        ("src/b.rs", "pub fn beta() { alpha(); }\n"),
+        ("src/c.rs", "pub fn gamma() { beta(); }\n"),
+    ];
+
+    #[test]
+    fn impact_levels_follow_a_caller_of_a_caller_and_name_the_way() {
+        let (dir, mut index) = setup("levels");
+        pass(&dir, &mut index, &CHAIN);
+        let two = levels(&index, "src/a.rs", 2);
+        assert_eq!(two.len(), 2);
+        assert_eq!((two[0].level, two[1].level), (1, 2));
+        assert_eq!(reached(&two[0]), [("src/b.rs", "alpha", "src/a.rs")]);
+        assert_eq!(reached(&two[1]), [("src/c.rs", "beta", "src/b.rs")]);
+        assert!(!two[0].truncated && !two[1].truncated);
+
+        // `c.rs` exports `gamma`, which `a.rs` mentions: the cycle does
+        // not bring the queried file back, and nothing appears twice.
+        let three = levels(&index, "src/a.rs", 3);
+        assert_eq!(three.len(), 3);
+        assert_eq!(three[2].files, []);
+        assert!(!three[2].truncated);
+        let one = levels(&index, "src/a.rs", 1);
+        assert_eq!(one.len(), 1);
+        assert_eq!(reached(&one[0]), [("src/b.rs", "alpha", "src/a.rs")]);
+    }
+
+    #[test]
+    fn a_file_appears_once_at_its_first_level() {
+        let (dir, mut index) = setup("levels-once");
+        // `d.rs` mentions both `alpha` (level 1) and `beta` (level 2).
+        let both = ("src/d.rs", "fn d() { alpha(); beta(); }\n");
+        pass(&dir, &mut index, &[CHAIN[0], CHAIN[1], CHAIN[2], both]);
+        let two = levels(&index, "src/a.rs", 2);
+        assert_eq!(
+            reached(&two[0]),
+            [
+                ("src/b.rs", "alpha", "src/a.rs"),
+                ("src/d.rs", "alpha", "src/a.rs")
+            ]
+        );
+        assert_eq!(reached(&two[1]), [("src/c.rs", "beta", "src/b.rs")]);
+    }
+
+    #[test]
+    fn impact_levels_expand_at_most_fifty_names_per_level_and_say_so() {
+        let (dir, mut index) = setup("levels-names");
+        let exports: String = (0..NAMES_PER_LEVEL + 1)
+            .map(|n| format!("pub fn n{n:02}() {{}}\n"))
+            .collect();
+        // Mentions only the last name in path order, which is past the bound.
+        let last = format!("fn x() {{ n{NAMES_PER_LEVEL:02}(); }}\n");
+        let first = "fn y() { n00(); }\n";
+        pass(
+            &dir,
+            &mut index,
+            &[
+                ("src/api.rs", &exports),
+                ("src/first.rs", first),
+                ("src/last.rs", &last),
+            ],
+        );
+        let one = levels(&index, "src/api.rs", 2);
+        assert_eq!(reached(&one[0]), [("src/first.rs", "n00", "src/api.rs")]);
+        assert!(one[0].truncated, "the 51st name was not expanded");
+        assert!(!one[1].truncated);
+    }
+
+    #[test]
+    fn impact_levels_stop_at_two_hundred_files_in_total() {
+        let (dir, mut index) = setup("levels-total");
+        let mut files: Vec<(String, String)> = vec![
+            ("src/api.rs".into(), "pub fn root() {}\n".into()),
+            ("src/hub.rs".into(), "pub fn hub() { root(); }\n".into()),
+        ];
+        // 150 files at level 1, 150 more at level 2: 100 are left out.
+        for n in 0..150 {
+            files.push((format!("src/l1_{n:03}.rs"), "fn f() { root(); }\n".into()));
+            files.push((format!("src/l2_{n:03}.rs"), "fn f() { hub(); }\n".into()));
+        }
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        // One pass parses at most `FILES_PER_PASS`; the second the rest.
+        pass(&dir, &mut index, &borrowed);
+        pass(&dir, &mut index, &borrowed);
+        let two = levels(&index, "src/api.rs", 2);
+        assert_eq!(two[0].files.len(), 151, "hub and 150 more");
+        assert!(!two[0].truncated);
+        assert_eq!(
+            two[0].files.len() + two[1].files.len(),
+            MAX_RESULTS as usize
+        );
+        assert!(two[1].truncated);
+    }
+
+    #[test]
+    fn a_passed_deadline_returns_the_levels_so_far_marked_truncated() {
+        let (dir, mut index) = setup("levels-deadline");
+        pass(&dir, &mut index, &CHAIN);
+        let late = index
+            .impact_levels("w", "src/a.rs", 3, Instant::now())
+            .unwrap();
+        assert!(late.len() <= 3);
+        assert!(late.last().is_some_and(|level| level.truncated), "{late:?}");
+    }
+
+    #[test]
+    fn levels_and_coverage_come_from_one_snapshot() {
+        let (dir, mut index) = setup("levels-snapshot");
+        pass(&dir, &mut index, &CHAIN);
+        let reader = Index::open_reader(&dir.0.join("graph.sqlite3")).unwrap();
+        // The writer adds a file between the reader's levels and its
+        // coverage: neither the levels nor the coverage see it.
+        let (two, coverage) = reader
+            .with_coverage("w", |reader| {
+                let two = reader.impact_levels(
+                    "w",
+                    "src/a.rs",
+                    2,
+                    Instant::now() + Duration::from_secs(10),
+                )?;
+                let more = ("src/d.rs", "fn d() { beta(); }\n");
+                pass(&dir, &mut index, &[CHAIN[0], CHAIN[1], CHAIN[2], more]);
+                Ok(two)
+            })
+            .unwrap();
+        assert_eq!(reached(&two[1]), [("src/c.rs", "beta", "src/b.rs")]);
+        assert_eq!(coverage.indexable_files, 3, "{coverage:?}");
+        let (after, coverage) = reader
+            .with_coverage("w", |reader| {
+                reader.impact_levels("w", "src/a.rs", 2, Instant::now() + Duration::from_secs(10))
+            })
+            .unwrap();
+        assert_eq!(after[1].files.len(), 2);
+        assert_eq!(coverage.indexable_files, 4);
     }
 
     #[test]
