@@ -3083,9 +3083,8 @@ impl<'de> Deserialize<'de> for Command {
     }
 }
 
-// One outcome is built per reply and serialized at once, so the size of its
-// largest variant (`Status`, the whole state view) costs nothing that
-// boxing it would save.
+// One reply per request, built and sent once: its size does not matter, and
+// boxing `Status`'s state would only add an allocation to every status read.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
