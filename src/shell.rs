@@ -715,6 +715,11 @@ pub struct Record {
     /// session's (its own hooks recorded them), not this run's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edited_elsewhere: Vec<String>,
+    /// Once finished: of `contested`, the paths part of whose change only
+    /// reformatted this session's own lines, journaled as this session's
+    /// (issue #124).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reformatted: Vec<String>,
     /// The command line, redacted and capped (`kept_command`), for a later
     /// refusal to name. `None` in a record written before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1971,6 +1976,7 @@ mod diff {
             background: false,
             commit_mine: false,
             edited_elsewhere: Vec::new(),
+            reformatted: Vec::new(),
             command: None,
         };
         let note = marks(&state).join(OVERFLOW);
