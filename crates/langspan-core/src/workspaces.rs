@@ -384,6 +384,9 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
     state.scan_coverage.remove(id);
     state.checkouts.remove(id);
     state.auto_checks.remove(id);
+    state.test_learning.remove(id);
+    // `writes` is kept: it is a generation that never goes back, so a run
+    // taken before the removal cannot match a count after it.
     let removals = state.workspace_removals.entry(id.to_owned()).or_default();
     *removals = removals.saturating_add(1);
     Ok(())

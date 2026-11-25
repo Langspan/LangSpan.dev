@@ -2,7 +2,7 @@
 //! what ends, and what refuses the change.
 use langspan_core::{
     CheckResult, Command, Event, FileState, ObservedFile, Outcome, SourceOrigin, State,
-    ToolIdentity, apply, decide,
+    TestResults, ToolIdentity, apply, decide,
 };
 
 fn run(state: &mut State, id: &str, command: Command, now: u64) -> Outcome {
@@ -490,6 +490,44 @@ fn remote_sharing_refuses_removal_until_disabled_and_withdrawn() {
         run(&mut state, "r3", remove(true), 15),
         Outcome::WorkspaceRemoval { applied: true, .. }
     ));
+}
+
+#[test]
+fn a_removed_workspace_forgets_what_its_tests_taught() {
+    let mut state = ready();
+    let writes = state.writes.get("work").copied().unwrap_or(0);
+    let recorded = run(
+        &mut state,
+        "tests",
+        Command::RecordCheck {
+            workspace_id: "work".into(),
+            name: "tests".into(),
+            command: "cargo test".into(),
+            tree_oid: oid('7'),
+            head_oid: None,
+            inputs: Vec::new(),
+            result: CheckResult::Passed {},
+            duration_ms: 10,
+            report: None,
+            tests: Some(TestResults {
+                all_passed: true,
+                passed: vec!["net::times_out".into()],
+                ..TestResults::default()
+            }),
+            rerun: None,
+            writes_before: Some(writes),
+            command_id: Some("c".repeat(64)),
+        },
+        5,
+    );
+    assert!(
+        matches!(recorded, Outcome::CheckRecorded { .. }),
+        "{recorded:?}"
+    );
+    assert!(state.test_learning.contains_key("work"));
+    run(&mut state, "rm", remove(true), 10);
+    // An ID registered again is a new workspace: its tests start unlearned.
+    assert!(!state.test_learning.contains_key("work"));
 }
 
 #[test]

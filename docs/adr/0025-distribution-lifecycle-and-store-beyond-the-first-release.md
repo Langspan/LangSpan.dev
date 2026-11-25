@@ -105,8 +105,8 @@ against, so it stays an owner command, as with `remote enable`.
   `--apply` (with `--request-id`) appends `workspace_removed`: the workspace,
   its sessions with their intents, admissions, activity, liveness and
   undelivered check results, and its checks, landings, notes, messages,
-  interface notices, scan records, automatic check and teammates' received
-  publications leave the state, so `status`, `recap`, briefings and the
+  interface notices, scan records, automatic check, what its tests taught
+  about flipping tests, and teammates' received publications leave the state, so `status`, `recap`, briefings and the
   dashboard no longer show it. Its Git snapshot is deleted with the event.
   The state counts each ID's removals (derived on replay, not in the status
   reply). The ID, its root and that count name one registration, and what a
