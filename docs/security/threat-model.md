@@ -173,7 +173,7 @@ derived from one agent session is placed in another session's model context.
 | Spoofing | A briefing names sessions by the host-supplied session ID recorded through the owner-only socket. Any same-user process can register a session and claim work; LangSpan does not authenticate agents to each other. |
 | Tampering (prompt injection) | A peer's task line is the first line of that owner's prompt; file paths come from the repository. Both are attacker-influenced if a peer session or the repository is. Control characters, Unicode line and paragraph separators, bidirectional overrides and zero-width characters become spaces; every such value is quoted with its own quotes escaped, capped at 200 bytes, each peer at 700 and the whole briefing at 2,400, under a fixed header stating that the lines are data, not instructions. This reduces, and cannot remove, the chance that a host model follows text in a briefing. A briefing never carries a permission decision, so it cannot allow or deny anything by itself. |
 | Repudiation | Each delivery is an event (`briefing_delivered`) with the signature of what was delivered; prompt summaries and session ends are events. |
-| Information disclosure | The first non-empty line of each prompt, and no later line, is stored in the local event log, appears in `status`, and is shown to other sessions of the same user in the same repository. Before that line, an intent summary, a note, a message or a handoff is sent to the daemon, one redaction function in the hook adapter replaces likely secrets with `[redacted]` (provider key shapes, JWTs, PEM blocks, URL passwords, secret-named assignments and query values, `--password`/`--token` arguments, and long high-entropy tokens under a conservative rule) and the owner's home prefix with `~`; the daemon applies it again on receipt. A secret in a shape the rule does not know, such as an all-hexadecimal or all-lower-case token, is still shared. `hooks install --prompt-summary off` stops recording prompt text. Nothing leaves the machine unless publication is enabled. Workspaces in other repositories are never briefed about each other. |
+| Information disclosure | The first non-empty line of each prompt, and no later line, is stored in the local event log, appears in `status`, and is shown to other sessions of the same user in the same repository. Before that line, an intent summary, a note, a message or a handoff is sent to the daemon, one redaction function in the hook adapter replaces likely secrets with `[redacted]` (provider key shapes, JWTs, PEM blocks, URL passwords, secret-named assignments and query values, `--password`/`--token` arguments, and long high-entropy tokens under a conservative rule) and the owner's home prefix with `~`; the daemon applies it again on receipt. A prompt or intent summary is held to its byte limit after redaction: one that would outgrow it keeps its longest redacted prefix that fits, ending in `[redacted]`, so a summary is never refused, and its prompt shared without one, because it held a secret. A secret in a shape the rule does not know, such as an all-hexadecimal or all-lower-case token, is still shared. `hooks install --prompt-summary off` stops recording prompt text. Nothing leaves the machine unless publication is enabled. Workspaces in other repositories are never briefed about each other. |
 | Denial of service | Session events share the 1.5 s hook budget and the daemon's bounded queue. Activity is 32 paths per session; a briefing reads at most 16 peers. Each prompt adds one receipt and at most three events; retention is still open. |
 | Spoofing (repository grouping) | `observe_workspace_git` is accepted from any client of the owner-only socket, like the other observation commands. A same-user process can therefore place two workspaces in one repository and make their sessions briefed about each other. It cannot affect admission. |
 | Elevation of privilege | Lifecycle hooks print context only. Every failure, including an unavailable daemon, prints nothing and exits 0. |
@@ -552,7 +552,18 @@ delivery need their own host contracts and acceptance evidence.
 `lease_valid` is a point-in-time result. An old `admitted` payload alone is not
 current authority. Retry the same request ID to recover the original outcome;
 use a new ID for a new operation. A transport error remains unknown/unavailable.
-Status pagination, coverage aggregation and retention are unfinished. macOS path,
+`status` answers within one frame however long the history: it lists open
+admissions and live or recent sessions, counts closed admissions per session,
+and names anything else it left out to fit. `status --all` pages through every
+record after an opaque cursor, each page within the same byte budget as event
+reads; a cursor the coordinator did not give is refused, never guessed at,
+including a position at the integer limit. Records read across pages are each
+as they were when their page was answered. A record larger than a page is sent
+in parts that the reader joins, up to 8 MiB, and resumes inside a record only
+if its JSON is unchanged; otherwise it starts that record again. Decisions that
+need a part the bounded view may leave out (landing retries, doctor, automatic
+checks) read it complete instead of treating it as absent.
+Coverage aggregation and retention are unfinished. macOS path,
 transport, sleep/resume and signing behavior, and Windows transport, need their
 own validation. Remote publication requires a separate concrete owner-approved
 data flow and threat-model update.

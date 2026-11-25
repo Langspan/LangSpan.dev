@@ -195,8 +195,14 @@ core does with an eight-hour gap.
 - A delivery is recorded when the daemon commits it. If the hook then misses
   its deadline, that briefing is not repeated until the situation changes or
   the session starts again.
-- `status` still returns the whole state in one frame, and activity adds up to
-  32 paths per session to it. Paginated current views are the next slice.
+- `status` returns a bounded view of current work in one frame: open
+  admissions, live or recent sessions and their activity, with closed
+  admissions counted per session. When even that exceeds the frame, activity
+  and other histories are left out first and named in its summary. The whole
+  state, history included, is paged with `status --all`; a record larger
+  than a page is given in ordered parts of its JSON. A caller that decides
+  from a part the view may leave out (a retry's landing, a workspace's scan,
+  an automatic check) reads that part complete when the summary names it.
 - A session whose working directory moves into another worktree keeps its
   first workspace binding; events from the second are not coordinated.
 - A peer's task line and file paths are another session's text. They are

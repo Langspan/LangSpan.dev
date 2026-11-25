@@ -54,8 +54,18 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
     let submodules = [
         include_str!("../src/dashboard.rs"),
         include_str!("../src/lines.rs"),
+        include_str!("../src/status.rs"),
     ];
-    let allowed_imports = [&allowed_imports[..], &["use std::collections::BTreeSet;"]].concat();
+    // Range bounds, `mem::take` and `iter::empty` for the status pages: pure.
+    let allowed_imports = [
+        &allowed_imports[..],
+        &[
+            "use std::collections::BTreeSet;",
+            "use std::ops::Bound;",
+            "use std::{iter, mem};",
+        ],
+    ]
+    .concat();
     for line in submodules
         .iter()
         .flat_map(|module| module.lines())
@@ -68,7 +78,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
             );
         }
         assert!(
-            !line.contains("std::") || line.starts_with("use std::collections"),
+            !line.contains("std::") || allowed_imports.contains(&line),
             "unreviewed standard-library access in a core submodule: {line}"
         );
         assert!(!line.contains("extern crate"));
@@ -79,7 +89,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
         .collect();
     assert_eq!(
         modules,
-        ["mod dashboard;", "mod lines;"],
+        ["mod dashboard;", "mod lines;", "mod status;"],
         "a new core module needs this check"
     );
 }

@@ -61,4 +61,4 @@ These numbers come from one Linux container and are not a macOS or tail-latency 
 4. **Denials are receipts, not events.** A conflict is persisted as the request's receipt and appears in the host transcript, but not in `langspan events`. Coverage counting needs to read receipts or add an event.
 5. **Large histories exceed the event frame.** After the 400 benchmark runs, `events --limit 1000` exceeded the 64 KiB response frame and failed explicitly. Pagination is already on the gap list.
 
-**M3 follow-up:** event and change reads now also respect a serialized byte budget. The large-event-page limitation above describes the observed M2 build; current status pagination remains separate work. The timings here were not rerun for the refactored M3 hook.
+**M3 follow-up:** event and change reads now also respect a serialized byte budget. The large-event-page limitation above describes the observed M2 build; `status` now answers a bounded view of open work and pages full history with `status --all`. The timings here were not rerun for the refactored M3 hook.

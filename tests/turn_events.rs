@@ -91,11 +91,10 @@ impl Fixture {
     fn root(&self) -> PathBuf {
         self.base.join("work")
     }
+    /// Every record: these tests read closed admissions, which `status`
+    /// only counts.
     fn state(&self) -> State {
-        match client::call(&self.state_dir(), &status()).unwrap().outcome {
-            Outcome::Status { state } => state,
-            other => panic!("{other:?}"),
-        }
+        client::full_state(&self.state_dir()).unwrap()
     }
     fn events(&self) -> Vec<Event> {
         let request = Request {
