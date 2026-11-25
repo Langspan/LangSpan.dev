@@ -280,7 +280,7 @@ without rereading the changed file.
 | Source context | Definitions, name mentions and one-level exported-name impact queries are implemented. Interface notices stay within one physical workspace. Extraction and real-daemon tests pass; a native-agent run remains unverified. [Scope and limits](docs/adr/0008-derived-source-index.md). |
 | Recap, notes and messages | Workspace recaps, persistent local notes, messages and handoffs are implemented. Delivery and acknowledgement have real-daemon tests; native-host delivery remains unverified. Messages stay in one workspace and do not wake idle sessions. [Message scope](docs/adr/0009-agent-messages-and-handoff.md). |
 | User-level installation | Hooks and MCP registration have temporary-home integration tests. The complete user-level setup still needs a live Claude Code or Codex run. [Install scope and limits](docs/adr/0010-user-level-install.md). |
-| CLI + MCP | Twenty-three MCP tools, with CLI access to the same operations. [Command reference](docs/usage.md#mcp). |
+| CLI + MCP | MCP tools (`TOOL_NAMES` in `src/mcp.rs` lists them), with CLI access to the same operations. [Command reference](docs/usage.md#mcp). |
 | Linux | Full check passed in CI for the local implementation. Process probing is Linux-only. |
 | macOS arm64 | Build, formatting, Clippy and test-suite passes are recorded. Native Claude briefing evidence is retained. |
 

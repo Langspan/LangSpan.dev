@@ -74,7 +74,7 @@ logical overlap that may conflict at integration, never as a held file.
 
 **One operation.** `brief` is a core command that goes through the same store
 and receipt path as every mutation, exposed as `langspan brief SESSION` and the
-tenth MCP tool, `langspan_brief`.
+MCP tool `langspan_brief`.
 
 **Versions.** The wire protocol is version 3. The SQLite schema marker is 3;
 no table changed, and the marker makes an older binary refuse a history that
