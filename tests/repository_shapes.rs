@@ -111,7 +111,7 @@ impl World {
             .unwrap()
             .outcome
         {
-            Outcome::Status { state } => state,
+            Outcome::Status { state, .. } => state,
             other => panic!("{other:?}"),
         }
     }

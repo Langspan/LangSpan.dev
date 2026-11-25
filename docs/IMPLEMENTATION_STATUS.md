@@ -46,7 +46,10 @@ partial [shell-write coverage](adr/0011-shell-writes.md);
 [region admission](adr/0012-region-admission.md); the read-only
 [dashboard](adr/0013-dashboard.md); the [observation spool](adr/0014-observation-spool.md);
 [version tolerance](adr/0015-version-tolerance.md); the
-[release pipeline](adr/0031-releases.md). The MCP server has 23 tools (`src/mcp.rs`,
+[release pipeline](adr/0031-releases.md); the
+[LangSpan skill](adr/0034-langspan-skill.md) (`install --skill`, off by
+default; tested with a temporary home, not yet observed in use by an agent on
+a real host). The MCP server has 23 tools (`src/mcp.rs`,
 asserted in `tests/mcp.rs`). The repository has an Apache-2.0 `LICENSE`.
 
 **Roadmap and the launch bar.** A source-level capability review on
@@ -97,6 +100,15 @@ Fixed on `main` since the validation:
   aside; a redelivered refusal for unread lines or a stale source is refused
   again. All tested with constructed events, real Git and a real daemon; no
   host run after the fixes.
+- Issue #1: a long shell command no longer claims a file another session
+  changed through its hooked edit tool while the command ran. Edit tool calls
+  leave edit marks, and the shell comparison credits such a file to the
+  editor, or to no session when both may have changed it
+  ([ADR 0011](adr/0011-shell-writes.md)). At the 4,096-mark cap an edit
+  goes unmarked and a shell run it could affect credits nothing. Tested with a real command held
+  open while the other session's hooks edit, real Git and a real daemon
+  (`tests/shell_concurrent_edits.rs`); the real-host rerun of the reported
+  scenario is pending.
 - Issue #2: the main checkout's hook steps aside for a linked worktree's
   own install only on Claude Code, the one host seen running both there.
   On Codex (0.171.0 was seen running only the main checkout's hooks in a
@@ -105,6 +117,13 @@ Fixed on `main` since the validation:
   a worktree install the host will not run. Tested with real linked
   worktrees, a real daemon and constructed events; the real Codex run in a
   linked worktree is pending.
+- Issue #99: `commit --mine` no longer reports a file as wholly another
+  session's because that session made one write whose lines are not known.
+  Such a file is still attributed hunk by hunk; a hunk whose lines that
+  write may share is refused with the reason ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)).
+  Tested with two sessions' hooked edits in alternation, each inserting above
+  the other's, real Git and a real daemon (`tests/commit_guard.rs`); the
+  dogfood run in a shared checkout is pending.
 
 **Observed on real hosts (retained on `main`):**
 
@@ -168,7 +187,9 @@ yet.
   failed this scenario. Planned
   fix, not started ([ADR 0011](adr/0011-shell-writes.md#known-gap-a-heredoc-that-rewrites-a-file)).
 - **A session that ends with neither `Stop` nor `SessionEnd`** (a killed
-  host, for example) keeps an unfinished shell run counting for 10 minutes:
+  host, for example) keeps an unfinished shell run counting for two hours, a
+  shell call's supported lifetime (ten minutes before PR #6, which a
+  longer-running command outlived; ADR 0011):
   it can still contest other sessions' changes and make `commit --mine`
   without `--session` see two running sessions (PR #58).
 - **No hook for the host's own permission denial.** None is registered or
@@ -305,7 +326,7 @@ shows it improving an outcome.
 
 | Area | Implemented | Remaining boundary |
 | --- | --- | --- |
-| Recap | `recap WORKSPACE` and MCP `langspan_recap`: a bounded account from projected state, under 48 KiB | One workspace at a time. `status` itself is still unpaginated. |
+| Recap | `recap WORKSPACE` and MCP `langspan_recap`: a bounded account from projected state, under 48 KiB | One workspace at a time. `status` is bounded the same way and pages full history with `status --all`. |
 | Notes | `remember` / `forget` and MCP tools; one line of at most 400 bytes about the workspace or up to 8 files; told to sessions working there; kept across restarts; 64 per workspace | Local only. Any local session can read and forget any note. |
 | Scan outcome | A failed scan is state (`scan_failed`), recorded once per distinct reason and cleared by a complete scan | The reason is the observer's own bounded message. |
 | Doctor | `doctor [--root DIR]` checks the coordinator, workspaces, scans, index coverage, publication and installed hooks; exit 1 if anything needs attention; `--json` | It cannot see whether Codex has approved its hooks. |
@@ -327,7 +348,7 @@ participants must use the same daemon/state directory.
 | Workspaces | Distinct physical worktree identities, daemon-verified nested linked roots, active-parent-claim check and permanent descendant-path exclusion | Related work in different worktrees is not automatically delivered to agents. |
 | Process evidence | Linux process-incarnation identity, optional recognized-host ancestry, explicit CLI attachment, alive/exited/unknown status | Point-in-time evidence only; no lease extension, release or authority. No other-platform process backend. |
 | Git observer | One bounded background worker, file content/kind observations, initial dirty baseline, local branch/HEAD commit and tree observations | Unattributed and periodic; incomplete scans retain the last complete view. No full logical change records. |
-| Storage and reads | SQLite schema 2; protocol 2; durable individual facts and complete snapshot projection in one transaction; byte-bounded event/changes pages | Retention policy, durable coverage summary and paginated status remain open. |
+| Storage and reads | SQLite schema 2; protocol 2; durable individual facts and complete snapshot projection in one transaction; byte-bounded event/changes pages | Retention policy and durable coverage summary remain open. `status` is a bounded current view; `status --all` pages every record within the frame (issue 97, tested with 10,000 closed admissions), a record larger than a page in ordered parts (tested with an automatic check and a session's known versions at their limits). `land` retries, `doctor` and `auto-check` read what the view left out complete. |
 | CLI/MCP | `changes WORKSPACE`, `session attach-pid`, and nine MCP tools including read-only `langspan_changes`; status includes liveness | Reading facts is not proof of automatic context delivery before an edit. |
 | Installation | Claude/Codex project hooks with explicit apply, stable ownership markers across executable moves, settings preservation and symlink refusal | Host trust, native permissions and new native-host acceptance remain separate. |
 
@@ -407,7 +428,7 @@ The M3 capability review identified three distinctions:
   owners relaying messages. A graph is not required for that first proof.
 
 The M5 benchmark harness is being prepared alongside M3. Product-outcome results
-remain pending. Coverage reporting and paginated status are still needed before
+remain pending. Coverage reporting is still needed before
 the proposed product release; a last successful scan does not prove a later
 failed scan covered the workspace. Failed hooks and unavailable daemons still
 have only best-effort host-side diagnostics.

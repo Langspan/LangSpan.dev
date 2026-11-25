@@ -883,3 +883,137 @@ fn stores_written_by_earlier_releases_still_open() {
     }
     assert!(opened >= 2, "the golden stores are missing");
 }
+
+#[test]
+fn a_check_command_recorded_before_redaction_is_redacted_when_shown() {
+    let database = Database::new();
+    let token = format!("ghp_{}", "aB3".repeat(12));
+    let record = Command::RecordCheck {
+        workspace_id: "workspace".into(),
+        name: "deploy".into(),
+        command: format!("./deploy-test --token {token}"),
+        tree_oid: "a".repeat(40),
+        head_oid: None,
+        inputs: Vec::new(),
+        result: langspan_core::CheckResult::Passed {},
+        duration_ms: 5,
+        report: None,
+    };
+    {
+        // As an earlier build stored it: the store itself does not redact.
+        let mut store = Store::open(&database.path()).unwrap();
+        register(&mut store);
+        execute(&mut store, "old-check", record.clone(), 1);
+    }
+    let stored: String = database
+        .connection()
+        .query_row(
+            "SELECT event_json FROM events
+             WHERE json_extract(event_json, '$.type') = 'check_recorded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(stored.contains(&token), "the fixture holds the old form");
+
+    let mut store = Store::open(&database.path()).unwrap();
+    let status = Command::CheckStatus {
+        workspace_id: "workspace".into(),
+        tree_oid: None,
+    };
+    let events = Command::Events {
+        after: 0,
+        limit: 1000,
+    };
+    let replayed = store.replay("old-check", &record, 2).unwrap().unwrap();
+    let shown = [
+        serde_json::to_string(&execute(&mut store, "read", status, 2)).unwrap(),
+        serde_json::to_string(&execute(&mut store, "read", events, 2)).unwrap(),
+        serde_json::to_string(&execute(&mut store, "read", Command::Dashboard, 2)).unwrap(),
+        // A retry of the old request answers from its stored receipt.
+        serde_json::to_string(&replayed.outcome).unwrap(),
+    ];
+    for shown in &shown {
+        assert!(!shown.contains(&token), "{shown}");
+    }
+    assert!(
+        shown[0].contains("./deploy-test --token [redacted]"),
+        "the program is still named: {}",
+        shown[0]
+    );
+}
+
+fn old_check(command: String) -> Command {
+    Command::RecordCheck {
+        workspace_id: "workspace".into(),
+        name: "deploy".into(),
+        command,
+        tree_oid: "a".repeat(40),
+        head_oid: None,
+        inputs: Vec::new(),
+        result: langspan_core::CheckResult::Passed {},
+        duration_ms: 5,
+        report: None,
+    }
+}
+
+/// A command an earlier build accepted, 511 of the 512 bytes allowed, that
+/// unbounded redaction lengthens to 520.
+fn near_the_limit() -> String {
+    let command = format!("{} --token x", "a".repeat(501));
+    assert_eq!(command.len(), 511);
+    command
+}
+
+#[test]
+fn a_check_command_near_the_limit_recorded_before_redaction_still_opens() {
+    let database = Database::new();
+    {
+        // As an earlier build stored it: the store itself does not redact.
+        let mut store = Store::open(&database.path()).unwrap();
+        register(&mut store);
+        execute(&mut store, "old-check", old_check(near_the_limit()), 1);
+    }
+    let mut store = Store::open(&database.path()).expect("an older store still opens");
+    let status = Command::CheckStatus {
+        workspace_id: "workspace".into(),
+        tree_oid: None,
+    };
+    let shown = serde_json::to_string(&execute(&mut store, "read", status, 2)).unwrap();
+    assert!(!shown.contains("--token x"), "{shown}");
+    assert!(shown.contains("[redacted]"), "{shown}");
+}
+
+#[test]
+fn a_check_recorded_before_redaction_is_answered_when_retried_after_upgrade() {
+    for command in [
+        format!("./deploy-test --token ghp_{}", "aB3".repeat(12)),
+        near_the_limit(),
+    ] {
+        let database = Database::new();
+        let record = old_check(command);
+        let first = {
+            let mut store = Store::open(&database.path()).unwrap();
+            register(&mut store);
+            execute(&mut store, "old-check", record.clone(), 1)
+        };
+        let Outcome::CheckRecorded { check } = first else {
+            panic!("{first:?}")
+        };
+        // The daemon redacts every request on receipt, so the identical
+        // retry reaches the store in its redacted form.
+        let mut retry = record.clone();
+        langspan::hook::redact_command(&mut retry);
+        let mut store = Store::open(&database.path()).unwrap();
+        let replayed = store.replay("old-check", &retry, 2).unwrap().unwrap();
+        let Outcome::CheckRecorded { check: answered } = &replayed.outcome else {
+            panic!(
+                "the retry is answered from its record: {:?}",
+                replayed.outcome
+            )
+        };
+        assert_eq!(answered.check_id, check.check_id);
+        assert!(!answered.command.contains("--token x"), "{answered:?}");
+        assert!(!answered.command.contains("ghp_"), "{answered:?}");
+    }
+}

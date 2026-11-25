@@ -57,10 +57,41 @@ added it (or, for a removed line, removed it); a session's subagents (IDs
   in unknown lines.
 
 A file that cannot be told apart by line (binary, over 512 KiB, a mode change,
-or one with any write whose lines are not known) is attributed whole: to the
-session whose journaled write left it as it is now, and not known when another
-session also changed it. A subagent's changes count as live while it or the
-session that started it is live.
+or one this session changed in a write whose lines are not known) is
+attributed whole: to the session whose journaled write left it as it is now,
+and not known when another session also changed it. A subagent's changes
+count as live while it or the session that started it is live.
+
+Another session's write whose lines are not known (an edit whose pre-tool
+hook did not run, a shell command whose starting version was not kept) does
+not make the file whole. Until issue #99 it did, and the file went to its
+latest writer: `commit --mine` reported a file as wholly another session's
+and left it, although some hunks in it were this session's. Now its hunks are
+attributed one by one. A hunk not wholly this session's may be that other
+session's, so it is that session's (or not known, if it is partly this
+session's); it is never this session's. A hunk wholly this session's stays so
+only while, for each of its lines, this session's writes added (or removed)
+at least as many copies as the whole file's diff holds; otherwise the other
+session's unknown write may hold one of them, and the hunk is not known, with
+that reason. Line numbers play no part in attribution: lines are matched by
+content, so edits that shift each other's lines do not change whose they are.
+
+Two refinements followed review. The copies are counted in the file's whole
+diff from `HEAD` to the working tree (or the diff the command takes, if that
+holds more), never in the staged part alone: a plain `git commit` of only the
+other session's copy is otherwise counted as one copy, matched by this
+session's one write, and taken without the guard holding it. And journal
+entries survive a commit made through ordinary Git (only `commit --mine`
+forgets them), so a copy this session already committed would still be
+counted as its own. Each move of `HEAD` since this session's first write of
+the file, from `HEAD`'s reflog, is compared with the one before it; a line
+this session's writes added (or removed) that such a move also added (or
+removed) may already be committed, and a hunk holding one is not known, with
+that reason. The reflog's times are this machine's clock, as the journal's
+are, in whole seconds, so a move in the same second as the write counts as
+after it. When the reflog is missing, longer than 256 moves since the write,
+or a version cannot be read in time, the hunk is not known. The move to the
+commit `commit --mine` has just made is its own and does not count.
 
 **1. The guard, before the command.** In the `Bash` pre-tool hook, before the
 shell snapshot, a lenient reader ([`src/shell/git_commands.rs`](../../src/shell/git_commands.rs))
@@ -136,13 +167,13 @@ command that runs `langspan commit --mine`, and exactly one such running
 record in the workspace names the session (zero or several is an error
 asking for `--session`). `--root DIR` defaults to the current directory.
 A call the host refuses after the pre-tool hook (its own permission check)
-sends no post event, so its record would stay "running" for the 10 minutes
-of ADR 0011. The end of the session's reply (Stop, StopFailure,
+sends no post event, so its record would stay "running" for a shell call's
+supported lifetime in ADR 0011 (two hours; ten minutes before PR #6). The end of the session's reply (Stop, StopFailure,
 SubagentStop) and the end of the session (SessionEnd) close that session's
 open records, finished with their changes unknown, so an ended session is
 never counted (added 25 November 2026 from the launch validation; test
 `a_refused_commit_mine_call_stops_counting_once_its_reply_or_session_ends`).
-A session that ends without either event still counts for those 10 minutes.
+A session that ends without either event still counts for those two hours.
 When no running record is found, the error names the state directory
 looked in; if a LangSpan project hook in the checkout (up to the directory
 holding `.git`) names a different `--state-dir`, the error names it and the

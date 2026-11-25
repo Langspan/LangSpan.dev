@@ -406,11 +406,11 @@ pub fn ask(
     Ok(response)
 }
 
+/// The status view with every landing in it: a retry is recognised by the
+/// landing it already made, so a view that left landings out to fit a
+/// frame would run the same landing again.
 fn read_state(state_dir: &Path) -> Result<State, crate::Error> {
-    match ask(state_dir, "read".into(), Command::Status)?.outcome {
-        Outcome::Status { state } => Ok(state),
-        _ => Err("the daemon did not return its state".into()),
-    }
+    client::status_from(state_dir, &["landings"]).map(|(state, _)| state)
 }
 
 /// The registered root of `workspace`.
@@ -463,9 +463,11 @@ fn shell_word(text: &str) -> String {
     }
 }
 
-/// The command as it is recorded: one line of at most 120 characters.
+/// The command as it is recorded: redacted like check output, then one line
+/// of at most 120 characters. Redaction comes first, so the cut cannot leave
+/// part of a secret too short to be recognised.
 pub fn command_line(argv: &[String]) -> String {
-    argv.join(" ")
+    crate::hook::redact(&argv.join(" "))
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .take(120)

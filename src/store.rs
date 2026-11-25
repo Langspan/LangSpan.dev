@@ -6,11 +6,60 @@
 
 use langspan_core::{
     Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event, LeaseStatus, Outcome,
-    RecordedEvent, SentPublication, State, apply, dashboard_denials, decide, expiry_events,
+    RecordedEvent, SentPublication, State, StatusRecord, apply, dashboard_denials, decide,
+    expiry_events, shrink_status, status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 use std::time::Duration;
+
+/// A read answer's body stops before this many bytes, leaving the rest of
+/// the 64 KiB frame for the envelope and JSON escaping of the envelope.
+pub const PAGE_BUDGET_BYTES: usize = 48 * 1024;
+
+/// Bytes a status part adds around its text: the record's fields with the
+/// largest offset, and the separator.
+const PART_OVERHEAD_BYTES: usize = 96;
+
+/// Bytes `text` takes as a JSON string's contents, at most: a quote or
+/// backslash is escaped in two, and a control character in at most six.
+fn escaped_len(text: &str) -> usize {
+    text.chars().map(escaped_char_len).sum()
+}
+
+fn escaped_char_len(c: char) -> usize {
+    match c {
+        '"' | '\\' => 2,
+        c if u32::from(c) < 0x20 => 6,
+        c => c.len_utf8(),
+    }
+}
+
+/// Where a part of `text` that starts at `start` ends, on a character
+/// boundary, so that the part fits in `room` bytes of a page.
+fn part_end(text: &str, start: usize, room: usize) -> usize {
+    let mut left = room.saturating_sub(PART_OVERHEAD_BYTES);
+    let mut end = start;
+    for c in text[start..].chars() {
+        let size = escaped_char_len(c);
+        if size > left {
+            break;
+        }
+        left -= size;
+        end += c.len_utf8();
+    }
+    end
+}
+
+/// Identifies one record's JSON across pages, so that a page resumes inside
+/// a record only if the record has not changed. Not a security control: a
+/// mismatch (or a different build) starts the record again from its start.
+fn digest(text: &str) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
 
 pub type StoreResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -25,6 +74,25 @@ pub struct Execution {
 pub struct Store {
     connection: Connection,
     state: State,
+}
+
+/// A check record written before check commands were redacted can still
+/// hold a command line as typed. It is redacted wherever it is read back:
+/// into state, into an event page and from a receipt.
+fn redact_event(event: &mut Event) {
+    if let Event::CheckRecorded { check } = event {
+        crate::hook::redact_check(check);
+    }
+}
+
+/// `event` as it may be shown, with the JSON its page budget is measured by.
+fn shown_event(mut event: Event, stored: String) -> StoreResult<(Event, String)> {
+    if !matches!(event, Event::CheckRecorded { .. }) {
+        return Ok((event, stored));
+    }
+    redact_event(&mut event);
+    let json = serde_json::to_string(&event)?;
+    Ok((event, json))
 }
 
 impl Store {
@@ -348,6 +416,7 @@ impl Store {
         if matches!(
             original,
             Command::Status
+                | Command::StatusRecords { .. }
                 | Command::Events { .. }
                 | Command::Changes { .. }
                 | Command::RemoteOutbox { .. }
@@ -381,10 +450,17 @@ impl Store {
                 now_ms,
             )))
         };
-        let Ok(recorded) = serde_json::from_str::<Command>(&command_json) else {
+        let Ok(mut recorded) = serde_json::from_str::<Command>(&command_json) else {
             return unreadable();
         };
-        if !recorded.same_request(original) {
+        // An earlier build may have stored a field the daemon now redacts on
+        // receipt (a check's command line), so the identical retry arrives in
+        // a form its receipt does not hold. Both sides are compared as the
+        // daemon now records them; redaction is a fixed point on its output.
+        crate::hook::redact_command(&mut recorded);
+        let mut retry = original.clone();
+        crate::hook::redact_command(&mut retry);
+        if !recorded.same_request(&retry) {
             return Ok(Some(self.execution(
                 Outcome::Error {
                     code: "request_id_conflict".into(),
@@ -395,9 +471,12 @@ impl Store {
                 now_ms,
             )));
         }
-        let Ok(outcome) = serde_json::from_str(&outcome_json) else {
+        let Ok(mut outcome) = serde_json::from_str(&outcome_json) else {
             return unreadable();
         };
+        if let Outcome::CheckRecorded { check } = &mut outcome {
+            crate::hook::redact_check(check);
+        }
         Ok(Some(self.execution(outcome, true, now_ms)))
     }
 
@@ -412,9 +491,24 @@ impl Store {
             return Ok(replayed);
         }
         let outcome = match original {
-            Command::Status => Outcome::Status {
-                state: self.state.clone(),
+            // What matters now, in one frame however long the history.
+            Command::Status => match decide(&self.state, prepared, request_id, now_ms).outcome {
+                Outcome::Status {
+                    mut state,
+                    summary: Some(mut summary),
+                } => {
+                    shrink_status(&mut state, &mut summary, |state, summary| {
+                        serde_json::to_vec(&(state, summary))
+                            .is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+                    });
+                    Outcome::Status {
+                        state,
+                        summary: Some(summary),
+                    }
+                }
+                outcome => outcome,
             },
+            Command::StatusRecords { after } => self.status_records(after.as_deref()),
             // A read: decided by the core, never recorded.
             Command::RemoteOutbox { .. }
             | Command::CheckStatus { .. }
@@ -577,6 +671,87 @@ impl Store {
         ))
     }
 
+    /// One page of state records from `after`, within `PAGE_BUDGET_BYTES`.
+    /// A record that fits a page is never split; one that does not (an
+    /// entry at its limits can be larger than a frame) is given as parts of
+    /// its JSON, so that every valid state can be read. A page holds at
+    /// least one record or part when any remain.
+    fn status_records(&self, after: Option<&str>) -> Outcome {
+        let (mut resume, records) = match status_records(&self.state, after) {
+            Ok(read) => read,
+            Err(error) => {
+                return Outcome::Error {
+                    code: error.code,
+                    message: error.message,
+                };
+            }
+        };
+        let mut page = Vec::new();
+        let mut bytes = 0;
+        let mut next = None;
+        for (position, record) in records {
+            let text = match serde_json::to_string(&record) {
+                Ok(text) => text,
+                Err(error) => {
+                    return Outcome::Error {
+                        code: "internal".into(),
+                        message: format!("a state record could not be encoded: {error}"),
+                    };
+                }
+            };
+            let digest = digest(&text);
+            // The rest of a record the last page began, if it is unchanged.
+            let start = match resume.take() {
+                Some((at, point))
+                    if at == position
+                        && point.digest == digest
+                        && point.offset < text.len()
+                        && text.is_char_boundary(point.offset) =>
+                {
+                    point.offset
+                }
+                _ => 0,
+            };
+            if start == 0 && text.len() < PAGE_BUDGET_BYTES {
+                if bytes + text.len() + 1 > PAGE_BUDGET_BYTES {
+                    return Outcome::StatusRecords {
+                        records: page,
+                        next,
+                    };
+                }
+                bytes += text.len() + 1;
+                page.push(record);
+                next = Some(position.after());
+                continue;
+            }
+            let end = part_end(&text, start, PAGE_BUDGET_BYTES.saturating_sub(bytes));
+            if end == start {
+                return Outcome::StatusRecords {
+                    records: page,
+                    next,
+                };
+            }
+            let last = end == text.len();
+            page.push(StatusRecord::Part {
+                text: text[start..end].into(),
+                offset: start as u64,
+                last,
+            });
+            if !last {
+                return Outcome::StatusRecords {
+                    records: page,
+                    next: Some(position.within(end, digest)),
+                };
+            }
+            bytes += PART_OVERHEAD_BYTES + escaped_len(&text[start..end]);
+            next = Some(position.after());
+        }
+        Outcome::StatusRecords {
+            records: page,
+            next: None,
+        }
+    }
+
     fn events(&self, after: u64, limit: u32) -> StoreResult<Outcome> {
         if !(1..=1000).contains(&limit) {
             return Ok(Outcome::Error {
@@ -593,7 +768,8 @@ impl Store {
         let mut page_bytes = 0;
         while let Some(row) = rows.next()? {
             let sequence: i64 = row.get(0)?;
-            let json: String = row.get(1)?;
+            let stored: String = row.get(1)?;
+            let (event, json) = shown_event(serde_json::from_str(&stored)?, stored)?;
             if page_bytes + json.len() + 64 > 48 * 1024 {
                 if events.is_empty() {
                     return Err("one event exceeds the transport page budget".into());
@@ -603,7 +779,7 @@ impl Store {
             page_bytes += json.len() + 64;
             events.push(RecordedEvent {
                 seq: u64::try_from(sequence)?,
-                event: serde_json::from_str(&json)?,
+                event,
             });
         }
         Ok(Outcome::Events { events })
@@ -782,9 +958,10 @@ impl Store {
                 return Err("event history contains a non-positive sequence".into());
             }
             let json: String = row.get(1)?;
-            let event: Event = serde_json::from_str(&json).map_err(|error| {
+            let mut event: Event = serde_json::from_str(&json).map_err(|error| {
                 format!("invalid persisted event at sequence {sequence}: {error}")
             })?;
+            redact_event(&mut event);
             apply(&mut state, &event).map_err(|error| {
                 format!("invalid persisted transition at sequence {sequence}: {error}")
             })?;

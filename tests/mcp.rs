@@ -194,6 +194,15 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
             "langspan_workspace_register",
         ])
     );
+    // Every tool the LangSpan skill names is one this server lists.
+    let named = langspan::skill::tools();
+    assert!(!named.is_empty());
+    for tool in named {
+        assert!(
+            names.contains(tool),
+            "the skill names {tool}, which is not listed"
+        );
+    }
     for tool in &tools {
         assert_eq!(
             tool.input_schema.get("additionalProperties"),
@@ -448,7 +457,7 @@ async fn stdio_changes_reads_uncached_pages_and_status_forwards_liveness() {
             String::from_utf8_lossy(&attached.stderr)
         );
         let status = response(call_tool(&client, "langspan_status", json!({})).await);
-        let Outcome::Status { state } = status.outcome else {
+        let Outcome::Status { state, .. } = status.outcome else {
             panic!("expected status")
         };
         let observed = &state.session_liveness["agent-a"];
@@ -547,7 +556,7 @@ async fn stdio_operations_share_daemon_state_and_preserve_retry_and_conflict_res
     .await
     .expect("independent client task")
     .expect("independent IPC status");
-    assert!(matches!(observed.outcome, Outcome::Status { ref state }
+    assert!(matches!(observed.outcome, Outcome::Status { ref state, .. }
         if state.leases["admit-a"].status == LeaseStatus::Active
         && state.intents.contains_key("agent-a")));
 
@@ -604,11 +613,27 @@ async fn stdio_operations_share_daemon_state_and_preserve_retry_and_conflict_res
         .await,
     );
     assert!(matches!(ended.outcome, Outcome::IntentEnded { .. }));
+    // The bounded view lists what is open and counts what closed.
     let status = response(call_tool(&client, "langspan_status", json!({})).await);
-    assert!(matches!(status.outcome, Outcome::Status { ref state }
+    assert!(
+        matches!(status.outcome, Outcome::Status { ref state, ref summary }
         if !state.intents.contains_key("agent-a")
-        && state.leases["admit-a"].status == LeaseStatus::Completed
-        && state.leases["admit-b-fresh"].status == LeaseStatus::Active));
+        && !state.leases.contains_key("admit-a")
+        && state.leases["admit-b-fresh"].status == LeaseStatus::Active
+        && summary.as_ref().is_some_and(|summary| summary.closed_admissions["agent-a"] == 1))
+    );
+    // `all` pages through every record, the closed admission included.
+    let page = response(call_tool(&client, "langspan_status", json!({"all": true})).await);
+    let Outcome::StatusRecords { records, next } = page.outcome else {
+        panic!("expected a status page, got {:?}", page.outcome)
+    };
+    assert_eq!(next, None, "a small state fits one page");
+    let mut whole = langspan_core::State::default();
+    for record in records {
+        record.apply(&mut whole).unwrap();
+    }
+    assert_eq!(whole.leases["admit-a"].status, LeaseStatus::Completed);
+    assert_eq!(whole.leases["admit-b-fresh"].status, LeaseStatus::Active);
     let events =
         response(call_tool(&client, "langspan_events", json!({"after":0,"limit":100})).await);
     let Outcome::Events { events } = events.outcome else {

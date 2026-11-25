@@ -1,8 +1,10 @@
 //! Redaction of likely secrets from owner and agent text before it is
 //! recorded. Every client applies `redact_command` before a request reaches
 //! the daemon, and the daemon applies it again on receipt, so a secret typed
-//! into a prompt, note, message, handoff or intent summary never reaches the
-//! event log, a briefing or a publication.
+//! into a prompt, note, message, handoff, intent summary or check command
+//! line never reaches the event log, a briefing or a publication. A field the
+//! daemon bounds (a summary or a check's command line) stays within its
+//! bound after redaction.
 
 //!
 //! What is replaced with `[redacted]`:
@@ -52,14 +54,65 @@ pub fn contains_secret(text: &str) -> bool {
 /// Redact every field of `command` that carries owner or agent text.
 pub fn redact_command(command: &mut Command) {
     match command {
-        Command::SessionPrompt { summary, .. } | Command::IntentSet { summary, .. } => {
-            *summary = redact(summary);
+        Command::SessionPrompt { summary, .. } => {
+            *summary = redact_bounded(summary, langspan_core::MAX_PROMPT_SUMMARY_BYTES);
+        }
+        Command::IntentSet { summary, .. } => {
+            *summary = redact_bounded(summary, langspan_core::MAX_INTENT_SUMMARY_BYTES);
         }
         Command::Remember { text, .. }
         | Command::SendMessage { text, .. }
         | Command::Handoff { text, .. } => *text = redact(text),
+        Command::RecordCheck { command, .. } => {
+            *command = redact_bounded(command, langspan_core::MAX_CHECK_COMMAND_BYTES);
+        }
         _ => {}
     }
+}
+
+/// Redact the command line of a check record that may have been stored
+/// before check commands were redacted, so it is never shown as typed.
+pub fn redact_check(check: &mut langspan_core::CheckRecord) {
+    check.command = redact_bounded(&check.command, langspan_core::MAX_CHECK_COMMAND_BYTES);
+}
+
+fn redact_bounded(text: &str, limit: usize) -> String {
+    let home = std::env::var("HOME").ok();
+    bounded(text, limit, home.as_deref())
+}
+
+/// `text` redacted and kept within `limit` bytes, for a field the daemon
+/// validates against that limit: a check's command line, a prompt summary
+/// or an intent summary. Redaction can lengthen text (`--token x` becomes
+/// `--token [redacted]`), and text within its limit must not be refused, nor
+/// a record an earlier build accepted become invalid when it is read back,
+/// so text that no longer fits keeps its longest prefix that does, cut at a
+/// character boundary and followed by the mark. The cut is taken from the
+/// redacted text, so it shows nothing redaction hid. The result is a fixed
+/// point: applying this again changes nothing, so a retry redacted by its
+/// client and again by the daemon still equals its recorded request.
+fn bounded(text: &str, limit: usize, home: Option<&str>) -> String {
+    let fit = |text: String| {
+        if text.len() <= limit {
+            return text;
+        }
+        let mut cut = limit - MARK.len();
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}{MARK}", &text[..cut])
+    };
+    let mut text = text.to_owned();
+    // Each pass only replaces text with the mark or cuts it, so a fixed
+    // point comes within a pass or two; the bound keeps that a guarantee.
+    for _ in 0..4 {
+        let next = fit(redact_with_home(&text, home));
+        if next == text {
+            return text;
+        }
+        text = next;
+    }
+    MARK.to_owned()
 }
 
 fn redact_with_home(text: &str, home: Option<&str>) -> String {
@@ -589,6 +642,68 @@ mod tests {
             redact_command(command);
             let json = serde_json::to_string(command).unwrap();
             assert!(json.contains("token=[redacted]"), "{json}");
+        }
+    }
+
+    #[test]
+    fn bounded_redaction_stays_within_each_limit_and_is_a_fixed_point() {
+        let home = Some("/Users/owner");
+        let token = secret_shape("ghp_", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789");
+        for limit in [
+            langspan_core::MAX_CHECK_COMMAND_BYTES,
+            langspan_core::MAX_PROMPT_SUMMARY_BYTES,
+            langspan_core::MAX_INTENT_SUMMARY_BYTES,
+        ] {
+            let mut texts = vec![
+                String::from("cargo test --workspace"),
+                format!("{} --token x", "a".repeat(limit - 11)),
+                format!("{} --token x", "é".repeat((limit - 10) / 2)),
+                format!("{} token=", "a".repeat(limit - 7)),
+                format!("{}{token}", "a ".repeat((limit - token.len()) / 2)),
+                format!("{} --password p --secret s", "b".repeat(limit - 32)),
+                MARK.to_owned(),
+            ];
+            // Every length from 24 under the limit to the limit, with a
+            // two-byte character wherever the cut falls and several secrets.
+            for width in limit - 24..=limit {
+                let tail = " --token x password=y";
+                let lead = if (width - tail.len()).is_multiple_of(2) {
+                    ""
+                } else {
+                    "a"
+                };
+                let pad = "é".repeat((width - lead.len() - tail.len()) / 2);
+                texts.push(format!("{lead}{pad}{tail}"));
+            }
+            for text in texts {
+                assert!(text.len() <= limit, "fixture within the limit");
+                let once = bounded(&text, limit, home);
+                assert!(
+                    !once.is_empty() && once.len() <= limit,
+                    "{} bytes",
+                    once.len()
+                );
+                assert_eq!(bounded(&once, limit, home), once, "{once}");
+                for secret in [" x", "=y", "=p", " s", &token] {
+                    assert!(!once.contains(secret), "{once}");
+                }
+                if text.len() + 9 > limit && text.contains("--token x") {
+                    assert!(once.ends_with(MARK), "{once}");
+                    // The longest redacted prefix that fits, cut at a
+                    // character boundary; a cut inside a mark merges into it.
+                    let redacted = r(&text);
+                    let mut cut = limit - MARK.len();
+                    while !redacted.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    let kept = once.strip_suffix(MARK).unwrap();
+                    assert!(redacted.starts_with(kept), "{once}");
+                    assert!(
+                        kept.len() == cut || redacted[kept.len()..cut].starts_with('['),
+                        "{once}"
+                    );
+                }
+            }
         }
     }
 

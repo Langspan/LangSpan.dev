@@ -325,15 +325,19 @@ fn a_complex_command_gets_no_decision_but_its_real_changes_are_attributed() {
     assert_eq!(pre.coverage, "shell_observing", "{pre:?}");
     assert!(pre.reason.is_none() && pre.context.is_none());
     assert!(pre.detail.contains("write set unknown"), "{}", pre.detail);
+    // Bob's admitted Write of a.txt is still under way: whether it or the
+    // command changed a.txt cannot be known, so a.txt is nobody's (issue #1).
     let post = post.unwrap();
-    assert_eq!(post.coverage, "shell_observed", "{post:?}");
+    assert_eq!(post.coverage, "contested", "{post:?}");
     assert!(
-        post.detail.contains("2 changed file(s) attributed"),
+        post.detail
+            .contains("1 changed file(s) attributed to this session")
+            && post.detail.contains("1 attributed to no session"),
         "{}",
         post.detail
     );
+    assert_eq!(credited(&f, ALICE), ["c.txt"]);
     let context = f.prompt(BOB).unwrap();
-    assert!(context.contains(r#""a.txt""#), "{context}");
     assert!(context.contains(r#""c.txt""#), "{context}");
 }
 

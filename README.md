@@ -18,9 +18,16 @@ documentation and not yet verified on a real Cursor or a live Gemini CLI session
 [Usage guide](docs/usage.md) ·
 [Implementation status](docs/IMPLEMENTATION_STATUS.md)
 
-[![Two native coding sessions sharing context through LangSpan, with an overlapping edit identified and unrelated work continuing.](docs/assets/langspan-overview.svg)](https://langspan.dev/#team-story)
+<a href="https://langspan.dev/#demo">
+  <picture>
+    <source media="(max-width: 600px)" srcset="https://langspan.dev/assets/product/langspan-overview-compact.svg">
+    <img src="https://langspan.dev/assets/product/langspan-overview.svg" alt="LangSpan holds a file for Agent A, denies Agent B’s overlapping edit, and leaves an unrelated test file available." width="1400">
+  </picture>
+</a>
 
-*An illustrated walkthrough. Open the demo to follow the two sessions.*
+*An authored illustration of local coordination. The brief animation settles into
+the complete picture; reduced motion shows that picture immediately.
+[Explore each step](https://langspan.dev/#demo) with Play, Pause and Replay.*
 
 ## Why we're building LangSpan
 
