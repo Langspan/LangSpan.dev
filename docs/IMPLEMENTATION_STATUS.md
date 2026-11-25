@@ -117,6 +117,17 @@ Fixed on `main` since the validation:
   a worktree install the host will not run. Tested with real linked
   worktrees, a real daemon and constructed events; the real Codex run in a
   linked worktree is pending.
+- Issue #101: a file a session creates with a whole-file write is that
+  session's recorded version and its own lines, including after its own
+  formatter rewrites it while another session edits in the same checkout:
+  the next edit is compared with that version and admitted, and
+  `commit --mine` commits the file. The cause was #98's; these are its
+  regression tests. Tested with two sessions' hooked writes, a
+  formatter-like shell command (after and during the other session's write),
+  real Git and a real daemon (`tests/shell_concurrent_edits.rs`); the
+  dogfood run in a shared checkout is pending. Another session's formatter
+  rewriting this session's uncommitted lines still leaves them credited to
+  neither session (#98), so the next edit is refused once as stale.
 - Issue #99: `commit --mine` no longer reports a file as wholly another
   session's because that session made one write whose lines are not known.
   Such a file is still attributed hunk by hunk; a hunk whose lines that
