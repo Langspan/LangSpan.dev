@@ -66,6 +66,12 @@ pub fn redact_command(command: &mut Command) {
         Command::RecordCheck { command, .. } => {
             *command = redact_bounded(command, langspan_core::MAX_CHECK_COMMAND_BYTES);
         }
+        Command::ObserveCheckoutRun {
+            command: Some(command),
+            ..
+        } => {
+            *command = redact_bounded(command, langspan_core::MAX_CHECKOUT_COMMAND_BYTES);
+        }
         _ => {}
     }
 }

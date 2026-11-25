@@ -11,7 +11,7 @@ use langspan_core::FileState;
 use serde::{Deserialize, Serialize};
 
 mod git_commands;
-pub use git_commands::{GitStep, git_steps};
+pub use git_commands::{GitStep, git_steps, moves_checkout};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -483,6 +483,10 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub head: Option<String>,
+    /// The branch checked out, as `refs/heads/NAME`; `None` when `HEAD` is
+    /// detached, or in a record written before this was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub files: BTreeMap<String, Entry>,
     /// A merge, rebase, cherry-pick or revert is under way, or a file is
     /// conflicted. Nothing is denied then.
@@ -557,6 +561,7 @@ pub fn snapshot(root: &Path, deadline: Instant) -> Result<Snapshot, String> {
     .map_err(|e| format!("git status: {e}"))?;
     let mut snapshot = Snapshot {
         head,
+        branch: checked_out_branch(&git_dir),
         files: BTreeMap::new(),
         in_progress,
     };
@@ -604,6 +609,47 @@ pub fn snapshot(root: &Path, deadline: Instant) -> Result<Snapshot, String> {
         );
     }
     Ok(snapshot)
+}
+
+/// The branch `HEAD` names in the Git directory `git_dir`, as
+/// `refs/heads/NAME`, read from its `HEAD` file (at most 1 KiB). `None` when
+/// it is detached or cannot be read.
+fn checked_out_branch(git_dir: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    fs::File::open(git_dir.join("HEAD"))
+        .ok()?
+        .take(1024)
+        .read_to_string(&mut text)
+        .ok()?;
+    let reference = text.strip_prefix("ref: ")?.trim_end();
+    (reference.len() > "refs/heads/".len()
+        && reference.starts_with("refs/heads/")
+        && !reference.chars().any(char::is_control))
+    .then(|| reference.to_owned())
+}
+
+/// The checkout a run's Git command left (`Record::checkout`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckoutLeft {
+    pub branch: Option<String>,
+    pub head: Option<String>,
+}
+
+/// What a run whose command runs a Git operation that changes the checkout
+/// (`moves_checkout`) left, when the checkout changed while it ran: another
+/// branch or HEAD, or files changed with them in place (a restore or stash).
+pub fn checkout_left(
+    before: &Snapshot,
+    after: &Snapshot,
+    changed_files: bool,
+) -> Option<CheckoutLeft> {
+    (before.head != after.head || before.branch != after.branch || changed_files).then(|| {
+        CheckoutLeft {
+            branch: after.branch.clone(),
+            head: after.head.clone(),
+        }
+    })
 }
 
 fn unversioned() -> String {
@@ -724,6 +770,14 @@ pub struct Record {
     /// refusal to name. `None` in a record written before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// The command runs a Git operation that changes the checkout
+    /// (`moves_checkout`), read from the whole command line.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub moves_checkout: bool,
+    /// Once finished: the checkout such a command left, when the checkout
+    /// changed while it ran (issue #139).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<CheckoutLeft>,
 }
 
 impl Record {
@@ -1769,6 +1823,7 @@ mod diff {
     fn snap(files: &[(&str, &str, FileState)]) -> Snapshot {
         Snapshot {
             head: Some("h".into()),
+            branch: None,
             files: files
                 .iter()
                 .map(|(path, code, state)| {
@@ -1978,6 +2033,8 @@ mod diff {
             edited_elsewhere: Vec::new(),
             reformatted: Vec::new(),
             command: None,
+            moves_checkout: false,
+            checkout: None,
         };
         let note = marks(&state).join(OVERFLOW);
         assert!(!overlapping_edits(&state, &run).incomplete);

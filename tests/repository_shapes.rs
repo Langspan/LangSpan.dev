@@ -226,6 +226,25 @@ impl World {
         let post = self.tool(session, "PostToolUse", "Write", call, file);
         assert_eq!(post.coverage, "observed");
     }
+    /// A shell call by `session` through its hooks: `run` stands for the
+    /// command running between the pre- and post-tool hooks.
+    fn shell(&self, session: &str, call: &str, command: &str, run: impl FnOnce()) -> Run {
+        let event = |name: &str| {
+            json!({
+                "session_id": session, "transcript_path": "/dev/null", "cwd": self.work(),
+                "hook_event_name": name, "tool_name": "Bash", "tool_use_id": call,
+                "tool_input": {"command": command, "description": "test command"},
+                "tool_response": {"stdout": "", "stderr": "", "interrupted": false},
+            })
+        };
+        let pre = self.hook(event("PreToolUse"));
+        assert!(
+            !matches!(pre.coverage.as_str(), "denied" | "denied_stale"),
+            "{pre:?}"
+        );
+        run();
+        self.hook(event("PostToolUse"))
+    }
     fn prompt(&self, session: &str) -> Run {
         self.hook(json!({
             "session_id": session, "transcript_path": "/dev/null", "cwd": self.work(),
@@ -442,6 +461,89 @@ fn a_checkout_switch_is_briefed_to_the_sessions_in_it_and_refused_once_per_file(
     w.read(ALICE, "read-c", "c.txt");
     let untouched = w.tool(ALICE, "PreToolUse", "Write", "c-1", "c.txt");
     assert_eq!(untouched.coverage, "admitted");
+}
+
+/// Issue #139: a session that merges through its own shell tool is not told
+/// the checkout changed under it; another session in the checkout is, with
+/// the session that ran the merge named. A change no session's command
+/// explains (the owner's terminal) is still told to both.
+#[test]
+fn a_sessions_own_merge_is_not_briefed_to_it_and_is_named_to_the_others() {
+    let w = World::new(|work| {
+        for file in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(work.join(file), format!("main {file}\n")).unwrap();
+        }
+        ok(work, &["add", "."]);
+        ok(work, &["commit", "--quiet", "-m", "main"]);
+        // What the remote's main has: a commit on top, as a remote-tracking ref.
+        ok(work, &["checkout", "--quiet", "-b", "upstream"]);
+        for file in ["a.txt", "b.txt"] {
+            fs::write(work.join(file), format!("upstream {file}\n")).unwrap();
+        }
+        ok(work, &["commit", "--quiet", "-am", "upstream"]);
+        let upstream = ok(work, &["rev-parse", "HEAD"]);
+        ok(work, &["update-ref", "refs/remotes/origin/main", &upstream]);
+        ok(work, &["checkout", "--quiet", "main"]);
+        ok(work, &["branch", "--quiet", "-D", "upstream"]);
+        ok(work, &["branch", "--quiet", "other"]);
+    });
+    w.read(ALICE, "read-a", "a.txt");
+    w.read(BOB, "read-b", "b.txt");
+    w.wait_for_scan_of_head();
+
+    // Alice merges through her shell tool. The scan records the change
+    // before her post-tool hook reports the command: the harder order.
+    let mut seen = None;
+    let post = w.shell(ALICE, "alice-merge", "git merge origin/main", || {
+        ok(&w.work(), &["merge", "--quiet", "origin/main"]);
+        seen = Some(w.wait("the merge's checkout change", || {
+            w.state().checkouts.get("work")?.first().cloned()
+        }));
+    });
+    let merged = seen.unwrap();
+    assert_eq!(merged.files, 2);
+    let own = post.context.unwrap_or_default();
+    assert!(
+        !own.contains("The checkout changed"),
+        "Alice's own merge is not news to her: {own}"
+    );
+    let own = w.prompt(ALICE).context.unwrap_or_default();
+    assert!(!own.contains("The checkout changed"), "{own}");
+
+    let theirs = w.prompt(BOB).context.unwrap_or_default();
+    assert!(
+        theirs.contains("The checkout changed under you"),
+        "{theirs}"
+    );
+    assert!(
+        theirs.contains(&format!("session claude-code.{ALICE}")),
+        "Bob is told who ran it: {theirs}"
+    );
+    assert!(theirs.contains("git merge origin/main"), "{theirs}");
+
+    // The owner switches branches in a terminal: no session's command.
+    w.wait_for_scan_of_head();
+    ok(&w.work(), &["checkout", "--quiet", "other"]);
+    w.wait("the owner's checkout change", || {
+        let change = w.state().checkouts.get("work")?.first().cloned()?;
+        (change.change_id != merged.change_id).then_some(())
+    });
+    for session in [ALICE, BOB] {
+        let context = w.prompt(session).context.unwrap_or_default();
+        assert!(
+            context.contains(r#"branch "main" became branch "other""#),
+            "{session}: {context}"
+        );
+        let line = context
+            .lines()
+            .find(|line| line.contains(r#"became branch "other""#))
+            .unwrap();
+        assert!(line.contains("The checkout changed under you"), "{line}");
+        assert!(
+            !line.contains("session claude-code."),
+            "nobody is named: {line}"
+        );
+    }
 }
 
 /// A file in conflict is never held, with one deliberate exception: a session that read the file before the merge is

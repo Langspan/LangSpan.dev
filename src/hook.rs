@@ -1583,9 +1583,21 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
         }
     }
     for change in &briefing.checkout_changes {
+        // Whose shell command it was, when one explains it (issue #139).
+        let by = match (&change.by_session, &change.command) {
+            (Some(session), Some(command)) => format!(
+                ", by session {}'s shell command {}",
+                clean(session, 128),
+                quoted(command)
+            ),
+            (Some(session), None) => {
+                format!(", by session {}'s shell command", clean(session, 128))
+            }
+            _ => String::new(),
+        };
         let line = truncate(
             &format!(
-                "The checkout changed under you {}: {}. Files you read or edited before then may differ on disk; read them again before changing them.",
+                "The checkout changed under you {}{by}: {}. Files you read or edited before then may differ on disk; read them again before changing them.",
                 age(change.age_ms),
                 checkout_text(
                     change.from_branch.as_deref(),
@@ -2851,6 +2863,8 @@ impl Session<'_> {
             edited_elsewhere: Vec::new(),
             reformatted: Vec::new(),
             command: call.map(|call| crate::shell::kept_command(&call.command)),
+            moves_checkout: call.is_some_and(|call| crate::shell::moves_checkout(&call.command)),
+            checkout: None,
         };
         if let Ok(before) = &record.before {
             crate::journal::before_shell(
@@ -2940,17 +2954,29 @@ impl Session<'_> {
                 return Reply::none("unknown", "this command's changes were already handled");
             }
             None => {
+                let mut checkout = None;
                 let result = match &record.before {
                     Err(reason) => Err(reason.clone()),
                     Ok(before) => {
                         crate::shell::snapshot(self.root, self.deadline).and_then(|after| {
-                            crate::shell::changed(before, &after, |path| {
+                            let changed = crate::shell::changed(before, &after, |path| {
                                 file_state(self.root, path)
-                            })
+                            });
+                            // The session's own Git command changed the
+                            // checkout: not news to it (issue #139).
+                            if record.moves_checkout {
+                                checkout = crate::shell::checkout_left(
+                                    before,
+                                    &after,
+                                    changed.as_ref().is_ok_and(|files| !files.is_empty()),
+                                );
+                            }
+                            changed
                         })
                     }
                 };
                 let mut run = record;
+                run.checkout = checkout;
                 run.finished_ms = Some(crate::shell::now_ms());
                 match result {
                     Ok(changed) => {
@@ -3133,6 +3159,36 @@ impl Session<'_> {
         operation: &langspan_core::ToolIdentity,
         run: &crate::shell::Record,
     ) -> Result<Reply, Failure> {
+        // First, so that this hook's own briefing already leaves it out.
+        if let Some(left) = &run.checkout {
+            self.attach(ids)?;
+            match self.call(
+                wire_id(
+                    "checkout-run",
+                    &[self.source, &ids.session_id, &ids.operation_id],
+                ),
+                Command::ObserveCheckoutRun {
+                    session_id: ids.session_id.clone(),
+                    command: run.command.clone(),
+                    to_branch: left.branch.clone(),
+                    to_head: left.head.clone(),
+                    // From the record, so a retry sends the same request.
+                    ran_ms: run
+                        .finished_ms
+                        .unwrap_or(run.started_ms)
+                        .saturating_sub(run.started_ms),
+                },
+            ) {
+                Ok(_) => {}
+                // Refused as invalid: the checkout change stays news to
+                // this session, as before; nothing else depends on it.
+                Err(Failure::Rejected(reason)) => eprintln!(
+                    "{}",
+                    json!({"event":"checkout_run_refused","detail":reason})
+                ),
+                Err(failure) => return Err(failure),
+            }
+        }
         let changed = match (&run.changed, &run.unobserved) {
             (Some(changed), _) => changed,
             (None, reason) => {

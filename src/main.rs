@@ -3563,6 +3563,10 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 change.files
             )
         ),
+        Outcome::CheckoutRunObserved { run } => println!(
+            "Checkout change by session {} recorded for {}.",
+            run.session_id, run.workspace_id
+        ),
         Outcome::Today { today } => {
             println!(
                 "{}",
