@@ -480,7 +480,11 @@ fn replaying_the_persisted_events_reproduces_the_same_state() {
     let mut forged = held[0].clone();
     forged.message_id = "forged".into();
     forged.text = "two\nlines".into();
-    assert!(apply(&mut replayed, &Event::MessageSent { message: forged }).is_err());
+    let forged = Event::MessageSent {
+        message: forged,
+        at: None,
+    };
+    assert!(apply(&mut replayed, &forged).is_err());
 }
 
 #[test]

@@ -6,9 +6,9 @@
 
 use langspan_core::{
     ClockAnchor, Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event,
-    LeaseStatus, Outcome, RecordedEvent, SentPublication, State, StatusRecord, TODAY_EVENTS,
-    TodayQuery, TodayWindow, apply, dashboard_denials, decide, expiry_events, shrink_status,
-    status_records,
+    HISTORY_EVENTS, HistoryQuery, LeaseStatus, Outcome, RecordedEvent, SentPublication, State,
+    StatusRecord, TODAY_EVENTS, TodayQuery, TodayWindow, apply, dashboard_denials, decide,
+    definition_history, expiry_events, shrink_status, status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
@@ -49,6 +49,49 @@ const ANCHOR_LOOKUP: &str = concat!(
     generation_marker!(),
     " ORDER BY seq DESC LIMIT 1"
 );
+
+/// The kinds of event a definition's history reads (roadmap D4). One owner
+/// for the partial index over them and the lookups that must match it.
+macro_rules! history_kinds {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         IN ('interface_changed', 'session_prompted', 'remembered', 'forgotten', 'message_sent')"
+    };
+}
+
+/// A partial index of those events, so a history reads them and not the
+/// rest of the log.
+const HISTORY_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_history ON events(seq) WHERE ",
+    history_kinds!()
+);
+
+/// The newest of those events before a sequence number.
+const HISTORY_BEFORE: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE seq < ?1 AND ",
+    history_kinds!(),
+    " ORDER BY seq DESC LIMIT ?2"
+);
+
+/// Notes, forgettings and messages from a sequence number on, oldest first:
+/// those that follow a page's changes.
+const HISTORY_FOLLOWING: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE seq >= ?1 AND ",
+    history_kinds!(),
+    " AND json_extract(event_json, '$.type') IN ('remembered', 'forgotten', 'message_sent')
+     ORDER BY seq LIMIT ?2"
+);
+
+/// Every generation's clock anchor.
+const ANCHORS: &str = concat!(
+    "SELECT event_json FROM events WHERE ",
+    generation_marker!(),
+    " ORDER BY seq"
+);
+
+/// A history's answer stops before this many bytes: the MCP result carries
+/// it twice, once escaped again as text, inside one 64 KiB frame.
+pub const HISTORY_BUDGET_BYTES: usize = 28 * 1024;
 
 /// Bytes a status part adds around its text: the record's fields with the
 /// largest offset, and the separator.
@@ -205,6 +248,7 @@ impl Store {
         // when opened (one pass over the log), and a build without it
         // reads and writes the same rows.
         connection.execute_batch(GENERATION_MARKER_INDEX)?;
+        connection.execute_batch(HISTORY_INDEX)?;
 
         let state = Self::recover(&connection)?;
         let generation = state
@@ -477,6 +521,7 @@ impl Store {
                 | Command::Recap { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
+                | Command::History { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
         ) {
@@ -603,6 +648,18 @@ impl Store {
                 workspace_id,
                 from_ms,
             } => self.today(workspace_id.as_deref(), *from_ms, wall_now_ms(), now_ms)?,
+            Command::History {
+                workspace_id,
+                name,
+                path,
+                limit,
+                before_seq,
+            } => self.history(
+                (workspace_id, name, path.as_deref()),
+                *limit,
+                *before_seq,
+                now_ms,
+            )?,
             Command::RemoteSent {
                 workspace_id,
                 limit,
@@ -931,6 +988,81 @@ impl Store {
         Ok(Outcome::Today { today })
     }
 
+    /// A definition's history (roadmap D4): the newest `HISTORY_EVENTS`
+    /// events of the kinds it reads before `before_seq`, the notes and
+    /// messages after that point, and every generation's anchor, decided by
+    /// the core. Reads only, through the `events_history` index; it writes
+    /// nothing and delivers nothing. When the log holds older events than
+    /// those read, the answer says `truncated` with a `next_seq` that reads
+    /// on from there.
+    pub fn history(
+        &self,
+        (workspace_id, name, path): (&str, &str, Option<&str>),
+        limit: u32,
+        before_seq: Option<u64>,
+        now_ms: u64,
+    ) -> StoreResult<Outcome> {
+        let read = |sql: &str, from: i64, count: usize| -> StoreResult<Vec<RecordedEvent>> {
+            let mut statement = self.connection.prepare_cached(sql)?;
+            let mut rows = statement.query(params![from, i64::try_from(count)?])?;
+            let mut events = Vec::new();
+            while let Some(row) = rows.next()? {
+                let seq: i64 = row.get(0)?;
+                let json: String = row.get(1)?;
+                events.push(RecordedEvent {
+                    seq: u64::try_from(seq)?,
+                    event: serde_json::from_str(&json)?,
+                });
+            }
+            Ok(events)
+        };
+        let before = before_seq.map_or(i64::MAX, |seq| i64::try_from(seq).unwrap_or(i64::MAX));
+        let mut events = read(HISTORY_BEFORE, before, HISTORY_EVENTS)?;
+        // The oldest event read, when the log may hold older ones.
+        let older = (events.len() == HISTORY_EVENTS)
+            .then(|| events.last().map(|recorded| recorded.seq))
+            .flatten();
+        if before_seq.is_some() {
+            events.extend(read(HISTORY_FOLLOWING, before, HISTORY_EVENTS)?);
+        }
+        let mut anchors = Vec::new();
+        let mut statement = self.connection.prepare_cached(ANCHORS)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            if let Event::ClockAnchored { anchor } = serde_json::from_str(&json)? {
+                anchors.push(anchor);
+            }
+        }
+        let query = HistoryQuery {
+            workspace_id,
+            name,
+            path,
+            limit,
+            before_seq,
+            events: &events,
+            anchors: &anchors,
+            now_ms,
+        };
+        let mut history = match definition_history(&self.state, &query) {
+            Ok(history) => history,
+            Err(failure) => {
+                return Ok(Outcome::Error {
+                    code: failure.code,
+                    message: failure.message,
+                });
+            }
+        };
+        if let (Some(oldest), false) = (older, history.truncated) {
+            history.truncated = true;
+            history.next_seq = Some(oldest);
+        }
+        history.shrink_until(|history| {
+            serde_json::to_vec(history).is_ok_and(|bytes| bytes.len() <= HISTORY_BUDGET_BYTES)
+        });
+        Ok(Outcome::History { history })
+    }
+
     /// The outbound audit: what left for a workspace, newest first, read
     /// from the `remote_published` events. Each payload is at most 16 KiB,
     /// which JSON escaping can at most double, so one record always fits a
@@ -1223,5 +1355,44 @@ mod tests {
                 .any(|step| step.contains("events_generation_marker")),
             "{plan:?}"
         );
+    }
+
+    /// A definition's history (roadmap D4) also runs in the request handler:
+    /// its reads go through the partial index of the five kinds it uses,
+    /// and the anchors through the generation markers.
+    #[test]
+    fn history_reads_only_the_events_it_uses() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-history-plan-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let plan = |sql: &str, arguments: &[i64]| -> Vec<String> {
+            store
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(rusqlite::params_from_iter(arguments), |row| {
+                    row.get::<_, String>(3)
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let plans = [
+            (plan(HISTORY_BEFORE, &[1_000_000, 10]), "events_history"),
+            (plan(HISTORY_FOLLOWING, &[1, 10]), "events_history"),
+            (plan(ANCHORS, &[]), "events_generation_marker"),
+        ];
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        for (steps, index) in plans {
+            assert!(
+                steps.iter().any(|step| step.contains(index)),
+                "{index}: {steps:?}"
+            );
+        }
     }
 }

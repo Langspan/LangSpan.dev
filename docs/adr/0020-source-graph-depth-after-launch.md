@@ -23,7 +23,7 @@ about graph depth waits.
 | D1 | Symbol lookup with calls, span, hash, notes and check state | Path, line, kind, signature | Built 25 November 2026 at the owner's request ([issue #50](https://github.com/Langspan/LangSpan.dev/issues/50)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Not yet called on a host |
 | D2 | Blast radius level by level | One level | Not now |
 | D3 | Typed edges, paths between symbols, a repository map | Name mentions | Not now |
-| D4 | A definition's history with rationales and reverted attempts | Raw `events` and `recap` | Not now |
+| D4 | A definition's history with rationales and reverted attempts | `graph history` and `langspan_history`: recorded interface changes newest first, with the last reported editor, its task line, nearby notes and messages, and `reverted` | Built 25 November 2026 ([issue #53](https://github.com/Langspan/LangSpan.dev/issues/53)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Not yet called on a host |
 | D5 | Graph export and import | None | Not now |
 | D6 | 11 languages | 4 languages | Not now. A grammar is a new C-built dependency, each with a row in [dependencies](../dependencies.md) |
 | D7, B10 (renames) | Renames that keep history | A rename is a removal | Not now. Landing's adaptation to landed renames (track L7) is separate and in the bar |

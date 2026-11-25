@@ -197,6 +197,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_blind_spots"
                 | "langspan_recap"
                 | "langspan_recall"
+                | "langspan_history"
                 | "langspan_today"
                 | "langspan_land_queue"
         ) {

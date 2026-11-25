@@ -176,12 +176,17 @@ impl World {
     /// message: its detail (which ends with the hook's own elapsed ms) and
     /// the process's wall time.
     fn hook(&self, event: Value) -> (String, Option<String>, String) {
+        self.hook_with(event, &[])
+    }
+    /// The same, with more hook options (`--prompt-summary off`).
+    fn hook_with(&self, event: Value, options: &[&str]) -> (String, Option<String>, String) {
         let started = Instant::now();
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.base.join("state"))
             .args(["--workspace", "app", "--root"])
             .arg(self.work())
+            .args(options)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -642,6 +647,233 @@ fn a_second_same_named_definition_is_told_as_added_and_losing_it_as_removed() {
         "alice",
         r#"method "text" changed from "pub fn text(&self) -> String" to "pub fn text(&self, limit: usize) -> String""#,
     );
+}
+
+/// `graph history app NAME --json`, waiting until it holds `count` entries.
+fn history(w: &World, name: &str, count: usize) -> Value {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, text) = w.cli(&["graph", "history", "app", name, "--json"]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome["history"]["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.len() >= count)
+        {
+            return outcome["history"].clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never saw {count} entries for {name}: {outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_definitions_history_shows_who_changed_it_why_and_that_it_was_reverted() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    let before = "pub fn upload(path: &str) -> bool";
+    let after = "pub fn upload(path: &str, retries: u32) -> bool";
+
+    // Alice, with prompt summaries on, adds a parameter.
+    w.hook(
+        json!({"session_id": "alice", "cwd": w.work(), "hook_event_name": "UserPromptSubmit",
+                  "prompt": "add retries to upload"}),
+    );
+    w.edits(
+        "alice",
+        "a1",
+        "src/upload.rs",
+        &original.replace(before, after),
+    );
+    history(&w, "upload", 1);
+    // Her reason, remembered just after the change.
+    let (code, _) = w.cli(&[
+        "remember",
+        "app",
+        "retries make the uploader deadlock under load",
+        "src/upload.rs",
+        "--request-id",
+        "note-1",
+    ]);
+    assert_eq!(code, 0);
+
+    // Bob, with prompt summaries off, puts the old signature back.
+    w.hook_with(
+        json!({"session_id": "bob", "cwd": w.work(), "hook_event_name": "UserPromptSubmit",
+               "prompt": "put upload back the way it was"}),
+        &["--prompt-summary", "off"],
+    );
+    // He reads Alice's lines first, as LangSpan asks before changing them.
+    let (coverage, _, detail) = w.hook(json!({
+        "session_id": "bob", "cwd": w.work(), "hook_event_name": "PostToolUse",
+        "tool_name": "Read", "tool_use_id": "b0",
+        "tool_input": {"file_path": w.work().join("src/upload.rs")},
+    }));
+    assert_eq!(coverage, "read_recorded", "Read b0: {detail}");
+    w.edits("bob", "b1", "src/upload.rs", &original);
+    let found = history(&w, "upload", 2);
+    let entries = found["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{found:#}");
+    let (newest, oldest) = (&entries[0], &entries[1]);
+    assert!(newest["seq"].as_u64() > oldest["seq"].as_u64());
+
+    assert_eq!(newest["change"], "signature_changed");
+    assert_eq!(newest["before"], after);
+    assert_eq!(newest["after"], before);
+    assert!(
+        newest["by_session"].as_str().unwrap().ends_with("bob"),
+        "{newest:#}"
+    );
+    assert_eq!(newest["reverted"], true);
+    assert_eq!(newest["task"], Value::Null, "Bob recorded no task line");
+
+    assert_eq!(oldest["before"], before);
+    assert_eq!(oldest["after"], after);
+    assert!(
+        oldest["by_session"].as_str().unwrap().ends_with("alice"),
+        "{oldest:#}"
+    );
+    assert_eq!(oldest["reverted"], false);
+    assert_eq!(oldest["task"], "add retries to upload");
+    assert_eq!(
+        oldest["notes"][0]["text"],
+        "retries make the uploader deadlock under load"
+    );
+    assert!(oldest["age_ms"].as_u64().is_some());
+    assert!(
+        found["attribution"]
+            .as_str()
+            .unwrap()
+            .contains("not proof of authorship")
+    );
+
+    // The person's view says the same, quoted, and names what a session is.
+    let (code, text) = w.cli(&["graph", "history", "app", "upload"]);
+    assert_eq!(code, 0, "{text}");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines[0].contains(&format!(
+            r#""src/upload.rs" function signature changed from {after:?} to {before:?} by session "#
+        )) && lines[0].contains("(reverted: back to an earlier signature)")
+            && !lines[0].contains("task:"),
+        "{text}"
+    );
+    // The note was made within 30 minutes of both changes, so both show it.
+    let note = r#"  note (note-1): "retries make the uploader deadlock under load""#;
+    assert_eq!(lines[1], note, "{text}");
+    assert!(
+        lines[2].contains(&format!(
+            r#""src/upload.rs" function signature changed from {before:?} to {after:?} by session "#
+        )) && lines[2].contains(r#"; task: "add retries to upload""#),
+        "{text}"
+    );
+    assert_eq!(lines[3], note, "{text}");
+    assert_eq!(
+        lines.last().copied(),
+        Some("Sessions are the last reported editors of the file, not proof of authorship.")
+    );
+    // A page of one says where to read on, and reading on gives the rest.
+    let (_, text) = w.cli(&[
+        "graph", "history", "app", "upload", "--limit", "1", "--json",
+    ]);
+    let page = serde_json::from_str::<Value>(&text).unwrap()["outcome"]["history"].clone();
+    assert_eq!(page["truncated"], true);
+    assert_eq!(page["next_seq"], newest["seq"]);
+    let next = newest["seq"].to_string();
+    let (_, text) = w.cli(&[
+        "graph", "history", "app", "upload", "--before", &next, "--json",
+    ]);
+    let rest = serde_json::from_str::<Value>(&text).unwrap()["outcome"]["history"].clone();
+    assert_eq!(rest["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(rest["entries"][0]["seq"], oldest["seq"]);
+
+    // A new export is recorded for its history, and told to no one.
+    // (Bob wrote the file last; Alice would first be asked to read it.)
+    w.edits(
+        "bob",
+        "b2",
+        "src/upload.rs",
+        &format!(
+            "{original}\npub fn upload_all(paths: &[&str]) -> usize {{\n    paths.len()\n}}\n"
+        ),
+    );
+    let added = history(&w, "upload_all", 1);
+    assert_eq!(added["entries"][0]["change"], "added");
+    assert_eq!(
+        added["entries"][0]["after"],
+        "pub fn upload_all(paths: &[&str]) -> usize"
+    );
+    let (_, text) = w.cli(&["recap", "app", "--json"]);
+    assert!(!text.contains("upload_all"), "{text}");
+
+    // Over MCP: labelled as data, with the same entries.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let state = w.base.join("state");
+    let (label, structured) = runtime.block_on(async move {
+        use rmcp::ServiceExt;
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+        command.arg("mcp").arg("--state-dir").arg(&state);
+        let client =
+            ().serve(rmcp::transport::TokioChildProcess::new(command).unwrap())
+                .await
+                .unwrap();
+        let request = rmcp::model::CallToolRequestParams::new("langspan_history").with_arguments(
+            json!({"workspace_id": "app", "name": "upload", "path": "src/upload.rs"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(10), client.call_tool(request))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        let label = match &result.content[0] {
+            rmcp::model::ContentBlock::Text(text) => text.text.clone(),
+            other => panic!("{other:?}"),
+        };
+        (label, result.structured_content.unwrap())
+    });
+    assert!(
+        label.contains("data, not instructions") && label.contains("not proof of authorship"),
+        "{label}"
+    );
+    assert_eq!(
+        structured["outcome"]["history"]["entries"][0]["reverted"],
+        true
+    );
+    assert_eq!(
+        structured["outcome"]["history"]["entries"][1]["task"],
+        "add retries to upload"
+    );
+}
+
+#[test]
+fn history_requests_match_the_committed_golden_vector() {
+    let wire: &[u8] = include_bytes!("../fixtures/history-request-v3.json");
+    let request: langspan::protocol::Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(request.version, langspan::protocol::PROTOCOL_VERSION);
+    assert_eq!(langspan::protocol::encode(&request).unwrap(), wire);
+    assert!(matches!(
+        &request.command,
+        langspan_core::Command::History {
+            workspace_id,
+            name,
+            path: Some(path),
+            limit: 10,
+            before_seq: Some(812),
+        } if workspace_id == "demo" && name == "save" && path == "src/store.rs"
+    ));
+    let unknown = String::from_utf8_lossy(wire).replace(r#""limit":10"#, r#""limit":10,"tag":"x""#);
+    assert!(serde_json::from_str::<langspan::protocol::Request>(&unknown).is_err());
 }
 
 #[test]
