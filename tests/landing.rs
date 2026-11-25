@@ -1598,6 +1598,109 @@ async fn an_mcp_check_whose_command_creates_an_untracked_file_says_so_and_what_t
     client.cancel().await.unwrap();
 }
 
+/// Every byte of the daemon's SQLite store, its write-ahead log included.
+fn store_bytes(state: &Path) -> String {
+    let mut bytes = Vec::new();
+    for entry in fs::read_dir(state).unwrap() {
+        let path = entry.unwrap().path();
+        if path.to_string_lossy().contains(".sqlite") {
+            bytes.extend(fs::read(&path).unwrap());
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[tokio::test]
+async fn a_secret_on_a_check_command_line_never_reaches_the_store_cli_or_mcp() {
+    use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+    let w = World::new();
+    let token = format!("ghp_{}", "aB3".repeat(12));
+    let password = "hunter2-plain";
+
+    // The CLI: a token after `--token` and a key-shaped argument.
+    let (code, text) = w.cli(&[
+        "check", "run", "app", "--name", "deploy", "--json", "--", "true", "--token", password,
+        &token,
+    ]);
+    assert_eq!(code, 0, "{text}");
+    assert!(!text.contains(&token) && !text.contains(password), "{text}");
+    let (code, status) = w.cli(&["check", "status", "app", "--json"]);
+    assert_eq!(code, 0, "{status}");
+    assert!(
+        !status.contains(&token) && !status.contains(password),
+        "{status}"
+    );
+    let status: serde_json::Value = serde_json::from_str(status.trim()).unwrap();
+    let record = &status["checks"][0]["record"];
+    // Still identifiable: its name and the program it ran.
+    assert_eq!(record["name"], "deploy", "{status}");
+    assert_eq!(
+        record["command"], "true --token [redacted] [redacted]",
+        "{status}"
+    );
+
+    // MCP: a combined check's record and the event history.
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command
+        .arg("mcp")
+        .arg("--state-dir")
+        .arg(w.base.join("state"));
+    let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+    let call = |name: &'static str, arguments: serde_json::Value| {
+        let request =
+            CallToolRequestParams::new(name).with_arguments(arguments.as_object().unwrap().clone());
+        let client = &client;
+        async move {
+            let result = tokio::time::timeout(Duration::from_secs(60), client.call_tool(request))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.is_error, Some(false), "{result:?}");
+            result.structured_content.unwrap()
+        }
+    };
+    let checked = call(
+        "langspan_integrate_check",
+        serde_json::json!({
+            "request_id": "agent-check-secret-argv", "workspace_id": "app", "onto": "main",
+            "name": "unit", "branches": ["feature-a"],
+            "command": ["true", "--token", password, &token], "timeout_s": 60,
+        }),
+    )
+    .await;
+    assert_eq!(checked["check"]["result"]["type"], "passed", "{checked}");
+    assert_eq!(
+        checked["check"]["command"], "true --token [redacted] [redacted]",
+        "{checked}"
+    );
+    let events = call(
+        "langspan_events",
+        serde_json::json!({"after": 0, "limit": 1000}),
+    )
+    .await;
+    assert!(
+        events.to_string().contains("true --token [redacted]"),
+        "{events}"
+    );
+    for shown in [checked.to_string(), events.to_string()] {
+        assert!(
+            !shown.contains(&token) && !shown.contains(password),
+            "{shown}"
+        );
+    }
+    client.cancel().await.unwrap();
+
+    let stored = store_bytes(&w.base.join("state"));
+    assert!(
+        stored.contains("true --token [redacted]"),
+        "the store was read"
+    );
+    assert!(
+        !stored.contains(&token) && !stored.contains(password),
+        "the secret reached the store"
+    );
+}
+
 #[tokio::test]
 async fn agents_check_and_land_through_the_mcp_adapter() {
     use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};

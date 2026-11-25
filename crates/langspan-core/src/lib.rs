@@ -740,6 +740,8 @@ pub const MAX_AUTO_CHECK_ARGS: usize = 64;
 pub const MAX_AUTO_CHECK_ARG_BYTES: usize = 1024;
 pub const MAX_AUTO_CHECK_TIMEOUT_S: u32 = 3600;
 pub const MAX_CHECK_TAIL_BYTES: usize = 2048;
+/// Bytes in a check record's one-line command.
+pub const MAX_CHECK_COMMAND_BYTES: usize = 512;
 pub const MAX_CHECK_REPORT_SESSIONS: usize = 16;
 /// Undelivered results kept per session.
 pub const MAX_CHECK_NOTICES: usize = 4;
@@ -4532,12 +4534,14 @@ fn validate_check(state: &State, check: &CheckRecord) -> Result<(), CoreError> {
     validate_id(&check.name, "check name")?;
     if check.name.len() > 64
         || check.command.is_empty()
-        || check.command.len() > 512
+        || check.command.len() > MAX_CHECK_COMMAND_BYTES
         || check.command.chars().any(char::is_control)
     {
         return Err(error(
             "invalid_check",
-            "A check has a name of at most 64 characters and a one-line command of 1 to 512 bytes",
+            &format!(
+                "A check has a name of at most 64 characters and a one-line command of 1 to {MAX_CHECK_COMMAND_BYTES} bytes"
+            ),
         ));
     }
     validate_oid(&check.tree_oid)?;
