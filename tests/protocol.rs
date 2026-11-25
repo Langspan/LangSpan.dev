@@ -215,6 +215,46 @@ fn v3_code_context_request_and_response_match_the_committed_golden_vectors() {
 }
 
 #[test]
+fn v3_blind_spots_request_and_response_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/graph-blind-spots-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::GraphBlindSpots { workspace_id, limit: 50 } if workspace_id == "app"
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+
+    let wire = include_bytes!("../fixtures/graph-blind-spots-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::GraphBlindSpots {
+        blind_spots,
+        coverage,
+        scan_failure,
+        truncated,
+    } = &response.outcome
+    else {
+        panic!("{response:?}");
+    };
+    assert_eq!(blind_spots.partial[0].since_ms, 1_700_000_000_000);
+    assert_eq!(blind_spots.unsupported_languages[0].files, 10);
+    assert_eq!((coverage.blind_in_scope, *truncated), (3, false));
+    assert!(scan_failure.is_none(), "absent when no scan failed");
+    assert_eq!(encode(&response).unwrap(), wire);
+    let unknown = String::from_utf8_lossy(wire).replace(r#""files":10"#, r#""files":10,"x":1"#);
+    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+    // Coverage without `blind_in_scope` is what earlier builds send: zero.
+    let earlier =
+        String::from_utf8_lossy(include_bytes!("../fixtures/graph-context-response-v3.json"))
+            .into_owned();
+    let response: Response = serde_json::from_str(&earlier).unwrap();
+    let langspan_core::Outcome::GraphContext { coverage, .. } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(coverage.blind_in_scope, 0);
+    assert_eq!(encode(&response).unwrap(), earlier.as_bytes());
+}
+
+#[test]
 fn v3_symbol_detail_request_and_response_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/graph-symbol-detail-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();

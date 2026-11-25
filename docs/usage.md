@@ -621,6 +621,30 @@ parsed, syntax errors can leave partial results, and other languages are outside
 the index. The observer's 4,096-file limit can prevent a larger repository from
 producing the complete scan needed for indexing.
 
+When `coverage.blind_in_scope` is above zero, that many supported files could
+not be read in full, so an empty or short answer is weak. Ask which ones:
+
+```sh
+./target/release/langspan graph blind-spots PROJECT --limit 50 --json
+```
+
+```text
+partial (2): "src/legacy/parse.rs" (since 3h), "web/src/app.tsx" (since 10m)
+waiting (1): "src/api.rs"
+too large (1): "src/generated/schema.rs"
+not indexed, other languages: .java 10, .rb 3
+```
+
+The lists are `partial` (a syntax error or a bound reached, with since when),
+`never_clean` (never parsed cleanly, so no interface notice can come from it),
+`waiting` (its current content is not indexed yet), `too_large` (over 1 MiB),
+`unscanned` (left out by the scan's bound) and `unsupported_languages` (other
+source files by extension). Each is in path order and holds at most `--limit`
+paths (1 to 200), so a capped list is the same on every call; `totals` has the
+full counts. MCP: `langspan_blind_spots`. Read those files directly when the
+index is silent; nothing guesses what they contain. `langspan doctor` also
+says when a workspace has blind files.
+
 When an indexed export disappears or its signature changes, relevant sessions
 receive an interface notice at their next prompt. The notice names files they
 work on or have read that mention the changed name. Notices stay within one
@@ -846,6 +870,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check |
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names, one level deep |
+| `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |

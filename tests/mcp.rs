@@ -170,6 +170,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
         names,
         BTreeSet::from([
             "langspan_admit",
+            "langspan_blind_spots",
             "langspan_brief",
             "langspan_changes",
             "langspan_commit_mine",
@@ -218,6 +219,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_symbol"
                 | "langspan_references"
                 | "langspan_impact"
+                | "langspan_blind_spots"
                 | "langspan_recap"
                 | "langspan_land_queue"
         ) {
@@ -299,13 +301,76 @@ async fn stdio_supports_current_discovery_lifecycle() {
         .await
         .expect("discovery-lifecycle tools/list timed out")
         .expect("discovery-lifecycle tools/list failed");
-    assert_eq!(tools.len(), 23);
+    assert_eq!(tools.len(), 24);
     let result = call_tool(&client, "langspan_status", json!({})).await;
     assert_eq!(result.is_error, Some(true));
     assert_eq!(
         result.structured_content.expect("adapter error")["code"],
         "daemon_request_failed"
     );
+    disconnect(client).await;
+}
+
+#[tokio::test]
+async fn stdio_blind_spots_names_a_partial_file_through_the_daemon() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let workspace = fs::canonicalize(directory.workspace()).expect("resolve workspace");
+    fs::write(workspace.join("src/broken.rs"), "pub fn half( {{{\n").expect("write file");
+    let git = Command::new("git")
+        .arg("-C")
+        .arg(&workspace)
+        .args(["init", "--quiet"])
+        .status()
+        .expect("run git");
+    assert!(git.success());
+    let _daemon = Daemon::start(&state_dir).await;
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"workspace-register", "workspace_id":"workspace", "root":workspace}),
+        )
+        .await,
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let outcome = loop {
+        let answer = response(
+            call_tool(
+                &client,
+                "langspan_blind_spots",
+                json!({"workspace_id":"workspace", "limit":10}),
+            )
+            .await,
+        );
+        let Outcome::GraphBlindSpots {
+            blind_spots,
+            coverage,
+            ..
+        } = answer.outcome
+        else {
+            panic!("unexpected outcome: {:?}", answer.outcome);
+        };
+        // Both files indexed: until then the other one is waiting.
+        if !blind_spots.partial.is_empty() && coverage.current_files == 2 {
+            break (blind_spots, coverage);
+        }
+        assert!(Instant::now() < deadline, "the partial file never appeared");
+        sleep(Duration::from_millis(100)).await;
+    };
+    let (blind_spots, coverage) = outcome;
+    assert_eq!(blind_spots.partial[0].path, "src/broken.rs");
+    assert_eq!(blind_spots.never_clean, ["src/broken.rs"]);
+    assert_eq!(coverage.blind_in_scope, 1);
+    let bad = call_tool(
+        &client,
+        "langspan_blind_spots",
+        json!({"workspace_id":"workspace", "limit":0}),
+    )
+    .await;
+    let bad = serde_json::to_string(&bad).expect("serialize");
+    assert!(bad.contains("limit must be between 1 and 200"), "{bad}");
     disconnect(client).await;
 }
 

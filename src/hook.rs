@@ -3831,6 +3831,7 @@ mod code_briefing_text {
             current_files: 3,
             partial_files: 0,
             scanned: true,
+            blind_in_scope: 0,
         }
     }
 

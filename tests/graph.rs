@@ -557,6 +557,146 @@ fn a_changed_exported_signature_is_reported_to_the_session_whose_files_mention_i
 }
 
 #[test]
+fn blind_spots_name_the_files_the_index_cannot_answer_for() {
+    let w = World::new();
+    // The only file mentioning `lonely` does not parse: impact finds the
+    // mention, and says one file in scope is blind.
+    fs::write(w.work().join("src/lonely.rs"), "pub fn lonely() {}\n").unwrap();
+    fs::write(
+        w.work().join("src/broken.rs"),
+        "fn caller() { lonely(); }\nfn half( {{{\n",
+    )
+    .unwrap();
+    let impact = w.wait_for(
+        "the partial file indexed",
+        "impact",
+        "src/lonely.rs",
+        |outcome| outcome["coverage"]["current_files"] == 5,
+    );
+    assert_eq!(
+        paths(&impact["references"]),
+        ["src/broken.rs:1"],
+        "{impact:#}"
+    );
+    assert_eq!(impact["coverage"]["blind_in_scope"], 1, "{impact:#}");
+    assert_eq!(impact["coverage"]["partial_files"], 1);
+
+    // Over the index's 1 MiB bound, over the scan's 4 MiB bound, and ten
+    // files in a language the index has no grammar for.
+    fs::write(
+        w.work().join("src/big.rs"),
+        format!("// {}\n", "x".repeat(1536 * 1024)),
+    )
+    .unwrap();
+    fs::write(
+        w.work().join("src/huge.rs"),
+        format!("// {}\n", "x".repeat(5 * 1024 * 1024)),
+    )
+    .unwrap();
+    fs::create_dir_all(w.work().join("java")).unwrap();
+    for n in 0..10 {
+        fs::write(
+            w.work().join(format!("java/C{n}.java")),
+            "class C { void lonely() {} }\n",
+        )
+        .unwrap();
+    }
+    let blind = |limit: &str| {
+        let (code, text) = w.cli(&["graph", "blind-spots", "app", "--limit", limit, "--json"]);
+        assert_eq!(code, 0, "{text}");
+        serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone()
+    };
+    let deadline = Instant::now() + WAIT;
+    let spots = loop {
+        let outcome = blind("50");
+        if outcome["blind_spots"]["too_large"].as_array().map(Vec::len) == Some(2)
+            && outcome["blind_spots"]["unsupported_languages"] != json!([])
+        {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "never saw them: {outcome:#}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let lists = &spots["blind_spots"];
+    assert_eq!(lists["partial"][0]["path"], "src/broken.rs", "{spots:#}");
+    assert!(lists["partial"][0]["since_ms"].as_u64().unwrap() > 0);
+    assert_eq!(lists["never_clean"], json!(["src/broken.rs"]));
+    assert_eq!(lists["too_large"], json!(["src/big.rs", "src/huge.rs"]));
+    assert_eq!(lists["waiting"], json!([]), "too large is not waiting");
+    assert_eq!(
+        lists["unsupported_languages"],
+        json!([{"extension": ".java", "files": 10}])
+    );
+    assert_eq!(spots["coverage"]["blind_in_scope"], 3);
+    assert_eq!(spots["truncated"], false);
+    assert!(
+        !spots.to_string().contains("class C"),
+        "no file content is returned"
+    );
+
+    // A capped list is the same on every call, and says it is capped.
+    let first = blind("1");
+    assert_eq!(first["blind_spots"]["too_large"], json!(["src/big.rs"]));
+    assert_eq!(first["blind_spots"]["totals"]["too_large"], 2);
+    assert_eq!(first["truncated"], true);
+    assert_eq!(blind("1")["blind_spots"], first["blind_spots"]);
+
+    let human = w.cli(&["graph", "blind-spots", "app"]).1;
+    assert!(
+        human.contains(r#"partial (1): "src/broken.rs" (since "#),
+        "{human}"
+    );
+    assert!(
+        human.contains(r#"too large (2): "src/big.rs", "src/huge.rs""#),
+        "{human}"
+    );
+    assert!(
+        human.contains("not indexed, other languages: .java 10"),
+        "{human}"
+    );
+    for args in [
+        &["graph", "blind-spots", "app", "--limit", "0"][..],
+        &["graph", "blind-spots", "app", "--limit", "201"][..],
+        &["graph", "blind-spots", "nowhere"][..],
+    ] {
+        let (code, text) = w.cli(args);
+        assert_eq!(code, 1, "{args:?}: {text}");
+    }
+
+    // A workspace no scan can complete in: nothing is known, and the
+    // answer carries the scan failure.
+    let plain = w.base.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    let (code, text) = w.cli(&[
+        "workspace",
+        "add",
+        "plain",
+        plain.to_str().unwrap(),
+        "--request-id",
+        "ws-plain",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let deadline = Instant::now() + WAIT;
+    let failed = loop {
+        let (_, text) = w.cli(&["graph", "blind-spots", "plain", "--json"]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome.get("scan_failure").is_some() {
+            break outcome;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never saw the failure: {outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(failed["coverage"]["scanned"], false, "{failed:#}");
+    assert_eq!(failed["blind_spots"]["partial"], json!([]));
+    let human = w.cli(&["graph", "blind-spots", "plain"]).1;
+    assert!(human.contains("The last scan failed"), "{human}");
+    assert!(human.contains("nothing is known"), "{human}");
+}
+
+#[test]
 fn a_workspace_where_a_session_acts_is_indexed_promptly_among_many() {
     // Found by the scenario benchmark: with about 35 workspaces on one
     // coordinator, a new workspace waited its round-robin turn (two seconds

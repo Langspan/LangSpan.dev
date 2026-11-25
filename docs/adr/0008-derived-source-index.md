@@ -51,6 +51,7 @@ every answer:
 | `graph symbol WORKSPACE NAME [--detail]` | `langspan_symbol` (`detail`) | Definitions of that name; with detail, what is around each (below) |
 | `graph references WORKSPACE NAME` | `langspan_references` | Mentions of that name |
 | `graph impact WORKSPACE PATH` | `langspan_impact` | What the file exports, and other files mentioning those names |
+| `graph blind-spots WORKSPACE` | `langspan_blind_spots` | The files the index cannot answer for, by reason (below) |
 
 **Symbol lookup with detail (added 25 November 2026, roadmap D1).** The
 indexer also stores, per definition, `body_digest`: the SHA-256 of the
@@ -94,6 +95,54 @@ November 2026, after CI caught a query pairing results read before the
 indexer's next commit with coverage read after it). Test:
 `coverage_describes_the_same_snapshot_as_the_results_it_comes_with` in
 `src/graph.rs`.
+
+**Blind spots (added 25 November 2026, roadmap D8).** Coverage counts say how
+many files are partial, not which, so an empty answer could not be told from
+one the index was unable to give. `graph blind-spots` (MCP
+`langspan_blind_spots`) lists, each in path order and capped at `--limit`
+(1 to 200, default 50) so a capped list is the same on every call, with full
+counts in `totals`:
+
+- `partial`: indexed with a syntax error or a bound reached, with `since_ms`,
+  the wall-clock time its indexed versions became partial (kept across further
+  partial versions, cleared by a clean parse);
+- `never_clean`: indexed but never parsed cleanly, so it has no interface
+  baseline and no notice can come from it;
+- `waiting`: its scanned content is not indexed yet;
+- `too_large`: over the index's 1 MiB bound, or over the scan's 4 MiB bound;
+- `unscanned`: left out by the scan's file, byte or time bound;
+- `unsupported_languages`: other source files the scan listed, by extension,
+  from a fixed list of about 40 programming-language extensions
+  (documentation, data and images are not counted).
+
+Every answer's `coverage` gains `blind_in_scope`: supported files that are
+partial, not indexed at their scanned content, or not read by the last scan.
+Every query matches names across the whole workspace, so each of those files
+could hold a match the answer lacks; the field is the count of them, omitted
+when zero so earlier answers are byte for byte unchanged. Paths only; nothing
+guesses what a blind file contains. With no complete scan the answer has
+`scanned: false`, and the last scan failure, if one is recorded, is in
+`scan_failure`. Lists past one 64 KiB frame are cut to the longest common
+prefix that fits, with `truncated`.
+
+To answer from one snapshot, the index keeps what the last complete scan did
+not read: up to 4,096 such supported-language paths with the reason, the full
+counts, and the language counts (tables `unread` and `scan_summary`; the paths
+are rewritten only when they change). A file between 1 and 4 MiB is marked
+too large for its scanned digest, so it is not retried every pass and no
+longer takes one of a pass's 200 places, which could stall indexing behind
+200 such files. A complete scan with no supported file now counts as
+`scanned`. The schema marker went from 3 to 4, so an older file is dropped
+and rebuilt. Past 4,096 unread files the counts still hold but those paths
+are not named, and `blind_in_scope` may count one of them twice if the index
+also holds an earlier row for it. Tests: `blind_spots_name_partial_never_clean_and_waiting_files`,
+`a_file_over_the_parse_bound_is_too_large_and_not_waiting`,
+`a_capped_list_is_the_same_on_every_call`,
+`impact_on_a_file_mentioned_only_by_a_partial_file_counts_one_blind_file` and
+`files_the_scan_did_not_read_and_other_languages_come_from_a_real_scan` in
+`src/graph.rs`; `blind_spots_name_the_files_the_index_cannot_answer_for` in
+`tests/graph.rs`; `stdio_blind_spots_names_a_partial_file_through_the_daemon`
+in `tests/mcp.rs`; golden vectors `fixtures/graph-blind-spots-*-v3.json`.
 
 **Interface-change notices.** When a file is re-indexed, its exported symbols
 are compared with the previous version by name and kind. A removed symbol or
