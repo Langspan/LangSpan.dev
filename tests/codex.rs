@@ -216,13 +216,11 @@ fn a_native_patch_admits_the_entire_scope_and_duplicate_post_records_once() {
             .count(),
         1
     );
-    match f.call(Command::Status).outcome {
-        Outcome::Status { state } => assert_eq!(
-            state.leases[&leases[0].lease_id].status,
-            LeaseStatus::Completed
-        ),
-        other => panic!("{other:?}"),
-    }
+    // A completed admission is only counted by `status`; `--all` lists it.
+    assert_eq!(
+        client::full_state(&f.state_dir()).unwrap().leases[&leases[0].lease_id].status,
+        LeaseStatus::Completed
+    );
 }
 
 #[test]
@@ -341,9 +339,11 @@ fn a_late_codex_post_cannot_complete_another_current_operation() {
         format!("claude-code.{CLAUDE_SESSION}")
     );
     match f.call(Command::Status).outcome {
-        Outcome::Status { state } => assert!(state.leases.values().any(|lease| lease.session_id
-            == format!("claude-code.{CLAUDE_SESSION}")
-            && lease.status == LeaseStatus::Active)),
+        Outcome::Status { state, .. } => {
+            assert!(state.leases.values().any(|lease| lease.session_id
+                == format!("claude-code.{CLAUDE_SESSION}")
+                && lease.status == LeaseStatus::Active))
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -414,7 +414,7 @@ fn check_inherited_worktree(nested: bool) {
         "admitted"
     );
     match f.call(Command::Status).outcome {
-        Outcome::Status { state } => {
+        Outcome::Status { state, .. } => {
             assert_eq!(state.workspaces.len(), 2);
             assert_eq!(
                 state
@@ -509,7 +509,7 @@ fn a_changed_post_scope_or_input_is_observed_without_completing_its_lease() {
         assert!(stdout.is_empty());
         let ids = langspan::hook::identities_for("codex", CODEX_SESSION, id);
         match f.call(Command::Status).outcome {
-            Outcome::Status { state } => {
+            Outcome::Status { state, .. } => {
                 assert_eq!(state.leases[&ids.admit].status, LeaseStatus::Active)
             }
             other => panic!("{other:?}"),

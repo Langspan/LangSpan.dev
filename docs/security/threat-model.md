@@ -533,7 +533,13 @@ delivery need their own host contracts and acceptance evidence.
 `lease_valid` is a point-in-time result. An old `admitted` payload alone is not
 current authority. Retry the same request ID to recover the original outcome;
 use a new ID for a new operation. A transport error remains unknown/unavailable.
-Status pagination, coverage aggregation and retention are unfinished. macOS path,
+`status` answers within one frame however long the history: it lists open
+admissions and live or recent sessions, counts closed admissions per session,
+and names anything else it left out to fit. `status --all` pages through every
+record after an opaque cursor, each page within the same byte budget as event
+reads; a cursor the coordinator did not give is refused, never guessed at.
+Records read across pages are each as they were when their page was answered.
+Coverage aggregation and retention are unfinished. macOS path,
 transport, sleep/resume and signing behavior, and Windows transport, need their
 own validation. Remote publication requires a separate concrete owner-approved
 data flow and threat-model update.

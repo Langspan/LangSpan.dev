@@ -106,7 +106,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Say what is and is not working: coordinator, scans,
                                  index, publication, the hooks installed in DIR, and
                                  the user-level install under the home
-  status                         Show workspaces, sessions, intents and admissions
+  status                         Show workspaces, live or recent sessions, intents and
+                                 open admissions; closed ones are counted per session
+  status --all [--after CURSOR]  Read every record, history included, one page at a
+                                 time; pass the page's `next` as --after for the next
   events [--after SEQ] [--limit N] Read ordered events (default limit 100; maximum 1000)
   changes WORKSPACE [--after SEQ] [--limit N]
                                  Read disk and local-branch observations and scan freshness
@@ -1033,7 +1036,7 @@ fn auto_check(
             },
         )?
     } else if command.is_empty() && options.is_empty() {
-        let Outcome::Status { state } = ask(state_dir, "read".into(), Command::Status)? else {
+        let Outcome::Status { state, .. } = ask(state_dir, "read".into(), Command::Status)? else {
             return Err("unexpected reply to status".into());
         };
         if !state.workspaces.contains_key(workspace) {
@@ -1641,7 +1644,7 @@ fn doctor(
                 state_dir.display()
             ),
         ),
-        Ok(Outcome::Status { state }) => {
+        Ok(Outcome::Status { state, .. }) => {
             note(
                 true,
                 format!(
@@ -1657,7 +1660,7 @@ fn doctor(
             note(
                 true,
                 format!(
-                    "{} session(s) registered since it started; {stale} from before it restarted are not coordinated until they act again.",
+                    "{} live or recent session(s) registered since it started; {stale} from before it restarted are not coordinated until they act again.",
                     state.sessions.len() - stale
                 ),
             );
@@ -2504,6 +2507,9 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 session_id: (*session).into(),
                 message_id: (*message).into(),
             },
+            ["status"] if options.remove("--all").is_some() => Command::StatusRecords {
+                after: options.remove("--after"),
+            },
             ["status"] => Command::Status,
             ["changes", workspace] => Command::Changes {
                 workspace_id: (*workspace).into(),
@@ -2530,6 +2536,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         let request_id = if matches!(
             command,
             Command::Status
+                | Command::StatusRecords { .. }
                 | Command::Events { .. }
                 | Command::Changes { .. }
                 | Command::RemoteOutbox { .. }
@@ -2622,6 +2629,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--check-again"
             | "--publish-as-branch"
             | "--mine"
+            | "--all"
             | "--off" => {
                 if options.insert(arg.clone(), String::new()).is_some() {
                     return Err(format!("duplicate option {arg}").into());
@@ -3250,7 +3258,18 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 println!("{} {}", event.seq, serde_json::to_string(&event.event)?);
             }
         }
-        Outcome::Status { state } => {
+        Outcome::StatusRecords { records, next } => {
+            for record in records {
+                println!("{}", serde_json::to_string(record)?);
+            }
+            if let Some(next) = next {
+                println!(
+                    "More: langspan status --all --after {}",
+                    serde_json::to_string(next)?
+                );
+            }
+        }
+        Outcome::Status { state, summary } => {
             println!("LangSpan generation {}", state.generation);
             for workspace in state.workspaces.values() {
                 println!("Workspace {}: {:?}", workspace.workspace_id, workspace.root);
@@ -3306,6 +3325,46 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
             println!(
                 "{active} active admission(s). Session registration is not a process-liveness signal."
             );
+            if let Some(summary) = summary {
+                let closed = summary.closed_admissions.values().sum::<u64>() + summary.other_closed;
+                if closed > 0 {
+                    let mut counts: Vec<String> = summary
+                        .closed_admissions
+                        .iter()
+                        .map(|(session, count)| format!("{session} {count}"))
+                        .collect();
+                    if summary.other_closed > 0 {
+                        counts.push(format!("other sessions {}", summary.other_closed));
+                    }
+                    println!(
+                        "{closed} closed admission(s), not listed: {}.",
+                        counts.join(", ")
+                    );
+                }
+                if summary.omitted_sessions > 0 {
+                    println!(
+                        "{} session(s) not shown: nothing open and idle for over {} minutes, or left out to fit.",
+                        summary.omitted_sessions,
+                        langspan_core::STATUS_RECENT_MS / 60_000
+                    );
+                }
+                if summary.omitted_open > 0 {
+                    println!(
+                        "{} open admission(s) left out to fit one answer.",
+                        summary.omitted_open
+                    );
+                }
+                if !summary.omitted.is_empty() {
+                    println!("Left out to fit: {}.", summary.omitted.join(", "));
+                }
+                if closed > 0
+                    || summary.omitted_sessions > 0
+                    || summary.omitted_open > 0
+                    || !summary.omitted.is_empty()
+                {
+                    println!("Every record, history included: langspan status --all");
+                }
+            }
             for link in state.remote_links.values() {
                 println!(
                     "{} {} to {:?} at {} as {:?}; last publication {}.",

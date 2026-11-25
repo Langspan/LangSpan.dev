@@ -314,7 +314,7 @@ shows it improving an outcome.
 
 | Area | Implemented | Remaining boundary |
 | --- | --- | --- |
-| Recap | `recap WORKSPACE` and MCP `langspan_recap`: a bounded account from projected state, under 48 KiB | One workspace at a time. `status` itself is still unpaginated. |
+| Recap | `recap WORKSPACE` and MCP `langspan_recap`: a bounded account from projected state, under 48 KiB | One workspace at a time. `status` is bounded the same way and pages full history with `status --all`. |
 | Notes | `remember` / `forget` and MCP tools; one line of at most 400 bytes about the workspace or up to 8 files; told to sessions working there; kept across restarts; 64 per workspace | Local only. Any local session can read and forget any note. |
 | Scan outcome | A failed scan is state (`scan_failed`), recorded once per distinct reason and cleared by a complete scan | The reason is the observer's own bounded message. |
 | Doctor | `doctor [--root DIR]` checks the coordinator, workspaces, scans, index coverage, publication and installed hooks; exit 1 if anything needs attention; `--json` | It cannot see whether Codex has approved its hooks. |
@@ -336,7 +336,7 @@ participants must use the same daemon/state directory.
 | Workspaces | Distinct physical worktree identities, daemon-verified nested linked roots, active-parent-claim check and permanent descendant-path exclusion | Related work in different worktrees is not automatically delivered to agents. |
 | Process evidence | Linux process-incarnation identity, optional recognized-host ancestry, explicit CLI attachment, alive/exited/unknown status | Point-in-time evidence only; no lease extension, release or authority. No other-platform process backend. |
 | Git observer | One bounded background worker, file content/kind observations, initial dirty baseline, local branch/HEAD commit and tree observations | Unattributed and periodic; incomplete scans retain the last complete view. No full logical change records. |
-| Storage and reads | SQLite schema 2; protocol 2; durable individual facts and complete snapshot projection in one transaction; byte-bounded event/changes pages | Retention policy, durable coverage summary and paginated status remain open. |
+| Storage and reads | SQLite schema 2; protocol 2; durable individual facts and complete snapshot projection in one transaction; byte-bounded event/changes pages | Retention policy and durable coverage summary remain open. `status` is a bounded current view; `status --all` pages every record within the frame (issue 97, tested with 10,000 closed admissions). |
 | CLI/MCP | `changes WORKSPACE`, `session attach-pid`, and nine MCP tools including read-only `langspan_changes`; status includes liveness | Reading facts is not proof of automatic context delivery before an edit. |
 | Installation | Claude/Codex project hooks with explicit apply, stable ownership markers across executable moves, settings preservation and symlink refusal | Host trust, native permissions and new native-host acceptance remain separate. |
 
@@ -416,7 +416,7 @@ The M3 capability review identified three distinctions:
   owners relaying messages. A graph is not required for that first proof.
 
 The M5 benchmark harness is being prepared alongside M3. Product-outcome results
-remain pending. Coverage reporting and paginated status are still needed before
+remain pending. Coverage reporting is still needed before
 the proposed product release; a last successful scan does not prove a later
 failed scan covered the workspace. Failed hooks and unavailable daemons still
 have only best-effort host-side diagnostics.

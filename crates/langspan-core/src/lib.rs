@@ -8,11 +8,15 @@ use serde::{Deserialize, Serialize};
 
 mod dashboard;
 mod lines;
+mod status;
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
     LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow, PublishRow, RecentFile, ScanRow,
     WorkspaceRow, dashboard_denials,
+};
+pub use status::{
+    STATUS_RECENT_MS, StatusRecord, StatusSummary, shrink_status, status_records, status_view,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1984,7 +1988,16 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "is_false")]
         mid_turn: bool,
     },
+    /// Read-only: the bounded view of what matters now. Closed admissions
+    /// are counted, not listed; the answer always fits one frame.
     Status,
+    /// Read-only: one page of every state record, history included, after
+    /// the cursor `after` (from the start when absent). Answered by the
+    /// daemon's store, which bounds each page's bytes.
+    StatusRecords {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
     /// Read-only: a bounded view of every session on every machine heard
     /// from, with what is held, what overlaps, evidence and health.
     Dashboard,
@@ -2367,6 +2380,10 @@ enum CommandWire {
         mid_turn: bool,
     },
     Status {},
+    StatusRecords {
+        #[serde(default)]
+        after: Option<String>,
+    },
     Dashboard {},
     Events {
         after: u64,
@@ -2421,8 +2438,19 @@ pub enum Outcome {
     BranchObserved {
         observation: BranchObservation,
     },
+    /// `state` is the bounded view of what matters now; `summary` says what
+    /// it counts instead of listing and what it left out to fit one frame.
+    /// An answer from a build before the summary has none.
     Status {
         state: State,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<StatusSummary>,
+    },
+    /// One page of state records in a fixed order. `next` resumes after the
+    /// last of them; it is absent on the last page.
+    StatusRecords {
+        records: Vec<StatusRecord>,
+        next: Option<String>,
     },
     Events {
         events: Vec<RecordedEvent>,
@@ -4027,12 +4055,16 @@ fn decide_checked(
                 dashboard: dashboard::dashboard(state, now_ms),
             },
         }),
-        Command::Status => Ok(Decision {
-            events: Vec::new(),
-            outcome: Outcome::Status {
-                state: state.clone(),
-            },
-        }),
+        Command::Status => {
+            let (view, summary) = status_view(state, now_ms);
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Status {
+                    state: view,
+                    summary: Some(summary),
+                },
+            })
+        }
         Command::Remember {
             workspace_id,
             author,
@@ -4207,6 +4239,7 @@ fn decide_checked(
             })
         }
         Command::Events { .. }
+        | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
         | Command::GraphSymbol { .. }
@@ -4215,7 +4248,7 @@ fn decide_checked(
         | Command::GraphContext { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
-            "Event history, change projections and index queries are answered by the daemon's stores",
+            "Event history, status pages, change projections and index queries are answered by the daemon's stores",
         )),
     }
 }

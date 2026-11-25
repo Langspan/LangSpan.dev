@@ -408,7 +408,7 @@ pub fn ask(
 
 fn read_state(state_dir: &Path) -> Result<State, crate::Error> {
     match ask(state_dir, "read".into(), Command::Status)?.outcome {
-        Outcome::Status { state } => Ok(state),
+        Outcome::Status { state, .. } => Ok(state),
         _ => Err("the daemon did not return its state".into()),
     }
 }

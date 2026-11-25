@@ -286,6 +286,45 @@ pub fn call_until(
     call(state_dir, request)
 }
 
+/// Pages `full_state` reads before it gives up: far more than any real
+/// history, so that a cursor that never ends cannot hold a caller forever.
+const MAX_STATUS_PAGES: usize = 100_000;
+
+/// Every record of the coordinator's state, history included, read page by
+/// page as `status --all` reads it and placed back into one `State`. A record
+/// that changes between pages is read as it was when its page was. The
+/// generation is the one the last page was answered in.
+pub fn full_state(state_dir: &std::path::Path) -> Result<langspan_core::State, crate::Error> {
+    use langspan_core::{Command, Outcome};
+    let mut state = langspan_core::State::default();
+    let mut after = None;
+    for _ in 0..MAX_STATUS_PAGES {
+        let response = call(
+            state_dir,
+            &crate::protocol::Request {
+                version: crate::protocol::PROTOCOL_VERSION,
+                request_id: "read".into(),
+                command: Command::StatusRecords { after },
+            },
+        )?;
+        state.generation = response.generation;
+        match response.outcome {
+            Outcome::StatusRecords { records, next } => {
+                for record in records {
+                    record.apply(&mut state);
+                }
+                match next {
+                    Some(cursor) => after = Some(cursor),
+                    None => return Ok(state),
+                }
+            }
+            Outcome::Error { code, message } => return Err(format!("{code}: {message}").into()),
+            other => return Err(format!("unexpected reply to a status page: {other:?}").into()),
+        }
+    }
+    Err(format!("status records did not end within {MAX_STATUS_PAGES} pages").into())
+}
+
 #[cfg(not(unix))]
 pub fn call(
     _state_dir: &std::path::Path,

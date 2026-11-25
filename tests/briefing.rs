@@ -105,7 +105,7 @@ impl Fixture {
     }
     fn state(&self) -> State {
         match client::call(&self.state_dir(), &request()).unwrap().outcome {
-            Outcome::Status { state } => state,
+            Outcome::Status { state, .. } => state,
             other => panic!("{other:?}"),
         }
     }

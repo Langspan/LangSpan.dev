@@ -7,10 +7,15 @@
 use langspan_core::{
     Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event, LeaseStatus, Outcome,
     RecordedEvent, SentPublication, State, apply, dashboard_denials, decide, expiry_events,
+    shrink_status, status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 use std::time::Duration;
+
+/// A read answer's body stops before this many bytes, leaving the rest of
+/// the 64 KiB frame for the envelope and JSON escaping of the envelope.
+pub const PAGE_BUDGET_BYTES: usize = 48 * 1024;
 
 pub type StoreResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -367,6 +372,7 @@ impl Store {
         if matches!(
             original,
             Command::Status
+                | Command::StatusRecords { .. }
                 | Command::Events { .. }
                 | Command::Changes { .. }
                 | Command::RemoteOutbox { .. }
@@ -441,9 +447,24 @@ impl Store {
             return Ok(replayed);
         }
         let outcome = match original {
-            Command::Status => Outcome::Status {
-                state: self.state.clone(),
+            // What matters now, in one frame however long the history.
+            Command::Status => match decide(&self.state, prepared, request_id, now_ms).outcome {
+                Outcome::Status {
+                    mut state,
+                    summary: Some(mut summary),
+                } => {
+                    shrink_status(&mut state, &mut summary, |state, summary| {
+                        serde_json::to_vec(&(state, summary))
+                            .is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+                    });
+                    Outcome::Status {
+                        state,
+                        summary: Some(summary),
+                    }
+                }
+                outcome => outcome,
             },
+            Command::StatusRecords { after } => self.status_records(after.as_deref()),
             // A read: decided by the core, never recorded.
             Command::RemoteOutbox { .. }
             | Command::CheckStatus { .. }
@@ -604,6 +625,39 @@ impl Store {
             refusals,
             more_refusals,
         ))
+    }
+
+    /// One page of state records after `after`, stopping before
+    /// `PAGE_BUDGET_BYTES`. Each record is bounded by the core's own limits,
+    /// so one always fits; a page holds at least one when any remain.
+    fn status_records(&self, after: Option<&str>) -> Outcome {
+        let mut records = match status_records(&self.state, after) {
+            Ok(records) => records.peekable(),
+            Err(error) => {
+                return Outcome::Error {
+                    code: error.code,
+                    message: error.message,
+                };
+            }
+        };
+        let mut page = Vec::new();
+        let mut bytes = 0;
+        let mut next = None;
+        while let Some((cursor, record)) = records.next() {
+            // A record that cannot be measured is still counted at a size
+            // that ends the page, rather than overrunning the frame.
+            let size = serde_json::to_vec(&record).map_or(PAGE_BUDGET_BYTES, |json| json.len() + 1);
+            if !page.is_empty() && bytes + size > PAGE_BUDGET_BYTES {
+                break;
+            }
+            bytes += size;
+            page.push(record);
+            next = records.peek().is_some().then_some(cursor);
+        }
+        Outcome::StatusRecords {
+            records: page,
+            next,
+        }
     }
 
     fn events(&self, after: u64, limit: u32) -> StoreResult<Outcome> {

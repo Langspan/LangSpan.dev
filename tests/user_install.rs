@@ -402,7 +402,7 @@ fn the_installed_user_level_hook_coordinates_any_repository_by_its_cwd() {
         &edit(&repo.join("src"), &repo.join("src/a.rs"), "toolu_u1"),
     );
     assert_eq!((coverage.as_str(), stdout.as_str()), ("admitted", ""));
-    let Outcome::Status { state } = client::call(&home.state_dir(), &status()).unwrap().outcome
+    let Outcome::Status { state, .. } = client::call(&home.state_dir(), &status()).unwrap().outcome
     else {
         panic!("status expected");
     };
@@ -486,7 +486,7 @@ fn a_repository_with_a_project_install_is_left_to_that_install() {
         (coverage.as_str(), stdout.as_str()),
         ("deferred_to_project", "")
     );
-    let Outcome::Status { state } = client::call(&home.state_dir(), &status()).unwrap().outcome
+    let Outcome::Status { state, .. } = client::call(&home.state_dir(), &status()).unwrap().outcome
     else {
         panic!("status expected");
     };
@@ -541,7 +541,7 @@ fn a_user_level_hook_adopts_the_id_a_project_install_already_registered() {
     let (stdout, coverage) = home.run_hook(&codex, &repo, &start);
     assert_ne!(coverage, "unknown", "{stdout}");
     assert_ne!(coverage, "unsupported", "{stdout}");
-    let Outcome::Status { state } = client::call(&home.state_dir(), &status()).unwrap().outcome
+    let Outcome::Status { state, .. } = client::call(&home.state_dir(), &status()).unwrap().outcome
     else {
         panic!("status expected");
     };

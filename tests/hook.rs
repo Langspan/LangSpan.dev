@@ -100,11 +100,11 @@ impl Fixture {
             other => panic!("{other:?}"),
         }
     }
+    /// Closed admissions are only counted by `status`; `status --all` lists them.
     fn lease_status(&self, lease_id: &str) -> LeaseStatus {
-        match self.call("read", Command::Status).outcome {
-            Outcome::Status { state } => state.leases[lease_id].status.clone(),
-            other => panic!("{other:?}"),
-        }
+        client::full_state(&self.state_dir()).unwrap().leases[lease_id]
+            .status
+            .clone()
     }
     fn event(&self, name: &str, session: &str, tool_use_id: &str, file: &str) -> Value {
         let mut event = json!({

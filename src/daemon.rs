@@ -980,7 +980,7 @@ mod unix {
         let mut linked = std::collections::BTreeMap::<String, Linked>::new();
         loop {
             std::thread::sleep(pass);
-            let Some(Outcome::Status { state }) = ask(&sender, "read".into(), Command::Status)
+            let Some(Outcome::Status { state, .. }) = ask(&sender, "read".into(), Command::Status)
             else {
                 continue;
             };
@@ -1435,7 +1435,7 @@ mod unix {
                 "JSON request was not received before the I/O deadline",
             ),
         };
-        let bytes=protocol::encode(&reply).or_else(|_|protocol::encode(&error(reply.request_id,reply.generation,"response_too_large","response exceeds 64 KiB; reduce event page size; status pagination is not yet implemented")));
+        let bytes=protocol::encode(&reply).or_else(|_|protocol::encode(&error(reply.request_id,reply.generation,"response_too_large","response exceeds 64 KiB; reduce the event page size, or page the state with `status --all`")));
         if let Ok(bytes) = bytes {
             let _ = timeout(
                 Duration::from_millis(config.io_timeout_ms),

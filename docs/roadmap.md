@@ -1944,7 +1944,7 @@ Definition findings (found by name; advisory):
 
 **Problem.** An agent that wants a running view of who is doing what must call three tools (`langspan_status`, `langspan_changes`, `langspan_events`) and stitch the answers together, and a host that reads MCP resources into context has nothing to read.
 
-**Today.** MCP tools `langspan_status` (whole shared state), `langspan_changes` (file and branch observations with scan freshness) and `langspan_events` (an ordered page of events). `langspan_brief` delivers a bounded peer briefing. The MCP server in `src/mcp.rs` offers tools only, no resources.
+**Today.** MCP tools `langspan_status` (a bounded view of current work; `all` pages through every record), `langspan_changes` (file and branch observations with scan freshness) and `langspan_events` (an ordered page of events). `langspan_brief` delivers a bounded peer briefing. The MCP server in `src/mcp.rs` offers tools only, no resources.
 
 **Behaviour to build.**
 - Hosts: any MCP client that lists and reads resources; Claude Code and Codex first, once observed reading one.
