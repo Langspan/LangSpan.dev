@@ -15,12 +15,12 @@
 //! Nothing here touches coordination state directly: the record goes to the
 //! state owner as a request, like any client's.
 
-use crate::integrate;
+use crate::{daemon::Registration, integrate};
 use langspan_core::{AutoCheck, CheckReport, CheckResult, Command, Outcome};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command as Process, Stdio},
     sync::{
         Arc, Mutex,
@@ -43,9 +43,12 @@ const TAIL_LINES: usize = 20;
 
 pub enum Message {
     /// `session_id` wrote files and reached a batch or stop.
+    /// `of` is the workspace's registration when the session wrote: the
+    /// run is in its root, and its result is recorded only while the
+    /// workspace still has it.
     Wrote {
         check: AutoCheck,
-        root: PathBuf,
+        of: Registration,
         session_id: String,
     },
     /// The owner turned the check off or changed it, or moved, switched or
@@ -100,8 +103,8 @@ struct Running {
     /// the sessions the run started for.
     sessions: BTreeMap<String, u64>,
     check: AutoCheck,
-    /// The checkout it runs in.
-    root: PathBuf,
+    /// The registration it runs for, in that registration's root.
+    of: Registration,
 }
 
 /// Requests to compare the tree again, one per burst of writes that
@@ -153,7 +156,7 @@ impl Running {
 
 #[derive(Default)]
 struct Workspace {
-    check: Option<(AutoCheck, PathBuf)>,
+    check: Option<(AutoCheck, Registration)>,
     /// Sessions whose writes are not yet covered by a run.
     waiting: BTreeSet<String>,
     first: Option<Instant>,
@@ -162,13 +165,15 @@ struct Workspace {
 }
 
 /// The worker loop. `record` sends a command to the state owner and returns
-/// its outcome, or `None` when the owner could not be reached.
+/// its outcome, or `None` when the owner could not be reached. With a
+/// registration, the owner refuses the command unless the workspace still
+/// has that registration.
 #[allow(clippy::too_many_lines)]
 pub fn worker(
     sender: mpsc::SyncSender<Message>,
     messages: mpsc::Receiver<Message>,
     debounce: Duration,
-    record: impl Fn(String, Command) -> Option<Outcome>,
+    record: impl Fn(Option<&Registration>, String, Command) -> Option<Outcome>,
 ) {
     let mut workspaces = BTreeMap::<String, Workspace>::new();
     let mut next_run = 0_u64;
@@ -183,7 +188,7 @@ pub fn worker(
         match messages.recv_timeout(wait) {
             Ok(Message::Wrote {
                 check,
-                root,
+                of,
                 session_id,
             }) => {
                 let workspace = workspaces.entry(check.workspace_id.clone()).or_default();
@@ -194,7 +199,7 @@ pub fn worker(
                 {
                     workspace.cancel();
                 }
-                workspace.check = Some((check, root));
+                workspace.check = Some((check, of));
                 if let Some(running) = &mut workspace.running {
                     running.not_covered_yet(&session_id);
                 }
@@ -267,7 +272,7 @@ pub fn worker(
             if workspace.due.is_none_or(|due| due > now) {
                 continue;
             }
-            let Some((check, root)) = workspace.check.clone() else {
+            let Some((check, of)) = workspace.check.clone() else {
                 workspace.waiting.clear();
                 workspace.due = None;
                 workspace.first = None;
@@ -290,7 +295,7 @@ pub fn worker(
                 for session in std::mem::take(&mut workspace.waiting) {
                     running.wrote_again(session, request);
                 }
-            } else if !still_enabled(&record, &check, &root) {
+            } else if !still_enabled(&record, &check, &of) {
                 // A turn-off or move that did not reach this worker: nothing
                 // runs.
                 workspace.check = None;
@@ -306,7 +311,7 @@ pub fn worker(
                         .map(|session| (session, 0))
                         .collect(),
                     check: check.clone(),
-                    root: root.clone(),
+                    of: of.clone(),
                 };
                 let (cancel, recheck, sender) = (
                     running.cancel.clone(),
@@ -317,7 +322,7 @@ pub fn worker(
                 let started = std::thread::Builder::new()
                     .name("langspan-auto-check".into())
                     .spawn(move || {
-                        let ended = run_once(&root, &check, &cancel, &recheck);
+                        let ended = run_once(&of.root, &check, &cancel, &recheck);
                         let _ = sender.send(Message::Finished {
                             workspace_id,
                             run,
@@ -340,25 +345,31 @@ pub fn worker(
 }
 
 /// Whether the owner's current setting is still `check` and the workspace is
-/// still registered at `root`, asked of the state owner just before a run
-/// starts and before its result is reported: a workspace moved or switched
-/// to another checkout is not checked, or reported on, in the old one.
-/// Unreachable counts as not enabled. A check at its size limits can be left
-/// out of the bounded view, so it is read complete then.
+/// still in the registration `of`, asked of the state owner just before a
+/// run starts and before its result is reported: a workspace moved or
+/// switched to another checkout, or removed and registered again, is not
+/// checked, or reported on, for its old registration. The read itself is
+/// refused once that registration has ended. Unreachable counts as not
+/// enabled. A check at its size limits can be left out of the bounded view,
+/// so it is read complete then.
 fn still_enabled(
-    record: &impl Fn(String, Command) -> Option<Outcome>,
+    record: &impl Fn(Option<&Registration>, String, Command) -> Option<Outcome>,
     check: &AutoCheck,
-    root: &Path,
+    of: &Registration,
 ) -> bool {
-    let ask = |command| {
-        record("read".into(), command).ok_or_else(|| crate::Error::from("the state owner is gone"))
+    let ask = |command| match record(Some(of), "read".into(), command) {
+        Some(Outcome::Error { code, message }) => {
+            Err(crate::Error::from(format!("{code}: {message}")))
+        }
+        Some(outcome) => Ok(outcome),
+        None => Err(crate::Error::from("the state owner is gone")),
     };
     crate::client::status_with(ask, &["auto_checks"]).is_ok_and(|(state, _)| {
         state.auto_checks.get(&check.workspace_id) == Some(check)
             && state
                 .workspaces
                 .get(&check.workspace_id)
-                .is_some_and(|workspace| Path::new(&workspace.root) == root)
+                .is_some_and(|workspace| Path::new(&workspace.root) == of.root)
     })
 }
 
@@ -382,14 +393,16 @@ fn log(event: &str, workspace_id: &str, detail: &str) {
 
 /// Record the result as a check of its tree, for the sessions it ran after.
 fn report(
-    record: &impl Fn(String, Command) -> Option<Outcome>,
+    record: &impl Fn(Option<&Registration>, String, Command) -> Option<Outcome>,
     workspace_id: &str,
     running: Running,
     finished: Finished,
 ) {
-    // Moved, switched or turned off after the run ended, before the worker
-    // heard: the result is about a checkout the workspace no longer is.
-    if !still_enabled(record, &running.check, &running.root) {
+    // Moved, switched, removed or turned off after the run ended, before the
+    // worker heard: the result is about a checkout the workspace no longer
+    // is. The record carries the registration too, so a move or removal
+    // after this read is refused by the state owner.
+    if !still_enabled(record, &running.check, &running.of) {
         return;
     }
     let check = running.check;
@@ -423,7 +436,7 @@ fn report(
     // The state owner's queue can be briefly full; the same request is
     // retried for up to five seconds.
     for _ in 0..50 {
-        match record(request_id.clone(), command.clone()) {
+        match record(Some(&running.of), request_id.clone(), command.clone()) {
             Some(Outcome::CheckRecorded { .. }) => return,
             Some(Outcome::Error { code, message }) => {
                 return log(
@@ -681,6 +694,14 @@ fn tail(bytes: &[u8], cut: bool) -> String {
 mod tests {
     use super::*;
 
+    fn registration() -> Registration {
+        Registration {
+            workspace_id: "work".into(),
+            root: std::path::PathBuf::new(),
+            removals: 0,
+        }
+    }
+
     #[test]
     fn the_tail_keeps_the_last_lines_within_its_bound_and_redacts() {
         let mut text = String::new();
@@ -724,7 +745,7 @@ mod tests {
                 argv: vec!["true".into()],
                 timeout_s: 1,
             },
-            root: PathBuf::new(),
+            of: registration(),
         };
         running.recheck.requested.store(2, Ordering::SeqCst);
         // The run found the tree unchanged after the first request only.
@@ -750,7 +771,7 @@ mod tests {
                 argv: vec!["true".into()],
                 timeout_s: 1,
             },
-            root: PathBuf::new(),
+            of: registration(),
         };
         running.wrote_again("first".into(), 1);
         running.wrote_again("first".into(), 2);
@@ -777,7 +798,7 @@ mod tests {
                 argv: vec!["true".into()],
                 timeout_s: 1,
             },
-            root: PathBuf::new(),
+            of: registration(),
         };
         // The run's final snapshot found the tree unchanged, then "first"
         // wrote again and the run finished before that write's debounce.

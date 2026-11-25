@@ -109,13 +109,23 @@ against, so it stays an owner command, as with `remote enable`.
   publications leave the state, so `status`, `recap`, briefings and the
   dashboard no longer show it. Its Git snapshot is deleted with the event.
   The state counts each ID's removals (derived on replay, not in the status
-  reply), and every scan and index pass carries the count it was asked for
-  under: the source index keeps the count beside the root and forgets the
-  workspace's entries and baselines when either differs, and a scan asked
-  for before a removal is not recorded after it. So an ID removed, changed
-  while unregistered and registered again at the same root starts a new
-  index baseline instead of reporting interface changes from its earlier
-  lifetime. The event log keeps every earlier event (`langspan events`). A disabled,
+  reply). The ID, its root and that count name one registration, and what a
+  daemon worker learns from a registration carries it back to the state
+  owner, which handles it only while the workspace still has that
+  registration and otherwise refuses it (`workspace_changed`) unrecorded: a
+  scan's result, each interface notice of an index pass, and an automatic
+  check's reads of its setting and its check record. The source index keeps
+  the count beside the root and forgets the workspace's entries and
+  baselines when either differs, or when it has no root record (an index
+  written before roots were kept), so that workspace's first pass after the
+  upgrade is a baseline. So an ID removed, changed while unregistered and
+  registered again at the same root, or switched to another checkout while
+  an index pass of the old one was queued or running, starts a new index
+  baseline instead of reporting interface changes from its earlier
+  registration. Remote passes carry no registration: move and removal wait
+  until publication is off and its ref withdrawn, which only the remote
+  worker's own sequential pass completes, so no pass of it is in flight
+  across either. The event log keeps every earlier event (`langspan events`). A disabled,
   withdrawn publication link stays, so the ID registered and published again
   continues its sequence for teammates. The ID can be registered again and
   starts empty; a hook event from the old root does exactly that.

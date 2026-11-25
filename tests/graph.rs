@@ -19,6 +19,8 @@ const WAIT: Duration = Duration::from_secs(60);
 struct World {
     base: PathBuf,
     daemon: Option<Child>,
+    /// Added to the daemon's environment.
+    daemon_env: Vec<(&'static str, String)>,
 }
 
 fn git(root: &Path, args: &[&str]) {
@@ -38,6 +40,9 @@ fn git(root: &Path, args: &[&str]) {
 
 impl World {
     fn new() -> Self {
+        Self::with_daemon_env(Vec::new())
+    }
+    fn with_daemon_env(daemon_env: Vec<(&'static str, String)>) -> Self {
         let base = fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
@@ -69,7 +74,11 @@ impl World {
         let state = base.join("state");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-        let mut world = Self { base, daemon: None };
+        let mut world = Self {
+            base,
+            daemon: None,
+            daemon_env,
+        };
         world.start_daemon();
         let root = world.work();
         assert_eq!(
@@ -92,6 +101,7 @@ impl World {
             Process::new(env!("CARGO_BIN_EXE_langspan"))
                 .args(["daemon", "--state-dir"])
                 .arg(self.base.join("state"))
+                .envs(self.daemon_env.iter().map(|(key, value)| (key, value)))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -626,6 +636,124 @@ fn a_workspace_registered_again_after_removal_is_not_compared_with_its_earlier_i
     let status: Value = serde_json::from_str(&status).unwrap();
     let notices = &status["outcome"]["state"]["interface_notices"];
     assert!(notices.get("app").is_none(), "{notices:#}");
+}
+
+/// How long the daemon holds the indexer's notices after a pass, for the
+/// tests below: far longer than the switch or removal they make meanwhile.
+const REPORT_DELAY_MS: u64 = 3000;
+
+/// A world whose indexer reports `REPORT_DELAY_MS` after each pass.
+fn slow_reporting_world() -> World {
+    let w = World::with_daemon_env(vec![(
+        "LANGSPAN_TEST_INDEX_REPORT_DELAY_MS",
+        REPORT_DELAY_MS.to_string(),
+    )]);
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    w
+}
+
+/// Change `upload`'s signature to take `parameter`, and wait until the
+/// index holds it: its notice is then on its way to the state owner.
+fn change_upload(w: &World, parameter: &str) {
+    fs::write(
+        w.work().join("src/upload.rs"),
+        format!("pub fn upload(path: &str, {parameter}) -> bool {{\n    !path.is_empty()\n}}\n"),
+    )
+    .unwrap();
+    w.wait_for("the new signature indexed", "symbol", "upload", |outcome| {
+        outcome["symbols"].as_array().is_some_and(|symbols| {
+            symbols
+                .iter()
+                .any(|symbol| symbol["signature"].as_str().unwrap().contains(parameter))
+        })
+    });
+}
+
+/// The `upload` signatures the workspace's interface notices hold.
+fn noticed(w: &World) -> String {
+    let (_, status) = w.cli(&["status", "--json"]);
+    let status: Value = serde_json::from_str(&status).unwrap();
+    status["outcome"]["state"]["interface_notices"]
+        .get("app")
+        .map(Value::to_string)
+        .unwrap_or_default()
+}
+
+/// The control for the two tests below: with nothing changed meanwhile, a
+/// delayed notice is recorded.
+fn a_delayed_notice_is_recorded(w: &World) {
+    change_upload(w, "first: u8");
+    let deadline = Instant::now() + WAIT;
+    while !noticed(w).contains("first: u8") {
+        assert!(Instant::now() < deadline, "the notice never arrived");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// An index pass of the old checkout that reports after `workspace move
+/// --switch` has bound the ID to another checkout: its notice is about a
+/// checkout the workspace no longer is, and the state owner refuses it.
+#[test]
+fn an_index_pass_reporting_after_a_switch_records_no_notice() {
+    let w = slow_reporting_world();
+    a_delayed_notice_is_recorded(&w);
+    change_upload(&w, "stale: u16");
+    let clone = w.base.join("clone");
+    git(
+        &w.base,
+        &[
+            "clone",
+            "--quiet",
+            w.work().to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    let (code, text) = w.cli(&[
+        "workspace",
+        "move",
+        "app",
+        clone.to_str().unwrap(),
+        "--switch",
+        "--request-id",
+        "switch-1",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    std::thread::sleep(Duration::from_millis(REPORT_DELAY_MS + 1500));
+    let notices = noticed(&w);
+    assert!(!notices.contains("stale: u16"), "{notices}");
+}
+
+/// The same for a workspace removed and registered again at the same root:
+/// the pass was of its earlier lifetime.
+#[test]
+fn an_index_pass_reporting_after_removal_and_registration_again_records_no_notice() {
+    let w = slow_reporting_world();
+    a_delayed_notice_is_recorded(&w);
+    change_upload(&w, "stale: u16");
+    let (code, text) = w.cli(&[
+        "workspace",
+        "remove",
+        "app",
+        "--apply",
+        "--request-id",
+        "r1",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let root = w.work();
+    let (code, text) = w.cli(&[
+        "workspace",
+        "add",
+        "app",
+        root.to_str().unwrap(),
+        "--request-id",
+        "ws-again",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    std::thread::sleep(Duration::from_millis(REPORT_DELAY_MS + 1500));
+    let notices = noticed(&w);
+    assert!(!notices.contains("stale: u16"), "{notices}");
 }
 
 /// Wait until `session`'s next prompt carries an interface notice holding

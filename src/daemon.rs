@@ -3,6 +3,40 @@
 #[cfg(not(unix))]
 use std::path::PathBuf;
 
+/// One lifetime of a workspace registration: its ID, its root and how many
+/// times the ID had been removed (roadmap G6). A `workspace move` changes
+/// the root; `workspace remove` ends the lifetime even if the ID is
+/// registered again at the same root. What a daemon worker learned during
+/// one lifetime (a scan, an index pass, an automatic check) carries it, and
+/// the state owner records it only while the workspace still has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Registration {
+    pub workspace_id: String,
+    pub root: std::path::PathBuf,
+    pub removals: u32,
+}
+
+impl Registration {
+    /// The workspace's current registration, if it is registered.
+    pub fn of(state: &langspan_core::State, workspace_id: &str) -> Option<Self> {
+        let workspace = state.workspaces.get(workspace_id)?;
+        Some(Self {
+            workspace_id: workspace_id.to_owned(),
+            root: workspace.root.clone().into(),
+            removals: state
+                .workspace_removals
+                .get(workspace_id)
+                .copied()
+                .unwrap_or(0),
+        })
+    }
+
+    /// Whether the workspace is still in this registration.
+    pub fn is_current(&self, state: &langspan_core::State) -> bool {
+        Self::of(state, &self.workspace_id).as_ref() == Some(self)
+    }
+}
+
 #[cfg(not(unix))]
 pub async fn run(_state_dir: PathBuf) -> Result<(), crate::Error> {
     Err("this initial daemon requires Unix sockets; Windows transport is not implemented".into())
@@ -10,6 +44,7 @@ pub async fn run(_state_dir: PathBuf) -> Result<(), crate::Error> {
 
 #[cfg(unix)]
 mod unix {
+    use super::Registration;
     use crate::{
         auto_check, local,
         protocol::{self, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response},
@@ -99,16 +134,29 @@ mod unix {
     struct Job {
         request: Request,
         reply: oneshot::Sender<Response>,
+        /// A worker's report about one registration of a workspace: refused,
+        /// unhandled, once the workspace is no longer in it.
+        of: Option<Registration>,
     }
 
     struct IndexJob {
-        workspace_id: String,
-        root: PathBuf,
-        /// A count other than the one last indexed starts the index again.
-        removals: u32,
+        /// The registration the scan was of. A root or removal count other
+        /// than the one last indexed starts the index again.
+        of: Registration,
         /// Its unobserved paths are kept in the index as they were, never
         /// treated as removed.
         scan: crate::graph::ScanView,
+    }
+
+    /// For tests only: `LANGSPAN_TEST_INDEX_REPORT_DELAY_MS`, at most 5 s,
+    /// holds an index pass's notices that long before they are reported, so
+    /// a test can move or remove the workspace in between. Not a setting: it
+    /// is undocumented for users and only delays what the indexer reports.
+    fn report_delay() -> Duration {
+        std::env::var("LANGSPAN_TEST_INDEX_REPORT_DELAY_MS")
+            .ok()
+            .and_then(|text| text.parse::<u64>().ok())
+            .map_or(Duration::ZERO, |ms| Duration::from_millis(ms.min(5000)))
     }
 
     /// The index's single writer. It only ever reads working trees and its
@@ -128,31 +176,38 @@ mod unix {
         let mut last_failure: Option<String> = None;
         while let Ok(job) = jobs.recv() {
             let deadline = Instant::now() + Duration::from_secs(2);
+            let of = &job.of;
             match index.update(
-                &job.workspace_id,
-                &job.root,
-                job.removals,
+                &of.workspace_id,
+                &of.root,
+                of.removals,
                 &job.scan,
                 now_ms(),
                 deadline,
             ) {
                 Ok(notices) => {
                     last_failure = None;
+                    if !notices.is_empty() {
+                        std::thread::sleep(report_delay());
+                    }
                     for notice in notices {
-                        // One request per version of the file: redelivery is a replay.
-                        ask(
+                        // One request per version of the file: redelivery is
+                        // a replay. A pass of a checkout the workspace has
+                        // since left, by a move or a removal, is refused.
+                        ask_as(
                             &sender,
+                            Some(of.clone()),
                             crate::hook::wire_id(
                                 "interface",
                                 &[
-                                    &job.workspace_id,
+                                    &of.workspace_id,
                                     &notice.path,
                                     &notice.before_digest,
                                     &notice.digest,
                                 ],
                             ),
                             Command::ObserveInterface {
-                                workspace_id: job.workspace_id.clone(),
+                                workspace_id: of.workspace_id.clone(),
                                 path: notice.path,
                                 changes: notice.changes,
                                 dependents: notice.dependents,
@@ -165,7 +220,7 @@ mod unix {
                     if last_failure.as_ref() != Some(&detail) {
                         eprintln!(
                             "{}",
-                            serde_json::json!({"level":"warn","event":"index_update_failed","workspace_id":job.workspace_id,"detail":detail})
+                            serde_json::json!({"level":"warn","event":"index_update_failed","workspace_id":of.workspace_id,"detail":detail})
                         );
                         last_failure = Some(detail);
                     }
@@ -543,26 +598,10 @@ mod unix {
         })
     }
 
-    /// `removals` is the workspace ID's removal count when the scan was
-    /// asked for: with the root, it names the registration the scan is of.
-    struct ScanJob {
-        workspace_id: String,
-        root: PathBuf,
-        removals: u32,
-    }
+    /// A scan of the registration the workspace had when it was asked for.
     struct ScanResult {
-        workspace_id: String,
-        root: PathBuf,
-        removals: u32,
+        of: Registration,
         snapshot: Result<crate::observer::Snapshot, String>,
-    }
-
-    fn removals(state: &langspan_core::State, workspace_id: &str) -> u32 {
-        state
-            .workspace_removals
-            .get(workspace_id)
-            .copied()
-            .unwrap_or(0)
     }
 
     pub async fn run(state_dir: PathBuf) -> Result<(), crate::Error> {
@@ -597,21 +636,16 @@ mod unix {
             UnixListener::bind(&socket).map_err(|e| format!("bind local Unix socket: {e}"))?;
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
         let (sender, receiver) = mpsc::sync_channel::<Job>(config.max_clients);
-        let (scan_sender, scan_receiver) = mpsc::sync_channel::<ScanJob>(1);
+        let (scan_sender, scan_receiver) = mpsc::sync_channel::<Registration>(1);
         let (scan_result_sender, scan_results) = mpsc::sync_channel::<ScanResult>(1);
         std::thread::Builder::new()
             .name("langspan-git-reader".into())
             .spawn(move || {
-                while let Ok(job) = scan_receiver.recv() {
+                while let Ok(of) = scan_receiver.recv() {
                     let snapshot =
-                        crate::observer::scan(&job.root, Instant::now() + Duration::from_secs(2));
+                        crate::observer::scan(&of.root, Instant::now() + Duration::from_secs(2));
                     if scan_result_sender
-                        .send(ScanResult {
-                            workspace_id: job.workspace_id,
-                            root: job.root,
-                            removals: job.removals,
-                            snapshot,
-                        })
+                        .send(ScanResult { of, snapshot })
                         .is_err()
                     {
                         break;
@@ -636,9 +670,14 @@ mod unix {
             std::thread::Builder::new()
                 .name("langspan-auto-checks".into())
                 .spawn(move || {
-                    auto_check::worker(check_sender, check_receiver, debounce, |id, command| {
-                        ask(&sender, id, command)
-                    })
+                    auto_check::worker(
+                        check_sender,
+                        check_receiver,
+                        debounce,
+                        |of: Option<&Registration>, id, command| {
+                            ask_as(&sender, of.cloned(), id, command)
+                        },
+                    )
                 })?;
         }
         std::thread::Builder::new()
@@ -662,6 +701,9 @@ mod unix {
                             if graph_reader.is_none() {
                                 graph_reader = crate::graph::Index::open_reader(&graph_path).ok();
                             }
+                            if let Some(refused) = stale_report(store.state(), &job) {
+                                let _ = job.reply.send(refused);
+                            } else {
                             let touched = touched_workspace(store.state(), &job.request.command);
                             let check_before = auto_check_of(store.state(), &job.request.command);
                             let boundary = boundary_session(&job.request.command);
@@ -683,6 +725,7 @@ mod unix {
                                 urgent.push_back(id);
                             }
                             let _ = job.reply.send(response); // Retry recovers a committed but dropped reply.
+                            }
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -698,22 +741,19 @@ mod unix {
                             }
                         }
                     }
-                    if let Ok(ScanResult {workspace_id, root, removals: scanned_in, snapshot}) = scan_results.try_recv() {
+                    if let Ok(ScanResult {of, snapshot}) = scan_results.try_recv() {
                         scan_pending = false;
-                        // The same registration: a scan of the workspace's
-                        // earlier lifetime is not recorded for a new one.
-                        let still_registered = store.state().workspaces.get(&workspace_id)
-                            .is_some_and(|workspace| Path::new(&workspace.root) == root)
-                            && removals(store.state(), &workspace_id) == scanned_in;
-                        let recorded = if still_registered {
+                        let workspace_id = of.workspace_id.clone();
+                        // The same registration: a scan of another root, or
+                        // of the workspace's earlier lifetime, is not
+                        // recorded for this one.
+                        let recorded = if of.is_current(store.state()) {
                             snapshot.and_then(|snapshot| {
                                 store.record_scan(&workspace_id, &snapshot, now).map_err(|e| e.to_string())?;
                                 // Hand the scan to the indexer. If it is busy the
                                 // next scan carries the same information.
                                 let _ = index_sender.try_send(IndexJob {
-                                    workspace_id: workspace_id.clone(),
-                                    root: root.clone(),
-                                    removals: scanned_in,
+                                    of,
                                     scan: crate::graph::ScanView::of(&snapshot),
                                 });
                                 Ok(snapshot.coverage)
@@ -751,20 +791,18 @@ mod unix {
                     }
                     if !scan_pending && (!urgent.is_empty() || Instant::now() >= next_scan) {
                         let workspace = std::iter::from_fn(|| urgent.pop_front())
-                            .find_map(|id| {
-                                store.state().workspaces.get(&id).map(|workspace| (id, PathBuf::from(&workspace.root)))
-                            })
+                            .find_map(|id| Registration::of(store.state(), &id))
                             .or_else(|| {
-                                let next = next_workspace(store.state(), previous_workspace.as_deref());
-                                if let Some((id, _)) = &next {
-                                    previous_workspace = Some(id.clone());
+                                let next = next_workspace(store.state(), previous_workspace.as_deref())
+                                    .and_then(|(id, _)| Registration::of(store.state(), &id));
+                                if let Some(of) = &next {
+                                    previous_workspace = Some(of.workspace_id.clone());
                                 }
                                 next
                             });
-                        if let Some((workspace_id, root)) = workspace {
-                            last_scanned.insert(workspace_id.clone(), Instant::now());
-                            let removals = removals(store.state(), &workspace_id);
-                            match scan_sender.try_send(ScanJob {workspace_id, root, removals}) {
+                        if let Some(of) = workspace {
+                            last_scanned.insert(of.workspace_id.clone(), Instant::now());
+                            match scan_sender.try_send(of) {
                                 Ok(()) => { scan_pending = true; }
                                 Err(error) => eprintln!("{}", serde_json::json!({"level":"error","event":"git_worker_unavailable","detail":error.to_string()})),
                             }
@@ -891,6 +929,17 @@ mod unix {
         request_id: String,
         command: Command,
     ) -> Option<Outcome> {
+        ask_as(sender, None, request_id, command)
+    }
+
+    /// Ask the state owner to record what a worker learned during the
+    /// registration `of`: refused if the workspace is no longer in it.
+    fn ask_as(
+        sender: &mpsc::SyncSender<Job>,
+        of: Option<Registration>,
+        request_id: String,
+        command: Command,
+    ) -> Option<Outcome> {
         let (reply, receive) = oneshot::channel();
         sender
             .try_send(Job {
@@ -900,6 +949,7 @@ mod unix {
                     command,
                 },
                 reply,
+                of,
             })
             .ok()?;
         receive
@@ -1308,6 +1358,24 @@ mod unix {
         }
     }
 
+    /// The refusal of a worker's report about a registration the workspace
+    /// has left: moved or switched to another root, or removed (and perhaps
+    /// registered again). Nothing is handled or recorded; the worker's next
+    /// pass, of the current registration, says what is true now.
+    fn stale_report(state: &State, job: &Job) -> Option<Response> {
+        let of = job.of.as_ref().filter(|of| !of.is_current(state))?;
+        Some(error(
+            job.request.request_id.clone(),
+            state.generation,
+            "workspace_changed",
+            format!(
+                "workspace {} was moved, switched or removed after this was observed in {}; nothing was recorded",
+                of.workspace_id,
+                of.root.display()
+            ),
+        ))
+    }
+
     fn error(id: String, generation: u64, code: &str, message: impl Into<String>) -> Response {
         Response {
             version: PROTOCOL_VERSION,
@@ -1423,7 +1491,7 @@ mod unix {
         let check = state.auto_checks.get(workspace_id).filter(|_| wrote)?;
         Some(auto_check::Message::Wrote {
             check: check.clone(),
-            root: PathBuf::from(&state.workspaces.get(workspace_id)?.root),
+            of: Registration::of(state, workspace_id)?,
             session_id,
         })
     }
@@ -1755,7 +1823,11 @@ mod unix {
                     crate::hook::redact_command(&mut request.command);
                     let id = request.request_id.clone();
                     let (tx, rx) = oneshot::channel();
-                    match sender.try_send(Job { request, reply: tx }) {
+                    match sender.try_send(Job {
+                        request,
+                        reply: tx,
+                        of: None,
+                    }) {
                         Ok(()) => {
                             match timeout(Duration::from_millis(config.request_timeout_ms), rx)
                                 .await
@@ -2475,6 +2547,91 @@ mod unix {
                 langspan_core::LeaseStatus::Active,
                 "liveness evidence must not revoke an admission"
             );
+        }
+    }
+
+    #[cfg(test)]
+    mod registration_tests {
+        use super::*;
+        /// The state owner's check for every worker report: a report about a
+        /// registration is handled only while the workspace still has it.
+        #[test]
+        fn a_report_about_a_registration_the_workspace_left_is_refused() {
+            let directory =
+                std::env::temp_dir().join(format!("langspan-registration-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&directory);
+            fs::create_dir(&directory).unwrap();
+            let mut store = Store::open(&directory.join("store.sqlite")).unwrap();
+            let mut step = 0;
+            let mut run = |store: &mut Store, command: Command, prepared: Command| {
+                step += 1;
+                let execution = store
+                    .execute(&format!("fixture-{step}"), &command, &prepared, 1)
+                    .unwrap();
+                assert!(
+                    !matches!(execution.outcome, Outcome::Error { .. }),
+                    "{:?}",
+                    execution.outcome
+                );
+            };
+            let register = |root: &str| Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: root.into(),
+            };
+            let report = |of: &Registration| {
+                let (reply, _) = oneshot::channel();
+                Job {
+                    request: Request {
+                        version: PROTOCOL_VERSION,
+                        request_id: "report".into(),
+                        command: Command::Status,
+                    },
+                    reply,
+                    of: Some(of.clone()),
+                }
+            };
+            let refused = |store: &Store, of: &Registration| {
+                stale_report(store.state(), &report(of)).map(|response| response.outcome)
+            };
+            run(&mut store, register("/work"), register("/work"));
+            let first = Registration::of(store.state(), "work").unwrap();
+            assert!(refused(&store, &first).is_none());
+            // Switched to another checkout.
+            run(
+                &mut store,
+                Command::WorkspaceMove {
+                    workspace_id: "work".into(),
+                    root: "/other".into(),
+                    switch: true,
+                },
+                Command::WorkspaceMoveVerified {
+                    workspace_id: "work".into(),
+                    root: "/other".into(),
+                    verified_overlaps: Vec::new(),
+                },
+            );
+            assert!(matches!(
+                refused(&store, &first),
+                Some(Outcome::Error { code, .. }) if code == "workspace_changed"
+            ));
+            let moved = Registration::of(store.state(), "work").unwrap();
+            assert!(refused(&store, &moved).is_none());
+            // Removed: no registration is current.
+            let remove = Command::WorkspaceRemove {
+                workspace_id: "work".into(),
+                apply: true,
+            };
+            run(&mut store, remove.clone(), remove);
+            assert!(refused(&store, &moved).is_some());
+            // Registered again at the same root: a new lifetime.
+            run(&mut store, register("/other"), register("/other"));
+            let again = Registration::of(store.state(), "work").unwrap();
+            assert_eq!(again.root, moved.root);
+            assert_ne!(again, moved);
+            assert!(refused(&store, &moved).is_some());
+            assert!(refused(&store, &again).is_none());
+            drop(store);
+            fs::remove_dir_all(directory).unwrap();
         }
     }
 }

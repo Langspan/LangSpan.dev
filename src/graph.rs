@@ -99,7 +99,8 @@ impl Index {
         }
         // The root each workspace was last indexed at, and how many times
         // its ID had been removed by then (roadmap G6). Added without a
-        // schema change: an index without it is kept, not rebuilt.
+        // schema change: an index without it is kept, and each workspace in
+        // it starts again at its next pass (see `start_again_at`).
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS roots (
                 workspace_id TEXT NOT NULL PRIMARY KEY, root TEXT NOT NULL,
@@ -282,7 +283,9 @@ impl Index {
     /// as interface changes. So is a workspace removed and registered again
     /// (`removals` differs), even at the same root: what changed while it
     /// was unregistered is not news from its earlier lifetime. A workspace
-    /// indexed before roots were kept is taken to be at its current root.
+    /// with no root record (indexed by a build before roots were kept) is of
+    /// an unknown checkout: what it holds is forgotten too, so its first
+    /// pass after the upgrade is a baseline that reports nothing.
     fn start_again_at(
         &mut self,
         workspace_id: &str,
@@ -305,22 +308,20 @@ impl Index {
             return Ok(());
         }
         let transaction = self.connection.transaction()?;
-        if indexed.is_some() {
-            for table in [
-                "files",
-                "unread",
-                "scan_summary",
-                "symbols",
-                "refs",
-                "imports",
-                "baselines",
-                "calls",
-            ] {
-                transaction.execute(
-                    &format!("DELETE FROM {table} WHERE workspace_id = ?1"),
-                    [workspace_id],
-                )?;
-            }
+        for table in [
+            "files",
+            "unread",
+            "scan_summary",
+            "symbols",
+            "refs",
+            "imports",
+            "baselines",
+            "calls",
+        ] {
+            transaction.execute(
+                &format!("DELETE FROM {table} WHERE workspace_id = ?1"),
+                [workspace_id],
+            )?;
         }
         transaction.execute(
             "INSERT INTO roots(workspace_id, root, removals) VALUES (?1, ?2, ?3)
@@ -1215,6 +1216,30 @@ mod review_regressions {
         let found = index.symbol("w", "upload", 10).unwrap();
         assert_eq!(found[0].signature, "pub fn upload(x: u8)");
         // At the same root, a changed signature is still a notice.
+        let again = ("src/api.rs", "pub fn upload(x: u16) {}\n");
+        assert_eq!(pass(&other, &mut index, &[again, CALLER]).len(), 1);
+    }
+
+    #[test]
+    fn an_index_written_before_roots_were_kept_starts_again_at_its_next_pass() {
+        // The previous version's schema-4 file: the same tables without
+        // `roots`, holding one checkout's files and baselines.
+        let (dir, mut index) = setup("unrooted");
+        let api = ("src/api.rs", "pub fn upload() {}\n");
+        assert!(pass(&dir, &mut index, &[api, CALLER]).is_empty());
+        index.connection.execute_batch("DROP TABLE roots;").unwrap();
+        drop(index);
+        let mut index = Index::open(&dir.0.join("graph.sqlite3")).unwrap();
+        // The workspace was moved before the first pass after the upgrade:
+        // the other checkout's differences are not interface changes.
+        let other = setup("unrooted-other").0;
+        let changed = ("src/api.rs", "pub fn upload(x: u8) {}\n");
+        let notices = pass(&other, &mut index, &[changed, CALLER]);
+        assert!(notices.is_empty(), "{notices:?}");
+        let found = index.symbol("w", "upload", 10).unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].signature, "pub fn upload(x: u8)");
+        // From then on, a changed signature at that root is a notice.
         let again = ("src/api.rs", "pub fn upload(x: u16) {}\n");
         assert_eq!(pass(&other, &mut index, &[again, CALLER]).len(), 1);
     }
