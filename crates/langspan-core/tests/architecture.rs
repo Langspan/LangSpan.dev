@@ -56,6 +56,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
         include_str!("../src/lines.rs"),
         include_str!("../src/status.rs"),
         include_str!("../src/status_line.rs"),
+        include_str!("../src/today.rs"),
     ];
     // Range bounds, `mem::take` and `iter::empty` for the status pages: pure.
     let allowed_imports = [
@@ -94,7 +95,8 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
             "mod dashboard;",
             "mod lines;",
             "mod status;",
-            "mod status_line;"
+            "mod status_line;",
+            "mod today;"
         ],
         "a new core module needs this check"
     );
