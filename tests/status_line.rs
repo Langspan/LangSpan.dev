@@ -307,6 +307,19 @@ fn the_line_counts_current_sessions_and_each_refusal_once() {
 fn the_command_writes_nothing_to_the_state_directory() {
     let fixture = Fixture::new();
     fixture.prompt(ALICE);
+    // The daemon's own work after the prompt (its first scan of the
+    // workspace) writes for a moment; wait until the directory is quiet.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut before = listing(&fixture.state());
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+        let now = listing(&fixture.state());
+        if now == before {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the daemon never went quiet");
+        before = now;
+    }
     let events = fixture.refusals();
     let before = listing(&fixture.state());
     for _ in 0..3 {
