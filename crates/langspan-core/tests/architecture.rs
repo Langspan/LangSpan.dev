@@ -55,6 +55,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
         include_str!("../src/dashboard.rs"),
         include_str!("../src/flaky.rs"),
         include_str!("../src/lines.rs"),
+        include_str!("../src/recall.rs"),
         include_str!("../src/status.rs"),
         include_str!("../src/status_line.rs"),
         include_str!("../src/today.rs"),
@@ -96,6 +97,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
             "mod dashboard;",
             "mod flaky;",
             "mod lines;",
+            "mod recall;",
             "mod status;",
             "mod status_line;",
             "mod today;"
