@@ -458,9 +458,26 @@ receives another briefing only when its content has changed; session start can
 restore context in a new or resumed session. Briefings also name files the
 session read before a peer reported editing them in the same checkout.
 
-By default, the first non-empty line of the latest user prompt becomes a bounded
-task line shared with relevant local sessions. To leave prompt text out, install
-with `--prompt-summary off`:
+By default, one line of the latest user prompt becomes a bounded task line
+shared with relevant local sessions:
+
+- A line that starts with `Task:` (in any case, among the prompt's first 32
+  non-empty lines) names the task; the marker is left out. Give each prompt a
+  `Task:` line when several sessions start from one prompt template.
+- Otherwise the first non-empty line is used, unless a live session in the same
+  repository (this checkout or a linked worktree) has a latest prompt that
+  begins with the same lines. Then the prompt's first line that differs is
+  used, so that sessions started from one template are told apart. A one-line
+  prompt is always summarised by that line.
+- A declared intent (`langspan intent set`, MCP `langspan_intent_set`)
+  replaces the task line in briefings while it is set.
+
+To compare prompts, the hook sends the coordinator a digest of each of the
+prompt's first 32 non-empty lines, after redaction. Digests are kept with the
+session's activity, are never shown or published, and say only whether two
+prompts begin with the same lines. The line chosen keeps the same redaction and
+200-byte limit as before. To leave prompt text out, install with
+`--prompt-summary off`:
 
 ```sh
 ./target/release/langspan hooks install claude-code \
@@ -780,6 +797,7 @@ scans and can lag changes on disk. Replace `PROJECT` with a registered workspace
 ```sh
 ./target/release/langspan graph symbol PROJECT upload --limit 50 --json
 ./target/release/langspan graph symbol PROJECT upload --detail --json
+./target/release/langspan graph impact PROJECT src/api.rs --depth 2 --json
 ./target/release/langspan graph references PROJECT upload --limit 50 --json
 ./target/release/langspan graph impact PROJECT src/api.rs --limit 50 --json
 ```
@@ -805,7 +823,28 @@ The answer has `resolution: "name"`: calls and callers are matched by name,
 not resolved, so a call of another function with the same name counts. No
 source body is returned. Definitions that would make the answer larger than
 64 KiB are left out and `truncated` is true. `references` finds mentions of the name. `impact` lists the file's
-exports and other files mentioning those names, one level deep. These queries
+exports and other files mentioning those names, one level deep.
+
+With `--depth N` (1 to 3, default 1; MCP: `langspan_impact` with `depth`),
+`impact` also returns `levels`: level 1 is the files mentioning an export of
+the file, and each further level the files mentioning an export of a file on
+the level before. Each file appears once, at its first level, with `via` (the
+name it mentions) and `from` (the file on the previous level). At most 200
+files in all and 50 exported names per level are followed; a level that a
+bound, the 64 KiB answer size or the 500 ms time budget cut has `truncated:
+true`. Levels are found by name, not resolved, and each level adds false
+positives. An empty level is no claim that nothing is affected; check
+`coverage` first. `--depth 1` gives exactly the answer without the flag; a
+depth outside 1 to 3 is refused:
+
+```text
+$ langspan graph impact PROJECT src/store.rs --depth 2
+Level 1 (mentions an export of "src/store.rs"): "src/api.rs" via "save", "src/cli.rs" via "load"
+Level 2: "src/server.rs" via "router" from "src/api.rs", "tests/api.rs" via "router" from "src/api.rs"
+Found by name, not resolved; each level adds false positives. Index: 120 of 120 supported files at their current content.
+```
+
+These queries
 match names without resolving scopes, types, modules or imports. Common names
 can produce unrelated matches; dynamic uses can be missed.
 
@@ -1067,6 +1106,21 @@ committed stay its own even while another session's command ran, so
 `commit --mine`. A line that other command could have changed otherwise is
 still no session's.
 
+Before such a command runs, the Bash pre-tool hook on Claude Code and Codex
+tells the session, once, which other live sessions have uncommitted changes in
+files it may rewrite: "LangSpan: this command may reformat files that another
+session in this checkout has not committed.", then each session and at most
+eight of its files, then how many more. The command is not refused, and the
+host's own permission prompt is unchanged. The hook recognises `cargo fmt` in
+any form (it formats every file of the workspace, even when files follow
+`--`), `rustfmt FILE...` (those files and the modules they declare) and
+`prettier --write PATH...` (directly or through `npx`, `pnpm exec` or `yarn`).
+A check such as `cargo fmt --check` or `prettier --check .` names nothing.
+The same files are not named again whichever formatter runs; a new file is.
+The hook's log line says why no notice was given (`formatter notice: …`). In a
+shared checkout, format only the files you changed, by name: `rustfmt FILE...`
+or `prettier --write FILE...`. The LangSpan skill says so too.
+
 When a Git step fails, the error names the step, its exit status and what Git
 said (its last lines, at most 1 KiB, redacted as other relayed text is). The
 commit is built in the Git directory, so it needs to write there: inside an
@@ -1108,7 +1162,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
 | `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check |
 | `langspan_references` | Find name mentions, with coverage and truncation |
-| `langspan_impact` | Find a file's exports and files mentioning those names, one level deep |
+| `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
@@ -1182,7 +1236,20 @@ Timeout values accept 100–5000 ms; client count accepts 1–128;
 coordinator looks for agent hosts with no LangSpan install, accepts
 100–86400000. IPC and MCP frames
 are limited to 64 KiB. The MCP SDK discards oversized input lines without replying
-to that line. File admission accepts up to 64 distinct normalized keys, 512 bytes
+to that line. An MCP tool result carries each answer twice, as structured
+content and as JSON text that escapes every quotation mark and backslash
+again, so the adapter measures the whole encoded result and keeps it, with
+512 bytes left for the JSON-RPC envelope, within one frame. An MCP page can
+therefore be shorter than the CLI's: a page of `langspan_events`,
+`langspan_changes` or `langspan_status` with `all` that would not fit is cut,
+and the result ends with a text note starting "LangSpan cut this page to fit
+one MCP reply" that names the `after` to call again with for the rest. The
+`status` view and `langspan_recap` leave more out instead, counted as the
+CLI's answer counts it (`summary`, `omitted_items`); every record is in
+`langspan_status` with `all`. A result no rule can cut, such as an oversized
+landing report, is replaced by the error `reply_too_large`, which keeps the
+operation's `exit_code` and outcome; the CLI's `--json` gives the whole
+answer. The CLI's answers are unchanged. File admission accepts up to 64 distinct normalized keys, 512 bytes
 per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit
 and prompt summaries a 512-byte one. Summaries are redacted on receipt, and
 redaction never makes one longer than its limit: a summary that would outgrow

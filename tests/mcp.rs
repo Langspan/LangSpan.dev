@@ -878,3 +878,98 @@ async fn stdio_symbol_with_detail_returns_calls_and_callers_by_name() {
     assert_eq!((&symbols[0].body_digest, &symbols[0].calls), (&None, &None));
     disconnect(client).await;
 }
+
+/// `langspan_impact` with `depth` through a real MCP client, daemon,
+/// indexer and Git repository (roadmap D2).
+#[tokio::test]
+async fn stdio_impact_with_depth_returns_levels_by_name() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let workspace = directory.workspace();
+    for (path, text) in [
+        ("src/a.rs", "pub fn alpha() {}\n"),
+        ("src/b.rs", "pub fn beta() { alpha(); }\n"),
+        ("src/c.rs", "fn main() { beta(); }\n"),
+    ] {
+        fs::write(workspace.join(path), text).expect("write source");
+    }
+    for args in [
+        &["init", "--quiet", "--initial-branch=main"][..],
+        &["add", "."],
+        &["commit", "--quiet", "-m", "init"],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?}");
+    }
+    let _daemon = Daemon::start(&state_dir).await;
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"workspace-register", "workspace_id":"workspace", "root":workspace}),
+        )
+        .await,
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let outcome = loop {
+        let answer = call_tool(
+            &client,
+            "langspan_impact",
+            json!({"workspace_id":"workspace", "path":"src/a.rs", "limit":10, "depth":2}),
+        )
+        .await;
+        let outcome = answer.structured_content.unwrap_or_default()["outcome"].clone();
+        // The test workspace holds a source file of its own besides these.
+        let coverage = &outcome["coverage"];
+        if coverage["scanned"] == true
+            && coverage["indexable_files"].as_u64() >= Some(3)
+            && coverage["current_files"] == coverage["indexable_files"]
+        {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "never indexed: {outcome:#}");
+        sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        outcome["levels"],
+        json!([
+            {"level": 1, "truncated": false,
+             "files": [{"path": "src/b.rs", "via": "alpha", "from": "src/a.rs"}]},
+            {"level": 2, "truncated": false,
+             "files": [{"path": "src/c.rs", "via": "beta", "from": "src/b.rs"}]},
+        ]),
+        "{outcome:#}"
+    );
+    assert_eq!(outcome["resolution"], "name");
+
+    // Without `depth`, the answer earlier builds give: no levels.
+    let plain = response(
+        call_tool(
+            &client,
+            "langspan_impact",
+            json!({"workspace_id":"workspace", "path":"src/a.rs", "limit":10}),
+        )
+        .await,
+    );
+    let Outcome::Graph { levels, .. } = plain.outcome else {
+        panic!("{:?}", plain.outcome);
+    };
+    assert_eq!(levels, None);
+
+    let refused = call_tool(
+        &client,
+        "langspan_impact",
+        json!({"workspace_id":"workspace", "path":"src/a.rs", "limit":10, "depth":4}),
+    )
+    .await;
+    let text = serde_json::to_string(&refused.structured_content).unwrap();
+    assert!(text.contains("depth must be between 1 and 3"), "{text}");
+    disconnect(client).await;
+}

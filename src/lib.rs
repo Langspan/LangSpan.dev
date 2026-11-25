@@ -8,6 +8,7 @@ pub mod clock;
 pub mod commit;
 pub mod daemon;
 pub mod dashboard;
+pub mod formatter;
 pub mod guidance;
 pub mod install;
 mod lines;

@@ -66,7 +66,11 @@ macOS signing behavior or Windows named-pipe behavior. The code uses Unix socket
 Windows transport, signed distributions and vendor adapters remain work to do.
 
 Events and receipts grow without compaction for now. Status and event responses
-must fit the 64 KiB transport frame; oversized responses fail explicitly. Large
+must fit the 64 KiB transport frame; oversized responses fail explicitly. An MCP
+tool result carries its answer twice, once re-escaped as text, so the adapter
+measures the whole encoded result against that frame and cuts a page to what
+fits, saying so and naming the cursor for the rest; an MCP page can be shorter
+than the CLI's. Large
 history pagination/projections, retention policy and graph indexing are later
 work. SQLite is for a local filesystem and local owner, not a database file on a
 shared network volume. Same-user processes are inside the trust boundary.
