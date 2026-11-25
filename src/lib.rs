@@ -11,6 +11,7 @@ pub mod dashboard;
 pub mod install;
 mod lines;
 mod local;
+pub mod local_day;
 pub mod mcp;
 pub mod protocol;
 pub mod regions;

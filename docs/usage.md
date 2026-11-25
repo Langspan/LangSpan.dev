@@ -133,9 +133,10 @@ directory. It asks the coordinator once with a 200 ms deadline
 (`--deadline-ms`, 100 to 5000). When the coordinator is not running or does
 not answer in time it prints `langspan · coordinator not running` and exits 0;
 it never starts the coordinator, never uses the network, and writes nothing.
-"Local midnight" is read from `date +%z` (the system's time zone, honouring
-`TZ`); if that fails, midnight UTC is used. A day of more than 1024 refusals
-shows 1024.
+"Local midnight" follows the system's time zone (honouring `TZ`): `date`
+gives the offset at the instants around midnight, so on a day the clocks
+change the count still starts at that day's 00:00. If `date` fails, midnight
+UTC is used. A day of more than 1024 refusals shows 1024.
 
 User-level installation has been tested with a temporary home and real daemon,
 Git and hook executable. It has not been observed in a native Claude Code or

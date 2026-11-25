@@ -118,87 +118,13 @@ pub fn run(state_dir: &Path, root: Option<PathBuf>, budget: Duration, started: I
         return Answer::Unavailable;
     };
     let now = crate::store::wall_now_ms();
-    let from_ms = midnight_ms(now, local_offset_minutes(deadline).unwrap_or(0));
+    let from_ms = crate::local_day::midnight_now_ms(now, deadline);
     ask(state_dir, &dir, from_ms, deadline)
-}
-
-/// The local offset from UTC in minutes, from `date +%z` (`+0100`,
-/// `-0530`): the system's own time-zone rules, honouring `TZ`. The child is
-/// stopped at the deadline.
-pub fn local_offset_minutes(deadline: Instant) -> Option<i32> {
-    let mut child = std::process::Command::new("date")
-        .arg("+%z")
-        .env("LC_ALL", "C")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(_)) | Err(_) => return None,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(2)),
-        }
-    }
-    let mut text = String::new();
-    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut text).ok()?;
-    parse_offset(text.trim())
-}
-
-/// `+HHMM` or `-HHMM` as minutes east of UTC.
-pub fn parse_offset(text: &str) -> Option<i32> {
-    let (sign, digits) = match text.as_bytes().first()? {
-        b'+' => (1, &text[1..]),
-        b'-' => (-1, &text[1..]),
-        _ => return None,
-    };
-    if digits.len() != 4 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let hours: i32 = digits[..2].parse().ok()?;
-    let minutes: i32 = digits[2..].parse().ok()?;
-    (hours <= 23 && minutes <= 59).then_some(sign * (hours * 60 + minutes))
-}
-
-/// The last local midnight at or before `now_ms`, at a fixed offset.
-pub fn midnight_ms(now_ms: u64, offset_minutes: i32) -> u64 {
-    let offset = i64::from(offset_minutes) * 60_000;
-    let local = i64::try_from(now_ms)
-        .unwrap_or(i64::MAX)
-        .saturating_add(offset);
-    let midnight = local - local.rem_euclid(86_400_000) - offset;
-    u64::try_from(midnight).unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn offsets_parse_and_midnight_is_local() {
-        assert_eq!(parse_offset("+0100"), Some(60));
-        assert_eq!(parse_offset("-0530"), Some(-330));
-        assert_eq!(parse_offset("+0000"), Some(0));
-        for bad in ["", "0100", "+01", "+01000", "+2460", "+0160", "+01a0"] {
-            assert_eq!(parse_offset(bad), None, "{bad:?}");
-        }
-        // 2026-11-25 10:00 UTC.
-        let now = 1_795_600_800_000;
-        let utc_midnight = 1_795_564_800_000;
-        assert_eq!(midnight_ms(now, 0), utc_midnight);
-        // At UTC-06:00 it is 04:00 on the same day: midnight is 06:00 UTC.
-        assert_eq!(midnight_ms(now, -360), utc_midnight + 6 * 3_600_000);
-        // At UTC+14:00 it is 00:00 on the next day exactly.
-        assert_eq!(midnight_ms(now, 840), now);
-        // One millisecond before that it is still the previous day.
-        assert_eq!(midnight_ms(now - 1, 840), now - 86_400_000);
-    }
 
     #[test]
     fn the_input_directory_prefers_the_workspace_then_cwd() {

@@ -63,9 +63,11 @@ Code only, the one launch host with a status-line command:
   monotonic clock, so each daemon start appends `clock_anchored` (that clock
   with the wall clock); a refusal is placed in wall time by its generation's
   anchor as it is applied, and a refusal of an unanchored generation (older
-  history) is never counted. The CLI finds local midnight from `date +%z`,
-  falling back to UTC. At most 1024 refusals from the last 48 hours are kept
-  in memory for the count; they are derived from the events on replay.
+  history) is never counted. The CLI finds local midnight with the system's
+  time-zone rules for that date, asking `date` for the offset at the
+  instants around midnight (so a daylight-saving day starts at its own
+  00:00, not an hour off), falling back to UTC. At most 1024 refusals from
+  the last 48 hours are kept in memory for the count; they are derived from the events on replay.
 - Failure mode: one socket call within 200 ms (100 to 5000); when the
   coordinator is down or slow it prints `langspan · coordinator not running`
   and exits 0. It never starts the coordinator, uses no network and writes

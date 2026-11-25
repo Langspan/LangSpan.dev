@@ -131,9 +131,10 @@ and per-project trust state.
 ## The status line
 
 `langspan statusline` (roadmap H2, [ADR 0019](../adr/0019-person-facing-surfaces-and-usage-accounting.md))
-adds three boundaries: Claude Code's status-line input on stdin, a `date`
-child process for the local offset, and a `statusLine` entry in the user's
-`~/.claude/settings.json`. The coordinator gains a read (`status_line`) and
+adds three boundaries: Claude Code's status-line input on stdin, `date`
+child processes for the local offset (three on most days, at most five, each
+given only a number of seconds; anything other than `+HHMM` or `-HHMM` is
+ignored), and a `statusLine` entry in the user's `~/.claude/settings.json`. The coordinator gains a read (`status_line`) and
 one reported event (`record_refusal`, a held commit).
 
 | Threat | Control | Residual risk |
@@ -142,7 +143,7 @@ one reported event (`record_refusal`, a held commit).
 | **Tampering**: host input chooses what is counted, or the install damages settings | Stdin is read only when not a terminal and `--root` is absent, within the deadline and the hooks' 8 MiB bound, and ignored beyond 64 KiB; parsed as JSON for `workspace.current_dir` and `cwd` only (at most 4096 bytes each); the directory only selects which registered workspace's counts are shown. The `statusLine` is written by the installer's guarded writer only where none is set, with a marked command whose arguments are single-quoted; another is never replaced or removed. | A hand-written `statusLine` ending in LangSpan's marker is treated as LangSpan's and removed by `uninstall`. |
 | **Repudiation** | Each refusal is an ordered event with its session, kind and time; a retried request is answered from its receipt and adds none. | The held-commit report can fail (the coordinator down); the hold still happens and the hook's diagnostic says the refusal was not recorded. |
 | **Information disclosure**: the line shows another session's work | The line and `--json` carry counts and the workspace ID only, never a path, a session's task or a peer ID. Nothing is printed to the model: Claude Code shows the status line to the person only. Other stdin fields (transcript path, model, cost) are not read. | Anyone who can run the command as the owner sees the counts of every registered workspace by naming its directory, as `status` already shows. |
-| **Denial of service**: the line slows the host | One socket call; the whole command is bounded by its deadline (200 ms, 100 to 5000), and the `date` child is killed at it. On any failure it prints the unavailable line and exits 0. It never starts the coordinator or uses the network. The daemon answers from memory, keeping at most 1024 refusals from the last 48 hours. | Claude Code runs the command after each message; a process start and one call each time. |
+| **Denial of service**: the line slows the host | One socket call; the whole command is bounded by its deadline (200 ms, 100 to 5000), and each `date` child is killed at it. On any failure it prints the unavailable line and exits 0. It never starts the coordinator or uses the network. The daemon answers from memory, keeping at most 1024 refusals from the last 48 hours. | Claude Code runs the command after each message; a few short process starts and one call each time. |
 | **Elevation of privilege** | The command writes nothing to the state directory and records nothing; it grants no admission and changes no permission. | Installing the status line is the owner's grant of a command run after each message; it is shown before it is written. |
 
 ## The LangSpan skill
