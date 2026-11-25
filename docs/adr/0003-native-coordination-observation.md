@@ -320,7 +320,9 @@ arrival; a run reported after a reboot is in a new generation and explains
 no change from before it. A duration counts as two hours at most. The
 run explains a checkout change the scan observed while it ran, or the first
 change observed after it, within 60 seconds, at the branch and HEAD it left.
-Either order works: the scan may see the change before the hook reports, or
+Once a scan while it ran has seen that branch and HEAD, no later change is
+its, so a later file restore at the same HEAD is still told. Either order
+works: the scan may see the change before the hook reports, or
 after. The session that ran it is not told of a change it explains; every
 other session in the checkout still is, with that session and its command
 named. A change no run explains, such as the owner's `git checkout` in a

@@ -162,6 +162,53 @@ fn the_first_change_after_the_command_at_the_checkout_it_left_is_its_own() {
     assert!(alice.iter().all(|notice| notice.by_session.is_none()));
 }
 
+/// Once a scan while the command ran saw the checkout it left, a later
+/// change at that same state within the grace period (the owner restoring
+/// dirty files, with branch and HEAD unchanged) came after it: not its own.
+#[test]
+fn a_change_after_the_run_whose_result_was_already_seen_is_not_its_own() {
+    let mut state = ready();
+    checkout(&mut state, "c1", MAIN, 'b', 1_000);
+    merged(&mut state, "alice", 'b', 300, 1_100);
+    let outcome = run(
+        &mut state,
+        "c2",
+        Command::ObserveCheckout {
+            workspace_id: "work".into(),
+            from_branch: Some(MAIN.into()),
+            to_branch: Some(MAIN.into()),
+            from_head: Some(oid('b')),
+            to_head: Some(oid('b')),
+            files: 2,
+        },
+        5_000,
+    );
+    assert!(
+        matches!(outcome, Outcome::CheckoutObserved { .. }),
+        "{outcome:?}"
+    );
+    let alice = notices(&mut state, "alice", 5_100);
+    assert_eq!(alice.len(), 1, "{alice:?}");
+    assert_eq!(alice[0].by_session, None);
+    let bob = notices(&mut state, "bob", 5_100);
+    assert_eq!(bob.len(), 2, "{bob:?}");
+    assert_eq!(
+        bob.iter()
+            .filter(|notice| notice.by_session.as_deref() == Some("alice"))
+            .count(),
+        1,
+        "{bob:?}"
+    );
+
+    // A scan while it ran that saw only a step on the way (a rebase's
+    // detour) leaves the grace match for the state it left.
+    let mut state = ready();
+    checkout(&mut state, "c1", OTHER, 'c', 1_000);
+    merged(&mut state, "alice", 'b', 300, 1_100);
+    checkout(&mut state, "c2", MAIN, 'b', 3_000);
+    assert_eq!(notices(&mut state, "alice", 3_100), []);
+}
+
 #[test]
 fn a_change_the_command_did_not_leave_or_that_came_too_late_or_too_early_is_told() {
     // At another HEAD than the command left.

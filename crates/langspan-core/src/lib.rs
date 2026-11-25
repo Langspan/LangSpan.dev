@@ -1679,7 +1679,8 @@ pub struct CheckoutRun {
 impl CheckoutRun {
     /// Whether this run explains `change`: observed while the command ran,
     /// or the first change observed after it finished, within
-    /// `CHECKOUT_RUN_GRACE_MS`, at the checkout the command left.
+    /// `CHECKOUT_RUN_GRACE_MS`, at the checkout the command left, unless a
+    /// change while it ran already showed that checkout.
     /// `changes` are the workspace's changes, to find the first.
     pub fn explains(&self, change: &CheckoutChange, changes: &[CheckoutChange]) -> bool {
         if change.workspace_id != self.workspace_id
@@ -1691,14 +1692,20 @@ impl CheckoutRun {
         if change.at_ms <= self.finished_ms {
             return true;
         }
+        let left = |other: &CheckoutChange| {
+            other.to_head == self.to_head && other.to_branch == self.to_branch
+        };
         change.at_ms <= self.finished_ms.saturating_add(CHECKOUT_RUN_GRACE_MS)
-            && change.to_head == self.to_head
-            && change.to_branch == self.to_branch
+            && left(change)
             && !changes.iter().any(|other| {
                 other.change_id != change.change_id
+                    && other.workspace_id == self.workspace_id
                     && other.generation == self.generation
-                    && other.at_ms > self.finished_ms
                     && other.at_ms < change.at_ms
+                    // Another change after the run came first; one while it
+                    // ran at the state it left already showed its result.
+                    && (other.at_ms > self.finished_ms
+                        || (other.at_ms >= self.started_ms && left(other)))
             })
     }
 }
