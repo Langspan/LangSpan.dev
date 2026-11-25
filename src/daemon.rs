@@ -11,7 +11,7 @@ pub async fn run(_state_dir: PathBuf) -> Result<(), crate::Error> {
 #[cfg(unix)]
 mod unix {
     use crate::{
-        auto_check, local,
+        auto_check, local, notify,
         protocol::{self, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response},
         store::{Execution, Store},
     };
@@ -44,6 +44,16 @@ mod unix {
         /// How long a workspace's sessions must stop writing before its
         /// automatic check starts, so one burst of batches runs one check.
         auto_check_debounce_ms: u64,
+        /// Desktop notices (roadmap H3): off unless switched on.
+        notify: bool,
+        /// A sound with each notice: off unless switched on.
+        notify_sound: bool,
+        /// At most one notice of a kind this often.
+        notify_kind_interval_ms: u64,
+        /// At most this many notices in any hour.
+        notify_hourly_limit: u32,
+        /// A handoff not taken up this long gets a notice.
+        notify_handoff_after_ms: u64,
     }
     impl Default for Config {
         fn default() -> Self {
@@ -53,6 +63,11 @@ mod unix {
                 max_clients: 32,
                 remote_pass_ms: 5000,
                 auto_check_debounce_ms: 2000,
+                notify: false,
+                notify_sound: false,
+                notify_kind_interval_ms: 300_000,
+                notify_hourly_limit: 10,
+                notify_handoff_after_ms: 600_000,
             }
         }
     }
@@ -82,13 +97,24 @@ mod unix {
                 || !(1..=128).contains(&result.max_clients)
                 || !(200..=600_000).contains(&result.remote_pass_ms)
                 || !(50..=60_000).contains(&result.auto_check_debounce_ms)
+                || !(1000..=86_400_000).contains(&result.notify_kind_interval_ms)
+                || !(1..=60).contains(&result.notify_hourly_limit)
+                || !(1000..=86_400_000).contains(&result.notify_handoff_after_ms)
             {
                 return Err(
-                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000"
+                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000"
                         .into(),
                 );
             }
             Ok(result)
+        }
+        fn notice_settings(&self) -> notify::Settings {
+            notify::Settings {
+                on: self.notify,
+                sound: self.notify_sound,
+                kind_interval: Duration::from_millis(self.notify_kind_interval_ms),
+                hourly_limit: self.notify_hourly_limit,
+            }
         }
     }
     struct Job {
@@ -614,11 +640,36 @@ mod unix {
                     })
                 })?;
         }
+        let (notice_sender, notice_receiver) = mpsc::sync_channel::<notify::Notice>(notify::QUEUE);
+        {
+            // Read again for each notice, so `langspan notify on|off` needs
+            // no restart.
+            let directory = directory.clone();
+            std::thread::Builder::new()
+                .name("langspan-notices".into())
+                .spawn(move || {
+                    notify::worker(notice_receiver, || {
+                        Config::read(&directory)
+                            .map(|config| config.notice_settings())
+                            .map_err(|error| error.to_string())
+                    })
+                })?;
+        }
+        let handoff_after = Duration::from_millis(config.notify_handoff_after_ms);
+        store.tap(notify::relevant);
         std::thread::Builder::new()
             .name("langspan-owner".into())
             .spawn(move || {
                 // Holding the file handle keeps ownership for exactly the writer's lifetime.
                 let _lock = lock;
+                let mut handoffs = notify::Handoffs::default();
+                // Never waits: a notice that finds the queue full is dropped.
+                let raise = |notice: notify::Notice| {
+                    let kind = notice.kind.name();
+                    if notice_sender.try_send(notice).is_err() {
+                        eprintln!("{}", serde_json::json!({"level":"info","event":"notice_dropped","kind":kind,"reason":"queue_full"}));
+                    }
+                };
                 let mut scan_pending = false;
                 let mut graph_reader: Option<crate::graph::Index> = None;
                 let mut next_scan = Instant::now();
@@ -716,7 +767,16 @@ mod unix {
                     }
                     if Instant::now() >= next_liveness {
                         observe_processes(&mut store, &mut previous_session, now);
+                        for notice in handoffs.due(store.state(), Instant::now(), handoff_after) {
+                            raise(notice);
+                        }
                         next_liveness = Instant::now() + Duration::from_secs(1);
+                    }
+                    // Facts already committed, whoever asked for them.
+                    for event in store.take_tapped() {
+                        if let Some(notice) = notify::notice_for(store.state(), &event) {
+                            raise(notice);
+                        }
                     }
                     if !scan_pending && (!urgent.is_empty() || Instant::now() >= next_scan) {
                         let workspace = std::iter::from_fn(|| urgent.pop_front())

@@ -13,6 +13,7 @@ mod lines;
 mod local;
 pub mod local_day;
 pub mod mcp;
+pub mod notify;
 pub mod protocol;
 mod reformat;
 pub mod regions;
