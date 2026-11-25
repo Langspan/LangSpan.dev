@@ -96,7 +96,12 @@ precedence. `langspan doctor --root /path/to/checkout` reports both setups;
 through a symbolic link (`/tmp` and `/private/tmp` on macOS) is the same
 coordinator, and only a genuinely different directory is reported.
 `langspan uninstall --apply` removes the user-level entries it recognizes and
-leaves the coordination state directory in place.
+leaves the coordination state directory in place. A hooks or MCP file left
+holding nothing else (`{}`, or empty text) is removed rather than left behind.
+Running it again after an upgrade also removes such a file an earlier
+version left behind. A file with any of your own settings in it keeps them
+byte for byte.
+`~/.claude.json` is never removed.
 
 #### An agent tool installed later
 
@@ -1015,11 +1020,51 @@ briefing point (a completed tool call, the next batch, or the next prompt):
 passed, failed with the exit code, stopped at its time limit, or inconclusive,
 with the tree ID and, unless it passed, up to 20 of the last output lines,
 redacted and labelled as the command's own text. Failures are not classified
-(which tests failed is left to the output's lines). The command runs as you, with
+as new or already failing, but when the output is that of `cargo test`,
+`go test -v` or `pytest`, the failing tests it named are listed. The command runs as you, with
 the daemon's environment, outside the agent host's sandbox and permission
 prompts: code an agent writes runs without the host asking. A command that
 looks like it holds a secret is refused; pass secrets through the environment.
 See [ADR 0030](adr/0030-automatic-checks-after-write-batches.md).
+
+#### Tests that flip on unchanged code
+
+Two results of the same check (name and command, compared by its whole
+argument list, not the shortened command line `check status` shows) on the
+same tree, with no write recorded in the workspace between them, that
+disagree about a test are one flip of that test. `check run` learns nothing
+from a command that looks like it holds a secret. A failing automatic check that named a failing test and
+took at most `flaky_rerun_max_s` (`config.json`, default 30, 0 turns it off)
+is run once more on the same tree, stopped after at most that long, to get
+that second result; a longer one is not run again, and a write recorded while
+either run goes, even one undone, means neither is compared. The rerun is
+not a record: the first
+run's failure is the result, in `check status` and to `land`, whatever the
+rerun found. Two `check run`s of one tree with no write between or during
+them are compared too. A test the output names as skipped (`ignored` in
+`cargo test`, `--- SKIP:` in `go test -v`, `SKIPPED`, `XFAIL` or `XPASS` in
+`pytest -v`) neither passed nor failed in that run, even when the run passed,
+and is not compared. A test that flipped at least twice in its last 20 such runs is known to
+flip, until it has gone 50 runs without one. Its failures are then labelled in
+the briefing, and still count as failures:
+
+```text
+1 failure named in its output: net::times_out (known to flip on unchanged code, 2 of 14 runs). Every one is of a test known to flip on unchanged code; the check still failed.
+```
+
+```sh
+langspan check flaky WORKSPACE [--name NAME] [--json]
+tests  "net::times_out"  runs 14  flips 2  last flip 3h ago
+langspan check flaky WORKSPACE --forget net::times_out [--name NAME] --request-id ID
+```
+
+`--forget` clears what was learned about a test, including its last result,
+so its next failure is not labelled. A test or check name that looks like a
+secret is refused (`secret_in_test_name`) before anything is recorded: such a
+name is never learned, so there is nothing to forget. The MCP tool `langspan_flaky_tests` reads the same list. Only test
+names are kept, in the local event log; no output, and nothing is published.
+Names are read from at most 4 MiB of output (at most 100 names and 10 KiB per
+run); a runner LangSpan does not recognise teaches nothing.
 
 ## Commits in a shared checkout
 
@@ -1190,6 +1235,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |
+| `langspan_flaky_tests` | Read which tests are known to flip on unchanged code, with runs, flips and the age of the last flip |
 | `langspan_land_cancel` | Stop a landing waiting for the push turn, by its `request_id` |
 | `langspan_recap` | Summarize one workspace's recorded activity, checks, notes and pending messages |
 | `langspan_today` | The day so far from the event log: sessions, refusals, checks, landings and what is still open, within 2,400 bytes |
@@ -1251,13 +1297,14 @@ processes exit `0` and convey denials through their JSON reply.
 Optional `config.json` in the state directory must be owner-only (`0600`):
 
 ```json
-{"io_timeout_ms":2000,"request_timeout_ms":5000,"max_clients":32,"auto_check_debounce_ms":2000,"host_check_ms":3600000}
+{"io_timeout_ms":2000,"request_timeout_ms":5000,"max_clients":32,"auto_check_debounce_ms":2000,"flaky_rerun_max_s":30,"host_check_ms":3600000}
 ```
 
 Timeout values accept 100–5000 ms; client count accepts 1–128;
-`auto_check_debounce_ms` accepts 50–60000; `host_check_ms`, how often the
-coordinator looks for agent hosts with no LangSpan install, accepts
-100–86400000. IPC and MCP frames
+`auto_check_debounce_ms` accepts 50–60000; `flaky_rerun_max_s` accepts
+0–3600 (0: a failing automatic check is never run again); `host_check_ms`,
+how often the coordinator looks for agent hosts with no LangSpan install,
+accepts 100–86400000. IPC and MCP frames
 are limited to 64 KiB. The MCP SDK discards oversized input lines without replying
 to that line. An MCP tool result carries each answer twice, as structured
 content and as JSON text that escapes every quotation mark and backslash

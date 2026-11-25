@@ -37,6 +37,14 @@ fn ready() -> State {
     state
 }
 
+/// The state without its counted writes, which mark automatic-check reruns
+/// and grant nothing.
+fn authority(state: &State) -> State {
+    let mut state = state.clone();
+    state.writes.clear();
+    state
+}
+
 fn present(digit: &str) -> Value {
     json!({"type": "present", "digest": digit.repeat(64)})
 }
@@ -67,7 +75,7 @@ fn disk_facts_keep_baseline_distinct_from_creation_and_never_change_authority() 
         let mut input = disk();
         input["before"] = prior.clone();
         let decision = decide(&state, &command(input), "scan-1", 20);
-        assert_eq!(state, before);
+        assert_eq!(authority(&state), authority(&before));
         let outcome = serde_json::to_value(&decision.outcome).unwrap();
         assert_eq!(outcome["type"], "disk_observed");
         assert_eq!(outcome["observation"]["before"], prior);
@@ -77,7 +85,7 @@ fn disk_facts_keep_baseline_distinct_from_creation_and_never_change_authority() 
         assert_eq!(outcome["observation"]["generation"], 1);
         assert_eq!(decision.events.len(), 1);
         apply(&mut state, &decision.events[0]).unwrap();
-        assert_eq!(state, before);
+        assert_eq!(authority(&state), authority(&before));
     }
 }
 
@@ -98,7 +106,8 @@ fn deletion_is_a_missing_file_and_correlations_are_sorted_unverified_ids() {
     let mut replay = state.clone();
     apply(&mut replay, &decision.events[0]).unwrap();
     assert_eq!(
-        replay, state,
+        authority(&replay),
+        authority(&state),
         "correlation never grants or completes a lease"
     );
 }
@@ -118,7 +127,7 @@ fn a_kind_change_is_visible_when_content_digest_is_the_same() {
     );
     let mut replay = state.clone();
     apply(&mut replay, &decision.events[0]).unwrap();
-    assert_eq!(replay, state);
+    assert_eq!(authority(&replay), authority(&state));
 }
 
 #[test]
