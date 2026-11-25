@@ -747,7 +747,10 @@ When an indexed export disappears or its signature changes, relevant sessions
 receive an interface notice at their next prompt. The notice names files they
 work on or have read that mention the changed name. Notices stay within one
 physical workspace. Body-only changes produce no notice, and a rename appears
-as a removal. A first indexing produces no change notice.
+as a removal. A first indexing produces no change notice. When a file holds
+several definitions of one name (a method of that name on two types, say), a
+definition added or removed is told as such, with how many there are now:
+"a second method "text" was added … (now 2 definitions with that name)".
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
 Code) or an `apply_patch` (Codex) is admitted, the hook parses the calls in the
