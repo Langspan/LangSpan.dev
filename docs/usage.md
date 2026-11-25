@@ -1107,10 +1107,17 @@ so `cargo fmt --all` during another session's test run leaves each session's
 `commit --mine` able to take its own hunks, and a new file one session wrote
 stays that session's after another session's formatter rewrites it. Tokens
 are compared by language: Rust, TypeScript and JavaScript as words and
-punctuation, with a comma just before a closing `)`, `]` or `}` ignored (a
-formatter adds and drops those when it wraps a list); Markdown as words and
-punctuation; any other file as its text with all whitespace removed.
-Whitespace inside a string literal is not told apart from formatting.
+punctuation, each string or character literal one token whitespace and all,
+with a comma just before a closing `)`, `]` or `}` ignored (a formatter adds
+and drops those when it wraps a list); Markdown as words and punctuation;
+Python as words, punctuation and strings, with the indentation of each line
+that starts a statement as content, so re-wrapping a call inside its
+parentheses is formatting but re-indenting a block is not; YAML, Makefiles
+and other indentation-sensitive files (`.haml`, `.pug`, `.sass`, `.styl`,
+`.nim`, `.fs` and the others ADR 0011 lists) as words and punctuation with
+every line's indentation as content; any other file as its text with all
+whitespace removed. Trailing whitespace and blank lines are always
+formatting.
 
 A change that alters tokens (a rename, an added line) is credited as before:
 to the command's session when nothing else could have made it and it
