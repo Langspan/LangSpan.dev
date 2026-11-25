@@ -934,9 +934,17 @@ built in a private index from `HEAD`, so nothing anyone else staged rides
 along, and made with your identity and Git hooks. The branch moves only if no
 other commit landed meanwhile; if one did, the session's changes are planned
 again on top of it once, or the command refuses and nothing is lost. Everything else stays as it
-was, staged or not, and is listed. If a hunk mixes the session's lines with
-another's or with lines no session wrote, nothing is committed (exit 1) and
-the hunk is named. Lines are matched by content, not position, so sessions
+was, staged or not, and is listed. When Git joins the session's lines and
+another session's into one hunk (two entries added one below the other to a
+list), the hunk is split between them and only the session's own lines are
+committed. If a hunk mixes the session's lines with lines no session wrote,
+or one session's line there replaced another's, or the two sessions' lines
+there could be in more than one order (one session changed "A B C" to "B X"
+and the other removed B: X could go above B or below it), nothing is
+committed (exit 1) and the hunk is named, with the reason. Nothing is
+committed either if the partial patch would not keep the session's lines in
+their one place among the other session's, or does not apply exactly to the
+version in the index. Lines are matched by content, not position, so sessions
 editing one file in turn keep their own hunks however their edits shift each
 other's lines. When another session changed the file in a write whose lines
 are not known, the session's hunks are still committed unless one of their
@@ -983,6 +991,12 @@ still takes them. A file in which the command rewrote another session's
 uncommitted lines is credited to neither session and left for its owner,
 as is a file another session edited or a shell run of another session may
 have written while the command ran ([ADR 0011](adr/0011-shell-writes.md)).
+One exception: lines the command only reformatted (same tokens, with
+whitespace and line breaks changed) that this session wrote and has not
+committed stay its own even while another session's command ran, so
+`cargo fmt --all` during another session's test run does not stop
+`commit --mine`. A line that other command could have changed otherwise is
+still no session's.
 
 When a Git step fails, the error names the step, its exit status and what Git
 said (its last lines, at most 1 KiB, redacted as other relayed text is). The
