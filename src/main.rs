@@ -20,9 +20,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  is refused without --allow-network; from a phone, use
                                  an SSH tunnel or a VPN to this machine instead
   workspace add ID ROOT          Register a physical workspace
-  workspace list                 Every workspace: root and whether it exists, current
+  workspace list [--after ID]    Every workspace: root and whether it exists, current
                                  sessions, notes, pending messages, check records,
-                                 automatic check and remote sharing
+                                 automatic check and remote sharing; a page at a
+                                 time, in ID order, naming the next page's command
   workspace move ID NEW_ROOT [--switch] --request-id ID
                                  Rebind a workspace to a checkout you moved (the old
                                  root is gone), or with --switch to another checkout of
@@ -2814,7 +2815,9 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 workspace_id: (*id).into(),
                 root: (*root).into(),
             },
-            ["workspace", "list"] => Command::WorkspaceList,
+            ["workspace", "list"] => Command::WorkspaceList {
+                after: options.remove("--after"),
+            },
             ["workspace", "move", id, root] => Command::WorkspaceMove {
                 workspace_id: (*id).into(),
                 // The daemon runs elsewhere: a relative root is this shell's.
@@ -3007,7 +3010,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphBlindSpots { .. }
                 | Command::Recap { .. }
                 | Command::Today { .. }
-                | Command::WorkspaceList
+                | Command::WorkspaceList { .. }
                 | Command::WorkspaceRemove { apply: false, .. }
         ) {
             options
@@ -3260,7 +3263,7 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             "Workspace {} registered at {:?}.",
             workspace.workspace_id, workspace.root
         ),
-        Outcome::Workspaces { workspaces } => {
+        Outcome::Workspaces { workspaces, next } => {
             if workspaces.is_empty() {
                 println!("No workspaces are registered.");
             }
@@ -3287,6 +3290,9 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                     workspace.checks,
                     extras.concat()
                 );
+            }
+            if let Some(next) = next {
+                println!("More: langspan workspace list --after {next}");
             }
         }
         Outcome::WorkspaceMoved {

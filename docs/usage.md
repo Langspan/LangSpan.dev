@@ -1085,9 +1085,14 @@ Project hooks name the old root; rerun:
   langspan hooks install claude-code --workspace 'app' --root '/path/to/work/app' --state-dir '…' --apply
 ```
 
-`workspace list [--json]` shows every workspace with its root and whether it
-exists, its current sessions, notes, pending messages, check records, and
-whether its automatic check and remote sharing are on.
+`workspace list [--after ID] [--json]` shows every workspace with its root and
+whether it exists, its current sessions, notes, pending messages, check
+records, and whether its automatic check and remote sharing are on. It answers
+a page at a time, in workspace ID order: at most 100 workspaces, and fewer when
+long roots would not fit one frame. When more remain, the page ends with
+`More: langspan workspace list --after ID` (`next` in the JSON); run that for
+the next page. A cursor whose workspace was removed since still continues after
+it.
 
 `workspace move ID NEW_ROOT` is for a checkout you moved: the old root must be
 gone and NEW_ROOT must be the top of a Git checkout. With `--switch`, the old

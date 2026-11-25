@@ -32,11 +32,19 @@ commands of the CLI only, for every host's workspaces. There is no MCP tool:
 moving or removing a workspace changes what every session is coordinated
 against, so it stays an owner command, as with `remote enable`.
 
-- `langspan workspace list [--json]` is a read (no receipt, no event): each
-  workspace's ID and root, whether the root is a directory now (the daemon
-  looks; the pure core cannot), its current sessions (this generation, not
-  ended), notes, pending messages, check records, and whether an automatic
-  check and remote sharing are on.
+- `langspan workspace list [--after ID] [--json]` is a read (no receipt, no
+  event): each workspace's ID and root, whether the root is a directory now
+  (the daemon looks; the pure core cannot), its current sessions (this
+  generation, not ended), notes, pending messages, check records, and whether
+  an automatic check and remote sharing are on. It is paged so that any
+  number of workspaces can be read: the core gives at most
+  `MAX_WORKSPACE_PAGE` (100) in ID order after the cursor `after`, a
+  workspace ID, and the store ends a page sooner to keep it within the same
+  byte budget as a `status --all` page (a root is at most 4096 bytes, so a
+  page always holds at least one). `next` is the last listed ID when more
+  remain. A cursor is a position in ID order, not a reference, so one whose
+  workspace was removed meanwhile still continues after it. No MCP tool lists
+  workspaces.
 - `langspan workspace move ID NEW_ROOT --request-id ID` is for a checkout
   the person moved. The daemon first checks, read-only and within one
   second, that NEW_ROOT is the top of a Git checkout (`not_checkout_top`

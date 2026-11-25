@@ -562,6 +562,70 @@ fn a_switch_away_from_the_checkout_its_id_was_derived_from_is_refused() {
     );
 }
 
+/// More workspaces than one frame holds are listed page by page, each page
+/// within a frame, every workspace once, in ID order.
+#[test]
+fn workspace_list_pages_with_a_cursor_however_many_workspaces_there_are() {
+    let mut home = Home::new();
+    home.start();
+    // Long roots, so that all of them in one answer would exceed a frame.
+    let long = "d".repeat(200);
+    let parent = home.base.join([long.as_str(); 4].join("/"));
+    let ids: Vec<String> = (0..80).map(|n| format!("w{n:03}")).collect();
+    for id in &ids {
+        let root = parent.join(id);
+        fs::create_dir_all(&root).unwrap();
+        home.ok(&[
+            "workspace",
+            "add",
+            id,
+            text(&root),
+            "--request-id",
+            &format!("add-{id}"),
+        ]);
+    }
+    let (mut seen, mut after, mut pages) = (Vec::new(), None::<String>, 0);
+    loop {
+        let mut args = vec!["workspace", "list", "--json"];
+        if let Some(cursor) = &after {
+            args.extend(["--after", cursor]);
+        }
+        let output = home.run(&args);
+        assert!(
+            output.stdout.len() < langspan::protocol::MAX_FRAME_BYTES,
+            "a page of {} bytes",
+            output.stdout.len()
+        );
+        let page: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stdout)));
+        assert_eq!(page["outcome"]["type"], "workspaces", "{page}");
+        let listed = page["outcome"]["workspaces"].as_array().unwrap();
+        assert!(!listed.is_empty(), "{page}");
+        seen.extend(
+            listed
+                .iter()
+                .map(|w| w["workspace_id"].as_str().unwrap().to_owned()),
+        );
+        pages += 1;
+        assert!(pages < 40, "paging does not end");
+        match page["outcome"]["next"].as_str() {
+            Some(next) => after = Some(next.to_owned()),
+            None => break,
+        }
+    }
+    assert!(pages > 1, "all {} in one page", seen.len());
+    assert_eq!(seen, ids);
+    // The text form names the command for the next page.
+    let first = home.ok(&["workspace", "list"]);
+    assert!(
+        first.contains("More: langspan workspace list --after "),
+        "{first}"
+    );
+    // A cursor is a workspace ID; anything else is refused, not guessed at.
+    let (code, refused) = home.cli(&["workspace", "list", "--after", "not an id"]);
+    assert_eq!(code, 1, "{refused}");
+}
+
 #[test]
 fn removal_is_a_dry_run_until_applied_and_waits_for_admissions_and_sharing() {
     let mut home = Home::new();

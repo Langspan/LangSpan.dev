@@ -171,10 +171,15 @@ fn remove(apply: bool) -> Command {
 #[test]
 fn list_shows_each_workspace_with_what_it_holds() {
     let mut state = ready();
-    let Outcome::Workspaces { workspaces } = run(&mut state, "read", Command::WorkspaceList, 10)
-    else {
+    let Outcome::Workspaces { workspaces, next } = run(
+        &mut state,
+        "read",
+        Command::WorkspaceList { after: None },
+        10,
+    ) else {
         panic!("a list")
     };
+    assert_eq!(next, None, "one page holds both");
     let ids: Vec<&str> = workspaces.iter().map(|w| w.workspace_id.as_str()).collect();
     assert_eq!(ids, ["other", "work"]);
     let work = &workspaces[1];
@@ -608,10 +613,92 @@ fn replaying_the_log_reproduces_moves_and_removals() {
     assert_eq!(replayed, state);
 }
 
+/// Pages hold at most `MAX_WORKSPACE_PAGE` workspaces in ID order; the
+/// cursor is the last one's ID, and a cursor whose workspace was removed
+/// since still continues after it.
+#[test]
+fn the_list_pages_in_id_order_from_a_cursor() {
+    let mut state = State::default();
+    apply(&mut state, &Event::Booted { generation: 1 }).unwrap();
+    let total = langspan_core::MAX_WORKSPACE_PAGE * 2 + 5;
+    let ids: Vec<String> = (0..total).map(|n| format!("w{n:04}")).collect();
+    for id in &ids {
+        run(
+            &mut state,
+            &format!("add-{id}"),
+            Command::WorkspaceRegister {
+                workspace_id: id.clone(),
+                root: format!("/repos/{id}"),
+            },
+            0,
+        );
+    }
+    let page = |state: &mut State, after: Option<&str>| match run(
+        state,
+        "read",
+        Command::WorkspaceList {
+            after: after.map(str::to_owned),
+        },
+        10,
+    ) {
+        Outcome::Workspaces { workspaces, next } => (
+            workspaces
+                .into_iter()
+                .map(|w| w.workspace_id)
+                .collect::<Vec<_>>(),
+            next,
+        ),
+        other => panic!("{other:?}"),
+    };
+    let (mut seen, mut after, mut pages) = (Vec::new(), None, 0);
+    loop {
+        let (listed, next) = page(&mut state, after.as_deref());
+        assert!(listed.len() <= langspan_core::MAX_WORKSPACE_PAGE);
+        assert_eq!(next.as_ref(), next.as_ref().and(listed.last()));
+        seen.extend(listed);
+        pages += 1;
+        match next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(pages, 3);
+    assert_eq!(seen, ids);
+
+    // The cursor's own workspace is removed: the next page is unchanged.
+    let (first, cursor) = page(&mut state, None);
+    let cursor = cursor.unwrap();
+    assert_eq!(first.last(), Some(&cursor));
+    let (expected, _) = page(&mut state, Some(&cursor));
+    run(
+        &mut state,
+        "rm",
+        Command::WorkspaceRemove {
+            workspace_id: cursor.clone(),
+            apply: true,
+        },
+        20,
+    );
+    assert_eq!(page(&mut state, Some(&cursor)).0, expected);
+    // Past the last: an empty page, no cursor.
+    assert_eq!(page(&mut state, Some("z")), (Vec::new(), None));
+    // Not a workspace ID: refused.
+    let refused = run(
+        &mut state,
+        "read",
+        Command::WorkspaceList {
+            after: Some("../x".into()),
+        },
+        30,
+    );
+    assert_eq!(error_code(&refused).0, "invalid_id", "{refused:?}");
+}
+
 #[test]
 fn the_wire_forms_are_strict() {
     for (json, ok) in [
         (r#"{"op":"workspace_list"}"#, true),
+        (r#"{"op":"workspace_list","after":"w"}"#, true),
         (r#"{"op":"workspace_list","x":1}"#, false),
         (
             r#"{"op":"workspace_move","workspace_id":"w","root":"/r"}"#,

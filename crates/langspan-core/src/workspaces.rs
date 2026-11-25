@@ -78,29 +78,58 @@ fn current(state: &State, session_id: &str) -> bool {
             .is_some_and(|activity| activity.ended)
 }
 
-pub(crate) fn list(state: &State) -> Vec<WorkspaceSummary> {
-    state
+/// Workspaces in one `workspace list` page at most. The daemon's store may
+/// end a page sooner to keep it within a frame (a root can be 4 KiB).
+pub const MAX_WORKSPACE_PAGE: usize = 100;
+
+/// One page of workspaces in ID order after the workspace ID `after`, and
+/// the cursor for the next page when more remain. A cursor need not name a
+/// workspace still registered: the page starts after it in ID order.
+pub(crate) fn list(
+    state: &State,
+    after: Option<&str>,
+) -> Result<(Vec<WorkspaceSummary>, Option<String>), CoreError> {
+    use std::ops::Bound;
+    let start = match after {
+        Some(after) => {
+            validate_id(after, "workspace list cursor")?;
+            Bound::Excluded(after)
+        }
+        None => Bound::Unbounded,
+    };
+    let mut rest = state
         .workspaces
-        .values()
-        .map(|workspace| {
-            let id = workspace.workspace_id.as_str();
-            WorkspaceSummary {
-                workspace_id: id.to_owned(),
-                root: workspace.root.clone(),
-                root_exists: false,
-                sessions_current: count(
-                    sessions_of(state, id)
-                        .filter(|session| current(state, session))
-                        .count(),
-                ),
-                notes: count(state.notes.get(id).map_or(0, Vec::len)),
-                messages_pending: count(state.messages.get(id).map_or(0, Vec::len)),
-                checks: count(state.checks.get(id).map_or(0, Vec::len)),
-                auto_check: state.auto_checks.contains_key(id),
-                remote_sharing: state.remote_links.get(id).is_some_and(|link| link.enabled),
-            }
-        })
-        .collect()
+        .range::<str, _>((start, Bound::Unbounded))
+        .map(|(_, workspace)| workspace);
+    let page: Vec<WorkspaceSummary> = rest
+        .by_ref()
+        .take(MAX_WORKSPACE_PAGE)
+        .map(|workspace| summary(state, workspace))
+        .collect();
+    let next = rest
+        .next()
+        .and(page.last())
+        .map(|last| last.workspace_id.clone());
+    Ok((page, next))
+}
+
+fn summary(state: &State, workspace: &Workspace) -> WorkspaceSummary {
+    let id = workspace.workspace_id.as_str();
+    WorkspaceSummary {
+        workspace_id: id.to_owned(),
+        root: workspace.root.clone(),
+        root_exists: false,
+        sessions_current: count(
+            sessions_of(state, id)
+                .filter(|session| current(state, session))
+                .count(),
+        ),
+        notes: count(state.notes.get(id).map_or(0, Vec::len)),
+        messages_pending: count(state.messages.get(id).map_or(0, Vec::len)),
+        checks: count(state.checks.get(id).map_or(0, Vec::len)),
+        auto_check: state.auto_checks.contains_key(id),
+        remote_sharing: state.remote_links.get(id).is_some_and(|link| link.enabled),
+    }
 }
 
 fn registered<'a>(state: &'a State, workspace_id: &str) -> Result<&'a Workspace, CoreError> {

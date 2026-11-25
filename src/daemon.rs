@@ -1696,7 +1696,7 @@ mod unix {
                     complete_dashboard(dashboard, graph);
                 }
                 // Only the daemon looks at the filesystem.
-                if let Outcome::Workspaces { workspaces } = &mut execution.outcome {
+                if let Outcome::Workspaces { workspaces, .. } = &mut execution.outcome {
                     for workspace in workspaces {
                         workspace.root_exists = Path::new(&workspace.root).is_dir();
                     }

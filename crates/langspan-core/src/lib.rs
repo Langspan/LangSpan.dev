@@ -31,7 +31,9 @@ pub use today::{
     TODAY_SESSIONS, Today, TodayChecks, TodayLandings, TodayOpen, TodayQuery, TodaySession,
     TodayWindow, today,
 };
-pub use workspaces::{MAX_ENDING_SESSIONS, WorkspaceEnding, WorkspaceKept, WorkspaceSummary};
+pub use workspaces::{
+    MAX_ENDING_SESSIONS, MAX_WORKSPACE_PAGE, WorkspaceEnding, WorkspaceKept, WorkspaceSummary,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1897,8 +1899,13 @@ pub enum Command {
         root: String,
         verified_overlaps: Vec<String>,
     },
-    /// Read-only: every registered workspace with what it holds.
-    WorkspaceList,
+    /// Read-only: one page of the registered workspaces with what each
+    /// holds, in ID order, after the workspace ID `after` (from the first
+    /// when absent). The daemon's store also bounds each page's bytes.
+    WorkspaceList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
     /// Rebind the workspace to `root`: a checkout the owner moved (the old
     /// root is gone), or with `switch` another checkout of the same
     /// repository. The daemon checks the filesystem and Git before the core
@@ -2373,7 +2380,10 @@ enum CommandWire {
         workspace_id: String,
         root: String,
     },
-    WorkspaceList {},
+    WorkspaceList {
+        #[serde(default)]
+        after: Option<String>,
+    },
     WorkspaceMove {
         workspace_id: String,
         root: String,
@@ -2825,6 +2835,9 @@ pub enum Outcome {
     },
     Workspaces {
         workspaces: Vec<WorkspaceSummary>,
+        /// The cursor for the next page (`after`), when more remain.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
     },
     WorkspaceMoved {
         workspace: Workspace,
@@ -3180,12 +3193,13 @@ fn decide_checked(
                 outcome: Outcome::Workspace { workspace },
             })
         }
-        Command::WorkspaceList => Ok(Decision {
-            events: Vec::new(),
-            outcome: Outcome::Workspaces {
-                workspaces: workspaces::list(state),
-            },
-        }),
+        Command::WorkspaceList { after } => {
+            let (workspaces, next) = workspaces::list(state, after.as_deref())?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Workspaces { workspaces, next },
+            })
+        }
         Command::WorkspaceMove {
             workspace_id, root, ..
         } => workspaces::decide_move(state, workspace_id, root, &[], now_ms),

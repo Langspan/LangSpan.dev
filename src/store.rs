@@ -84,6 +84,31 @@ fn part_end(text: &str, start: usize, room: usize) -> usize {
     end
 }
 
+/// A `workspace list` page within `PAGE_BUDGET_BYTES`: the core bounds it
+/// by count, and a root can be 4 KiB, so it may end sooner here, with the
+/// cursor moved back to its last workspace. It always keeps one, which a
+/// root's bound lets fit.
+fn workspace_page(
+    mut workspaces: Vec<langspan_core::WorkspaceSummary>,
+    mut next: Option<String>,
+) -> Outcome {
+    let mut bytes = 0usize;
+    let keep = workspaces
+        .iter()
+        .take_while(|workspace| {
+            let size = serde_json::to_vec(workspace).map_or(usize::MAX, |json| json.len() + 1);
+            let first = bytes == 0;
+            bytes = bytes.saturating_add(size);
+            first || bytes <= PAGE_BUDGET_BYTES
+        })
+        .count();
+    if keep < workspaces.len() {
+        workspaces.truncate(keep);
+        next = workspaces.last().map(|last| last.workspace_id.clone());
+    }
+    Outcome::Workspaces { workspaces, next }
+}
+
 /// Identifies one record's JSON across pages, so that a page resumes inside
 /// a record only if the record has not changed. Not a security control: a
 /// mismatch (or a different build) starts the record again from its start.
@@ -478,7 +503,7 @@ impl Store {
                 | Command::Today { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
-                | Command::WorkspaceList
+                | Command::WorkspaceList { .. }
                 | Command::WorkspaceRemove { apply: false, .. }
         ) {
             return Ok(None);
@@ -569,10 +594,11 @@ impl Store {
             | Command::LandingReadiness { .. }
             | Command::TurnQueue { .. }
             | Command::StatusLine { .. }
-            | Command::WorkspaceList
+            | Command::WorkspaceList { .. }
             | Command::WorkspaceRemove { apply: false, .. }
             | Command::Recap { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
+                    Outcome::Workspaces { workspaces, next } => workspace_page(workspaces, next),
                     // A recap must fit one frame with room for the envelope.
                     Outcome::Recap { mut recap } => {
                         recap.shrink_until(|recap| {
@@ -733,6 +759,7 @@ impl Store {
     }
 
     /// One page of state records from `after`, within `PAGE_BUDGET_BYTES`.
+    /// (`workspace_page` bounds a `workspace list` page the same way.)
     /// A record that fits a page is never split; one that does not (an
     /// entry at its limits can be larger than a frame) is given as parts of
     /// its JSON, so that every valid state can be read. A page holds at
