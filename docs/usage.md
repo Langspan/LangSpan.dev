@@ -697,8 +697,9 @@ the hunk is named. Lines are matched by content, not position, so sessions
 editing one file in turn keep their own hunks however their edits shift each
 other's lines. When another session changed the file in a write whose lines
 are not known, the session's hunks are still committed unless one of their
-lines appears in the diff more often than the session wrote it; that hunk is
-then named, with the reason. Run from an agent's shell, the session is the one running
+lines appears in the file's changes since `HEAD` more often than the session
+wrote it, or the session's earlier write of that line may already have been
+committed through Git; that hunk is then named, with the reason. Run from an agent's shell, the session is the one running
 the command; from a terminal, pass `--session` (a briefing says "Your session
 ID is …"). It looks for the running command in its own state directory, so
 with hooks installed under `--state-dir`, pass the same `--state-dir`; when

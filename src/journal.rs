@@ -611,9 +611,14 @@ pub fn rewrites_others(
         .collect()
 }
 
-/// A file's content in `HEAD`, empty when `HEAD` does not have it, `None`
-/// when Git cannot say in time.
-fn head_content(root: &Path, path: &str, head: Option<&str>, deadline: Instant) -> Option<Vec<u8>> {
+/// A file's content in `head` (any commit), empty when it does not have it,
+/// `None` when Git cannot say in time or the file is over the bound.
+pub(crate) fn head_content(
+    root: &Path,
+    path: &str,
+    head: Option<&str>,
+    deadline: Instant,
+) -> Option<Vec<u8>> {
     head_blob(root, path, head, deadline).map(Option::unwrap_or_default)
 }
 

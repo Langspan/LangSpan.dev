@@ -1060,3 +1060,77 @@ fn a_file_only_another_session_changed_in_unknown_lines_is_left_as_its() {
     );
     assert_eq!(f.status(), " M long.txt\n");
 }
+
+// Review of #99: copies are counted in the whole file's changes since HEAD,
+// and only this session's writes not yet committed account for them.
+
+/// Stage `content` as `file` in the shared index, the working tree as it is.
+fn stage_version(f: &Fixture, file: &str, content: &str) {
+    let staged = f.base.join("staged");
+    fs::write(&staged, content).unwrap();
+    let staged = staged.to_string_lossy().into_owned();
+    let oid = git(&f.work(), &["hash-object", "-w", "--path", file, &staged]);
+    let info = format!("100644,{},{file}", oid.trim());
+    git(&f.work(), &["update-index", "--cacheinfo", &info]);
+}
+
+#[test]
+fn a_plain_commit_of_only_another_sessions_staged_copy_of_this_sessions_line_is_held() {
+    let f = Fixture::new();
+    let start = long_file(&f);
+    f.edit(ALICE, "a1", "long.txt", "line 30\n", "line 30\nsame\n");
+    // Bob adds a line with the same text, in a write whose lines are not
+    // known, and stages only his own change.
+    f.edit_unseen(BOB, "b1", "long.txt", "line 5\n", "line 5\nsame\n");
+    stage_version(&f, "long.txt", &start.replace("line 5\n", "line 5\nsame\n"));
+
+    let run = f.bash(ALICE, "PreToolUse", "a2", "git commit -m 'Alice'");
+    assert_eq!(run.coverage, "denied_commit", "{run:?}");
+    let reason = run.reason.unwrap();
+    assert!(reason.contains(&format!("claude-code.{BOB}")), "{reason}");
+    assert!(reason.contains("long.txt"), "{reason}");
+}
+
+#[test]
+fn a_line_this_session_committed_through_git_does_not_make_another_sessions_copy_its() {
+    let f = Fixture::new();
+    long_file(&f);
+    f.edit(ALICE, "a1", "long.txt", "line 30\n", "line 30\nsame\n");
+    // Committed through ordinary Git: Alice's journal entry stays.
+    git(&f.work(), &["commit", "-q", "-am", "Alice, through Git"]);
+    f.edit_unseen(BOB, "b1", "long.txt", "line 5\n", "line 5\nsame\n");
+    let head = git(&f.work(), &["rev-parse", "HEAD"]);
+    let content = f.read("long.txt");
+
+    let output = f.commit_mine(ALICE, "Alice");
+    let text = said(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("nothing was committed"), "{text}");
+    assert!(text.contains("long.txt (line 6)"), "{text}");
+    assert!(text.contains("may already be committed"), "{text}");
+    assert_eq!(git(&f.work(), &["rev-parse", "HEAD"]), head);
+    assert_eq!(f.read("long.txt"), content);
+}
+
+#[test]
+fn after_a_commit_through_git_this_sessions_new_hunks_are_still_its_own() {
+    let f = Fixture::new();
+    let start = long_file(&f);
+    f.edit(ALICE, "a1", "long.txt", "line 30\n", "line 30\nAlice 1\n");
+    git(&f.work(), &["commit", "-q", "-am", "Alice, through Git"]);
+    f.reread_and_edit(ALICE, "a2", "long.txt", "line 10\n", "line 10, by Alice\n");
+    f.edit_unseen(BOB, "b1", "long.txt", "line 5\n", "line 5, by Bob\n");
+
+    let output = f.commit_mine(ALICE, "Alice");
+    let text = said(&output);
+    assert!(output.status.success(), "{text}");
+    let alice = start
+        .replace("line 30\n", "line 30\nAlice 1\n")
+        .replace("line 10\n", "line 10, by Alice\n");
+    assert_eq!(git(&f.work(), &["show", "HEAD:long.txt"]), alice);
+    let left = git(&f.work(), &["diff", "-U0", "HEAD"]);
+    assert!(
+        left.contains("+line 5, by Bob") && !left.contains("Alice"),
+        "{left}"
+    );
+}
