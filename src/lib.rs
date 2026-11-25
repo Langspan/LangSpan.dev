@@ -13,6 +13,7 @@ mod lines;
 mod local;
 pub mod mcp;
 pub mod protocol;
+mod reformat;
 pub mod regions;
 mod sha1;
 mod sha256;

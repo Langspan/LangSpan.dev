@@ -850,6 +850,12 @@ still takes them. A file in which the command rewrote another session's
 uncommitted lines is credited to neither session and left for its owner,
 as is a file another session edited or a shell run of another session may
 have written while the command ran ([ADR 0011](adr/0011-shell-writes.md)).
+One exception: lines the command only reformatted (same tokens, with
+whitespace and line breaks changed) that this session wrote and has not
+committed stay its own even while another session's command ran, so
+`cargo fmt --all` during another session's test run does not stop
+`commit --mine`. A line that other command could have changed otherwise is
+still no session's.
 
 When a Git step fails, the error names the step, its exit status and what Git
 said (its last lines, at most 1 KiB, redacted as other relayed text is). The

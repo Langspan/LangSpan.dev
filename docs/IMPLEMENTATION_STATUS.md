@@ -128,6 +128,15 @@ Fixed on `main` since the validation:
   dogfood run in a shared checkout is pending. Another session's formatter
   rewriting this session's uncommitted lines still leaves them credited to
   neither session (#98), so the next edit is refused once as stale.
+- Issue #124: a session's formatter run while another session's shell
+  command is still running keeps the lines it only reformatted, of the
+  session's own uncommitted lines, that session's; `commit --mine` takes
+  them. A line the other command also changed, and another session's lines
+  the formatter rewrote, are credited to no session
+  ([ADR 0011](adr/0011-shell-writes.md)). Tested with two sessions' real
+  hooks, a real command held open by a signal file, a formatter-like `sed`
+  rewrite, real Git and a real daemon (`tests/shell_concurrent_edits.rs`);
+  the dogfood run in a shared checkout is pending.
 - Issue #99: `commit --mine` no longer reports a file as wholly another
   session's because that session made one write whose lines are not known.
   Such a file is still attributed hunk by hunk; a hunk whose lines that

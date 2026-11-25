@@ -32,7 +32,10 @@ against the file as it was just before the write:
 - a `Bash` command: the version its pre-tool snapshot recorded (its content
   kept at that moment when it was not kept already, at most 4 MiB per
   command), or, for a file Git did not list, its `HEAD` content. Contested
-  files (ADR 0011) are not journaled.
+  files (ADR 0011) are not journaled, except for the lines of one that the
+  command only reformatted of its session's own (issue #124): a partial
+  entry keeps just those lines, and its version is not taken as the
+  session's for a file attributed whole.
 
 When the "before" is not known exactly, or a write changes more than 8,192
 lines on one side, the entry says the session changed the file in lines that

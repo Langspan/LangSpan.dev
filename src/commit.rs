@@ -2522,6 +2522,7 @@ mod tests {
                 added: added.iter().map(|l| journal::line_key(l)).collect(),
                 removed: removed.iter().map(|l| journal::line_key(l)).collect(),
             }),
+            partial: false,
         }
     }
 
