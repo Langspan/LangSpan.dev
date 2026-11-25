@@ -13,8 +13,12 @@
 //! none of its lines is this session's and some are that session's; nobody's
 //! when no session wrote any of it. Anything else is not known, and
 //! `commit_mine` refuses it rather than guess. Files Git cannot diff by line
-//! (binary, over 512 KiB, a mode change) belong to the session whose
-//! journaled write left them as they are now.
+//! (binary, over 512 KiB, a mode change), or that this session changed in
+//! lines that are not known, belong to the session whose journaled write
+//! left them as they are now. Another session's write of unknown lines does
+//! not make a file whole: a hunk not wholly this session's may be that
+//! session's, and one that is wholly this session's stays so only while its
+//! writes account for every copy of its lines in the file's diff.
 
 use crate::{
     hook::{Config, Reply, ShellCall},
@@ -366,19 +370,67 @@ fn foreign_sessions(
         .collect()
 }
 
+/// Why a hunk of this session's lines is not committed when another session
+/// also changed the file in lines that are not known.
+const UNSEEN_COPY: &str = "another session changed this file in lines that are not known, and some of this hunk's lines appear more often than this session wrote them";
+
+/// Per line key of `path`: how many more copies this session's journaled
+/// writes added than removed (negative when it removed more).
+fn own_net(me: &str, entries: &[Entry], path: &str) -> BTreeMap<String, i64> {
+    let mut net: BTreeMap<String, i64> = BTreeMap::new();
+    for entry in entries
+        .iter()
+        .filter(|e| e.path == path && is_own(me, &e.session_id))
+    {
+        for key in entry.lines.iter().flat_map(|lines| &lines.added) {
+            *net.entry(key.clone()).or_default() += 1;
+        }
+        for key in entry.lines.iter().flat_map(|lines| &lines.removed) {
+            *net.entry(key.clone()).or_default() -= 1;
+        }
+    }
+    net
+}
+
+/// Whether this session's writes account for every copy, in the whole
+/// file's diff, of each line `hunk` adds and removes. When another session
+/// changed the file in lines that are not known, a line it may also have
+/// written is told apart only by count.
+fn copies_accounted(file: &FileDiff, hunk: &Hunk, net: &BTreeMap<String, i64>) -> bool {
+    let count = |key: &str, side: fn(&Hunk) -> &Vec<String>| {
+        file.hunks
+            .iter()
+            .flat_map(side)
+            .filter(|k| k.as_str() == key)
+            .count() as i64
+    };
+    let net = |key: &str| net.get(key).copied().unwrap_or_default();
+    hunk.added
+        .iter()
+        .all(|key| count(key, |h| &h.added) <= net(key))
+        && hunk
+            .removed
+            .iter()
+            .all(|key| count(key, |h| &h.removed) <= -net(key))
+}
+
 fn file_owners(
     me: &str,
     root: &Path,
     file: &FileDiff,
     claims: &BTreeMap<&str, journal::FileLines<'_>>,
+    entries: &[Entry],
     current: &impl Fn(&Path, &str) -> Option<FileState>,
 ) -> FileOwners {
     let path = claims.get(file.path.as_str());
-    // A write whose lines are not known, or a file too large to journal by
-    // line, makes the file attributable only whole.
+    // A file too large to journal by line, or one this session changed in
+    // lines that are not known, is attributable only whole. Another
+    // session's write of unknown lines is not a reason to: this session's
+    // hunks are still told apart by their lines (issue #99).
     let oversize = fs::symlink_metadata(root.join(&file.path))
         .is_ok_and(|m| m.len() > journal::MAX_FILE_BYTES);
-    let whole = file.whole || oversize || path.is_some_and(|p| !p.unknown.is_empty());
+    let unknown_own = path.is_some_and(|p| p.unknown.iter().any(|s| is_own(me, s)));
+    let whole = file.whole || oversize || unknown_own;
     if whole {
         let others: BTreeSet<String> = path
             .map(|p| {
@@ -406,17 +458,38 @@ fn file_owners(
             whole: true,
         };
     }
+    // Other sessions that changed the file in lines that are not known: any
+    // hunk not wholly this session's may be theirs.
+    let unseen: BTreeSet<String> = path
+        .map(|p| p.unknown.iter().map(|s| (*s).to_owned()).collect())
+        .unwrap_or_default();
+    let net = (!unseen.is_empty()).then(|| own_net(me, entries, &file.path));
+    let mut owners = Vec::new();
+    let mut foreign = Vec::new();
+    for hunk in &file.hunks {
+        let mut owner = hunk_owner(me, hunk, path);
+        let mut theirs = foreign_sessions(me, hunk, path);
+        if let Some(net) = &net {
+            owner = match owner {
+                Owner::Own if copies_accounted(file, hunk, net) => Owner::Own,
+                Owner::Own => Owner::Unknown(UNSEEN_COPY),
+                Owner::Nobody => Owner::Others(unseen.clone()),
+                Owner::Others(mut sessions) => {
+                    sessions.extend(unseen.iter().cloned());
+                    Owner::Others(sessions)
+                }
+                unknown => unknown,
+            };
+            if owner != Owner::Own {
+                theirs.extend(unseen.iter().cloned());
+            }
+        }
+        owners.push(owner);
+        foreign.push(theirs);
+    }
     FileOwners {
-        owners: file
-            .hunks
-            .iter()
-            .map(|hunk| hunk_owner(me, hunk, path))
-            .collect(),
-        foreign: file
-            .hunks
-            .iter()
-            .map(|hunk| foreign_sessions(me, hunk, path))
-            .collect(),
+        owners,
+        foreign,
         whole: false,
     }
 }
@@ -676,7 +749,14 @@ pub fn guard_hook(config: &Config, me: &str, call: &ShellCall, deadline: Instant
     let mut found: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
     let mut evidence = Vec::new();
     for file in &files {
-        let owners = file_owners(me, &config.root, file, &claims, &crate::hook::file_state);
+        let owners = file_owners(
+            me,
+            &config.root,
+            file,
+            &claims,
+            &entries,
+            &crate::hook::file_state,
+        );
         for (index, sessions) in owners.foreign.iter().enumerate() {
             let where_ = match file.hunks.get(index) {
                 Some(hunk) if !owners.whole && !file.created && !file.deleted => lines_of(hunk),
@@ -913,7 +993,7 @@ fn plan(me: &str, root: &Path, files: Vec<FileDiff>, entries: &[Entry]) -> Plann
                 continue;
             }
         }
-        let attributed = file_owners(me, root, &file, &claims, &crate::hook::file_state);
+        let attributed = file_owners(me, root, &file, &claims, entries, &crate::hook::file_state);
         let owners = attributed.owners;
         let mut own = Vec::new();
         let mut others = BTreeSet::new();

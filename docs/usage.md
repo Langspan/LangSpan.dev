@@ -693,7 +693,12 @@ other commit landed meanwhile; if one did, the session's changes are planned
 again on top of it once, or the command refuses and nothing is lost. Everything else stays as it
 was, staged or not, and is listed. If a hunk mixes the session's lines with
 another's or with lines no session wrote, nothing is committed (exit 1) and
-the hunk is named. Run from an agent's shell, the session is the one running
+the hunk is named. Lines are matched by content, not position, so sessions
+editing one file in turn keep their own hunks however their edits shift each
+other's lines. When another session changed the file in a write whose lines
+are not known, the session's hunks are still committed unless one of their
+lines appears in the diff more often than the session wrote it; that hunk is
+then named, with the reason. Run from an agent's shell, the session is the one running
 the command; from a terminal, pass `--session` (a briefing says "Your session
 ID is …"). It looks for the running command in its own state directory, so
 with hooks installed under `--state-dir`, pass the same `--state-dir`; when

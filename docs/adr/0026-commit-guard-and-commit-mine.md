@@ -57,10 +57,24 @@ added it (or, for a removed line, removed it); a session's subagents (IDs
   in unknown lines.
 
 A file that cannot be told apart by line (binary, over 512 KiB, a mode change,
-or one with any write whose lines are not known) is attributed whole: to the
-session whose journaled write left it as it is now, and not known when another
-session also changed it. A subagent's changes count as live while it or the
-session that started it is live.
+or one this session changed in a write whose lines are not known) is
+attributed whole: to the session whose journaled write left it as it is now,
+and not known when another session also changed it. A subagent's changes
+count as live while it or the session that started it is live.
+
+Another session's write whose lines are not known (an edit whose pre-tool
+hook did not run, a shell command whose starting version was not kept) does
+not make the file whole. Until issue #99 it did, and the file went to its
+latest writer: `commit --mine` reported a file as wholly another session's
+and left it, although some hunks in it were this session's. Now its hunks are
+attributed one by one. A hunk not wholly this session's may be that other
+session's, so it is that session's (or not known, if it is partly this
+session's); it is never this session's. A hunk wholly this session's stays so
+only while, for each of its lines, this session's writes added (or removed)
+at least as many copies as the whole file's diff holds; otherwise the other
+session's unknown write may hold one of them, and the hunk is not known, with
+that reason. Line numbers play no part in attribution: lines are matched by
+content, so edits that shift each other's lines do not change whose they are.
 
 **1. The guard, before the command.** In the `Bash` pre-tool hook, before the
 shell snapshot, a lenient reader ([`src/shell/git_commands.rs`](../../src/shell/git_commands.rs))

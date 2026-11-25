@@ -909,3 +909,154 @@ fn commit_mine_in_the_wrong_state_directory_names_it_and_the_installed_one() {
     );
     assert!(f.head_files().contains("start"));
 }
+
+// Issue #99: two sessions editing different parts of one file, in turn.
+
+impl Fixture {
+    /// An `Edit` whose pre-tool hook never ran (it timed out, or the hooks
+    /// were installed mid-call): the journal records the write with its
+    /// lines unknown.
+    fn edit_unseen(&self, session: &str, call: &str, file: &str, old: &str, new: &str) {
+        let path = self.work().join(file);
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains(old), "{file} lacks {old:?}");
+        fs::write(&path, content.replacen(old, new, 1)).unwrap();
+        let input = json!({"file_path": path, "old_string": old, "new_string": new});
+        let post = self.hook(json!({
+            "session_id": session, "cwd": self.work(), "hook_event_name": "PostToolUse",
+            "tool_name": "Edit", "tool_use_id": call, "tool_input": input,
+            "tool_response": {"filePath": path},
+        }));
+        assert!(post.coverage.starts_with("observed"), "{post:?}");
+    }
+
+    /// A `Read` of `file`, then an `Edit` of it: what a session does in
+    /// turn with another one editing the same file.
+    fn reread_and_edit(&self, session: &str, call: &str, file: &str, old: &str, new: &str) {
+        let read = self.hook(json!({
+            "session_id": session, "cwd": self.work(), "hook_event_name": "PostToolUse",
+            "tool_name": "Read", "tool_use_id": format!("{call}-read"),
+            "tool_input": {"file_path": self.work().join(file)},
+        }));
+        assert!(!read.coverage.starts_with("denied"), "{read:?}");
+        self.edit(session, call, file, old, new);
+    }
+}
+
+fn said(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// Forty numbered lines, `long.txt`, committed.
+fn long_file(f: &Fixture) -> String {
+    let content: String = (1..=40).map(|n| format!("line {n}\n")).collect();
+    fs::write(f.work().join("long.txt"), &content).unwrap();
+    git(&f.work(), &["add", "long.txt"]);
+    git(&f.work(), &["commit", "-q", "-m", "long"]);
+    content
+}
+
+#[test]
+fn sessions_editing_one_file_in_turn_each_commit_their_own_hunks_past_shifted_lines() {
+    let f = Fixture::new();
+    let start = long_file(&f);
+    // In alternation, each inserting lines above the other's earlier edits.
+    let edit = |session, call, old, new| f.reread_and_edit(session, call, "long.txt", old, new);
+    edit(ALICE, "a1", "line 30\n", "line 30, by Alice\n");
+    edit(BOB, "b1", "line 25\n", "line 25, by Bob\n");
+    edit(BOB, "b2", "line 5\n", "line 5\nBob 1\nBob 2\nBob 3\n");
+    edit(ALICE, "a2", "line 2\n", "line 2\nAlice 1\nAlice 2\n");
+    edit(BOB, "b3", "line 1\n", "Bob 0\nline 1\n");
+    edit(ALICE, "a3", "line 36\n", "line 36, by Alice\n");
+    edit(BOB, "b4", "line 38\n", "");
+    let all = f.read("long.txt");
+
+    let output = f.commit_mine(ALICE, "Alice");
+    let text = said(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains(&format!("long.txt (claude-code.{BOB})")),
+        "{text}"
+    );
+    let alice = start
+        .replace("line 30\n", "line 30, by Alice\n")
+        .replace("line 2\n", "line 2\nAlice 1\nAlice 2\n")
+        .replace("line 36\n", "line 36, by Alice\n");
+    assert_eq!(git(&f.work(), &["show", "HEAD:long.txt"]), alice);
+    assert_eq!(f.read("long.txt"), all);
+
+    let output = f.commit_mine(BOB, "Bob");
+    assert!(output.status.success(), "{}", said(&output));
+    assert_eq!(git(&f.work(), &["show", "HEAD:long.txt"]), all);
+    assert_eq!(f.status(), "");
+}
+
+#[test]
+fn a_file_is_not_left_as_another_sessions_when_some_hunks_are_this_sessions() {
+    let f = Fixture::new();
+    let start = long_file(&f);
+    f.edit(ALICE, "a1", "long.txt", "line 30\n", "line 30, by Alice\n");
+    // Bob's writes whose lines the journal does not know, above Alice's.
+    f.edit_unseen(BOB, "b1", "long.txt", "line 5\n", "line 5\nBob 1\nBob 2\n");
+    f.reread_and_edit(ALICE, "a2", "long.txt", "line 2\n", "line 2\nAlice 1\n");
+    f.edit_unseen(BOB, "b2", "long.txt", "line 20\n", "line 20, by Bob\n");
+    let all = f.read("long.txt");
+
+    let output = f.commit_mine(ALICE, "Alice");
+    let text = said(&output);
+    assert!(output.status.success(), "{text}");
+    let alice = start
+        .replace("line 30\n", "line 30, by Alice\n")
+        .replace("line 2\n", "line 2\nAlice 1\n");
+    assert_eq!(git(&f.work(), &["show", "HEAD:long.txt"]), alice);
+    assert_eq!(f.read("long.txt"), all);
+    // What is left is Bob's, and only Bob's.
+    let left = git(&f.work(), &["diff", "-U0"]);
+    assert!(!left.contains("Alice"), "{left}");
+    assert!(
+        text.contains(&format!("long.txt (claude-code.{BOB})")),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_hunk_another_sessions_unknown_write_could_share_is_refused_saying_why() {
+    let f = Fixture::new();
+    long_file(&f);
+    f.edit(ALICE, "a1", "long.txt", "line 30\n", "line 30\nsame\n");
+    // Bob adds a line with the same text in a write whose lines are not
+    // known: which of the two is Alice's cannot be told.
+    f.edit_unseen(BOB, "b1", "long.txt", "line 5\n", "line 5\nsame\n");
+    let content = f.read("long.txt");
+    let index = fs::read(f.work().join(".git/index")).unwrap();
+
+    let output = f.commit_mine(ALICE, "Alice");
+    let text = said(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("nothing was committed"), "{text}");
+    assert!(text.contains("long.txt (line"), "{text}");
+    assert!(text.contains("not known"), "{text}");
+    assert!(f.head_files().contains("long"));
+    assert_eq!(fs::read(f.work().join(".git/index")).unwrap(), index);
+    assert_eq!(f.read("long.txt"), content);
+}
+
+#[test]
+fn a_file_only_another_session_changed_in_unknown_lines_is_left_as_its() {
+    let f = Fixture::new();
+    long_file(&f);
+    f.edit(ALICE, "a1", "a.txt", "alpha", "alpha, by Alice");
+    f.edit_unseen(BOB, "b1", "long.txt", "line 5\n", "line 5, by Bob\n");
+    let output = f.commit_mine(ALICE, "Alice");
+    let text = said(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains(&format!("long.txt (claude-code.{BOB})")),
+        "{text}"
+    );
+    assert_eq!(f.status(), " M long.txt\n");
+}
