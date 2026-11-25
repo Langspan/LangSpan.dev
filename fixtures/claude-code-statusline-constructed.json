@@ -1,0 +1,26 @@
+{
+  "hook_event_name": "Status",
+  "session_id": "00000000-0000-4000-8000-00000000000a",
+  "transcript_path": "__CWD__/transcript.jsonl",
+  "cwd": "__CWD__",
+  "model": {
+    "id": "claude-model",
+    "display_name": "Model"
+  },
+  "workspace": {
+    "current_dir": "__CWD__",
+    "project_dir": "__CWD__"
+  },
+  "version": "2.1.330",
+  "output_style": {
+    "name": "default"
+  },
+  "cost": {
+    "total_cost_usd": 0.0,
+    "total_duration_ms": 45000,
+    "total_api_duration_ms": 2300,
+    "total_lines_added": 3,
+    "total_lines_removed": 1
+  },
+  "exceeds_200k_tokens": false
+}

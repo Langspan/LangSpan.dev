@@ -122,6 +122,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  session's, no session's or not known; at most 200
                                  files. What commit --mine would commit and refuse;
                                  changes nothing. Session found as for commit --mine
+  statusline [--root DIR] [--deadline-ms N]
+                                 One line for the person: current sessions of this
+                                 repository and refusals since local midnight, as
+                                 Claude Code's statusLine (directory from its input
+                                 on stdin) or a shell prompt (--root). Never starts
+                                 the coordinator; within 200 ms (100-5000) or it
+                                 prints "coordinator not running" and exits 0
   status --all [--after CURSOR]  Read every record, history included, one page at a
                                  time; pass the page's `next` as --after for the next
   events [--after SEQ] [--limit N] Read ordered events (default limit 100; maximum 1000)
@@ -164,7 +171,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  the project rule .cursor/rules/langspan.mdc, which
                                  hooks remove cursor removes
   install [--home DIR] [--hosts claude-code,codex,cursor,gemini-cli] [--prompt-summary off]
-          [--skill] [--apply]
+          [--skill] [--statusline on|off] [--apply]
                                  Install the hooks once for every repository, in each
                                  host's user configuration, and register `langspan mcp`
                                  as the MCP server `langspan`. Hosts default to those
@@ -175,7 +182,9 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  the LangSpan skill, which teaches an agent how to work
                                  with LangSpan: Claude Code skills/langspan/SKILL.md, a
                                  marked section of Codex's AGENTS.md and of Gemini
-                                 CLI's GEMINI.md
+                                 CLI's GEMINI.md. --statusline on sets Claude Code's
+                                 statusLine to `langspan statusline` where none is
+                                 set (never replacing one); off removes LangSpan's
   uninstall [--home DIR] [--hosts ...] [--apply]
                                  Remove only what install wrote, the skill included;
                                  the state directory stays
@@ -601,6 +610,13 @@ fn user_install(
                 .into(),
         );
     }
+    let status_line = options.remove("--statusline");
+    if status_line.is_some() && !install {
+        return Err(
+            "--statusline is valid only for `install`; `uninstall` always removes LangSpan's status line"
+                .into(),
+        );
+    }
     no_unused_options(options)?;
     let vendors: Vec<Vendor> = match hosts {
         Some(list) => list
@@ -629,6 +645,27 @@ fn user_install(
         .into());
     }
     let executable = hooks::installed_executable(&std::env::current_exe()?)?;
+    // Claude Code's `statusLine` (roadmap H2): only where none is set, and
+    // removed by `uninstall` only where it is LangSpan's.
+    let status_line = match (install, status_line.as_deref()) {
+        (false, _) => user_install::StatusLineChoice::Off,
+        (true, None) => user_install::StatusLineChoice::Unchanged,
+        (true, Some("on")) => user_install::StatusLineChoice::On {
+            executable: executable.clone(),
+            state_dir: state_dir.clone(),
+        },
+        (true, Some("off")) => user_install::StatusLineChoice::Off,
+        (true, Some(other)) => {
+            return Err(format!("--statusline takes on or off, not {other:?}").into());
+        }
+    };
+    if status_line != user_install::StatusLineChoice::Unchanged
+        && install
+        && !vendors.contains(&Vendor::ClaudeCode)
+    {
+        return Err("--statusline is for Claude Code, the one host with a status-line command; add claude-code to --hosts".into());
+    }
+    let status_line = &status_line;
     let registration = install.then(|| hooks::UserRegistration {
         executable: executable.clone(),
         state_dir: state_dir.clone(),
@@ -682,8 +719,19 @@ fn user_install(
             }
             continue;
         }
-        let planned = hooks::plan_user_for(vendor, existing.clone(), registration)
-            .map_err(|e| format!("{}: {e}", files.hooks.display()))?;
+        // Claude Code's status line lives in the same settings file as its
+        // hooks: one plan, one guarded write.
+        let plan_file = move |existing: Option<serde_json::Value>| {
+            let planned = hooks::plan_user_for(vendor, existing, registration)?;
+            if vendor == Vendor::ClaudeCode {
+                user_install::plan_status_line(planned, status_line)
+            } else {
+                Ok((planned, None))
+            }
+        };
+        let (planned, note) =
+            plan_file(existing.clone()).map_err(|e| format!("{}: {e}", files.hooks.display()))?;
+        notes.extend(note);
         let path = files.hooks.clone();
         let replan = move |now: Option<&[u8]>| -> Result<Vec<u8>, langspan::Error> {
             let existing = hooks::parse_json(&path, now)?;
@@ -694,8 +742,8 @@ fn user_install(
                 )
                 .into());
             }
-            let planned = hooks::plan_user_for(vendor, existing, registration)
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+            let (planned, _) =
+                plan_file(existing).map_err(|e| format!("{}: {e}", path.display()))?;
             hooks::json_bytes(&planned)
         };
         plans.push((
@@ -1113,6 +1161,40 @@ fn commit_mine(
         println!("{}", report.text());
     }
     Ok(report.exit_code())
+}
+
+/// `statusline`: sessions here and refusals today, for the person (H2).
+/// Exits 0 with the unavailable line when the coordinator cannot answer.
+fn status_line(
+    state_dir: &std::path::Path,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    use langspan::status_line::{DEADLINE_RANGE_MS, DEFAULT_DEADLINE_MS, run};
+    let started = std::time::Instant::now();
+    let root = options.remove("--root").map(PathBuf::from);
+    let deadline_ms = number(options, "--deadline-ms", DEFAULT_DEADLINE_MS)?;
+    no_unused_options(options)?;
+    if !DEADLINE_RANGE_MS.contains(&deadline_ms) {
+        return Err(format!(
+            "--deadline-ms must be between {} and {}",
+            DEADLINE_RANGE_MS.start(),
+            DEADLINE_RANGE_MS.end()
+        )
+        .into());
+    }
+    let answer = run(
+        state_dir,
+        root,
+        std::time::Duration::from_millis(deadline_ms),
+        started,
+    );
+    if json {
+        println!("{}", answer.json());
+    } else {
+        println!("{}", answer.text());
+    }
+    Ok(0)
 }
 
 /// `status --mine`: this session's uncommitted lines, read-only (issue #40).
@@ -2577,6 +2659,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 json,
             );
         }
+        ["statusline"] => return status_line(&state_dir, &mut options, json),
         ["commit"] => return commit_mine(&state_dir, &mut options, json),
         ["status"] if options.remove("--mine").is_some() => {
             return status_mine(&state_dir, &mut options, json);
@@ -2934,7 +3017,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--workspace" | "--root" | "--budget-ms" | "--settings" | "--prompt-summary"
             | "--code-briefing" | "--max-peers" | "--remote" | "--name" | "--share-task"
             | "--onto" | "--timeout-s" | "--wait-s" | "--session" | "--to" | "--from"
-            | "--home" | "--hosts" | "--listen" | "-m" | "--message" => {
+            | "--home" | "--hosts" | "--listen" | "-m" | "--message" | "--statusline"
+            | "--deadline-ms" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -3467,6 +3551,10 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 change.files
             )
         ),
+        Outcome::StatusLine { line } => println!("{}", line.text()),
+        Outcome::RefusalRecorded { session_id } => {
+            println!("Refusal recorded for session {session_id}.")
+        }
         Outcome::Recap { recap } => {
             println!(
                 "Workspace {} at {:?}{}.",

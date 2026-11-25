@@ -142,7 +142,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## H. The person's view
 
-- [H2: A status line in Claude Code](https://github.com/Langspan/LangSpan.dev/issues/76): a person cannot see peers or today's refusals from the agent's own window.
 - [H3: Desktop notices for refusals and handoffs](https://github.com/Langspan/LangSpan.dev/issues/77): refusals and waiting handoffs go unnoticed when the person is not watching that agent.
 - [H4: A daily summary: `langspan today`](https://github.com/Langspan/LangSpan.dev/issues/78): `recap` shows current state, not an account of what the day's sessions did.
 - [H5: A monthly refusal count](https://github.com/Langspan/LangSpan.dev/issues/79): a person deciding whether to keep LangSpan has no count of how often it intervened.

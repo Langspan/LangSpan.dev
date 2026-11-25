@@ -5,13 +5,21 @@
 //! replay validity is calculated from the current recovered state.
 
 use langspan_core::{
-    Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event, LeaseStatus, Outcome,
-    RecordedEvent, SentPublication, State, StatusRecord, apply, dashboard_denials, decide,
-    expiry_events, shrink_status, status_records,
+    ClockAnchor, Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event,
+    LeaseStatus, Outcome, RecordedEvent, SentPublication, State, StatusRecord, apply,
+    dashboard_denials, decide, expiry_events, shrink_status, status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 use std::time::Duration;
+
+/// The wall clock in Unix milliseconds; 0 if it reads before the epoch.
+pub fn wall_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
 
 /// A read answer's body stops before this many bytes, leaving the rest of
 /// the 64 KiB frame for the envelope and JSON escaping of the envelope.
@@ -175,7 +183,20 @@ impl Store {
             .checked_add(1)
             .ok_or("authority generation exhausted; refusing to reuse a generation")?;
         let mut store = Self { connection, state };
-        store.commit(&[Event::Booted { generation }], None)?;
+        // The generation's clock against the wall clock, so refusals can be
+        // placed on a day (the status line, roadmap H2).
+        let anchor = ClockAnchor {
+            generation,
+            clock_ms: crate::clock::now_ms(),
+            wall_ms: wall_now_ms(),
+        };
+        store.commit(
+            &[
+                Event::Booted { generation },
+                Event::ClockAnchored { anchor },
+            ],
+            None,
+        )?;
         Ok(store)
     }
 
@@ -425,6 +446,7 @@ impl Store {
                 | Command::LandingReadiness { .. }
                 | Command::TurnQueue { .. }
                 | Command::Recap { .. }
+                | Command::StatusLine { .. }
                 | Command::Dashboard
         ) {
             return Ok(None);
@@ -514,6 +536,7 @@ impl Store {
             | Command::CheckStatus { .. }
             | Command::LandingReadiness { .. }
             | Command::TurnQueue { .. }
+            | Command::StatusLine { .. }
             | Command::Recap { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
                     // A recap must fit one frame with room for the envelope.
