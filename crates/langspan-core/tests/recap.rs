@@ -397,6 +397,7 @@ fn prompted(session: &str, summary: &str, at_ms: u64) -> Event {
     Event::SessionPrompted {
         session_id: session.into(),
         summary: summary.into(),
+        line_digests: Vec::new(),
         at_ms,
         generation: 1,
     }

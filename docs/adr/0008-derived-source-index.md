@@ -303,8 +303,9 @@ of `crates/langspan-core/tests/recap.rs` over constructed logs, and
 `a_definitions_history_shows_who_changed_it_why_and_that_it_was_reverted` and
 `history_requests_match_the_committed_golden_vector`
 (`fixtures/history-request-v3.json`) in `tests/graph.rs`, with a real daemon,
-index and repository changed across several scans, the CLI and the MCP tool.
-Not yet called on a native host.
+index and repository changed across several scans, the CLI and the MCP tool;
+`history_reads_only_the_events_it_uses` in `src/store.rs` checks that the
+query plans use the partial index. Not yet called on a native host.
 
 **Code briefing at a prompt (added later).** At `UserPromptSubmit`, for both
 hosts, the hook process takes candidate names from the prompt: ASCII words of
