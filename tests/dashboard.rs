@@ -271,13 +271,15 @@ fn the_dashboard_shows_every_session_only_to_its_token_holder_and_refuses_the_re
     assert_eq!(bob["state"], "editing");
     assert_eq!(bob["editing"], json!(["a.txt"]));
     assert_eq!(view["editing"][0]["path"], "a.txt");
-    // Carol was refused and has recorded no work: listed, not active.
+    // Carol was refused and has recorded no work, but her hook ran: she is
+    // active (roadmap J12), editing nothing.
     let carol = agents
         .iter()
         .find(|row| row["session"] == "22222222")
         .expect("Carol's session");
-    assert_eq!(carol["state"], "idle", "{carol}");
-    assert_eq!(view["active_agents"], 2);
+    assert_eq!(carol["state"], "active", "{carol}");
+    assert_eq!(carol["editing"], json!([]), "{carol}");
+    assert_eq!(view["active_agents"], 3);
     assert!(view["uptime_ms"].as_u64().is_some());
     let conflict = &view["denials"]["conflicts"][0];
     assert_eq!(conflict["session_id"], format!("codex.{CAROL}"));

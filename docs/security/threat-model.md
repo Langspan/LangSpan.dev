@@ -534,12 +534,39 @@ remain excluded from parent admissions even if the `.git` marker disappears.
 Separate worktrees share repository lineage, not writable file identity.
 
 **Process observations.** Linux PID, boot identity and process start metadata
-identify an incarnation. A missing or reused PID is exited; an uncertain probe
-is unknown. A different binding in the current generation is rejected. Restart
-makes previously projected liveness unknown until re-observed. The one-second
-poll visits at most 64 bindings; unchanged non-exited observations are coalesced
-for 15 seconds. These intervals do not promise instantaneous liveness, and
-neither a dead process nor a live process releases or extends any lease.
+identify an incarnation; on macOS, PID and start time. A missing or reused PID
+is exited; an uncertain probe is unknown. A different binding in the current
+generation is rejected. Restart makes previously projected liveness unknown
+until re-observed. The one-second poll visits at most 64 bindings; unchanged
+non-exited observations are coalesced for 15 seconds. These intervals do not
+promise instantaneous liveness, and neither a dead process nor a live process
+releases or extends any lease.
+
+**macOS process probe (roadmap J12).** A new child process: the hook (to find
+its host ancestor) and the daemon (to probe bindings) run `/bin/ps` by its
+absolute path. STRIDE: *Spoofing*: a `ps` earlier in `PATH` is never used, and
+the environment is cleared except `LC_ALL=C`. *Tampering*: the output is parsed
+into typed fields and a line that does not parse is dropped; the start token is
+hashed from it, so a crafted name cannot forge another incarnation's token.
+*Repudiation*: every recorded result is a `session_liveness_observed` event.
+*Information disclosure*: only ID, parent, owner, state, start time and
+accounting name are asked for, never arguments or environment; the ancestor
+walk lists only this user's processes, and another user's process is refused
+and recorded `unknown`. *Denial of service*: each run has a two-second deadline
+after which it is killed, its output is bounded to 1 MiB and read while it
+runs, and the daemon probes a page of up to 64 bindings in one run and does
+not re-probe one a hook saw alive less than 15 seconds before. *Elevation of
+privilege*: `ps` runs with LangSpan's own rights and no input; its only
+variable arguments are the user's numeric ID and a list of numeric PIDs; a failed or slow listing records `unknown`, never `exited`,
+so it cannot drop a live session from briefings.
+
+**Hook-run sightings (roadmap J12).** A `session_seen` event is evidence that
+a session's hook ran, from a same-user client of the owner-only socket. It is
+written at most once per 30 seconds per session, needs a session registered in
+this generation, never registers one, and grants, renews or releases nothing.
+A local client can keep a session it names in peers' briefings by sending
+requests for it; that is the same trust any such client already has over a
+session's prompts and edits. An unrecognised session is refused.
 
 **Git observations.** Scans have a two-second budget and rotate across workspaces
 on two-second opportunities. They bound file counts, content bytes, branches and

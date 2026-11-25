@@ -21,7 +21,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  an SSH tunnel or a VPN to this machine instead
   workspace add ID ROOT          Register a physical workspace
   session start ID WORKSPACE      Register or reattach a logical session
-  session attach-pid SESSION PID  Observe an owned process incarnation (Linux)
+  session attach-pid SESSION PID  Observe an owned process incarnation (Linux, macOS)
   intent set SESSION PATH...     Declare work; optional --summary TEXT
   intent end SESSION             End a work intention
   admit SESSION PATH...          Request a whole file set; --ttl-ms defaults to 5000
@@ -3193,6 +3193,10 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             liveness.observed_at_ms,
             liveness.generation
         ),
+        Outcome::SessionSeen {
+            session_id,
+            last_hook_ms,
+        } => println!("Session {session_id}: last hook run recorded at {last_hook_ms} ms."),
         Outcome::Intent { intent } => println!(
             "Intent for {}: {} on {:?}.",
             intent.session_id,
@@ -3853,6 +3857,13 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                     None => {
                         println!("  Process liveness: unknown; registration is not a heartbeat.")
                     }
+                }
+                match summary
+                    .as_ref()
+                    .and_then(|summary| summary.last_hook_age_ms.get(&session.session_id))
+                {
+                    Some(age) => println!("  Last hook run: {} s ago.", age / 1000),
+                    None => println!("  Last hook run: none recorded in this generation."),
                 }
             }
             for intent in state.intents.values() {
