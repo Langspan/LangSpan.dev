@@ -67,6 +67,7 @@ fn ready() -> State {
         Command::SessionPrompt {
             session_id: "alice".into(),
             summary: "Trace the upload failure".into(),
+            line_digests: Vec::new(),
         },
         0,
     );
