@@ -1,0 +1,435 @@
+[
+ {
+  "run": "0",
+  "scenario": "setup",
+  "host": "Codex 0.171.0",
+  "command": "CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec --trust -s workspace-write -C /tmp/lsc.XXXX/r --json PROMPT",
+  "allowed": "workspace-write sandbox; --trust recorded project trust for the throwaway repo in the dedicated CODEX_HOME",
+  "prompt": "Reply with the single word READY. Do not run any tools.",
+  "note": "Hooks not yet reviewed: Codex ran none and printed nothing about them.",
+  "thread": "01a2145c-16fe-7fa2-b496-c5f201e47bf6",
+  "items": [
+   {
+    "message": "READY"
+   }
+  ]
+ },
+ {
+  "run": "1",
+  "scenario": "1",
+  "host": "Codex 0.171.0",
+  "command": "CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec -s workspace-write -C /tmp/lsc.XXXX/r --json PROMPT",
+  "allowed": "workspace-write sandbox, default approval policy, no extra directories",
+  "prompt": "Run the shell command 'cat src/upload.rs', then use apply_patch to change src/upload.rs so upload also rejects paths longer than 255 bytes. Edit only that file. Do not run tests.",
+  "thread": "01a21465-03bd-7f90-a8ff-8351e22a0bb6",
+  "items": [
+   {
+    "message": "I’ll read `src/upload.rs` with `cat`, then patch only that file to enforce the 255-byte limit."
+   },
+   {
+    "command": "/bin/zsh -lc 'cat src/upload.rs'",
+    "exit_code": 0,
+    "output": "pub fn upload(path: &str) -> bool {\n    !path.is_empty()\n}\n"
+   },
+   {
+    "file_change": [
+     "/tmp/lsc.XXXX/r/src/upload.rs (update)"
+    ],
+    "status": "completed"
+   },
+   {
+    "command": "/bin/zsh -lc 'git diff -- src/upload.rs'",
+    "exit_code": 0,
+    "output": "diff --git a/src/upload.rs b/src/upload.rs\nindex e915af8..fc5ded3 100644\n--- a/src/upload.rs\n+++ b/src/upload.rs\n@@ -1,3 +1,3 @@\n pub fn upload(path: &str) -> bool {\n-    !path.is_empty()\n+    !path.is_empty() && path.len() <= 255\n }\n"
+   },
+   {
+    "message": "Updated [src/upload.rs](/tmp/lsc.XXXX/r/src/upload.rs) so `upload` accepts paths from 1 to 255 bytes. Only that file was edited. No tests were run."
+   }
+  ]
+ },
+ {
+  "run": "2a-peer",
+  "scenario": "2",
+  "host": "Claude Code 2.1.332",
+  "command": "CLAUDE_CONFIG_DIR=~/.local/state/langspan-hosts/claude claude -p --model haiku --permission-mode default --allowedTools 'Bash(sleep:*)' 'Bash(printf:*)' --output-format json PROMPT",
+  "allowed": "Bash limited to sleep and printf; nothing else pre-allowed",
+  "prompt": "Run exactly this one shell command with the Bash tool, unchanged, and nothing else: sleep 25; printf '// peer note\\n' >> src/gate.rs",
+  "note": "Claude Code blocked the long sleep itself; no hold was taken, so this attempt is not a conflict test. The Codex turn that followed (seq 28-39 in the event log) was admitted.",
+  "session": "e1d432ab-9329-4f76-836b-dbb613211ea9",
+  "result": "I didn't run the command. The Bash tool blocked it before it executed: `sleep 25` chained with the `printf` append is a pattern the harness rejects, and it suggests using Monitor with an until-loop or a background run instead. Splitting it into a bare `printf` or a shorter sleep would be a way around that block, and you asked for the command unchanged, so I left it alone. Nothing was written to `src/gate.rs`.\n\nIf you want the note appended, I can run the `printf` alone, without the sleep, which changes the command you specified. Or, if you still want the 25-second delay, I can run it as a background command. Tell me which you prefer.\n\nThe session-start notice says a codex session edited `src/upload.rs` 44 seconds before this prompt. It doesn't list `src/gate.rs`, so I don't see a hold on the file you asked me to change.",
+  "permission_denials": []
+ },
+ {
+  "run": "2b",
+  "scenario": "2",
+  "host": "Codex 0.171.0",
+  "command": "CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec -s workspace-write -C /tmp/lsc.XXXX/r --json PROMPT",
+  "allowed": "workspace-write sandbox",
+  "prompt": "Use apply_patch to change the number 4096 to 8192 in src/gate.rs, keeping the indentation. Do not read the file first. If the edit is refused, do not retry: report the exact refusal text you received, verbatim.",
+  "note": "Peer: interactive Claude Code with an Edit of src/gate.rs waiting at its permission prompt (never answered; cancelled with Esc afterwards). Codex made no tool call: it cited the briefing.",
+  "thread": "01a21467-cb5d-7043-bad7-d49dacd650f2",
+  "items": [
+   {
+    "message": "I couldn’t attempt the edit. The workspace requires me to re-read `src/gate.rs` before changing it, and you asked me to skip that read. I received no refusal text from `apply_patch`."
+   }
+  ]
+ },
+ {
+  "run": "2c",
+  "scenario": "2",
+  "host": "Codex 0.171.0",
+  "command": "CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec -s workspace-write -C /tmp/lsc.XXXX/r --json PROMPT",
+  "allowed": "workspace-write sandbox",
+  "prompt": "Run 'cat src/gate.rs', then use apply_patch to change the number 4096 to 8192 in src/gate.rs, keeping the indentation. If the apply_patch call is refused or blocked, do not retry: report the exact refusal text you received, verbatim, and stop.",
+  "note": "Peer held symbol name() of src/gate.rs (pending Edit). Codex changed limit(), a different symbol, and was admitted.",
+  "thread": "01a21468-c16a-7eb3-9030-e7cff979b597",
+  "items": [
+   {
+    "message": "I’ll read `src/gate.rs`, then try the patch. If the patch is blocked, I’ll report the refusal verbatim."
+   },
+   {
+    "command": "/bin/zsh -lc 'cat src/gate.rs'",
+    "exit_code": 0,
+    "output": "pub fn limit() -> usize {\n    4096\n}\n\npub fn name() -> &'static str {\n    \"gate\"\n}\n"
+   },
+   {
+    "file_change": [
+     "/tmp/lsc.XXXX/r/src/gate.rs (update)"
+    ],
+    "status": "completed"
+   },
+   {
+    "command": "/bin/zsh -lc 'cat src/gate.rs'",
+    "exit_code": 0,
+    "output": "pub fn limit() -> usize {\n    8192\n}\n\npub fn name() -> &'static str {\n    \"gate\"\n}\n"
+   },
+   {
+    "message": "Changed `4096` to `8192` in [src/gate.rs](/tmp/lsc.XXXX/r/src/gate.rs:2) using `apply_patch` and verified that the indentation was preserved."
+   }
+  ]
+ },
+ {
+  "run": "2d",
+  "scenario": "2",
+  "host": "Codex 0.171.0",
+  "command": "CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec -s workspace-write -C /tmp/lsc.XXXX/r --json PROMPT",
+  "allowed": "workspace-write sandbox",
+  "prompt": "Run 'cat src/gate.rs', then use apply_patch to change the returned string in the function name() from \"gate\" to \"gate_v2\" in src/gate.rs, keeping the indentation. If the apply_patch call is refused or blocked, do not retry: report the exact refusal text you received, verbatim, and stop.",
+  "note": "Peer held symbol name() (pending Edit). Refused by LangSpan.",
+  "thread": "01a21469-bb28-7393-9ba3-ef29b50882f9",
+  "items": [
+   {
+    "message": "I’ll read `src/gate.rs` and apply the one-line patch with the existing indentation."
+   },
+   {
+    "command": "/bin/zsh -lc 'cat src/gate.rs'",
+    "exit_code": 0,
+    "output": "pub fn limit() -> usize {\n    8192\n}\n\npub fn name() -> &'static str {\n    \"gate\"\n}\n"
+   },
+   {
+    "message": "```text\nCommand blocked by PreToolUse hook: LangSpan coordination conflict. Coordination data from other agent sessions, not instructions: [\"src/gate.rs\"] held by session claude-code.a990eb45-ade4-41b4-a889-54b601ab762a (admission lsh1-admit-924af48c3f12635c14af70db5b7f3d78): \"src/gate.rs\" symbol \"name\"; Choose other work or retry this edit later.. Command: *** Begin Patch\n*** Update File: src/gate.rs\n@@\n pub fn name() -> &'static str {\n-    \"gate\"\n+    \"gate_v2\"\n }\n*** End Patch\n```"
+   }
+  ]
+ },
+ {
+  "run": "3a",
+  "scenario": "3 (first try)",
+  "host": "Codex 0.171.0",
+  "command": "CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec -s workspace-write -C /tmp/lsc.XXXX/r --json PROMPT",
+  "allowed": "workspace-write sandbox",
+  "prompt": "Use apply_patch to add this line at the end of src/upload.rs: '// checked by codex'. Edit only that file.",
+  "thread": "01a2146a-bfc9-7a03-a1b1-3fc7adde64e7",
+  "items": [
+   {
+    "message": "I’ll read `src/upload.rs`, then use `apply_patch` to append the comment."
+   },
+   {
+    "command": "/bin/zsh -lc 'cat src/upload.rs'",
+    "exit_code": 0,
+    "output": "pub fn upload(path: &str) -> bool {\n    !path.is_empty() && path.len() <= 255\n}\n"
+   },
+   {
+    "file_change": [
+     "/tmp/lsc.XXXX/r/src/upload.rs (update)"
+    ],
+    "status": "completed"
+   },
+   {
+    "command": "/bin/zsh -lc 'tail -n 2 src/upload.rs'",
+    "exit_code": 0,
+    "output": "}\n// checked by codex\n"
+   },
+   {
+    "message": "Appended `// checked by codex` to [src/upload.rs](/tmp/lsc.XXXX/r/src/upload.rs:4) using `apply_patch`. This was the only file I edited."
+   }
+  ]
+ },
+ {
+  "run": "3b-peer",
+  "scenario": "3 (first try)",
+  "host": "Claude Code 2.1.332",
+  "command": "CLAUDE_CONFIG_DIR=~/.local/state/langspan-hosts/claude claude -p --model haiku --permission-mode default --allowedTools Read Edit --output-format json PROMPT",
+  "allowed": "Read and Edit pre-allowed; everything else would be refused",
+  "prompt": "Read src/upload.rs, then use the Edit tool to rename the function upload to upload_path. Edit only that file.",
+  "session": "ce6bb73e-64e4-4464-89d0-2bc045656d62",
+  "result": "I renamed `upload` to `upload_path` in `src/upload.rs` (line 1). Only that file was edited.\n\nThe file now reads `pub fn upload_path(path: &str) -> bool { ... }`. The body and the `// checked by codex` comment are unchanged.\n\nNothing else in the repo was changed, so any caller of `upload` will break. The LangSpan index shows `src/lib.rs` exports the module (`pub mod upload`), but no indexed file references the function by name. I didn't search beyond that index, so a `grep -rn \"upload(\" src/` would confirm there are no callers.\n\nAnother session (codex) edited this file recently. I re-read it right before the edit, and the edit applied to the current content.",
+  "permission_denials": []
+ },
+ {
+  "run": "3c",
+  "scenario": "3 (first try)",
+  "host": "Codex 0.171.0",
+  "command": "cd /tmp/lsc.XXXX/r && CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec resume THREAD -c 'sandbox_mode=\"workspace-write\"' --json PROMPT",
+  "allowed": "workspace-write sandbox",
+  "prompt": "Without reading src/upload.rs first, use apply_patch to change 'path.len() <= 255' to 'path.len() <= 512' in that file. If the apply_patch call is refused or blocked, report the exact refusal text verbatim, then run 'cat src/upload.rs' and make the same change once more with apply_patch against the file's current content.",
+  "note": "No LangSpan hook ran: the resumed session works in /private/tmp/... while the hooks were trusted under /tmp/...; Codex skipped them silently. The edit landed uncoordinated (seen only as disk_observed, seq 122). Discarded with git checkout.",
+  "thread": "01a2146a-bfc9-7a03-a1b1-3fc7adde64e7",
+  "items": [
+   {
+    "message": "I’ll try the one-line patch directly and check the result."
+   },
+   {
+    "file_change": [
+     "/private/tmp/lsc.XXXX/r/src/upload.rs (update)"
+    ],
+    "status": "completed"
+   },
+   {
+    "command": "/bin/zsh -lc \"rg -n -F 'path.len() <= 512' src/upload.rs\"",
+    "exit_code": 0,
+    "output": "2:    !path.is_empty() && path.len() <= 512\n"
+   },
+   {
+    "message": "Changed the path length limit from 255 to 512 in [src/upload.rs](/private/tmp/lsc.XXXX/r/src/upload.rs:2) using `apply_patch`. The first attempt succeeded without reading the file beforehand, and I verified the updated line afterward."
+   }
+  ]
+ },
+ {
+  "run": "3a2",
+  "scenario": "3",
+  "host": "Codex 0.171.0",
+  "command": "CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec -s workspace-write -C /private/tmp/lsc.XXXX/r --json PROMPT",
+  "allowed": "workspace-write sandbox",
+  "prompt": "Use apply_patch to add this line at the end of src/upload.rs: '// reviewed'. Edit only that file.",
+  "thread": "01a2146c-ff17-78f1-9d42-d27a44ef27ca",
+  "items": [
+   {
+    "message": "I’ll reread `src/upload.rs`, then append the comment with `apply_patch`."
+   },
+   {
+    "command": "/bin/zsh -lc 'cat src/upload.rs'",
+    "exit_code": 0,
+    "output": "pub fn upload(path: &str) -> bool {\n    !path.is_empty() && path.len() <= 255\n}\n// checked by codex\n"
+   },
+   {
+    "file_change": [
+     "/private/tmp/lsc.XXXX/r/src/upload.rs (update)"
+    ],
+    "status": "completed"
+   },
+   {
+    "command": "/bin/zsh -lc 'tail -n 2 src/upload.rs'",
+    "exit_code": 0,
+    "output": "// checked by codex\n// reviewed\n"
+   },
+   {
+    "message": "Appended `// reviewed` to [src/upload.rs](/private/tmp/lsc.XXXX/r/src/upload.rs:5) using `apply_patch` and verified it is the final line. This was the only file I edited."
+   }
+  ]
+ },
+ {
+  "run": "3b2-peer",
+  "scenario": "3",
+  "host": "Claude Code 2.1.332",
+  "command": "CLAUDE_CONFIG_DIR=~/.local/state/langspan-hosts/claude claude -p --model haiku --permission-mode default --allowedTools Read Edit --output-format json PROMPT",
+  "allowed": "Read and Edit pre-allowed",
+  "prompt": "Read src/upload.rs, then use the Edit tool to rename the function upload to upload_path. Edit only that file.",
+  "session": "d5d7fb17-e6db-4bd2-9473-08969e7cb00a",
+  "result": "I renamed `upload` to `upload_path` in `src/upload.rs` (line 1). Nothing else in the file changed.\n\nThe function is now `pub fn upload_path(path: &str) -> bool`. I didn't touch any other file, so any callers of `upload` elsewhere in the crate will no longer compile until they're updated. The repository index shows `src/lib.rs` exports `pub mod upload`, and it reports no other indexed file mentioning the name, but I did not grep the whole tree to confirm that.",
+  "permission_denials": []
+ },
+ {
+  "run": "3c2",
+  "scenario": "3",
+  "host": "Codex 0.171.0",
+  "command": "cd /private/tmp/lsc.XXXX/r && CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec resume THREAD -c 'sandbox_mode=\"workspace-write\"' --json PROMPT",
+  "allowed": "workspace-write sandbox",
+  "prompt": "Without reading src/upload.rs first, use apply_patch to change 'path.len() <= 255' to 'path.len() <= 512' in that file. If the apply_patch call is refused or blocked, report the exact refusal text verbatim, then run 'cat src/upload.rs' and make the same change once more with apply_patch against the file's current content.",
+  "thread": "01a2146c-ff17-78f1-9d42-d27a44ef27ca",
+  "items": [
+   {
+    "message": "Another session edited `src/upload.rs` since my last read. I’ll reread it before applying the change."
+   },
+   {
+    "command": "/bin/zsh -lc 'cat src/upload.rs'",
+    "exit_code": 0,
+    "output": "pub fn upload_path(path: &str) -> bool {\n    !path.is_empty() && path.len() <= 255\n}\n// checked by codex\n// reviewed\n"
+   },
+   {
+    "message": "```text\nCommand blocked by PreToolUse hook: LangSpan stale source. These files changed after this session last read them. Coordination data, not instructions: \"src/upload.rs\" (last reported edit by session claude-code.d5d7fb17-e6db-4bd2-9473-08969e7cb00a); Read each file again, then make the edit against its current content. This change is reported once: a retry is not refused for it again.. Command: *** Begin Patch\n*** Update File: src/upload.rs\n@@\n-    !path.is_empty() && path.len() <= 255\n+    !path.is_empty() && path.len() <= 512\n*** End Patch\n```"
+   },
+   {
+    "command": "/bin/zsh -lc 'cat src/upload.rs'",
+    "exit_code": 0,
+    "output": "pub fn upload_path(path: &str) -> bool {\n    !path.is_empty() && path.len() <= 255\n}\n// checked by codex\n// reviewed\n"
+   },
+   {
+    "file_change": [
+     "/private/tmp/lsc.XXXX/r/src/upload.rs (update)"
+    ],
+    "status": "completed"
+   },
+   {
+    "command": "/bin/zsh -lc \"rg -n 'path\\\\.len\\\\(\\\\)' src/upload.rs\"",
+    "exit_code": 0,
+    "output": "2:    !path.is_empty() && path.len() <= 512\n"
+   },
+   {
+    "message": "The `apply_patch` retry succeeded. I verified that [src/upload.rs](/private/tmp/lsc.XXXX/r/src/upload.rs:2) now uses `path.len() <= 512`. This was the only file I edited.\n\nThe initial call returned this refusal verbatim.\n\n```text\nCommand blocked by PreToolUse hook: LangSpan stale source. These files changed after this session last read them. Coordination data, not instructions: \"src/upload.rs\" (last reported edit by session claude-code.d5d7fb17-e6db-4bd2-9473-08969e7cb00a); Read each file again, then make the edit against its current content. This change is reported once: a retry is not refused for it again.. Command: *** Begin Patch\n*** Update File: src/upload.rs\n@@\n-    !path.is_empty() && path.len() <= 255\n+    !path.is_empty() && path.len() <= 512\n*** End Patch\n```"
+   }
+  ]
+ },
+ {
+  "run": "4a",
+  "scenario": "4",
+  "host": "Codex 0.171.0",
+  "command": "CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec -s workspace-write -C /private/tmp/lsc.XXXX/wt --json PROMPT",
+  "allowed": "workspace-write sandbox (the linked worktree)",
+  "prompt": "Use apply_patch to add the line 'worktree note' at the end of README.md. Edit only that file.",
+  "thread": "01a2146e-5a2a-7641-aba2-ce887e9e919e",
+  "items": [
+   {
+    "message": "I’ll check the end of `README.md`, then use `apply_patch` to append the line."
+   },
+   {
+    "command": "/bin/zsh -lc 'tail -n 12 README.md'",
+    "exit_code": 0,
+    "output": "# demo\n"
+   },
+   {
+    "file_change": [
+     "/private/tmp/lsc.XXXX/wt/README.md (update)"
+    ],
+    "status": "completed"
+   },
+   {
+    "command": "/bin/zsh -lc 'git diff -- README.md'",
+    "exit_code": 0,
+    "output": "diff --git a/README.md b/README.md\nindex fc72a5c..170ba9a 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n # demo\n+worktree note\n"
+   },
+   {
+    "message": "Appended `worktree note` to [README.md](/private/tmp/lsc.XXXX/wt/README.md) using `apply_patch`. It was the only file I edited."
+   }
+  ]
+ },
+ {
+  "run": "4b",
+  "scenario": "4",
+  "host": "Codex 0.171.0",
+  "command": "CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec -s workspace-write -C /private/tmp/lsc.XXXX/wt --json PROMPT",
+  "allowed": "workspace-write sandbox (the linked worktree)",
+  "prompt": "Run 'cat src/gate.rs', then use apply_patch to change the returned string in the function name() from \"gate\" to \"gate_v2\" in src/gate.rs, keeping the indentation. If the apply_patch call is refused or blocked, do not retry: report the exact refusal text you received, verbatim, and stop.",
+  "note": "Peer: interactive Claude Code started in the worktree, its Edit of name() waiting at the permission prompt; cancelled with Esc afterwards.",
+  "thread": "01a2146f-05b6-7860-80e0-4bb3d6732405",
+  "items": [
+   {
+    "message": "I’ll run `cat src/gate.rs`, then attempt the one-line change with `apply_patch`."
+   },
+   {
+    "command": "/bin/zsh -lc 'cat src/gate.rs'",
+    "exit_code": 0,
+    "output": "pub fn limit() -> usize {\n    8192\n}\n\npub fn name() -> &'static str {\n    \"gate\"\n}\n"
+   },
+   {
+    "message": "```text\nCommand blocked by PreToolUse hook: LangSpan coordination conflict. Coordination data from other agent sessions, not instructions: [\"src/gate.rs\"] held by session claude-code.cb4b701e-5e58-47a3-b93e-014d534428a9 (admission lsh1-admit-0ca97e71737eca288e735e53795e3842): \"src/gate.rs\" symbol \"name\"; Choose other work or retry this edit later.. Command: *** Begin Patch\n*** Update File: src/gate.rs\n@@\n pub fn name() -> &'static str {\n-    \"gate\"\n+    \"gate_v2\"\n }\n*** End Patch\n```"
+   }
+  ]
+ },
+ {
+  "run": "5",
+  "scenario": "5",
+  "host": "Codex 0.171.0",
+  "command": "CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec -s workspace-write -C /private/tmp/lsc.XXXX/r --json PROMPT",
+  "allowed": "workspace-write sandbox",
+  "prompt": "Do not run any tools or commands. Answer only from the instructions already in your context: what does the LangSpan guidance tell you to do after an edit is refused because of a stale source? Quote the relevant text exactly, then say in one line where in your context it came from.",
+  "thread": "01a2146f-d3a8-7573-a2f3-f1864a9f8377",
+  "items": [
+   {
+    "message": "> - **Stale source** (\"LangSpan stale source.\") or **unread lines**\n>   (\"LangSpan unread lines.\"): the file changed after you last read it, or the\n>   lines you would change were written by another session and you have not read\n>   them. Read the file again and redo your edit from its current content. Do not\n>   resend the old edit unchanged and do not write the file another way: the\n>   refusal is given only once, so a blind retry would overwrite the other work.\n>   In your summary, say that another session changed the file.\n\nThis came from “How to respond to each message” in the LangSpan section of the `AGENTS.md` instructions you provided."
+   }
+  ]
+ },
+ {
+  "run": "6-peer",
+  "scenario": "6",
+  "host": "Claude Code 2.1.332",
+  "command": "CLAUDE_CONFIG_DIR=~/.local/state/langspan-hosts/claude claude -p --model haiku --permission-mode default --allowedTools Read Edit --output-format json PROMPT",
+  "allowed": "Read and Edit pre-allowed",
+  "prompt": "Read src/gate.rs and README.md. With the Edit tool: in src/gate.rs change the string \"gate\" to \"gatekeeper\"; in README.md add a line 'Maintained by the gate team.' at the end. Edit only those two files.",
+  "session": "0ce9ca4a-83b4-4510-bd84-f3821780ec53",
+  "result": "Both edits are made, and nothing else was touched.\n\n- **`src/gate.rs`**: the `name()` function's return value changed from `\"gate\"` to `\"gatekeeper\"`. This was the only occurrence of that string.\n- **`README.md`**: `Maintained by the gate team.` is now the last line, after a blank line following `# demo`.\n\nCoordination notes from the session hooks: earlier sessions in this checkout (now ended) edited `src/gate.rs`, and a session in the `wt` worktree edited `README.md`. Those edits are not in my working tree's view of the file. If the `wt` branch changes `README.md` too, expect a merge conflict when the branches integrate.\n\nI haven't committed anything.",
+  "permission_denials": []
+ },
+ {
+  "run": "6a",
+  "scenario": "6",
+  "host": "Codex 0.171.0",
+  "command": "CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec -s workspace-write --add-dir /private/tmp/lsc.XXXX/r/.git -C /private/tmp/lsc.XXXX/r --json PROMPT",
+  "allowed": "workspace-write sandbox plus the Git directory writable (--add-dir .git)",
+  "prompt": "Run 'cat src/gate.rs src/upload.rs'. Then use apply_patch to change 8192 to 16384 in src/gate.rs and 512 to 1024 in src/upload.rs. Do not touch any other line or file. Then run exactly this command once: langspan --state-dir /private/tmp/lsc.XXXX/st commit --mine -m 'codex: raise limits' and report its complete output verbatim. Do not run git add or git commit yourself, and do not retry the command if it fails.",
+  "thread": "01a21470-71a7-7a32-922f-89ff7a22afd8",
+  "items": [
+   {
+    "message": "I’ll read both files, patch only the two limits, and run the LangSpan commit command once."
+   },
+   {
+    "command": "/bin/zsh -lc 'cat src/gate.rs src/upload.rs'",
+    "exit_code": 0,
+    "output": "pub fn limit() -> usize {\n    8192\n}\n\npub fn name() -> &'static str {\n    \"gatekeeper\"\n}\npub fn upload_path(path: &str) -> bool {\n    !path.is_empty() && path.len() <= 512\n}\n// checked by codex\n// reviewed\n"
+   },
+   {
+    "file_change": [
+     "/private/tmp/lsc.XXXX/r/src/gate.rs (update)",
+     "/private/tmp/lsc.XXXX/r/src/upload.rs (update)"
+    ],
+    "status": "completed"
+   },
+   {
+    "command": "/bin/zsh -lc \"langspan --state-dir /private/tmp/lsc.XXXX/st commit --mine -m 'codex: raise limits'\"",
+    "exit_code": 0,
+    "output": "Committed this session's changes of 2 file(s) as 0536063: src/gate.rs, src/upload.rs.\nLeft as they are, uncommitted: README.md (claude-code.0ce9ca4a-83b4-4510-bd84-f3821780ec53), src/gate.rs (claude-code.0ce9ca4a-83b4-4510-bd84-f3821780ec53).\n"
+   },
+   {
+    "message": "```text\nCommitted this session's changes of 2 file(s) as 0536063: src/gate.rs, src/upload.rs.\nLeft as they are, uncommitted: README.md (claude-code.0ce9ca4a-83b4-4510-bd84-f3821780ec53), src/gate.rs (claude-code.0ce9ca4a-83b4-4510-bd84-f3821780ec53).\n```"
+   }
+  ]
+ },
+ {
+  "run": "6b",
+  "scenario": "6",
+  "host": "Codex 0.171.0",
+  "command": "CODEX_HOME=~/.local/state/langspan-hosts/codex codex exec -s workspace-write -C /private/tmp/lsc.XXXX/r --json PROMPT",
+  "allowed": "workspace-write sandbox only (Git directory left read-only)",
+  "prompt": "Run 'cat src/lib.rs'. Then use apply_patch to add the line '// modules' at the end of src/lib.rs. Do not touch any other file. Then run exactly this command once: langspan --state-dir /private/tmp/lsc.XXXX/st commit --mine -m 'codex: note modules' and report its complete output verbatim. Do not run git add or git commit yourself, do not retry the command if it fails, and do not ask for more permissions.",
+  "thread": "01a21470-e1eb-7281-8958-4d88fc478efb",
+  "items": [
+   {
+    "message": "I’ll read `src/lib.rs`, append the comment with `apply_patch`, and run the specified LangSpan command once."
+   },
+   {
+    "command": "/bin/zsh -lc 'cat src/lib.rs'",
+    "exit_code": 0,
+    "output": "pub mod upload;\npub mod gate;\n"
+   },
+   {
+    "file_change": [
+     "/private/tmp/lsc.XXXX/r/src/lib.rs (update)"
+    ],
+    "status": "completed"
+   },
+   {
+    "message": "```text\n{\"level\":\"error\",\"message\":\"git read-tree 0536063d7e0f6c47d22f3471c31695b78d6380e4 failed (exit status: 128). Git said: fatal: Unable to create '/private/tmp/lsc.XXXX/r/.git/langspan-mine-66644-0-1795639280789.index.lock': Operation not permitted. The Git directory is read-only for this process, as it is inside some agents' workspace sandboxes: run `langspan commit --mine` outside the agent's sandbox (for example from a terminal, or with the host's permission to run it unsandboxed), or make the Git directory writable, then run it again; nothing was committed, and the index is as it was\"}\n```"
+   }
+  ]
+ }
+]

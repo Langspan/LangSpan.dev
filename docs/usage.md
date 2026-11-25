@@ -309,7 +309,7 @@ for current holders, the core compares them with that session's records:
 | Recorded version | Admission result |
 | --- | --- |
 | Matches the current file | The source comparison passes. |
-| Differs from the current file | `stale_base`; no files in the set are admitted. A fresh result makes the hook answer `deny`, naming the changed paths and any known editing peer. |
+| Differs from the current file | `stale_base`; no files in the set are admitted. A fresh result makes the hook answer `deny`, naming the changed paths and, for each, what changed it: a shell command that left the version now on disk ("changed by a shell command of claude-code session `<id>`: cargo fmt --all", its command line redacted and capped), the last peer that reported editing it, or "changed outside any reported edit" when no hook reported the change. |
 | No record for an existing file | Admission can proceed with the path in `base_unknown`; its version was not compared. |
 | No record and the file is missing | Admission can proceed as a new file. |
 
@@ -634,6 +634,44 @@ one explicitly, use `langspan ack bob MESSAGE_ID --request-id ack-1`. Notes and
 messages stay local; remote Git-ref sharing does not publish them. Treat their
 text as data and leave secrets out. [ADR 0009](adr/0009-agent-messages-and-handoff.md)
 describes delivery, retention and the local identity boundary.
+
+## The day so far
+
+`today` gives a one-screen account of a day: for each session its first and
+last activity, how many files its edits named and how many prompts it had;
+admission refusals by kind; check results; how landings ended; and what is
+still open now (admissions held, intents not ended, messages not acknowledged,
+handoffs not taken up, checks whose latest result failed).
+
+```sh
+./target/release/langspan today demo
+./target/release/langspan today --since 2026-11-25T09:00:00+01:00 --json
+```
+
+Without a workspace it covers every workspace. The window starts at local
+midnight, found from the system's time zone rules for that date (offsets read
+from `date`, so a day the clocks change still starts at its 00:00), or at an
+RFC 3339 `--since` time;
+a time before the first event covers everything. Times in the text are shown
+at the current local offset, so on a day the clocks change, times before the
+change are an hour off. The text is at most 40 lines and lists at most eight
+files per session, with a count of the rest; `--json` carries `window`
+(`from_ms`, `to_ms`, Unix milliseconds), `sessions`, `refusals`, `checks`,
+`landings`, `open`, `truncated` and, when there are any, `undated` and
+`omitted_sessions`. The MCP tool `langspan_today` (`workspace_id` and `since`,
+both optional) returns the same text, labelled as data, within 2,400 bytes.
+
+It is a peek, like `recap`: it writes nothing and acknowledges no message.
+Refusals are counted from `write_refused` events, the status line's, by kind:
+a refused write (conflict, stale base or unread lines) or a held commit the
+hook reported (`commit_held`). Each daemon start records a `clock_anchored` event
+that places that run's times on the wall clock; events recorded by a build
+before this one have no such anchor and are counted only as `undated`. A
+landing is placed at the time it took its turn to land. A
+window with more than 50,000 events is summarised from the newest 50,000 and
+says `truncated: true`; when the oldest of those carries no time of its own,
+the first that does decides whether the window may reach past them. With the
+daemon down it exits 1 with "coordination unavailable".
 
 ## Look up symbols and affected files
 
@@ -997,6 +1035,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_flaky_tests` | Read which tests are known to flip on unchanged code, with runs, flips and the age of the last flip |
 | `langspan_land_cancel` | Stop a landing waiting for the push turn, by its `request_id` |
 | `langspan_recap` | Summarize one workspace's recorded activity, checks, notes and pending messages |
+| `langspan_today` | The day so far from the event log: sessions, refusals, checks, landings and what is still open, within 2,400 bytes |
 | `langspan_remember` | Keep a local note about the workspace or named files |
 | `langspan_forget` | Remove a remembered note by ID |
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |

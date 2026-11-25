@@ -30,6 +30,8 @@ struct Fixture {
 struct Run {
     coverage: String,
     detail: String,
+    /// A refusal's reason, as the host shows it to the agent.
+    reason: String,
 }
 
 fn git(root: &Path, arguments: &[&str]) -> String {
@@ -149,9 +151,14 @@ impl Fixture {
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!(output.status.code(), Some(0), "{stderr}");
         let diagnostic: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+        let stdout: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
         Run {
             coverage: diagnostic["coverage"].as_str().unwrap().into(),
             detail: diagnostic["detail"].as_str().unwrap_or_default().into(),
+            reason: stdout["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
         }
     }
 
@@ -420,6 +427,10 @@ fn a_file_changed_by_both_the_command_and_another_sessions_edit_is_unknown() {
     assert_eq!(alice.coverage, "denied_stale", "{alice:?}");
     let bob = f.write_event(BOB, "PreToolUse", "bob-2", "a.txt", "y\n");
     assert_eq!(bob.coverage, "denied_stale", "{bob:?}");
+    // Which of the two made a.txt what it is cannot be told, so neither
+    // refusal puts it down to the command (issue #107).
+    assert!(!alice.reason.contains("shell command"), "{alice:?}");
+    assert!(!bob.reason.contains("shell command"), "{bob:?}");
 }
 
 /// An edit still under way when the command finishes: whether it or the
@@ -582,6 +593,89 @@ fn a_command_adding_to_another_sessions_file_without_rewriting_its_lines_is_cred
     );
     assert_eq!(post.coverage, "shell_observed", "{post:?}");
     assert_eq!(f.credited(ALICE, "Bash"), ["b.txt"]);
+}
+
+/// Issue #107: Alice's formatter rewrites the lines Bob just wrote. Bob's
+/// next edit from his own version is refused once, and the refusal names
+/// Alice's session and her shell command, not a change outside LangSpan.
+#[test]
+fn a_refusal_after_another_sessions_formatter_names_its_session_and_command() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "a.txt", "a line\nfn alice(x,y) {}\n");
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+    let post = f.run_shell(ALICE, "alice-2", &f.formatter(&["a.txt", "b.txt"]));
+    // Rewriting Bob's uncommitted lines credits b.txt to no session...
+    assert_eq!(post.coverage, "contested", "{post:?}");
+
+    // ...but the refusal still knows whose command changed it.
+    let bob = f.write_event(BOB, "PreToolUse", "bob-2", "b.txt", "y\n");
+    assert_eq!(bob.coverage, "denied_stale", "{bob:?}");
+    assert!(
+        bob.reason.contains(&format!(
+            "\"b.txt\" (changed by a shell command of claude-code session {ALICE}: sed "
+        )),
+        "{bob:?}"
+    );
+    assert!(!bob.reason.contains("outside any reported edit"), "{bob:?}");
+}
+
+/// A shell command credited with the file (it rewrote committed lines) is
+/// named as a shell command too, not only as the last reported edit.
+#[test]
+fn a_refusal_after_another_sessions_credited_shell_command_says_it_was_a_command() {
+    let f = Fixture::new();
+    f.write(BOB, "bob-1", "b.txt", "b line\nfn bob(x,y) {}\n");
+    git(&f.work(), &["commit", "-q", "-am", "Bob: committed"]);
+    let post = f.run_shell(ALICE, "alice-1", &f.formatter(&["b.txt"]));
+    assert_eq!(post.coverage, "shell_observed", "{post:?}");
+
+    let bob = f.write_event(BOB, "PreToolUse", "bob-2", "b.txt", "y\n");
+    assert_eq!(bob.coverage, "denied_stale", "{bob:?}");
+    assert!(
+        bob.reason.contains(&format!(
+            "(changed by a shell command of claude-code session {ALICE}: sed "
+        )),
+        "{bob:?}"
+    );
+}
+
+/// The command shown is redacted and capped, like other recorded command
+/// text, and a file changed again outside any hook after the command is
+/// not put down to it.
+#[test]
+fn the_command_named_in_a_refusal_is_redacted_and_capped_and_must_match_the_file() {
+    let f = Fixture::new();
+    f.write(BOB, "bob-1", "b.txt", "b line\n");
+    f.write(BOB, "bob-2", "a.txt", "a line\nBob's\n");
+    let secret = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
+    let padding = "x".repeat(400);
+    let command = format!(
+        "GITHUB_TOKEN={secret} true; for f in b.txt a.txt; do printf 'more\\n' >> $f; done; : {padding}"
+    );
+    f.run_shell(ALICE, "alice-1", &command);
+
+    let bob = f.write_event(BOB, "PreToolUse", "bob-3", "b.txt", "y\n");
+    assert_eq!(bob.coverage, "denied_stale", "{bob:?}");
+    assert!(
+        bob.reason.contains(&format!(
+            "(changed by a shell command of claude-code session {ALICE}: GITHUB_TOKEN=[redacted] true;"
+        )),
+        "{bob:?}"
+    );
+    assert!(!bob.reason.contains(secret), "{bob:?}");
+    assert!(!bob.reason.contains(&padding), "{bob:?}");
+    assert!(bob.reason.contains('…'), "{bob:?}");
+
+    // a.txt changed again with no hook after the command: nobody reported
+    // the version on disk now.
+    fs::write(f.work().join("a.txt"), "rewritten by hand\n").unwrap();
+    let again = f.write_event(BOB, "PreToolUse", "bob-4", "a.txt", "z\n");
+    assert_eq!(again.coverage, "denied_stale", "{again:?}");
+    assert!(
+        again.reason.contains("changed outside any reported edit"),
+        "{again:?}"
+    );
+    assert!(!again.reason.contains("shell command"), "{again:?}");
 }
 
 /// Set `path`'s modification time to `age` ago.

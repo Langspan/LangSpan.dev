@@ -90,6 +90,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   recap WORKSPACE               A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
                                  messages not yet acknowledged
+  today [WORKSPACE] [--since RFC3339]
+                                 What each session did since local midnight (or the
+                                 time given), refusals by kind, checks, landings, and
+                                 what is still open. Reads only; acknowledges nothing
   remember WORKSPACE TEXT [PATH...] [--session ID]
                                  Keep a one-line note for the repository or for files;
                                  sessions working there are told. Survives restarts
@@ -2944,6 +2948,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             ["recap", workspace] => Command::Recap {
                 workspace_id: (*workspace).into(),
             },
+            ["today", workspace @ ..] if workspace.len() <= 1 => Command::Today {
+                workspace_id: workspace.first().map(|id| (*id).into()),
+                from_ms: langspan::today::window_start(
+                    options.remove("--since").as_deref(),
+                    langspan::store::wall_now_ms(),
+                )?,
+            },
             ["remember", workspace, text, paths @ ..] => Command::Remember {
                 workspace_id: (*workspace).into(),
                 author: options.remove("--session"),
@@ -3009,6 +3020,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphImpact { .. }
                 | Command::GraphBlindSpots { .. }
                 | Command::Recap { .. }
+                | Command::Today { .. }
         ) {
             options
                 .remove("--request-id")
@@ -3108,7 +3120,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--code-briefing" | "--max-peers" | "--remote" | "--name" | "--share-task"
             | "--onto" | "--timeout-s" | "--wait-s" | "--session" | "--to" | "--from"
             | "--home" | "--hosts" | "--listen" | "-m" | "--message" | "--statusline"
-            | "--deadline-ms" | "--forget" => {
+            | "--deadline-ms" | "--forget" | "--since" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -3647,6 +3659,12 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 change.files
             )
         ),
+        Outcome::Today { today } => {
+            println!(
+                "{}",
+                langspan::today::text(today, &langspan::today::shown(&today.window))
+            );
+        }
         Outcome::StatusLine { line } => println!("{}", line.text()),
         Outcome::RefusalRecorded { session_id } => {
             println!("Refusal recorded for session {session_id}.")
@@ -3939,21 +3957,7 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
 fn utc(ms: u64) -> String {
     let seconds = ms / 1000;
     let (days, rest) = (seconds / 86_400, seconds % 86_400);
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    let (year, month, day) = langspan::today::civil_from_days(days as i64);
     format!(
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
         rest / 3600,
