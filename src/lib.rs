@@ -14,6 +14,7 @@ mod lines;
 mod local;
 pub mod local_day;
 pub mod mcp;
+pub mod notify;
 pub mod protocol;
 mod reformat;
 pub mod regions;
@@ -22,6 +23,7 @@ mod sha256;
 pub mod skill;
 pub mod status_line;
 pub mod store;
+pub mod test_output;
 pub mod today;
 pub mod user_install;
 
