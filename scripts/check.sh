@@ -10,7 +10,9 @@ cargo fmt --all -- --check
 cargo deny --locked check
 cargo machete
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+# The whole suite, with HOME at a read-only home holding a foreign LangSpan
+# install, so no test can depend on the machine's own (issue #108).
+sh scripts/test-foreign-home.sh
 # The integration tests run the langspan binary, so cargo test has just
 # built target/debug/langspan. No separate `cargo build`: its features
 # resolve without the dev-dependencies, so it would relink the binary (and

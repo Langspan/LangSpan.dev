@@ -15,6 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const CLAUDE: &str = "00000000-0000-4000-8000-0000000000c1";
 
@@ -338,12 +340,17 @@ fn project_hooks_install_once_run_as_installed_and_remove_exactly() {
     let original = "{\n  \"general\": {\n    \"vimMode\": true\n  },\n  \"mcpServers\": {\n    \"docs\": {\n      \"command\": \"npx\",\n      \"env\": {\n        \"DOCS_TOKEN\": \"not-a-real-token\"\n      }\n    }\n  }\n}\n";
     fs::write(&settings, original).unwrap();
     let cli = |args: &[&str]| {
-        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
-            .args(args)
-            .arg("--state-dir")
-            .arg(f.state_dir())
-            .output()
-            .unwrap();
+        // `doctor` reads the user-level install: this test's own home,
+        // never the machine's.
+        let output = support::in_home(
+            &mut Process::new(env!("CARGO_BIN_EXE_langspan")),
+            &f.base.join("home"),
+        )
+        .args(args)
+        .arg("--state-dir")
+        .arg(f.state_dir())
+        .output()
+        .unwrap();
         (
             output.status.code(),
             String::from_utf8(output.stdout).unwrap(),
