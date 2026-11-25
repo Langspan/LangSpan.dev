@@ -51,6 +51,25 @@ pub fn contains_secret(text: &str) -> bool {
     redact_with_home(text, None) != text
 }
 
+/// Why `command` is refused before anything of it is recorded: a field that
+/// names something, which redaction cannot rewrite without naming another
+/// thing, looks like a secret. `None` for every other command.
+pub fn refuse_secret(command: &Command) -> Option<langspan_core::Outcome> {
+    match command {
+        // A secret-looking test name is left out of every recorded result
+        // (see `redact_command`), so there is nothing to forget under it.
+        Command::ForgetFlakyTest { name, test, .. }
+            if contains_secret(test) || name.as_deref().is_some_and(contains_secret) =>
+        {
+            Some(langspan_core::Outcome::Error {
+                code: "secret_in_test_name".into(),
+                message: "The test or check name looks like a secret, so it was not recorded; a test whose name looks like a secret is never learned about, so there is nothing to forget".into(),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Redact every field of `command` that carries owner or agent text.
 pub fn redact_command(command: &mut Command) {
     match command {
@@ -63,8 +82,20 @@ pub fn redact_command(command: &mut Command) {
         Command::Remember { text, .. }
         | Command::SendMessage { text, .. }
         | Command::Handoff { text, .. } => *text = redact(text),
-        Command::RecordCheck { command, .. } => {
+        Command::RecordCheck {
+            command,
+            tests,
+            rerun,
+            ..
+        } => {
             *command = redact_bounded(command, langspan_core::MAX_CHECK_COMMAND_BYTES);
+            // A test name that looks like a secret is left out, not
+            // rewritten: a changed name would be another test.
+            for results in tests.iter_mut().chain(rerun.iter_mut()) {
+                results.failed.retain(|name| !contains_secret(name));
+                results.passed.retain(|name| !contains_secret(name));
+                results.skipped.retain(|name| !contains_secret(name));
+            }
         }
         _ => {}
     }
@@ -643,6 +674,42 @@ mod tests {
             redact_command(command);
             let json = serde_json::to_string(command).unwrap();
             assert!(json.contains("token=[redacted]"), "{json}");
+        }
+    }
+
+    #[test]
+    fn a_secret_looking_test_name_is_left_out_of_every_list_of_a_record() {
+        let secret = secret_shape("ghp_", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789");
+        let results = || langspan_core::TestResults {
+            failed: vec![secret.clone(), "net::times_out".into()],
+            passed: vec![secret.clone(), "parser::keeps_order".into()],
+            skipped: vec![secret.clone(), "needs_net".into()],
+            all_passed: false,
+        };
+        let mut command = Command::RecordCheck {
+            workspace_id: "w".into(),
+            name: "tests".into(),
+            command: "cargo test".into(),
+            command_id: Some("a".repeat(64)),
+            tree_oid: "a".repeat(40),
+            head_oid: None,
+            inputs: vec![],
+            result: langspan_core::CheckResult::Failed { exit_code: 101 },
+            duration_ms: 1,
+            report: None,
+            tests: Some(results()),
+            rerun: Some(results()),
+            writes_before: Some(0),
+        };
+        redact_command(&mut command);
+        let Command::RecordCheck { tests, rerun, .. } = &command else {
+            unreachable!()
+        };
+        for results in [tests, rerun] {
+            let results = results.as_ref().unwrap();
+            assert_eq!(results.failed, ["net::times_out"]);
+            assert_eq!(results.passed, ["parser::keeps_order"]);
+            assert_eq!(results.skipped, ["needs_net"]);
         }
     }
 

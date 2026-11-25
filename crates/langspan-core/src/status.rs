@@ -6,8 +6,8 @@
 use crate::{
     AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CoreError, Intent, InterfaceNotice,
     Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, RemoteLink, RemotePeer,
-    ScanCoverage, ScanFailure, Session, SessionActivity, SessionLiveness, State, Turn, TurnWaiter,
-    UninstalledHost, Workspace, WorkspaceGit, error,
+    ScanCoverage, ScanFailure, Session, SessionActivity, SessionLiveness, State, TestLearning,
+    Turn, TurnWaiter, UninstalledHost, Workspace, WorkspaceGit, error,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,12 +77,16 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         checkouts,
         auto_checks,
         check_notices,
+        test_learning,
         uninstalled_hosts,
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
         // Derived for the source index; never part of the status reply.
         workspace_removals: _,
+        // The write generation check runs carry: one count per workspace,
+        // never trimmed.
+        writes,
     } = state;
     let mut summary = StatusSummary::default();
     let mut open = BTreeMap::new();
@@ -137,11 +141,13 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         checkouts: checkouts.clone(),
         auto_checks: auto_checks.clone(),
         check_notices: keep(check_notices, of_shown),
+        test_learning: test_learning.clone(),
         uninstalled_hosts: uninstalled_hosts.clone(),
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),
         workspace_removals: BTreeMap::new(),
+        writes: writes.clone(),
     };
     (view, summary)
 }
@@ -202,8 +208,10 @@ macro_rules! activity {
 /// Parts of the view left out, in this order, while it does not fit: the
 /// bulkiest histories first, current coordination last. Each name is the one
 /// `StatusSummary::omitted` gives.
-const TRIMS: [Trim; 14] = [
+const TRIMS: [Trim; 15] = [
     activity!("activity.known", known),
+    // `check flaky` reads it through its own command.
+    field!("test_learning", test_learning),
     field!("checks", checks),
     field!("landings", landings),
     field!("interface_notices", interface_notices),
@@ -411,6 +419,10 @@ pub enum StatusRecord {
         key: String,
         notice: CheckNotice,
     },
+    TestLearning {
+        key: String,
+        learning: TestLearning,
+    },
     UninstalledHost {
         key: String,
         host: UninstalledHost,
@@ -427,7 +439,7 @@ pub enum StatusRecord {
 }
 
 /// Record kinds in page order. The cursor names one of these.
-const KINDS: [&str; 22] = [
+const KINDS: [&str; 23] = [
     "workspace",
     "session",
     "intent",
@@ -449,6 +461,7 @@ const KINDS: [&str; 22] = [
     "checkout",
     "auto_check",
     "check_notice",
+    "test_learning",
     "uninstalled_host",
 ];
 
@@ -493,6 +506,7 @@ impl StatusRecord {
             Self::CheckNotice { key, notice } => {
                 state.check_notices.entry(key).or_default().push(notice)
             }
+            Self::TestLearning { key, learning } => drop(state.test_learning.insert(key, learning)),
             Self::UninstalledHost { key, host } => drop(state.uninstalled_hosts.insert(key, host)),
         }
         Ok(())
@@ -680,7 +694,7 @@ pub fn status_records<'a>(
         .as_ref()
         .and_then(|after| Some((after.position.clone(), after.within?)));
     let after = after.as_ref();
-    let pages: [Page<'a>; 22] = [
+    let pages: [Page<'a>; 23] = [
         entries(0, &state.workspaces, after, |key, workspace| {
             StatusRecord::Workspace { key, workspace }
         }),
@@ -748,7 +762,10 @@ pub fn status_records<'a>(
         lists(20, &state.check_notices, after, |key, notice| {
             StatusRecord::CheckNotice { key, notice }
         }),
-        entries(21, &state.uninstalled_hosts, after, |key, host| {
+        entries(21, &state.test_learning, after, |key, learning| {
+            StatusRecord::TestLearning { key, learning }
+        }),
+        entries(22, &state.uninstalled_hosts, after, |key, host| {
             StatusRecord::UninstalledHost { key, host }
         }),
     ];

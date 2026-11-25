@@ -74,6 +74,10 @@ impl Fixture {
     /// A checkout with one commit and a daemon that waits `debounce_ms`
     /// after a session's last batch of writes before it starts the check.
     fn new(debounce_ms: u64) -> Self {
+        Self::with_config(json!({ "auto_check_debounce_ms": debounce_ms }))
+    }
+    /// As `new`, with the daemon's whole `config.json`.
+    fn with_config(config_json: Value) -> Self {
         let base = fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
@@ -93,11 +97,7 @@ impl Fixture {
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let config = state.join("config.json");
-        fs::write(
-            &config,
-            json!({ "auto_check_debounce_ms": debounce_ms }).to_string(),
-        )
-        .unwrap();
+        fs::write(&config, config_json.to_string()).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let daemon = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .args(["daemon", "--state-dir"])
@@ -239,19 +239,7 @@ impl Fixture {
     }
     /// One Claude Code Write of `a.txt`, then the batch that ends with it.
     fn write_batch(&self, call: &str, content: &str) -> Run {
-        let file = self.root().join("a.txt");
-        let input = json!({"file_path": file, "content": content});
-        let tool = |name: &str| {
-            json!({"session_id": ALICE, "cwd": self.root(), "hook_event_name": name,
-                   "tool_name": "Write", "tool_use_id": call, "tool_input": input})
-        };
-        assert_eq!(
-            self.run("claude-code", tool("PreToolUse")).coverage,
-            "admitted"
-        );
-        fs::write(&file, content).unwrap();
-        let post = self.run("claude-code", tool("PostToolUse"));
-        assert_eq!(post.coverage, "observed", "{}", post.detail);
+        let (file, input, post) = self.write(call, content);
         let batch = self.run(
             "claude-code",
             json!({"session_id": ALICE, "cwd": self.root(), "hook_event_name": "PostToolBatch",
@@ -273,6 +261,24 @@ impl Fixture {
             };
         }
         batch
+    }
+    /// One Claude Code Write of `a.txt`, admitted and observed, with no
+    /// batch after it.
+    fn write(&self, call: &str, content: &str) -> (PathBuf, Value, Run) {
+        let file = self.root().join("a.txt");
+        let input = json!({"file_path": file, "content": content});
+        let tool = |name: &str| {
+            json!({"session_id": ALICE, "cwd": self.root(), "hook_event_name": name,
+                   "tool_name": "Write", "tool_use_id": call, "tool_input": input})
+        };
+        assert_eq!(
+            self.run("claude-code", tool("PreToolUse")).coverage,
+            "admitted"
+        );
+        fs::write(&file, content).unwrap();
+        let post = self.run("claude-code", tool("PostToolUse"));
+        assert_eq!(post.coverage, "observed", "{}", post.detail);
+        (file, input, post)
     }
     fn prompt(&self, id: &str) -> Run {
         self.run(
@@ -614,4 +620,492 @@ fn a_check_that_changes_the_tree_itself_is_recorded_inconclusive_and_said_so() {
     assert_eq!(f.log_lines(), ["run"], "no session wrote: not run again");
     let context = f.prompt("p1").context().expect("delivered");
     assert!(context.contains("was inconclusive"), "{context}");
+}
+
+/// A `cargo test`-shaped program that fails on a schedule: its runs are
+/// counted in the log named by `$0`, outside the checkout, and the runs in
+/// `failing` (from 0) report `net::times_out` failing. A run in `slow`
+/// first sleeps for 1.5 s.
+fn scheduled(failing: &[u32], slow: &[u32]) -> String {
+    scheduled_sleeping(failing, slow, "1.5")
+}
+
+/// As `scheduled`, with a run in `slow` sleeping `seconds` first.
+fn scheduled_sleeping(failing: &[u32], slow: &[u32], seconds: &str) -> String {
+    let list = |runs: &[u32]| {
+        if runs.is_empty() {
+            "none".to_owned()
+        } else {
+            runs.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join("|")
+        }
+    };
+    // One line: an automatic check's arguments hold no control characters.
+    format!(
+        concat!(
+            r#"n=$(cat "$0" 2>/dev/null | wc -l | tr -d ' '); echo run >> "$0"; "#,
+            r#"case "$n" in {slow}) sleep {seconds};; esac; "#,
+            r#"echo "running 2 tests"; echo "test parser::keeps_order ... ok"; "#,
+            r#"case "$n" in {failing}) echo "test net::times_out ... FAILED"; "#,
+            r#"echo "test result: FAILED. 1 passed; 1 failed"; exit 101;; "#,
+            r#"*) echo "test net::times_out ... ok"; echo "test result: ok. 2 passed; 0 failed"; exit 0;; esac"#,
+        ),
+        failing = list(failing),
+        slow = list(slow),
+        seconds = seconds,
+    )
+}
+
+/// What the daemon learned about `test` of check `tests`: its flips and
+/// runs on unchanged trees.
+fn learned(f: &Fixture, test: &str) -> Option<(usize, usize)> {
+    let state = f.state();
+    let history = state
+        .test_learning
+        .get("work")?
+        .tests
+        .get("tests")?
+        .get(test)?;
+    Some((
+        history.runs.iter().filter(|flipped| **flipped).count(),
+        history.runs.len(),
+    ))
+}
+
+/// What `land` asks before it pushes: whether a passing check of `tests`
+/// is recorded for exactly `tree`.
+fn ready_to_land(f: &Fixture, tree: &str) -> bool {
+    let request = Request {
+        version: PROTOCOL_VERSION,
+        request_id: "read".into(),
+        command: Command::LandingReadiness {
+            workspace_id: "work".into(),
+            name: "tests".into(),
+            tree_oid: tree.into(),
+        },
+    };
+    match client::call(&f.state_dir(), &request).unwrap().outcome {
+        Outcome::Readiness { ready, .. } => ready,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_failure_that_passes_on_a_rerun_of_the_identical_tree_records_one_flip() {
+    let f = Fixture::with_config(json!({"auto_check_debounce_ms": 100, "flaky_rerun_max_s": 30}));
+    f.enable(60, &scheduled(&[0], &[]));
+    f.write_batch("call-1", "one\n");
+    let checks = f.wait_for_checks(1);
+    // The record is the first run's failure; the rerun that passed is no
+    // record of its own.
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].result, CheckResult::Failed { exit_code: 101 });
+    assert_eq!(f.log_lines().len(), 2, "run once more on the same tree");
+    assert_eq!(learned(&f, "net::times_out"), Some((1, 1)));
+    assert_eq!(learned(&f, "parser::keeps_order"), None);
+    let context = f.prompt("p1").context().expect("delivered");
+    assert!(
+        context.contains("1 failure named in its output: net::times_out."),
+        "one flip is not yet known to flip: {context}"
+    );
+    assert!(!ready_to_land(&f, &checks[0].tree_oid));
+}
+
+#[test]
+fn a_failure_then_a_pass_after_a_write_records_no_flip() {
+    // Reruns off: each run is the one after a batch of writes.
+    let f = Fixture::with_config(json!({"auto_check_debounce_ms": 100, "flaky_rerun_max_s": 0}));
+    f.enable(60, &scheduled(&[0], &[]));
+    f.write_batch("call-1", "one\n");
+    assert_eq!(
+        f.wait_for_checks(1)[0].result,
+        CheckResult::Failed { exit_code: 101 }
+    );
+    f.write_batch("call-2", "two\n");
+    let checks = f.wait_for_checks(2);
+    assert_eq!(checks[0].result, CheckResult::Passed {});
+    assert_eq!(f.log_lines().len(), 2, "no rerun when reruns are off");
+    assert_eq!(learned(&f, "net::times_out"), None);
+}
+
+#[test]
+fn a_rerun_that_would_take_longer_than_its_bound_is_not_started() {
+    let f = Fixture::with_config(json!({"auto_check_debounce_ms": 100, "flaky_rerun_max_s": 1}));
+    f.enable(60, &scheduled(&[0], &[0]));
+    f.write_batch("call-1", "one\n");
+    let checks = f.wait_for_checks(1);
+    assert_eq!(checks[0].result, CheckResult::Failed { exit_code: 101 });
+    assert!(checks[0].duration_ms > 1000, "{}", checks[0].duration_ms);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(
+        f.log_lines().len(),
+        1,
+        "the 1.5 s failure was not run again"
+    );
+    assert_eq!(learned(&f, "net::times_out"), None);
+}
+
+#[test]
+fn a_rerun_that_hangs_is_stopped_at_the_rerun_bound_not_the_check_timeout() {
+    let f = Fixture::with_config(json!({"auto_check_debounce_ms": 100, "flaky_rerun_max_s": 1}));
+    // The first run fails at once; its rerun would take 30 s, well inside
+    // the check's 60 s limit.
+    f.enable(60, &scheduled_sleeping(&[0], &[1], "30"));
+    let started = Instant::now();
+    f.write_batch("call-1", "one\n");
+    let checks = f.wait_for_checks(1);
+    let took = started.elapsed();
+    assert_eq!(checks[0].result, CheckResult::Failed { exit_code: 101 });
+    assert_eq!(f.log_lines().len(), 2, "the rerun started");
+    // The known failure waits at most the rerun bound (1 s) and a snapshot,
+    // not the rerun's 30 s.
+    assert!(took < Duration::from_secs(15), "took {took:?}");
+    assert_eq!(
+        learned(&f, "net::times_out"),
+        None,
+        "a stopped rerun teaches nothing"
+    );
+}
+
+#[test]
+fn a_write_undone_between_a_failure_and_its_rerun_records_no_flip() {
+    let f = Fixture::with_config(json!({"auto_check_debounce_ms": 100, "flaky_rerun_max_s": 30}));
+    // The first run fails at once; its rerun passes after 3 s, long enough
+    // for a session to write the file and put it back.
+    f.enable(60, &scheduled_sleeping(&[0], &[1], "3"));
+    f.write_batch("call-1", "one\n");
+    f.wait_for_log(2);
+    // Written and restored inside one tool batch that has not ended: the
+    // tree the rerun ends on is the one it started on.
+    f.write("call-2", "changed\n");
+    f.write("call-3", "one\n");
+    let checks = f.wait_for_checks(1);
+    assert_eq!(checks[0].result, CheckResult::Failed { exit_code: 101 });
+    assert_eq!(f.log_lines().len(), 2);
+    assert_eq!(
+        learned(&f, "net::times_out"),
+        None,
+        "recorded writes between the runs: not compared"
+    );
+}
+
+#[test]
+fn after_two_flips_the_briefing_labels_the_failure_which_stays_failed_until_forgotten() {
+    let f = Fixture::with_config(json!({"auto_check_debounce_ms": 100, "flaky_rerun_max_s": 30}));
+    // Each batch's run fails and its rerun passes.
+    f.enable(60, &scheduled(&[0, 2, 4], &[]));
+    f.write_batch("call-1", "one\n");
+    f.wait_for_checks(1);
+    assert!(f.prompt("p1").context().is_some());
+    f.write_batch("call-2", "two\n");
+    let checks = f.wait_for_checks(2);
+    assert_eq!(f.log_lines().len(), 4);
+    assert_eq!(learned(&f, "net::times_out"), Some((2, 2)));
+    let context = f.prompt("p2").context().expect("delivered");
+    assert!(
+        context.contains("tests failed (exit 101)")
+            && context.contains(
+                "1 failure named in its output: net::times_out (known to flip on unchanged code, 2 of 2 runs). Every one is of a test known to flip on unchanged code; the check still failed."
+            ),
+        "{context}"
+    );
+    // Still a failure: in `check status`, and to a landing.
+    let (code, status, stderr) = f.cli(&["check", "status", "work"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        status.contains("failed (exit 101)") && status.contains("Applies to the working tree"),
+        "{status}"
+    );
+    assert!(!ready_to_land(&f, &checks[0].tree_oid));
+    // Listed, as text and as JSON.
+    let (code, listed, stderr) = f.cli(&["check", "flaky", "work"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        listed.contains("tests  \"net::times_out\"  runs 2  flips 2  last flip"),
+        "{listed}"
+    );
+    let (_, listed, _) = f.cli(&["check", "flaky", "work", "--name", "tests", "--json"]);
+    let listed: Value = serde_json::from_str(&listed).unwrap();
+    assert_eq!(listed["tests"][0]["test"], "net::times_out", "{listed}");
+    assert_eq!(listed["tests"][0]["check_name"], "tests");
+    assert_eq!(listed["tests"][0]["flips"], 2);
+    assert!(listed["tests"][0]["last_flip_age_ms"].is_u64(), "{listed}");
+    // Forgotten: the next failure is not labelled.
+    let (code, forgot, stderr) = f.cli(&[
+        "check",
+        "flaky",
+        "work",
+        "--forget",
+        "net::times_out",
+        "--request-id",
+        "forget-1",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(forgot.contains("Forgot what was learned"), "{forgot}");
+    let (_, listed, _) = f.cli(&["check", "flaky", "work"]);
+    assert!(listed.contains("No test is known to flip"), "{listed}");
+    f.write_batch("call-3", "three\n");
+    f.wait_for_checks(3);
+    let context = f.prompt("p3").context().expect("delivered");
+    assert!(
+        context.contains("1 failure named in its output: net::times_out.")
+            && !context.contains("known to flip"),
+        "{context}"
+    );
+}
+
+#[test]
+fn forgetting_a_secret_looking_test_name_is_refused_and_never_stored() {
+    let f = Fixture::new(100);
+    let secret = "test_login[password=hunter2-is-the-pass]";
+    let token = ["ghp_", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"].concat();
+    // Through the CLI, which redacts before it sends.
+    let (code, stdout, stderr) = f.cli(&[
+        "check",
+        "flaky",
+        "work",
+        "--forget",
+        secret,
+        "--request-id",
+        "forget-secret-cli",
+    ]);
+    assert_ne!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("looks like a secret") && !stderr.contains("hunter2"),
+        "{stdout}{stderr}"
+    );
+    // A client that sends the request unredacted: a secret-looking test
+    // name, then a secret-looking check name.
+    for (id, name, test) in [
+        ("forget-secret-raw", None, secret.to_owned()),
+        ("forget-secret-name", Some(token.clone()), "ok::test".into()),
+    ] {
+        let reply = client::call(
+            &f.state_dir(),
+            &Request {
+                version: PROTOCOL_VERSION,
+                request_id: id.into(),
+                command: Command::ForgetFlakyTest {
+                    workspace_id: "work".into(),
+                    name,
+                    test,
+                },
+            },
+        )
+        .unwrap();
+        let Outcome::Error { code, message } = &reply.outcome else {
+            panic!("{:?}", reply.outcome)
+        };
+        assert_eq!(code, "secret_in_test_name", "{message}");
+        assert!(!message.contains("hunter2") && !message.contains(&token));
+    }
+    let database = rusqlite::Connection::open(f.state_dir().join("state.sqlite3")).unwrap();
+    let stored: String = database
+        .query_row(
+            "SELECT coalesce(group_concat(request_id || command_json || outcome_json), '') FROM receipts",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("forget-secret"), "{stored}");
+    assert!(
+        !stored.contains("hunter2") && !stored.contains(&token),
+        "{stored}"
+    );
+    let events: String = database
+        .query_row(
+            "SELECT coalesce(group_concat(event_json), '') FROM events",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !events.contains("hunter2") && !events.contains(&token),
+        "{events}"
+    );
+}
+
+#[test]
+fn two_check_runs_on_one_tree_with_no_write_between_record_a_flip() {
+    let f = Fixture::new(100);
+    let log = f.log();
+    let script = scheduled(&[0], &[]);
+    let run = || {
+        f.cli(&[
+            "check",
+            "run",
+            "work",
+            "--name",
+            "tests",
+            "--",
+            "sh",
+            "-c",
+            &script,
+            log.to_str().unwrap(),
+        ])
+    };
+    let (code, stdout, stderr) = run();
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    // The command's own output still reaches the caller, on stderr.
+    assert!(
+        stderr.contains("test net::times_out ... FAILED"),
+        "{stderr}"
+    );
+    assert_eq!(learned(&f, "net::times_out"), None);
+    let (code, stdout, stderr) = run();
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(learned(&f, "net::times_out"), Some((1, 1)));
+}
+
+#[test]
+fn two_commands_whose_summaries_are_equal_are_not_compared() {
+    let f = Fixture::new(100);
+    let log = f.log();
+    let script = scheduled(&[0], &[]);
+    // The recorded command line is cut at 120 characters, inside the
+    // script, so these two commands share it; they differ after it.
+    assert!(script.len() > 120);
+    let argv = |extra: &str| -> Vec<String> {
+        ["sh", "-c", &script, log.to_str().unwrap(), extra]
+            .map(str::to_owned)
+            .to_vec()
+    };
+    assert_eq!(
+        langspan::landing::command_line(&argv("first")),
+        langspan::landing::command_line(&argv("second")),
+        "one summary for both"
+    );
+    let run = |extra: &str| {
+        let mut args: Vec<String> = ["check", "run", "work", "--name", "tests", "--"]
+            .map(str::to_owned)
+            .to_vec();
+        args.extend(argv(extra));
+        f.cli(&args.iter().map(String::as_str).collect::<Vec<_>>())
+    };
+    let (code, stdout, stderr) = run("first");
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let (code, stdout, stderr) = run("second");
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        learned(&f, "net::times_out"),
+        None,
+        "a failure of one command and a pass of another are no flip"
+    );
+    // A command that looks like it holds a secret sends no test names, so
+    // no digest of it is stored: fail, then pass, is learned from nothing.
+    let own_log = log.with_file_name("secret-runs.log");
+    for expected in [1, 0] {
+        let args = [
+            "check",
+            "run",
+            "work",
+            "--name",
+            "secret",
+            "--",
+            "sh",
+            "-c",
+            &script,
+            own_log.to_str().unwrap(),
+            "--token",
+            "hunter2",
+        ];
+        let (code, stdout, stderr) = f.cli(&args);
+        assert_eq!(code, expected, "{stdout}{stderr}");
+    }
+    let state = f.state();
+    assert!(
+        state
+            .test_learning
+            .get("work")
+            .is_none_or(|learning| !learning.last.contains_key("secret")),
+        "{:?}",
+        state.test_learning
+    );
+}
+
+#[test]
+fn a_test_skipped_in_a_passing_run_between_two_failures_records_no_flip() {
+    let f = Fixture::new(100);
+    let log = f.log();
+    // Lines as `cargo test` prints them: the second run passes as a whole
+    // with the failing test ignored, so it says nothing about that test.
+    let script = concat!(
+        r#"n=$(cat "$0" 2>/dev/null | wc -l | tr -d ' '); echo run >> "$0"; "#,
+        r#"echo "running 3 tests"; echo "test needs_net ... ignored, needs network"; "#,
+        r#"echo "test parser::keeps_order ... ok"; "#,
+        r#"case "$n" in 1) echo "test net::times_out ... ignored"; "#,
+        r#"echo "test result: ok. 1 passed; 0 failed; 2 ignored"; exit 0;; "#,
+        r#"*) echo "test net::times_out ... FAILED"; "#,
+        r#"echo "test result: FAILED. 1 passed; 1 failed; 1 ignored"; exit 101;; esac"#,
+    );
+    let run = || {
+        f.cli(&[
+            "check",
+            "run",
+            "work",
+            "--name",
+            "tests",
+            "--",
+            "sh",
+            "-c",
+            script,
+            log.to_str().unwrap(),
+        ])
+    };
+    for expected in [1, 0, 1] {
+        let (code, stdout, stderr) = run();
+        assert_eq!(code, expected, "{stdout}{stderr}");
+    }
+    assert_eq!(
+        learned(&f, "net::times_out"),
+        None,
+        "a skipped test neither passed nor failed: fail, skip, fail is no flip"
+    );
+    assert_eq!(learned(&f, "needs_net"), None);
+}
+
+#[test]
+fn a_check_run_across_a_written_and_restored_file_is_not_compared_with_the_next() {
+    let f = Fixture::new(100);
+    let log = f.log();
+    // The first run fails after 3 s, long enough for a session to write the
+    // file and put it back; the second passes at once.
+    let script = scheduled_sleeping(&[0], &[0], "3");
+    let run = || {
+        f.cli(&[
+            "check",
+            "run",
+            "work",
+            "--name",
+            "tests",
+            "--",
+            "sh",
+            "-c",
+            &script,
+            log.to_str().unwrap(),
+        ])
+    };
+    let (code, stdout, stderr) = std::thread::scope(|scope| {
+        let first = scope.spawn(run);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while fs::read_to_string(&log).map_or(0, |log| log.lines().count()) < 1 {
+            assert!(Instant::now() < deadline, "the first run did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Recorded writes while it runs; the tree it ends on is the one it
+        // started on.
+        f.write("call-1", "changed\n");
+        f.write("call-2", "hello\n");
+        first.join().unwrap()
+    });
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let (code, stdout, stderr) = run();
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        learned(&f, "net::times_out"),
+        None,
+        "a write recorded during the first run: the two runs are not of unchanged code"
+    );
 }

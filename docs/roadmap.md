@@ -129,7 +129,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 ## F. Checks and landing
 
 - [F1: Say which tests a write broke](https://github.com/Langspan/LangSpan.dev/issues/69): a failed automatic check does not say whether this write, an earlier state or a peer broke the test.
-- [F2: Learn which tests flip on unchanged code](https://github.com/Langspan/LangSpan.dev/issues/70): every agent that hits a flaky test tries to fix code that is not broken.
 - [F3: Run the wider check when an interface changes](https://github.com/Langspan/LangSpan.dev/issues/71): the fast check misses breaks in packages that call a changed exported function.
 - [F5: Rebase landings and adapt identifier renames](https://github.com/Langspan/LangSpan.dev/issues/72): a landing refused over a rename leaves every use to fix by hand, and there is no linear-history landing.
 - [F8: An integration branch every session lands on](https://github.com/Langspan/LangSpan.dev/issues/73): each agent's own branch leaves the person merging six branches by hand to see the work together.
@@ -137,7 +136,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## H. The person's view
 
-- [H3: Desktop notices for refusals and handoffs](https://github.com/Langspan/LangSpan.dev/issues/77): refusals and waiting handoffs go unnoticed when the person is not watching that agent.
 - [H5: A monthly refusal count](https://github.com/Langspan/LangSpan.dev/issues/79): a person deciding whether to keep LangSpan has no count of how often it intervened.
 - [H6: A daily "work saved" line, once measured](https://github.com/Langspan/LangSpan.dev/issues/80): people want a savings figure, which needs measurement rather than assumptions.
 - [H8: A coordination report per session and host](https://github.com/Langspan/LangSpan.dev/issues/81): a person cannot tell whether a new host version or model still follows coordination well.

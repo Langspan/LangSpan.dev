@@ -91,8 +91,17 @@ then preview and apply the install again.
 User-level hooks find the Git repository from the agent's working directory and
 do nothing outside a repository. An existing LangSpan project install takes
 precedence. `langspan doctor --root /path/to/checkout` reports both setups;
+`install` and `hooks install` write `--state-dir` as given, and `doctor` and
+`hosts` compare state directories by their canonical form, so one reached
+through a symbolic link (`/tmp` and `/private/tmp` on macOS) is the same
+coordinator, and only a genuinely different directory is reported.
 `langspan uninstall --apply` removes the user-level entries it recognizes and
-leaves the coordination state directory in place.
+leaves the coordination state directory in place. A hooks or MCP file left
+holding nothing else (`{}`, or empty text) is removed rather than left behind.
+Running it again after an upgrade also removes such a file an earlier
+version left behind. A file with any of your own settings in it keeps them
+byte for byte.
+`~/.claude.json` is never removed.
 
 #### An agent tool installed later
 
@@ -747,6 +756,64 @@ says `truncated: true`; when the oldest of those carries no time of its own,
 the first that does decides whether the window may reach past them. With the
 daemon down it exits 1 with "coordination unavailable".
 
+## Desktop notices
+
+When a session is refused, an automatic check fails or a handoff waits, the
+person is often looking at something else. The coordinator can show a desktop
+notice for these (roadmap H3). It is off until switched on:
+
+```sh
+langspan notify on                 # notices on, sound as it was (off by default)
+langspan notify on --sound on      # with a sound
+langspan notify status             # on or off, and which notifier was found
+langspan notify off
+```
+
+A notice looks like this:
+
+```text
+LangSpan
+demo: codex.7c2e9a1b… refused on src/api.rs (held by claude-code.4f1a0c3d…)
+```
+
+Three things raise one: a refusal (any `write_refused` event: a write held by
+another session, a stale or unread edit, a held commit), an automatic check
+that failed ([ADR 0030](adr/0030-automatic-checks-after-write-batches.md)),
+and a handoff no session has taken up for 10 minutes. The body names the
+workspace's directory, the session (its host and the first eight characters of
+its ID) and at most three paths with a count of the rest, and is at most 200
+bytes. It never carries a prompt, a message's or handoff's text, a check's
+output or file content.
+
+The notice is shown by `osascript` on macOS and `notify-send` on other
+systems, the first one found on the coordinator's `PATH`, as a child process
+the coordinator kills after 2 seconds. With sound on, `notify-send` asks for
+the `message-new-instant` sound and `osascript` for `Glass`. With sound off,
+`notify-send` passes the `suppress-sound` hint, so a desktop set to play a
+default sound for every notice stays quiet for these (a notification server
+that ignores the hint may still play one), and `osascript` names no sound,
+which macOS shows silently. It runs on a thread of its own, so no
+hook or request waits for it, and nothing about it reaches the model, holds or
+refuses anything, or uses the network. Where neither program is found,
+nothing is shown, and `notify status` says so (it looks on its own `PATH`,
+which is normally the coordinator's). A `notify-send` started by a
+coordinator that has no desktop session in its environment (no
+`DBUS_SESSION_BUS_ADDRESS`) fails; the coordinator logs that once and goes
+on.
+
+At most one notice of a kind is shown per 5 minutes and 10 per hour in total;
+the rest are dropped. The coordinator's log (stderr) records each notice as
+`notice_sent` or `notice_dropped` with its kind and reason (`kind_limit`,
+`hourly_limit`, `queue_full`, `notifier_missing`, `notifier_failed`,
+`notifier_timed_out`), and a notifier that is missing, fails or times out is
+also logged once per coordinator run. No event is recorded.
+
+`notify on|off` writes `notify` and, with `--sound`, `notify_sound` into
+`config.json`, keeping every other setting; the coordinator reads them again
+at each notice, so no restart is needed. The limits are set in the same file
+(see [Configuration and limits](#configuration-and-limits)). A handoff that is
+already waiting when the coordinator starts is timed from that start.
+
 ## Look up symbols and affected files
 
 The source index finds definitions and name mentions in Rust, Python,
@@ -972,11 +1039,51 @@ briefing point (a completed tool call, the next batch, or the next prompt):
 passed, failed with the exit code, stopped at its time limit, or inconclusive,
 with the tree ID and, unless it passed, up to 20 of the last output lines,
 redacted and labelled as the command's own text. Failures are not classified
-(which tests failed is left to the output's lines). The command runs as you, with
+as new or already failing, but when the output is that of `cargo test`,
+`go test -v` or `pytest`, the failing tests it named are listed. The command runs as you, with
 the daemon's environment, outside the agent host's sandbox and permission
 prompts: code an agent writes runs without the host asking. A command that
 looks like it holds a secret is refused; pass secrets through the environment.
 See [ADR 0030](adr/0030-automatic-checks-after-write-batches.md).
+
+#### Tests that flip on unchanged code
+
+Two results of the same check (name and command, compared by its whole
+argument list, not the shortened command line `check status` shows) on the
+same tree, with no write recorded in the workspace between them, that
+disagree about a test are one flip of that test. `check run` learns nothing
+from a command that looks like it holds a secret. A failing automatic check that named a failing test and
+took at most `flaky_rerun_max_s` (`config.json`, default 30, 0 turns it off)
+is run once more on the same tree, stopped after at most that long, to get
+that second result; a longer one is not run again, and a write recorded while
+either run goes, even one undone, means neither is compared. The rerun is
+not a record: the first
+run's failure is the result, in `check status` and to `land`, whatever the
+rerun found. Two `check run`s of one tree with no write between or during
+them are compared too. A test the output names as skipped (`ignored` in
+`cargo test`, `--- SKIP:` in `go test -v`, `SKIPPED`, `XFAIL` or `XPASS` in
+`pytest -v`) neither passed nor failed in that run, even when the run passed,
+and is not compared. A test that flipped at least twice in its last 20 such runs is known to
+flip, until it has gone 50 runs without one. Its failures are then labelled in
+the briefing, and still count as failures:
+
+```text
+1 failure named in its output: net::times_out (known to flip on unchanged code, 2 of 14 runs). Every one is of a test known to flip on unchanged code; the check still failed.
+```
+
+```sh
+langspan check flaky WORKSPACE [--name NAME] [--json]
+tests  "net::times_out"  runs 14  flips 2  last flip 3h ago
+langspan check flaky WORKSPACE --forget net::times_out [--name NAME] --request-id ID
+```
+
+`--forget` clears what was learned about a test, including its last result,
+so its next failure is not labelled. A test or check name that looks like a
+secret is refused (`secret_in_test_name`) before anything is recorded: such a
+name is never learned, so there is nothing to forget. The MCP tool `langspan_flaky_tests` reads the same list. Only test
+names are kept, in the local event log; no output, and nothing is published.
+Names are read from at most 4 MiB of output (at most 100 names and 10 KiB per
+run); a runner LangSpan does not recognise teaches nothing.
 
 ## Commits in a shared checkout
 
@@ -1053,18 +1160,31 @@ private index, no commit, and Git reads run with `--no-optional-locks`. The
 MCP tool `langspan_my_changes` does the same. Other worktrees and machines
 are not included.
 
-A formatter or other workspace-wide command (`cargo fmt --all`) run by one
-session keeps that session's own reformatted lines its own, so `commit --mine`
-still takes them. A file in which the command rewrote another session's
-uncommitted lines is credited to neither session and left for its owner,
-as is a file another session edited or a shell run of another session may
-have written while the command ran ([ADR 0011](adr/0011-shell-writes.md)).
-One exception: lines the command only reformatted (same tokens, with
-whitespace and line breaks changed) that this session wrote and has not
-committed stay its own even while another session's command ran, so
-`cargo fmt --all` during another session's test run does not stop
-`commit --mine`. A line that other command could have changed otherwise is
-still no session's.
+A formatter or other workspace-wide command (`cargo fmt --all`) does not
+change who wrote a line it only reformats. Where the command kept a line's
+tokens in order and changed only whitespace and line breaks (re-indented,
+re-wrapped, joined or split it), each line it left keeps the author of the
+uncommitted lines it came from: the session that ran the formatter, another
+session, or both sessions' own lines in one file. This holds whoever ran the
+command and whether or not another session's command ran at the same time,
+so `cargo fmt --all` during another session's test run leaves each session's
+`commit --mine` able to take its own hunks, and a new file one session wrote
+stays that session's after another session's formatter rewrites it. Tokens
+are compared by language: Rust, TypeScript and JavaScript as words and
+punctuation, with a comma just before a closing `)`, `]` or `}` ignored (a
+formatter adds and drops those when it wraps a list); Markdown as words and
+punctuation; any other file as its text with all whitespace removed.
+Whitespace inside a string literal is not told apart from formatting.
+
+A change that alters tokens (a rename, an added line) is credited as before:
+to the command's session when nothing else could have made it and it
+rewrote no other session's uncommitted line, and otherwise to no session, so
+`commit --mine` leaves or refuses it. The same holds for a file another
+session edited through its edit tool while the command ran
+([ADR 0011](adr/0011-shell-writes.md)). A line two sessions both wrote (a
+blank line, a closing brace) goes with the lines around it in a hunk, so it
+does not stop either session's `commit --mine`
+([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)).
 
 Before such a command runs, the Bash pre-tool hook on Claude Code and Codex
 tells the session, once, which other live sessions have uncommitted changes in
@@ -1127,6 +1247,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |
+| `langspan_flaky_tests` | Read which tests are known to flip on unchanged code, with runs, flips and the age of the last flip |
 | `langspan_land_cancel` | Stop a landing waiting for the push turn, by its `request_id` |
 | `langspan_recap` | Summarize one workspace's recorded activity, checks, notes and pending messages |
 | `langspan_today` | The day so far from the event log: sessions, refusals, checks, landings and what is still open, within 2,400 bytes |
@@ -1253,13 +1374,21 @@ processes exit `0` and convey denials through their JSON reply.
 Optional `config.json` in the state directory must be owner-only (`0600`):
 
 ```json
-{"io_timeout_ms":2000,"request_timeout_ms":5000,"max_clients":32,"auto_check_debounce_ms":2000,"host_check_ms":3600000}
+{"io_timeout_ms":2000,"request_timeout_ms":5000,"max_clients":32,"auto_check_debounce_ms":2000,
+ "flaky_rerun_max_s":30,"host_check_ms":3600000,"notify":false,"notify_sound":false,
+ "notify_kind_interval_ms":300000,"notify_hourly_limit":10,"notify_handoff_after_ms":600000}
 ```
 
 Timeout values accept 100–5000 ms; client count accepts 1–128;
-`auto_check_debounce_ms` accepts 50–60000; `host_check_ms`, how often the
-coordinator looks for agent hosts with no LangSpan install, accepts
-100–86400000. IPC and MCP frames
+`auto_check_debounce_ms` accepts 50–60000; `flaky_rerun_max_s` accepts
+0–3600 (0: a failing automatic check is never run again); `host_check_ms`,
+how often the coordinator looks for agent hosts with no LangSpan install,
+accepts 100–86400000. For [desktop notices](#desktop-notices),
+`notify_kind_interval_ms` and `notify_handoff_after_ms` accept 1000–86400000
+and `notify_hourly_limit` 1–60; `notify`, `notify_sound` and the two notice
+limits are read again at each notice, `notify_handoff_after_ms` when the
+coordinator starts. A build before notices refuses to start with a
+`config.json` that has these keys. IPC and MCP frames
 are limited to 64 KiB. The MCP SDK discards oversized input lines without replying
 to that line. An MCP tool result carries each answer twice, as structured
 content and as JSON text that escapes every quotation mark and backslash

@@ -12,11 +12,18 @@
 //! check record bound to its tree, with a notice for the sessions it ran
 //! after, delivered at their next briefing.
 //!
+//! A failing run that named its failing tests, and took at most the rerun
+//! bound, is run once more on the same tree before it is recorded: the tests
+//! both runs named go with the record, so the state owner learns which tests
+//! flip on unchanged code (issue #70). The rerun is no record of its own:
+//! the first run's failure is the result, and a pass of the rerun never
+//! replaces it.
+//!
 //! Nothing here touches coordination state directly: the record goes to the
 //! state owner as a request, like any client's.
 
-use crate::{daemon::Registration, integrate};
-use langspan_core::{AutoCheck, CheckReport, CheckResult, Command, Outcome};
+use crate::{daemon::Registration, integrate, test_output};
+use langspan_core::{AutoCheck, CheckReport, CheckResult, Command, Outcome, TestResults};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
@@ -35,11 +42,28 @@ use std::{
 const MAX_WAIT: Duration = Duration::from_secs(30);
 /// How long a snapshot of the working tree may take.
 const SNAPSHOT: Duration = Duration::from_secs(120);
-/// How much of the command's combined output is kept while it runs.
+/// How much of the command's combined output is kept for its tail once the
+/// whole of it no longer fits `test_output::MAX_OUTPUT_BYTES`.
 const KEPT_BYTES: usize = 8 * 1024;
 /// What of it is reported: the last lines, at most this many bytes.
 const TAIL_BYTES: usize = 1500;
 const TAIL_LINES: usize = 20;
+
+/// The writes recorded per workspace ([`langspan_core::State::writes`]), as
+/// the state owner last published them. A run takes its workspace's count
+/// before its first tree; its results, and its rerun's, are learned from
+/// only if the state owner's count is still that when the record arrives.
+pub type WriteCounts = Arc<Mutex<BTreeMap<String, u64>>>;
+
+/// The daemon's timing for automatic checks (`config.json`).
+#[derive(Debug, Clone, Copy)]
+pub struct Timing {
+    /// Quiet time after a session's last batch before a check starts.
+    pub debounce: Duration,
+    /// A failing run that took at most this long is run once more on the
+    /// same tree; zero runs nothing again.
+    pub rerun_max: Duration,
+}
 
 pub enum Message {
     /// `session_id` wrote files and reached a batch or stop.
@@ -93,6 +117,11 @@ pub struct Finished {
     timed_out_s: Option<u32>,
     duration_ms: u64,
     tail: String,
+    /// The tests its output named, and those of its rerun.
+    tests: Option<TestResults>,
+    rerun: Option<TestResults>,
+    /// The workspace's recorded writes before the first run's tree.
+    writes_before: u64,
 }
 
 struct Running {
@@ -172,9 +201,11 @@ struct Workspace {
 pub fn worker(
     sender: mpsc::SyncSender<Message>,
     messages: mpsc::Receiver<Message>,
-    debounce: Duration,
+    timing: Timing,
+    writes: WriteCounts,
     record: impl Fn(Option<&Registration>, String, Command) -> Option<Outcome>,
 ) {
+    let debounce = timing.debounce;
     let mut workspaces = BTreeMap::<String, Workspace>::new();
     let mut next_run = 0_u64;
     loop {
@@ -313,16 +344,24 @@ pub fn worker(
                     check: check.clone(),
                     of: of.clone(),
                 };
-                let (cancel, recheck, sender) = (
+                let (cancel, recheck, sender, writes) = (
                     running.cancel.clone(),
                     running.recheck.clone(),
                     sender.clone(),
+                    writes.clone(),
                 );
                 let (workspace_id, run) = (workspace_id.clone(), next_run);
                 let started = std::thread::Builder::new()
                     .name("langspan-auto-check".into())
                     .spawn(move || {
-                        let ended = run_once(&of.root, &check, &cancel, &recheck);
+                        let ended = run_once(
+                            &of.root,
+                            &check,
+                            &cancel,
+                            &recheck,
+                            timing.rerun_max,
+                            &writes,
+                        );
                         let _ = sender.send(Message::Finished {
                             workspace_id,
                             run,
@@ -432,6 +471,14 @@ fn report(
             tail: finished.tail,
             timed_out_s: finished.timed_out_s,
         }),
+        writes_before: finished.tests.as_ref().map(|_| finished.writes_before),
+        // An automatic check's command holds no secret (`refuse_secrets`).
+        command_id: finished
+            .tests
+            .as_ref()
+            .map(|_| crate::landing::command_id(&check.argv)),
+        tests: finished.tests,
+        rerun: finished.rerun,
     };
     // The state owner's queue can be briefly full; the same request is
     // retried for up to five seconds.
@@ -462,8 +509,24 @@ fn report(
     );
 }
 
-/// One run: the tree before, the command, the tree after.
-fn run_once(root: &Path, check: &AutoCheck, cancel: &AtomicBool, recheck: &Recheck) -> Ended {
+/// One run: the tree before, the command, the tree after; then, for a quick
+/// failure that named its failing tests, the command again on that tree.
+fn run_once(
+    root: &Path,
+    check: &AutoCheck,
+    cancel: &AtomicBool,
+    recheck: &Recheck,
+    rerun_max: Duration,
+    writes: &WriteCounts,
+) -> Ended {
+    // Taken before the tree: a write recorded after this, even one the tree
+    // no longer shows when the rerun ends, keeps the two runs uncompared.
+    let writes_before = writes
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&check.workspace_id)
+        .copied()
+        .unwrap_or(0);
     let snapshot = || integrate::working_tree(root, Instant::now() + SNAPSHOT);
     let (head, before) = match snapshot() {
         Ok(tree) => tree,
@@ -488,9 +551,8 @@ fn run_once(root: &Path, check: &AutoCheck, cancel: &AtomicBool, recheck: &Reche
         }
         changed
     };
-    let (ran, duration_ms, tail) = match run_command(root, &check.argv, limit, |deadline| {
-        cancel.load(Ordering::SeqCst) || tree_changed(deadline)
-    }) {
+    let stop = |deadline| cancel.load(Ordering::SeqCst) || tree_changed(deadline);
+    let (ran, duration_ms, output) = match run_command(root, &check.argv, limit, stop) {
         Ok(ran) => ran,
         Err(error) => return Ended::Failed(error),
     };
@@ -500,17 +562,22 @@ fn run_once(root: &Path, check: &AutoCheck, cancel: &AtomicBool, recheck: &Reche
         // Stopped because a session's writes changed the tree.
         None => return Ended::Changed(None),
     };
-    // Every request made before this snapshot is answered by it.
-    let request = recheck.requested.load(Ordering::SeqCst);
-    let held = match snapshot() {
-        Ok((_, after)) => after == before,
+    // Every request made before this snapshot is answered by it, and the
+    // answer is whether the tree still is the one the command ran on.
+    let held_still = || {
+        let request = recheck.requested.load(Ordering::SeqCst);
+        let held = snapshot().map(|(_, after)| after == before)?;
+        if held {
+            recheck.confirmed.fetch_max(request, Ordering::SeqCst);
+        }
+        Ok::<_, crate::Error>(held)
+    };
+    let held = match held_still() {
+        Ok(held) => held,
         Err(error) => return Ended::Failed(format!("could not take the working tree: {error}")),
     };
     if cancel.load(Ordering::SeqCst) {
         return Ended::Cancelled;
-    }
-    if held {
-        recheck.confirmed.fetch_max(request, Ordering::SeqCst);
     }
     // As `check run` decides: a result is about a tree only if the tree held
     // still while it ran.
@@ -521,13 +588,52 @@ fn run_once(root: &Path, check: &AutoCheck, cancel: &AtomicBool, recheck: &Reche
         Exit::Signal => (CheckResult::Inconclusive {}, None),
         Exit::TimedOut => (CheckResult::Inconclusive {}, Some(check.timeout_s)),
     };
+    let tests = match result {
+        CheckResult::Passed {} => output.tests(true, &[]),
+        CheckResult::Failed { .. } => output.tests(false, &[]),
+        CheckResult::Inconclusive {} => None,
+    };
+    // A quick failure that named a failing test runs once more on the same
+    // tree, stopped by a tree change like any run and at the rerun bound:
+    // the known failure waits at most that long. Only the tests it names
+    // are kept: its result is no record.
+    let mut rerun = None;
+    if let Some(first) = &tests
+        && !first.failed.is_empty()
+        && !rerun_max.is_zero()
+        && u128::from(duration_ms) <= rerun_max.as_millis()
+    {
+        match run_command(root, &check.argv, limit.min(rerun_max), stop) {
+            Ok((Some(Exit::Code(code)), _, again)) => match held_still() {
+                Ok(true) => rerun = again.tests(code == 0, &first.failed),
+                // Changed while it ran again: the first result stands, and
+                // the writes get a run of their own.
+                Ok(false) => {}
+                Err(error) => log(
+                    "auto_check_rerun_failed",
+                    &check.workspace_id,
+                    &error.to_string(),
+                ),
+            },
+            Ok((Some(_), _, _)) => {}
+            Ok((None, _, _)) if cancel.load(Ordering::SeqCst) => return Ended::Cancelled,
+            Ok((None, _, _)) => {}
+            Err(error) => log("auto_check_rerun_failed", &check.workspace_id, &error),
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return Ended::Cancelled;
+        }
+    }
     let finished = Box::new(Finished {
         tree: before,
         head,
         result,
         timed_out_s,
         duration_ms,
-        tail,
+        tail: output.tail(),
+        tests,
+        rerun,
+        writes_before,
     });
     if held {
         Ended::Done(finished)
@@ -542,8 +648,41 @@ enum Exit {
     TimedOut,
 }
 
+/// What was kept of a run's combined output: all of it while it fits
+/// `test_output::MAX_OUTPUT_BYTES`, then only its end, with `cut` set.
+#[derive(Default, Clone)]
+struct Output {
+    bytes: Vec<u8>,
+    cut: bool,
+}
+
+impl Output {
+    fn push(&mut self, read: &[u8]) {
+        self.bytes.extend_from_slice(read);
+        let bound = if self.cut {
+            KEPT_BYTES
+        } else {
+            test_output::MAX_OUTPUT_BYTES
+        };
+        if self.bytes.len() > bound {
+            // Past the whole-output bound only the end is kept, so a long
+            // output costs one move of the bound and then small ones.
+            let excess = self.bytes.len() - KEPT_BYTES;
+            self.bytes.drain(..excess);
+            self.cut = true;
+        }
+    }
+    fn tail(&self) -> String {
+        let start = self.bytes.len().saturating_sub(KEPT_BYTES);
+        tail(&self.bytes[start..], self.cut || start > 0)
+    }
+    fn tests(&self, all_passed: bool, prefer: &[String]) -> Option<TestResults> {
+        test_output::read(&self.bytes, self.cut, all_passed, prefer)
+    }
+}
+
 /// Run `argv` in `dir` without a shell, in its own process group, with its
-/// standard output and error joined and only their end kept. `None` when
+/// standard output and error joined and kept as [`Output`]. `None` when
 /// `stop` asked for it to be stopped. Its whole process group is killed
 /// when it ends, whatever the reason, as `check run` does.
 #[allow(clippy::type_complexity)]
@@ -552,7 +691,7 @@ fn run_command(
     argv: &[String],
     limit: Duration,
     mut stop: impl FnMut(Instant) -> bool,
-) -> Result<(Option<Exit>, u64, String), String> {
+) -> Result<(Option<Exit>, u64, Output), String> {
     use std::os::unix::process::CommandExt;
     let (program, args) = argv.split_first().ok_or("the check has no command")?;
     let (mut reader, writer) =
@@ -579,8 +718,7 @@ fn run_command(
         let _ = child.wait();
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
     };
-    // The kept bytes, and whether anything before them was dropped.
-    let kept = Arc::new(Mutex::new((Vec::<u8>::new(), false)));
+    let kept = Arc::new(Mutex::new(Output::default()));
     let (finished_reading, read_done) = mpsc::channel::<()>();
     let reading = {
         let kept = kept.clone();
@@ -592,13 +730,9 @@ fn run_command(
                     if read == 0 {
                         break;
                     }
-                    let mut kept = kept.lock().unwrap_or_else(|e| e.into_inner());
-                    kept.0.extend_from_slice(&buffer[..read]);
-                    let excess = kept.0.len().saturating_sub(KEPT_BYTES);
-                    if excess > 0 {
-                        kept.0.drain(..excess);
-                        kept.1 = true;
-                    }
+                    kept.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(&buffer[..read]);
                 }
                 let _ = finished_reading.send(());
             })
@@ -643,8 +777,8 @@ fn run_command(
     // not waited for beyond a second.
     let _ = read_done.recv_timeout(Duration::from_secs(1));
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let (bytes, cut) = kept.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    Ok((exit, duration_ms, tail(&bytes, cut)))
+    let output = std::mem::take(&mut *kept.lock().unwrap_or_else(|e| e.into_inner()));
+    Ok((exit, duration_ms, output))
 }
 
 /// The last lines of the output, redacted, without control characters other

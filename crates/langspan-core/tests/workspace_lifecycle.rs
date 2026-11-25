@@ -115,6 +115,10 @@ fn ready() -> State {
             result: CheckResult::Passed {},
             duration_ms: 10,
             report: None,
+            tests: None,
+            rerun: None,
+            writes_before: None,
+            command_id: None,
         },
         3,
     ) else {

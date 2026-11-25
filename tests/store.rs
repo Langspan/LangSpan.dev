@@ -898,6 +898,10 @@ fn a_check_command_recorded_before_redaction_is_redacted_when_shown() {
         result: langspan_core::CheckResult::Passed {},
         duration_ms: 5,
         report: None,
+        tests: None,
+        rerun: None,
+        writes_before: None,
+        command_id: None,
     };
     {
         // As an earlier build stored it: the store itself does not redact.
@@ -954,6 +958,10 @@ fn old_check(command: String) -> Command {
         result: langspan_core::CheckResult::Passed {},
         duration_ms: 5,
         report: None,
+        tests: None,
+        rerun: None,
+        writes_before: None,
+        command_id: None,
     }
 }
 
