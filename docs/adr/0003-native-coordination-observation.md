@@ -319,7 +319,7 @@ receipts. Existing persisted types default newly added optional fields, and
 archived v1 golden vectors remain readable. Old wire clients are not accepted
 as version 2 clients; upgrade the daemon and its clients together.
 
-`changes WORKSPACE` and the ninth MCP tool, `langspan_changes`, return paginated
+`changes WORKSPACE` and the MCP tool `langspan_changes` return paginated
 disk/branch events plus the last complete scan summary. `events` and `changes`
 are read-only, do not cache reads as mutation receipts, and cap their event
 payload budgets below the 64 KiB frame limit. `status` includes process evidence

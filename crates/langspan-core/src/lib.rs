@@ -487,7 +487,25 @@ pub struct SessionActivity {
     /// one is a point to run the workspace's automatic check.
     #[serde(default, skip_serializing_if = "is_false")]
     pub wrote_since_boundary: bool,
+    /// Where the definitions named in the session's last prompt are, from
+    /// the source index (roadmap C8). Paths only; never the prompt's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_targets: Option<PromptTargets>,
 }
+
+/// The definition paths a prompt's code briefing found, and when. Compared
+/// with other sessions' targets and work while within `BRIEF_HORIZON_MS`;
+/// never a hold, an admission or a publication.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PromptTargets {
+    pub paths: Vec<String>,
+    pub at_ms: u64,
+}
+
+/// At most this many prompt target paths: every definition a code briefing
+/// can find, `CONTEXT_DEFINITIONS` for each of `CONTEXT_NAMES` names.
+pub const MAX_PROMPT_TARGETS: usize = CONTEXT_NAMES * CONTEXT_DEFINITIONS as usize;
 
 fn is_zero(value: &u32) -> bool {
     *value == 0
@@ -549,8 +567,14 @@ pub struct PeerWork {
     pub intent: Option<String>,
     pub editing: Vec<String>,
     pub recent: Vec<RecentPath>,
-    /// Paths this peer shares with the asking session's own work.
+    /// Paths this peer shares with the asking session's own work. The
+    /// asking session's prompt targets count as its work here.
     pub overlap: Vec<String>,
+    /// Paths this peer's last prompt points at (its prompt targets) that the
+    /// asking session works on or its own prompt points at, and that are not
+    /// already in `overlap`. Advisory: it never holds a write (roadmap C8).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_overlap: Vec<String>,
     /// How this peer is related to the asking session through a host
     /// subagent; absent for an unrelated session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1489,6 +1513,14 @@ pub enum Event {
         at_ms: u64,
         generation: u64,
     },
+    /// The definition paths the session's prompt named, replacing earlier
+    /// ones. Local only: never published.
+    PromptTargetsSet {
+        session_id: String,
+        paths: Vec<String>,
+        at_ms: u64,
+        generation: u64,
+    },
     SessionEnded {
         session_id: String,
     },
@@ -2059,6 +2091,13 @@ pub enum Command {
         session_id: String,
         summary: String,
     },
+    /// Where the definitions the session's prompt named are, from the
+    /// source index: replaces the session's earlier prompt targets. Paths
+    /// only, at most `MAX_PROMPT_TARGETS`.
+    SetPromptTargets {
+        session_id: String,
+        paths: Vec<String>,
+    },
     SessionEnd {
         session_id: String,
     },
@@ -2462,6 +2501,13 @@ enum CommandWire {
         session_id: String,
         summary: String,
     },
+    /// Where the definitions the session's prompt named are, from the
+    /// source index: replaces the session's earlier prompt targets. Paths
+    /// only, at most `MAX_PROMPT_TARGETS`.
+    SetPromptTargets {
+        session_id: String,
+        paths: Vec<String>,
+    },
     SessionEnd {
         session_id: String,
     },
@@ -2577,6 +2623,10 @@ pub enum Outcome {
     },
     SessionPrompted {
         session_id: String,
+    },
+    PromptTargets {
+        session_id: String,
+        paths: Vec<String>,
     },
     SessionEnded {
         session_id: String,
@@ -3296,6 +3346,24 @@ fn decide_checked(
                 }],
                 outcome: Outcome::SessionPrompted {
                     session_id: session_id.clone(),
+                },
+            })
+        }
+        Command::SetPromptTargets { session_id, paths } => {
+            current_session(state, session_id)?;
+            let paths = prompt_target_paths(paths)?;
+            // Recorded again when unchanged: naming the same code again
+            // renews how recent the targets are.
+            Ok(Decision {
+                events: vec![Event::PromptTargetsSet {
+                    session_id: session_id.clone(),
+                    paths: paths.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }],
+                outcome: Outcome::PromptTargets {
+                    session_id: session_id.clone(),
+                    paths,
                 },
             })
         }
@@ -5388,7 +5456,22 @@ fn brief(
         }
         (editing, recent, all)
     };
+    // Where a running session's last prompt pointed, while it is recent.
+    let prompt_targets = |id: &str| -> BTreeSet<String> {
+        state
+            .activity
+            .get(id)
+            .filter(|activity| activity.generation == state.generation && !activity.ended)
+            .and_then(|activity| activity.prompt_targets.as_ref())
+            .filter(|targets| now_ms.saturating_sub(targets.at_ms) <= BRIEF_HORIZON_MS)
+            .map(|targets| targets.paths.iter().cloned().collect())
+            .unwrap_or_default()
+    };
     let (_, _, mine) = work_paths(session_id);
+    // What a peer's work or task is compared with: this session's work and
+    // the files its own task points at.
+    let mut mine_or_targeted = mine.clone();
+    mine_or_targeted.extend(prompt_targets(session_id));
     let mut peers = Vec::new();
     for peer in state.sessions.values() {
         if peer.session_id == session_id || peer.generation != state.generation {
@@ -5430,7 +5513,8 @@ fn brief(
             .intents
             .get(&peer.session_id)
             .filter(|intent| intent.generation == state.generation);
-        if editing.is_empty() && intent.is_none() && !fresh {
+        let targets = prompt_targets(&peer.session_id);
+        if editing.is_empty() && intent.is_none() && !fresh && targets.is_empty() {
             continue;
         }
         // A finished session matters only for the edits it left behind.
@@ -5443,7 +5527,11 @@ fn brief(
         let Some(workspace) = state.workspaces.get(&peer.workspace_id) else {
             continue;
         };
-        let overlap: Vec<String> = all.intersection(&mine).take(BRIEF_PATHS).cloned().collect();
+        let overlap: Vec<String> = all
+            .intersection(&mine_or_targeted)
+            .take(BRIEF_PATHS)
+            .cloned()
+            .collect();
         editing.truncate(BRIEF_PATHS);
         recent.truncate(BRIEF_PATHS);
         let last_ms = activity.map(|activity| activity.last_ms).unwrap_or(0);
@@ -5454,8 +5542,22 @@ fn brief(
         if task_known && editing.is_empty() && recent.is_empty() {
             continue;
         }
+        let target_overlap: Vec<String> = if task_known {
+            Vec::new()
+        } else {
+            targets
+                .intersection(&mine_or_targeted)
+                .filter(|path| !overlap.contains(*path))
+                .take(BRIEF_PATHS)
+                .cloned()
+                .collect()
+        };
         peers.push((
-            (overlap.is_empty(), editing.is_empty(), u64::MAX - last_ms),
+            (
+                overlap.is_empty() && target_overlap.is_empty(),
+                editing.is_empty(),
+                u64::MAX - last_ms,
+            ),
             PeerWork {
                 session_id: peer.session_id.clone(),
                 workspace_id: peer.workspace_id.clone(),
@@ -5473,6 +5575,7 @@ fn brief(
                 editing,
                 recent,
                 overlap,
+                target_overlap,
                 relation,
             },
         ));
@@ -5496,6 +5599,7 @@ fn brief(
                     .editing
                     .iter()
                     .chain(&peer.overlap)
+                    .chain(&peer.target_overlap)
                     .chain(peer.recent.iter().map(|recent| &recent.path))
                     .map(|path| path.len() + 32)
                     .sum::<usize>();
@@ -5730,6 +5834,12 @@ fn brief(
         for text in [&peer.summary, &peer.intent, &peer.branch_ref] {
             signature.push('|');
             signature.push_str(text.as_deref().unwrap_or(""));
+        }
+        // Only when present, so a briefing without one keeps the signature
+        // it had before prompt targets existed and is not delivered again.
+        if !peer.target_overlap.is_empty() {
+            signature.push_str("|targets:");
+            signature.push_str(&peer.target_overlap.join(","));
         }
         signature.push_str(if peer.ended { "|ended\n" } else { "\n" });
     }
@@ -6349,6 +6459,32 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             }
             let activity = activity_mut(state, session_id);
             activity.summary = Some(summary.clone());
+            activity.last_ms = activity.last_ms.max(*at_ms);
+        }
+        Event::PromptTargetsSet {
+            session_id,
+            paths,
+            at_ms,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            if prompt_target_paths(paths)? != *paths {
+                return Err(error(
+                    "invalid_event",
+                    "Prompt targets must be recorded sorted and without repeats",
+                ));
+            }
+            if *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A prompt targets record must belong to the current daemon generation",
+                ));
+            }
+            let activity = activity_mut(state, session_id);
+            activity.prompt_targets = Some(PromptTargets {
+                paths: paths.clone(),
+                at_ms: *at_ms,
+            });
             activity.last_ms = activity.last_ms.max(*at_ms);
         }
         Event::SessionEnded { session_id } => {
@@ -7288,6 +7424,19 @@ fn normalized_paths(paths: &[String]) -> Result<Vec<String>, CoreError> {
         }
     }
     Ok(unique.into_iter().collect())
+}
+
+/// Prompt target paths, sorted and without repeats: 1 to
+/// `MAX_PROMPT_TARGETS` normalized relative paths.
+fn prompt_target_paths(paths: &[String]) -> Result<Vec<String>, CoreError> {
+    let paths = normalized_paths(paths)?;
+    if paths.len() > MAX_PROMPT_TARGETS {
+        return Err(error(
+            "too_many_paths",
+            &format!("A prompt names at most {MAX_PROMPT_TARGETS} target paths"),
+        ));
+    }
+    Ok(paths)
 }
 
 fn normalized_related_ids(ids: &[String]) -> Result<Vec<String>, CoreError> {

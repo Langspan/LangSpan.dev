@@ -356,6 +356,22 @@ Inspect the dry run and add `--apply` to write it. The option also applies to th
 Codex installer. File activity and admission information remain available when
 prompt summaries are off.
 
+Two tasks aimed at the same code are flagged before either session edits it.
+At each recorded prompt the files where the code briefing found the prompt's
+names defined (at most 12 names and 3 definitions each) become the session's
+prompt targets: paths only, never the prompt's words, replaced at its next
+prompt that finds a definition and ignored after 30 minutes or once the session
+ends. When another session's targets share a file with your targets, admissions,
+recent edits or declared intent, its peer line says
+`task points at your files: "src/http.rs";`, and your own targets count as your
+work for `shares files with your work`. The prompting session is told in that
+prompt's briefing, the other at its next delivery point (after a tool batch on
+Claude Code, otherwise its next prompt), once. A target never holds a write,
+never counts as an admission and is never published through the remote setup.
+Nothing is recorded with `--prompt-summary off` or `--code-briefing off`, or
+while the source index has no complete scan. `langspan status --json` shows
+each session's `prompt_targets` under its activity.
+
 Relevant peers share the same checkout or a Git repository identified by the
 observer. Linked worktrees can share briefings while keeping separate physical
 admission domains. Another worktree's file is reported as a logical overlap,
@@ -831,6 +847,33 @@ it finds no running session, the error names the directory it looked in and,
 if a LangSpan hook installed in the checkout names another one, that one.
 The MCP tool `langspan_commit_mine` does the same.
 
+To see first what `commit --mine` would take:
+
+```sh
+langspan status --mine [--session ID] [--root DIR] [--json]
+```
+
+```text
+shared.txt  mixed  lines 10-14 mine, line 22 no session's, lines 40-41 claude-code.…
+src/new.rs  mine   lines 1-30
+3 changed file(s) hold other sessions' lines.
+```
+
+It lists, by path, each changed file that holds this session's lines:
+`mine` (`commit --mine` would commit all of it), `mixed` (only its hunks
+marked mine) or `unknown` (it would refuse, and why), whether some of it is
+`staged` in the shared index, and each hunk's first line, line count and
+owner: `mine`, another session's (`others`, with `sessions`), `none` (no
+session wrote it) or `unknown` (with `reason`). A file attributed as a whole
+(binary, over 512 KiB, a mode change) is `whole`, with no hunks. `others`
+counts the changed files that hold other sessions' lines, also where they
+share an `unknown` hunk with this session's. At most 200 files
+are listed (`truncated` when there are more). It runs the same attribution as
+`commit --mine`, finds its session the same way, and changes nothing: no
+private index, no commit, and Git reads run with `--no-optional-locks`. The
+MCP tool `langspan_my_changes` does the same. Other worktrees and machines
+are not included.
+
 A formatter or other workspace-wide command (`cargo fmt --all`) run by one
 session keeps that session's own reformatted lines its own, so `commit --mine`
 still takes them. A file in which the command rewrote another session's
@@ -891,6 +934,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |
 | `langspan_handoff` | Leave a message for the next other session to take up |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |
+| `langspan_my_changes` | List this session's own uncommitted files and hunks in a shared checkout, as `langspan_commit_mine` would split them; changes nothing |
 
 Every mutation tool requires a caller-owned `request_id` (for
 `langspan_land_cancel`, it names the waiting landing). Conflicts are normal

@@ -74,7 +74,7 @@ logical overlap that may conflict at integration, never as a held file.
 
 **One operation.** `brief` is a core command that goes through the same store
 and receipt path as every mutation, exposed as `langspan brief SESSION` and the
-tenth MCP tool, `langspan_brief`.
+MCP tool `langspan_brief`.
 
 **Versions.** The wire protocol is version 3. The SQLite schema marker is 3;
 no table changed, and the marker makes an older binary refuse a history that
@@ -87,6 +87,29 @@ again and, only if it changed since the last delivery, returns it as
 the model at its next tool call instead of its next prompt. It is never sent
 in place of a decision. Codex does not get it yet: its handling of context on
 a completed tool call has not been observed on the host.
+
+**Prompt targets (added later, roadmap C8).** A prompt's code briefing finds
+where the prompt's names are defined (at most 12 names, 3 definitions each).
+When the prompt summary was recorded and the index has a complete scan, the
+prompt hook records those files as the session's prompt targets
+(`set_prompt_targets`, event `prompt_targets_set`): 1 to 36 sorted relative
+paths, the session and the time, never the prompt's words. They replace the
+session's earlier targets; a prompt that finds no definition leaves them. The
+hook now looks the names up before it asks for the briefing, so the prompting
+session's own targets are compared in that prompt's briefing. Targets count
+while they are at most `BRIEF_HORIZON_MS` (30 minutes) old in this generation
+and the session has not ended. For each peer, `target_overlap` lists the
+peer's targets that meet the asking session's admissions, recent edits,
+declared intent or targets, leaving out paths already in `overlap`; the
+asking session's own targets count as its work for `overlap`. Either ranks a
+peer first, and `target_overlap` is part of the delivery signature only when
+present, so earlier signatures are unchanged. The peer line says
+`task points at your files: ...`. The other session hears of it at its next
+delivery point (a tool batch on Claude Code, otherwise its next prompt), once.
+Targets never hold a write, never count as an admission, and are not part of
+what the remote setup publishes. The comparison is by file, not by meaning or
+symbol: two tasks naming different functions in one file are told, and a name
+defined in several files points at each of them.
 
 **Tools covered (added later).** Claude Code `MultiEdit` and `NotebookEdit`
 (`notebook_path`) are admitted, denied and observed like `Edit` and `Write`.

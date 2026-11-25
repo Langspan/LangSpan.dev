@@ -20,6 +20,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const ALICE: &str = "00000000-0000-4000-8000-00000000000a";
 const BOB: &str = "00000000-0000-4000-8000-00000000000b";
@@ -151,12 +153,17 @@ impl World {
         });
     }
     fn cli(&self, args: &[&str]) -> (i32, String) {
-        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
-            .arg("--state-dir")
-            .arg(self.state_dir())
-            .args(args)
-            .output()
-            .unwrap();
+        // `doctor` reads the user-level install: this world's own home,
+        // never the machine's.
+        let output = support::in_home(
+            &mut Process::new(env!("CARGO_BIN_EXE_langspan")),
+            &self.base.join("home"),
+        )
+        .arg("--state-dir")
+        .arg(self.state_dir())
+        .args(args)
+        .output()
+        .unwrap();
         (
             output.status.code().unwrap(),
             format!(

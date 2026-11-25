@@ -20,7 +20,7 @@ an edit, and nothing tells LangSpan whether the agent followed it.
 | A7 | Detecting agent tools installed after setup | Not now | Install is an explicit owner step ([ADR 0010](0010-user-level-install.md)); running `langspan install` again covers a new host |
 | I7 | An AGENTS.md block and rules-file text | Not now | Comes with the rules-file hosts; it changes files in the owner's repository |
 | I8 | A LangSpan skill that teaches agents how to work with it: a general skill for every host, then task skills | Superseded: planned, part 1 built ([ADR 0034](0034-langspan-skill.md)) | The maintainers asked for it, and running LangSpan on its own development showed every agent needed the same instructions by hand |
-| I11 | MCP menu trimming: tools hidden from read-only members, and bookkeeping tools hidden once hooks report (added by the second review) | Not now | All 23 tools are always listed. Hiding tools once hooks run needs to know, per host, that they do, and the cost of the 23 descriptions has not been measured |
+| I11 | MCP menu trimming: tools hidden from read-only members, and bookkeeping tools hidden once hooks report (added by the second review) | Not now | Every tool is always listed. Hiding tools once hooks run needs to know, per host, that they do, and the cost of their descriptions has not been measured |
 
 The Gemini CLI part of row A6 is launch track L10, not this ADR.
 

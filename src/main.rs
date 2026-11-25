@@ -115,6 +115,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  whether the LangSpan skill is installed and current
   status                         Show workspaces, live or recent sessions, intents and
                                  open admissions; closed ones are counted per session
+  status --mine [--session ID] [--root DIR]
+                                 This session's uncommitted changes in a shared
+                                 checkout, file by file and hunk by hunk: each file
+                                 mine, mixed or unknown, each hunk mine, another
+                                 session's, no session's or not known; at most 200
+                                 files. What commit --mine would commit and refuse;
+                                 changes nothing. Session found as for commit --mine
   status --all [--after CURSOR]  Read every record, history included, one page at a
                                  time; pass the page's `next` as --after for the next
   events [--after SEQ] [--limit N] Read ordered events (default limit 100; maximum 1000)
@@ -1106,6 +1113,31 @@ fn commit_mine(
         println!("{}", report.text());
     }
     Ok(report.exit_code())
+}
+
+/// `status --mine`: this session's uncommitted lines, read-only (issue #40).
+fn status_mine(
+    state_dir: &std::path::Path,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    let root = match options.remove("--root") {
+        Some(root) => PathBuf::from(root),
+        None => std::env::current_dir()?,
+    };
+    let session = options.remove("--session");
+    no_unused_options(options)?;
+    let session = match session {
+        Some(session) => session,
+        None => langspan::commit::running_session(state_dir, &root)?,
+    };
+    let status = langspan::commit::status_mine(state_dir, &root, &session)?;
+    if json {
+        println!("{}", serde_json::to_string(&status)?);
+    } else {
+        println!("{}", status.text());
+    }
+    Ok(0)
 }
 
 /// `check auto`: turn the automatic check on, off, or show it.
@@ -2455,6 +2487,9 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             );
         }
         ["commit"] => return commit_mine(&state_dir, &mut options, json),
+        ["status"] if options.remove("--mine").is_some() => {
+            return status_mine(&state_dir, &mut options, json);
+        }
         ["integrate", "check", workspace, branches @ ..] | ["land", workspace, branches @ ..] => {
             return integrate(
                 &state_dir,
@@ -2968,6 +3003,10 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
         Outcome::SessionPrompted { session_id } => {
             println!("Task summary recorded for {session_id}.")
         }
+        Outcome::PromptTargets { session_id, paths } => println!(
+            "Prompt targets recorded for {session_id}: {} file(s).",
+            paths.len()
+        ),
         Outcome::SessionEnded { session_id } => {
             println!("Session {session_id} marked ended.")
         }

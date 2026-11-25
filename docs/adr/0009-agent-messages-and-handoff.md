@@ -96,8 +96,7 @@ counted on a "not shown" line.
 [--from SESSION]`, `langspan handoff SESSION TEXT [PATH...]`, `langspan ack
 SESSION MESSAGE`, and pending messages in `langspan recap`. MCP tools
 `langspan_send_message` (the caller's `session_id` is the sender) and
-`langspan_handoff`, both mutations with a caller `request_id`; there are now 18
-tools. Wire protocol stays version 3: the new commands, events and the optional
+`langspan_handoff`, both mutations with a caller `request_id`. Wire protocol stays version 3: the new commands, events and the optional
 field are additions, with golden vectors in `fixtures/`.
 
 ## Consequences and limits
