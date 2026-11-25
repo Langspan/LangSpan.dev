@@ -598,7 +598,11 @@ sender (`null` for the owner), recipient, whole text, every path and
 message's `message_sent` event, so it also works after the message was
 acknowledged or dropped from the pending list, and across daemon restarts. It is
 read-only and acknowledges nothing. An ID not sent in that workspace is the
-error `unknown_message`; with the daemon down the command reports coordination
+error `unknown_message`. Once retention has deleted the oldest events, an ID not
+found is `message_not_kept` instead: the message says from which event sequence
+the log is kept and that a message sent before then no longer has its full text
+(the log cannot tell such an ID from one never sent). With the daemon down the
+command reports coordination
 unavailable. Any local session or the owner can read any message, as with
 `recap`. Notes and
 messages stay local; remote Git-ref sharing does not publish them. Treat their

@@ -340,6 +340,64 @@ fn a_message_cut_in_a_briefing_is_shown_in_full_even_after_it_is_acknowledged() 
     assert_eq!(shown["outcome"]["message"]["text"], json!(text));
 }
 
+/// Retention (roadmap J7) deletes the oldest events. Once a message's
+/// `message_sent` event is among them, `messages show` says the full text is
+/// no longer kept instead of claiming the message was never sent. The test
+/// deletes the rows itself, as a compaction would, while the daemon runs.
+#[test]
+fn a_message_whose_event_was_removed_is_answered_as_no_longer_kept() {
+    let f = Fixture::new();
+    f.start_session("claude-code", ALICE);
+    let alice = format!("claude-code.{ALICE}");
+    for id in ["m-old", "m-new"] {
+        f.send(&[
+            "message",
+            "work",
+            "hello",
+            "--to",
+            &alice,
+            "--request-id",
+            id,
+        ]);
+    }
+    // Before anything is removed, an ID that was never sent is unknown.
+    let (code, unknown) = f.cli(&["messages", "show", "work", "m-404"]);
+    assert_eq!(code, 1);
+    assert!(unknown.contains("unknown_message"), "{unknown}");
+
+    let database = rusqlite::Connection::open(f.state_dir().join("state.sqlite3")).unwrap();
+    database.busy_timeout(Duration::from_secs(5)).unwrap();
+    let cut: i64 = database
+        .query_row(
+            r#"SELECT seq FROM events WHERE json_extract(event_json, '$.type') = 'message_sent'
+               AND json_extract(event_json, '$.message.message_id') = 'm-old'"#,
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let removed = database
+        .execute("DELETE FROM events WHERE seq <= ?1", [cut])
+        .unwrap();
+    assert!(removed > 0);
+    drop(database);
+
+    let (code, pruned) = f.cli(&["messages", "show", "work", "m-old"]);
+    assert_eq!(code, 1, "{pruned}");
+    assert!(
+        pruned.contains("message_not_kept") && pruned.contains("no longer kept"),
+        "{pruned}"
+    );
+    let (code, pruned) = f.cli(&["messages", "show", "work", "m-old", "--json"]);
+    assert_eq!(code, 1, "{pruned}");
+    let pruned: Value = serde_json::from_str(&pruned).unwrap();
+    assert_eq!(pruned["outcome"]["code"], "message_not_kept", "{pruned}");
+    // A message whose event is still kept is shown as before.
+    let (code, kept) = f.cli(&["messages", "show", "work", "m-new", "--json"]);
+    assert_eq!(code, 0, "{kept}");
+    let kept: Value = serde_json::from_str(&kept).unwrap();
+    assert_eq!(kept["outcome"]["message"]["message_id"], "m-new");
+}
+
 #[test]
 fn a_message_for_everyone_reaches_a_codex_session_as_it_starts_and_not_its_sender() {
     let f = Fixture::new();

@@ -53,7 +53,10 @@ unchanged. `ShowMessage` (`langspan messages show`, MCP
 acknowledgement, after the cap drops the message from state, and across
 restarts; it is never recorded and acknowledges nothing. It returns the ID,
 sender, recipient, text, paths and `retracted`, always false until a message
-can be retracted (roadmap E11). An unknown ID is `unknown_message`. It reads
+can be retracted (roadmap E11). An unknown ID is `unknown_message`;
+once retention (roadmap J7) has deleted the oldest events, it is
+`message_not_kept`, naming the first kept sequence and saying a message sent
+before it no longer has its full text. It reads
 what `recap` and `events` already expose to any local session, so it adds no
 trust boundary.
 

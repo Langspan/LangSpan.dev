@@ -884,6 +884,17 @@ impl Store {
             )
             .optional()?;
         let Some(stored) = stored else {
+            // Retention deletes the oldest events. Once any were deleted, an
+            // ID not found may be a message whose event went with them, and
+            // the log cannot tell that from one never sent: say so plainly.
+            if let Some(first_kept) = self.first_kept_event()? {
+                return Ok(Outcome::Error {
+                    code: "message_not_kept".into(),
+                    message: format!(
+                        "message {message_id:?} is not in the event log of workspace {workspace_id:?}, which keeps events from sequence {first_kept} on; if it was sent before then, its full text is no longer kept. `langspan recap {workspace_id}` lists the messages still pending"
+                    ),
+                });
+            }
             return Ok(Outcome::Error {
                 code: "unknown_message".into(),
                 message: format!(
@@ -896,6 +907,29 @@ impl Store {
         };
         Ok(Outcome::MessageShown {
             message: message.into(),
+        })
+    }
+
+    /// `Some(N)` once events before sequence N have been deleted (by
+    /// retention): the first kept event is past 1, or every row is gone
+    /// while the sequence counter has advanced. `None` while the log is
+    /// whole.
+    fn first_kept_event(&self) -> StoreResult<Option<i64>> {
+        let first: Option<i64> =
+            self.connection
+                .query_row("SELECT MIN(seq) FROM events", [], |row| row.get(0))?;
+        let counter: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'events'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(match (first, counter) {
+            (Some(first), _) if first > 1 => Some(first),
+            (None, Some(last)) if last > 0 => Some(last + 1),
+            _ => None,
         })
     }
 
