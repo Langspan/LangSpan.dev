@@ -1863,7 +1863,13 @@ pub fn resolve_workspace(
     if cwd.starts_with(&anchor) && !nested_boundary {
         return Ok(resolved);
     }
-    if let Some(file) = worktree_install(config, &anchor, &cwd) {
+    let own = worktree_install(config, &anchor, &cwd);
+    // Step aside only where the host is known to run the worktree's own
+    // install for this same event. Otherwise this hook may be the only one
+    // the host runs there (Codex), or that is not known: it decides.
+    if let Some((file, _)) = &own
+        && config.vendor.worktree_hooks() == crate::install::WorktreeHooks::Both
+    {
         return Err(Reply::none(
             "deferred_to_worktree",
             format!(
@@ -1879,51 +1885,78 @@ pub fn resolve_workspace(
             "host cwd is outside the installed repository and its linked worktrees".into(),
         ));
     }
-    resolved.workspace_id = wire_id(
-        "worktree",
-        &[&config.workspace_id, &current_git.root.to_string_lossy()],
-    );
+    match own {
+        // Decide as the worktree's own install would, so this session is
+        // coordinated in the same workspace as sessions that install covers,
+        // and a host that runs both reaches one decision. An opt-out in
+        // either install holds.
+        Some((_, registration)) if registration.root == current_git.root => {
+            resolved.workspace_id = registration.workspace_id;
+            resolved.share_prompt &= registration.share_prompt;
+            resolved.code_briefing &= registration.code_briefing;
+        }
+        _ => {
+            resolved.workspace_id = wire_id(
+                "worktree",
+                &[&config.workspace_id, &current_git.root.to_string_lossy()],
+            );
+        }
+    }
     resolved.root = current_git.root;
     Ok(resolved)
 }
 
 /// The project file of the worktree holding `cwd` that has a LangSpan hook of
 /// its own for this host and state directory, when that worktree is not the
-/// installed root. A host started in a linked worktree may also run the main
-/// checkout's project hooks (Claude Code reads the main checkout's local
-/// settings); that inherited copy leaves the event to the worktree's own
-/// hook. Only files are read: no Git process and no coordinator call. The
-/// worktree is the nearest directory holding `.git`. Anything that cannot be
-/// read is not a match, and the event is handled as before.
-fn worktree_install(config: &Config, anchor: &Path, cwd: &Path) -> Option<PathBuf> {
+/// installed root, with that hook's registration (its root canonical). A
+/// host started in a linked worktree may run the main checkout's project
+/// hooks as well as, or instead of, the worktree's own
+/// (`Vendor::worktree_hooks`). Only files are read: no Git process and no
+/// coordinator call. The worktree is the nearest directory holding `.git`.
+/// Anything that cannot be read is not a match, and the event is handled as
+/// before.
+fn worktree_install(
+    config: &Config,
+    anchor: &Path,
+    cwd: &Path,
+) -> Option<(PathBuf, crate::install::Registration)> {
     let worktree = cwd
         .ancestors()
         .find(|dir| dir.join(".git").symlink_metadata().is_ok())?;
     if worktree == anchor {
         return None;
     }
+    install_at(config.vendor, &config.state_dir, worktree)
+}
+
+/// The project file in `dir` (canonical) holding a LangSpan hook for
+/// `vendor` that names `dir` as its root and `state_dir`, with that hook's
+/// registration, its root canonical. Also used by `doctor`.
+pub fn install_at(
+    vendor: crate::install::Vendor,
+    state_dir: &Path,
+    dir: &Path,
+) -> Option<(PathBuf, crate::install::Registration)> {
     // The state directory may not exist yet: no coordinator has started.
     let canonical = |dir: &Path| fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let state_dir = canonical(&config.state_dir);
-    config
-        .vendor
-        .project_hook_files()
-        .iter()
-        .map(|file| worktree.join(file))
-        .find(|path| {
-            let Ok(Some(settings)) = crate::install::read(path) else {
-                return false;
-            };
-            !crate::install::managed_hooks(&settings, |hook| {
-                crate::install::parse_project_hook(config.vendor, hook).is_some_and(
-                    |registration| {
-                        canonical(&registration.root) == worktree
-                            && canonical(&registration.state_dir) == state_dir
-                    },
-                )
+    let state_dir = canonical(state_dir);
+    vendor.project_hook_files().iter().find_map(|file| {
+        let path = dir.join(file);
+        let Ok(Some(settings)) = crate::install::read(&path) else {
+            return None;
+        };
+        crate::install::managed_hooks(&settings, |_| true)
+            .iter()
+            .filter_map(|hook| crate::install::parse_project_hook(vendor, hook))
+            .map(|mut registration| {
+                registration.root = canonical(&registration.root);
+                registration
             })
-            .is_empty()
-        })
+            .find(|registration| {
+                registration.root == dir && canonical(&registration.state_dir) == state_dir
+            })
+            .map(|registration| (path, registration))
+    })
 }
 
 /// The workspace ID a user-level hook uses for a repository root: the same

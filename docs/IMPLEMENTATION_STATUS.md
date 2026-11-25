@@ -95,6 +95,14 @@ Fixed on `main` since the validation:
   aside; a redelivered refusal for unread lines or a stale source is refused
   again. All tested with constructed events, real Git and a real daemon; no
   host run after the fixes.
+- Issue #2: the main checkout's hook steps aside for a linked worktree's
+  own install only on Claude Code, the one host seen running both there.
+  On Codex (0.171.0 was seen running only the main checkout's hooks in a
+  linked worktree) and on Cursor and Gemini CLI (not observed there), it
+  decides under the worktree install's workspace instead; `doctor` reports
+  a worktree install the host will not run. Tested with real linked
+  worktrees, a real daemon and constructed events; the real Codex run in a
+  linked worktree is pending.
 
 **Observed on real hosts (retained on `main`):**
 

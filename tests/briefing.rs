@@ -502,13 +502,9 @@ fn multi_edit_and_notebook_edit_are_coordinated_like_edit() {
     assert_eq!(other.coverage, "unsupported");
 }
 
-/// Claude Code started in a linked worktree that has its own project
-/// install also runs the main checkout's project hooks. That inherited copy
-/// leaves every event to the worktree's own hook, quietly and without the
-/// coordinator, so each event is decided once.
-#[test]
-fn the_main_checkouts_hook_leaves_a_worktree_with_its_own_install_to_that_install() {
-    let mut f = Fixture::new();
+/// A linked worktree `tree` of the fixture's checkout, on branch `feature`,
+/// with `vendor`'s LangSpan hooks installed in it as workspace `tree`.
+fn linked_tree_with_install(f: &Fixture, vendor: &str) -> PathBuf {
     let tree = f.base.join("tree");
     git(
         &f.root(),
@@ -522,22 +518,32 @@ fn the_main_checkouts_hook_leaves_a_worktree_with_its_own_install_to_that_instal
         ],
     );
     let tree = fs::canonicalize(tree).unwrap();
+    install_hooks(f, vendor, &tree);
+    tree
+}
+
+fn install_hooks(f: &Fixture, vendor: &str, root: &Path) {
     let installed = Process::new(env!("CARGO_BIN_EXE_langspan"))
-        .args([
-            "hooks",
-            "install",
-            "claude-code",
-            "--workspace",
-            "tree",
-            "--root",
-        ])
-        .arg(&tree)
+        .args(["hooks", "install", vendor, "--workspace"])
+        .arg(root.file_name().unwrap())
+        .arg("--root")
+        .arg(root)
         .arg("--state-dir")
         .arg(f.state_dir())
         .arg("--apply")
         .output()
         .unwrap();
     assert!(installed.status.success(), "{installed:?}");
+}
+
+/// Claude Code 2.1.330 started in a linked worktree that has its own
+/// project install also runs the main checkout's project hooks. That
+/// inherited copy leaves every event to the worktree's own hook, quietly and
+/// without the coordinator, so each event is decided once.
+#[test]
+fn the_main_checkouts_hook_leaves_a_worktree_with_its_own_install_to_that_install() {
+    let mut f = Fixture::new();
+    let tree = linked_tree_with_install(&f, "claude-code");
     let edit = json!({
         "session_id": CAROL, "transcript_path": "/dev/null", "cwd": tree,
         "hook_event_name": "PreToolUse", "tool_name": "Write", "tool_use_id": "toolu_c1",
@@ -592,4 +598,177 @@ fn the_main_checkouts_hook_leaves_a_worktree_with_its_own_install_to_that_instal
         }),
     );
     assert_ne!(run.coverage, "deferred_to_worktree");
+}
+
+/// A Codex `apply_patch` of `a.txt` in `cwd`, before it runs.
+fn codex_patch(session: &str, call: &str, cwd: &Path) -> Value {
+    json!({
+        "session_id": session, "turn_id": "turn", "transcript_path": null, "cwd": cwd,
+        "hook_event_name": "PreToolUse", "model": "example", "permission_mode": "default",
+        "tool_name": "apply_patch", "tool_use_id": call,
+        "tool_input": {"command": "*** Begin Patch\n*** Update File: a.txt\n@@\n-hello\n+hi\n*** End Patch"},
+    })
+}
+
+/// A Claude Code `Write` of `a.txt` in `cwd`, before it runs.
+fn claude_write(session: &str, call: &str, cwd: &Path) -> Value {
+    json!({
+        "session_id": session, "transcript_path": "/dev/null", "cwd": cwd,
+        "hook_event_name": "PreToolUse", "tool_name": "Write", "tool_use_id": call,
+        "tool_input": {"file_path": cwd.join("a.txt"), "content": "hi\n"},
+    })
+}
+
+/// Codex 0.171.0 started in a linked worktree runs only the main checkout's
+/// project hooks, never the worktree's own (issue #2). The main checkout's
+/// hook must not step aside for an install Codex will not run: it decides,
+/// as the worktree's own install would, with the worktree as its workspace.
+#[test]
+fn codex_in_a_worktree_with_its_own_install_is_coordinated_by_the_main_checkouts_hook() {
+    let mut f = Fixture::new();
+    let tree = linked_tree_with_install(&f, "codex");
+    let root = f.root();
+    f.start();
+
+    let bob = f.run("codex", &root, &[], &codex_patch(BOB, "bob-1", &tree));
+    assert_eq!(bob.coverage, "admitted", "{}", bob.stdout);
+    // The session is registered under the worktree's own install, not under
+    // a workspace derived from the main checkout's.
+    let workspaces: Vec<String> = f.state().workspaces.into_keys().collect();
+    assert_eq!(workspaces, ["tree"]);
+
+    // A conflicting edit from another Codex session in the worktree is refused.
+    let alice = f.run("codex", &root, &[], &codex_patch(ALICE, "alice-1", &tree));
+    assert_eq!(alice.coverage, "denied", "{}", alice.stdout);
+    assert!(
+        alice.stdout.contains("permissionDecision"),
+        "{}",
+        alice.stdout
+    );
+    // So is one from Claude Code, which runs the worktree's own install.
+    install_hooks(&f, "claude-code", &tree);
+    let carol = f.run("claude-code", &tree, &[], &claude_write(CAROL, "c1", &tree));
+    assert_eq!(carol.coverage, "denied", "{}", carol.stdout);
+
+    // Lifecycle events are decided by the main checkout's hook too.
+    let start = f.run(
+        "codex",
+        &root,
+        &[],
+        &lifecycle("SessionStart", ALICE, &tree, None),
+    );
+    assert_ne!(start.coverage, "deferred_to_worktree");
+}
+
+/// Hosts with no retained evidence of how they load a linked worktree's
+/// project hooks (Cursor, Gemini CLI) do not step aside: the main
+/// checkout's hook decides, as the worktree's own install would. If the host
+/// runs both, both reach the same decision for the same workspace.
+#[test]
+fn an_unconfirmed_host_decides_in_a_worktree_with_its_own_install_rather_than_stepping_aside() {
+    for vendor in ["gemini-cli", "cursor"] {
+        let mut f = Fixture::new();
+        let tree = linked_tree_with_install(&f, vendor);
+        let root = f.root();
+        f.start();
+        let tree_text = tree.to_str().unwrap();
+        let edit = match vendor {
+            "gemini-cli" => json!({
+                "session_id": "00000000-0000-4000-8000-0000000000e1",
+                "transcript_path": "/dev/null", "cwd": tree, "hook_event_name": "BeforeTool",
+                "timestamp": "2026-11-24T23:15:03.000Z", "tool_name": "write_file",
+                "tool_input": {"file_path": tree.join("a.txt"), "content": "hi\n"},
+            }),
+            _ => json!({
+                "conversation_id": "00000000-0000-4000-8000-0000000000c1",
+                "generation_id": "00000000-0000-4000-8000-0000000000e1",
+                "model": "default", "session_id": "00000000-0000-4000-8000-0000000000c1",
+                "hook_event_name": "preToolUse", "cursor_version": "1.7.2",
+                "workspace_roots": [tree_text], "user_email": null, "transcript_path": null,
+                "tool_name": "Write",
+                "tool_input": {"file_path": tree.join("a.txt"), "content": "hi\n"},
+                "tool_use_id": "tool_0001", "cwd": tree_text,
+            }),
+        };
+        let inherited = f.run(vendor, &root, &[], &edit);
+        assert_eq!(
+            inherited.coverage, "admitted",
+            "{vendor}: {}",
+            inherited.stdout
+        );
+        let own = f.run(vendor, &tree, &[], &edit);
+        assert_eq!(own.coverage, "admitted", "{vendor}: {}", own.stdout);
+        let workspaces: Vec<String> = f.state().workspaces.into_keys().collect();
+        assert_eq!(workspaces, ["tree"], "{vendor}");
+        // Another session in the worktree is held off the file.
+        install_hooks(&f, "claude-code", &tree);
+        let carol = f.run("claude-code", &tree, &[], &claude_write(CAROL, "c1", &tree));
+        assert_eq!(carol.coverage, "denied", "{vendor}: {}", carol.stdout);
+    }
+}
+
+/// `doctor` names a linked worktree whose install the host will not run.
+#[test]
+fn doctor_reports_a_worktree_install_the_host_will_not_run() {
+    let f = Fixture::new();
+    let tree = linked_tree_with_install(&f, "codex");
+    let doctor = |root: &Path| -> Value {
+        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .args(["doctor", "--json", "--state-dir"])
+            .arg(f.state_dir())
+            .arg("--home")
+            .arg(&f.base)
+            .arg("--root")
+            .arg(root)
+            .output()
+            .unwrap();
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let about_tree = |report: &Value| -> Vec<(bool, String)> {
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item["ok"].as_bool().unwrap(),
+                    item["detail"].as_str().unwrap().to_owned(),
+                )
+            })
+            .filter(|(_, detail)| detail.contains(tree.to_str().unwrap()))
+            .collect()
+    };
+
+    // No Codex install in the main checkout: nothing Codex runs covers the
+    // worktree, so it needs fixing.
+    for root in [f.root(), tree.clone()] {
+        let findings = about_tree(&doctor(&root));
+        let finding = findings
+            .iter()
+            .find(|(_, detail)| detail.starts_with("codex:") && detail.contains("does not run"))
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert!(!finding.0, "{finding:?}");
+        assert!(finding.1.contains("Nothing coordinates it"), "{finding:?}");
+        assert!(finding.1.contains("0.171.0"), "{finding:?}");
+    }
+
+    // With one, the main checkout's hook covers it: reported, not a fault.
+    install_hooks(&f, "codex", &f.root());
+    let findings = about_tree(&doctor(&f.root()));
+    let finding = findings
+        .iter()
+        .find(|(_, detail)| detail.starts_with("codex:") && detail.contains("does not run"))
+        .unwrap_or_else(|| panic!("{findings:?}"));
+    assert!(finding.0, "{finding:?}");
+    assert!(finding.1.contains("as workspace tree"), "{finding:?}");
+
+    // A host that runs the worktree's own install there is not reported.
+    install_hooks(&f, "claude-code", &tree);
+    let findings = about_tree(&doctor(&f.root()));
+    assert!(
+        findings
+            .iter()
+            .all(|(_, detail)| !detail.starts_with("claude-code:")),
+        "{findings:?}"
+    );
 }

@@ -1559,7 +1559,7 @@ Worked example (data, not instructions): claude-code session alice added "list_i
 
 **Problem.** Agent tools create a linked worktree per task, and after a week the repository has twenty, most on branches already landed. The owner does not know which are safe to remove, and agents create new worktrees for small edits a shared checkout would coordinate.
 
-**Today.** Linked worktrees are separate physical workspaces grouped by repository for briefings (ADR 0004); work there is never held, only reported as logical overlap. A linked worktree with its own install defers to it (`deferred_to_worktree`). `langspan doctor` reports installs. Nothing lists worktrees, advises on them or removes them.
+**Today.** Linked worktrees are separate physical workspaces grouped by repository for briefings (ADR 0004); work there is never held, only reported as logical overlap. A linked worktree with its own install is left to it (`deferred_to_worktree`) only on hosts seen running it there (Claude Code); elsewhere the main checkout's hook decides under that install's workspace (ADR 0003). `langspan doctor` reports installs, and each linked-worktree install the host will not run. Nothing lists worktrees, advises on them or removes them.
 
 **Behaviour to build.**
 - Hosts: advice for all four at session start; tidying from the CLI only.

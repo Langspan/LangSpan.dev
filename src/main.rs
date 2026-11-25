@@ -1896,6 +1896,9 @@ fn doctor(
                 "Shell commands (Bash) are covered partly: a write is refused before it runs only for literal forms such as `> file`, `sed -i` or `mv`; other commands' changes are found afterwards by comparing Git status, and are not recorded when that comparison is incomplete (ADR 0011).".into(),
             );
         }
+        for (ok, text) in worktree_install_findings(state_dir, root) {
+            note(ok, text);
+        }
     }
     for (ok, text) in user_level_findings(state_dir, home)? {
         note(ok, text);
@@ -1924,6 +1927,91 @@ fn doctor(
         );
     }
     Ok(u8::from(problems > 0))
+}
+
+/// What `doctor` says about each linked worktree of `root`'s repository with
+/// a LangSpan install of its own that the host may not run there
+/// (`Vendor::worktree_hooks`, ADR 0003).
+fn worktree_install_findings(
+    state_dir: &std::path::Path,
+    root: &std::path::Path,
+) -> Vec<(bool, String)> {
+    use langspan::{
+        hook::install_at,
+        install::{Vendor, WorktreeHooks},
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let listed = match langspan::git::output(
+        root,
+        &["worktree", "list", "--porcelain", "-z"],
+        deadline,
+        1 << 20,
+    ) {
+        Ok(listed) => listed,
+        Err(error) => {
+            return vec![(
+                true,
+                format!(
+                    "Linked worktrees of {} were not checked: {error}.",
+                    root.display()
+                ),
+            )];
+        }
+    };
+    // The main worktree comes first; a listed worktree that no longer
+    // exists on disk has no install to run.
+    let mut trees = listed
+        .split(|byte| *byte == 0)
+        .filter_map(|field| field.strip_prefix(b"worktree "))
+        .filter_map(|path| std::fs::canonicalize(String::from_utf8_lossy(path).as_ref()).ok());
+    let Some(main) = trees.next() else {
+        return Vec::new();
+    };
+    let mut findings = Vec::new();
+    for tree in trees {
+        for vendor in Vendor::ALL {
+            let Some((file, own)) = install_at(vendor, state_dir, &tree) else {
+                continue;
+            };
+            let name = vendor.name();
+            match vendor.worktree_hooks() {
+                WorktreeHooks::Both => {}
+                WorktreeHooks::MainOnly => {
+                    let covered = install_at(vendor, state_dir, &main);
+                    findings.push((
+                        covered.is_some(),
+                        format!(
+                            "{name}: a session started in linked worktree {} does not run the hooks installed in {} (observed on {}); it runs the main checkout's project hooks. {}",
+                            tree.display(),
+                            file.display(),
+                            vendor.worktree_hooks_observed().unwrap_or("this host"),
+                            if covered.is_some() {
+                                format!(
+                                    "The main checkout's hook coordinates it as workspace {}.",
+                                    own.workspace_id
+                                )
+                            } else {
+                                format!(
+                                    "Nothing coordinates it: run `langspan hooks install {name} --workspace ID --root {} --apply`.",
+                                    main.display()
+                                )
+                            }
+                        ),
+                    ));
+                }
+                WorktreeHooks::Unconfirmed => findings.push((
+                    true,
+                    format!(
+                        "{name}: whether a session started in linked worktree {} runs the hooks installed in {} has not been observed on a real host. The main checkout's hook, where the host runs it there, also decides, as workspace {}, so it does not step aside.",
+                        tree.display(),
+                        file.display(),
+                        own.workspace_id
+                    ),
+                )),
+            }
+        }
+    }
+    findings
 }
 
 /// What `doctor` says about the user-level install of each host present
