@@ -66,27 +66,62 @@ fn scratch(name: &str) -> PathBuf {
     base
 }
 
+/// A new Git repository at `root` with `a.txt` committed.
+fn repository(root: &Path) {
+    fs::create_dir(root).unwrap();
+    git(root, &["init", "--quiet", "-b", "main"]);
+    fs::write(root.join("a.txt"), "hello\n").unwrap();
+    git(root, &["add", "a.txt"]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "init",
+        ],
+    );
+}
+
+/// One event through the user-level hook (no `--root`, no `--workspace`):
+/// its coverage and its answer.
+fn user_hook(state: &Path, name: &str, body: &Value) -> (String, String) {
+    let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .args(["hook", "antigravity", "--event", name, "--state-dir"])
+        .arg(state)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{name}: {stderr}");
+    let diagnostic: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+    (
+        format!(
+            "{}: {}",
+            diagnostic["coverage"].as_str().unwrap(),
+            diagnostic["detail"].as_str().unwrap_or_default()
+        ),
+        String::from_utf8(output.stdout).unwrap(),
+    )
+}
+
 impl Fixture {
     fn new() -> Self {
         let base = scratch("run");
-        let root = base.join("work");
-        fs::create_dir(&root).unwrap();
-        git(&root, &["init", "--quiet", "-b", "main"]);
-        fs::write(root.join("a.txt"), "hello\n").unwrap();
-        git(&root, &["add", "a.txt"]);
-        git(
-            &root,
-            &[
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@example.invalid",
-                "commit",
-                "--quiet",
-                "-m",
-                "init",
-            ],
-        );
+        repository(&base.join("work"));
         let child = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .args(["daemon", "--state-dir"])
             .arg(base.join("state"))
@@ -658,29 +693,103 @@ fn the_user_level_hook_steps_aside_for_the_workspaces_project_install() {
         ("PreToolUse", event("pre-replace.json", &f.root())),
         ("SessionStart", event("session-start.json", &f.root())),
     ] {
-        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
-            .args(["hook", "antigravity", "--event", name, "--state-dir"])
-            .arg(&state)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(body.to_string().as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        let diagnostic: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
-        assert_eq!(
-            diagnostic["coverage"], "deferred_to_project",
-            "{name}: {stderr}"
+        let (coverage, stdout) = user_hook(&state, name, &body);
+        assert!(
+            coverage.starts_with("deferred_to_project:"),
+            "{name}: {coverage}"
         );
-        assert_eq!(String::from_utf8(output.stdout).unwrap(), "{}");
+        assert_eq!(stdout, "{}");
     }
+}
+
+#[test]
+fn the_user_level_hook_decides_where_the_project_definition_is_switched_off() {
+    let f = Fixture::new();
+    let state = f.base.join("state");
+    hooks(&state, &f.root(), "install", &["--apply"]);
+    let path = f.root().join(".agents/hooks.json");
+    let mut settings: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    // Antigravity runs none of a definition's hooks with `"enabled": false`,
+    // so the project install covers nothing and the user-level hook decides.
+    settings["langspan"]["enabled"] = json!(false);
+    fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+    f.bob_holds_a();
+    let (coverage, stdout) = user_hook(&state, "PreToolUse", &event("pre-replace.json", &f.root()));
+    assert!(coverage.starts_with("denied:"), "{coverage}");
+    let reply: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(reply["decision"], "deny", "{stdout}");
+
+    // Switched back on, the project install covers the workspace again.
+    settings["langspan"]["enabled"] = json!(true);
+    fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+    let (coverage, _) = user_hook(&state, "PreToolUse", &event("pre-replace.json", &f.root()));
+    assert!(coverage.starts_with("deferred_to_project:"), "{coverage}");
+}
+
+#[test]
+fn a_user_level_conversation_is_coordinated_in_each_of_its_workspace_folders() {
+    let f = Fixture::new();
+    let state = f.base.join("state");
+    let second = f.base.join("second");
+    repository(&second);
+    let folders = json!([f.root(), second]);
+    let with_folders = |name: &str, root: &Path| {
+        let mut body = event(name, root);
+        body["workspacePaths"] = folders.clone();
+        body
+    };
+    let (coverage, _) = user_hook(
+        &state,
+        "SessionStart",
+        &with_folders("session-start.json", &f.root()),
+    );
+    assert!(!coverage.starts_with("unsupported:"), "{coverage}");
+    let (coverage, _) = user_hook(
+        &state,
+        "PreInvocation",
+        &with_folders("pre-invocation.json", &f.root()),
+    );
+    assert!(!coverage.starts_with("unsupported:"), "{coverage}");
+
+    // A read in the second folder is recorded for the conversation there, so
+    // an edit from that old read is refused as stale.
+    let (coverage, _) = user_hook(
+        &state,
+        "PostToolUse",
+        &with_folders("post-view-file.json", &second),
+    );
+    assert!(coverage.starts_with("read_recorded:"), "{coverage}");
+    fs::write(second.join("a.txt"), "changed behind its back\n").unwrap();
+    let mut stale = with_folders("pre-replace.json", &second);
+    stale["stepIdx"] = json!(20);
+    let (coverage, stdout) = user_hook(&state, "PreToolUse", &stale);
+    assert!(coverage.starts_with("denied_stale:"), "{coverage}");
+    assert!(stdout.contains("LangSpan stale source"), "{stdout}");
+
+    // The same conversation works in both folders: each write is admitted,
+    // in its own repository, and so is a command in the second.
+    for (step, name, root) in [
+        (21, "pre-replace.json", f.root()),
+        (22, "pre-replace.json", second.clone()),
+        (23, "pre-run-command.json", second.clone()),
+    ] {
+        let mut body = with_folders(name, &root);
+        body["stepIdx"] = json!(step);
+        let (coverage, stdout) = user_hook(&state, "PreToolUse", &body);
+        assert!(
+            coverage.starts_with("admitted:"),
+            "{name} {root:?}: {coverage}"
+        );
+        assert_eq!(stdout, "{}");
+    }
+
+    // Another conversation, open only on the second folder, is refused the
+    // file the first one holds there.
+    let mut other = event("pre-write-to-file.json", &second);
+    other["conversationId"] = json!("00000000-0000-4000-8000-0000000000c2");
+    let (coverage, stdout) = user_hook(&state, "PreToolUse", &other);
+    assert!(coverage.starts_with("denied:"), "{coverage}");
+    assert!(stdout.contains("antigravity"), "{stdout}");
 }
 
 #[test]

@@ -671,15 +671,34 @@ pub fn lifecycle_parsed(
     deadline: Instant,
 ) -> Reply {
     if !valid_host_id(host_session) {
-        return Reply::none(
-            "unsupported",
-            "lifecycle event lacks a usable session identity",
-        );
+        return no_session_identity();
     }
-    let config = match resolve_workspace(config, cwd, deadline) {
-        Ok(config) => config,
-        Err(reply) => return reply,
-    };
+    match resolve_workspace(config, cwd, deadline) {
+        Ok(config) => lifecycle_resolved(
+            source,
+            host_session,
+            kind,
+            (event_name, event_id),
+            &config,
+            deadline,
+        ),
+        Err(reply) => reply,
+    }
+}
+
+/// `lifecycle_parsed` for a workspace the adapter has already resolved
+/// (`resolve_workspace`), for a host whose session identity depends on it.
+pub fn lifecycle_resolved(
+    source: &str,
+    host_session: &str,
+    kind: LifecycleKind,
+    (event_name, event_id): (&str, Option<&str>),
+    config: &Config,
+    deadline: Instant,
+) -> Reply {
+    if !valid_host_id(host_session) {
+        return no_session_identity();
+    }
     let event_id = event_id
         .filter(|id| valid_host_id(id) && id.len() <= 64)
         .filter(|_| matches!(kind, LifecycleKind::Prompt { .. }));
@@ -688,8 +707,15 @@ pub fn lifecycle_parsed(
         host_session,
         kind,
         (event_name, event_id),
-        &config,
+        config,
         deadline,
+    )
+}
+
+fn no_session_identity() -> Reply {
+    Reply::none(
+        "unsupported",
+        "lifecycle event lacks a usable session identity",
     )
 }
 
@@ -2219,7 +2245,9 @@ fn project_install(
     Ok(None)
 }
 
-/// `path`, if it holds a LangSpan project hook for `vendor`.
+/// `path`, if it holds a LangSpan project hook for `vendor` that the host
+/// runs. A definition switched off as a whole runs none of its hooks, so it
+/// covers nothing and the user-level hook decides.
 fn covered(vendor: crate::install::Vendor, path: PathBuf) -> Result<Option<PathBuf>, Reply> {
     let settings = crate::install::read(&path).map_err(|error| {
         Reply::none(
@@ -2228,6 +2256,7 @@ fn covered(vendor: crate::install::Vendor, path: PathBuf) -> Result<Option<PathB
         )
     })?;
     Ok(settings
+        .filter(|settings| !crate::install::switched_off(vendor, settings))
         .filter(|settings| {
             !crate::install::managed_hooks(settings, |hook| {
                 crate::install::is_managed_for(vendor, hook)

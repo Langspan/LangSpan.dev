@@ -78,8 +78,23 @@ A `replace_file_content` names its replacement (`TargetContent`,
 parses ([ADR 0012](0012-region-admission.md)). `write_to_file` states the whole
 file, and `multi_replace_file_content`'s chunk fields are not documented, so
 both hold the file whole. A `run_command` with `RunPersistent` is a background
-command. Sessions are `antigravity.<conversationId>`; the call ID is
-`step-<stepIdx>`.
+command. The call ID is `step-<stepIdx>`.
+
+**One session per workspace.** A conversation can hold several workspace
+folders, each possibly a repository of its own, while a LangSpan session
+belongs to one workspace: binding a session to a second workspace is refused
+(`session_conflict`). So a conversation is a session in each workspace it
+works in, `antigravity.<conversationId>.w<12 hex>`, where the suffix is a
+digest of the workspace ID the event resolved to. Every event uses the same
+rule: a file tool and `run_command` take the workspace of the folder they
+resolve to, and `SessionStart` and `PreInvocation` run in each folder in
+`workspacePaths` (at most 8; a later folder's session starts at its first
+tool call), once per workspace, so two folders in one repository share one
+session. Their briefings are joined, in folder order, within the one briefing
+limit. Linking one conversation's sessions as a single participant was
+rejected: the core binds a session to one workspace on purpose, and peers in
+each repository only need the session working there. A peer therefore sees
+one session per workspace, each with the same conversation ID at its start.
 
 **Which event.** Because the payload does not name its event, each installed
 command carries it: `langspan hook antigravity --event PreToolUse ...`. The
@@ -133,7 +148,14 @@ workspace folder holds a LangSpan project hook, as for Gemini CLI. The workspace
 folder is the one in `workspacePaths` that holds the target file (for
 `run_command`, its `Cwd`), else the first. A command run below that folder is
 still resolved from the folder, since that is where Antigravity reads its
-hooks.
+hooks. A project definition with `"enabled": false` runs none of its hooks,
+so it covers nothing: the user-level hook decides there. The other hosts'
+documented switches are not per definition: Claude Code's `disableAllHooks`
+and Gemini CLI's `hooksConfig.enabled` turn hooks off as a whole, and Gemini
+CLI's `hooksConfig.disabled` names a hook, and LangSpan's user and project
+hooks share the name `langspan`. Where they apply, the user-level hook is off
+too, so deferring changes nothing, and their deferral is unchanged. This
+reading of their settings has not been checked in a live run.
 
 ## What is unverified
 

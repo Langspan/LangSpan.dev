@@ -65,15 +65,19 @@ struct ToolCall {
 }
 
 impl HostEvent {
-    /// The workspace folder the event is about: the one holding `target`,
-    /// else the first. Each must be absolute.
-    fn directory(&self, target: Option<&str>) -> Option<&str> {
-        let mut folders = self
-            .workspace_paths
+    /// The conversation's workspace folders that are absolute, in order.
+    fn folders(&self) -> impl Iterator<Item = &str> + Clone {
+        self.workspace_paths
             .iter()
             .flatten()
             .map(String::as_str)
-            .filter(|dir| Path::new(dir).is_absolute());
+            .filter(|dir| Path::new(dir).is_absolute())
+    }
+
+    /// The workspace folder the event is about: the one holding `target`,
+    /// else the first. Each must be absolute.
+    fn directory(&self, target: Option<&str>) -> Option<&str> {
+        let mut folders = self.folders();
         let first = folders.clone().next();
         target
             .and_then(|target| folders.find(|dir| Path::new(target).starts_with(dir)))
@@ -137,17 +141,8 @@ fn handle(input: impl Read, config: &Config, event_name: &str, deadline: Instant
             "Antigravity event lacks a usable conversation identity",
         );
     };
-    let lifecycle = |kind: LifecycleKind| {
-        hook::lifecycle_parsed(
-            SOURCE,
-            &conversation,
-            kind,
-            (event_name, None),
-            event.directory(None),
-            config,
-            deadline,
-        )
-    };
+    let lifecycle =
+        |kind: LifecycleKind| lifecycle(&event, &conversation, kind, event_name, config, deadline);
     let pre = match event_name {
         "SessionStart" => return lifecycle(LifecycleKind::Start),
         // Before every model call. The first of an execution starts from
@@ -165,15 +160,129 @@ fn handle(input: impl Read, config: &Config, event_name: &str, deadline: Instant
         "PostToolUse" => false,
         _ => return Reply::none("unsupported", "unsupported Antigravity hook event"),
     };
-    match tool_call(&event, conversation, pre, config, deadline) {
+    match tool_call(&event, &conversation, pre, config, deadline) {
         Ok((operation, resolved)) => hook::execute(operation, &resolved, deadline),
         Err(reply) => reply,
     }
 }
 
+/// At most this many workspace folders are registered and briefed at one
+/// lifecycle event. A folder past them gets its session at its first tool
+/// call, and no briefing.
+const LIFECYCLE_FOLDERS: usize = 8;
+
+/// The conversation's session in one workspace. A conversation can hold
+/// several workspace folders, each possibly a repository of its own, while a
+/// LangSpan session belongs to one workspace. So every event names the
+/// session of the workspace it resolved to: the conversation ID and a short
+/// digest of that workspace's ID. The same pair always gives the same ID; a
+/// conversation ID too long to take the suffix is replaced by its digest.
+fn scoped_session(conversation: &str, workspace_id: &str) -> String {
+    let digest = |text: &str| crate::sha256::hex(&crate::sha256::digest(text.as_bytes()));
+    let scope = &digest(workspace_id)[..12];
+    let head = if conversation.len() + scope.len() + 2 <= 100 {
+        conversation.to_owned()
+    } else {
+        format!("h{}", &digest(conversation)[..32])
+    };
+    format!("{head}.w{scope}")
+}
+
+/// A lifecycle event in each of the conversation's workspace folders (the
+/// installed root when it names none), once per workspace: each workspace's
+/// session is registered and briefed there. The briefings are joined, within
+/// the one briefing limit.
+fn lifecycle(
+    event: &HostEvent,
+    conversation: &str,
+    kind: LifecycleKind,
+    event_name: &str,
+    config: &Config,
+    deadline: Instant,
+) -> Reply {
+    let mut folders: Vec<Option<&str>> =
+        event.folders().take(LIFECYCLE_FOLDERS).map(Some).collect();
+    if folders.is_empty() {
+        folders.push(None);
+    }
+    let mut workspaces = Vec::new();
+    let mut replies = Vec::new();
+    for folder in folders {
+        let resolved = match hook::resolve_workspace(config, folder, deadline) {
+            Ok(resolved) => resolved,
+            Err(reply) => {
+                replies.push(reply);
+                continue;
+            }
+        };
+        if workspaces.contains(&resolved.workspace_id) {
+            continue;
+        }
+        replies.push(hook::lifecycle_resolved(
+            SOURCE,
+            &scoped_session(conversation, &resolved.workspace_id),
+            kind.clone(),
+            (event_name, None),
+            &resolved,
+            deadline,
+        ));
+        workspaces.push(resolved.workspace_id);
+    }
+    joined(replies)
+}
+
+/// One reply for a lifecycle event handled in several workspaces: their
+/// contexts in folder order, cut to the briefing limit, under the coverage
+/// of the first that briefed, else the first that did not fail.
+fn joined(replies: Vec<Reply>) -> Reply {
+    if replies.len() == 1 {
+        return replies
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Reply::none("unknown", ""));
+    }
+    let context = |reply: &Reply| {
+        serde_json::from_str::<Value>(&reply.stdout)
+            .ok()?
+            .get("hookSpecificOutput")?
+            .get("additionalContext")?
+            .as_str()
+            .map(str::to_owned)
+    };
+    let contexts: Vec<String> = replies.iter().filter_map(context).collect();
+    let failed = |reply: &&Reply| {
+        matches!(reply.coverage, "unsupported" | "unknown" | "timeout")
+            || reply.coverage.starts_with("deferred")
+    };
+    let coverage = replies
+        .iter()
+        .find(|reply| context(reply).is_some())
+        .or_else(|| replies.iter().find(|reply| !failed(reply)))
+        .or(replies.first())
+        .map_or("unknown", |reply| reply.coverage);
+    let detail = replies
+        .iter()
+        .map(|reply| reply.detail.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let stdout = if contexts.is_empty() {
+        String::new()
+    } else {
+        json!({ "hookSpecificOutput": {
+            "additionalContext": hook::truncate(&contexts.join("\n\n"), hook::BRIEFING_LIMIT)
+        }})
+        .to_string()
+    };
+    Reply {
+        stdout,
+        coverage,
+        detail,
+    }
+}
+
 fn tool_call(
     event: &HostEvent,
-    host_session: String,
+    conversation: &str,
     pre: bool,
     config: &Config,
     deadline: Instant,
@@ -223,7 +332,7 @@ fn tool_call(
         let config = hook::resolve_workspace(config, folder, deadline)?;
         let operation = hook::shell_operation(
             SOURCE,
-            &host_session,
+            &scoped_session(conversation, &config.workspace_id),
             // A subagent is a conversation of its own; its events do not
             // name the conversation that started it.
             None,
@@ -255,7 +364,7 @@ fn tool_call(
     Ok((
         Operation {
             source: SOURCE.into(),
-            host_session,
+            host_session: scoped_session(conversation, &config.workspace_id),
             tool_use_id,
             tool: tool.into(),
             paths: vec![key.clone()],
@@ -407,7 +516,7 @@ mod tests {
             let session = parsed.conversation_id.clone().unwrap();
             tool_call(
                 &parsed,
-                session,
+                &session,
                 pre,
                 &config,
                 Instant::now() + config.budget,
@@ -638,6 +747,60 @@ mod tests {
                 assert!(!reply.stdout.contains(word), "{stdout}");
             }
         }
+    }
+
+    #[test]
+    fn a_conversation_has_one_stable_session_per_workspace() {
+        let conversation = "00000000-0000-4000-8000-0000000000a1";
+        let one = scoped_session(conversation, "root-one");
+        assert_eq!(one, scoped_session(conversation, "root-one"));
+        assert_ne!(one, scoped_session(conversation, "root-two"));
+        assert_ne!(one, scoped_session("other", "root-one"));
+        assert!(one.starts_with(conversation), "{one}");
+        // The longest valid conversation ID still gives a valid, distinct one.
+        let long = "a".repeat(100);
+        let scoped = scoped_session(&long, "root-one");
+        assert!(hook::valid_host_id(&scoped), "{scoped}");
+        assert_ne!(scoped, scoped_session(&"b".repeat(100), "root-one"));
+        for id in [one, scoped] {
+            langspan_core::validate_request_id(&format!("{SOURCE}.{id}")).unwrap();
+        }
+    }
+
+    #[test]
+    fn briefings_from_several_workspaces_are_joined_within_the_limit() {
+        let briefed = |context: &str| Reply {
+            stdout: json!({"hookSpecificOutput": {"additionalContext": context}}).to_string(),
+            coverage: "briefed",
+            detail: "one".into(),
+        };
+        let both = joined(vec![
+            Reply::none("deferred_to_project", "deferred"),
+            briefed("first"),
+            briefed("second"),
+        ]);
+        assert_eq!(both.coverage, "briefed");
+        let value: Value = serde_json::from_str(&both.stdout).unwrap();
+        assert_eq!(
+            value["hookSpecificOutput"]["additionalContext"],
+            "first\n\nsecond"
+        );
+        assert!(both.detail.contains("deferred"), "{}", both.detail);
+        let long = joined(vec![
+            briefed(&"x".repeat(hook::BRIEFING_LIMIT)),
+            briefed("tail"),
+        ]);
+        let value: Value = serde_json::from_str(&long.stdout).unwrap();
+        let text = value["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.len() <= hook::BRIEFING_LIMIT, "{}", text.len());
+        // Nothing to say: the coverage of the workspace that did not fail.
+        let quiet = joined(vec![
+            Reply::none("unsupported", "not a repository"),
+            Reply::none("no_briefing", "nothing new"),
+        ]);
+        assert_eq!((quiet.coverage, quiet.stdout.as_str()), ("no_briefing", ""));
     }
 
     #[test]

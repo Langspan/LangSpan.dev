@@ -310,8 +310,13 @@ event does not say which event it is, so each installed command names it with
 | `PreInvocation` | none | Before each model call: news from peers since the session was last told, as a system message; at the first call of an execution, the prompt summary and code briefing too |
 
 Every other answer is `{}`: the hook never answers `allow`, `auto_approve` or
-`ask`, so Antigravity's own permission policy decides. Sessions appear as
-`antigravity.<conversationId>`. A tool call is identified by its `stepIdx`.
+`ask`, so Antigravity's own permission policy decides. A conversation is one
+session in each workspace it works in, appearing as
+`antigravity.<conversationId>.w<digest of the workspace>`; with several
+workspace folders, each is registered and briefed at `SessionStart` and
+`PreInvocation`. A tool call is identified by its `stepIdx`. A user-level
+hook steps aside for the workspace's `.agents/hooks.json` only while that
+file's `langspan` definition is not `"enabled": false`.
 Antigravity has no session-end event, and its `Stop` requires a decision, so
 neither is registered. A `replace_file_content` holds the region it replaces;
 `write_to_file` and `multi_replace_file_content` hold the whole file.
