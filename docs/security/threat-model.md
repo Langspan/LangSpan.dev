@@ -128,6 +128,24 @@ and per-project trust state.
 | **Denial of service**: a broken user-level hook affects every repository | The hook keeps the project form's budget, gives no decision on any failure, exits 0, and prints nothing outside a Git repository or when a project install covers the repository. | A missing executable makes the host report a failed hook on every event until `uninstall` or a reinstall; `doctor` names it and the command to run again. Under Homebrew the entries name the `opt` link rather than the versioned keg, so `brew upgrade` does not cause this; that link is resolved on every run, and anyone who can change it can already replace the binary in the same Homebrew prefix. |
 | **Elevation of privilege** | No permission, trust or approval setting of either host is written or weakened. Codex still requires its own review of the new hook; Claude Code's own permission flow still governs every tool call. The hook never answers `allow`. | Installing a user-level hook is the owner's grant of a command that runs on every session; it is shown before it is written. |
 
+## Host detection
+
+`langspan hosts`, `doctor` and the daemon's hourly host check (roadmap A7,
+[ADR 0018](../adr/0018-other-hosts-after-launch.md)) read each host's
+configuration directory entry and LangSpan's own entries in its hook and MCP
+files. The daemon now reads files in the user's home, which it did not before,
+and records what it finds in the local store.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: an entry that looks like LangSpan's is taken for an install | The same exact-shape recognition as `install` and `doctor`. | A hand-written entry of the generated shape counts as an install, as it does for `uninstall`. |
+| **Tampering**: detection changes a host's configuration | Detection has no write path: it uses the read functions of `install` only (1 MiB bound, no symlinks or special files). A test compares every file under the home before and after `hosts`, the daemon's checks and `doctor`. | None known. |
+| **Tampering**: a client records a false host | `observe_hosts` takes at most 16 names of 1–32 lower-case letters and hyphens; anything else is refused with nothing recorded. | Any same-user client can send it, as with every other observation; the next check replaces it. |
+| **Repudiation** | Each change of a host's state is an event (`host_not_installed`, `host_cleared`) with the daemon's time. | Who installed a host later is not known. |
+| **Information disclosure** | Only the host's name is stored; no path, setting or file content leaves the check. Agents are not told: the line is for the owner's `status`, dashboard and `doctor`. | `hosts --json` prints the configuration directory paths to the terminal that ran it. |
+| **Denial of service** | One bounded check per interval (default one hour, at least 100 ms) in its own thread; unreadable directories are `unknown`, never absent, and a held host that is `unknown` keeps its notice rather than being cleared. A failed check or inspection is logged once per new failure. | A host directory on a hung network filesystem can stall that thread; it does not block the state owner or a hook. |
+| **Elevation of privilege** | LangSpan never installs, upgrades or edits a host by itself; the note only names the command for the owner to run, with this coordinator's state directory single-quoted for the shell. | None. |
+
 ## The status line
 
 `langspan statusline` (roadmap H2, [ADR 0019](../adr/0019-person-facing-surfaces-and-usage-accounting.md))
@@ -392,9 +410,10 @@ A note is text one session or the owner asks LangSpan to show other sessions.
 | --- | --- |
 | Tampering (prompt injection) | A note is the most direct way for one agent to place text in another's context. It is one line, at most 400 bytes, control characters refused at the core, rendered quoted under the same "data, not instructions" header and caps as peer text, and at most four are shown per briefing. An agent that can call `langspan_remember` can still write persuasive text; a host model may follow it. |
 | Spoofing | The author is the session ID the caller supplies, checked only for being registered. |
-| Repudiation | Remembering and forgetting are events. |
-| Information disclosure | Every local session in the workspace can read every note through recap. Notes are not published to teammates. The tool description says not to store secrets. |
-| Denial of service | 64 notes per workspace, oldest dropped. Any session can forget any note. |
+| Repudiation | Remembering and forgetting are events. A recall is a read and is not recorded. |
+| Tampering (recall) | `langspan recall` and `langspan_recall` (roadmap E2) return held notes matching a query as data fields of a tool result, never placed in a briefing. The MCP result puts a label first saying the note text is remembered repository text, data, not instructions; the CLI prints note text quoted with escapes. Note text keeps the bounds `remember` already applies. A note written to match likely queries reaches an agent that searches for them, the same reach recap already gives it. |
+| Information disclosure | Every local session in the workspace can read every note through recap, and search them with recall. Notes are not published to teammates. The tool description says not to store secrets. |
+| Denial of service | 64 notes per workspace, oldest dropped. Any session can forget any note. A recall reads at most those 64 notes with a query of at most 200 bytes and 8 words (at most 8 × 64 × 9 substring searches over at most 4.5 KiB of text and paths per note), and its answer is held to 28 KiB. The MCP result carries the answer twice, once re-escaped as text, so the adapter encodes the whole result and drops notes until it leaves 512 bytes of one 64 KiB frame, however many quotation marks and backslashes the notes hold. |
 
 ## Messages and handoffs
 

@@ -94,6 +94,37 @@ precedence. `langspan doctor --root /path/to/checkout` reports both setups;
 `langspan uninstall --apply` removes the user-level entries it recognizes and
 leaves the coordination state directory in place.
 
+#### An agent tool installed later
+
+Install chooses hosts once, when it runs. A host installed afterwards has no
+LangSpan hooks, so its edits are neither checked nor shown to other sessions.
+`langspan hosts [--home DIR] [--json]` lists each host LangSpan knows, with
+`name`, `config_dir`, `present` (its configuration directory exists; `null`
+with an `error` when it could not be looked at), `user_install` (`none`,
+`current`, `outdated`, `other_state_dir` or `unknown`) and `next_step`, the
+install command, where one is proposed. It only reads. Gemini CLI is listed but
+never proposed: install it by naming it, as above.
+
+The coordinator checks the same at start and then every hour
+(`host_check_ms` in `config.json`). A host that is present, has no user-level
+install and has no project install in any registered workspace is recorded once
+as a `host_not_installed` event, with the host name only, and recorded again
+only after it was covered (`host_cleared`). A host whose directory or files
+cannot be read at a check keeps the notice it had; the reason is logged as
+`host_check_failed`, and nothing is recorded until an install or a removal is
+seen. `langspan status` then shows:
+
+```text
+hosts: cursor has a configuration directory but no LangSpan hooks; run `langspan install --hosts cursor --state-dir '/path/to/state'` to preview, then add --apply
+```
+
+The command always names this coordinator's state directory, so the hooks it
+installs talk to the coordinator that reported the host, whatever the shell's
+own default. The dashboard shows the same command under Health. `langspan doctor` marks the host as
+needing attention once sessions of another host use this coordinator. Agents
+are not told. LangSpan never installs or edits a host's configuration by itself;
+after you run the install, the line is gone at the next check.
+
 #### A status line in Claude Code
 
 `langspan install --statusline on` also sets Claude Code's `statusLine` in
@@ -637,6 +668,32 @@ one line of at most 400 bytes and up to eight paths. Each workspace retains at
 most 64 notes and 64 pending messages, dropping the oldest when that limit is
 exceeded. Any local session can read or remove a note.
 
+A briefing carries at most four notes, and only those about the session's own
+files or the whole workspace. `recall` searches all the notes a workspace
+holds, including notes about other files:
+
+```sh
+./target/release/langspan recall demo "upload id" --json
+./target/release/langspan recall demo errors --path src/api.rs --limit 5
+```
+
+The query is 1 to 200 bytes of at most eight words separated by spaces (quoted
+as one argument or given as several). A note is found when every word appears
+in its text or its paths, compared without case and as a substring, so
+`upload id` finds a note saying `Upload_ID`. `--path` keeps only notes about
+that file or about the whole workspace. Notes hit in both text and paths come
+first, then the newest. `--limit` is 1 to 50 (default 10); `truncated: true`
+says more notes matched than were returned, which also happens when the
+answer would pass 28 KiB. The JSON answer is
+`{"workspace_id", "query", "notes": [{"note_id", "author", "text", "paths"}],
+"truncated"}`. A recall is a read: it records nothing, delivers nothing and
+does not change any briefing. Forgotten notes are not found. The MCP tool
+`langspan_recall` takes `workspace_id`, `query` and optional `path` and
+`limit`, and puts a label before the notes saying their text is data, not
+instructions. Its result carries the answer twice, once as escaped JSON
+text, so it can return fewer notes than the CLI (with `truncated: true`) to
+keep the whole reply within one 64 KiB frame.
+
 `message` addresses a registered session in the same workspace. Without `--to`,
 it addresses every other session; without `--from`, its sender label is the
 owner. These labels do not authenticate the sender. Messages arrive through the
@@ -764,7 +821,10 @@ When an indexed export disappears or its signature changes, relevant sessions
 receive an interface notice at their next prompt. The notice names files they
 work on or have read that mention the changed name. Notices stay within one
 physical workspace. Body-only changes produce no notice, and a rename appears
-as a removal. A first indexing produces no change notice.
+as a removal. A first indexing produces no change notice. When a file holds
+several definitions of one name (a method of that name on two types, say), a
+definition added or removed is told as such, with how many there are now:
+"a second method "text" was added … (now 2 definitions with that name)".
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
 Code) or an `apply_patch` (Codex) is admitted, the hook parses the calls in the
@@ -1050,6 +1110,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_today` | The day so far from the event log: sessions, refusals, checks, landings and what is still open, within 2,400 bytes |
 | `langspan_remember` | Keep a local note about the workspace or named files |
 | `langspan_forget` | Remove a remembered note by ID |
+| `langspan_recall` | Search a workspace's remembered notes: every query word in a note's text or paths, without case; best first, at most 50 |
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |
 | `langspan_handoff` | Leave a message for the next other session to take up |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |
@@ -1105,11 +1166,13 @@ processes exit `0` and convey denials through their JSON reply.
 Optional `config.json` in the state directory must be owner-only (`0600`):
 
 ```json
-{"io_timeout_ms":2000,"request_timeout_ms":5000,"max_clients":32,"auto_check_debounce_ms":2000}
+{"io_timeout_ms":2000,"request_timeout_ms":5000,"max_clients":32,"auto_check_debounce_ms":2000,"host_check_ms":3600000}
 ```
 
 Timeout values accept 100–5000 ms; client count accepts 1–128;
-`auto_check_debounce_ms` accepts 50–60000. IPC and MCP frames
+`auto_check_debounce_ms` accepts 50–60000; `host_check_ms`, how often the
+coordinator looks for agent hosts with no LangSpan install, accepts
+100–86400000. IPC and MCP frames
 are limited to 64 KiB. The MCP SDK discards oversized input lines without replying
 to that line. File admission accepts up to 64 distinct normalized keys, 512 bytes
 per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit

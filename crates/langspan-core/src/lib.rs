@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 mod dashboard;
 mod lines;
+mod recall;
 mod status;
 mod status_line;
 mod today;
@@ -16,6 +17,9 @@ pub use dashboard::{
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
     LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow, PublishRow, RecentFile, ScanRow,
     WorkspaceRow, dashboard_denials,
+};
+pub use recall::{
+    RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
@@ -1121,7 +1125,11 @@ pub struct BlindSpots {
 pub struct InterfaceChange {
     pub name: String,
     pub kind: String,
-    /// `removed` or `signature_changed`.
+    /// `removed`, `signature_changed`, `definition_added` or
+    /// `definition_removed`. The last two mean only the number of
+    /// definitions sharing the name and kind changed: `after` (added) or
+    /// `before` (removed) holds the signatures that came or went, and the
+    /// counts say how many there were and are.
     pub change: String,
     pub before: Option<String>,
     pub after: Option<String>,
@@ -1132,7 +1140,16 @@ pub struct InterfaceChange {
     pub before_arity: Option<Arity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_arity: Option<Arity>,
+    /// Definitions with this name and kind before and after, for
+    /// `definition_added` and `definition_removed` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_count: Option<u32>,
 }
+
+/// Definitions sharing one name and kind that a notice counts at most.
+pub const MAX_DEFINITION_COUNT: u32 = 65_535;
 
 /// How many arguments a function takes, read from its signature text.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1488,6 +1505,11 @@ pub struct State {
     /// Automatic check results not yet delivered, per session, newest first.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub check_notices: BTreeMap<String, Vec<CheckNotice>>,
+    /// Agent hosts present on this machine with no LangSpan install that
+    /// covers them, by host name (roadmap A7). For the owner; agents are
+    /// not told.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub uninstalled_hosts: BTreeMap<String, UninstalledHost>,
     /// The current generation's clock anchor, once recorded. Derived from
     /// the events on replay; not part of the status reply.
     #[serde(skip)]
@@ -1500,6 +1522,22 @@ pub struct State {
 
 /// Checkout changes kept per workspace.
 pub const MAX_CHECKOUTS: usize = 4;
+
+/// Host names one host check may report.
+pub const MAX_HOSTS: usize = 16;
+
+/// An agent host whose configuration directory exists on this machine but
+/// which no LangSpan install covers: no user-level install, and no project
+/// install in a registered workspace. Only its name is kept; what the owner
+/// can run is derived from it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UninstalledHost {
+    pub host: String,
+    /// When the daemon first saw it so, by its own clock.
+    pub at_ms: u64,
+    pub generation: u64,
+}
 
 /// The checkout of one physical workspace changed under the sessions in it:
 /// its branch changed, its HEAD moved and files changed with it, or several
@@ -1767,6 +1805,17 @@ pub enum Event {
     },
     CheckoutChanged {
         change: CheckoutChange,
+    },
+    /// A host check found this host present and not covered by any
+    /// LangSpan install. Recorded once; repeated only after a
+    /// `HostCleared`.
+    HostNotInstalled {
+        host: UninstalledHost,
+    },
+    /// A host recorded as not installed is covered now, or its
+    /// configuration directory is gone.
+    HostCleared {
+        host: String,
     },
 }
 
@@ -2082,9 +2131,25 @@ pub enum Command {
         to_head: Option<String>,
         files: u32,
     },
+    /// The daemon's host check: every host present now with no LangSpan
+    /// install covering it, by name (roadmap A7). Hosts held from an
+    /// earlier check and absent here are cleared.
+    ObserveHosts {
+        not_installed: Vec<String>,
+    },
     /// Read-only: a bounded account of one workspace.
     Recap {
         workspace_id: String,
+    },
+    /// Read-only: the held notes of one workspace that hold every word of
+    /// `query`, about `path` or the whole workspace when a path is given
+    /// (roadmap E2). Never recorded, never counted as delivered.
+    Recall {
+        workspace_id: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
     },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
@@ -2525,9 +2590,25 @@ enum CommandWire {
         to_head: Option<String>,
         files: u32,
     },
+    /// The daemon's host check: every host present now with no LangSpan
+    /// install covering it, by name (roadmap A7). Hosts held from an
+    /// earlier check and absent here are cleared.
+    ObserveHosts {
+        not_installed: Vec<String>,
+    },
     /// Read-only: a bounded account of one workspace.
     Recap {
         workspace_id: String,
+    },
+    /// Read-only: the held notes of one workspace that hold every word of
+    /// `query`, about `path` or the whole workspace when a path is given
+    /// (roadmap E2). Never recorded, never counted as delivered.
+    Recall {
+        workspace_id: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
     },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
@@ -2933,11 +3014,18 @@ pub enum Outcome {
         workspace_id: String,
         failed: bool,
     },
+    /// The hosts held as not installed after a host check.
+    HostsObserved {
+        not_installed: Vec<String>,
+    },
     CheckoutObserved {
         change: CheckoutChange,
     },
     Recap {
         recap: Recap,
+    },
+    Recall {
+        recall: Recall,
     },
     Today {
         today: Today,
@@ -4580,6 +4668,47 @@ fn decide_checked(
                 },
             })
         }
+        Command::ObserveHosts { not_installed } => {
+            if not_installed.len() > MAX_HOSTS {
+                return Err(error(
+                    "invalid_hosts",
+                    &format!("a host check names at most {MAX_HOSTS} hosts"),
+                ));
+            }
+            let now_missing: BTreeSet<&str> = not_installed.iter().map(String::as_str).collect();
+            if now_missing.len() != not_installed.len() {
+                return Err(error("invalid_hosts", "a host is named more than once"));
+            }
+            for host in &now_missing {
+                validate_host_name(host)?;
+            }
+            // Each change of a host's state is one fact; an unchanged
+            // host is not recorded again.
+            let mut events: Vec<Event> = state
+                .uninstalled_hosts
+                .keys()
+                .filter(|host| !now_missing.contains(host.as_str()))
+                .map(|host| Event::HostCleared { host: host.clone() })
+                .collect();
+            events.extend(
+                now_missing
+                    .iter()
+                    .filter(|host| !state.uninstalled_hosts.contains_key(**host))
+                    .map(|host| Event::HostNotInstalled {
+                        host: UninstalledHost {
+                            host: (*host).into(),
+                            at_ms: now_ms,
+                            generation: state.generation,
+                        },
+                    }),
+            );
+            Ok(Decision {
+                events,
+                outcome: Outcome::HostsObserved {
+                    not_installed: now_missing.iter().map(|host| (*host).into()).collect(),
+                },
+            })
+        }
         Command::ObserveCheckout {
             workspace_id,
             from_branch,
@@ -4616,6 +4745,17 @@ fn decide_checked(
                 },
             })
         }
+        Command::Recall {
+            workspace_id,
+            query,
+            path,
+            limit,
+        } => Ok(Decision {
+            events: Vec::new(),
+            outcome: Outcome::Recall {
+                recall: recall_notes(state, workspace_id, query, path.as_deref(), *limit)?,
+            },
+        }),
         Command::StatusLine { root, from_ms } => {
             if !root.starts_with('/') || root.len() > 4096 {
                 return Err(error(
@@ -4968,9 +5108,35 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
             change.before.as_ref(),
             change.after.as_ref(),
         ];
+        let counts = match (change.before_count, change.after_count) {
+            (Some(before), Some(after)) => Some((before, after)),
+            (None, None) => None,
+            _ => Some((0, 0)),
+        };
+        // A count change names its counts, in the direction it says, and
+        // carries the signatures that came or went; nothing else has
+        // counts.
+        let shaped = match (change.change.as_str(), counts) {
+            ("removed" | "signature_changed", None) => true,
+            ("definition_added", Some((before, after))) => {
+                before >= 1
+                    && before < after
+                    && after <= MAX_DEFINITION_COUNT
+                    && change.before.is_none()
+                    && change.after.is_some()
+            }
+            ("definition_removed", Some((before, after))) => {
+                after >= 1
+                    && after < before
+                    && before <= MAX_DEFINITION_COUNT
+                    && change.before.is_some()
+                    && change.after.is_none()
+            }
+            _ => false,
+        };
         if change.name.is_empty()
             || change.name.len() > 128
-            || !matches!(change.change.as_str(), "removed" | "signature_changed")
+            || !shaped
             || change.kind.len() > 16
             || texts
                 .into_iter()
@@ -4979,7 +5145,7 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         {
             return Err(error(
                 "invalid_notice",
-                "An interface change has a name, a kind, `removed` or `signature_changed`, and single-line signatures of at most 256 bytes",
+                "An interface change has a name, a kind, `removed`, `signature_changed`, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
             ));
         }
     }
@@ -7085,6 +7251,23 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 }
             }
         }
+        Event::HostNotInstalled { host } => {
+            validate_host_name(&host.host)?;
+            if !state.uninstalled_hosts.contains_key(&host.host)
+                && state.uninstalled_hosts.len() >= MAX_HOSTS
+            {
+                return Err(error(
+                    "invalid_hosts",
+                    &format!("at most {MAX_HOSTS} hosts are held as not installed"),
+                ));
+            }
+            state
+                .uninstalled_hosts
+                .insert(host.host.clone(), host.clone());
+        }
+        Event::HostCleared { host } => {
+            state.uninstalled_hosts.remove(host);
+        }
         Event::CheckoutChanged { change } => {
             validate_checkout(state, change)?;
             let changes = state
@@ -7899,6 +8082,23 @@ fn validate_branch_observation(
                 "Observed Git object IDs must contain 40 or 64 hexadecimal characters",
             ));
         }
+    }
+    Ok(())
+}
+
+/// A host's command-line name: lower-case letters and hyphens, as the
+/// adapters name them (`claude-code`, `gemini-cli`).
+fn validate_host_name(host: &str) -> Result<(), CoreError> {
+    if host.is_empty()
+        || host.len() > 32
+        || !host
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+    {
+        return Err(error(
+            "invalid_hosts",
+            "a host name is 1 to 32 lower-case letters and hyphens",
+        ));
     }
     Ok(())
 }

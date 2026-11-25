@@ -427,6 +427,22 @@ pub enum Change {
         before: String,
         after: String,
     },
+    /// More definitions share this name and kind than before, and every
+    /// earlier signature is still among them. `signatures` are the added
+    /// ones, each shown once; `before` and `after` count the definitions.
+    DefinitionsAdded {
+        signatures: String,
+        before: u32,
+        after: u32,
+    },
+    /// Fewer definitions share this name and kind, at least one remains,
+    /// and every remaining signature was there before. `signatures` are the
+    /// removed ones, each shown once.
+    DefinitionsRemoved {
+        signatures: String,
+        before: u32,
+        after: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -533,15 +549,59 @@ pub fn diff(before: &FileGraph, after: &FileGraph) -> Vec<SymbolChange> {
             .collect::<Vec<_>>()
             .join(" | ")
     };
+    // The signatures of `more` left over once each of `fewer` is matched
+    // with one equal to it, or `None` when one of `fewer` has no match.
+    // Both are sorted by compared form.
+    fn beyond<'a>(more: &'a Signatures, fewer: &Signatures) -> Option<Vec<&'a (String, String)>> {
+        let mut rest = Vec::new();
+        let mut pending = fewer.iter().peekable();
+        for signature in more {
+            if pending.peek().is_some_and(|next| next.0 == signature.0) {
+                pending.next();
+            } else {
+                rest.push(signature);
+            }
+        }
+        pending.peek().is_none().then_some(rest)
+    }
+    // Each compared form once, as first written (input sorted).
+    fn distinct(signatures: Vec<&(String, String)>) -> String {
+        let mut seen: Vec<&(String, String)> = Vec::new();
+        for signature in signatures {
+            if seen.last().is_none_or(|last| last.0 != signature.0) {
+                seen.push(signature);
+            }
+        }
+        seen.iter()
+            .map(|s| s.1.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+    let count = |signatures: &Signatures| u32::try_from(signatures.len()).unwrap_or(u32::MAX);
     let mut changes = Vec::new();
     for (key, signatures) in &old {
         let change = match new.get(key) {
             None => Change::Removed,
-            Some(current) if !same(current, signatures) => Change::SignatureChanged {
-                before: shown(signatures),
-                after: shown(current),
+            Some(current) if same(current, signatures) => continue,
+            // Only the number of same-named definitions changed, each
+            // earlier (or each remaining) signature still there: say so,
+            // never "changed from X to X | X".
+            Some(current) => match (beyond(current, signatures), beyond(signatures, current)) {
+                (Some(added), _) => Change::DefinitionsAdded {
+                    signatures: distinct(added),
+                    before: count(signatures),
+                    after: count(current),
+                },
+                (_, Some(removed)) => Change::DefinitionsRemoved {
+                    signatures: distinct(removed),
+                    before: count(signatures),
+                    after: count(current),
+                },
+                (None, None) => Change::SignatureChanged {
+                    before: shown(signatures),
+                    after: shown(current),
+                },
             },
-            Some(_) => continue,
         };
         changes.push(SymbolChange {
             name: key.0.clone(),

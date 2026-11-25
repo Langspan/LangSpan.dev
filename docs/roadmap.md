@@ -60,7 +60,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [A4: Verify the Cursor adapter on a real Cursor](https://github.com/Langspan/LangSpan.dev/issues/12): the Cursor adapter rests on documentation alone, so Cursor cannot yet be relied on to be coordinated.
 - [A5: A plugin adapter for the Hermes agent](https://github.com/Langspan/LangSpan.dev/issues/13): a Hermes agent beside other hosts gets no admission or briefing, and its edits go unrecorded.
 - [A6: Gemini CLI verified on a real session, and guidance for rules-file hosts](https://github.com/Langspan/LangSpan.dev/issues/14): the Gemini CLI adapter has never run live, and editors without hooks get nothing at all.
-- [A7: Notice agent tools added after install](https://github.com/Langspan/LangSpan.dev/issues/15): a host installed after LangSpan has no hooks, so its edits are invisible and nobody is told.
 - [A11: Outline first for whole reads of large files](https://github.com/Langspan/LangSpan.dev/issues/16): whole reads of large files spend context to find one function; nothing offers the file's shape first.
 - [A12: Index answers next to a search result](https://github.com/Langspan/LangSpan.dev/issues/17): a search result does not say where a name is defined, what depends on it or whether a peer is changing it.
 - [A13: Show where peers are looking](https://github.com/Langspan/LangSpan.dev/issues/18): a session that has read and planned but not written yet is missing from peers' briefings.
@@ -118,7 +117,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 ## E. Memory and messages
 
 - [E1: Notes anchored to a definition, with staleness and tags](https://github.com/Langspan/LangSpan.dev/issues/60): notes attach only to files, keep being told after their code changes, and cannot be grouped.
-- [E2: Search remembered notes](https://github.com/Langspan/LangSpan.dev/issues/61): a note about another file stays invisible to an agent that needs its decision.
+- [E2: Search remembered notes](https://github.com/Langspan/LangSpan.dev/issues/61): a note about another file stays invisible to an agent that needs its decision. Built as `langspan recall` and `langspan_recall`; a real-host run remains.
 - [E3: Token, model and cost lines in the recap](https://github.com/Langspan/LangSpan.dev/issues/62): the owner cannot see which session used most tokens or which model it ran.
 - [E4: Messages addressed to a file or a definition](https://github.com/Langspan/LangSpan.dev/issues/63): a message can go only to everyone or to one session ID, not to whoever uses some code.
 - [E7: Sender recorded from the running session](https://github.com/Langspan/LangSpan.dev/issues/64): a shell-sent message needs `--from`, and a wrong or missing value misattributes it.
