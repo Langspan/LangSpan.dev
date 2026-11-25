@@ -113,6 +113,9 @@ pub struct Symbol {
     /// `export` in TypeScript, a capital in Go, no leading underscore in
     /// Python.
     pub exported: bool,
+    /// The definition's own bytes in the source it was extracted from,
+    /// without leading comments or attributes.
+    pub bytes: std::ops::Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,6 +384,7 @@ fn visit(
                 SIGNATURE_BYTES,
             ),
             exported: exported(language, node, name_text),
+            bytes: node.start_byte()..node.end_byte(),
         });
         return Some(name.id());
     }
@@ -397,6 +401,7 @@ fn visit(
             end_line: end_line(node),
             signature: signature(node, source),
             exported: exported(language, node, name_text),
+            bytes: node.start_byte()..node.end_byte(),
         });
         return Some(name.id());
     }

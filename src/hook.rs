@@ -3803,6 +3803,7 @@ mod code_briefing_text {
             signature: signature.into(),
             exported: true,
             digest: "0".repeat(64),
+            ..SymbolRef::default()
         }
     }
 

@@ -215,6 +215,45 @@ fn v3_code_context_request_and_response_match_the_committed_golden_vectors() {
 }
 
 #[test]
+fn v3_symbol_detail_request_and_response_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/graph-symbol-detail-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::GraphSymbol { name, limit: 10, detail: true, .. } if name == "upload"
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+    // Without detail the request is the one earlier clients send.
+    let plain = String::from_utf8_lossy(wire).replace(r#","detail":true"#, "");
+    let request: Request = serde_json::from_str(&plain).unwrap();
+    assert!(matches!(
+        request.command,
+        Command::GraphSymbol { detail: false, .. }
+    ));
+    assert_eq!(encode(&request).unwrap(), plain.as_bytes());
+
+    let wire = include_bytes!("../fixtures/graph-symbol-detail-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::Graph {
+        symbols,
+        resolution,
+        ..
+    } = &response.outcome
+    else {
+        panic!("{response:?}");
+    };
+    assert_eq!(resolution.as_deref(), Some("name"));
+    let symbol = &symbols[0];
+    assert_eq!(symbol.calls.as_ref().unwrap()[0].count, 2);
+    assert_eq!(symbol.callers.as_ref().unwrap().sites.len(), 2);
+    assert_eq!(symbol.notes.as_ref().unwrap()[0].id, "note-1");
+    assert_eq!(symbol.last_check.as_ref().unwrap().result, "passed");
+    assert_eq!(encode(&response).unwrap(), wire);
+    let unknown = String::from_utf8_lossy(wire).replace(r#""count":1,"#, r#""count":1,"x":1,"#);
+    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+}
+
+#[test]
 fn v3_message_handoff_and_ack_requests_match_the_committed_golden_vectors() {
     let vectors: &[&[u8]] = &[
         include_bytes!("../fixtures/send-message-request-v3.json"),

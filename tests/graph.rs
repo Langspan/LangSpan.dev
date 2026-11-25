@@ -70,20 +70,7 @@ impl World {
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let mut world = Self { base, daemon: None };
-        world.daemon = Some(
-            Process::new(env!("CARGO_BIN_EXE_langspan"))
-                .args(["daemon", "--state-dir"])
-                .arg(&state)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while world.cli(&["status"]).0 != 0 {
-            assert!(Instant::now() < deadline, "daemon did not become ready");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        world.start_daemon();
         let root = world.work();
         assert_eq!(
             world
@@ -100,8 +87,43 @@ impl World {
         );
         world
     }
+    fn start_daemon(&mut self) {
+        self.daemon = Some(
+            Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .args(["daemon", "--state-dir"])
+                .arg(self.base.join("state"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.cli(&["status"]).0 != 0 {
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn stop_daemon(&mut self) {
+        if let Some(mut child) = self.daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
     fn work(&self) -> PathBuf {
         self.base.join("work")
+    }
+    /// `graph symbol --detail`, waiting until `done` holds.
+    fn detail(&self, what: &str, name: &str, done: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let (_, text) = self.cli(&["graph", "symbol", "app", name, "--detail", "--json"]);
+            let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+            if done(&outcome) {
+                return outcome;
+            }
+            assert!(Instant::now() < deadline, "never saw {what}: {outcome:#}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
     fn cli(&self, args: &[&str]) -> (i32, String) {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
@@ -199,10 +221,7 @@ impl World {
 
 impl Drop for World {
     fn drop(&mut self) {
-        if let Some(mut child) = self.daemon.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.stop_daemon();
         let _ = fs::remove_dir_all(&self.base);
     }
 }
@@ -309,6 +328,146 @@ fn definitions_mentions_and_impact_are_answered_with_coverage_and_follow_the_fil
     // The index is derived: delete it, restart, and it is rebuilt.
     let human = w.cli(&["graph", "impact", "app", "src/upload.rs"]).1;
     assert!(human.contains("by name, not resolved uses"), "{human}");
+}
+
+/// The `upload` function of `src/upload.rs` in the detail test: it calls
+/// `open` twice and `hash` once.
+const UPLOAD: &str = "pub fn upload(path: &str) -> bool {\n    let file = open(path);\n    let again = open(path);\n    hash(file, again)\n}\n\npub fn gate(user: &str) -> bool {\n    user == \"admin\"\n}\n";
+
+fn upload_function(outcome: &Value) -> Option<&Value> {
+    outcome["symbols"]
+        .as_array()?
+        .iter()
+        .find(|symbol| symbol["kind"] == "function")
+}
+
+#[test]
+fn a_detailed_lookup_adds_calls_callers_digest_notes_and_check_and_is_rebuilt() {
+    let mut w = World::new();
+    fs::write(w.work().join("src/upload.rs"), UPLOAD).unwrap();
+    fs::write(
+        w.work().join("src/api.rs"),
+        "fn serve() {\n    upload::upload(\"b\");\n}\n",
+    )
+    .unwrap();
+    let ready = |outcome: &Value| {
+        outcome["coverage"]["current_files"] == 4
+            && upload_function(outcome).is_some_and(|symbol| symbol["calls"] != json!([]))
+    };
+    let found = w.detail("upload with its calls", "upload", ready);
+    assert_eq!(found["resolution"], "name", "{found:#}");
+    let upload = upload_function(&found).unwrap();
+    assert_eq!(
+        upload["calls"],
+        json!([{"name": "open", "count": 2, "line": 2}, {"name": "hash", "count": 1, "line": 4}])
+    );
+    assert_eq!(
+        upload["callers"],
+        json!({"count": 2, "sites": ["src/api.rs:2", "src/main.rs:4"]})
+    );
+    assert_eq!(upload["notes"], json!([]));
+    assert!(
+        upload.get("last_check").is_none(),
+        "no check yet: {upload:#}"
+    );
+    assert!(
+        !upload.to_string().contains("let file"),
+        "no source body is returned"
+    );
+
+    // A note on the file appears; a workspace-wide one does not.
+    for (id, text, paths) in [
+        (
+            "note-file",
+            "The response field is named upload_id.",
+            &["src/upload.rs"][..],
+        ),
+        ("note-wide", "Release freeze until Friday", &[][..]),
+    ] {
+        let mut args = vec!["remember", "app", text];
+        args.extend(paths);
+        args.extend(["--request-id", id]);
+        let (code, text) = w.cli(&args);
+        assert_eq!(code, 0, "{text}");
+    }
+    // A check on the working tree as it is.
+    let (code, text) = w.cli(&["check", "run", "app", "--name", "unit", "--", "true"]);
+    assert_eq!(code, 0, "{text}");
+    let tree = text
+        .split("passed on tree ")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_hexdigit()).next())
+        .unwrap_or_else(|| panic!("no tree in: {text}"))
+        .to_owned();
+    let found = w.detail("the note and the check", "upload", |outcome| {
+        upload_function(outcome).is_some_and(|symbol| symbol.get("last_check").is_some())
+    });
+    let upload = upload_function(&found).unwrap().clone();
+    assert_eq!(
+        upload["notes"],
+        json!([{"id": "note-file", "text": "The response field is named upload_id."}])
+    );
+    assert_eq!(
+        upload["last_check"],
+        json!({"name": "unit", "result": "passed", "tree": tree})
+    );
+    let human = w.cli(&["graph", "symbol", "app", "upload", "--detail"]).1;
+    assert!(human.contains("open ×2 (line 2)"), "{human}");
+    assert!(
+        human.contains(r#"note note-file: "The response field is named upload_id.""#),
+        "quoted: {human}"
+    );
+
+    // The index is derived: delete it, restart, and the same answer is
+    // rebuilt, calls included.
+    w.stop_daemon();
+    let state = w.base.join("state");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(state.join(format!("graph.sqlite3{suffix}")));
+    }
+    w.start_daemon();
+    let rebuilt = w.detail("the rebuilt index", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 4
+            && upload_function(outcome).is_some_and(|symbol| symbol.get("last_check").is_some())
+    });
+    assert_eq!(upload_function(&rebuilt).unwrap(), &upload);
+
+    // Editing another function in the file changes the file's digest but
+    // not upload's own; the check no longer holds this content.
+    fs::write(
+        w.work().join("src/upload.rs"),
+        UPLOAD.replace("\"admin\"", "\"root\""),
+    )
+    .unwrap();
+    let edited = w.detail("the edit to gate", "upload", |outcome| {
+        upload_function(outcome).is_some_and(|symbol| symbol["digest"] != upload["digest"])
+    });
+    let after = upload_function(&edited).unwrap();
+    assert_eq!(after["body_digest"], upload["body_digest"]);
+    assert_eq!(after["body_digest"].as_str().unwrap().len(), 64);
+    assert!(after.get("last_check").is_none(), "{after:#}");
+
+    // Without --detail the answer is today's, field for field.
+    let plain = w.graph("symbol", "upload");
+    let keys =
+        |value: &Value| -> Vec<String> { value.as_object().unwrap().keys().cloned().collect() };
+    assert_eq!(
+        keys(&plain),
+        ["type", "symbols", "references", "coverage", "truncated"]
+    );
+    assert_eq!(
+        keys(upload_function(&plain).unwrap()),
+        [
+            "path",
+            "name",
+            "kind",
+            "line",
+            "end_line",
+            "signature",
+            "exported",
+            "digest"
+        ]
+    );
 }
 
 #[test]

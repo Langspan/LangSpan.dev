@@ -11,7 +11,7 @@ use langspan_graph::{Change, FileGraph, Language, Symbol, SymbolKind};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{collections::BTreeMap, fs, io::Read, path::Path, time::Instant};
 
-const SCHEMA: i64 = 2;
+const SCHEMA: i64 = 3;
 /// Files parsed in one pass. The rest wait for the next.
 pub const FILES_PER_PASS: usize = 200;
 pub const MAX_RESULTS: u32 = 200;
@@ -48,7 +48,7 @@ impl Index {
             transaction.execute_batch(
                 "DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS symbols;
                  DROP TABLE IF EXISTS refs; DROP TABLE IF EXISTS imports;
-                 DROP TABLE IF EXISTS baselines;
+                 DROP TABLE IF EXISTS baselines; DROP TABLE IF EXISTS calls;
                  CREATE TABLE files (
                     workspace_id TEXT NOT NULL, path TEXT NOT NULL,
                     scan_digest TEXT NOT NULL, digest TEXT, partial INTEGER NOT NULL DEFAULT 0,
@@ -57,7 +57,8 @@ impl Index {
                  CREATE TABLE symbols (
                     workspace_id TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL,
                     kind TEXT NOT NULL, line INTEGER NOT NULL, end_line INTEGER NOT NULL,
-                    signature TEXT NOT NULL, exported INTEGER NOT NULL);
+                    signature TEXT NOT NULL, exported INTEGER NOT NULL,
+                    body_digest TEXT NOT NULL);
                  CREATE INDEX symbols_by_name ON symbols(workspace_id, name);
                  CREATE INDEX symbols_by_path ON symbols(workspace_id, path);
                  CREATE TABLE refs (
@@ -73,7 +74,12 @@ impl Index {
                     workspace_id TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL,
                     kind TEXT NOT NULL, signature TEXT NOT NULL);
                  CREATE INDEX baselines_by_path ON baselines(workspace_id, path);
-                 PRAGMA user_version = 2;",
+                 CREATE TABLE calls (
+                    workspace_id TEXT NOT NULL, path TEXT NOT NULL, caller TEXT,
+                    callee TEXT NOT NULL, line INTEGER NOT NULL, args INTEGER);
+                 CREATE INDEX calls_by_callee ON calls(workspace_id, callee, path, line);
+                 CREATE INDEX calls_by_path ON calls(workspace_id, path, line);
+                 PRAGMA user_version = 3;",
             )?;
             transaction.commit()?;
         }
@@ -123,6 +129,7 @@ impl Index {
                     end_line: 0,
                     signature: row.get(2)?,
                     exported: true,
+                    bytes: 0..0,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -255,7 +262,7 @@ impl Index {
         }
         let transaction = self.connection.transaction()?;
         for path in indexed.keys().filter(removed) {
-            for table in ["files", "symbols", "refs", "imports", "baselines"] {
+            for table in ["files", "symbols", "refs", "imports", "baselines", "calls"] {
                 transaction.execute(
                     &format!("DELETE FROM {table} WHERE workspace_id = ?1 AND path = ?2"),
                     params![workspace_id, path],
@@ -291,17 +298,21 @@ impl Index {
             let Ok(graph) = langspan_graph::extract(language, &bytes) else {
                 continue;
             };
+            // Same bound and parser as `extract`, so it fails only where that
+            // did; a file without calls stores none.
+            let calls = langspan_graph::calls(language, &bytes).unwrap_or_default();
             let before = self.baseline(workspace_id, path)?;
             let transaction = self.connection.transaction()?;
-            for table in ["symbols", "refs", "imports"] {
+            for table in ["symbols", "refs", "imports", "calls"] {
                 transaction.execute(
                     &format!("DELETE FROM {table} WHERE workspace_id = ?1 AND path = ?2"),
                     params![workspace_id, path],
                 )?;
             }
             for symbol in &graph.symbols {
+                let body = bytes.get(symbol.bytes.clone()).unwrap_or_default();
                 transaction.execute(
-                    "INSERT INTO symbols VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    "INSERT INTO symbols VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
                         workspace_id,
                         path,
@@ -310,8 +321,15 @@ impl Index {
                         symbol.line,
                         symbol.end_line,
                         symbol.signature,
-                        symbol.exported
+                        symbol.exported,
+                        crate::sha256::hex(&crate::sha256::digest(body))
                     ],
+                )?;
+            }
+            for (call, caller) in calls.iter().zip(innermost(&graph.symbols, &calls)) {
+                transaction.execute(
+                    "INSERT INTO calls VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![workspace_id, path, caller, call.name, call.line, call.args],
                 )?;
             }
             for reference in &graph.references {
@@ -430,10 +448,79 @@ impl Index {
                     signature: row.get(5)?,
                     exported: row.get(6)?,
                     digest: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                    ..SymbolRef::default()
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Add what the index knows around one definition: the digest of its
+    /// own bytes, the names called within its lines, and the call sites of
+    /// its name outside it. All by name; nothing is resolved.
+    pub fn add_detail(&self, workspace_id: &str, symbol: &mut SymbolRef) -> Result<(), Failure> {
+        let connection = &self.connection;
+        let (path, line, end) = (&symbol.path, symbol.line, symbol.end_line);
+        symbol.body_digest = connection
+            .prepare_cached(
+                "SELECT body_digest FROM symbols WHERE workspace_id = ?1 AND path = ?2
+                 AND line = ?3 AND end_line = ?4 AND name = ?5 AND kind = ?6",
+            )?
+            .query_row(
+                params![workspace_id, path, line, end, symbol.name, symbol.kind],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let calls = connection
+            .prepare_cached(
+                "SELECT callee, count(*), min(line) FROM calls
+                 WHERE workspace_id = ?1 AND path = ?2 AND line BETWEEN ?3 AND ?4
+                 GROUP BY callee ORDER BY min(line), callee LIMIT ?5",
+            )?
+            .query_map(
+                params![
+                    workspace_id,
+                    path,
+                    line,
+                    end,
+                    langspan_core::MAX_SYMBOL_CALLS
+                ],
+                |row| {
+                    Ok(langspan_core::CallCount {
+                        name: row.get(0)?,
+                        count: row.get(1)?,
+                        line: row.get(2)?,
+                    })
+                },
+            )?
+            .collect::<Result<_, _>>()?;
+        // A call within the definition itself (recursion) is not a caller.
+        const OUTSIDE: &str = "FROM calls WHERE workspace_id = ?1 AND callee = ?5
+             AND NOT (path = ?2 AND line BETWEEN ?3 AND ?4)";
+        let count: u32 = connection
+            .prepare_cached(&format!("SELECT count(*) {OUTSIDE}"))?
+            .query_row(params![workspace_id, path, line, end, symbol.name], |row| {
+                row.get(0)
+            })?;
+        let limit = langspan_core::MAX_CALLER_SITES;
+        let sites = connection
+            .prepare_cached(&format!(
+                "SELECT path, line {OUTSIDE} ORDER BY path, line LIMIT ?6"
+            ))?
+            .query_map(
+                params![workspace_id, path, line, end, symbol.name, limit],
+                |row| {
+                    Ok(format!(
+                        "{}:{}",
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u32>(1)?
+                    ))
+                },
+            )?
+            .collect::<Result<_, _>>()?;
+        symbol.calls = Some(calls);
+        symbol.callers = Some(langspan_core::Callers { count, sites });
+        Ok(())
     }
 
     /// Definitions named `name`, at most `limit + 1` so truncation shows.
@@ -520,6 +607,131 @@ impl Index {
         }
         Ok((symbols, references))
     }
+}
+
+/// For each call, in the same order, the name of the innermost definition
+/// whose lines hold its line. Definitions nest, so one sweep in line order
+/// with a stack of the open ones finds it.
+fn innermost<'a>(symbols: &'a [Symbol], calls: &[langspan_graph::Call]) -> Vec<Option<&'a str>> {
+    let mut definitions: Vec<&Symbol> = symbols.iter().collect();
+    definitions.sort_by_key(|symbol| (symbol.line, std::cmp::Reverse(symbol.end_line)));
+    let mut definitions = definitions.into_iter().peekable();
+    // A callee's name can sit on a later line than a call nested in its
+    // receiver, so calls are visited in line order.
+    let mut order: Vec<usize> = (0..calls.len()).collect();
+    order.sort_by_key(|&index| calls[index].line);
+    let mut open: Vec<&Symbol> = Vec::new();
+    let mut found = vec![None; calls.len()];
+    for index in order {
+        let line = calls[index].line;
+        while let Some(symbol) = definitions.next_if(|symbol| symbol.line <= line) {
+            while open.last().is_some_and(|top| top.end_line < symbol.line) {
+                open.pop();
+            }
+            open.push(symbol);
+        }
+        while open.last().is_some_and(|top| top.end_line < line) {
+            open.pop();
+        }
+        found[index] = open.last().map(|symbol| symbol.name.as_str());
+    }
+    found
+}
+
+/// Check records a detailed lookup compares, newest conclusive first.
+pub const LAST_CHECK_RECORDS: usize = 8;
+
+/// For each of `files` (path to indexed digest), the newest conclusive check
+/// record whose tree holds exactly those bytes at that path. The bytes are
+/// read again from `root` and used only if they still have the indexed
+/// digest; they are compared as a raw Git blob, so a file Git stores through
+/// a clean filter is never matched. One read-only `git ls-tree` per record,
+/// at most `LAST_CHECK_RECORDS`, stopping at `deadline`. A path not found
+/// by then has no entry: absence claims nothing.
+pub fn last_checks(
+    root: &Path,
+    files: &BTreeMap<String, String>,
+    records: &[langspan_core::CheckRecord],
+    deadline: Instant,
+) -> BTreeMap<String, langspan_core::LastCheck> {
+    use langspan_core::CheckResult;
+    // Blob IDs in both object formats, so the file is read only once.
+    let blobs: BTreeMap<&str, [Option<String>; 2]> = files
+        .iter()
+        .take_while(|_| Instant::now() < deadline)
+        .filter_map(|(path, digest)| {
+            let bytes = read_exact_version(root, path, digest)?;
+            let id = |length| crate::observer::blob_id(&bytes, length);
+            Some((path.as_str(), [id(40), id(64)]))
+        })
+        .collect();
+    let mut found = BTreeMap::new();
+    let conclusive = records.iter().filter_map(|record| {
+        let result = match record.result {
+            CheckResult::Passed {} => "passed",
+            CheckResult::Failed { .. } => "failed",
+            CheckResult::Inconclusive {} => return None,
+        };
+        Some((record, result))
+    });
+    for (record, result) in conclusive.take(LAST_CHECK_RECORDS) {
+        let tree = record.tree_oid.as_str();
+        let pending: Vec<&str> = blobs
+            .keys()
+            .copied()
+            .filter(|path| !found.contains_key(*path))
+            .collect();
+        if pending.is_empty() || Instant::now() >= deadline {
+            break;
+        }
+        let format = match tree.len() {
+            40 => 0,
+            64 => 1,
+            _ => continue,
+        };
+        // A tree ID from the record is passed to Git only as hex.
+        if !tree.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        let mut args = vec![
+            "--literal-pathspecs",
+            "ls-tree",
+            "--full-tree",
+            "-z",
+            tree,
+            "--",
+        ];
+        args.extend(&pending);
+        let Ok(listing) = crate::git::output(root, &args, deadline, 1 << 20) else {
+            continue;
+        };
+        // Each entry: `MODE SP TYPE SP OID TAB PATH NUL`.
+        for entry in listing.split(|byte| *byte == 0) {
+            let entry = String::from_utf8_lossy(entry);
+            let Some((meta, path)) = entry.split_once('\t') else {
+                continue;
+            };
+            let mut meta = meta.split(' ');
+            let (Some(_mode), Some("blob"), Some(oid)) = (meta.next(), meta.next(), meta.next())
+            else {
+                continue;
+            };
+            let matches = blobs
+                .get(path)
+                .is_some_and(|ids| ids[format].as_deref() == Some(oid));
+            if matches && !found.contains_key(path) {
+                found.insert(
+                    path.to_owned(),
+                    langspan_core::LastCheck {
+                        name: record.name.clone(),
+                        result: result.into(),
+                        tree: tree.into(),
+                    },
+                );
+            }
+        }
+    }
+    found
 }
 
 /// The file's bytes, only if they are still exactly the scanned version.
@@ -698,6 +910,108 @@ mod review_regressions {
             .unwrap();
         assert_eq!(symbols.len(), 1);
         assert_eq!((coverage.indexable_files, coverage.current_files), (2, 2));
+    }
+
+    const UPLOAD: (&str, &str) = (
+        "src/api.rs",
+        "pub fn upload(path: &str) -> u8 {\n    let a = open(path);\n    let b = open(path);\n    hash(a, b)\n}\n\npub fn other() -> u8 { 1 }\n",
+    );
+    const CLI: (&str, &str) = ("src/cli.rs", "fn main() {\n    api::upload(\"a\");\n}\n");
+    const WEB: (&str, &str) = (
+        "src/web.rs",
+        "fn serve() {\n\n    upload(\"b\");\n    upload(\"c\");\n}\n",
+    );
+
+    fn upload_with_detail(index: &Index) -> SymbolRef {
+        let mut symbol = index.symbol("w", "upload", 10).unwrap().remove(0);
+        index.add_detail("w", &mut symbol).unwrap();
+        symbol
+    }
+
+    #[test]
+    fn detail_counts_the_calls_inside_a_definition_and_its_callers_elsewhere() {
+        let (dir, mut index) = setup("detail");
+        pass(&dir, &mut index, &[UPLOAD, CLI, WEB]);
+        let upload = upload_with_detail(&index);
+        let call = |name: &str, count, line| langspan_core::CallCount {
+            name: name.into(),
+            count,
+            line,
+        };
+        assert_eq!(
+            upload.calls.as_deref(),
+            Some(&[call("open", 2, 2), call("hash", 1, 4)][..])
+        );
+        assert_eq!(
+            upload.callers,
+            Some(langspan_core::Callers {
+                count: 3,
+                sites: vec![
+                    "src/cli.rs:2".into(),
+                    "src/web.rs:3".into(),
+                    "src/web.rs:4".into()
+                ],
+            })
+        );
+        // Each call is stored with the innermost definition it is in.
+        let caller: String = index
+            .connection
+            .query_row(
+                "SELECT caller FROM calls WHERE callee = 'hash'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(caller, "upload");
+        // Without detail nothing is added.
+        let plain = index.symbol("w", "upload", 10).unwrap().remove(0);
+        assert_eq!(
+            (plain.body_digest, plain.calls, plain.callers),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn a_body_digest_changes_only_with_the_definitions_own_bytes() {
+        let (dir, mut index) = setup("body");
+        pass(&dir, &mut index, &[UPLOAD, CLI]);
+        let before = upload_with_detail(&index);
+        let elsewhere = UPLOAD.1.replace("{ 1 }", "{ 2 }");
+        pass(&dir, &mut index, &[(UPLOAD.0, &elsewhere), CLI]);
+        let after = upload_with_detail(&index);
+        assert_ne!(before.digest, after.digest, "the file changed");
+        assert_eq!(before.body_digest, after.body_digest, "upload did not");
+        assert_eq!(before.body_digest.as_ref().unwrap().len(), 64);
+        let inside = UPLOAD.1.replace("hash(a, b)", "hash(b, a)");
+        pass(&dir, &mut index, &[(UPLOAD.0, &inside), CLI]);
+        assert_ne!(upload_with_detail(&index).body_digest, after.body_digest);
+    }
+
+    #[test]
+    fn a_deleted_index_is_rebuilt_with_the_same_calls() {
+        let (dir, mut index) = setup("rebuild");
+        pass(&dir, &mut index, &[UPLOAD, CLI, WEB]);
+        let before = upload_with_detail(&index);
+        drop(index);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = fs::remove_file(dir.0.join(format!("graph.sqlite3{suffix}")));
+        }
+        let mut index = Index::open(&dir.0.join("graph.sqlite3")).unwrap();
+        pass(&dir, &mut index, &[UPLOAD, CLI, WEB]);
+        assert_eq!(upload_with_detail(&index), before);
+    }
+
+    #[test]
+    fn an_index_of_the_previous_schema_is_discarded() {
+        let (dir, index) = setup("schema");
+        index
+            .connection
+            .execute_batch("DROP TABLE calls; PRAGMA user_version = 2;")
+            .unwrap();
+        drop(index);
+        let mut index = Index::open(&dir.0.join("graph.sqlite3")).unwrap();
+        pass(&dir, &mut index, &[UPLOAD, CLI]);
+        assert_eq!(upload_with_detail(&index).callers.unwrap().count, 1);
     }
 
     #[test]

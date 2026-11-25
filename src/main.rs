@@ -75,6 +75,8 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   land-cancel WORKSPACE --onto BRANCH --request-id ID
                                  Stop the waiting landing ID; it pushes nothing
   graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go)
+                                 [--detail]: with its body digest, calls, callers
+                                 by name, notes on its file and last check
   graph references WORKSPACE NAME  Where a name is mentioned
   graph impact WORKSPACE PATH    What a file exports and which files mention those names.
                                  All three match by name and report index coverage
@@ -1721,6 +1723,7 @@ fn doctor(
                         workspace_id: id.clone(),
                         name: "_".into(),
                         limit: 1,
+                        detail: false,
                     },
                 ) {
                     let behind = coverage.indexable_files - coverage.current_files;
@@ -2462,6 +2465,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                         workspace_id,
                         name: (*subject).into(),
                         limit,
+                        detail: options.remove("--detail").is_some(),
                     },
                     "references" => Command::GraphReferences {
                         workspace_id,
@@ -2616,12 +2620,14 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             "--apply" => apply = true,
             // Flags, kept with the options so that only the commands that take
             // them accept them (`dashboard`: `--open`, `--allow-network`;
-            // `land`: `--check-again`; `remote enable`: `--publish-as-branch`).
+            // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
+            // `graph symbol`: `--detail`).
             "--open"
             | "--allow-network"
             | "--check-again"
             | "--publish-as-branch"
             | "--mine"
+            | "--detail"
             | "--off" => {
                 if options.insert(arg.clone(), String::new()).is_some() {
                     return Err(format!("duplicate option {arg}").into());
@@ -2665,6 +2671,47 @@ fn no_unused_options(options: &BTreeMap<String, String>) -> Result<(), langspan:
     }
     Ok(())
 }
+/// The lines `graph symbol --detail` adds under a definition. Note text is
+/// another session's: quoted, so it reads as data.
+fn print_symbol_detail(symbol: &langspan_core::SymbolRef) {
+    if let Some(digest) = &symbol.body_digest {
+        println!("  body digest {digest}");
+    }
+    if let Some(calls) = &symbol.calls {
+        let shown: Vec<String> = calls
+            .iter()
+            .map(|call| format!("{} ×{} (line {})", call.name, call.count, call.line))
+            .collect();
+        println!(
+            "  calls: {}",
+            if shown.is_empty() {
+                "none found".into()
+            } else {
+                shown.join(", ")
+            }
+        );
+    }
+    if let Some(callers) = &symbol.callers {
+        let more = callers.count as usize > callers.sites.len();
+        println!(
+            "  called by name at {} site(s){}{}{}",
+            callers.count,
+            if callers.sites.is_empty() { "" } else { ": " },
+            callers.sites.join(", "),
+            if more { ", …" } else { "" }
+        );
+    }
+    for note in symbol.notes.iter().flatten() {
+        println!("  note {}: {:?}", note.id, note.text);
+    }
+    if let Some(check) = &symbol.last_check {
+        println!(
+            "  last check on this file's content: {} {} on tree {}",
+            check.name, check.result, check.tree
+        );
+    }
+}
+
 fn print_human(response: &Response) -> Result<(), langspan::Error> {
     if response.replayed {
         println!(
@@ -3008,6 +3055,7 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
             references,
             coverage,
             truncated,
+            ..
         } => {
             for symbol in symbols {
                 println!(
@@ -3019,6 +3067,7 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                     if symbol.exported { " (exported)" } else { "" },
                     symbol.signature
                 );
+                print_symbol_detail(symbol);
             }
             for reference in references {
                 println!(

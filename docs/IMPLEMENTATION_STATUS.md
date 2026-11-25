@@ -302,7 +302,7 @@ and landing over MCP. No native-agent run uses these commands yet.
 | --- | --- | --- |
 | Extraction | `langspan-graph`: definitions, mentions, imports, export status and signatures for Rust, Python, TypeScript/JavaScript, Go | Name matching only. Other languages are not indexed. |
 | Index | Derived `graph.sqlite3`, keyed by workspace, path and content digest; incremental after each scan; rebuilt if deleted | Holds the files the observer's scan versioned (at most 4,096; partial scans keep the rest as last indexed); lags by one scan and one pass. |
-| Queries | `graph symbol`, `graph references`, `graph impact`; three read-only MCP tools; bounded, with coverage | One level of impact. |
+| Queries | `graph symbol`, `graph references`, `graph impact`; three read-only MCP tools; bounded, with coverage. `graph symbol --detail` (roadmap D1) adds each definition's body digest, calls, callers by name, notes on its file and last check, from a `calls` table at schema marker 3 | One level of impact. Callers are name matches. Detail is tested with a real daemon, Git repository and MCP client (`tests/graph.rs`, `tests/mcp.rs`); no agent has called it on a host. |
 | Notices | Removed exported symbols and changed signatures reach sessions whose files mention the name, at their next prompt | One workspace only. Renames show as removals. Bodies are not compared. |
 
 Tests: four extraction cases across the languages, including hostile and

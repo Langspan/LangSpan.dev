@@ -1597,7 +1597,9 @@ Kept: /home/user/app-quota (live session claude-code alice), /home/user/app-docs
 
 ### D1. Look up a symbol with its calls, callers, digest and notes
 
-**Decision:** [ADR 0020](adr/0020-source-graph-depth-after-launch.md), not now: after launch, when a run shows agents missing what a lookup would have told them. Launch track: none.
+**Decision:** [ADR 0020](adr/0020-source-graph-depth-after-launch.md): built 25 November 2026 at the owner's request ([issue #50](https://github.com/Langspan/LangSpan.dev/issues/50)), recorded in [ADR 0008](adr/0008-derived-source-index.md). A real-host run remains. Launch track: none.
+
+**Built.** `langspan graph symbol WORKSPACE NAME --detail` and `langspan_symbol` with `detail: true` add `body_digest`, `calls`, `callers`, `notes` and `last_check` to each definition, with `resolution: "name"`, as below. The `calls` table and `symbols.body_digest` are in `graph.sqlite3` at schema marker 3. `last_check` compares the file's raw Git blob with the trees of the 8 newest conclusive check records, within 300 ms; a file stored through a clean filter never matches. Definitions past one 64 KiB frame are left out with `truncated: true`. Without `detail`, the request and answer are unchanged (golden vectors `fixtures/graph-symbol-detail-*-v3.json`). Not yet called by an agent on a host.
 
 **Problem.** An agent that looks up `upload` learns where it is defined but not what it calls, how many places call it, whether its body changed since the agent last read it, or what a peer remembered about its file. It reads the whole file and greps to find out.
 
@@ -1612,13 +1614,14 @@ Kept: /home/user/app-quota (live session claude-code alice), /home/user/app-docs
 - Failure mode: an index with no complete scan answers with `coverage.scanned: false` and empty lists, as today; a file over 1 MiB has no calls.
 
 **Acceptance criteria.**
-- [ ] `--detail` on `fn upload` that calls `open` twice and `hash` once returns `calls` with those counts and first lines.
-- [ ] Two files calling `upload` give `callers.count` of 2 and both locations.
-- [ ] Editing a different function in the same file leaves `upload`'s `body_digest` unchanged and changes `digest`.
-- [ ] A note remembered on the file appears under `notes`; a workspace-wide note does not.
-- [ ] Without `--detail`, the output is today's, field for field.
-- [ ] Deleting `graph.sqlite3` and restarting rebuilds the `calls` table with the same answers.
-- [ ] Evidence: extraction tests in `crates/langspan-graph/tests/calls.rs`; index tests in `src/graph.rs`; `tests/graph.rs` and `tests/mcp.rs` with a real daemon, Git repository and MCP client; a real-host run where Claude Code calls `langspan_symbol` with `detail`.
+- [x] `--detail` on `fn upload` that calls `open` twice and `hash` once returns `calls` with those counts and first lines.
+- [x] Two files calling `upload` give `callers.count` of 2 and both locations.
+- [x] Editing a different function in the same file leaves `upload`'s `body_digest` unchanged and changes `digest`.
+- [x] A note remembered on the file appears under `notes`; a workspace-wide note does not.
+- [x] Without `--detail`, the output is today's, field for field.
+- [x] Deleting `graph.sqlite3` and restarting rebuilds the `calls` table with the same answers.
+- [x] Evidence: extraction tests in `crates/langspan-graph/tests/calls.rs`; index tests in `src/graph.rs`; `tests/graph.rs` and `tests/mcp.rs` with a real daemon, Git repository and MCP client.
+- [ ] Evidence: a real-host run where Claude Code calls `langspan_symbol` with `detail`.
 
 **Example.**
 `bob` (Codex) asks through MCP for `upload` with `detail: true`:
@@ -1988,7 +1991,7 @@ Definition findings (found by name; advisory):
 **Behaviour to build.**
 - Hosts: all four launch hosts, through the existing briefing paths (Claude Code and Codex session start and prompt hooks, Gemini CLI `SessionStart` and `BeforeAgent`, Cursor `sessionStart` and `beforeSubmitPrompt`) and MCP. No new hook event.
 - Interface: `langspan remember WORKSPACE TEXT [PATH...] --symbol NAME [--tag TAG]...` (proposed flags). MCP `langspan_remember` gains `symbol` (string) and `tags` (array) (proposed fields). With `--symbol`, exactly one indexed definition of that name must exist in the named path (or in the workspace when no path is given); otherwise the command fails with `symbol_ambiguous` or `symbol_not_found` (proposed codes), listing up to 8 candidates with path and line.
-- The note stores an `anchor` (proposed): `path`, `name`, `kind`, `line`, and `body_digest`, a SHA-256 of the definition's own byte range. The indexer gains that per-definition digest (proposed `SymbolRef.body_digest`).
+- The note stores an `anchor` (proposed): `path`, `name`, `kind`, `line`, and `body_digest`, a SHA-256 of the definition's own byte range. The indexer already stores that per-definition digest (`SymbolRef.body_digest`, built in D1).
 - Staleness: after each complete scan the core compares each anchor with the index. A note is `current` when the definition's `body_digest` is unchanged, `changed` when the definition exists with a different digest, and `gone` when no definition of that name remains in that file (proposed states, field `anchor_state`). A renamed definition reads as `gone`, as renames do in the index today.
 - Tags: up to 4 per note, each 1 to 32 bytes of lower-case letters, digits and `-`. `recap --tag TAG` and `langspan_recap` with `tag` (proposed) filter notes.
 - What the agent sees: an anchored note reaches sessions whose files are the anchor's path or mention the name (a name lookup, as `langspan_references`). The existing "Remembered for this repository" line names the definition and its state, for example `(about parse_upload in "src/api.rs"; the code changed since this note was written)`. Notes keep their 400-byte cap and the briefing keeps its 2,400-byte cap and 4-note limit; `current` notes are chosen before `changed` and `gone` ones.

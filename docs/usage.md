@@ -514,12 +514,32 @@ scans and can lag changes on disk. Replace `PROJECT` with a registered workspace
 
 ```sh
 ./target/release/langspan graph symbol PROJECT upload --limit 50 --json
+./target/release/langspan graph symbol PROJECT upload --detail --json
 ./target/release/langspan graph references PROJECT upload --limit 50 --json
 ./target/release/langspan graph impact PROJECT src/api.rs --limit 50 --json
 ```
 
 `symbol` returns definitions with their location, signature, export status and
-source digest. `references` finds mentions of the name. `impact` lists the file's
+source digest. With `--detail` (MCP: `langspan_symbol` with `detail: true`),
+each definition also has:
+
+- `body_digest`: the SHA-256 of the definition's own bytes, which an edit
+  elsewhere in the file does not change;
+- `calls`: up to 32 names called within the definition, each with a count and
+  the line of the first call;
+- `callers`: how many call sites outside the definition use its name, and up
+  to 8 of them as `path:line`;
+- `notes`: up to 4 remembered notes on its file (workspace-wide notes are not
+  included);
+- `last_check`: the newest passed or failed check record, of the 8 newest,
+  whose tree holds the file's indexed content. It is left out when none does,
+  when the file is stored through a Git clean filter, or when the comparison
+  does not finish within 300 ms.
+
+The answer has `resolution: "name"`: calls and callers are matched by name,
+not resolved, so a call of another function with the same name counts. No
+source body is returned. Definitions that would make the answer larger than
+64 KiB are left out and `truncated` is true. `references` finds mentions of the name. `impact` lists the file's
 exports and other files mentioning those names, one level deep. These queries
 match names without resolving scopes, types, modules or imports. Common names
 can produce unrelated matches; dynamic uses can be missed.
@@ -740,7 +760,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_events` | Read an ordered page of persisted events |
 | `langspan_changes` | Read file and local-branch observations with scan freshness |
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
-| `langspan_symbol` | Find indexed definitions by name, with source digests and coverage |
+| `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check |
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names, one level deep |
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
