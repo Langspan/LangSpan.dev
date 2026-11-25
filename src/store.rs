@@ -26,6 +26,11 @@ pub fn wall_now_ms() -> u64 {
 /// the 64 KiB frame for the envelope and JSON escaping of the envelope.
 pub const PAGE_BUDGET_BYTES: usize = 48 * 1024;
 
+/// The smallest status-records page a reader can ask for. It leaves room for
+/// at least one part of a record however its text escapes, so every page
+/// moves the cursor on.
+pub const MIN_PAGE_BYTES: usize = 1024;
+
 /// A generation marker: a `booted` or `clock_anchored` event. One owner for
 /// the index over them and the lookup that must match it to use it.
 macro_rules! generation_marker {
@@ -606,7 +611,14 @@ impl Store {
                 }
                 outcome => outcome,
             },
-            Command::StatusRecords { after } => self.status_records(after.as_deref()),
+            Command::StatusRecords { after, page_bytes } => self.status_records(
+                after.as_deref(),
+                page_bytes.map_or(PAGE_BUDGET_BYTES, |bytes| {
+                    usize::try_from(bytes)
+                        .unwrap_or(PAGE_BUDGET_BYTES)
+                        .clamp(MIN_PAGE_BYTES, PAGE_BUDGET_BYTES)
+                }),
+            ),
             // A read: decided by the core, never recorded.
             Command::RemoteOutbox { .. }
             | Command::CheckStatus { .. }
@@ -797,12 +809,13 @@ impl Store {
         ))
     }
 
-    /// One page of state records from `after`, within `PAGE_BUDGET_BYTES`.
-    /// A record that fits a page is never split; one that does not (an
-    /// entry at its limits can be larger than a frame) is given as parts of
-    /// its JSON, so that every valid state can be read. A page holds at
-    /// least one record or part when any remain.
-    fn status_records(&self, after: Option<&str>) -> Outcome {
+    /// One page of state records from `after`, within `budget` bytes
+    /// (`PAGE_BUDGET_BYTES` unless the reader asked for less, never under
+    /// `MIN_PAGE_BYTES`). A record that fits a page is never split; one that
+    /// does not (an entry at its limits can be larger than a frame) is given
+    /// as parts of its JSON, so that every valid state can be read. A page
+    /// holds at least one record or part when any remain.
+    fn status_records(&self, after: Option<&str>, budget: usize) -> Outcome {
         let (mut resume, records) = match status_records(&self.state, after) {
             Ok(read) => read,
             Err(error) => {
@@ -838,8 +851,8 @@ impl Store {
                 }
                 _ => 0,
             };
-            if start == 0 && text.len() < PAGE_BUDGET_BYTES {
-                if bytes + text.len() + 1 > PAGE_BUDGET_BYTES {
+            if start == 0 && text.len() < budget {
+                if bytes + text.len() + 1 > budget {
                     return Outcome::StatusRecords {
                         records: page,
                         next,
@@ -850,7 +863,7 @@ impl Store {
                 next = Some(position.after());
                 continue;
             }
-            let end = part_end(&text, start, PAGE_BUDGET_BYTES.saturating_sub(bytes));
+            let end = part_end(&text, start, budget.saturating_sub(bytes));
             if end == start {
                 return Outcome::StatusRecords {
                     records: page,

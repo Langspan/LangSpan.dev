@@ -50,7 +50,7 @@ every answer:
 | --- | --- | --- |
 | `graph symbol WORKSPACE NAME [--detail]` | `langspan_symbol` (`detail`) | Definitions of that name; with detail, what is around each (below) |
 | `graph references WORKSPACE NAME` | `langspan_references` | Mentions of that name |
-| `graph impact WORKSPACE PATH` | `langspan_impact` | What the file exports, and other files mentioning those names |
+| `graph impact WORKSPACE PATH [--depth N]` | `langspan_impact` (`depth`) | What the file exports, and other files mentioning those names; with a depth of 2 or 3, those files level by level (below) |
 | `graph blind-spots WORKSPACE` | `langspan_blind_spots` | The files the index cannot answer for, by reason (below) |
 | `graph history WORKSPACE NAME` | `langspan_history` | The recorded interface changes of that name, from the event log (below) |
 
@@ -161,6 +161,40 @@ also holds an earlier row for it. Tests: `blind_spots_name_partial_never_clean_a
 `src/graph.rs`; `blind_spots_name_the_files_the_index_cannot_answer_for` in
 `tests/graph.rs`; `stdio_blind_spots_names_a_partial_file_through_the_daemon`
 in `tests/mcp.rs`; golden vectors `fixtures/graph-blind-spots-*-v3.json`.
+
+**Impact level by level (added 25 November 2026, roadmap D2).**
+`graph_impact` takes `depth`, 1 to 3 (`MAX_IMPACT_DEPTH`); anything else is
+refused with "depth must be between 1 and 3". Above 1 the answer adds
+`levels`: level 1 is the files mentioning a name the queried file exports,
+and level n+1 the files mentioning a name a level-n file exports. Each file
+appears once, at its first level, with `via` (the exported name it mentions)
+and `from` (the previous-level file; the queried file for level 1), so a
+cycle never brings the queried file or an earlier level back. Files are
+reached in the previous level's order, names in name order. Bounds: 200
+files across all levels (`MAX_RESULTS`), 50 distinct exported names expanded
+per level (`NAMES_PER_LEVEL`), and the answer must fit one 64 KiB frame;
+a level any of these cut, and every level after a frame cut, is `truncated`.
+The levels are read in the same snapshot as the exports, references and
+coverage (`with_coverage`). They may take 500 ms (`IMPACT_BUDGET`): the daemon
+answers one request at a time, so hooks behind a long query wait; past it the levels finished so far and the one
+in progress are returned, the last `truncated`. The answer then also has
+`resolution: "name"`, and the CLI says "Found by name, not resolved; each
+level adds false positives". An empty level is no claim that nothing is
+affected: with blind or lagging files in `coverage`, the CLI says so. At
+depth 1 the field is left out of the request and `levels` and `resolution`
+out of the answer, which is byte-for-byte the earlier one, and the request
+is the one earlier builds send. Nothing is stored. Tests:
+`impact_levels_follow_a_caller_of_a_caller_and_name_the_way`,
+`a_file_appears_once_at_its_first_level`,
+`impact_levels_expand_at_most_fifty_names_per_level_and_say_so`,
+`impact_levels_stop_at_two_hundred_files_in_total`,
+`a_passed_deadline_returns_the_levels_so_far_marked_truncated` and
+`levels_and_coverage_come_from_one_snapshot` in `src/graph.rs`;
+`impact_levels_with_long_paths_are_cut_to_one_frame_and_say_so` in
+`src/daemon.rs`;
+`impact_by_level_reaches_a_caller_of_a_caller_and_depth_one_is_unchanged`
+in `tests/graph.rs`; `stdio_impact_with_depth_returns_levels_by_name` in
+`tests/mcp.rs`; the request vectors in `tests/protocol.rs`.
 
 **Interface-change notices.** When a file is re-indexed, its exported symbols
 are compared with the previous version by name and kind. A removed symbol or
@@ -303,9 +337,10 @@ has no complete scan or nothing matched, and any failure adds nothing.
   scanned partially (ADR 0003): changed files first, then clean ones in path
   order. The index holds the files the scan versioned; a file a partial scan
   left out keeps what was last indexed for it and is not reported removed.
-- Impact is one level: files mentioning the names a file exports. It does not
-  follow chains, and import targets are stored but not yet used to narrow
-  matches.
+- Impact is one level by default: files mentioning the names a file exports.
+  With `--depth` it follows up to three levels of such name matches; each
+  level compounds the false positives of the one before, and nothing is
+  resolved. Import targets are stored but not yet used to narrow matches.
 - Notices cover one physical workspace. A teammate on another machine or in
   another worktree is not yet told of an interface change.
 - False positives are expected for common names. False negatives occur for
