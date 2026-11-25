@@ -302,7 +302,7 @@ async fn stdio_supports_current_discovery_lifecycle() {
         .await
         .expect("discovery-lifecycle tools/list timed out")
         .expect("discovery-lifecycle tools/list failed");
-    assert_eq!(tools.len(), 24);
+    assert_eq!(tools.len(), 25);
     let result = call_tool(&client, "langspan_status", json!({})).await;
     assert_eq!(result.is_error, Some(true));
     assert_eq!(

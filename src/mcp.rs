@@ -987,7 +987,7 @@ mod tests {
         let router = McpAdapter::tool_router();
         let status = router.get("langspan_status").unwrap();
         assert!(status.description.as_deref().unwrap().contains("liveness"));
-        assert_eq!(router.list_all().len(), 24);
+        assert_eq!(router.list_all().len(), 25);
         assert!(router.get("langspan_attach_pid").is_none());
         for name in [
             "langspan_status",
