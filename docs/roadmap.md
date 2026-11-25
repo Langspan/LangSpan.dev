@@ -105,7 +105,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 ## D. Source graph and queries
 
 - [D1: Look up a symbol with its calls, callers, digest and notes](https://github.com/Langspan/LangSpan.dev/issues/50): a symbol lookup gives its definition but not its calls, callers, changes or notes. Built with `--detail`; a real-host run remains.
-- [D2: Show a change's blast radius level by level](https://github.com/Langspan/LangSpan.dev/issues/51): `graph impact` stops at direct dependents, hiding breaks two steps away.
+- [D2: Show a change's blast radius level by level](https://github.com/Langspan/LangSpan.dev/issues/51): `graph impact` stops at direct dependents, hiding breaks two steps away. Built with `--depth`; a real-host run remains.
 - [D3: Typed edges, paths between symbols and a repository map](https://github.com/Langspan/LangSpan.dev/issues/52): name mentions alone cannot follow a call chain or show how modules relate.
 - [D4: Show the history of a definition](https://github.com/Langspan/LangSpan.dev/issues/53): an agent cannot see who changed a definition recently, why, or who reverted the same change.
 - [D5: Export and import the source index](https://github.com/Langspan/LangSpan.dev/issues/54): a large repository's first indexing takes many passes, and the index cannot be inspected outside LangSpan.

@@ -524,6 +524,14 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn one() -> u32 {
+    1
+}
+
+fn is_one(value: &u32) -> bool {
+    *value == 1
+}
+
 /// The signature of a briefing with nothing in it.
 const EMPTY_SIGNATURE: &str = "cbf29ce484222325";
 /// A briefing outcome stays well inside one 64 KiB transport frame.
@@ -1029,6 +1037,33 @@ pub struct NameRef {
     pub name: String,
     pub line: u32,
     pub digest: String,
+}
+
+/// The deepest `graph impact` level a client may ask for (roadmap D2).
+pub const MAX_IMPACT_DEPTH: u32 = 3;
+
+/// One level of a multi-level impact answer (roadmap D2): the files that
+/// mention a name the previous level's files export. Found by name, not
+/// resolved, so each level compounds the false positives of the one before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ImpactLevel {
+    /// From 1: level 1 mentions an export of the queried file.
+    pub level: u32,
+    pub files: Vec<ImpactFile>,
+    /// A bound, the frame size or the request deadline cut this level.
+    pub truncated: bool,
+}
+
+/// A file reached at its first level, and how.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ImpactFile {
+    pub path: String,
+    /// The exported name of `from` that this file mentions.
+    pub via: String,
+    /// The file at the previous level (the queried file for level 1).
+    pub from: String,
 }
 
 /// How much of a workspace the index covers, so a short answer is not read
@@ -2128,6 +2163,12 @@ pub enum Command {
         limit: u32,
         #[serde(default, skip_serializing_if = "is_false")]
         blind_in_scope: bool,
+        /// Levels to follow, 1 to `MAX_IMPACT_DEPTH` (roadmap D2). Above 1
+        /// the answer adds `levels`; at 1 the field is absent from the
+        /// request, which is then the one earlier builds send, and the
+        /// answer is theirs too.
+        #[serde(default = "one", skip_serializing_if = "is_one")]
+        depth: u32,
     },
     /// Read-only: the files the index cannot answer for, by reason, at
     /// most `limit` paths per list (roadmap D8).
@@ -2569,6 +2610,12 @@ enum CommandWire {
         limit: u32,
         #[serde(default, skip_serializing_if = "is_false")]
         blind_in_scope: bool,
+        /// Levels to follow, 1 to `MAX_IMPACT_DEPTH` (roadmap D2). Above 1
+        /// the answer adds `levels`; at 1 the field is absent from the
+        /// request, which is then the one earlier builds send, and the
+        /// answer is theirs too.
+        #[serde(default = "one", skip_serializing_if = "is_one")]
+        depth: u32,
     },
     /// Read-only: the files the index cannot answer for, by reason, at
     /// most `limit` paths per list (roadmap D8).
@@ -2942,6 +2989,10 @@ pub enum Outcome {
         resolution: Option<String>,
         coverage: GraphCoverage,
         truncated: bool,
+        /// `graph impact` with a depth above 1: each level's files, from
+        /// the same index snapshot as `coverage`. Absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        levels: Option<Vec<ImpactLevel>>,
     },
     /// Only names with at least one definition, in the order asked.
     GraphContext {

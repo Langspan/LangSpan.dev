@@ -79,6 +79,8 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  by name, notes on its file and last check
   graph references WORKSPACE NAME  Where a name is mentioned
   graph impact WORKSPACE PATH    What a file exports and which files mention those names.
+                                 [--depth N]: 1 to 3 levels, each the files that
+                                 mention an export of the level before
                                  All three match by name and report index coverage
   graph blind-spots WORKSPACE [--limit N]
                                  Files the index cannot answer for: partial, never
@@ -1784,6 +1786,50 @@ fn print_combined(
     print_renames(&merged.renames);
 }
 
+/// `graph impact --depth N`: one line per level, paths and names quoted
+/// because they are repository text. An empty level never claims that
+/// nothing is affected.
+fn print_impact_levels(
+    levels: &[langspan_core::ImpactLevel],
+    coverage: &langspan_core::GraphCoverage,
+) {
+    let blind = coverage.blind_in_scope > 0 || coverage.current_files < coverage.indexable_files;
+    for level in levels {
+        let files: Vec<String> = level
+            .files
+            .iter()
+            .map(|file| {
+                if level.level == 1 {
+                    format!("{:?} via {:?}", file.path, file.via)
+                } else {
+                    format!("{:?} via {:?} from {:?}", file.path, file.via, file.from)
+                }
+            })
+            .collect();
+        let heading = match (level.level, level.files.first()) {
+            (1, Some(file)) => format!("Level 1 (mentions an export of {:?})", file.from),
+            (n, _) => format!("Level {n}"),
+        };
+        let found = if files.is_empty() {
+            if blind {
+                "none found by name, but the index is not complete, so this is no claim that none is affected".to_owned()
+            } else {
+                "none found by name".to_owned()
+            }
+        } else {
+            files.join(", ")
+        };
+        println!(
+            "{heading}: {found}{}",
+            if level.truncated {
+                " (cut by a bound; more may exist)"
+            } else {
+                ""
+            }
+        );
+    }
+}
+
 /// `graph blind-spots`: one line per non-empty list, paths quoted, with the
 /// full count in parentheses.
 fn print_blind_spots(
@@ -2847,6 +2893,10 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                         path: (*subject).into(),
                         limit,
                         blind_in_scope: true,
+                        // The daemon checks the range, so every client is
+                        // told the same.
+                        depth: u32::try_from(number(&mut options, "--depth", 1)?)
+                            .map_err(|_| "--depth must be between 1 and 3")?,
                     },
                 }
             }
@@ -3030,7 +3080,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--code-briefing" | "--max-peers" | "--remote" | "--name" | "--share-task"
             | "--onto" | "--timeout-s" | "--wait-s" | "--session" | "--to" | "--from"
             | "--home" | "--hosts" | "--listen" | "-m" | "--message" | "--statusline"
-            | "--deadline-ms" | "--since" => {
+            | "--deadline-ms" | "--since" | "--depth" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -3458,6 +3508,7 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
             references,
             coverage,
             truncated,
+            levels,
             ..
         } => {
             for symbol in symbols {
@@ -3472,11 +3523,17 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 );
                 print_symbol_detail(symbol);
             }
-            for reference in references {
-                println!(
-                    "{}:{} mentions {}",
-                    reference.path, reference.line, reference.name
-                );
+            match levels {
+                // Level 1 lists the files of `references`, once each.
+                Some(levels) => print_impact_levels(levels, coverage),
+                None => {
+                    for reference in references {
+                        println!(
+                            "{}:{} mentions {}",
+                            reference.path, reference.line, reference.name
+                        );
+                    }
+                }
             }
             if *truncated {
                 println!("More results exist than the limit allows.");
@@ -3487,7 +3544,12 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 );
             } else {
                 println!(
-                    "Matches are by name, not resolved uses. Index: {} of {} supported files at their current content{}.",
+                    "{}. Index: {} of {} supported files at their current content{}.",
+                    if levels.is_some() {
+                        "Found by name, not resolved; each level adds false positives"
+                    } else {
+                        "Matches are by name, not resolved uses"
+                    },
                     coverage.current_files,
                     coverage.indexable_files,
                     if coverage.partial_files > 0 {
