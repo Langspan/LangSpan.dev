@@ -13,6 +13,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct World {
@@ -39,9 +41,16 @@ impl World {
     fn work(&self) -> PathBuf {
         self.base.join("work")
     }
+    /// The langspan executable with this world's own home, so nothing
+    /// installed on the machine changes what it reports.
+    fn langspan(&self) -> Process {
+        let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
+        support::in_home(&mut command, &self.base.join("home"));
+        command
+    }
     fn start(&mut self) {
         self.daemon = Some(
-            Process::new(env!("CARGO_BIN_EXE_langspan"))
+            self.langspan()
                 .args(["daemon", "--state-dir"])
                 .arg(self.base.join("state"))
                 .stdout(Stdio::null())
@@ -56,7 +65,8 @@ impl World {
         }
     }
     fn cli(&self, args: &[&str]) -> (i32, String) {
-        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        let output = self
+            .langspan()
             .arg("--state-dir")
             .arg(self.base.join("state"))
             .args(args)
@@ -82,7 +92,8 @@ impl World {
         );
     }
     fn hook(&self, event: Value) -> Option<String> {
-        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        let mut child = self
+            .langspan()
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.base.join("state"))
             .args(["--workspace", "app", "--root"])
@@ -189,6 +200,12 @@ fn doctor_names_each_thing_that_is_not_working_and_stops_when_it_is_fixed() {
         code == 0 && text.contains("index holds 1 of 1")
     });
     assert!(text.contains("Nothing needs attention"), "{text}");
+    // Its home is the world's own and empty: no user-level install, the
+    // machine's included, is reported.
+    assert!(
+        !text.contains("user-level") && !text.contains("LangSpan skill"),
+        "{text}"
+    );
 
     // Hooks: installed, then pointing at an executable that is gone.
     let work = w.work();

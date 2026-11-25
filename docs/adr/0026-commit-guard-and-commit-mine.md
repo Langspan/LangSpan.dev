@@ -287,7 +287,7 @@ Writes are recorded only by the hooks (`before_edit`, `before_shell`,
   for the journal.
 - The shared index is written only by `commit --mine`, which the agent runs
   for that purpose, and only for the files it commits.
-- A new MCP tool, `langspan_commit_mine` (21 tools); later
+- A new MCP tool, `langspan_commit_mine`; later
   `langspan_my_changes`, read-only (issue #40).
 
 ## Design input adopted

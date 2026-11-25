@@ -192,7 +192,7 @@ macro_rules! activity {
 /// Parts of the view left out, in this order, while it does not fit: the
 /// bulkiest histories first, current coordination last. Each name is the one
 /// `StatusSummary::omitted` gives.
-const TRIMS: [Trim; 13] = [
+const TRIMS: [Trim; 14] = [
     activity!("activity.known", known),
     field!("checks", checks),
     field!("landings", landings),
@@ -202,6 +202,7 @@ const TRIMS: [Trim; 13] = [
     field!("remote_peers", remote_peers),
     activity!("activity.touched", touched),
     activity!("activity.alerted", alerted),
+    activity!("activity.prompt_targets", prompt_targets),
     // Only the shown sessions' notices are in the view.
     Trim {
         name: "check_notices",

@@ -255,6 +255,42 @@ fn v3_blind_spots_request_and_response_match_the_committed_golden_vectors() {
 }
 
 #[test]
+fn v3_prompt_targets_request_and_target_briefing_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/prompt-targets-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::SetPromptTargets {
+            session_id: "codex.bob".into(),
+            paths: vec!["src/http.rs".into()],
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    // Paths only: a prompt's words have no field to travel in.
+    let worded = String::from_utf8_lossy(wire).replace(
+        r#""paths":["src/http.rs"]"#,
+        r#""paths":["src/http.rs"],"prompt":"x""#,
+    );
+    assert!(serde_json::from_str::<Request>(&worded).is_err());
+
+    let wire = include_bytes!("../fixtures/target-briefing-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(briefing.peers[0].target_overlap, ["src/http.rs"]);
+    assert_eq!(encode(&response).unwrap(), wire);
+    // A briefing from before prompt targets has no such field and still reads.
+    let older = String::from_utf8_lossy(wire).replace(r#","target_overlap":["src/http.rs"]"#, "");
+    let response: Response = serde_json::from_str(&older).unwrap();
+    let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert!(briefing.peers[0].target_overlap.is_empty());
+    assert_eq!(encode(&response).unwrap(), older.as_bytes());
+}
+
+#[test]
 fn v3_symbol_detail_request_and_response_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/graph-symbol-detail-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();

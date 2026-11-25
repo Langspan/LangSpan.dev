@@ -302,7 +302,11 @@ async fn stdio_supports_current_discovery_lifecycle() {
         .await
         .expect("discovery-lifecycle tools/list timed out")
         .expect("discovery-lifecycle tools/list failed");
-    assert_eq!(tools.len(), 25);
+    if let Err(problem) =
+        langspan::mcp::compare_tool_names(tools.iter().map(|tool| tool.name.as_ref()))
+    {
+        panic!("tools/list over stdio: {problem}");
+    }
     let result = call_tool(&client, "langspan_status", json!({})).await;
     assert_eq!(result.is_error, Some(true));
     assert_eq!(
