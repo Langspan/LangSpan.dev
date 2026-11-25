@@ -500,6 +500,7 @@ impl Store {
                 | Command::LandingReadiness { .. }
                 | Command::TurnQueue { .. }
                 | Command::Recap { .. }
+                | Command::Recall { .. }
                 | Command::Today { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
@@ -596,15 +597,26 @@ impl Store {
             | Command::StatusLine { .. }
             | Command::WorkspaceList { .. }
             | Command::WorkspaceRemove { apply: false, .. }
-            | Command::Recap { .. } => {
+            | Command::Recap { .. }
+            | Command::Recall { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
                     Outcome::Workspaces { workspaces, next } => workspace_page(workspaces, next),
-                    // A recap must fit one frame with room for the envelope.
+                    // A recap or a recall must fit one frame with room for
+                    // the envelope.
                     Outcome::Recap { mut recap } => {
                         recap.shrink_until(|recap| {
                             serde_json::to_vec(recap).is_ok_and(|bytes| bytes.len() <= 48 * 1024)
                         });
                         Outcome::Recap { recap }
+                    }
+                    // Within the daemon's frame. The MCP result carries the
+                    // answer twice, once escaped again as text, so the MCP
+                    // adapter trims it once more against its encoded result.
+                    Outcome::Recall { mut recall } => {
+                        recall.shrink_until(|recall| {
+                            serde_json::to_vec(recall).is_ok_and(|bytes| bytes.len() <= 28 * 1024)
+                        });
+                        Outcome::Recall { recall }
                     }
                     outcome => outcome,
                 }
