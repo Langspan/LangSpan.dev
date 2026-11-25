@@ -95,19 +95,89 @@ in time could have written the same files. A file changed in this run is
 attributed to neither session when an overlapping run of another session
 changed it too, or when that run's changes are unknown (still running, or not
 observed). The coverage is `contested`. A run whose result never arrives
-stops counting after 10 minutes; one still open when its session's reply or
+stops counting after the supported lifetime of a shell call (below); one still open when its session's reply or
 the session ends is closed then, with its changes unknown (ADR 0026). Two exceptions (added 24 November 2026,
 for shared-checkout cases): a file this command names as a literal
 write target (its whole write set parsed) is this command's, unless the
 overlapping run names it too; and a Claude Code call with `run_in_background`
-counts as still running for 10 minutes after it started, since its process
+counts as still running for that lifetime after it started, since its process
 outlives the call, so it contests other sessions' changes their commands do
-not name. Tests: `concurrent_commands_credit_a_change_to_the_one_that_names_the_file`,
+not name.
+
+**A shell call's supported lifetime** (changed 25 November 2026, PR #6
+review): two hours (`RUN_LIFETIME_MS`), the longest Claude Code lets a
+`run_in_background` command run; a foreground call stops at ten minutes.
+It was ten minutes, so a longer run's still-open record was taken as
+abandoned: another session's next edit then pruned the finished edit marks
+the run still needed, and the run's result credited that session's file to
+the command's session. Until the lifetime has passed an unfinished run
+counts as running, and the run records and marks it needs are kept. A run
+whose result arrives after it (a Codex process kept alive past two hours,
+for example) may have lost those marks, so all it changed is `contested`:
+credited to no session. Tests:
+`a_command_running_longer_than_ten_minutes_keeps_the_edit_marks_it_needs`,
+`a_command_older_than_a_shell_calls_lifetime_is_credited_with_nothing`. Tests: `concurrent_commands_credit_a_change_to_the_one_that_names_the_file`,
 `a_change_no_concurrent_command_names_is_credited_to_no_session`,
 `a_running_background_command_contests_changes_no_command_names`. Only runs in the same physical workspace are
 compared: each run record keeps the workspace's canonical root, because
 changed paths are relative to it. Sessions in other repositories or linked
 worktrees that share the state directory never contest each other's changes.
+
+**Another session's hooked edits during the run** (added 25 November 2026,
+issue #1). Comparing the workspace before and after a command also finds the
+files another session changed through its own edit tool (Edit, Write, a
+patch) while the command ran. Those were once credited to the command's
+session: a later edit from that session's old read was then admitted, and
+`commit --mine` refused the editor's line as written by two sessions. Now
+every edit tool call that is not refused leaves an *edit mark* in
+`STATE/shell/edits/`: its session, its workspace's canonical root, when it
+started and finished, and each file's version just before the call (taken by
+the pre-tool hook) and after it (taken by the post-tool hook). The shell
+post-tool hook reads the marks of other sessions in the same workspace that
+overlapped the run (finished after it started, or still going and younger
+than a shell call's supported lifetime). For each changed file one or more of those marks touched:
+
+- If the marked edits, in the order they started, form one chain of known
+  versions from the file before the run to the file now, the edits alone
+  explain the change. The file is the editing session's, which its own hooks
+  already recorded; the command's session is not credited with it.
+- Otherwise (the file changed before or after an edit, an edit is still
+  under way, or a version is not known) both may have changed it and the
+  order cannot be known. The file is `contested`: attributed to no session
+  by the command's observation, journaled for neither, and the command's
+  session gets no version of it. The editor keeps the version its own write
+  left, which is no longer the file on disk, so each session's next edit
+  from what it last knew is refused once as stale (ADR 0005).
+
+A changed file no mark touched is the command's as before. A mark whose post
+never arrives is closed, with its result unknown, when its session's reply or
+the session ends. Marks are pruned as run records are: a finished mark is
+kept while a shell run that could overlap it is still going, and nothing is
+kept for more than a day; at most 4,096 are kept. Tests:
+`tests/shell_concurrent_edits.rs` (a real command held open by a signal file
+while the other session's real hooks edit), and
+`an_edit_that_alone_explains_a_change_is_the_editors_and_anything_else_is_unknown`.
+
+The cap holds on every path that creates a mark: an edit's pre-tool hook, and
+its post-tool hook when the start was not kept. An edit call refused a mark at
+the cap goes unmarked and leaves an overflow note (`STATE/shell/edits/overflow`,
+the time it happened). A shell run then cannot vouch for any file it changed:
+if the note is younger than a shell call's supported lifetime before the run
+started, or the directory holds more marks than a listing reads (as an older
+build could leave), every changed file is `contested` and the run's session
+is credited with nothing. Tests:
+`a_full_edit_mark_directory_stays_bounded_and_credits_the_command_nothing` and
+`overflowing_edit_marks_make_a_runs_overlapping_edits_incomplete`.
+
+The window between an edit's pre-tool hook and the tool's own write is not
+seen: a command that writes the file inside it, before the tool reads and
+replaces it, is taken as part of the edit. That window is the time the host
+takes to run the tool after its hook returns. The window after the tool is
+closed: the post-tool hook reads the edit's files on entry, before any
+daemon call, and the mark keeps those versions. A command's write that lands
+while the hook waits on the daemon is then a change the edit does not
+explain, so the file is `contested` rather than the editor's. Test:
+`a_shell_write_during_an_edits_post_hook_is_not_taken_for_the_edits`.
 
 **Recorded once, even when the daemon fails.** The post-tool hook first keeps
 the comparison's outcome (the changed and contested paths, or why the change
@@ -153,12 +223,14 @@ Coverage values: `admitted`, `denied`, `denied_stale` (before, literal forms);
 - Writes by a process that outlives the tool call: a background job, a
   daemon, Claude Code's `run_in_background`. Only what changed by the time the
   post hook ran is attributed to it. A `run_in_background` call does contest
-  other sessions' unnamed changes for 10 minutes after it started (see
+  other sessions' unnamed changes for two hours after it started (see
   "Contested changes"); a job a command backgrounds itself (`&`, `nohup`) is
   not known to be running and contests nothing.
-- Changes made by anything else while the command ran (an editor, another
-  session's edit tool, the owner) are attributed to the command's session.
-  Only another session's overlapping shell run is detected as contested.
+- Changes made by anything outside the hooks while the command ran (an
+  editor, the owner, an unhooked tool) are attributed to the command's
+  session. Another session's overlapping shell run and its hooked edit tool
+  calls are detected (see "Contested changes" and "Another session's hooked
+  edits during the run").
 - A change of ignore rules during the command can make a previously ignored,
   unchanged file appear new.
 - Files over the bounds, non-Git directories, a workspace root below its
@@ -180,7 +252,9 @@ Coverage values: `admitted`, `denied`, `denied_stale` (before, literal forms);
   two thirds of the remaining time so a decision is still possible.
 - `STATE/shell/` holds one small file per running or recently finished
   command. A finished run is kept while a running run overlaps it, a running
-  one for at most a day; at most 4,096 are kept.
+  one for at most a day; at most 4,096 are kept. `STATE/shell/edits/` holds
+  one small owner-only file per recent edit tool call, pruned the same way,
+  so each edit tool call's hooks write one more file.
 - The parser is a second grammar to keep conservative. A form is added only
   with a test that names its targets and the disqualifiers that go with it.
 

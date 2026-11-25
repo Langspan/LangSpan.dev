@@ -657,8 +657,13 @@ pub fn changed(
 // Run records: the "before" of each command, and what each run changed
 // ---------------------------------------------------------------------------
 
-/// A run whose result never arrived stops counting as running after this.
-pub const ABANDONED_MS: u64 = 10 * 60 * 1000;
+/// The longest a shell call is supported to run: two hours, the longest
+/// Claude Code lets a `run_in_background` command run (a foreground call
+/// stops at ten minutes). Until then an unfinished run counts as running,
+/// so the run records and edit marks it needs are kept; after it, a run
+/// whose result never arrived is taken as abandoned, and a run whose result
+/// does arrive is credited with nothing (`outlived`).
+pub const RUN_LIFETIME_MS: u64 = 2 * 60 * 60 * 1000;
 const RECORD_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_RECORDS: usize = 4096;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -696,7 +701,7 @@ pub struct Record {
     pub named: Vec<String>,
     /// Started in the background (Claude Code's `run_in_background`): it
     /// may still be running after its call returns, so until
-    /// `ABANDONED_MS` after it started it contests other sessions' changes
+    /// `RUN_LIFETIME_MS` after it started it contests other sessions' changes
     /// as a running command does.
     #[serde(default)]
     pub background: bool,
@@ -704,6 +709,30 @@ pub struct Record {
     /// command may take its session from this record (ADR 0026).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub commit_mine: bool,
+    /// Once finished: of `changed`, the paths another session's hooked edit
+    /// tool made what they are now while this run was going. They are that
+    /// session's (its own hooks recorded them), not this run's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edited_elsewhere: Vec<String>,
+}
+
+impl Record {
+    /// Of `changed`, the paths this run's session is credited with: neither
+    /// contested nor another session's edit.
+    pub fn attributed(&self, changed: &[String]) -> Vec<String> {
+        changed
+            .iter()
+            .filter(|path| !self.contested.contains(path) && !self.edited_elsewhere.contains(path))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether the run started more than `RUN_LIFETIME_MS` before `now`:
+    /// the edit marks and run records it needed may have been pruned, so
+    /// what it changed cannot be told from other sessions' changes.
+    pub fn outlived(&self, now: u64) -> bool {
+        now.saturating_sub(self.started_ms) >= RUN_LIFETIME_MS
+    }
 }
 
 /// Whether a shell command runs `langspan commit --mine`.
@@ -719,7 +748,7 @@ pub fn committing_sessions(state_dir: &Path, workspace: &Path) -> BTreeSet<Strin
     let now = now_ms();
     listing(state_dir)
         .into_iter()
-        .filter(|(_, done, modified)| !done && now.saturating_sub(*modified) < ABANDONED_MS)
+        .filter(|(_, done, modified)| !done && now.saturating_sub(*modified) < RUN_LIFETIME_MS)
         .filter_map(|(path, _, _)| read_record(&path))
         .filter(|record| {
             record.commit_mine
@@ -863,7 +892,7 @@ pub fn start(state_dir: &Path, operation_id: &str, record: &Record) -> Result<()
     let entries = listing(state_dir);
     let earliest_running = entries
         .iter()
-        .filter(|(_, done, modified)| !done && now.saturating_sub(*modified) < ABANDONED_MS)
+        .filter(|(_, done, modified)| !done && now.saturating_sub(*modified) < RUN_LIFETIME_MS)
         .map(|(_, _, modified)| *modified)
         .min()
         .unwrap_or(now);
@@ -872,7 +901,7 @@ pub fn start(state_dir: &Path, operation_id: &str, record: &Record) -> Result<()
         // A finished background command may still be running: its record is
         // kept while it can still contest.
         let background = done
-            && now.saturating_sub(modified) < ABANDONED_MS
+            && now.saturating_sub(modified) < RUN_LIFETIME_MS
             && read_record(&path).is_some_and(|record| record.background);
         let expired = now.saturating_sub(modified) > DAY_MS
             || (done
@@ -945,7 +974,7 @@ pub fn contested(
             continue;
         }
         // A background command's call returning does not mean it stopped.
-        let still_running = |started: u64| now.saturating_sub(started) < ABANDONED_MS;
+        let still_running = |started: u64| now.saturating_sub(started) < RUN_LIFETIME_MS;
         let overlapping = match other.finished_ms {
             Some(_) if other.background => still_running(other.started_ms),
             Some(finished) => finished >= run.started_ms,
@@ -968,6 +997,370 @@ pub fn contested(
         }
     }
     contested.into_iter().collect()
+}
+
+// ---------------------------------------------------------------------------
+// Edit marks: hooked edits a shell run must not take for its own
+// ---------------------------------------------------------------------------
+
+/// One file of an edit tool call: its version just before the call and, once
+/// it finished, after it. `None` is a version that is not known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkedFile {
+    pub before: Option<FileState>,
+    pub after: Option<FileState>,
+}
+
+/// An edit tool call (Edit, Write, a patch) admitted in a workspace, kept so
+/// that a shell run going at the same time can tell that call's changes from
+/// its command's. Written by the call's pre-tool hook and finished by its
+/// post-tool hook; a call whose post never arrives is closed with its result
+/// unknown when its session's reply or the session ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditMark {
+    pub session_id: String,
+    pub workspace: PathBuf,
+    pub started_ms: u64,
+    pub finished_ms: Option<u64>,
+    pub files: BTreeMap<String, MarkedFile>,
+}
+
+fn marks(state_dir: &Path) -> PathBuf {
+    records(state_dir).join("edits")
+}
+
+fn mark_path(state_dir: &Path, operation_id: &str) -> PathBuf {
+    marks(state_dir).join(format!("{operation_id}.json"))
+}
+
+#[cfg(unix)]
+fn write_mark(path: &Path, mark: &EditMark) -> Result<(), String> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec(mark).map_err(|e| e.to_string())?;
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    let _ = fs::remove_file(&temporary);
+    let mut file =
+        crate::local::private_file(&temporary, true).map_err(|e| format!("edit mark: {e}"))?;
+    file.write_all(&bytes)
+        .map_err(|e| format!("edit mark: {e}"))?;
+    fs::rename(&temporary, path).map_err(|e| format!("edit mark: {e}"))
+}
+
+#[cfg(not(unix))]
+fn write_mark(_: &Path, _: &EditMark) -> Result<(), String> {
+    Err("edit marks require Unix".into())
+}
+
+#[cfg(unix)]
+fn read_mark(path: &Path) -> Option<EditMark> {
+    use std::io::Read;
+    let file = crate::local::private_file(path, false).ok()?;
+    let mut bytes = Vec::new();
+    file.take(RECORD_LIMIT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > RECORD_LIMIT_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+#[cfg(not(unix))]
+fn read_mark(_: &Path) -> Option<EditMark> {
+    None
+}
+
+/// Every mark file with its modification time, up to `MAX_RECORDS + 1`.
+fn mark_listing(state_dir: &Path) -> Vec<(PathBuf, u64)> {
+    let Ok(entries) = fs::read_dir(marks(state_dir)) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
+        .take(MAX_RECORDS + 1)
+        .filter_map(|entry| {
+            let modified = entry
+                .metadata()
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_millis() as u64;
+            Some((entry.path(), modified))
+        })
+        .collect()
+}
+
+/// Before an edit tool call runs, once it is not refused: keep the versions
+/// of its files. Old marks go first: those no running shell run can still
+/// need, and anything older than a day.
+pub fn edit_started(
+    state_dir: &Path,
+    operation_id: &str,
+    session_id: &str,
+    root: &Path,
+    before: BTreeMap<String, Option<FileState>>,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    crate::local::private_directory(&marks(state_dir)).map_err(|e| format!("edit marks: {e}"))?;
+    let now = now_ms();
+    // The earliest start of a shell run that may still be going.
+    let earliest_running = listing(state_dir)
+        .iter()
+        .filter(|(_, _, modified)| now.saturating_sub(*modified) < RUN_LIFETIME_MS)
+        .filter_map(|(path, _, _)| read_record(path))
+        .filter(|record| record.finished_ms.is_none() || record.background)
+        .map(|record| record.started_ms)
+        .min()
+        .unwrap_or(now);
+    let mut kept = 0;
+    for (path, modified) in mark_listing(state_dir) {
+        let expired = now.saturating_sub(modified) > DAY_MS
+            || (modified + 2_000 < earliest_running.min(now.saturating_sub(60_000))
+                && read_mark(&path).is_none_or(|mark| mark.finished_ms.is_some()));
+        if expired {
+            let _ = fs::remove_file(path);
+        } else {
+            kept += 1;
+        }
+    }
+    if kept >= MAX_RECORDS {
+        return Err(mark_overflowed(state_dir, now));
+    }
+    let mark = EditMark {
+        session_id: session_id.into(),
+        workspace: workspace_identity(root),
+        started_ms: now,
+        finished_ms: None,
+        files: before
+            .into_iter()
+            .map(|(path, before)| {
+                (
+                    path,
+                    MarkedFile {
+                        before,
+                        after: None,
+                    },
+                )
+            })
+            .collect(),
+    };
+    write_mark(&mark_path(state_dir, operation_id), &mark)
+}
+
+/// Note that an edit call went unmarked because the marks are at their cap,
+/// and say so. Until `RUN_LIFETIME_MS` after this, a shell run's overlapping
+/// edits are incomplete (`overlapping_edits`). If even this note cannot be
+/// written, the cap error says that too.
+fn mark_overflowed(state_dir: &Path, now: u64) -> String {
+    let refused = "too many edit tool calls are recorded";
+    match write_overflow(&marks(state_dir).join(OVERFLOW), now) {
+        Ok(()) => refused.into(),
+        Err(error) => format!("{refused}; the overflow note failed too: {error}"),
+    }
+}
+
+/// The file naming the last time an edit call went unmarked. It has no
+/// `.json` extension, so it is never listed or counted as a mark.
+const OVERFLOW: &str = "overflow";
+
+#[cfg(unix)]
+fn write_overflow(path: &Path, now: u64) -> Result<(), String> {
+    use std::io::Write;
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    let _ = fs::remove_file(&temporary);
+    let mut file = crate::local::private_file(&temporary, true).map_err(|e| e.to_string())?;
+    file.write_all(now.to_string().as_bytes())
+        .map_err(|e| e.to_string())?;
+    fs::rename(&temporary, path).map_err(|e| e.to_string())
+}
+
+#[cfg(not(unix))]
+fn write_overflow(_: &Path, _: u64) -> Result<(), String> {
+    Err("edit marks require Unix".into())
+}
+
+/// When an edit call last went unmarked: `Ok(None)` if none has, `Err` when
+/// the note exists but cannot be read (taken as a recent overflow).
+#[cfg(unix)]
+fn read_overflow(state_dir: &Path) -> Result<Option<u64>, ()> {
+    use std::io::Read;
+    let path = marks(state_dir).join(OVERFLOW);
+    if fs::symlink_metadata(&path).is_err() {
+        return Ok(None);
+    }
+    let file = crate::local::private_file(&path, false).map_err(|_| ())?;
+    let mut text = String::new();
+    file.take(32).read_to_string(&mut text).map_err(|_| ())?;
+    text.trim().parse().map(Some).map_err(|_| ())
+}
+
+#[cfg(not(unix))]
+fn read_overflow(_: &Path) -> Result<Option<u64>, ()> {
+    Ok(None)
+}
+
+/// After an edit tool call: its files as they are now. A call whose start was
+/// not kept is marked as starting now from versions that are not known,
+/// unless the marks are at their cap: then it is not marked, and the
+/// overflow is noted instead.
+pub fn edit_finished(
+    state_dir: &Path,
+    operation_id: &str,
+    session_id: &str,
+    root: &Path,
+    after: BTreeMap<String, Option<FileState>>,
+) -> Result<(), String> {
+    let path = mark_path(state_dir, operation_id);
+    let now = now_ms();
+    let mut mark = match read_mark(&path).filter(|mark| mark.session_id == session_id) {
+        Some(mark) => mark,
+        None => {
+            #[cfg(unix)]
+            crate::local::private_directory(&marks(state_dir))
+                .map_err(|e| format!("edit marks: {e}"))?;
+            // A new mark file: bounded like `edit_started`, so that the
+            // directory never holds more marks than a listing reads.
+            if !path.exists() && mark_listing(state_dir).len() >= MAX_RECORDS {
+                return Err(mark_overflowed(state_dir, now));
+            }
+            EditMark {
+                session_id: session_id.into(),
+                workspace: workspace_identity(root),
+                started_ms: now,
+                finished_ms: None,
+                files: BTreeMap::new(),
+            }
+        }
+    };
+    if mark.finished_ms.is_some() {
+        return Ok(());
+    }
+    mark.finished_ms = Some(now);
+    for (file, state) in after {
+        mark.files
+            .entry(file)
+            .or_insert(MarkedFile {
+                before: None,
+                after: None,
+            })
+            .after = state;
+    }
+    #[cfg(unix)]
+    crate::local::private_directory(&marks(state_dir)).map_err(|e| format!("edit marks: {e}"))?;
+    write_mark(&path, &mark)
+}
+
+/// Close `session_id`'s edit calls whose result never arrived: finished now,
+/// with what they left unknown. Returns how many were closed.
+pub fn close_edits(state_dir: &Path, session_id: &str) -> usize {
+    let now = now_ms();
+    let mut closed = 0;
+    for (path, _) in mark_listing(state_dir) {
+        let Some(mut mark) = read_mark(&path) else {
+            continue;
+        };
+        if mark.session_id != session_id || mark.finished_ms.is_some() {
+            continue;
+        }
+        mark.finished_ms = Some(now);
+        if write_mark(&path, &mark).is_ok() {
+            closed += 1;
+        }
+    }
+    closed
+}
+
+/// The edit marks a shell run is compared with, and whether they can be
+/// missing an edit that overlapped it.
+#[derive(Debug, Default)]
+pub struct OverlappingEdits {
+    pub marks: Vec<EditMark>,
+    /// An edit call may have gone unmarked while the run was going, or more
+    /// marks are kept than were read: a changed file no mark names may still
+    /// be another session's, so none of the run's changes can be vouched for.
+    pub incomplete: bool,
+}
+
+/// Every kept edit mark of another session than `run`'s, in its workspace,
+/// that overlapped it in time: finished after it started, or still going
+/// and not abandoned. Incomplete when the directory holds more marks than
+/// are read, or an edit call went unmarked at the cap recently enough to
+/// have been going during the run (within `RUN_LIFETIME_MS` before its start,
+/// as an unfinished mark would count).
+pub fn overlapping_edits(state_dir: &Path, run: &Record) -> OverlappingEdits {
+    let now = now_ms();
+    let listing = mark_listing(state_dir);
+    let overflowed = match read_overflow(state_dir) {
+        Ok(None) => false,
+        Ok(Some(at)) => at.saturating_add(RUN_LIFETIME_MS) > run.started_ms,
+        Err(()) => true,
+    };
+    let incomplete = overflowed || listing.len() > MAX_RECORDS;
+    let marks = listing
+        .into_iter()
+        .filter_map(|(path, _)| read_mark(&path))
+        .filter(|mark| {
+            mark.session_id != run.session_id
+                && run
+                    .workspace
+                    .as_ref()
+                    .is_none_or(|ours| *ours == mark.workspace)
+                && match mark.finished_ms {
+                    Some(finished) => finished >= run.started_ms,
+                    None => now.saturating_sub(mark.started_ms) < RUN_LIFETIME_MS,
+                }
+        })
+        .collect();
+    OverlappingEdits { marks, incomplete }
+}
+
+/// Of `changed`, the paths other sessions' edit calls (`marks`) touched while
+/// the run was going: `(theirs, unknown)`.
+///
+/// A path is theirs when its edits, in the order they started, form one
+/// chain of known versions from the file before the run (`before`) to the
+/// file now (`current`): no other change came between them, so the command
+/// did not change it. Otherwise both the command and an edit may have
+/// changed it, or an edit is still going and the order cannot be known: it
+/// is unknown, and the run's session is not credited with it.
+pub fn classify_edits(
+    marks: &[EditMark],
+    changed: &[String],
+    before: impl Fn(&str) -> Option<FileState>,
+    current: impl Fn(&str) -> Option<FileState>,
+) -> (Vec<String>, Vec<String>) {
+    let mut theirs = Vec::new();
+    let mut unknown = Vec::new();
+    for path in changed {
+        let mut edits: Vec<(&EditMark, &MarkedFile)> = marks
+            .iter()
+            .filter_map(|mark| mark.files.get(path).map(|file| (mark, file)))
+            .collect();
+        if edits.is_empty() {
+            continue;
+        }
+        edits.sort_by_key(|(mark, _)| mark.started_ms);
+        let chain = || -> Option<()> {
+            let mut version = before(path)?;
+            for (mark, file) in &edits {
+                mark.finished_ms?;
+                if file.before.as_ref()? != &version {
+                    return None;
+                }
+                version = file.after.clone()?;
+            }
+            (current(path)? == version).then_some(())
+        };
+        if chain().is_some() {
+            theirs.push(path.clone());
+        } else {
+            unknown.push(path.clone());
+        }
+    }
+    (theirs, unknown)
 }
 
 #[cfg(test)]
@@ -1203,6 +1596,92 @@ mod diff {
         );
     }
 
+    fn edit(
+        started_ms: u64,
+        finished: Option<u64>,
+        files: &[(&str, Option<&str>, Option<&str>)],
+    ) -> EditMark {
+        EditMark {
+            session_id: "peer".into(),
+            workspace: PathBuf::from("/w"),
+            started_ms,
+            finished_ms: finished,
+            files: files
+                .iter()
+                .map(|(path, before, after)| {
+                    (
+                        (*path).to_owned(),
+                        MarkedFile {
+                            before: before.map(present),
+                            after: after.map(present),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_edit_that_alone_explains_a_change_is_the_editors_and_anything_else_is_unknown() {
+        let marks = [
+            // Edited from the run's "before" to what is on disk now.
+            edit(1, Some(2), &[("theirs.txt", Some("0"), Some("1"))]),
+            // Two edits in a row, each from the last one's result.
+            edit(1, Some(2), &[("chain.txt", Some("0"), Some("1"))]),
+            edit(3, Some(4), &[("chain.txt", Some("1"), Some("2"))]),
+            // Changed again after the edit: by the command, or someone.
+            edit(1, Some(2), &[("after.txt", Some("0"), Some("1"))]),
+            // Changed before the edit started.
+            edit(1, Some(2), &[("before.txt", Some("5"), Some("1"))]),
+            // Still going.
+            edit(1, None, &[("going.txt", Some("0"), None)]),
+            // Finished with what it left unknown (closed with no result).
+            edit(1, Some(2), &[("closed.txt", Some("0"), None)]),
+            // A start that was not kept.
+            edit(1, Some(2), &[("unkept.txt", None, Some("1"))]),
+        ];
+        let changed: Vec<String> = [
+            "after.txt",
+            "before.txt",
+            "chain.txt",
+            "closed.txt",
+            "going.txt",
+            "mine.txt",
+            "theirs.txt",
+            "unkept.txt",
+        ]
+        .map(String::from)
+        .into();
+        let now = |path: &str| {
+            Some(present(match path {
+                "chain.txt" => "2",
+                "after.txt" => "9",
+                _ => "1",
+            }))
+        };
+        let (theirs, unknown) = classify_edits(&marks, &changed, |_| Some(present("0")), now);
+        assert_eq!(theirs, ["chain.txt", "theirs.txt"]);
+        assert_eq!(
+            unknown,
+            [
+                "after.txt",
+                "before.txt",
+                "closed.txt",
+                "going.txt",
+                "unkept.txt"
+            ]
+        );
+        // The version before the run is not known: no chain can be shown.
+        let (theirs, unknown) = classify_edits(&marks[..1], &changed, |_| None, now);
+        assert!(theirs.is_empty());
+        assert_eq!(unknown, ["theirs.txt"]);
+        // No edit touched a path: nothing is said about it.
+        assert_eq!(
+            classify_edits(&[], &changed, |_| None, now),
+            (vec![], vec![])
+        );
+    }
+
     #[test]
     fn a_moved_head_or_an_index_only_listing_makes_the_change_set_unknown() {
         let before = snap(&[]);
@@ -1221,5 +1700,67 @@ mod diff {
             .codes
             .push("??".into());
         assert!(changed(&before, &after, |_| None).is_err());
+    }
+
+    /// The marks a shell run is compared with are incomplete when an edit
+    /// went unmarked at the cap within a shell call's lifetime of the run,
+    /// or the directory holds more marks than a listing reads.
+    #[cfg(unix)]
+    #[test]
+    fn overflowing_edit_marks_make_a_runs_overlapping_edits_incomplete() {
+        let state = std::env::temp_dir().join(format!(
+            "ls-marks-overflow-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        crate::local::private_directory(&state).unwrap();
+        crate::local::private_directory(&marks(&state)).unwrap();
+        let now = now_ms();
+        let run = Record {
+            session_id: "shell".into(),
+            workspace: Some(PathBuf::from("/w")),
+            started_ms: now,
+            admitted: false,
+            before: Err("test".into()),
+            finished_ms: None,
+            changed: None,
+            unobserved: None,
+            contested: Vec::new(),
+            pending: false,
+            named: Vec::new(),
+            background: false,
+            commit_mine: false,
+            edited_elsewhere: Vec::new(),
+        };
+        let note = marks(&state).join(OVERFLOW);
+        assert!(!overlapping_edits(&state, &run).incomplete);
+
+        // An overflow longer than a shell call's lifetime before the run.
+        write_overflow(&note, now - RUN_LIFETIME_MS - 1).unwrap();
+        assert!(!overlapping_edits(&state, &run).incomplete);
+        // One the run may have overlapped, and one while it ran.
+        write_overflow(&note, now - RUN_LIFETIME_MS + 1_000).unwrap();
+        assert!(overlapping_edits(&state, &run).incomplete);
+        write_overflow(&note, now + 1).unwrap();
+        assert!(overlapping_edits(&state, &run).incomplete);
+        // An unreadable note counts as a recent overflow.
+        fs::write(&note, "not a time").unwrap();
+        assert!(overlapping_edits(&state, &run).incomplete);
+        fs::remove_file(&note).unwrap();
+
+        // More marks than a listing reads, as an older build could leave.
+        let mark = edit(now, None, &[]);
+        for n in 0..=MAX_RECORDS {
+            write_mark(&mark_path(&state, &format!("m{n}")), &mark).unwrap();
+        }
+        assert!(overlapping_edits(&state, &run).incomplete);
+        // A late post hook at the cap adds no mark and notes the overflow.
+        fs::remove_file(mark_path(&state, "m0")).unwrap();
+        let after = BTreeMap::from([("a.txt".to_owned(), Some(present("1")))]);
+        let error = edit_finished(&state, "late", "peer", Path::new("/w"), after).unwrap_err();
+        assert!(error.contains("too many edit tool calls"), "{error}");
+        assert!(!mark_path(&state, "late").exists());
+        assert!(read_overflow(&state).unwrap().is_some_and(|at| at >= now));
+        fs::remove_dir_all(&state).unwrap();
     }
 }

@@ -205,17 +205,21 @@ stop; Codex subagent events are refused; Claude Code edits get no snapshot.
 
 [ADR 0011](../adr/0011-shell-writes.md): the hook now parses agent shell
 commands, runs Git and reads changed files before and after each `Bash` call,
-and keeps a run record per call under the state directory.
+and keeps a run record per call under the state directory. Each edit tool
+call that is not refused also leaves an edit mark (`STATE/shell/edits/`: its
+session, workspace root, times and its files' SHA-256 versions before and
+after), so a shell run going at the same time does not take another
+session's edit for its own (issue #1).
 
 | Concern | Behavior and remaining boundary |
 | --- | --- |
 | Spoofing | The command text comes from the host event, which a same-user process could forge, as with every hook event. A forged event can admit paths for, or attribute changes to, the session it names; it cannot write files. Run records name their session and are owner-only. |
-| Tampering | Command text is model output: data, never instructions. It is parsed, never executed or rewritten by LangSpan. A same-user process can edit or delete a run record (`STATE/shell/`, `0700`/`0600`, no-follow opens, size-capped reads) and so change what is attributed; the records are not a boundary against the owner's own processes. |
-| Repudiation | An attributed change is an ordinary observation event in the append-only log, tool `Bash`. A change the comparison could not separate is `shell_unobserved` or `contested`, never attributed by guess. A file the command names as a literal write target is attributed to it even when another session's run overlapped, unless that run names it too; a same-user forged event could name a file to claim it, as it could already admit one. A `run_in_background` call contests other sessions' unnamed changes for 10 minutes, so a forged one can at most make changes unattributed. |
+| Tampering | Command text is model output: data, never instructions. It is parsed, never executed or rewritten by LangSpan. A same-user process can edit or delete a run record or an edit mark (`STATE/shell/`, `0700`/`0600`, no-follow opens, size-capped reads) and so change what is attributed; the records are not a boundary against the owner's own processes. A forged edit mark can only withhold a file from a shell run's session (as the editor's, or `contested`); it credits no session with anything. |
+| Repudiation | An attributed change is an ordinary observation event in the append-only log, tool `Bash`. A change the comparison could not separate is `shell_unobserved` or `contested`, never attributed by guess. A file the command names as a literal write target is attributed to it even when another session's run overlapped, unless that run names it too; a same-user forged event could name a file to claim it, as it could already admit one. A `run_in_background` call contests other sessions' unnamed changes for two hours (a shell call's supported lifetime, ADR 0011), so a forged one can at most make changes unattributed. |
 | Information disclosure | Only file paths and SHA-256 digests enter run records and events, never file content or the command text. Git runs with `--no-optional-locks`, and its stderr is never relayed. |
-| Denial of service | Commands over 8 KiB are not parsed. A snapshot reads at most 1,024 files, 64 MiB and 1 MiB of status output, inside the hook deadline; over a bound it is incomplete and records nothing. Run records are pruned and capped at 4,096. A run whose result never arrives can mark another session's overlapping changes `contested` for at most 10 minutes. |
+| Denial of service | Commands over 8 KiB are not parsed. A snapshot reads at most 1,024 files, 64 MiB and 1 MiB of status output, inside the hook deadline; over a bound it is incomplete and records nothing. Run records and edit marks are pruned and each capped at 4,096, on every path that creates one. An edit call left unmarked at the cap is noted, and a shell run that note could affect credits nothing it changed, so filling the directory can withhold attribution but never misattribute. A run, or an edit call, whose result never arrives can mark another session's overlapping changes `contested` for at most two hours, or until its session's reply ends. A run whose result arrives later than that is credited with nothing. |
 | Elevation of privilege | The only new decision is `deny`, and only for literal targets inside the workspace with a current holder or a stale version. A parse failure, an incomplete snapshot, a merge or rebase in progress, or any other failure gives no decision; the host's own permission flow is untouched. |
-| Isolation claim | Shell coverage is partial and cooperative. Writes outside the workspace, in ignored files, by background processes after the call returns, or by other programs during it are not separated; see the ADR's "Never covered". |
+| Isolation claim | Shell coverage is partial and cooperative. Writes outside the workspace, in ignored files, by background processes after the call returns, or by unhooked programs during it are not separated; see the ADR's "Never covered". |
 
 ## Commits in a shared checkout
 

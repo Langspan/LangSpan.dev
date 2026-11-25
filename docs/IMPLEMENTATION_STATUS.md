@@ -95,6 +95,15 @@ Fixed on `main` since the validation:
   aside; a redelivered refusal for unread lines or a stale source is refused
   again. All tested with constructed events, real Git and a real daemon; no
   host run after the fixes.
+- Issue #1: a long shell command no longer claims a file another session
+  changed through its hooked edit tool while the command ran. Edit tool calls
+  leave edit marks, and the shell comparison credits such a file to the
+  editor, or to no session when both may have changed it
+  ([ADR 0011](adr/0011-shell-writes.md)). At the 4,096-mark cap an edit
+  goes unmarked and a shell run it could affect credits nothing. Tested with a real command held
+  open while the other session's hooks edit, real Git and a real daemon
+  (`tests/shell_concurrent_edits.rs`); the real-host rerun of the reported
+  scenario is pending.
 - Issue #2: the main checkout's hook steps aside for a linked worktree's
   own install only on Claude Code, the one host seen running both there.
   On Codex (0.171.0 was seen running only the main checkout's hooks in a
@@ -166,7 +175,9 @@ yet.
   failed this scenario. Planned
   fix, not started ([ADR 0011](adr/0011-shell-writes.md#known-gap-a-heredoc-that-rewrites-a-file)).
 - **A session that ends with neither `Stop` nor `SessionEnd`** (a killed
-  host, for example) keeps an unfinished shell run counting for 10 minutes:
+  host, for example) keeps an unfinished shell run counting for two hours, a
+  shell call's supported lifetime (ten minutes before PR #6, which a
+  longer-running command outlived; ADR 0011):
   it can still contest other sessions' changes and make `commit --mine`
   without `--session` see two running sessions (PR #58).
 - **No hook for the host's own permission denial.** None is registered or

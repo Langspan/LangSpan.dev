@@ -136,13 +136,13 @@ command that runs `langspan commit --mine`, and exactly one such running
 record in the workspace names the session (zero or several is an error
 asking for `--session`). `--root DIR` defaults to the current directory.
 A call the host refuses after the pre-tool hook (its own permission check)
-sends no post event, so its record would stay "running" for the 10 minutes
-of ADR 0011. The end of the session's reply (Stop, StopFailure,
+sends no post event, so its record would stay "running" for a shell call's
+supported lifetime in ADR 0011 (two hours; ten minutes before PR #6). The end of the session's reply (Stop, StopFailure,
 SubagentStop) and the end of the session (SessionEnd) close that session's
 open records, finished with their changes unknown, so an ended session is
 never counted (added 25 November 2026 from the launch validation; test
 `a_refused_commit_mine_call_stops_counting_once_its_reply_or_session_ends`).
-A session that ends without either event still counts for those 10 minutes.
+A session that ends without either event still counts for those two hours.
 When no running record is found, the error names the state directory
 looked in; if a LangSpan project hook in the checkout (up to the directory
 holding `.git`) names a different `--state-dir`, the error names it and the
