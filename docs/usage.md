@@ -481,7 +481,9 @@ This presence comes from Claude Code `Read` and `Grep`, Cursor `Read` and
 reads: each operand of `cat`, `head`, `tail`, `less`, `more`, `wc`, `nl`,
 `ls`, `stat`, `file`, `diff`, `tree` or `du`, and the operands after the
 pattern of a `grep`, `egrep`, `fgrep` or `rg` whose options are all flags
-without a value. Only paths that exist inside the checkout are kept, at most 4
+that program takes without a value (any other option, such as `rg -E` or
+`grep -e`, records nothing for that command). After `cd`, `pushd`, `popd`,
+`source`, `.` or `eval`, only absolute paths are taken. Only paths that exist inside the checkout are kept, at most 4
 per command. A search records only the path it was scoped to (its `path`
 input, else its working directory, never the whole checkout); its pattern,
 glob and type, and a shell command's text, are never recorded. Codex reports
@@ -491,10 +493,11 @@ At most 4 paths are shown per peer, newest first, within the 700-byte peer line
 and the 2,400-byte briefing, and only paths looked at in the last 10 minutes
 that the peer is not editing and has not edited. A peer known only by where it
 looked is listed after every peer with work. When the briefing is full, the
-clause is the first thing left out: every peer's line is placed without it,
-and it is added only where room is left. A change in where peers look is news
-at a session start or prompt, never mid-turn after a tool call, and its ageing
-out is not news. Presence never
+clause is the first thing left out: every peer's line, local and remote, is
+placed without it, and it is added only where room is left. A peer seen
+reading a path it had not been shown reading is news at a session start or
+prompt, never mid-turn after a tool call; paths ageing out, or read again,
+are not news. Presence never
 holds, refuses or delays a read, search or shell call, and it is not published
 through the remote setup. The briefing JSON (`langspan brief --json`,
 `langspan_brief`) gives each peer a `looking` list of

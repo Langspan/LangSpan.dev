@@ -144,21 +144,30 @@ text. The issue proposed a `search_observed` event; one event with a kind
 serves both. A search is Claude Code's or Cursor's completed `Grep`, recorded
 as the path it was scoped to; a shell command's paths are the existing paths
 its reading programs name (`shell::looked_at`), which skips a search
-program's pattern and gives nothing when an option might take a value. Each
+program's pattern and gives nothing when an option is not one that program
+(`grep` or `rg`, each with its own list) is known to take without a value.
+After `cd`, `pushd`, `popd`, `source`, `.` or `eval`, only absolute operands
+are taken, since a relative one would name a file in another directory. Each
 session keeps its 16 most recent looked-at paths, newest first, one entry per
 path, in `SessionActivity::looking`. For each peer, `PeerWork::looking` lists
 at most 4, within the asking session's presence window (10 minutes by
 default), leaving out every path the peer holds or edited within the
 briefing horizon. A peer known only by where it looked is a peer, ranked after
-every peer with work. The hook adds `looking at ...` at the end of the line,
+every peer with work or a task. The core chooses peers within its byte budget
+by their work first and adds their presence in the space left, so presence
+never takes another peer's place. The hook adds `looking at ...` at the end of the line,
 whole or not at all, and only after every peer's line, local and remote, has
-been placed without it. Presence has a signature part of its own, appended to
-the delivery signature as `+` and a second fingerprint only when present, so
-earlier signatures are unchanged, and a peer listed only for where it looked
-is left out of the work part. A briefing whose work part is unchanged is news
-only at a session start or prompt, only while some presence is shown, and
-only when it differs from what was delivered: never mid-turn, and not when
-presence merely ages out. `set_presence` (event `presence_set`) holds a session's
+been placed without it; a line that is only presence is placed after every
+work line, local and remote. Presence has a signature part of its own,
+appended to the delivery signature as `+` and 23 bytes in hex only when
+present, so earlier signatures are unchanged and every signature stays within
+an event's 64 bytes, and a peer listed only for where it looked is left out of
+the work part. The presence part sets two bits for each peer and path shown. A
+briefing whose work part is unchanged is news only at a session start or
+prompt, and only when it shows a peer and path whose bits were clear in what
+was delivered: never mid-turn, and not when some or all presence merely ages
+out or a shown path is read again. A new path whose bits another pair already
+set is not news by itself; it is shown with the next briefing that is. `set_presence` (event `presence_set`) holds a session's
 own setting when it is not the default: `shown` false (`--presence off`) keeps
 every read, search and shell path of that session out of peers' briefings and
 forgets what was recorded, and `window_ms` (1 to 30 minutes,
