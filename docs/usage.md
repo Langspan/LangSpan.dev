@@ -239,9 +239,16 @@ LangSpan's section is left as it is, and a file that held only the section is
 removed with it. An existing `SKILL.md` or `langspan.mdc` that LangSpan did not
 write, or a section whose markers are broken, stops the install before any
 file is written. Reinstalling replaces LangSpan's own copy, edits to it
-included. `langspan doctor` reports, for each host, whether the skill is not
-installed, installed and up to date, or different from this version's (then
-run the install again); for Cursor it does so with `--root DIR`. The skill is
+included. LangSpan never writes the skill through a symlink: installing it
+there is refused, while `uninstall` and `doctor` leave a symlinked
+`AGENTS.md`, `GEMINI.md` or `SKILL.md` alone, so a guidance file kept in
+dotfiles never stops an uninstall. `langspan doctor` reports, for each host,
+whether the skill is not installed, installed and up to date, or different
+from this version's (then run the install again); for Cursor it does so with
+`--root DIR`. For Codex it also names an `AGENTS.override.md` that Codex
+reads instead of `AGENTS.md`, and a section that ends past the 32 KiB Codex
+reads of its combined AGENTS files by default (`project_doc_max_bytes`): the
+owner's own text shares that budget. The skill is
 advice: nothing is held or refused through it.
 [ADR 0034](adr/0034-langspan-skill.md) records the formats and their limits.
 

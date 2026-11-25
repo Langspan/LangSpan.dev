@@ -40,7 +40,8 @@ pub const MESSAGES: [&str; 7] = [
 
 /// The most a host's form may hold. Claude Code's skill documentation and
 /// Cursor's rules documentation each advise under 500 lines; Codex reads at
-/// most 32 KiB of `AGENTS.md` text (`project_doc_max_bytes`); Gemini CLI
+/// most 32 KiB of its combined AGENTS files (`project_doc_max_bytes`,
+/// [`CODEX_CHAIN_MAX_BYTES`]), which the owner's text shares; Gemini CLI
 /// documents no limit. LangSpan keeps every form within all of them, and
 /// within 8 KiB of its own.
 pub const MAX_LINES: usize = 500;
@@ -107,6 +108,9 @@ pub enum State {
     Current,
     /// LangSpan's, from another version or edited: install replaces it.
     Outdated,
+    /// A symlink or other non-regular file, which LangSpan never writes
+    /// through: it leaves it alone.
+    Unmanaged,
 }
 
 /// The state of the skill in a file holding `existing` (`None`: absent).
@@ -296,9 +300,26 @@ impl FilePlan {
     }
 }
 
+/// Whether `path` is a symlink or another non-regular file. LangSpan never
+/// writes its skill through one, so such a file cannot hold LangSpan's
+/// file or section: uninstall and `doctor` leave it alone.
+fn unmanaged(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file())
+}
+
 /// Plan the skill's file for `vendor` at `path`. Every refusal is raised
-/// here, before anything is written.
+/// here, before anything is written. Installing through a symlink is
+/// refused; removing leaves a symlink untouched.
 pub fn plan_file(vendor: Vendor, path: &Path, install: bool) -> Result<FilePlan, crate::Error> {
+    if !install && unmanaged(path) {
+        return Ok(FilePlan {
+            vendor,
+            path: path.to_owned(),
+            install,
+            original: None,
+            planned: None,
+        });
+    }
     let original = install::read_bytes(path)?;
     let existing = install::parse_text(path, original.as_deref())?;
     let planned = plan(vendor, existing.as_deref(), install)
@@ -314,8 +335,50 @@ pub fn plan_file(vendor: Vendor, path: &Path, install: bool) -> Result<FilePlan,
 
 /// The state of the skill in the file at `path`, for `doctor`.
 pub fn file_state(vendor: Vendor, path: &Path) -> Result<State, String> {
+    if unmanaged(path) {
+        return Ok(State::Unmanaged);
+    }
     let text = install::read_text(path).map_err(|e| e.to_string())?;
     state(vendor, text.as_deref()).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The most of its instruction chain Codex reads by default
+/// (`project_doc_max_bytes`). The limit is for the combined chain, every
+/// AGENTS file Codex reads together, so LangSpan's section shares it with
+/// the owner's own text.
+pub const CODEX_CHAIN_MAX_BYTES: usize = 32 * 1024;
+
+/// How many bytes of `text` come before the end of LangSpan's section, if
+/// it holds one.
+pub fn bytes_through_section(text: &str) -> Option<usize> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let (_, end) = section(&lines).ok()??;
+    Some(lines[..=end].iter().map(|line| line.len()).sum())
+}
+
+/// Why Codex would not read all of LangSpan's section in its user
+/// `AGENTS.md` under `dir`, if it would not: `AGENTS.override.md` is read
+/// instead, or the text up to the section's end is past the chain's
+/// default limit on its own. Project files Codex adds to the chain share
+/// the same limit; this does not measure them.
+pub fn codex_unread(dir: &Path) -> Option<String> {
+    let path = path(Vendor::Codex, dir);
+    let text = install::read_text(&path).ok()??;
+    let through = bytes_through_section(&text)?;
+    let instead = dir.join("AGENTS.override.md");
+    if fs::symlink_metadata(&instead).is_ok() {
+        return Some(format!(
+            "Codex reads {} instead of {}, so it does not read the LangSpan skill there; move the skill's section into the override file by hand, or remove the override",
+            instead.display(),
+            path.display()
+        ));
+    }
+    (through > CODEX_CHAIN_MAX_BYTES).then(|| {
+        format!(
+            "{} holds {through} bytes up to the end of the LangSpan skill, past the 32 KiB Codex reads of its combined AGENTS files by default (`project_doc_max_bytes`), so the skill is cut off; shorten the text before it, or raise `project_doc_max_bytes`",
+            path.display()
+        )
+    })
 }
 
 /// Every span between backticks in the skill.
@@ -353,6 +416,15 @@ mod tests {
     use super::*;
 
     const OWNER: &str = "# My notes\n\nUse tabs.\n";
+
+    #[test]
+    fn the_bytes_codex_must_read_end_with_langspans_section() {
+        assert_eq!(bytes_through_section(OWNER), None);
+        let section = render(Vendor::Codex);
+        let after = "# Later\n";
+        let text = format!("{OWNER}\n{section}{after}");
+        assert_eq!(bytes_through_section(&text), Some(text.len() - after.len()));
+    }
 
     #[test]
     fn every_form_carries_the_one_source_text_unchanged() {

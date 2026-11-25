@@ -1071,6 +1071,97 @@ fn a_skill_file_langspan_did_not_write_stops_the_install_and_is_kept() {
 }
 
 #[test]
+fn guidance_files_that_are_symlinks_do_not_stop_uninstall_and_are_left_alone() {
+    let home = Home::new();
+    home.claude_and_codex();
+    // The owner keeps both guidance files in their dotfiles, linked in.
+    let dotfiles = home.base.join("dotfiles");
+    fs::create_dir_all(&dotfiles).unwrap();
+    for (relative, owner, name) in [
+        (".codex/AGENTS.md", OWNER_AGENTS, "AGENTS.md"),
+        (".gemini/GEMINI.md", OWNER_GEMINI, "GEMINI.md"),
+    ] {
+        let target = dotfiles.join(name);
+        fs::write(&target, owner).unwrap();
+        let link = home.home().join(relative);
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+    }
+    home.ok(&["install", "--hosts", SKILL_HOSTS, "--apply"]);
+    let text = home.doctor_lines();
+    for host in ["codex", "gemini-cli"] {
+        assert!(
+            text.contains(&format!("ok {host}: ")) && text.contains("is a symlink"),
+            "{text}"
+        );
+        assert!(!text.contains(&format!("FIX {host}: ")), "{text}");
+    }
+
+    let removed = home.ok(&["uninstall", "--hosts", SKILL_HOSTS, "--apply"]);
+    assert!(!removed.contains("AGENTS.md"), "{removed}");
+    assert!(
+        !home.home().join(".codex/hooks.json").exists()
+            || !fs::read_to_string(home.home().join(".codex/hooks.json"))
+                .unwrap()
+                .contains("langspan"),
+        "the hooks were removed"
+    );
+    for (relative, owner, name) in [
+        (".codex/AGENTS.md", OWNER_AGENTS, "AGENTS.md"),
+        (".gemini/GEMINI.md", OWNER_GEMINI, "GEMINI.md"),
+    ] {
+        let link = home.home().join(relative);
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(fs::read_to_string(dotfiles.join(name)).unwrap(), owner);
+    }
+
+    // Writing the skill through a symlink is still refused.
+    let output = home.langspan(&["install", "--skill", "--hosts", "codex", "--apply"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("symlink"),
+        "{output:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(dotfiles.join("AGENTS.md")).unwrap(),
+        OWNER_AGENTS
+    );
+}
+
+#[test]
+fn doctor_warns_when_codex_would_not_read_the_whole_section() {
+    use langspan::{install::Vendor, skill};
+    let home = Home::new();
+    home.claude_and_codex();
+    // The owner's own text before the section nearly fills Codex's budget.
+    let long = format!("# Notes\n\n{}\n", "x".repeat(30 * 1024));
+    home.write(".codex/AGENTS.md", &long);
+    home.ok(&["install", "--skill", "--hosts", "codex", "--apply"]);
+    let text = home.doctor_lines();
+    assert!(
+        text.contains("FIX codex: ") && text.contains("32 KiB"),
+        "{text}"
+    );
+
+    // Within the budget, nothing is said about it.
+    home.write(
+        ".codex/AGENTS.md",
+        &format!("{OWNER_AGENTS}\n{}", skill::render(Vendor::Codex)),
+    );
+    let text = home.doctor_lines();
+    assert!(!text.contains("32 KiB"), "{text}");
+    assert!(!text.contains("FIX codex"), "{text}");
+
+    // AGENTS.override.md is read instead of AGENTS.md.
+    home.write(".codex/AGENTS.override.md", "# Override\n");
+    let text = home.doctor_lines();
+    assert!(
+        text.contains("FIX codex: ") && text.contains("AGENTS.override.md"),
+        "{text}"
+    );
+}
+
+#[test]
 fn cursor_gets_the_skill_as_a_project_rule_that_hooks_remove_takes_away() {
     use langspan::{install::Vendor, skill};
     let home = Home::new();

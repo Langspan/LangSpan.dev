@@ -2190,6 +2190,11 @@ fn user_level_findings(
                 &path,
                 &format!("langspan install --skill --hosts {name} --apply"),
             ));
+            if vendor == Vendor::Codex
+                && let Some(problem) = langspan::skill::codex_unread(&files.config_dir)
+            {
+                findings.push((false, format!("{name}: {problem}.")));
+            }
         }
         let (hooks, missing): (Vec<install::UserRegistration>, Vec<&str>) = match install::read(
             &files.hooks,
@@ -2341,6 +2346,13 @@ fn skill_finding(
             false,
             format!(
                 "{name}: the LangSpan skill in {} differs from this version's; run `{install}` to replace it.",
+                path.display()
+            ),
+        ),
+        Ok(State::Unmanaged) => (
+            true,
+            format!(
+                "{name}: {} is a symlink or not a regular file, so the LangSpan skill is not installed there; LangSpan leaves it alone and will not write its skill through it.",
                 path.display()
             ),
         ),

@@ -23,12 +23,18 @@ different format:
 | Host | Where | Format | Size guidance |
 | --- | --- | --- | --- |
 | Claude Code | `~/.claude/skills/langspan/SKILL.md` (under `CLAUDE_CONFIG_DIR` when set) | A personal skill: YAML front matter (`name`, `description`) and Markdown | Its skills documentation advises keeping `SKILL.md` under 500 lines; a description is cut at 1,536 characters in the skill listing |
-| Codex | `~/.codex/AGENTS.md` (under `CODEX_HOME` when set) | Global `AGENTS.md` guidance, plain Markdown | At most 32 KiB of `AGENTS.md` text is read (`project_doc_max_bytes`) |
-| Cursor | `.cursor/rules/langspan.mdc` in the project | A project rule: front matter (`description`, `alwaysApply`) and Markdown | Its rules documentation advises keeping a rule under 500 lines |
+| Codex | `~/.codex/AGENTS.md` (under `CODEX_HOME` when set); `AGENTS.override.md` there is read instead when it exists | Global `AGENTS.md` guidance, plain Markdown | At most 32 KiB by default (`project_doc_max_bytes`) of the combined instruction chain: every AGENTS file Codex reads together, not `AGENTS.md` alone |
+| Cursor | `.cursor/rules/langspan.mdc` in the project | A project rule: front matter (`description`, `globs`, `alwaysApply`) and Markdown | Its rules documentation advises keeping a rule under 500 lines. **Unverified:** the documentation does not say whether the Cursor CLI reads `.cursor/rules` |
 | Gemini CLI | `~/.gemini/GEMINI.md` (under `GEMINI_CLI_HOME` when set) | The global context file, plain Markdown | None documented |
 
 Cursor documents user rules only as a setting in its own interface, not as a
-file, so its form is a project rule.
+file, so its form is a project rule. Cursor's documentation covers project
+rules in the editor; whether the Cursor CLI reads `.cursor/rules` is not
+documented, and stays unverified until a real-host run shows it.
+
+Because Codex's 32 KiB applies to the combined chain, LangSpan's section
+shares that budget with the owner's own text in the global file and with
+every project AGENTS file Codex adds.
 
 ## Decision
 
@@ -76,7 +82,12 @@ section is removed with it. `langspan hooks remove cursor` removes Cursor's
 rule. Writes use the installer's guarded writer: atomic replacement, new files
 `0600`, symlinks refused, 1 MiB bound, and a file changed since it was
 planned is planned again, never overwritten; a removal is refused if the file
-changed since it was planned.
+changed since it was planned. Since LangSpan never writes through a symlink,
+a symlinked or otherwise non-regular `AGENTS.md`, `GEMINI.md` or `SKILL.md`
+cannot hold LangSpan's file or section: `langspan uninstall` leaves it
+untouched rather than failing, so an owner who keeps guidance files in
+their dotfiles can always uninstall, and `install --skill` still refuses
+it.
 
 **Reported by `doctor`.** For each of Claude Code, Codex and Gemini CLI whose
 configuration directory exists, and for Cursor in `doctor --root DIR` when
@@ -84,7 +95,13 @@ Cursor's project hooks are installed, `doctor` reports the skill as not
 installed (not a problem, since it is optional), installed and up to date, or
 different from this version's (a problem, with the command that replaces it).
 A file of the skill's name that LangSpan did not write is reported as a
-problem.
+problem; a symlink is reported as left alone, not as a problem. For Codex,
+when `~/.codex/AGENTS.md` holds LangSpan's section, `doctor` reports a
+problem if `AGENTS.override.md` exists beside it (Codex reads that instead),
+or if the file's bytes up to the end of the section already exceed 32 KiB.
+It measures only the global file at the default limit: it does not read a
+raised `project_doc_max_bytes` from Codex's configuration, and does not add
+the project files a given session's chain includes.
 
 ## Consequences
 
@@ -100,13 +117,17 @@ problem.
 - The skill is advice. Nothing is held or refused through it, and on a host
   whose hooks are not installed or not trusted it is the only coordination the
   agent gets.
-- Codex's documentation describes an `AGENTS.override.md` read in place of
-  `AGENTS.md`, and Gemini CLI's a setting that names another context file; in
-  either case the installed section would not be read. `doctor` detects
-  neither.
-- The host locations, formats and limits above come from each host's
-  documentation as the maintainers know it. In this change only Claude Code's
-  skills page was re-read; Codex's, Cursor's and Gemini CLI's pages could not
-  be fetched, so those rows await a check against the current documentation.
+- Gemini CLI's documentation describes a setting (`context.fileName`) that
+  names another context file, in which case the installed section would not
+  be read; `doctor` does not detect it. Codex's `AGENTS.override.md` is
+  detected in the user directory only.
+- Project AGENTS files share Codex's budget with the section, so a project
+  whose own files are large can still leave part of the chain unread in a
+  way `doctor` does not see.
+- The maintainers checked the locations and limits above against each host's
+  current documentation (Codex's AGENTS.md guide, Cursor's rules page, Gemini
+  CLI's GEMINI.md page and Claude Code's skills page). That check corrected
+  Codex's limit to the combined chain and found that Cursor's documentation
+  does not say whether its CLI reads project rules; the rest was confirmed.
 - Part 2 of I8, the task skills (`langspan-land` and others), builds on this
   module and is not part of this decision.
