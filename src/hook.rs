@@ -409,6 +409,10 @@ pub fn execute(operation: Operation, config: &Config, deadline: Instant) -> Repl
             tool: identity.tool.clone(),
             input_digest: identity.input_digest.clone(),
             parent: operation.parent.clone(),
+            presence: crate::spool::Presence {
+                shown: config.presence,
+                window_ms: config.presence_window_ms,
+            },
             report,
         };
         reply.detail = match crate::spool::keep(&config.state_dir, &entry) {
@@ -527,6 +531,8 @@ fn resend(config: &Config, until: Instant, entry: &crate::spool::Entry) -> crate
     let config = Config {
         workspace_id: entry.workspace_id.clone(),
         root: entry.root.clone(),
+        presence: entry.presence.shown,
+        presence_window_ms: entry.presence.window_ms,
         ..config.clone()
     };
     let ids = identities_for(&entry.source, &entry.host_session, &entry.tool_use_id);
