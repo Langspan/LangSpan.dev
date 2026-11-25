@@ -2,7 +2,16 @@
 
 Build, connect native sessions, inspect coordination, and integrate through MCP.
 For the product overview and support summary, see [the README](../README.md).
-Commands below run from the LangSpan repository root unless stated otherwise.
+Examples below use the binary built from the LangSpan repository root.
+If you installed a release binary on your PATH, replace
+`./target/release/langspan` with `langspan`.
+
+## Install a release
+
+[v0.1.0](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0) provides
+macOS and Linux binaries. Follow the [platform downloads, verification and
+installation instructions](../README.md#install) before starting the coordinator.
+A source build is optional.
 
 ## Build from source
 
