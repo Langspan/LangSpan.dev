@@ -57,6 +57,17 @@ pub struct TestResults {
 impl TestResults {
     /// Whether the run passed `test`: `None` when it says nothing about it,
     /// or skipped it.
+    /// Say nothing about `test` from now on, as if the run had skipped it.
+    /// Only a forgotten test is added, and each record replaces the result,
+    /// so this grows it by at most the tests followed.
+    fn unknown(&mut self, test: &str) {
+        self.failed.retain(|name| name != test);
+        self.passed.retain(|name| name != test);
+        if !self.skipped.iter().any(|name| name == test) {
+            self.skipped.push(test.to_owned());
+        }
+    }
+
     fn passed(&self, test: &str) -> Option<bool> {
         if self.failed.iter().any(|name| name == test) {
             Some(false)
@@ -337,15 +348,20 @@ impl TestLearning {
     }
 
     /// Forget `test`, in check `name` or in every check: whether it was
-    /// followed.
+    /// followed. Its result in each such check's last result is forgotten
+    /// too, so its next result is compared with nothing from before.
     pub(crate) fn forget(&mut self, name: Option<&str>, test: &str) -> bool {
+        let matches = |check: &str| name.is_none_or(|name| name == check);
         let mut forgotten = false;
         self.tests.retain(|check, tests| {
-            if name.is_none_or(|name| name == check.as_str()) {
+            if matches(check) {
                 forgotten |= tests.remove(test).is_some();
             }
             !tests.is_empty()
         });
+        for (_, last) in self.last.iter_mut().filter(|(check, _)| matches(check)) {
+            last.results.unknown(test);
+        }
         forgotten
     }
 

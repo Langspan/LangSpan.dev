@@ -14,13 +14,31 @@ fn run(state: &mut State, id: &str, command: Command, now: u64) -> Outcome {
     for event in &decision.events {
         apply(state, event).unwrap();
     }
-    // The state is derived from the events alone: replaying them gives it.
+    LOG.with(|log| log.borrow_mut().extend(decision.events.iter().cloned()));
     decision.outcome
+}
+
+thread_local! {
+    /// Every event this test's state took, in order.
+    static LOG: std::cell::RefCell<Vec<Event>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The state rebuilt from this test's events alone, as on a restart.
+fn replayed() -> State {
+    let mut state = State::default();
+    LOG.with(|log| {
+        for event in log.borrow().iter() {
+            apply(&mut state, event).unwrap();
+        }
+    });
+    state
 }
 
 fn ready() -> State {
     let mut state = State::default();
-    apply(&mut state, &Event::Booted { generation: 1 }).unwrap();
+    let booted = Event::Booted { generation: 1 };
+    apply(&mut state, &booted).unwrap();
+    LOG.with(|log| log.borrow_mut().push(booted));
     run(
         &mut state,
         "w",
@@ -603,6 +621,55 @@ fn forgetting_a_test_clears_it_and_its_next_failure_is_unlabelled() {
         600,
     );
     assert!(notice_failures(&state)[0].flaky.is_none());
+}
+
+#[test]
+fn forgetting_a_test_drops_its_last_result_so_no_flip_is_counted_against_it() {
+    let mut state = ready();
+    let failed = || failing(&["net::times_out"], &["parser::keeps_order"]);
+    for (n, c) in ['a', 'b'].into_iter().enumerate() {
+        write(&mut state, &format!("w{n}"));
+        record(
+            &mut state,
+            &format!("c{n}"),
+            &tree(c),
+            failed(),
+            Some(passing()),
+            100,
+        );
+    }
+    // The last result on tree b, before forgetting, is a failure.
+    record(&mut state, "c2", &tree('b'), failed(), None, 200);
+    assert!(notice_failures(&state)[0].flaky.is_some());
+    let outcome = run(
+        &mut state,
+        "f1",
+        Command::ForgetFlakyTest {
+            workspace_id: "work".into(),
+            name: Some("tests".into()),
+            test: "net::times_out".into(),
+        },
+        300,
+    );
+    assert!(
+        matches!(
+            outcome,
+            Outcome::FlakyTestForgotten {
+                forgotten: true,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    // Fail, forget, pass, fail on one unchanged tree: only the pass and the
+    // failure after the forget are compared, one flip, so it is unlabelled.
+    record(&mut state, "c3", &tree('b'), passing(), None, 400);
+    assert_eq!(history(&state, "net::times_out"), None);
+    record(&mut state, "c4", &tree('b'), failed(), None, 500);
+    assert_eq!(history(&state, "net::times_out"), Some((1, 1)));
+    assert!(notice_failures(&state)[0].flaky.is_none());
+    // The state after a forget is the one its events rebuild on a restart.
+    assert_eq!(replayed(), state);
 }
 
 #[test]
