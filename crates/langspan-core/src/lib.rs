@@ -5754,9 +5754,13 @@ fn brief(
             signature.push_str(&recent.path);
             signature.push(',');
         }
-        for text in [&peer.summary, &peer.intent, &peer.branch_ref] {
+        // A peer in this checkout is on this session's own branch, learned
+        // by the Git observer on its own thread, perhaps only after a
+        // briefing: not news. A change of that branch is a checkout change.
+        let branch = (!peer.same_workspace).then_some(&peer.branch_ref);
+        for text in [Some(&peer.summary), Some(&peer.intent), branch] {
             signature.push('|');
-            signature.push_str(text.as_deref().unwrap_or(""));
+            signature.push_str(text.and_then(Option::as_deref).unwrap_or(""));
         }
         signature.push_str(if peer.ended { "|ended\n" } else { "\n" });
     }
