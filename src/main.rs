@@ -11,7 +11,11 @@ const HELP: &str = r#"LangSpan — local cooperative coordination for AI coding 
 Usage: langspan [--state-dir DIR] COMMAND [--json]
 
   daemon                         Run the local coordinator in the foreground
-  mcp                            Serve MCP over stdin/stdout using the coordinator
+  mcp [--tools all|hooked --host claude-code|codex]
+                                 Serve MCP over stdin/stdout using the coordinator.
+                                 --tools hooked leaves the four tools the hooks call
+                                 out of the list while that host's hooks report here;
+                                 each still answers when called
   dashboard [--listen 127.0.0.1:7311] [--open] [--allow-network]
                                  Serve a live, read-only page of every agent on this
                                  machine and every teammate heard from, on loopback.
@@ -189,7 +193,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  the project rule .cursor/rules/langspan.mdc, which
                                  hooks remove cursor removes
   install [--home DIR] [--hosts claude-code,codex,cursor,gemini-cli] [--prompt-summary off]
-          [--skill] [--statusline on|off] [--apply]
+          [--skill] [--statusline on|off] [--mcp-tools all|hooked] [--apply]
                                  Install the hooks once for every repository, in each
                                  host's user configuration, and register `langspan mcp`
                                  as the MCP server `langspan`. Hosts default to those
@@ -202,7 +206,9 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  marked section of Codex's AGENTS.md and of Gemini
                                  CLI's GEMINI.md. --statusline on sets Claude Code's
                                  statusLine to `langspan statusline` where none is
-                                 set (never replacing one); off removes LangSpan's
+                                 set (never replacing one); off removes LangSpan's.
+                                 --mcp-tools hooked writes `mcp --tools hooked` for
+                                 Claude Code and Codex (default all)
   uninstall [--home DIR] [--hosts ...] [--apply]
                                  Remove only what install wrote, the skill included;
                                  the state directory stays
@@ -435,6 +441,7 @@ fn hooks(
         .map(|registration| langspan::user_install::McpServer {
             executable: registration.executable.clone(),
             state_dir: registration.state_dir.clone(),
+            hooked_host: None,
         });
     let registration = registration.as_ref();
     let server = server.as_ref();
@@ -627,6 +634,16 @@ fn user_install(
                 .into(),
         );
     }
+    let hooked_tools = match options.remove("--mcp-tools").as_deref() {
+        Some(_) if !install => {
+            return Err("--mcp-tools is valid only for `install`; `uninstall` removes the whole MCP entry, flag included".into());
+        }
+        None | Some("all") => false,
+        Some("hooked") => true,
+        Some(other) => {
+            return Err(format!("--mcp-tools takes all or hooked, not {other:?}").into());
+        }
+    };
     no_unused_options(options)?;
     let vendors: Vec<Vendor> = match hosts {
         Some(list) => list
@@ -681,16 +698,50 @@ fn user_install(
         state_dir: state_dir.clone(),
         share_prompt,
     });
-    let server = install.then(|| user_install::McpServer {
-        executable: executable.clone(),
-        state_dir: state_dir.clone(),
-    });
+    // Each host's entry: with `--mcp-tools hooked`, the Claude Code and Codex
+    // entries list fewer tools while their hooks report (roadmap I11).
+    let servers: Vec<(Vendor, user_install::McpServer)> = if install {
+        vendors
+            .iter()
+            .map(|&vendor| {
+                let hooked_host = (hooked_tools
+                    && langspan::mcp::HOOKED_HOSTS.contains(&vendor.name()))
+                .then(|| vendor.name().to_owned());
+                (
+                    vendor,
+                    user_install::McpServer {
+                        executable: executable.clone(),
+                        state_dir: state_dir.clone(),
+                        hooked_host,
+                    },
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     // A host may rewrite its file between this plan and the write.
     let mut plans: Vec<FilePlan> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
+    if hooked_tools {
+        let others: Vec<&str> = vendors
+            .iter()
+            .map(|vendor| vendor.name())
+            .filter(|name| !langspan::mcp::HOOKED_HOSTS.contains(name))
+            .collect();
+        if !others.is_empty() {
+            notes.push(format!(
+                "--mcp-tools hooked applies to claude-code and codex; {} keep every tool until their hooks are verified on a real host.",
+                others.join(" and ")
+            ));
+        }
+    }
     let registration = registration.as_ref();
-    let server = server.as_ref();
     for &vendor in &vendors {
+        let server = servers
+            .iter()
+            .find(|(each, _)| *each == vendor)
+            .map(|(_, server)| server);
         let files = home.files(vendor);
         let original = hooks::read_bytes(&files.hooks)?;
         let existing = hooks::parse_json(&files.hooks, original.as_deref())?;
@@ -2823,13 +2874,18 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             .await??;
         return Ok(0);
     }
-    if words == ["daemon"] || words == ["mcp"] {
+    if words == ["daemon"] {
         no_unused_options(&options)?;
-        if words[0] == "daemon" {
-            langspan::daemon::run(state_dir).await?;
-        } else {
-            langspan::mcp::serve(state_dir).await?;
-        }
+        langspan::daemon::run(state_dir).await?;
+        return Ok(0);
+    }
+    if words == ["mcp"] {
+        let list = langspan::mcp::ToolList::parse(
+            options.remove("--tools").as_deref(),
+            options.remove("--host").as_deref(),
+        )?;
+        no_unused_options(&options)?;
+        langspan::mcp::serve(state_dir, list).await?;
         return Ok(0);
     }
     let mut enable_root: Option<String> = None;
@@ -3145,7 +3201,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--code-briefing" | "--max-peers" | "--remote" | "--name" | "--share-task"
             | "--onto" | "--timeout-s" | "--wait-s" | "--session" | "--to" | "--from"
             | "--home" | "--hosts" | "--listen" | "-m" | "--message" | "--statusline"
-            | "--deadline-ms" | "--since" | "--depth" | "--path" => {
+            | "--deadline-ms" | "--since" | "--depth" | "--path" | "--tools" | "--host"
+            | "--mcp-tools" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
