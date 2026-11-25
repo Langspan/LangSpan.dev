@@ -1,8 +1,8 @@
 //! The daily account (roadmap H4), across a simulated midnight: every time
 //! is injected, on the daemon's clock and on the wall clock.
 use langspan_core::{
-    ClockAnchor, Command, Event, Outcome, RecordedEvent, State, TODAY_SESSIONS, Today, TodayQuery,
-    TodayWindow, ToolResult, apply, decide, today,
+    AttemptResult, ClockAnchor, Command, Event, LandingAttempt, Outcome, RecordedEvent, State,
+    TODAY_SESSIONS, Today, TodayQuery, TodayWindow, ToolResult, apply, decide, today,
 };
 
 /// Midnight, wall clock, in Unix milliseconds (2026-11-25T00:00:00Z).
@@ -381,6 +381,63 @@ fn another_workspaces_work_is_left_out_unless_every_workspace_is_asked_for() {
         },
     );
     assert_eq!(all.sessions.len(), 2);
+}
+
+#[test]
+fn a_landing_today_on_yesterdays_check_evidence_is_counted_today() {
+    let mut log = Log::ready();
+    // Yesterday: the last edit; the passing check it lands on is reused.
+    log.edited("claude-code.alice", "src/a.rs", at(MIDNIGHT - 20 * 60_000));
+    // Today: a landing with nothing recorded before it but its own turn.
+    let now = at(MIDNIGHT + 60_000);
+    let taken = log.run(
+        "land-1",
+        Command::TakeTurn {
+            workspace_id: "work".into(),
+            onto: "main".into(),
+            session_id: Some("claude-code.alice".into()),
+            ttl_ms: 60_000,
+            turn_id: None,
+            queue: None,
+        },
+        now,
+    );
+    assert!(matches!(taken, Outcome::Turn { .. }), "{taken:?}");
+    let released = log.run(
+        "land-1-release",
+        Command::ReleaseTurn {
+            workspace_id: "work".into(),
+            onto: "main".into(),
+            turn_id: "land-1".into(),
+            attempts: vec![LandingAttempt {
+                target_oid: Some("a".repeat(40)),
+                commit_oid: Some("b".repeat(40)),
+                result: AttemptResult::Landed {},
+            }],
+        },
+        now + 1_000,
+    );
+    assert!(
+        matches!(released, Outcome::TurnReleased { released: true, .. }),
+        "{released:?}"
+    );
+    let summary = log.today_from(MIDNIGHT, false, now + 2_000);
+    assert_eq!(summary.landings.landed, 1, "{summary:?}");
+    let yesterday = today(
+        &log.state,
+        &TodayQuery {
+            workspace_id: Some("work"),
+            window: TodayWindow {
+                from_ms: MIDNIGHT - HOUR,
+                to_ms: MIDNIGHT - 1,
+            },
+            events: &log.events,
+            anchor: None,
+            earlier: false,
+            now_ms: now + 2_000,
+        },
+    );
+    assert_eq!(yesterday.landings.landed, 0, "{yesterday:?}");
 }
 
 #[test]

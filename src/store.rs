@@ -26,6 +26,30 @@ use std::time::Duration;
 /// the 64 KiB frame for the envelope and JSON escaping of the envelope.
 pub const PAGE_BUDGET_BYTES: usize = 48 * 1024;
 
+/// A generation marker: a `booted` or `clock_anchored` event. One owner for
+/// the index over them and the lookup that must match it to use it.
+macro_rules! generation_marker {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         IN ('booted', 'clock_anchored')"
+    };
+}
+
+/// A partial index of the generation markers, a few rows per daemon start,
+/// so the anchor lookup does not read the generation's other events.
+const GENERATION_MARKER_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_generation_marker ON events(seq) WHERE ",
+    generation_marker!()
+);
+
+/// The newest generation marker before a sequence number: the anchor of the
+/// generation the event there belongs to. Read through the partial index.
+const ANCHOR_LOOKUP: &str = concat!(
+    "SELECT event_json FROM events WHERE seq < ?1 AND ",
+    generation_marker!(),
+    " ORDER BY seq DESC LIMIT 1"
+);
+
 /// Bytes a status part adds around its text: the record's fields with the
 /// largest offset, and the separator.
 const PART_OVERHEAD_BYTES: usize = 96;
@@ -177,6 +201,10 @@ impl Store {
             // binary refuse this history instead of failing partway through it.
             connection.pragma_update(None, "user_version", 3)?;
         }
+        // An index, not a format change: a store of any version 3 gains it
+        // when opened (one pass over the log), and a build without it
+        // reads and writes the same rows.
+        connection.execute_batch(GENERATION_MARKER_INDEX)?;
 
         let state = Self::recover(&connection)?;
         let generation = state
@@ -860,14 +888,7 @@ impl Store {
         // The generation the first event read belongs to, if it was anchored.
         let before: Option<String> = self
             .connection
-            .query_row(
-                "SELECT event_json FROM events
-                 WHERE seq < ?1
-                   AND json_extract(event_json, '$.type') IN ('booted', 'clock_anchored')
-                 ORDER BY seq DESC LIMIT 1",
-                [first],
-                |row| row.get(0),
-            )
+            .query_row(ANCHOR_LOOKUP, [first], |row| row.get(0))
             .optional()?;
         let anchor = match before
             .map(|json| serde_json::from_str::<Event>(&json))
@@ -1155,4 +1176,38 @@ fn observed_branches(
         );
     }
     branches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `today` runs in the daemon's request handler: finding the anchor must
+    /// read the generation markers only, not every older event of a long
+    /// generation.
+    #[test]
+    fn the_anchor_lookup_reads_only_generation_markers() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-anchor-plan-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let plan: Vec<String> = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {ANCHOR_LOOKUP}"))
+            .unwrap()
+            .query_map([1_000_000i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("events_generation_marker")),
+            "{plan:?}"
+        );
+    }
 }

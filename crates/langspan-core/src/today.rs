@@ -255,6 +255,9 @@ fn event_facts(event: &Event) -> (Option<&str>, Option<(u64, u64)>) {
             (Some(session_id), None)
         }
         Event::CheckRecorded { check } => (None, Some((check.recorded_ms, check.generation))),
+        // A landing on existing check evidence records nothing else first:
+        // its release is placed at the time its turn was taken.
+        Event::TurnTaken { turn } => (None, Some((turn.taken_ms, turn.generation))),
         _ => (None, None),
     }
 }

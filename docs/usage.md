@@ -621,6 +621,7 @@ Refusals are counted from `write_refused` events, one per refused admission
 event, and is not counted. Each daemon start records a `clock_anchored` event
 that places that run's times on the wall clock; events recorded by a build
 before this one have no such anchor and are counted only as `undated`. A
+landing is placed at the time it took its turn to land. A
 window with more than 50,000 events is summarised from the newest 50,000 and
 says `truncated: true`. With the daemon down it exits 1 with "coordination
 unavailable".

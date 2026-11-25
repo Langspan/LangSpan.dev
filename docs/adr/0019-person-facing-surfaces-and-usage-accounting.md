@@ -57,7 +57,9 @@ acknowledgement. Three choices were needed:
   start now records `clock_anchored` (generation, its clock, the wall clock)
   after `booted`, so a time of that generation maps to wall time. An event
   without its own time takes the time of the event before it in its
-  generation. Generations started by an earlier build have no anchor; their
+  generation; a landing's `turn_released` therefore takes the time its
+  `turn_taken` recorded, even when it lands on check evidence from an earlier
+  day. Generations started by an earlier build have no anchor; their
   events are counted as `undated` and in nothing else. A wall-clock change
   while the daemon runs shifts that run's placement by the change.
 - *Counting refusals.* Conflicts were receipts only, without a time. An
@@ -68,7 +70,13 @@ acknowledgement. Three choices were needed:
   nothing in the daemon, so `commit_held` is not counted; recording it would
   need a new command from the hook.
 - *Bounds.* One answer reads at most the newest 50,000 events and says
-  `truncated` when the window may reach past them. The text is at most 40
+  `truncated` when the window may reach past them. The anchor of the oldest
+  event read is found through a partial index of `booted` and
+  `clock_anchored` rows (`events_generation_marker`, created when a store
+  opens), so its cost does not grow with the generation's history: behind
+  100,000 events of one generation it fell from 17.2 ms to 25 µs (one run,
+  debug build, arm64 macOS); building the index added about 40 ms to
+  the first open of that store. The text is at most 40
   lines and eight files per session; the MCP text, labelled as data, at most
   2,400 bytes, as a briefing. The local offset comes from `date +%z` (2 s
   deadline), shown at one offset for the whole window.
