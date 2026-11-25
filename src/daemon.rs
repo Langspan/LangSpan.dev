@@ -44,6 +44,9 @@ mod unix {
         /// How long a workspace's sessions must stop writing before its
         /// automatic check starts, so one burst of batches runs one check.
         auto_check_debounce_ms: u64,
+        /// How often the agent hosts on this machine are checked for a
+        /// LangSpan install (roadmap A7). The first check is at start.
+        host_check_ms: u64,
     }
     impl Default for Config {
         fn default() -> Self {
@@ -53,6 +56,7 @@ mod unix {
                 max_clients: 32,
                 remote_pass_ms: 5000,
                 auto_check_debounce_ms: 2000,
+                host_check_ms: 3_600_000,
             }
         }
     }
@@ -82,9 +86,10 @@ mod unix {
                 || !(1..=128).contains(&result.max_clients)
                 || !(200..=600_000).contains(&result.remote_pass_ms)
                 || !(50..=60_000).contains(&result.auto_check_debounce_ms)
+                || !(100..=86_400_000).contains(&result.host_check_ms)
             {
                 return Err(
-                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000"
+                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, host_check_ms 100..86400000"
                         .into(),
                 );
             }
@@ -818,6 +823,14 @@ mod unix {
                     remote_worker(sender, directory, generation, Duration::from_millis(pass))
                 })?;
         }
+        {
+            let sender = sender.clone();
+            let directory = directory.clone();
+            let every = Duration::from_millis(config.host_check_ms);
+            std::thread::Builder::new()
+                .name("langspan-hosts".into())
+                .spawn(move || host_worker(sender, directory, every))?;
+        }
         eprintln!(
             "{}",
             serde_json::json!({"level":"info","event":"daemon_ready","generation":generation})
@@ -842,6 +855,75 @@ mod unix {
     /// Unchanged work is republished this often, so teammates can tell a
     /// quiet participant from a disconnected one.
     const REMOTE_HEARTBEAT: Duration = Duration::from_secs(120);
+
+    /// Check the agent hosts in the daemon's home at start and every
+    /// `every` after (roadmap A7). Reads directory entries and LangSpan's
+    /// own entries in host files, never writes them; what it finds reaches
+    /// the state owner as one request naming the uncovered hosts.
+    fn host_worker(sender: mpsc::SyncSender<Job>, directory: PathBuf, every: Duration) {
+        let home = match crate::hosts::UserHome::new(None) {
+            Ok(home) => home,
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"level":"warn","event":"host_check_unavailable","detail":error.to_string()})
+                );
+                return;
+            }
+        };
+        let mut checks: u64 = 0;
+        let mut last_failure: Option<String> = None;
+        loop {
+            let known = match ask(&sender, "read".into(), Command::Status) {
+                Some(Outcome::Status { state, .. }) => Some((
+                    state
+                        .workspaces
+                        .values()
+                        .map(|workspace| PathBuf::from(&workspace.root))
+                        .collect::<Vec<_>>(),
+                    state.uninstalled_hosts.keys().cloned().collect::<Vec<_>>(),
+                )),
+                _ => None,
+            };
+            let failure = match known {
+                // The owner is busy or stopping: the next check counts.
+                None => Some("the state owner did not answer".to_owned()),
+                Some((roots, held)) => {
+                    let reports = crate::hosts::report(&home, &directory);
+                    // A host that could not be inspected keeps the notice
+                    // it has, and the reason is logged.
+                    let observation = crate::hosts::observe(&reports, &roots, &directory, &held);
+                    checks += 1;
+                    let answer = match ask(
+                        &sender,
+                        format!("hosts-{}-{checks}", now_ms()),
+                        Command::ObserveHosts {
+                            not_installed: observation.not_installed,
+                        },
+                    ) {
+                        Some(Outcome::HostsObserved { .. }) => None,
+                        Some(Outcome::Error { code, message }) => {
+                            Some(format!("{code}: {message}"))
+                        }
+                        _ => Some("the state owner did not answer".to_owned()),
+                    };
+                    let mut problems = observation.errors;
+                    problems.extend(answer);
+                    (!problems.is_empty()).then(|| problems.join("; "))
+                }
+            };
+            if failure != last_failure {
+                if let Some(detail) = &failure {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({"level":"warn","event":"host_check_failed","detail":detail})
+                    );
+                }
+                last_failure = failure;
+            }
+            std::thread::sleep(every);
+        }
+    }
 
     /// Ask the single state owner, exactly as a socket client would.
     fn ask(
