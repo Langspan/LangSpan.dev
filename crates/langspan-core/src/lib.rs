@@ -612,12 +612,16 @@ const BRIEF_BYTES: usize = 40 * 1024;
 /// FNV-1a, 64 bits. It only tells one briefing from the next for the same
 /// session; a collision would withhold one repeat briefing and nothing else.
 fn fingerprint(text: &str) -> String {
+    format!("{:016x}", fingerprint_u64(text))
+}
+
+fn fingerprint_u64(text: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{hash:016x}")
+    hash
 }
 
 pub const MAX_TOUCHED: usize = 32;
@@ -4656,10 +4660,10 @@ fn decide_checked(
             // from the next briefing: the remembered signature leaves them
             // out, and any message at all makes this briefing new.
             // Presence is news only at a session start or prompt, and only
-            // while there is some: where peers look, newly or differently.
-            // Mid-turn, or when it merely aged out, it is not (see `brief`).
+            // for a path not shown before. Mid-turn, or when some or all of
+            // it merely aged out, it is not (see `brief`).
             let differs = without_presence(&signature) != without_presence(previous)
-                || (!*mid_turn && signature.contains('+') && signature != previous);
+                || (!*mid_turn && new_presence(&signature, previous));
             briefing.changed =
                 differs || !briefing.messages.is_empty() || !briefing.checks.is_empty();
             let mut events = Vec::new();
@@ -6288,15 +6292,23 @@ fn brief(
             },
         ));
     }
-    peers.sort_by(|a, b| (&a.0, &a.1.session_id).cmp(&(&b.0, &b.1.session_id)));
+    // A peer known only by where it looked ranks after every other, so it
+    // never takes a slot from a peer with work or a task.
+    let rank = |(key, peer): &((bool, bool, bool, u64), PeerWork)| {
+        (key.0, key.1, key.2, presence_only(peer), key.3)
+    };
+    peers.sort_by(|a, b| (rank(a), &a.1.session_id).cmp(&(rank(b), &b.1.session_id)));
     let total = peers.len();
+    // Peers are chosen by their work within the byte budget first; where
+    // they look is added after, in the space left, first peers first, so
+    // presence never takes the place of another peer's work.
     let mut bytes = 0;
-    let peers: Vec<PeerWork> = peers
+    let mut peers: Vec<PeerWork> = peers
         .into_iter()
         .map(|(_, peer)| peer)
         .take(max_peers as usize)
         .take_while(|peer| {
-            bytes += 256
+            let cost = 256
                 + peer.workspace_root.len()
                 + [&peer.summary, &peer.intent, &peer.branch_ref]
                     .into_iter()
@@ -6309,12 +6321,32 @@ fn brief(
                     .chain(&peer.overlap)
                     .chain(&peer.target_overlap)
                     .chain(peer.recent.iter().map(|recent| &recent.path))
-                    .chain(peer.looking.iter().map(|looked| &looked.path))
                     .map(|path| path.len() + 32)
                     .sum::<usize>();
-            bytes <= BRIEF_BYTES
+            bytes += cost;
+            if bytes > BRIEF_BYTES {
+                bytes -= cost;
+                return false;
+            }
+            true
         })
         .collect();
+    // A peer there only for where it looked, without room for that, is left
+    // out and counted.
+    peers.retain_mut(|peer| {
+        let presence: usize = peer
+            .looking
+            .iter()
+            .map(|looked| looked.path.len() + 32)
+            .sum();
+        if bytes + presence <= BRIEF_BYTES {
+            bytes += presence;
+            return true;
+        }
+        let only = presence_only(peer);
+        peer.looking.clear();
+        !only
+    });
     let mut stale_reads: Vec<StaleRead> = known_versions(state, session_id)
         .iter()
         .filter_map(|version| {
@@ -6559,30 +6591,19 @@ fn brief(
     }
     // Presence has a signature part of its own: alone it makes a briefing
     // new only at a session start or prompt, never mid-turn, so a peer's
-    // reads do not interrupt a turn. The paths are sorted: reading the same
-    // files in another order is not news.
-    let mut presence = String::new();
-    for peer in &peers {
-        if peer.looking.is_empty() {
-            continue;
-        }
-        let paths: BTreeSet<&str> = peer
-            .looking
-            .iter()
-            .map(|looked| looked.path.as_str())
-            .collect();
-        presence.push_str(&format!(
-            "{}|{}\n",
-            peer.session_id,
-            paths.into_iter().collect::<Vec<_>>().join(",")
-        ));
-    }
+    // reads do not interrupt a turn. The part is a set of bits, one pair per
+    // peer and path (`presence_bits`), so that a briefing is news only for
+    // a path not shown before: a path that ages out, or is read again, or
+    // the same files read in another order, is not.
+    let presence = presence_bits(&peers);
     // Without presence the signature is as it was before presence existed,
     // so a briefing stored then is not delivered again.
     let mut signature = fingerprint(&signature);
-    if !presence.is_empty() {
+    if let Some(bits) = presence {
         signature.push('+');
-        signature.push_str(&fingerprint(&presence));
+        for byte in bits {
+            signature.push_str(&format!("{byte:02x}"));
+        }
     }
     Ok((
         Briefing {
@@ -6609,6 +6630,58 @@ fn brief(
         },
         signature,
     ))
+}
+
+/// Bytes in the presence part of a briefing signature: with the work
+/// fingerprint and its `+`, the signature stays within the 64 bytes an
+/// event holds.
+const PRESENCE_SIGNATURE_BYTES: usize = 23;
+
+/// The presence part of a briefing signature: for each peer and path it
+/// shows as presence, two bits set from that pair's fingerprint. None when
+/// it shows none. A path whose bits another pair already set is not news on
+/// its own; it is shown with the next briefing that is.
+fn presence_bits(peers: &[PeerWork]) -> Option<[u8; PRESENCE_SIGNATURE_BYTES]> {
+    const BITS: u64 = (PRESENCE_SIGNATURE_BYTES * 8) as u64;
+    let mut bits = [0u8; PRESENCE_SIGNATURE_BYTES];
+    let mut any = false;
+    for peer in peers {
+        for looked in &peer.looking {
+            let hash = fingerprint_u64(&format!("{}|{}", peer.session_id, looked.path));
+            for bit in [hash % BITS, (hash >> 32) % BITS] {
+                bits[(bit / 8) as usize] |= 1 << (bit % 8);
+            }
+            any = true;
+        }
+    }
+    any.then_some(bits)
+}
+
+/// Whether a briefing signature shows presence that `previous` did not:
+/// a bit set in its presence part that is clear in the previous one. A
+/// previous signature without a presence part, or from before this form,
+/// has shown none.
+fn new_presence(signature: &str, previous: &str) -> bool {
+    let bits = |signature: &str| -> Option<Vec<u8>> {
+        let (_, hex) = signature.split_once('+')?;
+        if hex.len() != PRESENCE_SIGNATURE_BYTES * 2 {
+            return None;
+        }
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+            .collect()
+    };
+    let Some(now) = bits(signature) else {
+        return false;
+    };
+    match bits(previous) {
+        Some(before) => now
+            .iter()
+            .zip(&before)
+            .any(|(now, before)| now & !before != 0),
+        None => true,
+    }
 }
 
 /// A briefing signature without its presence part.

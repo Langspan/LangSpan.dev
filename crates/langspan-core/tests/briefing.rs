@@ -1534,3 +1534,60 @@ fn a_declared_intent_replaces_the_prompt_summary_in_a_briefing() {
         Some("refresh the session handler")
     );
 }
+
+#[test]
+fn presence_that_only_partly_ages_out_is_not_news() {
+    let mut state = ready();
+    read(&mut state, "alice", "src/auth.rs", 1_000);
+    read(&mut state, "alice", "src/token.rs", 5 * MINUTE);
+    assert!(brief(&mut state, "bob", "b1", 5 * MINUTE + 1).changed);
+    // The older path ages out, the newer one remains: nothing happened.
+    let partly = brief(&mut state, "bob", "b2", 10 * MINUTE + 2_000);
+    assert_eq!(
+        looking(&partly, "alice"),
+        [("src/token.rs", PresenceKind::Read)]
+    );
+    assert!(!partly.changed, "{partly:?}");
+    // A path not shown before is news again.
+    read(&mut state, "alice", "src/session.rs", 11 * MINUTE);
+    assert!(brief(&mut state, "bob", "b3", 11 * MINUTE + 1).changed);
+}
+
+#[test]
+fn presence_never_takes_a_work_bearing_peers_place_in_the_briefing() {
+    let mut state = ready();
+    let long =
+        |peer: usize, n: usize, kind: &str| format!("src/{kind}{peer}-{n}-{}", "x".repeat(450));
+    for peer in 0..8 {
+        let id = format!("p{peer}");
+        ok(run(
+            &mut state,
+            &format!("s-{id}"),
+            Command::SessionRegister {
+                session_id: id.clone(),
+                workspace_id: "main".into(),
+                parent: None,
+                headless: false,
+            },
+            0,
+        ));
+        for n in 0..8 {
+            edited(&mut state, &id, &long(peer, n, "w"), 1_000 + n as u64);
+        }
+        let looked_at: Vec<String> = (0..4).map(|n| long(peer, n, "l")).collect();
+        let looked_at: Vec<&str> = looked_at.iter().map(String::as_str).collect();
+        looked(&mut state, &id, PresenceKind::Search, &looked_at, 2_000);
+    }
+    let briefing = brief(&mut state, "bob", "b1", 3_000);
+    for peer in 0..8 {
+        assert!(
+            briefing
+                .peers
+                .iter()
+                .any(|work| work.session_id == format!("p{peer}")),
+            "p{peer} dropped: {} peers shown",
+            briefing.peers.len()
+        );
+    }
+    assert_eq!(briefing.omitted_peers, 0);
+}
