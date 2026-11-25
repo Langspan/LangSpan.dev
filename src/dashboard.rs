@@ -394,10 +394,24 @@ fn state(state_dir: &Path) -> Reply {
     };
     let (status, body) = match client::call(state_dir, &request) {
         Ok(response) => match response.outcome {
-            Outcome::Dashboard { dashboard } => (
-                200,
-                serde_json::json!({"available": true, "dashboard": dashboard}),
-            ),
+            Outcome::Dashboard { dashboard } => {
+                // The install command for each uncovered host, naming this
+                // coordinator's state directory (roadmap A7).
+                let advice: serde_json::Map<String, serde_json::Value> = dashboard
+                    .uninstalled_hosts
+                    .iter()
+                    .map(|host| {
+                        (
+                            host.clone(),
+                            crate::hosts::preview_command(host, state_dir).into(),
+                        )
+                    })
+                    .collect();
+                (
+                    200,
+                    serde_json::json!({"available": true, "dashboard": dashboard, "install_advice": advice}),
+                )
+            }
             Outcome::Error { code, message } => (
                 503,
                 serde_json::json!({"available": false, "error": format!("{code}: {message}")}),
