@@ -3216,11 +3216,13 @@ impl Session<'_> {
                     command: run.command.clone(),
                     to_branch: left.branch.clone(),
                     to_head: left.head.clone(),
-                    // From the record, so a retry sends the same request.
+                    // From the record, written when the command finished:
+                    // a retry sends the same request and the same window.
                     ran_ms: run
                         .finished_ms
                         .unwrap_or(run.started_ms)
                         .saturating_sub(run.started_ms),
+                    finished_ms: run.finished_ms.unwrap_or(run.started_ms),
                 },
             ) {
                 Ok(_) => {}

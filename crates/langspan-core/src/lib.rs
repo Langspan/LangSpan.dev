@@ -1599,8 +1599,8 @@ pub struct CheckoutRun {
     /// The checkout the command left.
     pub to_branch: Option<String>,
     pub to_head: Option<String>,
-    /// When the command started and when its result reached the daemon, on
-    /// the daemon's clock: the start is the report less the run's duration.
+    /// When the command started and finished, as its hook recorded them
+    /// (never after the report reached the daemon), whenever it is reported.
     pub started_ms: u64,
     pub finished_ms: u64,
     pub generation: u64,
@@ -2202,9 +2202,13 @@ pub enum Command {
         command: Option<String>,
         to_branch: Option<String>,
         to_head: Option<String>,
-        /// How long the command ran, as its hook measured it. The daemon
-        /// places its start this long before the report, on its own clock.
+        /// How long the command ran, as its hook measured it.
         ran_ms: u64,
+        /// When the command finished, as its hook recorded it then: a
+        /// report redelivered later keeps the command's own window. The
+        /// hook and daemon share one machine's clock; a time past the
+        /// report is taken as the report.
+        finished_ms: u64,
     },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
@@ -2661,9 +2665,13 @@ enum CommandWire {
         command: Option<String>,
         to_branch: Option<String>,
         to_head: Option<String>,
-        /// How long the command ran, as its hook measured it. The daemon
-        /// places its start this long before the report, on its own clock.
+        /// How long the command ran, as its hook measured it.
         ran_ms: u64,
+        /// When the command finished, as its hook recorded it then: a
+        /// report redelivered later keeps the command's own window. The
+        /// hook and daemon share one machine's clock; a time past the
+        /// report is taken as the report.
+        finished_ms: u64,
     },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
@@ -4794,6 +4802,7 @@ fn decide_checked(
             to_branch,
             to_head,
             ran_ms,
+            finished_ms,
         } => {
             let Some(session) = state.sessions.get(session_id) else {
                 return Err(error(
@@ -4808,10 +4817,13 @@ fn decide_checked(
                 command: command.clone(),
                 to_branch: to_branch.clone(),
                 to_head: to_head.clone(),
-                // A duration, not the hook's clock: the daemon's clock is
-                // its own. A shell call runs two hours at most.
-                started_ms: now_ms.saturating_sub((*ran_ms).min(MAX_CHECKOUT_RUN_MS)),
-                finished_ms: now_ms,
+                // When the command ran, not when its report arrived: a
+                // redelivered report credits no later change. Never after
+                // the report; two hours at most, a shell call's lifetime.
+                started_ms: (*finished_ms)
+                    .min(now_ms)
+                    .saturating_sub((*ran_ms).min(MAX_CHECKOUT_RUN_MS)),
+                finished_ms: (*finished_ms).min(now_ms),
                 generation: state.generation,
             };
             validate_checkout_run(state, &run)?;

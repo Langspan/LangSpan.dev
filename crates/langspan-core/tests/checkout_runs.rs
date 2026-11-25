@@ -87,8 +87,20 @@ fn checkout(state: &mut State, id: &str, branch: &str, to: char, now: u64) {
 }
 
 /// `session`'s `git merge` ran for `ran` ms and left `main` at `to`;
-/// reported at `now`.
+/// reported at `now`, as it finished.
 fn merged(state: &mut State, session: &str, to: char, ran: u64, now: u64) -> Outcome {
+    reported(state, session, to, ran, now, now)
+}
+
+/// As `merged`, finished at `finished` and reported at `now`.
+fn reported(
+    state: &mut State,
+    session: &str,
+    to: char,
+    ran: u64,
+    finished: u64,
+    now: u64,
+) -> Outcome {
     run(
         state,
         &format!("run-{session}-{now}"),
@@ -98,6 +110,7 @@ fn merged(state: &mut State, session: &str, to: char, ran: u64, now: u64) -> Out
             to_branch: Some(MAIN.into()),
             to_head: Some(oid(to)),
             ran_ms: ran,
+            finished_ms: finished,
         },
         now,
     )
@@ -183,6 +196,31 @@ fn a_change_the_command_did_not_leave_or_that_came_too_late_or_too_early_is_told
 }
 
 #[test]
+fn a_redelivered_report_keeps_the_commands_own_window() {
+    // Alice's one-second merge ran from 9_000 to 10_000; the scan saw it at
+    // 10_500. Another checkout change, nobody's, came at 69_500. Alice's
+    // post hook reached the daemon only at 70_000, on redelivery.
+    let mut state = ready();
+    checkout(&mut state, "c1", MAIN, 'b', 10_500);
+    checkout(&mut state, "c2", OTHER, 'c', 69_500);
+    let outcome = reported(&mut state, "alice", 'b', 1_000, 10_000, 70_000);
+    assert!(
+        matches!(&outcome, Outcome::CheckoutRunObserved { run }
+            if run.started_ms == 9_000 && run.finished_ms == 10_000),
+        "{outcome:?}"
+    );
+    // Her own merge is not news to her; the other change still is.
+    let alice = notices(&mut state, "alice", 70_100);
+    assert_eq!(alice.len(), 1, "{alice:?}");
+    assert_eq!(alice[0].to_branch.as_deref(), Some(OTHER));
+    assert_eq!(alice[0].by_session, None);
+    let bob = notices(&mut state, "bob", 70_100);
+    assert_eq!(bob.len(), 2, "{bob:?}");
+    assert_eq!(bob[0].by_session, None, "{bob:?}");
+    assert_eq!(bob[1].by_session.as_deref(), Some("alice"), "{bob:?}");
+}
+
+#[test]
 fn a_run_is_refused_for_an_unknown_session_or_an_invalid_state() {
     let mut state = ready();
     let outcome = merged(&mut state, "carol", 'b', 300, 1_000);
@@ -199,6 +237,7 @@ fn a_run_is_refused_for_an_unknown_session_or_an_invalid_state() {
             to_branch: Some("main".into()),
             to_head: Some(oid('b')),
             ran_ms: 0,
+            finished_ms: 1_000,
         },
         1_000,
     );
@@ -212,6 +251,7 @@ fn a_run_is_refused_for_an_unknown_session_or_an_invalid_state() {
             to_branch: Some(MAIN.into()),
             to_head: Some(oid('b')),
             ran_ms: 0,
+            finished_ms: 1_000,
         },
         1_000,
     );
@@ -222,6 +262,14 @@ fn a_run_is_refused_for_an_unknown_session_or_an_invalid_state() {
     assert!(
         matches!(&outcome, Outcome::CheckoutRunObserved { run }
             if run.started_ms == 10_000_000_000 - langspan_core::MAX_CHECKOUT_RUN_MS),
+        "{outcome:?}"
+    );
+    // A finish after the report is taken as the report: a run never
+    // reaches past what the daemon has seen.
+    let outcome = reported(&mut state, "alice", 'b', 300, u64::MAX, 20_000);
+    assert!(
+        matches!(&outcome, Outcome::CheckoutRunObserved { run }
+            if run.started_ms == 19_700 && run.finished_ms == 20_000),
         "{outcome:?}"
     );
 }
