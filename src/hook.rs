@@ -1777,7 +1777,8 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
     }
     // What changed recently (roadmap C3), at a session's start only: its
     // room is set aside here, after the messages, and it is placed after
-    // the peer lines. What does not fit is counted.
+    // the peer lines. What does not fit is counted. 160 bytes stay free for
+    // the count lines that may follow it.
     let (recent, recent_unshown) = match &briefing.recent {
         Some(recent) => crate::recent::render(
             recent,

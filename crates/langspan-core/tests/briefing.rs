@@ -1426,7 +1426,12 @@ fn an_ended_session_in_this_checkout_is_a_candidate_for_work_left_uncommitted() 
 fn nothing_older_than_the_window_or_from_before_the_current_boot_appears() {
     let mut state = ready();
     let now = 10 * HOUR;
-    edited(&mut state, "alice", "src/old.rs", now - RECENT_WINDOW_MS - 1);
+    edited(
+        &mut state,
+        "alice",
+        "src/old.rs",
+        now - RECENT_WINDOW_MS - 1,
+    );
     edited(&mut state, "alice", "src/edge.rs", now - RECENT_WINDOW_MS);
     edited(&mut state, "bob", "src/new.rs", now - 2 * MINUTE);
     register_at(&mut state, "erin", "main", now);
@@ -1476,7 +1481,12 @@ fn the_section_is_bounded_and_counts_what_it_leaves_out() {
     let mut state = ready();
     for n in 0..12 {
         edited(&mut state, "alice", &format!("src/a{n:02}.rs"), HOUR + n);
-        edited(&mut state, "bob", &format!("src/a{n:02}.rs"), HOUR + 100 + n);
+        edited(
+            &mut state,
+            "bob",
+            &format!("src/a{n:02}.rs"),
+            HOUR + 100 + n,
+        );
     }
     register_at(&mut state, "erin", "main", 2 * HOUR);
     let recent = recent(&mut state, "erin", 2 * HOUR);
@@ -1518,5 +1528,10 @@ fn only_a_starting_briefing_carries_the_section_and_it_is_never_news_by_itself()
     // The asking session's own edits are not news to it.
     edited(&mut state, "erin", "src/mine.rs", 2 * HOUR + 30);
     let again = recent(&mut state, "erin", 2 * HOUR + 40);
-    assert!(again.changed_paths.iter().all(|path| path.path != "src/mine.rs"));
+    assert!(
+        again
+            .changed_paths
+            .iter()
+            .all(|path| path.path != "src/mine.rs")
+    );
 }

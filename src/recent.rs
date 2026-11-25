@@ -187,10 +187,7 @@ pub fn render(recent: &RecentChanges, limit: usize) -> (String, usize) {
         );
         if !change.dependents.is_empty() {
             let dependents: Vec<String> = change.dependents.iter().map(|p| quoted(p)).collect();
-            line.push_str(&format!(
-                "; files mentioning it: {}",
-                dependents.join(", ")
-            ));
+            line.push_str(&format!("; files mentioning it: {}", dependents.join(", ")));
         }
         let room = room(&text);
         if room < LINE_MINIMUM {

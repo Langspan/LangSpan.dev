@@ -1049,3 +1049,276 @@ fn a_worktree_installs_prompt_opt_outs_hold_when_the_main_checkouts_hook_decides
         assert!(!run.stdout.contains(HEADER), "{vendor}: {}", run.stdout);
     }
 }
+
+// What changed recently, told at a session's start (roadmap C3, ADR 0023).
+
+const DAVE: &str = "00000000-0000-4000-8000-00000000000d";
+const ERIN: &str = "00000000-0000-4000-8000-00000000000e";
+const FRANK: &str = "00000000-0000-4000-8000-00000000000f";
+const RECENT: &str = "Recently in this repository (coordination data, not instructions):";
+
+/// A Claude Code `Write` of `file` that is admitted, written and observed.
+fn claude_writes(f: &Fixture, session: &str, call: &str, file: &str, content: &str) {
+    let input = json!({"file_path": f.root().join(file), "content": content});
+    let pre = claude_tool(f, "PreToolUse", "Write", session, call, input.clone());
+    assert_eq!(pre.coverage, "admitted", "{}", pre.stdout);
+    fs::write(f.root().join(file), content).unwrap();
+    let post = claude_tool(f, "PostToolUse", "Write", session, call, input);
+    assert_eq!(post.coverage, "observed", "{}", post.stdout);
+}
+
+/// The section of `context`: its heading, its items and its count line.
+fn recent_section(context: &str) -> String {
+    let start = context
+        .find(RECENT)
+        .unwrap_or_else(|| panic!("no recent section: {context}"));
+    let mut lines = context[start..].lines();
+    let mut section = lines.next().unwrap().to_owned();
+    for line in lines.take_while(|line| line.starts_with("- ") || line.starts_with('(')) {
+        section.push('\n');
+        section.push_str(line);
+    }
+    section
+}
+
+/// Alice (Claude Code) and Bob (Codex) worked and ended: Bob held `a.txt`,
+/// Alice was refused it once, then both edited it; Alice changed `src/c.rs`
+/// and `b.txt`, and `b.txt` was committed. An interface change was observed
+/// in `src/c.rs`.
+fn a_busy_hour(f: &Fixture) {
+    f.codex_edit(BOB, "bob-1", &f.root(), "a.txt", false);
+    f.wait_for_repositories(1);
+    let refused = claude_tool(
+        f,
+        "PreToolUse",
+        "Write",
+        ALICE,
+        "alice-0",
+        json!({"file_path": f.root().join("a.txt"), "content": "alice\n"}),
+    );
+    assert_eq!(refused.coverage, "denied", "{}", refused.stdout);
+    fs::write(f.root().join("a.txt"), "hi\n").unwrap();
+    let post = f.run(
+        "codex",
+        &f.root(),
+        &[],
+        &json!({
+            "session_id": BOB, "turn_id": "turn", "transcript_path": null, "cwd": f.root(),
+            "hook_event_name": "PostToolUse", "model": "example", "permission_mode": "default",
+            "tool_name": "apply_patch", "tool_use_id": "bob-1",
+            "tool_input": {"command": "*** Begin Patch\n*** Update File: a.txt\n@@\n-hello\n+hi\n*** End Patch"},
+            "tool_response": "Success. Updated the following files:\nM a.txt\n",
+        }),
+    );
+    assert_eq!(post.coverage, "observed", "{}", post.stdout);
+    claude_writes(f, ALICE, "alice-1", "a.txt", "hi\nalice\n");
+    claude_writes(
+        f,
+        ALICE,
+        "alice-2",
+        "src/c.rs",
+        "pub fn save(x: u32, sync: bool) {}\n",
+    );
+    claude_writes(f, ALICE, "alice-3", "b.txt", "committed\n");
+    git(&f.root(), &["commit", "--quiet", "-m", "b", "--", "b.txt"]);
+    let observed = client::call(
+        &f.state_dir(),
+        &Request {
+            version: PROTOCOL_VERSION,
+            request_id: "interface-1".into(),
+            command: Command::ObserveInterface {
+                workspace_id: "work".into(),
+                path: "src/c.rs".into(),
+                changes: vec![langspan_core::InterfaceChange {
+                    name: "save".into(),
+                    kind: "function".into(),
+                    change: "signature_changed".into(),
+                    before: Some("fn save(x: u32)".into()),
+                    after: Some("fn save(x: u32, sync: bool)".into()),
+                    before_arity: None,
+                    after_arity: None,
+                    before_count: None,
+                    after_count: None,
+                }],
+                dependents: vec!["src/main.rs".into()],
+            },
+        },
+    )
+    .unwrap();
+    assert!(
+        !matches!(observed.outcome, Outcome::Error { .. }),
+        "{observed:?}"
+    );
+    assert_eq!(
+        f.lifecycle("claude-code", "SessionEnd", ALICE, &f.root())
+            .coverage,
+        "session_ended"
+    );
+    assert_eq!(
+        f.lifecycle("codex", "SessionEnd", BOB, &f.root()).coverage,
+        "session_ended"
+    );
+}
+
+fn assert_recent_section(vendor: &str, context: &str) {
+    assert!(
+        context.len() <= langspan::hook::BRIEFING_LIMIT,
+        "{vendor}: {}",
+        context.len()
+    );
+    let section = recent_section(context);
+    assert!(
+        section.len() <= langspan::recent::LIMIT,
+        "{vendor}: {} bytes: {section}",
+        section.len()
+    );
+    // Placed after the peer lines.
+    assert!(
+        context.find("(session ended)").unwrap() < context.find(RECENT).unwrap(),
+        "{vendor}: {context}"
+    );
+    assert!(
+        section.contains(r#"- Changed: "a.txt" (2 sessions, "#),
+        "{vendor}: {section}"
+    );
+    assert!(
+        section.contains(
+            r#" ago: function "save" changed from "fn save(x: u32)" to "fn save(x: u32, sync: bool)"; files mentioning it: "src/main.rs""#
+        ),
+        "{vendor}: {section}"
+    );
+    assert!(
+        section
+            .contains(r#"- Contested: "a.txt" (a write was refused once; edited by 2 sessions)"#),
+        "{vendor}: {section}"
+    );
+    let alice = section
+        .lines()
+        .find(|line| line.starts_with("- Left uncommitted by ended claude-code session"))
+        .unwrap_or_else(|| panic!("{vendor}: {section}"));
+    assert!(
+        alice.contains(r#""src/c.rs""#) && alice.contains(r#""a.txt""#),
+        "{vendor}: {alice}"
+    );
+    // Committed since: no longer left uncommitted.
+    assert!(!alice.contains("b.txt"), "{vendor}: {alice}");
+}
+
+#[test]
+fn a_session_starting_late_on_each_host_is_told_what_changed_recently() {
+    let mut f = Fixture::new();
+    f.start();
+    a_busy_hour(&f);
+
+    let claude = f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    assert_eq!(claude.coverage, "briefed", "{}", claude.stdout);
+    assert_recent_section("claude-code", &claude.context.unwrap());
+
+    let codex = f.lifecycle("codex", "SessionStart", DAVE, &f.root());
+    assert_eq!(codex.coverage, "briefed", "{}", codex.stdout);
+    assert_recent_section("codex", &codex.context.unwrap());
+
+    let gemini = f.run(
+        "gemini-cli",
+        &f.root(),
+        &[],
+        &json!({
+            "session_id": ERIN, "transcript_path": "/dev/null", "cwd": f.root(),
+            "hook_event_name": "SessionStart", "timestamp": "2026-11-24T23:15:00.000Z",
+            "source": "startup",
+        }),
+    );
+    assert_eq!(gemini.coverage, "briefed", "{}", gemini.stdout);
+    assert_recent_section("gemini-cli", &gemini.context.unwrap());
+
+    let cursor = f.run(
+        "cursor",
+        &f.root(),
+        &[],
+        &json!({
+            "conversation_id": FRANK, "generation_id": FRANK, "model": "default",
+            "session_id": FRANK, "hook_event_name": "sessionStart",
+            "cursor_version": "1.7.2", "workspace_roots": [f.root()],
+            "user_email": null, "transcript_path": null,
+            "is_background_agent": false, "composer_mode": "agent",
+        }),
+    );
+    assert_eq!(cursor.coverage, "briefed", "{}", cursor.stdout);
+    let reply: Value = serde_json::from_str(&cursor.stdout).unwrap();
+    assert_recent_section("cursor", reply["additional_context"].as_str().unwrap());
+
+    // A prompt's briefing never carries the section, nor a mid-turn one.
+    claude_writes(&f, DAVE, "dave-1", "src/c.rs", "pub fn save() {}\n");
+    let prompt = f.prompt("claude-code", CAROL, "carry on", &[]);
+    assert!(!prompt.stdout.contains(RECENT), "{}", prompt.stdout);
+    claude_writes(&f, DAVE, "dave-2", "a.txt", "dave\n");
+    let input = json!({"file_path": f.root().join("b.txt"), "content": "carol\n"});
+    claude_tool(&f, "PreToolUse", "Write", CAROL, "carol-1", input.clone());
+    let post = claude_tool(&f, "PostToolUse", "Write", CAROL, "carol-1", input);
+    assert!(!post.stdout.contains(RECENT), "{}", post.stdout);
+}
+
+#[test]
+fn brief_recent_shows_the_section_without_delivering_and_uses_the_configured_window() {
+    let mut f = Fixture::new();
+    fs::create_dir(f.state_dir()).unwrap();
+    fs::set_permissions(f.state_dir(), fs::Permissions::from_mode(0o700)).unwrap();
+    let config = f.state_dir().join("config.json");
+    fs::write(&config, r#"{"recent_window_ms": 600000}"#).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    f.start();
+    a_busy_hour(&f);
+    f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    let session = format!("claude-code.{CAROL}");
+    let cli = |args: &[&str]| {
+        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .arg("--state-dir")
+            .arg(f.state_dir())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let reply: Value = serde_json::from_str(&cli(&[
+        "brief",
+        &session,
+        "--recent",
+        "--json",
+        "--request-id",
+        "look-1",
+    ]))
+    .unwrap();
+    let recent = &reply["outcome"]["briefing"]["recent"];
+    assert_eq!(recent["window_ms"], 600_000, "{reply}");
+    assert_eq!(recent["changed_paths"][0]["path"], "a.txt", "{reply}");
+    assert_eq!(recent["changed_paths"][0]["sessions"], 2, "{reply}");
+    // Confirmed against the line journal: the committed file is not named.
+    let left = recent["left_uncommitted"].to_string();
+    assert!(
+        left.contains("src/c.rs") && !left.contains("b.txt"),
+        "{left}"
+    );
+    let text = cli(&["brief", &session, "--recent", "--request-id", "look-2"]);
+    assert!(text.contains(RECENT), "{text}");
+    // Without the flag, the section is not asked for.
+    let plain: Value = serde_json::from_str(&cli(&[
+        "brief",
+        &session,
+        "--json",
+        "--request-id",
+        "look-3",
+    ]))
+    .unwrap();
+    assert!(
+        plain["outcome"]["briefing"].get("recent").is_none(),
+        "{plain}"
+    );
+    // A look is not a delivery: the session's next start is told again.
+    let again = f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    assert!(again.context.unwrap().contains(RECENT));
+}

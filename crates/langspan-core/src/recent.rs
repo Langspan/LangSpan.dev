@@ -21,7 +21,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BRIEF_PATHS, CoreError, InterfaceChange, LivenessStatus, Session, State, error, is_zero,
+    BRIEF_PATHS, CoreError, InterfaceChange, LivenessStatus, Session, State, error, is_false,
+    is_zero,
 };
 
 /// The window when the daemon's configuration names none: four hours.
@@ -87,7 +88,7 @@ pub struct ChangedPath {
     pub age_ms: u64,
     /// Every counted edit was in another worktree of this repository, so
     /// the change is on another branch, not in this checkout.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub elsewhere: bool,
 }
 
@@ -311,7 +312,12 @@ pub(crate) fn recent(state: &State, me: &Session, window_ms: u64, now_ms: u64) -
                     .take(RECENT_NOTICE_CHANGES)
                     .cloned()
                     .collect(),
-                dependents: notice.dependents.iter().take(BRIEF_PATHS).cloned().collect(),
+                dependents: notice
+                    .dependents
+                    .iter()
+                    .take(BRIEF_PATHS)
+                    .cloned()
+                    .collect(),
                 age_ms: now_ms.saturating_sub(notice.at_ms),
             }
         })

@@ -14,12 +14,6 @@ mod recent;
 mod status;
 mod status_line;
 mod today;
-pub use recent::{
-    ChangedPath, ContestedPath, LeftUncommitted, MAX_PATH_REFUSALS, MAX_RECENT_WINDOW_MS,
-    MIN_RECENT_WINDOW_MS, PathRefusal, RECENT_CHANGED, RECENT_CONTESTED, RECENT_INTERFACES,
-    RECENT_LEFT, RECENT_LEFT_CANDIDATES, RECENT_NOTICE_CHANGES, RECENT_WINDOW_MS, RecentChanges,
-    RecentInterfaceChange,
-};
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
@@ -33,6 +27,12 @@ pub use flaky::{
 };
 pub use recall::{
     RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
+};
+pub use recent::{
+    ChangedPath, ContestedPath, LeftUncommitted, MAX_PATH_REFUSALS, MAX_RECENT_WINDOW_MS,
+    MIN_RECENT_WINDOW_MS, PathRefusal, RECENT_CHANGED, RECENT_CONTESTED, RECENT_INTERFACES,
+    RECENT_LEFT, RECENT_LEFT_CANDIDATES, RECENT_NOTICE_CHANGES, RECENT_WINDOW_MS, RecentChanges,
+    RecentInterfaceChange,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
@@ -2994,6 +2994,11 @@ impl<'de> Deserialize<'de> for Command {
     }
 }
 
+/// `Status` carries the whole status view of `State`, so it is the largest
+/// variant by design. An outcome is built once per request and moved to its
+/// reply, never held in bulk, so the size difference costs nothing worth a
+/// box at every one of its match sites.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Outcome {
