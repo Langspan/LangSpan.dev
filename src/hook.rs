@@ -2179,9 +2179,7 @@ pub fn install_at(
     state_dir: &Path,
     dir: &Path,
 ) -> Option<(PathBuf, crate::install::Registration)> {
-    // The state directory may not exist yet: no coordinator has started.
     let canonical = |dir: &Path| fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let state_dir = canonical(state_dir);
     vendor.project_hook_files().iter().find_map(|file| {
         let path = dir.join(file);
         let Ok(Some(settings)) = crate::install::read(&path) else {
@@ -2195,7 +2193,8 @@ pub fn install_at(
                 registration
             })
             .find(|registration| {
-                registration.root == dir && canonical(&registration.state_dir) == state_dir
+                registration.root == dir
+                    && crate::install::same_directory(&registration.state_dir, state_dir)
             })
             .map(|registration| (path, registration))
     })
@@ -3171,17 +3170,21 @@ impl Session<'_> {
                                 run.contested.extend(changed.iter().cloned());
                                 noted.clear();
                             } else {
-                                // What only reformats this session's own
-                                // lines is its own, whatever ran alongside
-                                // (issue #124).
-                                let candidates: Vec<String> = overlapped
+                                // A line the command only reformatted keeps
+                                // its author, whatever ran alongside (issues
+                                // #124 and #141); a change of tokens is
+                                // still credited to no session.
+                                let candidates: Vec<crate::journal::Candidate> = overlapped
                                     .into_iter()
-                                    .filter(|path| {
-                                        !rewritten.contains(path)
-                                            && !run.edited_elsewhere.contains(path)
+                                    .map(|path| (path, true))
+                                    .chain(rewritten.iter().map(|path| (path.clone(), false)))
+                                    .filter(|(path, _)| !run.edited_elsewhere.contains(path))
+                                    .map(|(path, overlapped)| crate::journal::Candidate {
+                                        path,
+                                        overlapped,
                                     })
                                     .collect();
-                                let reformats = crate::journal::own_reformats(
+                                let reformats = crate::journal::reformat_authors(
                                     state_dir,
                                     self.root,
                                     &ids.session_id,
@@ -3196,14 +3199,17 @@ impl Session<'_> {
                             }
                             run.contested.sort();
                             run.contested.dedup();
+                            noted.sort();
+                            noted.dedup();
                             self.note_shell_changes(&run, &noted);
                             run.reformatted =
-                                partial.iter().map(|(path, _)| path.clone()).collect();
+                                partial.iter().map(|(path, _, _)| path.clone()).collect();
+                            run.reformatted.dedup();
                             if let Err(error) = crate::journal::record_partial(
                                 state_dir,
                                 self.root,
-                                &ids.session_id,
                                 &partial,
+                                run.started_ms,
                             ) {
                                 eprintln!(
                                     "{}",
@@ -3219,6 +3225,7 @@ impl Session<'_> {
                                 crate::journal::Origin::Shell {
                                     snapshot: before,
                                     deadline: self.deadline,
+                                    started_ms: run.started_ms,
                                 },
                             ) {
                                 eprintln!(
@@ -3375,7 +3382,7 @@ impl Session<'_> {
         let partly = match run.reformatted.len() {
             0 => String::new(),
             partly => format!(
-                " ({partly} of them partly this session's: the lines its command only reformatted)"
+                " ({partly} of them keep the authors of the lines the command only reformatted)"
             ),
         };
         Ok(if run.contested.is_empty() {

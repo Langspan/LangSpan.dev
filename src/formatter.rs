@@ -3,9 +3,10 @@
 //!
 //! In a checkout several sessions share, `cargo fmt --all` or `prettier
 //! --write .` rewrites every file it formats, another session's uncommitted
-//! ones too. Those rewritten lines are credited to no one (issue #98), but the
-//! other session's work still changes under it and its next edit of the file
-//! is refused as stale. Before such a command, the Bash pre-tool hook finds
+//! ones too. Lines it only reformats keep their author (issue #141) and a
+//! change of tokens is credited to no one (issue #98), but the other
+//! session's work still changes under it and its next edit of the file is
+//! refused as stale. Before such a command, the Bash pre-tool hook finds
 //! which other live sessions have uncommitted changes in files the command may
 //! rewrite and tells the session, once for each set of files. The command is
 //! never refused for it, and the host shows the notice with the command's
