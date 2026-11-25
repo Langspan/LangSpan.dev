@@ -15,6 +15,7 @@
 use crate::{
     commit::{is_live, is_own},
     hook::{Config, REASON_LIMIT, ShellCall, clean, truncate},
+    journal::{Entry, Lines},
     shell::{Formatting, Reach, Snapshot},
 };
 use std::{
@@ -74,17 +75,18 @@ pub fn notice(
             .any(|(prefixes, run)| in_reach(path, prefixes.as_deref(), run.extensions))
     };
     // Another session's journaled write of a file that still differs from
-    // `HEAD`: its uncommitted change.
+    // `HEAD`: perhaps its uncommitted change.
+    let entries = crate::journal::entries(&config.state_dir, &config.root);
     let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for entry in crate::journal::entries(&config.state_dir, &config.root) {
+    for entry in &entries {
         if !is_own(me, &entry.session_id)
             && before.files.contains_key(&entry.path)
             && reached(&entry.path)
         {
             candidates
-                .entry(entry.session_id)
+                .entry(entry.session_id.clone())
                 .or_default()
-                .insert(entry.path);
+                .insert(entry.path.clone());
         }
     }
     if candidates.is_empty() {
@@ -97,6 +99,24 @@ pub fn notice(
         Err(error) => return Some(Notice::quiet(format!("no decision ({error})"))),
     };
     candidates.retain(|session, _| is_live(&live, session));
+    // The journal keeps writes a commit through Git has since taken: a
+    // session is named for a file only while its lines are still among the
+    // file's changes from `HEAD` (the review of #142).
+    let mut changes = BTreeMap::new();
+    for (session, paths) in &mut candidates {
+        paths.retain(|path| {
+            let changed = changes.entry(path.clone()).or_insert_with(|| {
+                crate::journal::uncommitted_lines(
+                    &config.root,
+                    path,
+                    before.head.as_deref(),
+                    deadline,
+                )
+            });
+            still_changed(me, session, path, &entries, changed.as_ref())
+        });
+    }
+    candidates.retain(|_, paths| !paths.is_empty());
     if candidates.is_empty() {
         return Some(Notice::quiet(
             "no live session's uncommitted file is in its reach",
@@ -121,6 +141,58 @@ pub fn notice(
             candidates.len()
         ),
     })
+}
+
+/// Whether `session`'s journaled writes of `path` may still be among
+/// `changed`, the file's changes from `HEAD` (`None`: not known). A line it
+/// added counts while the file adds more copies of it than `me`'s own writes
+/// account for, and a line it removed likewise; a write of unknown lines, or
+/// changes that cannot be read, may be its work, so it is named.
+fn still_changed(
+    me: &str,
+    session: &str,
+    path: &str,
+    entries: &[Entry],
+    changed: Option<&Lines>,
+) -> bool {
+    let Some(changed) = changed else {
+        return true;
+    };
+    let mut own: BTreeMap<&str, i64> = BTreeMap::new();
+    let mut theirs = (BTreeSet::new(), BTreeSet::new());
+    for entry in entries.iter().filter(|entry| entry.path == path) {
+        let Some(lines) = &entry.lines else {
+            if entry.session_id == session {
+                return true;
+            }
+            continue;
+        };
+        if is_own(me, &entry.session_id) {
+            for key in &lines.added {
+                *own.entry(key).or_default() += 1;
+            }
+            for key in &lines.removed {
+                *own.entry(key).or_default() -= 1;
+            }
+        } else if entry.session_id == session {
+            theirs.0.extend(lines.added.iter().map(String::as_str));
+            theirs.1.extend(lines.removed.iter().map(String::as_str));
+        }
+    }
+    fn counts(keys: &[String]) -> BTreeMap<&str, i64> {
+        let mut counts: BTreeMap<&str, i64> = BTreeMap::new();
+        for key in keys {
+            *counts.entry(key).or_default() += 1;
+        }
+        counts
+    }
+    let net = |key: &str| own.get(key).copied().unwrap_or_default();
+    counts(&changed.added)
+        .into_iter()
+        .any(|(key, count)| theirs.0.contains(key) && count > net(key).max(0))
+        || counts(&changed.removed)
+            .into_iter()
+            .any(|(key, count)| theirs.1.contains(key) && count > (-net(key)).max(0))
 }
 
 /// The notice text: each session and its files, at most `NAMED` files in
@@ -246,6 +318,56 @@ mod tests {
             Some(vec!["sub".into(), "src/a.rs".into(), "web".into()])
         );
         assert_eq!(keys(root, root, &Reach::Workspace), None);
+    }
+
+    #[test]
+    fn a_session_is_named_only_while_its_lines_outnumber_this_sessions_copies() {
+        let entry = |session: &str, added: &[&str], removed: &[&str], known: bool| Entry {
+            session_id: session.into(),
+            path: "a.rs".into(),
+            at_ms: 1,
+            after: langspan_core::FileState::Missing,
+            lines: known.then(|| Lines {
+                added: added.iter().map(|k| (*k).to_owned()).collect(),
+                removed: removed.iter().map(|k| (*k).to_owned()).collect(),
+            }),
+            partial: false,
+        };
+        let changed = |added: &[&str], removed: &[&str]| Lines {
+            added: added.iter().map(|k| (*k).to_owned()).collect(),
+            removed: removed.iter().map(|k| (*k).to_owned()).collect(),
+        };
+        let (me, peer) = ("claude-code.b", "claude-code.a");
+        // The peer's `}` and `old` are committed; the file adds one `}` of
+        // this session's and removes nothing the peer removed.
+        let entries = vec![
+            entry(peer, &["alice", "}"], &["old"], true),
+            entry(me, &["bob", "}"], &[], true),
+        ];
+        let still = |changed: &Lines| still_changed(me, peer, "a.rs", &entries, Some(changed));
+        assert!(!still(&changed(&["bob", "}"], &[])));
+        // A second `}`, more than this session wrote: maybe the peer's.
+        assert!(still(&changed(&["bob", "}", "}"], &[])));
+        assert!(still(&changed(&["alice"], &[])));
+        assert!(still(&changed(&[], &["old"])));
+        // A path the peer did not write, or changes that cannot be read.
+        assert!(!still_changed(
+            me,
+            peer,
+            "b.rs",
+            &entries,
+            Some(&changed(&["alice"], &[]))
+        ));
+        assert!(still_changed(me, peer, "a.rs", &entries, None));
+        // A write of unknown lines may be anywhere.
+        let unknown = vec![entry(peer, &[], &[], false)];
+        assert!(still_changed(
+            me,
+            peer,
+            "a.rs",
+            &unknown,
+            Some(&changed(&["bob"], &[]))
+        ));
     }
 
     #[test]

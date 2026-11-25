@@ -239,9 +239,18 @@ lenient reader built on the commit guard's lexer) and how far each reaches:
 
 A file is named when another session's journaled write
 ([ADR 0026](0026-commit-guard-and-commit-mine.md)) changed it, it still
-differs from `HEAD` in the command's own snapshot, it is in the reach, and
-that session is live (registered, not ended and not known to have exited, the
-commit guard's rule). The reply carries the notice as
+differs from `HEAD` in the command's own snapshot, it is in the reach, that
+session is live (registered, not ended and not known to have exited, the
+commit guard's rule), and its journaled lines are still among the file's
+changes from `HEAD`. The journal keeps a write for a week whatever commits
+it, and only `commit --mine` forgets one, so a write committed through plain
+Git would otherwise be named for as long as anyone else's change kept the
+file dirty, and spend the once-only notice. A line the other session added
+(or removed) counts while the file adds (or removes) more copies of it than
+the formatting session's own writes account for, so a `}` both wrote is not
+enough. A write of unknown lines, or a file whose versions cannot be read
+within the journal's bound and the hook's budget, still names the session:
+the notice errs toward telling. The reply carries the notice as
 `hookSpecificOutput.additionalContext` with no permission decision, so the
 command runs as it would without LangSpan. It names each session and at most
 eight files in all, then counts the rest; paths are cleaned and the list is

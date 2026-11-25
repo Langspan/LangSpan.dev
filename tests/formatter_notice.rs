@@ -164,14 +164,19 @@ impl Fixture {
     /// A whole Claude Code `Write` of `file`: its pre hook, the write as the
     /// host would make it, and its post hook.
     fn write(&self, session: &str, file: &str) {
+        let content = format!("// {file}, changed by {session} in {}\n", self.call_id());
+        self.write_content(session, file, &content);
+    }
+
+    /// A whole Claude Code `Write` of `file` with `content`.
+    fn write_content(&self, session: &str, file: &str, content: &str) {
         let call = self.call_id();
-        let content = format!("// {file}, changed by {session} in {call}\n");
-        let pre = self.write_event(session, "PreToolUse", &call, file, &content);
+        let pre = self.write_event(session, "PreToolUse", &call, file, content);
         assert_eq!(pre.coverage, "admitted", "{pre:?}");
         let path = self.work().join(file);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, &content).unwrap();
-        let post = self.write_event(session, "PostToolUse", &call, file, &content);
+        fs::write(path, content).unwrap();
+        let post = self.write_event(session, "PostToolUse", &call, file, content);
         assert_eq!(post.coverage, "observed", "{post:?}");
     }
 
@@ -322,5 +327,43 @@ fn committed_changes_are_not_named() {
     // A new uncommitted change of the same file is named.
     fixture.write(ALICE, "src/lib.rs");
     let run = fixture.bash(BOB, "cargo fmt --all");
+    assert!(run.context.contains("\"src/lib.rs\""), "{run:?}");
+}
+
+/// The review of #142: Alice's journaled write of a file is committed with
+/// plain Git (the journal keeps it; only `commit --mine` forgets it), then Bob
+/// changes the same file. The file differs from `HEAD` only by Bob's lines, so
+/// Alice is not named, and the once-only notice is not spent on her: her
+/// later uncommitted change of the file is still named.
+#[test]
+fn a_session_whose_changes_of_a_dirty_file_were_committed_with_git_is_not_named() {
+    let fixture = Fixture::new(&["src/lib.rs"]);
+    fixture.write_content(ALICE, "src/lib.rs", "// src/lib.rs\nfn alice() {\n}\n");
+    git(&fixture.work(), &["commit", "-q", "-am", "alice"]);
+    // Bob's lines include one Alice also wrote (`}`): his own copy.
+    fixture.write_content(
+        BOB,
+        "src/lib.rs",
+        "// src/lib.rs\nfn alice() {\n}\nfn bob() {\n}\n",
+    );
+    let run = fixture.bash(BOB, "cargo fmt --all");
+    not_refused(&run);
+    assert_eq!(run.context, "", "{run:?}");
+
+    // Bob changed the file since Alice wrote it: her next write is refused
+    // once as stale, then admitted.
+    let content = "// src/lib.rs\nfn alice() {\n    todo!()\n}\nfn bob() {\n}\n";
+    let path = fixture.work().join("src/lib.rs");
+    let stale = fixture.hook(json!({
+        "session_id": ALICE, "cwd": fixture.work(), "hook_event_name": "PreToolUse",
+        "tool_name": "Write", "tool_use_id": fixture.call_id(),
+        "tool_input": {"file_path": path, "content": content},
+    }));
+    assert_eq!(stale.coverage, "denied_stale", "{stale:?}");
+    fixture.write_content(ALICE, "src/lib.rs", content);
+    let run = fixture.bash(BOB, "cargo fmt --all");
+    not_refused(&run);
+    assert!(run.context.starts_with(NOTICE), "{run:?}");
+    assert!(run.context.contains(&alice()), "{run:?}");
     assert!(run.context.contains("\"src/lib.rs\""), "{run:?}");
 }
