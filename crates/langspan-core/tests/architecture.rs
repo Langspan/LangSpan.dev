@@ -56,6 +56,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
         include_str!("../src/flaky.rs"),
         include_str!("../src/lines.rs"),
         include_str!("../src/status.rs"),
+        include_str!("../src/status_line.rs"),
     ];
     // Range bounds, `mem::take` and `iter::empty` for the status pages: pure.
     let allowed_imports = [
@@ -90,7 +91,13 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
         .collect();
     assert_eq!(
         modules,
-        ["mod dashboard;", "mod flaky;", "mod lines;", "mod status;"],
+        [
+            "mod dashboard;",
+            "mod flaky;",
+            "mod lines;",
+            "mod status;",
+            "mod status_line;"
+        ],
         "a new core module needs this check"
     );
 }

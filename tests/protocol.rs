@@ -215,6 +215,69 @@ fn v3_code_context_request_and_response_match_the_committed_golden_vectors() {
 }
 
 #[test]
+fn v3_blind_spots_request_and_response_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/graph-blind-spots-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::GraphBlindSpots { workspace_id, limit: 50 } if workspace_id == "app"
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+
+    let wire = include_bytes!("../fixtures/graph-blind-spots-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::GraphBlindSpots {
+        blind_spots,
+        coverage,
+        scan_failure,
+        truncated,
+    } = &response.outcome
+    else {
+        panic!("{response:?}");
+    };
+    assert_eq!(blind_spots.partial[0].since_ms, 1_700_000_000_000);
+    assert_eq!(blind_spots.unsupported_languages[0].files, 10);
+    assert_eq!((coverage.blind_in_scope, *truncated), (3, false));
+    assert!(scan_failure.is_none(), "absent when no scan failed");
+    assert_eq!(encode(&response).unwrap(), wire);
+    let unknown = String::from_utf8_lossy(wire).replace(r#""files":10"#, r#""files":10,"x":1"#);
+    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+    // Coverage without `blind_in_scope` is what earlier builds send: zero.
+    let earlier =
+        String::from_utf8_lossy(include_bytes!("../fixtures/graph-context-response-v3.json"))
+            .into_owned();
+    let response: Response = serde_json::from_str(&earlier).unwrap();
+    let langspan_core::Outcome::GraphContext { coverage, .. } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(coverage.blind_in_scope, 0);
+    assert_eq!(encode(&response).unwrap(), earlier.as_bytes());
+
+    // A lookup asks for the count; without the flag it is the request
+    // earlier clients send.
+    let asked = r#"{"version":3,"request_id":"read","command":{"op":"graph_impact","workspace_id":"app","path":"src/a.rs","limit":10,"blind_in_scope":true}}"#;
+    let request: Request = serde_json::from_str(asked).unwrap();
+    assert!(matches!(
+        request.command,
+        Command::GraphImpact {
+            blind_in_scope: true,
+            ..
+        }
+    ));
+    assert_eq!(encode(&request).unwrap(), format!("{asked}\n").as_bytes());
+    let plain = asked.replace(r#","blind_in_scope":true"#, "");
+    let request: Request = serde_json::from_str(&plain).unwrap();
+    assert!(matches!(
+        request.command,
+        Command::GraphImpact {
+            blind_in_scope: false,
+            ..
+        }
+    ));
+    assert_eq!(encode(&request).unwrap(), format!("{plain}\n").as_bytes());
+}
+
+#[test]
 fn v3_prompt_targets_request_and_target_briefing_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/prompt-targets-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
@@ -380,4 +443,67 @@ fn v3_region_admission_matches_the_committed_golden_vector() {
     let unknown =
         String::from_utf8_lossy(wire).replace(r#""end_line":13"#, r#""end_line":13,"allow":true"#);
     assert!(serde_json::from_str::<Request>(&unknown).is_err());
+}
+
+#[test]
+fn v3_status_line_request_and_response_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/status-line-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::StatusLine {
+            root: "/repos/app".into(),
+            from_ms: 1_795_564_800_000,
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+
+    let wire = include_bytes!("../fixtures/status-line-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::StatusLine { line } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(line.text(), "langspan · 3 sessions here · 2 refusals today");
+    assert_eq!(response.lease_valid, None, "a read grants nothing");
+    assert_eq!(encode(&response).unwrap(), wire);
+    // Counts only: a path has no field to travel in.
+    let pathed = String::from_utf8_lossy(wire).replace(
+        r#""refusals_today":2"#,
+        r#""refusals_today":2,"paths":["src/api.rs"]"#,
+    );
+    assert!(serde_json::from_str::<Response>(&pathed).is_err());
+}
+
+#[test]
+fn v3_held_commit_report_and_refusal_event_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/record-refusal-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::RecordRefusal {
+            session_id: "claude-code.alice".into(),
+            kind: langspan_core::RefusalKind::CommitHeld,
+            paths: vec!["src/api.rs".into()],
+            peer_session_id: Some("codex.bob".into()),
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+
+    let wire = include_str!("../fixtures/write-refused-event-v3.json");
+    let event: langspan_core::Event = serde_json::from_str(wire).unwrap();
+    assert!(matches!(
+        &event,
+        langspan_core::Event::WriteRefused {
+            kind: langspan_core::RefusalKind::Conflict,
+            at_ms: 5000,
+            ..
+        }
+    ));
+    assert_eq!(
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+        wire
+    );
+    // An event without a peer omits it, and still reads.
+    let alone = wire.replace(r#""peer_session_id":"codex.bob","#, "");
+    assert!(serde_json::from_str::<langspan_core::Event>(&alone).is_ok());
 }
