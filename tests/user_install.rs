@@ -2,7 +2,7 @@
 //! `langspan install` / `uninstall` against a temporary home, and the hook
 //! command they write, run as the host would run it, against a real daemon.
 
-#[allow(dead_code)] // Only `output_once_not_busy` is used here.
+#[allow(dead_code)] // Only `output_once_not_busy` and `in_home` are used here.
 mod support;
 
 use langspan::{
@@ -1245,4 +1245,417 @@ fn cursor_gets_the_skill_as_a_project_rule_that_hooks_remove_takes_away() {
             settings.get("hooks").is_none()
         }
     );
+}
+
+/// Every file under `dir` with its content, so a check can show that
+/// nothing in a host's configuration changed.
+fn contents(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut found = std::collections::BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                found.insert(path.clone(), fs::read(&path).unwrap());
+            }
+        }
+    }
+    found
+}
+
+fn host<'a>(report: &'a Value, name: &str) -> &'a Value {
+    report["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|host| host["name"] == name)
+        .unwrap_or_else(|| panic!("{name} missing from {report}"))
+}
+
+#[test]
+fn hosts_reports_a_host_added_after_install_and_changes_nothing() {
+    let home = Home::new();
+    home.claude_and_codex();
+    home.ok(&["install", "--hosts", "claude-code", "--apply"]);
+    // Installed afterwards: Cursor, and Gemini CLI and Antigravity directories.
+    fs::create_dir(home.home().join(".cursor")).unwrap();
+    home.write(".gemini/settings.json", "{}\n");
+    home.write(".gemini/config/hooks.json", "{}\n");
+    let before = contents(&home.home());
+
+    let report: Value = serde_json::from_str(&home.ok(&["hosts", "--json"])).unwrap();
+    let cursor = host(&report, "cursor");
+    assert_eq!(cursor["present"], true, "{report}");
+    assert_eq!(cursor["user_install"], "none", "{report}");
+    assert_eq!(
+        cursor["config_dir"],
+        home.home().join(".cursor").to_string_lossy().as_ref()
+    );
+    let next = cursor["next_step"].as_str().unwrap();
+    assert!(
+        next.starts_with("langspan install --hosts cursor --apply"),
+        "{next}"
+    );
+    assert_eq!(host(&report, "claude-code")["user_install"], "current");
+    assert_eq!(host(&report, "claude-code")["next_step"], Value::Null);
+    assert_eq!(host(&report, "codex")["present"], true);
+    assert_eq!(host(&report, "codex")["user_install"], "none");
+    // Gemini CLI is reported, but proposed only when the owner names it.
+    let gemini = host(&report, "gemini-cli");
+    assert_eq!(gemini["present"], true, "{report}");
+    assert_eq!(gemini["user_install"], "none", "{report}");
+    assert_eq!(gemini["next_step"], Value::Null, "{report}");
+    // So is Antigravity, whose files are under `~/.gemini/config`.
+    let antigravity = host(&report, "antigravity");
+    assert_eq!(antigravity["present"], true, "{report}");
+    assert_eq!(antigravity["user_install"], "none", "{report}");
+    assert_eq!(
+        antigravity["config_dir"],
+        home.home()
+            .join(".gemini/config")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(antigravity["next_step"], Value::Null, "{report}");
+
+    // An install for another state directory talks to another coordinator.
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .args(["hosts", "--json", "--home"])
+        .arg(home.home())
+        .arg("--state-dir")
+        .arg(home.base.join("elsewhere"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let other: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        host(&other, "claude-code")["user_install"],
+        "other_state_dir"
+    );
+
+    let text = home.ok(&["hosts"]);
+    assert!(text.contains("cursor"), "{text}");
+    assert!(text.contains("langspan install --hosts cursor"), "{text}");
+    assert_eq!(contents(&home.home()), before, "detection writes nothing");
+}
+
+#[test]
+fn an_unreadable_host_directory_is_unknown_not_absent() {
+    let home = Home::new();
+    let locked = home.home().join("locked");
+    fs::create_dir_all(locked.join(".codex")).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads it anyway: nothing to show then.
+    let unreadable = fs::metadata(locked.join(".codex")).is_err();
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .args(["hosts", "--json", "--home"])
+        .arg(&locked)
+        .arg("--state-dir")
+        .arg(home.state_dir())
+        .output()
+        .unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(output.status.success(), "{output:?}");
+    if !unreadable {
+        return;
+    }
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let codex = host(&report, "codex");
+    assert_eq!(codex["present"], Value::Null, "{report}");
+    assert_eq!(codex["user_install"], "unknown", "{report}");
+    assert!(
+        codex["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "{report}"
+    );
+    assert_eq!(codex["next_step"], Value::Null, "{report}");
+}
+
+#[test]
+fn the_daemon_notes_an_uninstalled_host_once_until_it_is_installed() {
+    let mut home = Home::new();
+    home.claude_and_codex();
+    home.ok(&["install", "--hosts", "claude-code,codex", "--apply"]);
+    fs::create_dir(home.home().join(".cursor")).unwrap();
+    home.write(".gemini/settings.json", "{}\n");
+    home.write(".gemini/config/hooks.json", "{}\n");
+    fs::create_dir(home.state_dir()).unwrap();
+    fs::set_permissions(home.state_dir(), fs::Permissions::from_mode(0o700)).unwrap();
+    let config = home.state_dir().join("config.json");
+    fs::write(&config, r#"{"host_check_ms": 200}"#).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    let before = contents(&home.home());
+
+    let mut daemon = Process::new(env!("CARGO_BIN_EXE_langspan"));
+    support::in_home(&mut daemon, &home.home())
+        .args(["daemon", "--state-dir"])
+        .arg(home.state_dir())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    home.daemon = Some(daemon.spawn().unwrap());
+    let state_dir = home.state_dir();
+    let held = |want: bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(response) = client::call(&state_dir, &status())
+                && let Outcome::Status { state, .. } = response.outcome
+                && state.uninstalled_hosts.contains_key("cursor") == want
+            {
+                return state;
+            }
+            assert!(Instant::now() < deadline, "cursor never held as {want}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let state = held(true);
+    // Gemini CLI and Antigravity are never proposed unless named; installed
+    // hosts are covered.
+    assert_eq!(
+        state.uninstalled_hosts.keys().collect::<Vec<_>>(),
+        ["cursor"]
+    );
+    let events = |kind: &str| {
+        let Outcome::Events { events } = client::call(
+            &state_dir,
+            &Request {
+                version: PROTOCOL_VERSION,
+                request_id: "read".into(),
+                command: Command::Events {
+                    after: 0,
+                    limit: 1000,
+                },
+            },
+        )
+        .unwrap()
+        .outcome
+        else {
+            panic!("events expected");
+        };
+        events
+            .iter()
+            .filter(|event| serde_json::to_value(&event.event).unwrap()["type"] == kind)
+            .count()
+    };
+    // Several checks later, still one record.
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(events("host_not_installed"), 1);
+
+    let status_text = || {
+        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .args(["status", "--state-dir"])
+            .arg(&state_dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let text = status_text();
+    let lines: Vec<&str> = text.lines().filter(|l| l.starts_with("hosts:")).collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert!(lines[0].contains("cursor"), "{text}");
+    assert!(
+        lines[0].contains("langspan install --hosts cursor"),
+        "{text}"
+    );
+
+    // Doctor marks it once a session of another host works in a workspace.
+    let doctor = || String::from_utf8(home.langspan(&["doctor"]).stdout).unwrap();
+    let report = doctor();
+    assert!(
+        report.contains("ok cursor: no user-level install"),
+        "{report}"
+    );
+    let repo = home.repo("project");
+    for (id, command) in [
+        (
+            "w1",
+            Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: repo.to_string_lossy().into(),
+            },
+        ),
+        (
+            "s1",
+            Command::SessionRegister {
+                session_id: "claude-code.s1".into(),
+                workspace_id: "work".into(),
+                parent: None,
+                headless: false,
+            },
+        ),
+    ] {
+        client::call(
+            &state_dir,
+            &Request {
+                version: PROTOCOL_VERSION,
+                request_id: id.into(),
+                command,
+            },
+        )
+        .unwrap();
+    }
+    let report = doctor();
+    assert!(
+        report.contains("FIX cursor: no user-level install"),
+        "{report}"
+    );
+    assert!(
+        report.contains("langspan install --hosts cursor"),
+        "{report}"
+    );
+    assert_eq!(contents(&home.home()), before, "detection writes nothing");
+
+    home.ok(&["install", "--hosts", "cursor", "--apply"]);
+    held(false);
+    assert!(
+        !status_text().lines().any(|l| l.starts_with("hosts:")),
+        "the line is gone"
+    );
+    assert_eq!(events("host_cleared"), 1);
+    assert_eq!(events("host_not_installed"), 1);
+}
+
+impl Home {
+    /// A daemon in this home checking its hosts every 200 ms, logging to
+    /// `daemon.log` in the base directory.
+    fn start_host_check(&mut self) {
+        fs::create_dir(self.state_dir()).unwrap();
+        fs::set_permissions(self.state_dir(), fs::Permissions::from_mode(0o700)).unwrap();
+        let config = self.state_dir().join("config.json");
+        fs::write(&config, r#"{"host_check_ms": 200}"#).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        let log = fs::File::create(self.base.join("daemon.log")).unwrap();
+        let mut daemon = Process::new(env!("CARGO_BIN_EXE_langspan"));
+        support::in_home(&mut daemon, &self.home())
+            .args(["daemon", "--state-dir"])
+            .arg(self.state_dir())
+            .stdout(Stdio::null())
+            .stderr(log);
+        self.daemon = Some(daemon.spawn().unwrap());
+    }
+    /// Wait until `host` is held as not installed (or not); the state then.
+    fn held(&self, host: &str, want: bool) -> langspan_core::State {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(response) = client::call(&self.state_dir(), &status())
+                && let Outcome::Status { state, .. } = response.outcome
+                && state.uninstalled_hosts.contains_key(host) == want
+            {
+                return state;
+            }
+            assert!(Instant::now() < deadline, "{host} never held as {want}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    /// How many events of `kind` the coordinator has recorded.
+    fn count(&self, kind: &str) -> usize {
+        let Outcome::Events { events } = client::call(
+            &self.state_dir(),
+            &Request {
+                version: PROTOCOL_VERSION,
+                request_id: "read".into(),
+                command: Command::Events {
+                    after: 0,
+                    limit: 1000,
+                },
+            },
+        )
+        .unwrap()
+        .outcome
+        else {
+            panic!("events expected");
+        };
+        events
+            .iter()
+            .filter(|event| serde_json::to_value(&event.event).unwrap()["type"] == kind)
+            .count()
+    }
+}
+
+#[test]
+fn a_host_notice_is_kept_while_the_host_cannot_be_inspected() {
+    let mut home = Home::new();
+    home.claude_and_codex();
+    home.ok(&["install", "--hosts", "claude-code,codex", "--apply"]);
+    fs::create_dir(home.home().join(".cursor")).unwrap();
+    home.start_host_check();
+    home.held("cursor", true);
+
+    // Cursor's hook file cannot be parsed for a moment: neither an install
+    // nor a removal is established, so the notice stays, nothing new is
+    // recorded, and the inspection error is logged once.
+    let hooks = home.write(".cursor/hooks.json", "{ not json");
+    std::thread::sleep(Duration::from_millis(1200));
+    let state = home.held("cursor", true);
+    assert!(state.uninstalled_hosts.contains_key("cursor"));
+    assert_eq!(home.count("host_cleared"), 0);
+    let log = fs::read_to_string(home.base.join("daemon.log")).unwrap();
+    let failed: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("host_check_failed"))
+        .collect();
+    assert_eq!(failed.len(), 1, "logged once: {log}");
+    assert!(
+        failed[0].contains("cursor") && failed[0].contains("hooks.json"),
+        "{log}"
+    );
+
+    // Readable again and still not installed: the same notice, not a new one.
+    fs::remove_file(hooks).unwrap();
+    std::thread::sleep(Duration::from_millis(1000));
+    home.held("cursor", true);
+    assert_eq!(home.count("host_cleared"), 0);
+    assert_eq!(home.count("host_not_installed"), 1);
+}
+
+#[test]
+fn following_the_status_advice_verbatim_installs_for_this_coordinator() {
+    let mut home = Home::new();
+    home.claude_and_codex();
+    home.ok(&["install", "--hosts", "claude-code,codex", "--apply"]);
+    fs::create_dir(home.home().join(".cursor")).unwrap();
+    // The coordinator's state directory is not this home's default one.
+    home.start_host_check();
+    home.held("cursor", true);
+
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .args(["status", "--state-dir"])
+        .arg(home.state_dir())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("hosts: cursor"))
+        .unwrap_or_else(|| panic!("{text}"));
+    let advice = line.split('`').nth(1).unwrap_or_else(|| panic!("{line}"));
+
+    // Run as the owner would, in a shell in that home with `langspan` on
+    // the path: the preview, then the same command with --apply.
+    let bin = Path::new(env!("CARGO_BIN_EXE_langspan")).parent().unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    for command in [advice.to_owned(), format!("{advice} --apply")] {
+        let mut shell = Process::new("/bin/sh");
+        let output = support::in_home(&mut shell, &home.home())
+            .args(["-c", &command])
+            .env("PATH", &path)
+            .current_dir(&home.base)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command}: {output:?}");
+    }
+
+    let report: Value = serde_json::from_str(&home.ok(&["hosts", "--json"])).unwrap();
+    assert_eq!(
+        host(&report, "cursor")["user_install"],
+        "current",
+        "{advice}: {report}"
+    );
+    home.held("cursor", false);
 }

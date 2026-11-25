@@ -1457,6 +1457,49 @@ pub(crate) fn quoted(text: &str) -> String {
     format!("{:?}", clean(text, SUMMARY_LIMIT))
 }
 
+/// A change in how many definitions share a name and kind, said as an
+/// addition or a removal with the counts, never as a signature changed to
+/// itself. `change` has both counts (`definition_added` or
+/// `definition_removed`).
+fn definitions_text(change: &langspan_core::InterfaceChange) -> String {
+    let (before, after) = (
+        change.before_count.unwrap_or_default(),
+        change.after_count.unwrap_or_default(),
+    );
+    let kind = clean(&change.kind, 16);
+    let kinds = if kind.ends_with('s') {
+        format!("{kind}es")
+    } else {
+        format!("{kind}s")
+    };
+    let name = quoted(&change.name);
+    let now = format!(
+        "(now {after} definition{} with that name)",
+        if after == 1 { "" } else { "s" }
+    );
+    let signatures = |text: &Option<String>| text.as_deref().map(quoted).unwrap_or_default();
+    if change.change == "definition_removed" {
+        let gone = before.saturating_sub(after);
+        let (lead, verb) = if gone == 1 {
+            ("one".to_owned(), "was")
+        } else {
+            (gone.to_string(), "were")
+        };
+        format!(
+            "{lead} of {before} {kinds} {name} {verb} removed: {} {now}",
+            signatures(&change.before)
+        )
+    } else {
+        let added = after.saturating_sub(before);
+        let lead = match (before, added) {
+            (1, 1) => format!("a second {kind} {name} was added"),
+            (_, 1) => format!("another {kind} {name} was added"),
+            _ => format!("{added} more {kinds} {name} were added"),
+        };
+        format!("{lead}: {} {now}", signatures(&change.after))
+    }
+}
+
 /// An automatic check's results first: each is delivered once, so they are
 /// always shown, and the peer lines take the room that is left.
 fn render_briefing_within(briefing: &langspan_core::Briefing, limit: usize) -> String {
@@ -1631,6 +1674,7 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
             .changes
             .iter()
             .map(|change| match (&change.before, &change.after) {
+                _ if change.before_count.is_some() => definitions_text(change),
                 (Some(before), Some(after)) => format!(
                     "{} {} changed from {} to {}",
                     clean(&change.kind, 16),
@@ -3788,6 +3832,8 @@ mod briefing_text {
                     after: Some("a".repeat(240)),
                     before_arity: None,
                     after_arity: None,
+                    before_count: None,
+                    after_count: None,
                 }],
                 affected: vec![format!("src/{long}.rs")],
                 age_ms: 1,
@@ -3797,6 +3843,73 @@ mod briefing_text {
         assert!(text.len() <= BRIEFING_LIMIT, "{}", text.len());
         assert!(text.contains("more notice(s) not shown"), "{text}");
         assert!(text.ends_with("before changing it."), "the footer is kept");
+    }
+
+    #[test]
+    fn a_count_of_same_named_definitions_is_said_as_added_or_removed() {
+        use langspan_core::InterfaceChange;
+        let counted = |change: &str, kind: &str, (before, after): (u32, u32)| {
+            let signature = Some("pub fn text(&self) -> String".to_owned());
+            let added = change == "definition_added";
+            definitions_text(&InterfaceChange {
+                name: "text".into(),
+                kind: kind.into(),
+                change: change.into(),
+                before: (!added).then(|| signature.clone()).flatten(),
+                after: added.then_some(signature).flatten(),
+                before_arity: None,
+                after_arity: None,
+                before_count: Some(before),
+                after_count: Some(after),
+            })
+        };
+        let sig = r#""pub fn text(&self) -> String""#;
+        for (change, kind, counts, said) in [
+            (
+                "definition_added",
+                "method",
+                (1, 2),
+                format!(
+                    r#"a second method "text" was added: {sig} (now 2 definitions with that name)"#
+                ),
+            ),
+            (
+                "definition_added",
+                "method",
+                (2, 3),
+                format!(
+                    r#"another method "text" was added: {sig} (now 3 definitions with that name)"#
+                ),
+            ),
+            (
+                "definition_added",
+                "class",
+                (1, 3),
+                format!(
+                    r#"2 more classes "text" were added: {sig} (now 3 definitions with that name)"#
+                ),
+            ),
+            (
+                "definition_removed",
+                "method",
+                (2, 1),
+                format!(
+                    r#"one of 2 methods "text" was removed: {sig} (now 1 definition with that name)"#
+                ),
+            ),
+            (
+                "definition_removed",
+                "function",
+                (4, 2),
+                format!(
+                    r#"2 of 4 functions "text" were removed: {sig} (now 2 definitions with that name)"#
+                ),
+            ),
+        ] {
+            let text = counted(change, kind, counts);
+            assert_eq!(text, said);
+            assert!(!text.contains("changed from"), "{text}");
+        }
     }
 
     fn message(from: Option<&str>, to: langspan_core::Recipient, text: &str) -> Message {
