@@ -137,6 +137,15 @@ Fixed on `main` since the validation:
   hooks, a real command held open by a signal file, a formatter-like `sed`
   rewrite, real Git and a real daemon (`tests/shell_concurrent_edits.rs`);
   the dogfood run in a shared checkout is pending.
+- Issue #126: before `cargo fmt` (any form), `rustfmt FILE...` or
+  `prettier --write PATH...`, the Bash pre-tool hook on Claude Code and Codex
+  names, once, the other live sessions with uncommitted changes in files the
+  formatter may rewrite (at most eight files), and never refuses the command;
+  the skill advises formatting only one's own files by name
+  ([ADR 0011](adr/0011-shell-writes.md)). Tested with two sessions' real
+  hooks, a real daemon and real Git (`tests/formatter_notice.rs`); the
+  formatters themselves are not run there. A real host reading the notice and
+  the dogfood run in a shared checkout are pending.
 - Issue #99: `commit --mine` no longer reports a file as wholly another
   session's because that session made one write whose lines are not known.
   Such a file is still attributed hunk by hunk; a hunk whose lines that

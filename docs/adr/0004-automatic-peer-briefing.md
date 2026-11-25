@@ -28,11 +28,30 @@ LangSpan.
 
 **What a session's work is.** The core keeps one bounded activity record per
 session, derived from events: the 32 most recently successfully edited paths
-with their times, and the first non-empty line of the owner's latest prompt
-(whitespace collapsed, control and invisible characters removed, at most 200
-bytes). Later lines of a prompt never leave the session. `hooks install
+with their times, and one line of the owner's latest prompt (redacted,
+whitespace collapsed, control and invisible characters removed, at most 200
+bytes). That line is the first of the prompt's leading 32 non-empty lines to
+start with `Task:` (any case, marker removed); otherwise its first non-empty
+line. Only that one line leaves the session as text. `hooks install
 --prompt-summary off` installs hooks that record no prompt text at all. Current admissions and declared intents are
 already in state. No model call summarises anything.
+
+**Sessions from one template (issue #114).** Several agents are often started
+from one shared prompt whose first line is the same for all of them. With the
+prompt's line, the hook also sends a 128-bit SHA-256 prefix of each of its
+first 32 non-empty, redacted and cleaned lines. The core keeps them in the
+session's activity and answers with the number of leading lines that the
+latest prompt of another live session in the same repository (registered this
+generation, not ended, not known to have exited) shares. When that number is
+neither zero nor the whole prompt and the prompt has no `Task:` line, the hook
+records the prompt again under its first line that differs. A one-line prompt
+is therefore summarised as before. The comparison runs on digests so that no
+other line of either prompt is sent or stored; a digest of a short line is
+guessable by anyone who can read the local store, who can read the task lines
+already. Digests are never shown in a briefing and never published. The
+session that started first keeps its first line until its next prompt; its
+peers' lines tell them apart. A declared intent replaces the task line in a
+briefing while it is set, since it is the session's own account of its task.
 
 **Who is relevant.** A briefing for session S names another session P only when
 all of these hold:

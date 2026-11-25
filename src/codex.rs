@@ -223,6 +223,9 @@ fn shell(
         false,
         &config.root,
         false,
+        // Its PreToolUse reply's `additionalContext` reaches the model, as
+        // for `apply_patch`.
+        true,
     );
     Ok((operation, config))
 }

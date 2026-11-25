@@ -1115,7 +1115,7 @@ fn file_owners(
 }
 
 /// Whether `session`, or the session it is a subagent of, is live.
-fn is_live(live: &BTreeSet<String>, session: &str) -> bool {
+pub(crate) fn is_live(live: &BTreeSet<String>, session: &str) -> bool {
     let mut name = session;
     loop {
         if live.contains(name) {
@@ -1313,7 +1313,10 @@ pub enum Guarded {
 
 /// The other sessions of the workspace that are live: registered, not
 /// ended and not known to have exited.
-fn live_sessions(config: &Config, deadline: Instant) -> Result<BTreeSet<String>, String> {
+pub(crate) fn live_sessions(
+    config: &Config,
+    deadline: Instant,
+) -> Result<BTreeSet<String>, String> {
     let request = crate::protocol::Request {
         version: crate::protocol::PROTOCOL_VERSION,
         request_id: "read".into(),

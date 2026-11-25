@@ -38,15 +38,15 @@ pub enum GitStep {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Word {
-    text: String,
+pub(super) struct Word {
+    pub(super) text: String,
     /// Holds an expansion, a substitution or an unquoted glob: its value
     /// is not the text.
-    expanded: bool,
+    pub(super) expanded: bool,
 }
 
 impl Word {
-    fn literal(&self) -> Option<&str> {
+    pub(super) fn literal(&self) -> Option<&str> {
         (!self.expanded).then_some(self.text.as_str())
     }
 }
@@ -153,9 +153,10 @@ fn subcommand(words: &[Word]) -> Option<&str> {
     None
 }
 
-/// One segment's words from the command it runs: past assignments,
-/// reserved words and the usual wrappers (`if git …`, `env X=1 git …`).
-fn command_words(mut words: &[Word]) -> &[Word] {
+/// A simple command's words from the command it runs, past the words that
+/// run the command that follows: assignments, reserved words and the usual
+/// wrappers (`if git …`, `env X=1 git …`).
+pub(super) fn command_words(mut words: &[Word]) -> &[Word] {
     loop {
         match words.first().map(|word| word.text.as_str()) {
             Some(
@@ -399,7 +400,7 @@ fn commit(words: &[Word], cwd: Option<PathBuf>) -> Result<Option<GitStep>, &'sta
 // A lenient shell lexer: words and command boundaries, nothing more
 // ---------------------------------------------------------------------------
 
-struct Lexer {
+pub(super) struct Lexer {
     chars: Vec<char>,
     at: usize,
     /// Heredoc delimiters whose bodies start after the current line.
@@ -407,7 +408,7 @@ struct Lexer {
 }
 
 impl Lexer {
-    fn new(command: &str) -> Self {
+    pub(super) fn new(command: &str) -> Self {
         Self {
             chars: command.chars().collect(),
             at: 0,
@@ -420,7 +421,7 @@ impl Lexer {
     }
 
     /// The simple commands of the line, as words.
-    fn segments(mut self) -> Result<Vec<Vec<Word>>, &'static str> {
+    pub(super) fn segments(mut self) -> Result<Vec<Vec<Word>>, &'static str> {
         let mut segments = vec![Vec::new()];
         let mut word: Option<Word> = None;
         let end_word = |segments: &mut Vec<Vec<Word>>, word: &mut Option<Word>| {
