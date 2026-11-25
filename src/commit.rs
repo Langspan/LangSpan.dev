@@ -1965,10 +1965,13 @@ impl MineStatus {
 /// How `status --mine` lists one file, and whether it holds other
 /// sessions' lines. `None` when nothing of it is this session's.
 fn mine_file(file: &FileDiff, owners: &FileOwners, staged: bool) -> (Option<MineFile>, bool) {
+    // Other sessions' lines also sit in a hunk or file whose owner is not
+    // known: count the foreign contributions recorded for every owner.
     let theirs = owners
         .owners
         .iter()
-        .any(|owner| matches!(owner, Owner::Others(_)));
+        .any(|owner| matches!(owner, Owner::Others(_)))
+        || owners.foreign.iter().any(|sessions| !sessions.is_empty());
     let own = owners.owners.iter().filter(|o| **o == Owner::Own).count();
     let unknown = owners.owners.iter().find_map(|owner| match owner {
         Owner::Unknown(why) => Some(*why),

@@ -1317,6 +1317,30 @@ fn status_mine_marks_a_file_unknown_where_commit_mine_would_refuse() {
 }
 
 #[test]
+fn status_mine_counts_another_sessions_lines_in_an_unknown_hunk() {
+    let f = Fixture::new();
+    // Alice and Bob each wrote one line of the same hunk: it is not known
+    // whose, but Bob's line is in it.
+    f.edit(
+        ALICE,
+        "alice-1",
+        "shared.txt",
+        "line 2\n",
+        "line 2\nAlice\n",
+    );
+    f.reread_and_edit(BOB, "bob-1", "shared.txt", "Alice\n", "Alice\nBob\n");
+    let value = f.status_mine(ALICE, "alice-2");
+    assert_eq!(value["files"][0]["owner"], "unknown", "{value}");
+    assert_eq!(value["others"], 1, "{value}");
+    let (_, ran) = f.bash_call(ALICE, "alice-3", &f.status_mine_command(false));
+    let text = said(&ran.unwrap());
+    assert!(
+        text.contains("1 changed file(s) hold other sessions' lines."),
+        "{text}"
+    );
+}
+
+#[test]
 fn status_mine_without_a_running_call_names_the_state_directory() {
     let f = Fixture::new();
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))

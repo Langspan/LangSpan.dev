@@ -816,7 +816,8 @@ marked mine) or `unknown` (it would refuse, and why), whether some of it is
 owner: `mine`, another session's (`others`, with `sessions`), `none` (no
 session wrote it) or `unknown` (with `reason`). A file attributed as a whole
 (binary, over 512 KiB, a mode change) is `whole`, with no hunks. `others`
-counts the changed files that hold other sessions' lines. At most 200 files
+counts the changed files that hold other sessions' lines, also where they
+share an `unknown` hunk with this session's. At most 200 files
 are listed (`truncated` when there are more). It runs the same attribution as
 `commit --mine`, finds its session the same way, and changes nothing: no
 private index, no commit, and Git reads run with `--no-optional-locks`. The

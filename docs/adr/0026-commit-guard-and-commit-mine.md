@@ -212,7 +212,7 @@ was in `HEAD`'s when it only removes lines) and its owner: `mine`, `others`
 with the sessions, `none` or `unknown` with the reason. A file attributed
 whole has no hunks and `whole: true`. `staged` says the shared index holds
 some of the file's changes. `others` counts the changed files holding other
-sessions' lines; a file with nothing of this session's is not listed. At most
+sessions' lines, including lines in a hunk whose owner is `unknown`; a file with nothing of this session's is not listed. At most
 200 files are listed, then `truncated`. The session is found as for
 `commit --mine`: the pre-tool hook marks a running `status --mine` command's
 record as it marks `commit --mine`'s, and the same missing-record error names
