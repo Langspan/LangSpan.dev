@@ -252,6 +252,29 @@ fn v3_blind_spots_request_and_response_match_the_committed_golden_vectors() {
     };
     assert_eq!(coverage.blind_in_scope, 0);
     assert_eq!(encode(&response).unwrap(), earlier.as_bytes());
+
+    // A lookup asks for the count; without the flag it is the request
+    // earlier clients send.
+    let asked = r#"{"version":3,"request_id":"read","command":{"op":"graph_impact","workspace_id":"app","path":"src/a.rs","limit":10,"blind_in_scope":true}}"#;
+    let request: Request = serde_json::from_str(asked).unwrap();
+    assert!(matches!(
+        request.command,
+        Command::GraphImpact {
+            blind_in_scope: true,
+            ..
+        }
+    ));
+    assert_eq!(encode(&request).unwrap(), format!("{asked}\n").as_bytes());
+    let plain = asked.replace(r#","blind_in_scope":true"#, "");
+    let request: Request = serde_json::from_str(&plain).unwrap();
+    assert!(matches!(
+        request.command,
+        Command::GraphImpact {
+            blind_in_scope: false,
+            ..
+        }
+    ));
+    assert_eq!(encode(&request).unwrap(), format!("{plain}\n").as_bytes());
 }
 
 #[test]

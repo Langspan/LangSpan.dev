@@ -830,6 +830,7 @@ impl McpAdapter {
                 name: args.name,
                 limit: args.limit,
                 detail: args.detail,
+                blind_in_scope: true,
             },
         )
         .await
@@ -849,6 +850,7 @@ impl McpAdapter {
                 workspace_id: args.workspace_id,
                 name: args.name,
                 limit: args.limit,
+                blind_in_scope: true,
             },
         )
         .await
@@ -868,6 +870,7 @@ impl McpAdapter {
                 workspace_id: args.workspace_id,
                 path: args.path,
                 limit: args.limit,
+                blind_in_scope: true,
             },
         )
         .await

@@ -1932,6 +1932,7 @@ fn doctor(
                         name: "_".into(),
                         limit: 1,
                         detail: false,
+                        blind_in_scope: true,
                     },
                 ) {
                     let behind = coverage.indexable_files - coverage.current_files;
@@ -2746,16 +2747,19 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                         name: (*subject).into(),
                         limit,
                         detail: options.remove("--detail").is_some(),
+                        blind_in_scope: true,
                     },
                     "references" => Command::GraphReferences {
                         workspace_id,
                         name: (*subject).into(),
                         limit,
+                        blind_in_scope: true,
                     },
                     _ => Command::GraphImpact {
                         workspace_id,
                         path: (*subject).into(),
                         limit,
+                        blind_in_scope: true,
                     },
                 }
             }

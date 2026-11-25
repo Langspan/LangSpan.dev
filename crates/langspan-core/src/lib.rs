@@ -1037,7 +1037,10 @@ pub struct GraphCoverage {
     /// current content (partial, waiting, too large, left out of the scan).
     /// Every query matches names across the whole workspace, so any of them
     /// may hold a match the answer lacks; above zero, an empty or short
-    /// answer is weak. `graph blind-spots` names them. Absent when zero.
+    /// answer is weak. `graph blind-spots` names them. Absent when zero,
+    /// and sent only to a client that asks for it (`blind_in_scope` on a
+    /// lookup, or `graph_blind_spots`): earlier builds read coverage
+    /// strictly and reject a field they do not know.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub blind_in_scope: u32,
 }
@@ -2042,18 +2045,27 @@ pub enum Command {
         limit: u32,
         #[serde(default, skip_serializing_if = "is_false")]
         detail: bool,
+        /// The client reads `GraphCoverage::blind_in_scope`. A request
+        /// without it is one an earlier build sends, and its answer keeps
+        /// the coverage shape that build knows.
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
         workspace_id: String,
         name: String,
         limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: what `path` exports and which files mention those names.
     GraphImpact {
         workspace_id: String,
         path: String,
         limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: the files the index cannot answer for, by reason, at
     /// most `limit` paths per list (roadmap D8).
@@ -2450,18 +2462,27 @@ enum CommandWire {
         limit: u32,
         #[serde(default, skip_serializing_if = "is_false")]
         detail: bool,
+        /// The client reads `GraphCoverage::blind_in_scope`. A request
+        /// without it is one an earlier build sends, and its answer keeps
+        /// the coverage shape that build knows.
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
         workspace_id: String,
         name: String,
         limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: what `path` exports and which files mention those names.
     GraphImpact {
         workspace_id: String,
         path: String,
         limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: the files the index cannot answer for, by reason, at
     /// most `limit` paths per list (roadmap D8).

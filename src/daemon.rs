@@ -1388,6 +1388,59 @@ mod unix {
         graph: Option<&crate::graph::Index>,
         request: Request,
     ) -> Response {
+        let reads_blind = reads_blind_in_scope(&request.command);
+        let mut response = answer(store, graph, request);
+        if !reads_blind {
+            for coverage in coverages(&mut response.outcome) {
+                coverage.blind_in_scope = 0;
+            }
+        }
+        response
+    }
+
+    /// Whether the client asked for `GraphCoverage::blind_in_scope`. Earlier
+    /// builds read coverage with `deny_unknown_fields`; a request that does
+    /// not ask is answered in the shape they know, the field absent.
+    fn reads_blind_in_scope(command: &Command) -> bool {
+        matches!(
+            command,
+            Command::GraphBlindSpots { .. }
+                | Command::GraphSymbol {
+                    blind_in_scope: true,
+                    ..
+                }
+                | Command::GraphReferences {
+                    blind_in_scope: true,
+                    ..
+                }
+                | Command::GraphImpact {
+                    blind_in_scope: true,
+                    ..
+                }
+        )
+    }
+
+    /// Every index coverage an outcome carries.
+    fn coverages(outcome: &mut Outcome) -> Vec<&mut langspan_core::GraphCoverage> {
+        match outcome {
+            Outcome::Graph { coverage, .. }
+            | Outcome::GraphContext { coverage, .. }
+            | Outcome::CallBreaks { coverage, .. }
+            | Outcome::GraphBlindSpots { coverage, .. } => vec![coverage],
+            Outcome::Dashboard { dashboard } => dashboard
+                .workspaces
+                .iter_mut()
+                .filter_map(|workspace| workspace.coverage.as_mut())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn answer(
+        store: &mut Store,
+        graph: Option<&crate::graph::Index>,
+        request: Request,
+    ) -> Response {
         let Request {
             version,
             request_id,

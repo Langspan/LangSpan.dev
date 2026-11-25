@@ -115,11 +115,25 @@ counts in `totals`:
   from a fixed list of about 40 programming-language extensions
   (documentation, data and images are not counted).
 
-Every answer's `coverage` gains `blind_in_scope`: supported files that are
+Lookup answers' `coverage` gains `blind_in_scope`: supported files that are
 partial, not indexed at their scanned content, or not read by the last scan.
 Every query matches names across the whole workspace, so each of those files
 could hold a match the answer lacks; the field is the count of them, omitted
-when zero so earlier answers are byte for byte unchanged. Paths only; nothing
+when zero. Earlier builds read coverage with `deny_unknown_fields`, and the
+protocol has no negotiation, so an older CLI or a long-running MCP adapter
+would fail to read any answer that carried the field. As with symbol
+`detail`, the client asks: `graph_symbol`, `graph_references` and
+`graph_impact` take `blind_in_scope: true` (sent by this build's CLI and MCP
+tools), and `graph_blind_spots` always gets it. Every other answer that
+carries coverage (code context, call breaks, the dashboard) and every request
+without the flag gets the shape earlier builds know, the field absent; the
+daemon applies this in one place before it replies. Bumping the protocol
+version instead would have broken every command of an older client against
+this daemon, not only these. A request with the flag sent to an earlier
+daemon is refused as an unknown field, like `detail`; restart the daemon
+after upgrading. Test: `blind_spots_name_the_files_the_index_cannot_answer_for`
+(`tests/graph.rs`) reads every such answer with a strict copy of the earlier
+coverage, over the daemon's socket; it failed before the change. Paths only; nothing
 guesses what a blind file contains. With no complete scan the answer has
 `scanned: false`, and the last scan failure, if one is recorded, is in
 `scan_failure`. Lists past one 64 KiB frame are cut to the longest common
@@ -131,7 +145,10 @@ counts, and the language counts (tables `unread` and `scan_summary`; the paths
 are rewritten only when they change). A file between 1 and 4 MiB is marked
 too large for its scanned digest, so it is not retried every pass and no
 longer takes one of a pass's 200 places, which could stall indexing behind
-200 such files. A complete scan with no supported file now counts as
+200 such files. The mark is set only after the file's bytes, read up to the
+scan's 4 MiB bound, are confirmed to be that digest: a file scanned small that
+grew before the pass ran is left for the next scan, so its scanned version is
+not skipped if it returns (`a_small_scanned_version_is_not_marked_too_large_by_a_later_large_file`). A complete scan with no supported file now counts as
 `scanned`. The schema marker went from 3 to 4, so an older file is dropped
 and rebuilt. Past 4,096 unread files the counts still hold but those paths
 are not named, and `blind_in_scope` may count one of them twice if the index

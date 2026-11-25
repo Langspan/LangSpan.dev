@@ -137,6 +137,20 @@ impl World {
             String::from_utf8(output.stdout).unwrap(),
         )
     }
+    /// One request written to the daemon's socket as it is, as any client
+    /// build would send it.
+    fn raw(&self, request: &Value) -> Value {
+        use std::io::{BufRead, BufReader};
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(self.base.join("state/daemon.sock")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        writeln!(stream, "{request}").unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
     fn graph(&self, query: &str, subject: &str) -> Value {
         let (_, text) = self.cli(&["graph", query, "app", subject, "--json"]);
         serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone()
@@ -580,6 +594,52 @@ fn blind_spots_name_the_files_the_index_cannot_answer_for() {
     );
     assert_eq!(impact["coverage"]["blind_in_scope"], 1, "{impact:#}");
     assert_eq!(impact["coverage"]["partial_files"], 1);
+
+    // An earlier client (a CLI or a long-running MCP adapter) does not ask
+    // for the count and reads coverage strictly: every answer it can get
+    // keeps the shape it knows, while a file in scope is blind.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct EarlierCoverage {
+        indexable_files: u32,
+        current_files: u32,
+        partial_files: u32,
+        scanned: bool,
+    }
+    for command in [
+        json!({"op": "graph_impact", "workspace_id": "app", "path": "src/lonely.rs", "limit": 10}),
+        json!({"op": "graph_symbol", "workspace_id": "app", "name": "lonely", "limit": 10}),
+        json!({"op": "graph_symbol", "workspace_id": "app", "name": "lonely", "limit": 10, "detail": true}),
+        json!({"op": "graph_references", "workspace_id": "app", "name": "lonely", "limit": 10}),
+        json!({"op": "graph_context", "workspace_id": "app", "names": ["lonely"], "limit": 3}),
+        json!({"op": "dashboard"}),
+    ] {
+        let response = w.raw(&json!({"version": 3, "request_id": "earlier", "command": command}));
+        let outcome = &response["outcome"];
+        let coverages = match outcome.get("dashboard") {
+            Some(dashboard) => dashboard["workspaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|workspace| workspace["coverage"].clone())
+                .collect(),
+            None => vec![outcome["coverage"].clone()],
+        };
+        assert!(!coverages.is_empty(), "{response:#}");
+        for coverage in coverages {
+            serde_json::from_value::<EarlierCoverage>(coverage.clone())
+                .unwrap_or_else(|error| panic!("{command}: {error}: {coverage}"));
+        }
+    }
+    // A client that asks gets the count.
+    let asked = w.raw(&json!({"version": 3, "request_id": "asked", "command": {
+        "op": "graph_impact", "workspace_id": "app", "path": "src/lonely.rs", "limit": 10,
+        "blind_in_scope": true}}));
+    assert_eq!(
+        asked["outcome"]["coverage"]["blind_in_scope"], 1,
+        "{asked:#}"
+    );
 
     // Over the index's 1 MiB bound, over the scan's 4 MiB bound, and ten
     // files in a language the index has no grammar for.

@@ -315,22 +315,24 @@ impl Index {
             let Some(language) = Language::for_path(path) else {
                 continue;
             };
+            // The file must still be exactly what the scan saw; otherwise
+            // the next scan brings its new digest. Read up to the scan's own
+            // bound, so a version the scan digested can be confirmed.
+            let scanned = crate::observer::Limits::default().max_file_bytes;
+            let Some(bytes) = read_exact_version(root, path, digest, scanned) else {
+                continue;
+            };
             // Too large to parse: remembered for this version, so it neither
-            // waits forever nor takes a place in every later pass.
-            if fs::symlink_metadata(root.join(path))
-                .is_ok_and(|meta| meta.is_file() && meta.len() > MAX_SOURCE_BYTES as u64)
-            {
+            // waits forever nor takes a place in every later pass. Only the
+            // confirmed scanned bytes say so; a file that grew after the
+            // scan says nothing about the scanned version.
+            if bytes.len() > MAX_SOURCE_BYTES {
                 self.connection.execute(
                     "UPDATE files SET oversize_digest = ?3 WHERE workspace_id = ?1 AND path = ?2",
                     params![workspace_id, path, digest],
                 )?;
                 continue;
             }
-            // The file must still be exactly what the scan saw; otherwise
-            // the next scan brings its new digest.
-            let Some(bytes) = read_exact_version(root, path, digest) else {
-                continue;
-            };
             let Ok(graph) = langspan_graph::extract(language, &bytes) else {
                 continue;
             };
@@ -821,7 +823,7 @@ pub fn last_checks(
         .iter()
         .take_while(|_| Instant::now() < deadline)
         .filter_map(|(path, digest)| {
-            let bytes = read_exact_version(root, path, digest)?;
+            let bytes = read_exact_version(root, path, digest, MAX_SOURCE_BYTES)?;
             let id = |length| crate::observer::blob_id(&bytes, length);
             Some((path.as_str(), [id(40), id(64)]))
         })
@@ -895,8 +897,9 @@ pub fn last_checks(
     found
 }
 
-/// The file's bytes, only if they are still exactly the scanned version.
-fn read_exact_version(root: &Path, path: &str, digest: &str) -> Option<Vec<u8>> {
+/// The file's bytes, only if they are still exactly the scanned version and
+/// at most `max` long.
+fn read_exact_version(root: &Path, path: &str, digest: &str, max: usize) -> Option<Vec<u8>> {
     let full = root.join(path);
     if !fs::symlink_metadata(&full).ok()?.is_file() {
         return None;
@@ -904,11 +907,10 @@ fn read_exact_version(root: &Path, path: &str, digest: &str) -> Option<Vec<u8>> 
     let mut bytes = Vec::new();
     fs::File::open(&full)
         .ok()?
-        .take(langspan_graph::MAX_SOURCE_BYTES as u64 + 1)
+        .take(max as u64 + 1)
         .read_to_end(&mut bytes)
         .ok()?;
-    (bytes.len() <= langspan_graph::MAX_SOURCE_BYTES
-        && crate::sha256::hex(&crate::sha256::digest(&bytes)) == digest)
+    (bytes.len() <= max && crate::sha256::hex(&crate::sha256::digest(&bytes)) == digest)
         .then_some(bytes)
 }
 
@@ -1177,6 +1179,41 @@ mod review_regressions {
         );
         let (spots, coverage) = blind(&index, 10);
         assert!(spots.too_large.is_empty(), "{spots:?}");
+        assert_eq!(coverage.blind_in_scope, 0);
+    }
+
+    #[test]
+    fn a_small_scanned_version_is_not_marked_too_large_by_a_later_large_file() {
+        let (dir, mut index) = setup("oversize-race");
+        let small = "pub fn small() {}\n";
+        let digest = crate::sha256::hex(&crate::sha256::digest(small.as_bytes()));
+        // Scanned small, then grew past the bound before the index ran.
+        let big = format!("// {}\n", "x".repeat(MAX_SOURCE_BYTES));
+        fs::write(dir.0.join("src/api.rs"), &big).unwrap();
+        let scan = ScanView {
+            files: BTreeMap::from([("src/api.rs".to_owned(), digest.clone())]),
+            ..ScanView::default()
+        };
+        let far = Instant::now() + Duration::from_secs(10);
+        index.update("w", &dir.0, &scan, NOW, far).unwrap();
+        let oversize: Option<String> = index
+            .connection
+            .query_row(
+                "SELECT oversize_digest FROM files WHERE path = 'src/api.rs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            oversize, None,
+            "the large bytes are not the scanned version"
+        );
+        // Back to the scanned content: that version is indexed.
+        fs::write(dir.0.join("src/api.rs"), small).unwrap();
+        let far = Instant::now() + Duration::from_secs(10);
+        index.update("w", &dir.0, &scan, NOW, far).unwrap();
+        let (spots, coverage) = blind(&index, 10);
+        assert_eq!(spots, langspan_core::BlindSpots::default());
         assert_eq!(coverage.blind_in_scope, 0);
     }
 
