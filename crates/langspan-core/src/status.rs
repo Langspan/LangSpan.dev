@@ -81,6 +81,8 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
+        // Derived for the source index; never part of the status reply.
+        workspace_removals: _,
     } = state;
     let mut summary = StatusSummary::default();
     let mut open = BTreeMap::new();
@@ -139,6 +141,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),
+        workspace_removals: BTreeMap::new(),
     };
     (view, summary)
 }

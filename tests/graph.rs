@@ -570,6 +570,64 @@ fn a_changed_exported_signature_is_reported_to_the_session_whose_files_mention_i
     assert!(w.prompt("alice").is_none());
 }
 
+/// A workspace removed, changed while unregistered, and registered again
+/// under the same ID and root is a new start: its next scan is a baseline,
+/// not a comparison with what was indexed before the removal.
+#[test]
+fn a_workspace_registered_again_after_removal_is_not_compared_with_its_earlier_index() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let (code, text) = w.cli(&[
+        "workspace",
+        "remove",
+        "app",
+        "--apply",
+        "--request-id",
+        "r1",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    fs::write(
+        w.work().join("src/upload.rs"),
+        "pub fn upload(path: &str, retries: u32) -> bool {\n    retries > 0 && path.len() > 0\n}\n",
+    )
+    .unwrap();
+    let root = w.work();
+    let (code, text) = w.cli(&[
+        "workspace",
+        "add",
+        "app",
+        root.to_str().unwrap(),
+        "--request-id",
+        "ws-again",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    w.wait_for("the new signature indexed", "symbol", "upload", |outcome| {
+        outcome["symbols"].as_array().is_some_and(|symbols| {
+            symbols
+                .iter()
+                .any(|symbol| symbol["signature"].as_str().unwrap().contains("retries"))
+        })
+    });
+    // A later pass indexed: the earlier one has delivered any notices.
+    // Only an addition, which is never a notice.
+    fs::write(
+        w.work().join("src/other.py"),
+        "def unrelated():\n    return 1\n\ndef later():\n    return 1\n",
+    )
+    .unwrap();
+    w.wait_for("a later pass", "symbol", "later", |outcome| {
+        outcome["symbols"]
+            .as_array()
+            .is_some_and(|symbols| !symbols.is_empty())
+    });
+    let (_, status) = w.cli(&["status", "--json"]);
+    let status: Value = serde_json::from_str(&status).unwrap();
+    let notices = &status["outcome"]["state"]["interface_notices"];
+    assert!(notices.get("app").is_none(), "{notices:#}");
+}
+
 /// Wait until `session`'s next prompt carries an interface notice holding
 /// `text`.
 fn told(w: &World, session: &str, text: &str) -> String {

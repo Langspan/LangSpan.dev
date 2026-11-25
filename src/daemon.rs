@@ -104,6 +104,8 @@ mod unix {
     struct IndexJob {
         workspace_id: String,
         root: PathBuf,
+        /// A count other than the one last indexed starts the index again.
+        removals: u32,
         /// Its unobserved paths are kept in the index as they were, never
         /// treated as removed.
         scan: crate::graph::ScanView,
@@ -126,7 +128,14 @@ mod unix {
         let mut last_failure: Option<String> = None;
         while let Ok(job) = jobs.recv() {
             let deadline = Instant::now() + Duration::from_secs(2);
-            match index.update(&job.workspace_id, &job.root, &job.scan, now_ms(), deadline) {
+            match index.update(
+                &job.workspace_id,
+                &job.root,
+                job.removals,
+                &job.scan,
+                now_ms(),
+                deadline,
+            ) {
                 Ok(notices) => {
                     last_failure = None;
                     for notice in notices {
@@ -534,14 +543,26 @@ mod unix {
         })
     }
 
+    /// `removals` is the workspace ID's removal count when the scan was
+    /// asked for: with the root, it names the registration the scan is of.
     struct ScanJob {
         workspace_id: String,
         root: PathBuf,
+        removals: u32,
     }
     struct ScanResult {
         workspace_id: String,
         root: PathBuf,
+        removals: u32,
         snapshot: Result<crate::observer::Snapshot, String>,
+    }
+
+    fn removals(state: &langspan_core::State, workspace_id: &str) -> u32 {
+        state
+            .workspace_removals
+            .get(workspace_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub async fn run(state_dir: PathBuf) -> Result<(), crate::Error> {
@@ -588,6 +609,7 @@ mod unix {
                         .send(ScanResult {
                             workspace_id: job.workspace_id,
                             root: job.root,
+                            removals: job.removals,
                             snapshot,
                         })
                         .is_err()
@@ -676,10 +698,13 @@ mod unix {
                             }
                         }
                     }
-                    if let Ok(ScanResult {workspace_id, root, snapshot}) = scan_results.try_recv() {
+                    if let Ok(ScanResult {workspace_id, root, removals: scanned_in, snapshot}) = scan_results.try_recv() {
                         scan_pending = false;
+                        // The same registration: a scan of the workspace's
+                        // earlier lifetime is not recorded for a new one.
                         let still_registered = store.state().workspaces.get(&workspace_id)
-                            .is_some_and(|workspace| Path::new(&workspace.root) == root);
+                            .is_some_and(|workspace| Path::new(&workspace.root) == root)
+                            && removals(store.state(), &workspace_id) == scanned_in;
                         let recorded = if still_registered {
                             snapshot.and_then(|snapshot| {
                                 store.record_scan(&workspace_id, &snapshot, now).map_err(|e| e.to_string())?;
@@ -688,6 +713,7 @@ mod unix {
                                 let _ = index_sender.try_send(IndexJob {
                                     workspace_id: workspace_id.clone(),
                                     root: root.clone(),
+                                    removals: scanned_in,
                                     scan: crate::graph::ScanView::of(&snapshot),
                                 });
                                 Ok(snapshot.coverage)
@@ -737,7 +763,8 @@ mod unix {
                             });
                         if let Some((workspace_id, root)) = workspace {
                             last_scanned.insert(workspace_id.clone(), Instant::now());
-                            match scan_sender.try_send(ScanJob {workspace_id, root}) {
+                            let removals = removals(store.state(), &workspace_id);
+                            match scan_sender.try_send(ScanJob {workspace_id, root, removals}) {
                                 Ok(()) => { scan_pending = true; }
                                 Err(error) => eprintln!("{}", serde_json::json!({"level":"error","event":"git_worker_unavailable","detail":error.to_string()})),
                             }

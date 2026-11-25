@@ -320,6 +320,8 @@ pub(crate) fn decide_remove(
 /// Everything derived for the workspace and its sessions leaves the state.
 /// A disabled publication's link stays, already withdrawn, so that the ID
 /// registered and published again continues its sequence for teammates.
+/// The removal is counted, so a later registration under the same ID and
+/// root is still a new lifetime to the source index.
 pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(), CoreError> {
     registered(state, workspace_id)?;
     let id = workspace_id;
@@ -353,5 +355,7 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
     state.scan_coverage.remove(id);
     state.checkouts.remove(id);
     state.auto_checks.remove(id);
+    let removals = state.workspace_removals.entry(id.to_owned()).or_default();
+    *removals = removals.saturating_add(1);
     Ok(())
 }

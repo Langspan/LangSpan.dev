@@ -97,11 +97,13 @@ impl Index {
             )?;
             transaction.commit()?;
         }
-        // The root each workspace was last indexed at (roadmap G6). Added
-        // without a schema change: an index without it is kept, not rebuilt.
+        // The root each workspace was last indexed at, and how many times
+        // its ID had been removed by then (roadmap G6). Added without a
+        // schema change: an index without it is kept, not rebuilt.
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS roots (
-                workspace_id TEXT NOT NULL PRIMARY KEY, root TEXT NOT NULL) WITHOUT ROWID;",
+                workspace_id TEXT NOT NULL PRIMARY KEY, root TEXT NOT NULL,
+                removals INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;",
         )?;
         Ok(Self { connection })
     }
@@ -277,19 +279,29 @@ impl Index {
     /// A workspace now at another root than it was indexed at (`workspace
     /// move`) is another checkout: what was indexed for the old one is
     /// forgotten, so differences between the two checkouts are not reported
-    /// as interface changes. A workspace indexed before roots were kept is
-    /// taken to be at its current root.
-    fn start_again_at(&mut self, workspace_id: &str, root: &Path) -> Result<(), Failure> {
+    /// as interface changes. So is a workspace removed and registered again
+    /// (`removals` differs), even at the same root: what changed while it
+    /// was unregistered is not news from its earlier lifetime. A workspace
+    /// indexed before roots were kept is taken to be at its current root.
+    fn start_again_at(
+        &mut self,
+        workspace_id: &str,
+        root: &Path,
+        removals: u32,
+    ) -> Result<(), Failure> {
         let root = root.to_string_lossy();
-        let indexed: Option<String> = self
+        let indexed: Option<(String, u32)> = self
             .connection
             .query_row(
-                "SELECT root FROM roots WHERE workspace_id = ?1",
+                "SELECT root, removals FROM roots WHERE workspace_id = ?1",
                 [workspace_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if indexed.as_deref() == Some(root.as_ref()) {
+        if indexed
+            .as_ref()
+            .is_some_and(|(at, count)| at == root.as_ref() && *count == removals)
+        {
             return Ok(());
         }
         let transaction = self.connection.transaction()?;
@@ -311,9 +323,10 @@ impl Index {
             }
         }
         transaction.execute(
-            "INSERT INTO roots(workspace_id, root) VALUES (?1, ?2)
-             ON CONFLICT(workspace_id) DO UPDATE SET root = excluded.root",
-            params![workspace_id, root],
+            "INSERT INTO roots(workspace_id, root, removals) VALUES (?1, ?2, ?3)
+             ON CONFLICT(workspace_id) DO UPDATE SET root = excluded.root,
+                removals = excluded.removals",
+            params![workspace_id, root, removals],
         )?;
         transaction.commit()?;
         Ok(())
@@ -326,16 +339,19 @@ impl Index {
     /// already holds for it and is not treated as removed. Parses at most
     /// `FILES_PER_PASS` files and stops at `deadline`; what is left is picked
     /// up by the next call. `now_ms` (wall clock) dates a file that becomes
-    /// partial. Returns the interface changes it found.
+    /// partial. `removals` is how many times the workspace ID had been
+    /// removed when the scan was taken. Returns the interface changes it
+    /// found.
     pub fn update(
         &mut self,
         workspace_id: &str,
         root: &Path,
+        removals: u32,
         scan: &ScanView,
         now_ms: u64,
         deadline: Instant,
     ) -> Result<Vec<Notice>, Failure> {
-        self.start_again_at(workspace_id, root)?;
+        self.start_again_at(workspace_id, root, removals)?;
         let (files, unobserved) = (&scan.files, &scan.unobserved);
         // Each path's indexed digest, and the scanned digest at which it was
         // found too large to parse: that version is not tried again.
@@ -1172,7 +1188,7 @@ mod review_regressions {
             ..ScanView::default()
         };
         index
-            .update("w", &dir.0, &scan, now_ms, Instant::now() + budget)
+            .update("w", &dir.0, 0, &scan, now_ms, Instant::now() + budget)
             .unwrap()
     }
 
@@ -1297,7 +1313,7 @@ mod review_regressions {
             ..ScanView::default()
         };
         let far = Instant::now() + Duration::from_secs(10);
-        index.update("w", &dir.0, &scan, NOW, far).unwrap();
+        index.update("w", &dir.0, 0, &scan, NOW, far).unwrap();
         let oversize: Option<String> = index
             .connection
             .query_row(
@@ -1313,7 +1329,7 @@ mod review_regressions {
         // Back to the scanned content: that version is indexed.
         fs::write(dir.0.join("src/api.rs"), small).unwrap();
         let far = Instant::now() + Duration::from_secs(10);
-        index.update("w", &dir.0, &scan, NOW, far).unwrap();
+        index.update("w", &dir.0, 0, &scan, NOW, far).unwrap();
         let (spots, coverage) = blind(&index, 10);
         assert_eq!(spots, langspan_core::BlindSpots::default());
         assert_eq!(coverage.blind_in_scope, 0);
@@ -1391,6 +1407,7 @@ mod review_regressions {
             .update(
                 "w",
                 &root,
+                0,
                 &scan,
                 NOW,
                 Instant::now() + Duration::from_secs(10),

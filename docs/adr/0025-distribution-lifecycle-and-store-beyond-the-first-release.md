@@ -100,7 +100,14 @@ against, so it stays an owner command, as with `remote enable`.
   interface notices, scan records, automatic check and teammates' received
   publications leave the state, so `status`, `recap`, briefings and the
   dashboard no longer show it. Its Git snapshot is deleted with the event.
-  The event log keeps every earlier event (`langspan events`). A disabled,
+  The state counts each ID's removals (derived on replay, not in the status
+  reply), and every scan and index pass carries the count it was asked for
+  under: the source index keeps the count beside the root and forgets the
+  workspace's entries and baselines when either differs, and a scan asked
+  for before a removal is not recorded after it. So an ID removed, changed
+  while unregistered and registered again at the same root starts a new
+  index baseline instead of reporting interface changes from its earlier
+  lifetime. The event log keeps every earlier event (`langspan events`). A disabled,
   withdrawn publication link stays, so the ID registered and published again
   continues its sequence for teammates. The ID can be registered again and
   starts empty; a hook event from the old root does exactly that.
