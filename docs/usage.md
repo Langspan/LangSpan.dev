@@ -651,6 +651,32 @@ one line of at most 400 bytes and up to eight paths. Each workspace retains at
 most 64 notes and 64 pending messages, dropping the oldest when that limit is
 exceeded. Any local session can read or remove a note.
 
+A briefing carries at most four notes, and only those about the session's own
+files or the whole workspace. `recall` searches all the notes a workspace
+holds, including notes about other files:
+
+```sh
+./target/release/langspan recall demo "upload id" --json
+./target/release/langspan recall demo errors --path src/api.rs --limit 5
+```
+
+The query is 1 to 200 bytes of at most eight words separated by spaces (quoted
+as one argument or given as several). A note is found when every word appears
+in its text or its paths, compared without case and as a substring, so
+`upload id` finds a note saying `Upload_ID`. `--path` keeps only notes about
+that file or about the whole workspace. Notes hit in both text and paths come
+first, then the newest. `--limit` is 1 to 50 (default 10); `truncated: true`
+says more notes matched than were returned, which also happens when the
+answer would pass 28 KiB. The JSON answer is
+`{"workspace_id", "query", "notes": [{"note_id", "author", "text", "paths"}],
+"truncated"}`. A recall is a read: it records nothing, delivers nothing and
+does not change any briefing. Forgotten notes are not found. The MCP tool
+`langspan_recall` takes `workspace_id`, `query` and optional `path` and
+`limit`, and puts a label before the notes saying their text is data, not
+instructions. Its result carries the answer twice, once as escaped JSON
+text, so it can return fewer notes than the CLI (with `truncated: true`) to
+keep the whole reply within one 64 KiB frame.
+
 `message` addresses a registered session in the same workspace. Without `--to`,
 it addresses every other session; without `--from`, its sender label is the
 owner. These labels do not authenticate the sender. Messages arrive through the
@@ -1052,6 +1078,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_today` | The day so far from the event log: sessions, refusals, checks, landings and what is still open, within 2,400 bytes |
 | `langspan_remember` | Keep a local note about the workspace or named files |
 | `langspan_forget` | Remove a remembered note by ID |
+| `langspan_recall` | Search a workspace's remembered notes: every query word in a note's text or paths, without case; best first, at most 50 |
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |
 | `langspan_handoff` | Leave a message for the next other session to take up |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |
