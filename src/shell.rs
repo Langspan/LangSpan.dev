@@ -796,9 +796,11 @@ impl Record {
     /// A finished run's timing for its checkout run's report, as durations
     /// on the daemon's clock read at `now_clock`: how long it ran and how
     /// long ago it finished. A record without those readings (written
-    /// before they were kept) reports the wall-clock duration, finished now.
-    /// A reading from before a reboot is later than `now_clock`, and also
-    /// counts as finished now.
+    /// before they were kept) reports the wall-clock duration, finished now,
+    /// as does a finish reading later than `now_clock` (taken before a
+    /// reboot restarted the clock). A reading from before a reboot that is
+    /// earlier than `now_clock` gives a wrong age; the daemon's run is then
+    /// in a new generation, so it explains no change from before the reboot.
     pub fn checkout_timing(&self, now_clock: u64) -> (u64, u64) {
         match (self.started_clock_ms, self.finished_clock_ms) {
             (Some(started), Some(finished)) => (
@@ -2128,7 +2130,7 @@ mod checkout_timing {
         record.started_clock_ms = Some(1_000);
         record.finished_clock_ms = Some(1_250);
         assert_eq!(record.checkout_timing(5_000), (250, 3_750));
-        // Read before a reboot restarted the clock: finished now.
+        // A finish reading later than the clock now: finished now.
         assert_eq!(record.checkout_timing(100), (250, 0));
     }
 }

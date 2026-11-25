@@ -314,8 +314,10 @@ unreachable sends the age measured at that delivery, so the run keeps its
 own window rather than moving to the retry's arrival: a retry neither loses
 the command's change nor credits a later one to it. A retry differing from
 a recorded report only in that age is the same request. A record written
-before these readings, or read before a reboot restarted the clock, reports
-the run as finishing on arrival. A duration counts as two hours at most. The
+before these readings, or with a finish reading later than the clock now
+(taken before a reboot restarted it), reports the run as finishing on
+arrival; a run reported after a reboot is in a new generation and explains
+no change from before it. A duration counts as two hours at most. The
 run explains a checkout change the scan observed while it ran, or the first
 change observed after it, within 60 seconds, at the branch and HEAD it left.
 Either order works: the scan may see the change before the hook reports, or
