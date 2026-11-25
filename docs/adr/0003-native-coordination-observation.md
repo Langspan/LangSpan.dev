@@ -297,6 +297,53 @@ in `tests/repository_shapes.rs`, through the real hook executable,
 `a_file_changed_after_a_peers_edit_is_refused_once_without_naming_the_peer` in
 `crates/langspan-core/tests/source_versions.rs`.
 
+#### Changes no hook reported, with a Codex session registered
+
+Amended 25 November 2026 (issue #129). Codex keys hook trust to the exact path
+of the project's hooks file. A real run (`docs/evidence/codex-real-host/`)
+trusted LangSpan's hooks with Codex started at `/tmp/…`; `codex exec resume`
+reopened the session at `/private/tmp/…`, the same directory on macOS, where
+Codex ran none of them, warned nobody, and the edit landed seen only as a
+`disk_observed` fact. LangSpan cannot observe a hook that does not run, so it
+reports the effect instead:
+
+- When a scan sees a file's content change since a complete earlier scan, and
+  no checkout change accounts for the scan, the daemon passes those files at
+  their new versions to the core (`ObserveUncoordinated`, internal to the scan
+  like `ObserveDisk`). The core drops files under an active admission (an edit
+  whose report has not arrived) and versions any session of the workspace
+  read or wrote. If any remain and a Codex session is registered there in this
+  generation, it records `UncoordinatedChanged` naming up to two Codex
+  sessions, most recently active first, and up to eight files. A Codex
+  session already named in a notice still within the briefing horizon is not
+  named again, so one resumed session produces one notice, not one per scan.
+- The next briefing to each session of that workspace carries the newest
+  owed notice once (`UncoordinatedDelivered`), as one line naming the session,
+  the likely cause and the files still at an unreported version; a report
+  arriving after the scan removes its file from the line, and a notice whose
+  files are all explained is dropped.
+- The named session is the likely cause, not a proven author: a hand edit or
+  another tool looks the same, and the line says so. With no Codex session
+  registered nothing is recorded, since there is no cause to name and a hand
+  edit is ordinary. Only Codex has this observed path-keyed trust failure,
+  so the rule names Codex sessions only.
+- `langspan hooks install codex` prints the resolved root (no symbolic links)
+  and recommends starting and resuming Codex there; the usage guide and the
+  skill say the same.
+
+The notice adds no trust boundary: its inputs are the daemon's own scan and
+existing session records. Paths in it are repository paths already validated
+by the scan, quoted and bounded like every briefing line. Tests:
+`crates/langspan-core/tests/uncoordinated.rs` (decision, once-per-session
+delivery, horizon, validation and wire vector),
+`a_real_change_no_session_reported_names_the_registered_codex_session` in
+`tests/store_scan_integration.rs` (a real Git checkout and SQLite store),
+`a_change_no_hook_reported_is_told_once_naming_the_registered_codex_session`
+in `tests/briefing.rs` (a real daemon, its background scan and the real hook
+executable) and `codex_hook_install_names_the_resolved_root_to_start_codex_in`
+in `tests/cli.rs`. A real Codex run resumed under an aliased path, showing the
+warning, is pending.
+
 The owner commits individual `DiskObserved` and `BranchObserved` events with the
 complete current snapshot projection in the same SQLite transaction. All
 snapshot paths and file states are validated, including clean or unchanged

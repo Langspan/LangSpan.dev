@@ -75,6 +75,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         scan_failures,
         scan_coverage,
         checkouts,
+        uncoordinated,
         auto_checks,
         check_notices,
         uninstalled_hosts,
@@ -133,6 +134,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         scan_failures: scan_failures.clone(),
         scan_coverage: scan_coverage.clone(),
         checkouts: checkouts.clone(),
+        uncoordinated: uncoordinated.clone(),
         auto_checks: auto_checks.clone(),
         check_notices: keep(check_notices, of_shown),
         uninstalled_hosts: uninstalled_hosts.clone(),
@@ -199,12 +201,13 @@ macro_rules! activity {
 /// Parts of the view left out, in this order, while it does not fit: the
 /// bulkiest histories first, current coordination last. Each name is the one
 /// `StatusSummary::omitted` gives.
-const TRIMS: [Trim; 14] = [
+const TRIMS: [Trim; 15] = [
     activity!("activity.known", known),
     field!("checks", checks),
     field!("landings", landings),
     field!("interface_notices", interface_notices),
     field!("checkouts", checkouts),
+    field!("uncoordinated", uncoordinated),
     field!("notes", notes),
     field!("remote_peers", remote_peers),
     activity!("activity.touched", touched),
