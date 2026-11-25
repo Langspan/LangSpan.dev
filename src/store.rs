@@ -112,7 +112,19 @@ pub struct Execution {
 pub struct Store {
     connection: Connection,
     state: State,
+    tap: Option<Tap>,
 }
+
+/// Events committed since the tap was last drained that its filter keeps,
+/// at most `TAP_LIMIT`: a consumer reads facts already recorded, after they
+/// are durable, and never changes what is committed.
+struct Tap {
+    keep: fn(&Event) -> bool,
+    events: Vec<Event>,
+}
+
+/// The most events a tap holds between drains; later ones are not kept.
+const TAP_LIMIT: usize = 64;
 
 /// A check record written before check commands were redacted can still
 /// hold a command line as typed. It is redacted wherever it is read back:
@@ -216,7 +228,11 @@ impl Store {
             .generation
             .checked_add(1)
             .ok_or("authority generation exhausted; refusing to reuse a generation")?;
-        let mut store = Self { connection, state };
+        let mut store = Self {
+            connection,
+            state,
+            tap: None,
+        };
         // The generation's clock against the wall clock, so times can be
         // placed on a day (the status line and `today`).
         let anchor = ClockAnchor {
@@ -236,6 +252,23 @@ impl Store {
 
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    /// From now on, keep each committed event `keep` accepts, for
+    /// `take_tapped`. Events replayed when the store opened are not kept.
+    pub fn tap(&mut self, keep: fn(&Event) -> bool) {
+        self.tap = Some(Tap {
+            keep,
+            events: Vec::new(),
+        });
+    }
+
+    /// The events kept since the last call, oldest first.
+    pub fn take_tapped(&mut self) -> Vec<Event> {
+        self.tap
+            .as_mut()
+            .map(|tap| std::mem::take(&mut tap.events))
+            .unwrap_or_default()
     }
 
     pub fn refresh(&mut self, now_ms: u64) -> StoreResult<()> {
@@ -1109,6 +1142,17 @@ impl Store {
         }
         transaction.commit()?;
         self.state = next_state;
+        if let Some(tap) = &mut self.tap {
+            let room = TAP_LIMIT.saturating_sub(tap.events.len());
+            let keep = tap.keep;
+            tap.events.extend(
+                events
+                    .iter()
+                    .filter(|event| keep(event))
+                    .take(room)
+                    .cloned(),
+            );
+        }
         Ok(())
     }
 

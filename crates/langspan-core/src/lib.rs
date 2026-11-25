@@ -3094,9 +3094,8 @@ impl<'de> Deserialize<'de> for Command {
     }
 }
 
-// `Status` carries the whole `State` by value. One reply is built per
-// request and serialized at once, so its size costs nothing that matters,
-// and boxing it would change every caller that matches on it.
+// One reply per request, built and sent once: its size does not matter, and
+// boxing `Status`'s state would only add an allocation to every status read.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
