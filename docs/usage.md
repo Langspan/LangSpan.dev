@@ -91,6 +91,10 @@ then preview and apply the install again.
 User-level hooks find the Git repository from the agent's working directory and
 do nothing outside a repository. An existing LangSpan project install takes
 precedence. `langspan doctor --root /path/to/checkout` reports both setups;
+`install` and `hooks install` write `--state-dir` as given, and `doctor` and
+`hosts` compare state directories by their canonical form, so one reached
+through a symbolic link (`/tmp` and `/private/tmp` on macOS) is the same
+coordinator, and only a genuinely different directory is reported.
 `langspan uninstall --apply` removes the user-level entries it recognizes and
 leaves the coordination state directory in place.
 
