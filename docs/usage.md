@@ -94,6 +94,37 @@ precedence. `langspan doctor --root /path/to/checkout` reports both setups;
 `langspan uninstall --apply` removes the user-level entries it recognizes and
 leaves the coordination state directory in place.
 
+#### An agent tool installed later
+
+Install chooses hosts once, when it runs. A host installed afterwards has no
+LangSpan hooks, so its edits are neither checked nor shown to other sessions.
+`langspan hosts [--home DIR] [--json]` lists each host LangSpan knows, with
+`name`, `config_dir`, `present` (its configuration directory exists; `null`
+with an `error` when it could not be looked at), `user_install` (`none`,
+`current`, `outdated`, `other_state_dir` or `unknown`) and `next_step`, the
+install command, where one is proposed. It only reads. Gemini CLI is listed but
+never proposed: install it by naming it, as above.
+
+The coordinator checks the same at start and then every hour
+(`host_check_ms` in `config.json`). A host that is present, has no user-level
+install and has no project install in any registered workspace is recorded once
+as a `host_not_installed` event, with the host name only, and recorded again
+only after it was covered (`host_cleared`). A host whose directory or files
+cannot be read at a check keeps the notice it had; the reason is logged as
+`host_check_failed`, and nothing is recorded until an install or a removal is
+seen. `langspan status` then shows:
+
+```text
+hosts: cursor has a configuration directory but no LangSpan hooks; run `langspan install --hosts cursor --state-dir '/path/to/state'` to preview, then add --apply
+```
+
+The command always names this coordinator's state directory, so the hooks it
+installs talk to the coordinator that reported the host, whatever the shell's
+own default. The dashboard shows the same command under Health. `langspan doctor` marks the host as
+needing attention once sessions of another host use this coordinator. Agents
+are not told. LangSpan never installs or edits a host's configuration by itself;
+after you run the install, the line is gone at the next check.
+
 #### A status line in Claude Code
 
 `langspan install --statusline on` also sets Claude Code's `statusLine` in
@@ -1100,11 +1131,13 @@ processes exit `0` and convey denials through their JSON reply.
 Optional `config.json` in the state directory must be owner-only (`0600`):
 
 ```json
-{"io_timeout_ms":2000,"request_timeout_ms":5000,"max_clients":32,"auto_check_debounce_ms":2000}
+{"io_timeout_ms":2000,"request_timeout_ms":5000,"max_clients":32,"auto_check_debounce_ms":2000,"host_check_ms":3600000}
 ```
 
 Timeout values accept 100–5000 ms; client count accepts 1–128;
-`auto_check_debounce_ms` accepts 50–60000. IPC and MCP frames
+`auto_check_debounce_ms` accepts 50–60000; `host_check_ms`, how often the
+coordinator looks for agent hosts with no LangSpan install, accepts
+100–86400000. IPC and MCP frames
 are limited to 64 KiB. The MCP SDK discards oversized input lines without replying
 to that line. File admission accepts up to 64 distinct normalized keys, 512 bytes
 per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit
