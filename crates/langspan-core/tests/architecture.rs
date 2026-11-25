@@ -53,6 +53,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
     // and its own crate.
     let submodules = [
         include_str!("../src/dashboard.rs"),
+        include_str!("../src/flaky.rs"),
         include_str!("../src/lines.rs"),
         include_str!("../src/status.rs"),
     ];
@@ -89,7 +90,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
         .collect();
     assert_eq!(
         modules,
-        ["mod dashboard;", "mod lines;", "mod status;"],
+        ["mod dashboard;", "mod flaky;", "mod lines;", "mod status;"],
         "a new core module needs this check"
     );
 }

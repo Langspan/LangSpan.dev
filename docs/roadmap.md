@@ -130,7 +130,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 ## F. Checks and landing
 
 - [F1: Say which tests a write broke](https://github.com/Langspan/LangSpan.dev/issues/69): a failed automatic check does not say whether this write, an earlier state or a peer broke the test.
-- [F2: Learn which tests flip on unchanged code](https://github.com/Langspan/LangSpan.dev/issues/70): every agent that hits a flaky test tries to fix code that is not broken.
 - [F3: Run the wider check when an interface changes](https://github.com/Langspan/LangSpan.dev/issues/71): the fast check misses breaks in packages that call a changed exported function.
 - [F5: Rebase landings and adapt identifier renames](https://github.com/Langspan/LangSpan.dev/issues/72): a landing refused over a rename leaves every use to fix by hand, and there is no linear-history landing.
 - [F8: An integration branch every session lands on](https://github.com/Langspan/LangSpan.dev/issues/73): each agent's own branch leaves the person merging six branches by hand to see the work together.

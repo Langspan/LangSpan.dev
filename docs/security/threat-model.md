@@ -351,6 +351,24 @@ model.
 | Denial of service | Off by default. One run per workspace at a time; a burst of batches waits for a pause of `auto_check_debounce_ms` (50 ms to 60 s) and at most 30 s; the command is killed with its process group at its limit (1 to 3,600 s) and whenever it ends. The trigger queue holds 256 and never blocks the state owner; output kept while running is 8 KiB. Each run takes two snapshots of the working tree, plus one per trigger while it runs. If the daemon stops, a running check's process group is not killed and runs to its end. |
 | Elevation of privilege | **The command runs outside the agent host**: as the daemon's user, with the daemon's environment, in the workspace root, not in the host's sandbox and not behind its permission prompts. Code an agent writes and the command executes (tests, build scripts, a `Makefile`) therefore runs without the host asking, and a prompt-injected agent can use that to run code the host would have refused. Turning the check on is the owner's grant of this. There is no MCP tool for it; the CLI and any other client of the owner-only socket can set it, so an agent that runs `langspan check auto` through its shell does so under the host's own prompt for that shell command. An owner who runs agents in a sandbox for safety should leave it off. |
 
+### Tests that flip on unchanged code
+
+Learning which tests flip (issue #70, ADR 0030) widens three things: a quick
+failing automatic check runs the owner's command a second time; test names
+read from command output are stored in the event log and placed in the
+model's context with a label that can change how it treats a failure; and
+`check run` now reads its command's output instead of passing it straight to
+the terminal.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Any client of the owner-only socket can send `record_check` with test names and a rerun's names, so a same-user process can make a test look flaky. It cannot turn a failure into a pass: the label never changes a record's result or what a landing accepts. |
+| Tampering (prompt injection) | Test names are repository-controlled text. Each is at most 200 bytes on one line, without control characters or anything redaction would change, at most 100 and 10 KiB per run; the briefing cleans deceptive characters and shows at most 480 bytes of them, labelled as named in the check's output, before the output lines and their data-not-instructions label. A crafted output can make its own failures look known to flip only by flipping on unchanged code, which a real program can do on purpose: a test written to fail every other run is labelled flaky. The label says the check still failed, and the skill tells agents to read the output before dismissing it. |
+| Repudiation | Each result's names are a `tests_recorded` event, and forgetting is `flaky_test_forgotten`; a flip is derived from two of those events, so the log shows why a test is labelled. A rerun that is stopped records nothing. |
+| Information disclosure | Names stay in the local event log and the local agent's context; nothing is published to the remote (ADR 0006's payload is unchanged). A name that looks like a secret is left out. `check run` passes its output on to standard error unchanged, and keeps at most 4 MiB of it in memory until it ends. |
+| Denial of service | One rerun per failing automatic check, only when the first run named a failing test and took at most `flaky_rerun_max_s` (default 30 s, at most 3,600, 0 off), under the same time limit, process-group kill and cancellation as any run; the result reaches the agent later by at most that long. The worker keeps at most 4 MiB of a run's output, then its last 8 KiB. At most 500 tests and 16 check names are followed per workspace. |
+| Elevation of privilege | The rerun executes the same command, as the same user, on the same tree as the run before it: no grant beyond the owner's turning the check on. Forgetting a test is CLI only; the MCP tool is read-only. |
+
 ## Remembered notes
 
 A note is text one session or the owner asks LangSpan to show other sessions.

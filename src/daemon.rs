@@ -44,6 +44,9 @@ mod unix {
         /// How long a workspace's sessions must stop writing before its
         /// automatic check starts, so one burst of batches runs one check.
         auto_check_debounce_ms: u64,
+        /// A failing automatic check that took at most this long is run once
+        /// more on the same tree, to learn which tests flip; 0 turns it off.
+        flaky_rerun_max_s: u64,
     }
     impl Default for Config {
         fn default() -> Self {
@@ -53,6 +56,7 @@ mod unix {
                 max_clients: 32,
                 remote_pass_ms: 5000,
                 auto_check_debounce_ms: 2000,
+                flaky_rerun_max_s: 30,
             }
         }
     }
@@ -82,9 +86,10 @@ mod unix {
                 || !(1..=128).contains(&result.max_clients)
                 || !(200..=600_000).contains(&result.remote_pass_ms)
                 || !(50..=60_000).contains(&result.auto_check_debounce_ms)
+                || result.flaky_rerun_max_s > 3600
             {
                 return Err(
-                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000"
+                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600"
                         .into(),
                 );
             }
@@ -535,11 +540,14 @@ mod unix {
         {
             let sender = sender.clone();
             let check_sender = check_sender.clone();
-            let debounce = Duration::from_millis(config.auto_check_debounce_ms);
+            let timing = auto_check::Timing {
+                debounce: Duration::from_millis(config.auto_check_debounce_ms),
+                rerun_max: Duration::from_secs(config.flaky_rerun_max_s),
+            };
             std::thread::Builder::new()
                 .name("langspan-auto-checks".into())
                 .spawn(move || {
-                    auto_check::worker(check_sender, check_receiver, debounce, |id, command| {
+                    auto_check::worker(check_sender, check_receiver, timing, |id, command| {
                         ask(&sender, id, command)
                     })
                 })?;

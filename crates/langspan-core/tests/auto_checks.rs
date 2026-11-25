@@ -131,6 +131,8 @@ fn record(state: &mut State, id: &str, tree: char, sessions: &[&str], tail: &str
                 tail: tail.into(),
                 timed_out_s: None,
             }),
+            tests: None,
+            rerun: None,
         },
         10,
     )
@@ -354,6 +356,8 @@ fn several_waiting_results_are_delivered_one_per_briefing_newest_first() {
                     tail: String::new(),
                     timed_out_s: None,
                 }),
+                tests: None,
+                rerun: None,
             },
             11,
         )
@@ -394,6 +398,7 @@ fn a_report_that_disagrees_with_its_record_or_has_none_does_not_apply() {
         duration_ms: 900,
         timed_out_s: None,
         tail: String::new(),
+        failures: Vec::new(),
     };
     let report = |notice: &langspan_core::CheckNotice| Event::CheckReported {
         session_ids: vec!["alice".into()],

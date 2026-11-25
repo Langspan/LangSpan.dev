@@ -569,6 +569,10 @@ fn run_check(
             result,
             duration_ms,
             report: None,
+            // A combination's check teaches nothing about flips: each one
+            // runs on a new temporary checkout of a combined tree.
+            tests: None,
+            rerun: None,
         },
     )?
     .outcome

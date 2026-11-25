@@ -7,6 +7,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 mod dashboard;
+mod flaky;
 mod lines;
 mod status;
 pub use dashboard::{
@@ -14,6 +15,11 @@ pub use dashboard::{
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
     LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow, PublishRow, RecentFile, ScanRow,
     WorkspaceRow, dashboard_denials,
+};
+pub use flaky::{
+    FLAKY_DECAY_RUNS, FLAKY_MIN_FLIPS, FLAKY_WINDOW_RUNS, FlakyCount, FlakyTest, LastTests,
+    MAX_FLAKY_LISTED, MAX_LEARNED_CHECKS, MAX_LEARNED_TESTS, MAX_TEST_NAME_BYTES, MAX_TEST_NAMES,
+    MAX_TEST_RESULT_BYTES, TestFailure, TestHistory, TestLearning, TestResults,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
@@ -807,6 +813,10 @@ pub struct CheckNotice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timed_out_s: Option<u32>,
     pub tail: String,
+    /// The failing tests its output named, each labelled when it is known
+    /// to flip on unchanged code. Empty when no test was named.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<TestFailure>,
 }
 
 /// A push of an integrated result that LangSpan made at the owner's command.
@@ -1407,6 +1417,9 @@ pub struct State {
     /// Automatic check results not yet delivered, per session, newest first.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub check_notices: BTreeMap<String, Vec<CheckNotice>>,
+    /// Tests that flip on unchanged code, learned per workspace.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub test_learning: BTreeMap<String, TestLearning>,
 }
 
 /// Checkout changes kept per workspace.
@@ -1585,6 +1598,30 @@ pub enum Event {
     CheckDelivered {
         session_id: String,
         check_id: String,
+    },
+    /// Which tests one run of check `name` failed and passed on `tree_oid`:
+    /// names only, no output. Follows the `CheckRecorded` of record
+    /// `check_id`; `rerun` for the run made again on the same tree, which is
+    /// no record of its own. Compared with the check's last such result,
+    /// unless a write was recorded in the workspace since.
+    TestsRecorded {
+        workspace_id: String,
+        check_id: String,
+        name: String,
+        tree_oid: String,
+        command: String,
+        results: TestResults,
+        #[serde(default, skip_serializing_if = "is_false")]
+        rerun: bool,
+        at_ms: u64,
+    },
+    /// The owner cleared what was learned about `test`, in check `name` or
+    /// in every check.
+    FlakyTestForgotten {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        test: String,
     },
     Landed {
         landing: Landing,
@@ -1849,6 +1886,29 @@ pub enum Command {
         /// end.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         report: Option<CheckReport>,
+        /// The tests its output named, for a working-tree check that passed
+        /// or failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tests: Option<TestResults>,
+        /// The tests of a second run on the same tree, made to learn which
+        /// tests flip; its result is not recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rerun: Option<TestResults>,
+    },
+    /// Read-only: the tests known to flip on unchanged code, of check `name`
+    /// or of every check.
+    FlakyTests {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Clear what was learned about `test`, in check `name` or in every
+    /// check.
+    ForgetFlakyTest {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        test: String,
     },
     /// Run `argv` automatically after a session's writes in the workspace,
     /// recorded as check `name`. Replaces any earlier automatic check.
@@ -2251,6 +2311,29 @@ enum CommandWire {
         /// end.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         report: Option<CheckReport>,
+        /// The tests its output named, for a working-tree check that passed
+        /// or failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tests: Option<TestResults>,
+        /// The tests of a second run on the same tree, made to learn which
+        /// tests flip; its result is not recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rerun: Option<TestResults>,
+    },
+    /// Read-only: the tests known to flip on unchanged code, of check `name`
+    /// or of every check.
+    FlakyTests {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Clear what was learned about `test`, in check `name` or in every
+    /// check.
+    ForgetFlakyTest {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        test: String,
     },
     /// Run `argv` automatically after a session's writes in the workspace,
     /// recorded as check `name`. Replaces any earlier automatic check.
@@ -2659,6 +2742,19 @@ pub enum Outcome {
     },
     Checks {
         checks: Vec<CheckView>,
+    },
+    /// Known-flaky tests, newest flip first; `more` when some were left out.
+    FlakyTests {
+        workspace_id: String,
+        tests: Vec<FlakyTest>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        more: bool,
+    },
+    /// `forgotten` is false when nothing was learned about the test.
+    FlakyTestForgotten {
+        workspace_id: String,
+        test: String,
+        forgotten: bool,
     },
     /// `ready` only when a passing check of that name exists for exactly
     /// the tree asked about. `reason` says what is missing otherwise.
@@ -3676,6 +3772,8 @@ fn decide_checked(
             result,
             duration_ms,
             report,
+            tests,
+            rerun,
         } => {
             let check = CheckRecord {
                 check_id: request_id.into(),
@@ -3695,6 +3793,56 @@ fn decide_checked(
             let mut events = vec![Event::CheckRecorded {
                 check: check.clone(),
             }];
+            // What this record teaches about tests that flip, learned on a
+            // copy so that its notice is labelled with it.
+            let mut learning = state
+                .test_learning
+                .get(workspace_id)
+                .cloned()
+                .unwrap_or_default();
+            if rerun.is_some() && tests.is_none() {
+                return Err(error(
+                    "invalid_test_results",
+                    "A rerun's test results come with the record's own",
+                ));
+            }
+            let runs = tests
+                .iter()
+                .map(|results| (results, false))
+                .chain(rerun.iter().map(|results| (results, true)));
+            for (results, again) in runs {
+                if !inputs.is_empty() || matches!(result, CheckResult::Inconclusive {}) {
+                    return Err(error(
+                        "invalid_test_results",
+                        "Test results belong to a working-tree check that passed or failed",
+                    ));
+                }
+                let passed = if again {
+                    results.all_passed
+                } else {
+                    matches!(result, CheckResult::Passed {})
+                };
+                flaky::validate_test_results(results, passed)?;
+                learning.learn(name, tree_oid, command, results, now_ms);
+                events.push(Event::TestsRecorded {
+                    workspace_id: workspace_id.clone(),
+                    check_id: check.check_id.clone(),
+                    name: name.clone(),
+                    tree_oid: tree_oid.clone(),
+                    command: command.clone(),
+                    results: results.clone(),
+                    rerun: again,
+                    at_ms: now_ms,
+                });
+            }
+            let failures = tests
+                .iter()
+                .flat_map(|results| &results.failed)
+                .map(|test| TestFailure {
+                    test: test.clone(),
+                    flaky: learning.label(name, test),
+                })
+                .collect();
             if let Some(report) = report {
                 let reported = Event::CheckReported {
                     session_ids: report.session_ids.clone(),
@@ -3706,6 +3854,7 @@ fn decide_checked(
                         duration_ms: check.duration_ms,
                         timed_out_s: report.timed_out_s,
                         tail: report.tail.clone(),
+                        failures,
                     },
                 };
                 validate_check_report(state, &check.workspace_id, &reported)?;
@@ -3714,6 +3863,50 @@ fn decide_checked(
             Ok(Decision {
                 events,
                 outcome: Outcome::CheckRecorded { check },
+            })
+        }
+        Command::FlakyTests { workspace_id, name } => {
+            validate_known_workspace(state, workspace_id)?;
+            let (tests, more) = state
+                .test_learning
+                .get(workspace_id)
+                .map(|learning| learning.flaky(name.as_deref(), now_ms))
+                .unwrap_or_default();
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::FlakyTests {
+                    workspace_id: workspace_id.clone(),
+                    tests,
+                    more,
+                },
+            })
+        }
+        Command::ForgetFlakyTest {
+            workspace_id,
+            name,
+            test,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            validate_forget_flaky(name.as_deref(), test)?;
+            let forgotten = state
+                .test_learning
+                .get(workspace_id)
+                .is_some_and(|learning| learning.follows(name.as_deref(), test));
+            Ok(Decision {
+                events: if forgotten {
+                    vec![Event::FlakyTestForgotten {
+                        workspace_id: workspace_id.clone(),
+                        name: name.clone(),
+                        test: test.clone(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                outcome: Outcome::FlakyTestForgotten {
+                    workspace_id: workspace_id.clone(),
+                    test: test.clone(),
+                    forgotten,
+                },
             })
         }
         Command::AutoCheckEnable {
@@ -5891,6 +6084,36 @@ fn validate_check_report(
     Ok(())
 }
 
+/// A write was recorded in the workspace: later check results are not
+/// compared with earlier ones to learn which tests flip.
+fn wrote_in(state: &mut State, workspace_id: &str) {
+    if let Some(learning) = state.test_learning.get_mut(workspace_id) {
+        learning.wrote();
+        if learning.is_empty() {
+            state.test_learning.remove(workspace_id);
+        }
+    }
+}
+
+fn validate_forget_flaky(name: Option<&str>, test: &str) -> Result<(), CoreError> {
+    if let Some(name) = name {
+        validate_id(name, "check name")?;
+    }
+    if test.is_empty()
+        || test.len() > MAX_TEST_NAME_BYTES
+        || test.trim() != test
+        || test.chars().any(char::is_control)
+    {
+        return Err(error(
+            "invalid_test_name",
+            &format!(
+                "A test name is 1 to {MAX_TEST_NAME_BYTES} bytes on one line without surrounding spaces"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_prompt_summary(summary: &str) -> Result<(), CoreError> {
     if summary.is_empty()
         || summary.len() > MAX_PROMPT_SUMMARY_BYTES
@@ -6360,6 +6583,9 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             // same-session holders differently; preserve those historical
             // decisions rather than rejecting an existing event log.
             if observation.result == ToolResult::Succeeded {
+                if !observation.paths.is_empty() {
+                    wrote_in(state, &observation.workspace_id);
+                }
                 let activity = activity_mut(state, &observation.session_id);
                 activity.wrote_since_boundary |= !observation.paths.is_empty();
                 // The file is no longer the version the session knew. Until
@@ -6766,6 +6992,71 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 }
             }
         }
+        Event::TestsRecorded {
+            workspace_id,
+            check_id,
+            name,
+            tree_oid,
+            command,
+            results,
+            rerun,
+            at_ms,
+        } => {
+            let Some(record) = state
+                .checks
+                .get(workspace_id)
+                .and_then(|records| records.iter().find(|record| record.check_id == *check_id))
+            else {
+                return Err(error(
+                    "invalid_event",
+                    "Test results follow the record they belong to",
+                ));
+            };
+            if record.name != *name
+                || record.tree_oid != *tree_oid
+                || record.command != *command
+                || !record.inputs.is_empty()
+            {
+                return Err(error(
+                    "invalid_event",
+                    "Test results must match the working-tree record they belong to",
+                ));
+            }
+            let passed = match (&record.result, rerun) {
+                (_, true) => results.all_passed,
+                (CheckResult::Passed {}, false) => true,
+                (CheckResult::Failed { .. }, false) => false,
+                (CheckResult::Inconclusive {}, _) => {
+                    return Err(error(
+                        "invalid_event",
+                        "An inconclusive record has no test results",
+                    ));
+                }
+            };
+            flaky::validate_test_results(results, passed)?;
+            state
+                .test_learning
+                .entry(workspace_id.clone())
+                .or_default()
+                .learn(name, tree_oid, command, results, *at_ms);
+        }
+        Event::FlakyTestForgotten {
+            workspace_id,
+            name,
+            test,
+        } => {
+            validate_forget_flaky(name.as_deref(), test)?;
+            let Some(learning) = state.test_learning.get_mut(workspace_id) else {
+                return Err(error(
+                    "invalid_event",
+                    "Nothing was learned about tests in this workspace",
+                ));
+            };
+            learning.forget(name.as_deref(), test);
+            if learning.is_empty() {
+                state.test_learning.remove(workspace_id);
+            }
+        }
         Event::Landed { landing } => {
             validate_request_id(&landing.landing_id)?;
             validate_known_workspace(state, &landing.workspace_id)?;
@@ -6953,12 +7244,14 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             validate_disk_observation(state, observation)?;
             // A first baseline is not a change. Anything else means the
             // working tree a check ran on is no longer the working tree.
-            if observation
+            let changed = observation
                 .before
                 .as_ref()
-                .is_some_and(|before| before != &observation.after)
-                && let Some(records) = state.checks.get_mut(&observation.workspace_id)
-            {
+                .is_some_and(|before| before != &observation.after);
+            if changed {
+                wrote_in(state, &observation.workspace_id);
+            }
+            if changed && let Some(records) = state.checks.get_mut(&observation.workspace_id) {
                 for record in records.iter_mut().filter(|record| record.inputs.is_empty()) {
                     record.changed_since = true;
                 }

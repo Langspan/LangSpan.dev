@@ -63,8 +63,19 @@ pub fn redact_command(command: &mut Command) {
         Command::Remember { text, .. }
         | Command::SendMessage { text, .. }
         | Command::Handoff { text, .. } => *text = redact(text),
-        Command::RecordCheck { command, .. } => {
+        Command::RecordCheck {
+            command,
+            tests,
+            rerun,
+            ..
+        } => {
             *command = redact_bounded(command, langspan_core::MAX_CHECK_COMMAND_BYTES);
+            // A test name that looks like a secret is left out, not
+            // rewritten: a changed name would be another test.
+            for results in tests.iter_mut().chain(rerun.iter_mut()) {
+                results.failed.retain(|name| !contains_secret(name));
+                results.passed.retain(|name| !contains_secret(name));
+            }
         }
         _ => {}
     }

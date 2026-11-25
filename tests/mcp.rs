@@ -175,6 +175,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
             "langspan_commit_mine",
             "langspan_complete",
             "langspan_events",
+            "langspan_flaky_tests",
             "langspan_forget",
             "langspan_handoff",
             "langspan_impact",
@@ -221,6 +222,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_impact"
                 | "langspan_recap"
                 | "langspan_land_queue"
+                | "langspan_flaky_tests"
         ) {
             assert!(
                 tool.input_schema["required"]

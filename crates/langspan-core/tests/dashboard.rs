@@ -239,6 +239,8 @@ fn evidence_and_risks_are_carried_with_their_applicability() {
             result: CheckResult::Failed { exit_code: 101 },
             duration_ms: 50,
             report: None,
+            tests: None,
+            rerun: None,
         },
         100,
     );

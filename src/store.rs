@@ -422,6 +422,7 @@ impl Store {
                 | Command::RemoteOutbox { .. }
                 | Command::RemoteSent { .. }
                 | Command::CheckStatus { .. }
+                | Command::FlakyTests { .. }
                 | Command::LandingReadiness { .. }
                 | Command::TurnQueue { .. }
                 | Command::Recap { .. }
@@ -512,6 +513,7 @@ impl Store {
             // A read: decided by the core, never recorded.
             Command::RemoteOutbox { .. }
             | Command::CheckStatus { .. }
+            | Command::FlakyTests { .. }
             | Command::LandingReadiness { .. }
             | Command::TurnQueue { .. }
             | Command::Recap { .. } => {
