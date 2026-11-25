@@ -28,7 +28,7 @@ events and can follow them.
 | A17 | Wake: an unattended agent started for an untaken message | None | Not now. Starting agents without the owner is a large step in autonomy and needs its own ADR |
 | B12 | Tripwire that fires into the next editor's tool result | Notes told at the next prompt | Not now |
 | C3 | Start-of-session recency: changed modules, renames, hotspots, abandoned work | Peers' recent edits and task lines | Not now |
-| C8 | Two tasks on the same code told before either writes | Peers ranked by overlap | Not now |
+| C8 | Two tasks on the same code told before either writes | Peers ranked by overlap | Built 25 November 2026 ([issue #45](https://github.com/Langspan/LangSpan.dev/issues/45)), ahead of the condition below: prompt targets, see [ADR 0004](0004-automatic-peer-briefing.md). Not yet run on a host |
 | C9 | Automatic handoff and trail at session end | Manual `handoff` | Not now. Can be built from recorded edits once L2 and L3 deliver the end events |
 | C12 | Worktree advice and tidying | None | Not now. Tidying would remove the owner's worktrees |
 | E1 | Notes anchored to a definition with staleness, tags and confidence | One-line notes on a workspace or files | Not now |

@@ -70,6 +70,11 @@ impl World {
             "def unrelated():\n    return 1\n",
         )
         .unwrap();
+        fs::write(
+            work.join("src/http.rs"),
+            "pub fn parse_header(line: &str) -> Option<(&str, &str)> {\n    line.split_once(':')\n}\n",
+        )
+        .unwrap();
         git(&work, &["init", "--quiet", "--initial-branch=main"]);
         git(&work, &["add", "."]);
         git(&work, &["commit", "--quiet", "-m", "init"]);
@@ -118,13 +123,13 @@ impl World {
             String::from_utf8(output.stdout).unwrap(),
         )
     }
-    /// The index covers all three source files at their current content.
+    /// The index covers all four source files at their current content.
     fn wait_for_index(&self) {
         let deadline = Instant::now() + WAIT;
         loop {
             let (_, text) = self.cli(&["graph", "symbol", "app", "upload", "--json"]);
             let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
-            if outcome["coverage"]["current_files"] == 3 {
+            if outcome["coverage"]["current_files"] == 4 {
                 return;
             }
             assert!(Instant::now() < deadline, "never indexed: {outcome:#}");
@@ -178,6 +183,25 @@ impl World {
             event["permission_mode"] = json!("default");
         }
         self.hook(vendor, extra, &event)
+    }
+    /// The end of a Claude Code tool batch: its mid-turn delivery point.
+    fn batch(&self, session: &str, call: &str) -> Run {
+        self.hook(
+            "claude-code",
+            &[],
+            &json!({
+                "session_id": session, "cwd": self.work(), "hook_event_name": "PostToolBatch",
+                "prompt_id": "p0", "permission_mode": "default",
+                "tool_calls": [{"tool_name": "Read", "tool_use_id": call,
+                                "tool_input": {"file_path": self.work().join("src/http.rs")},
+                                "tool_response": "read"}],
+            }),
+        )
+    }
+    fn status(&self) -> Value {
+        let (code, text) = self.cli(&["status", "--json"]);
+        assert_eq!(code, 0, "{text}");
+        serde_json::from_str(&text).unwrap()
     }
     /// A complete reported Claude Code write of a new file.
     fn writes(&self, session: &str, call: &str, file: &str) {
@@ -350,4 +374,148 @@ fn the_daemon_refuses_an_unbounded_code_context_query_and_records_none() {
     assert_eq!(ask(json!(["upload"]), 3)["matches"][0]["name"], "upload");
     let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
     assert!(!events.contains("missing_name"), "{events}");
+}
+
+const POINTS: &str = r#"task points at your files: "src/http.rs";"#;
+
+/// The peer line about `who` in a briefing, which must be there.
+fn line_about<'a>(context: &'a str, who: &str) -> &'a str {
+    context
+        .lines()
+        .find(|line| line.starts_with(&format!("- {who} ")))
+        .unwrap_or_else(|| panic!("no line about {who}: {context}"))
+}
+
+fn assert_bounded(context: &str) {
+    assert!(context.len() <= 2400, "{}: {context}", context.len());
+    for line in context.lines() {
+        assert!(line.len() <= 700, "{}: {line}", line.len());
+    }
+}
+
+/// Roadmap C8: two sessions whose prompts name `parse_header` are each told
+/// of the other before either writes. The second is told in its prompt's
+/// briefing, the first at its next delivery point: mid-turn on Claude Code,
+/// its next prompt on Codex.
+#[test]
+fn two_prompts_naming_one_function_tell_each_session_of_the_other_before_either_writes() {
+    for (first, second) in [("claude-code", "codex"), ("codex", "claude-code")] {
+        let w = World::new();
+        w.wait_for_index();
+        let alice = w.prompt(
+            first,
+            "alice",
+            "make `parse_header` accept folded lines",
+            &[],
+        );
+        assert_eq!(alice.coverage, "code_briefed", "{first}: no peers yet");
+        // The second line of a prompt never leaves the session.
+        let bob = w.prompt(
+            second,
+            "bob",
+            "fix the 400 from parse_header on empty values\nzebra_private_detail",
+            &[],
+        );
+        assert_eq!(bob.coverage, "briefed", "{first} then {second}");
+        let context = bob.context.unwrap();
+        assert_bounded(&context);
+        let line = line_about(&context, &format!("{first} session alice"));
+        assert!(
+            line.contains(&format!(r#"in this checkout on branch "main": {POINTS}"#)),
+            "{line}"
+        );
+        assert!(
+            line.contains(r#"task: "make `parse_header` accept folded lines";"#),
+            "{line}"
+        );
+        assert!(!line.contains("editing now") && !line.contains("edited:"));
+
+        // The first session's next delivery point, once.
+        let told = if first == "claude-code" {
+            let told = w.batch("alice", "call-1");
+            assert_eq!(told.coverage, "batch_briefed", "{}", told.stdout);
+            let again = w.batch("alice", "call-2");
+            assert_eq!(again.coverage, "batch_recorded", "{}", again.stdout);
+            told
+        } else {
+            let told = w.prompt(first, "alice", "continue", &[]);
+            assert_eq!(told.coverage, "briefed", "{}", told.stdout);
+            let again = w.prompt(first, "alice", "continue", &[]);
+            assert_eq!(again.coverage, "no_briefing", "{}", again.stdout);
+            told
+        };
+        let context = told.context.unwrap();
+        assert_bounded(&context);
+        assert!(
+            line_about(&context, &format!("{second} session bob")).contains(POINTS),
+            "{context}"
+        );
+
+        // `status --json` shows each session's targets: paths only.
+        let status = w.status();
+        for session in [format!("{first}.alice"), format!("{second}.bob")] {
+            let targets = &status["outcome"]["state"]["activity"][&session]["prompt_targets"];
+            assert_eq!(targets["paths"], json!(["src/http.rs"]), "{status:#}");
+        }
+        let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
+        let events: Value = serde_json::from_str(&events).unwrap();
+        let recorded: Vec<&Value> = events["outcome"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| &record["event"])
+            .filter(|event| event["type"] == "prompt_targets_set")
+            .collect();
+        assert_eq!(recorded.len(), 2, "{events:#}");
+        for event in recorded {
+            let mut keys: Vec<&str> = event
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["at_ms", "generation", "paths", "session_id", "type"]);
+            assert_eq!(event["paths"], json!(["src/http.rs"]));
+        }
+        let text = events.to_string();
+        assert!(!text.contains("zebra_private_detail"), "{text}");
+    }
+}
+
+#[test]
+fn with_the_prompt_summary_or_code_briefing_off_no_targets_are_recorded() {
+    let w = World::new();
+    w.wait_for_index();
+    let alice = w.prompt("claude-code", "alice", "make parse_header strict", &[]);
+    assert_eq!(alice.coverage, "code_briefed");
+    for (session, flag) in [("carol", "--prompt-summary"), ("dave", "--code-briefing")] {
+        let run = w.prompt(
+            "codex",
+            session,
+            "fix parse_header on empty values",
+            &[flag, "off"],
+        );
+        // Carol is still told about alice's task line, as before; neither
+        // is told that alice's task points at its files, which are none.
+        if let Some(context) = &run.context {
+            assert!(!context.contains("task points at"), "{context}");
+        }
+        let status = w.status();
+        let activity = &status["outcome"]["state"]["activity"][format!("codex.{session}")];
+        assert!(activity["prompt_targets"].is_null(), "{status:#}");
+    }
+    // Alice is told nothing new about them.
+    let batch = w.batch("alice", "call-1");
+    assert!(
+        batch
+            .context
+            .as_deref()
+            .is_none_or(|context| !context.contains("task points at")),
+        "{}",
+        batch.stdout
+    );
+    let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
+    let count = events.matches("prompt_targets_set").count();
+    assert_eq!(count, 1, "only alice's: {events}");
 }
