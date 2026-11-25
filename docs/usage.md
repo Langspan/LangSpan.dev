@@ -590,7 +590,7 @@ one explicitly, use `langspan ack bob MESSAGE_ID --request-id ack-1`.
 
 A briefing renders each message on one line of at most 700 bytes. Quoting can
 take a 400-byte message with many quotes or long paths past that; the line is
-then cut and ends with `… (cut; langspan messages show WORKSPACE MESSAGE_ID)`,
+then cut and ends with `… (cut; langspan messages show -- WORKSPACE MESSAGE_ID)`,
 inside the 700 bytes. `langspan messages show demo m-9 [--json]` (MCP
 `langspan_show_message`) returns that message in full as it was sent: its ID,
 sender (`null` for the owner), recipient, whole text, every path and

@@ -45,7 +45,7 @@ held receives it too. The event log keeps the whole history.
 **A cut line names how to read the rest** (25 November 2026, roadmap E13). An
 adapter renders a message on one line of at most `MESSAGE_LINE_LIMIT` (700)
 bytes. Quoting can take a 400-byte message with many quotes or long paths
-past it; the cut line then ends with `… (cut; langspan messages show
+past it; the cut line then ends with `… (cut; langspan messages show --
 WORKSPACE ID)`, inside the limit, so the core's per-briefing bound is
 unchanged. `ShowMessage` (`langspan messages show`, MCP
 `langspan_show_message`) is a read the store answers from the newest

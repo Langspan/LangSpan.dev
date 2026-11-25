@@ -1493,14 +1493,15 @@ const PEERS_NOT_SHOWN: &str = "(Other sessions' work in this repository is not s
 /// One message's rendered line, within `MESSAGE_LINE_LIMIT`. A line that
 /// quoting took past it ends with the command that shows the message in
 /// full, inside the limit. Both IDs are validated identifiers; cleaning
-/// them only bounds what an older record could hold.
+/// them only bounds what an older record could hold. `--` ends option
+/// parsing, since a valid ID can begin with a hyphen.
 fn cut_message_line(line: String, message: &langspan_core::Message) -> String {
     let limit = langspan_core::MESSAGE_LINE_LIMIT;
     if line.len() <= limit {
         return line;
     }
     let suffix = format!(
-        " (cut; langspan messages show {} {})",
+        " (cut; langspan messages show -- {} {})",
         clean(&message.workspace_id, 128),
         clean(&message.message_id, 128)
     );
@@ -3819,7 +3820,7 @@ mod briefing_text {
             let line = &lines[0];
             assert!(line.len() <= MESSAGE_LINE_LIMIT, "{}: {line}", line.len());
             let suffix = format!(
-                "… (cut; langspan messages show {} {})",
+                "… (cut; langspan messages show -- {} {})",
                 "w".repeat(128),
                 "m".repeat(128)
             );
@@ -3832,7 +3833,7 @@ mod briefing_text {
         short.workspace_id = "demo".into();
         let line = &message_lines(vec![short])[0];
         assert!(
-            line.ends_with("… (cut; langspan messages show demo m-9)"),
+            line.ends_with("… (cut; langspan messages show -- demo m-9)"),
             "{line}"
         );
         assert!(line.len() <= MESSAGE_LINE_LIMIT);

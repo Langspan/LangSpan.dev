@@ -273,8 +273,8 @@ fn a_message_cut_in_a_briefing_is_shown_in_full_even_after_it_is_acknowledged() 
         .collect();
     assert_eq!(cut.len(), 2, "{context}");
     assert!(
-        cut[0].ends_with("… (cut; langspan messages show work m-9)")
-            || cut[1].ends_with("… (cut; langspan messages show work m-9)"),
+        cut[0].ends_with("… (cut; langspan messages show -- work m-9)")
+            || cut[1].ends_with("… (cut; langspan messages show -- work m-9)"),
         "{context}"
     );
     for line in &cut {
@@ -338,6 +338,45 @@ fn a_message_cut_in_a_briefing_is_shown_in_full_even_after_it_is_acknowledged() 
     assert_eq!(code, 0, "{shown}");
     let shown: Value = serde_json::from_str(&shown).unwrap();
     assert_eq!(shown["outcome"]["message"]["text"], json!(text));
+}
+
+/// Workspace and request IDs may begin with a hyphen. The command a cut line
+/// names ends option parsing first, so it runs as printed for such an ID.
+#[test]
+fn the_command_a_cut_line_names_runs_for_an_id_beginning_with_a_hyphen() {
+    let f = Fixture::new();
+    f.start_session("claude-code", ALICE);
+    let alice = format!("claude-code.{ALICE}");
+    let text = "\"".repeat(400);
+    f.send(&[
+        "message",
+        "work",
+        &text,
+        "--to",
+        &alice,
+        "--request-id",
+        "-m9",
+    ]);
+    let prompt = f.prompt("claude-code", ALICE);
+    let context = prompt.context.as_deref().unwrap();
+    let line = context
+        .lines()
+        .find(|line| line.starts_with("- From the owner"))
+        .unwrap_or_else(|| panic!("{context}"));
+    let command = line
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once("(cut; langspan "))
+        .map(|(_, command)| command)
+        .unwrap_or_else(|| panic!("no recovery command: {line}"));
+    assert_eq!(command, "messages show -- work -m9", "{line}");
+    let args: Vec<&str> = command.split(' ').collect();
+    let (code, shown) = f.cli(&args);
+    assert_eq!(code, 0, "{command}: {shown}");
+    assert!(shown.contains("Message -m9 from the owner"), "{shown}");
+    assert!(
+        shown.contains(&serde_json::to_string(&text).unwrap()),
+        "{shown}"
+    );
 }
 
 /// Retention (roadmap J7) deletes the oldest events. Once a message's
