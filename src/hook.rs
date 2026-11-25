@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod redact;
-pub use redact::{contains_secret, redact, redact_check, redact_command};
+pub use redact::{contains_secret, redact, redact_check, redact_command, refuse_secret};
 pub const MAX_EVENT_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const REASON_LIMIT: usize = 600;
 #[derive(Debug, Clone)]
@@ -1511,6 +1511,10 @@ fn render_checks(checks: &[langspan_core::CheckNotice]) -> String {
             notice.duration_ms as f64 / 1000.0,
             clean(&notice.check_id, 64),
         );
+        if let Some(failures) = render_failures(&notice.failures) {
+            section.push('\n');
+            section.push_str(&failures);
+        }
         let lines: Vec<String> = notice
             .tail
             .lines()
@@ -1544,6 +1548,54 @@ fn render_checks(checks: &[langspan_core::CheckNotice]) -> String {
         text.push_str(&section);
     }
     text
+}
+
+/// Room for the names of an automatic check's failing tests.
+const FAILURES_LIMIT: usize = 480;
+pub const FLAKY_LABEL: &str = "known to flip on unchanged code";
+
+/// `2 failures named in its output: a (known to flip on unchanged code, 2
+/// of 14 runs), b.` Every failure stays a failure; when all of them are of
+/// tests known to flip, a second sentence says so and that the check still
+/// failed.
+fn render_failures(failures: &[langspan_core::TestFailure]) -> Option<String> {
+    if failures.is_empty() {
+        return None;
+    }
+    let mut names = Vec::new();
+    let mut size = 0;
+    for failure in failures {
+        let mut name = clean(&failure.test, langspan_core::MAX_TEST_NAME_BYTES);
+        if let Some(count) = &failure.flaky {
+            name.push_str(&format!(
+                " ({FLAKY_LABEL}, {} of {} runs)",
+                count.flips, count.runs
+            ));
+        }
+        if size + name.len() + 2 > FAILURES_LIMIT && !names.is_empty() {
+            break;
+        }
+        size += name.len() + 2;
+        names.push(name);
+    }
+    let left = failures.len() - names.len();
+    let mut text = format!(
+        "{} failure{} named in its output: {}{}.",
+        failures.len(),
+        if failures.len() == 1 { "" } else { "s" },
+        names.join(", "),
+        if left > 0 {
+            format!(", and {left} more")
+        } else {
+            String::new()
+        }
+    );
+    if failures.iter().all(|failure| failure.flaky.is_some()) {
+        text.push_str(&format!(
+            " Every one is of a test {FLAKY_LABEL}; the check still failed."
+        ));
+    }
+    Some(text)
 }
 
 pub(crate) fn quoted(text: &str) -> String {
@@ -4591,7 +4643,48 @@ mod code_briefing_text {
             duration_ms: 2300,
             timed_out_s: None,
             tail: tail.into(),
+            failures: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_flaky_failure_is_labelled_and_the_section_stays_within_its_bound() {
+        use langspan_core::{FlakyCount, TestFailure};
+        let failure = |test: &str, flaky: Option<(u32, u32)>| TestFailure {
+            test: test.into(),
+            flaky: flaky.map(|(flips, runs)| FlakyCount { flips, runs }),
+        };
+        let mut check = failed_check("test net::times_out ... FAILED");
+        check.failures = vec![failure("net::times_out", Some((2, 14)))];
+        let text = render_checks(std::slice::from_ref(&check));
+        assert!(
+            text.contains(
+                "1 failure named in its output: net::times_out (known to flip on unchanged code, 2 of 14 runs). Every one is of a test known to flip on unchanged code; the check still failed."
+            ),
+            "{text}"
+        );
+        assert!(text.contains("tests failed (exit 101)"), "{text}");
+        // One that is not known to flip: no label, and no "every one".
+        check.failures.push(failure("parser::rejects_empty", None));
+        let text = render_checks(std::slice::from_ref(&check));
+        assert!(
+            text.contains("2 failures named in its output: net::times_out (known to flip on unchanged code, 2 of 14 runs), parser::rejects_empty."),
+            "{text}"
+        );
+        assert!(!text.contains("Every one"), "{text}");
+        // 100 long names: counted, cut, and the section within its share.
+        check.failures = (0..100)
+            .map(|n| failure(&format!("{n:03}{}", "x".repeat(197)), Some((2, 20))))
+            .collect();
+        check.tail = (0..20)
+            .map(|n| format!("line {n} {}", "y".repeat(60)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = render_checks(std::slice::from_ref(&check));
+        assert!(text.len() <= CHECKS_LIMIT, "{}", text.len());
+        assert!(text.contains("100 failures named in its output"), "{text}");
+        assert!(text.contains("more."), "{text}");
+        assert!(text.contains("line 19"), "{text}");
     }
 
     #[test]
