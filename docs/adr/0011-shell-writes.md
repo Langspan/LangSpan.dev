@@ -286,6 +286,59 @@ in `tests/shell_concurrent_edits.rs` (two sessions' real hooks, a real
 command held open by a signal file, a real `sed` rewrite and `commit
 --mine`), and the unit tests of `src/reformat.rs`.
 
+**A notice before a formatter reaches another session's files** (added 25
+November 2026, issue #126). Crediting a rewrite to no one keeps attribution
+right, but the other session's work still changes under it and its next edit
+of the file is refused as stale. Before a shell command, the pre-tool hook
+reads which recognised formatters it runs (`src/shell/formatters.rs`, a
+lenient reader built on the commit guard's lexer) and how far each reaches:
+
+- `cargo fmt` in any form: every `.rs` file of the workspace. Files given
+  after `--` are added to its targets, not put in their place (observed with
+  rustfmt 1.11.0: `cargo fmt -- src/a.rs` also reformatted the crate root).
+- `rustfmt FILE...`: those files and the modules they declare (the directory
+  beside a crate root or `mod.rs`, otherwise the one named after the file).
+- `prettier --write PATH...` (also through `npx`, `pnpm exec`, `yarn`, a
+  path, or `prettier@N`): the files named, and every file of the languages
+  Prettier formats without a plugin under a directory or a glob's literal
+  directory.
+- A check (`--check`), a run that prints (`rustfmt --emit stdout`, no file),
+  or a Prettier run without `--write` reaches nothing. An operand that is an
+  expansion, or a `cd` the reader cannot follow, reaches the whole workspace.
+
+A file is named when another session's journaled write
+([ADR 0026](0026-commit-guard-and-commit-mine.md)) changed it, it still
+differs from `HEAD` in the command's own snapshot, it is in the reach, that
+session is live (registered, not ended and not known to have exited, the
+commit guard's rule), and its journaled lines are still among the file's
+changes from `HEAD`. The journal keeps a write for a week whatever commits
+it, and only `commit --mine` forgets one, so a write committed through plain
+Git would otherwise be named for as long as anyone else's change kept the
+file dirty, and spend the once-only notice. A line the other session added
+(or removed) counts while the file adds (or removes) more copies of it than
+the formatting session's own writes account for, so a `}` both wrote is not
+enough. A write of unknown lines, or a file whose versions cannot be read
+within the journal's bound and the hook's budget, still names the session:
+the notice errs toward telling. The reply carries the notice as
+`hookSpecificOutput.additionalContext` with no permission decision, so the
+command runs as it would without LangSpan. It names each session and at most
+eight files in all, then counts the rest; paths are cleaned and the list is
+capped like a refusal's. It is given once per session for each set of
+session and file pairs (the commit guard's "told" record): the same files are
+not named again whichever formatter runs, and a new file in the reach makes a
+new notice. Only hosts that show pre-tool context to the model get it
+(Claude Code and Codex); for Cursor and Gemini CLI nothing is computed, so a
+notice is not spent unread. Claude Code shows the context next to the tool
+result ([ADR 0029](0029-break-alerts-at-write-time.md)), so the model reads it
+after the formatter ran: it says whom to tell and how to format only one's
+own files next time. The skill gives the same advice beforehand. A failure
+to reach the daemon for liveness gives no notice and says so in the hook's
+detail. Other formatters (`gofmt`, `black`, `ruff format`) and a formatter run
+by a script or `npm run` are not recognised. Tests: `tests/formatter_notice.rs`
+(two sessions' real hooks, a real daemon and Git repository), the unit tests
+of `src/shell/formatters.rs` and `src/formatter.rs`, and
+`the_formatter_commands_the_skill_names_are_read_as_it_says`.
+
 The cap holds on every path that creates a mark: an edit's pre-tool hook, and
 its post-tool hook when the start was not kept. An edit call refused a mark at
 the cap goes unmarked and leaves an overflow note (`STATE/shell/edits/overflow`,

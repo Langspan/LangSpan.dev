@@ -815,6 +815,21 @@ pub(crate) fn head_content(
     head_blob(root, path, head, deadline).map(Option::unwrap_or_default)
 }
 
+/// The lines a workspace file on disk adds to and removes from its version
+/// in `head`: its uncommitted change. `None` when either version cannot be
+/// read in time and within the bound, or they differ by more than the
+/// journal keeps.
+pub(crate) fn uncommitted_lines(
+    root: &Path,
+    path: &str,
+    head: Option<&str>,
+    deadline: Instant,
+) -> Option<Lines> {
+    let before = head_content(root, path, head, deadline)?;
+    let after = read_file(root, path)?.unwrap_or_default();
+    diff_lines(&before, &after)
+}
+
 /// A file's version in `HEAD` (missing when `HEAD` does not have it), `None`
 /// when Git cannot say in time or the file is over the journal's bound.
 pub fn head_state(
