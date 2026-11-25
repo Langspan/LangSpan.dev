@@ -450,6 +450,7 @@ fn a_summary_near_its_limit_that_holds_secrets_is_stored_redacted_never_refused(
         let command = Command::SessionPrompt {
             session_id: "alice".into(),
             summary: original.clone(),
+            line_digests: Vec::new(),
         };
         let id = format!("prompt-{index}");
         let first = f.call(&id, command.clone());
