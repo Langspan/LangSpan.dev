@@ -9,9 +9,16 @@ use serde::{Deserialize, Serialize};
 mod dashboard;
 mod lines;
 mod recall;
+mod recent;
 mod status;
 mod status_line;
 mod today;
+pub use recent::{
+    ChangedPath, ContestedPath, LeftUncommitted, MAX_PATH_REFUSALS, MAX_RECENT_WINDOW_MS,
+    MIN_RECENT_WINDOW_MS, PathRefusal, RECENT_CHANGED, RECENT_CONTESTED, RECENT_INTERFACES,
+    RECENT_LEFT, RECENT_LEFT_CANDIDATES, RECENT_NOTICE_CHANGES, RECENT_WINDOW_MS, RecentChanges,
+    RecentInterfaceChange,
+};
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
@@ -1479,6 +1486,10 @@ pub struct Briefing {
     /// yet delivered. Each is delivered once. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckNotice>,
+    /// What changed recently in the repository, only in a briefing asked
+    /// for at session start (roadmap C3). Never part of the signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent: Option<RecentChanges>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1553,6 +1564,11 @@ pub struct State {
     /// line (roadmap H2). Derived on replay; not part of the status reply.
     #[serde(skip)]
     pub refusals: Vec<RecentRefusal>,
+    /// Refusals of the current run with their paths, newest first, at most
+    /// `MAX_PATH_REFUSALS`, for a starting session's recent section
+    /// (roadmap C3). Derived on replay; not part of the status reply.
+    #[serde(skip)]
+    pub path_refusals: Vec<PathRefusal>,
 }
 
 /// Checkout changes kept per workspace.
@@ -2355,6 +2371,15 @@ pub enum Command {
         /// tool call. A handoff waits for a session's start or next prompt.
         #[serde(default, skip_serializing_if = "is_false")]
         mid_turn: bool,
+        /// Add what changed recently in the repository (roadmap C3). Set
+        /// by session-start hooks and `langspan brief --recent` only; never
+        /// with `mid_turn`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        recent: bool,
+        /// How far back `recent` looks. The daemon sets it from its
+        /// configuration; absent means `RECENT_WINDOW_MS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recent_window_ms: Option<u64>,
     },
     /// Read-only: the bounded view of what matters now. Closed admissions
     /// are counted, not listed; the answer always fits one frame.
@@ -2825,6 +2850,10 @@ enum CommandWire {
         /// tool call. A handoff waits for a session's start or next prompt.
         #[serde(default, skip_serializing_if = "is_false")]
         mid_turn: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        recent: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recent_window_ms: Option<u64>,
     },
     Status {},
     StatusRecords {
@@ -4462,6 +4491,8 @@ fn decide_checked(
             max_peers,
             deliver,
             mid_turn,
+            recent,
+            recent_window_ms,
         } => {
             if !(1..=MAX_BRIEF_PEERS).contains(max_peers) {
                 return Err(error(
@@ -4469,8 +4500,21 @@ fn decide_checked(
                     "A briefing names between 1 and 16 peers",
                 ));
             }
+            if *recent && *mid_turn {
+                return Err(error(
+                    "invalid_request",
+                    "What changed recently is told at a session's start, never mid-turn; leave out recent",
+                ));
+            }
+            let window = recent::window(*recent_window_ms)?;
             let (mut briefing, signature) =
                 brief(state, session_id, *max_peers, !*mid_turn, now_ms)?;
+            // Not part of the signature: a prompt's briefing never carries
+            // it, so it must not make the next one look new.
+            if *recent {
+                let me = current_session(state, session_id)?;
+                briefing.recent = Some(recent::recent(state, me, window, now_ms));
+            }
             let previous = state
                 .activity
                 .get(session_id)
@@ -6345,6 +6389,7 @@ fn brief(
                 .cloned()
                 .into_iter()
                 .collect(),
+            recent: None,
         },
         fingerprint(&signature),
     ))
@@ -6883,6 +6928,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 ));
             }
             status_line::remember(state, workspace_id, *at_ms, *generation);
+            recent::remember_refusal(state, workspace_id, paths, *at_ms, *generation);
         }
         Event::WorkspaceRegistered { workspace } => {
             validate_workspace(state, workspace)?;

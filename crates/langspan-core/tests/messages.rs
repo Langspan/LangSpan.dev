@@ -68,6 +68,8 @@ fn brief(session: &str, deliver: bool, mid_turn: bool) -> Command {
         max_peers: 4,
         deliver,
         mid_turn,
+        recent: false,
+        recent_window_ms: None,
     }
 }
 
@@ -553,6 +555,8 @@ mod headless_handoffs {
                 max_peers: 4,
                 deliver: false,
                 mid_turn: false,
+                recent: false,
+                recent_window_ms: None,
             },
             "look",
             0,

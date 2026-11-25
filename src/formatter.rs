@@ -148,7 +148,7 @@ pub fn notice(
 /// added counts while the file adds more copies of it than `me`'s own writes
 /// account for, and a line it removed likewise; a write of unknown lines, or
 /// changes that cannot be read, may be its work, so it is named.
-fn still_changed(
+pub(crate) fn still_changed(
     me: &str,
     session: &str,
     path: &str,

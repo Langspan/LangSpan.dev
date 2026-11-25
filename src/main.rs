@@ -2892,6 +2892,8 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 // A look from the terminal is not a delivery to the session.
                 deliver: false,
                 mid_turn: false,
+                recent: options.remove("--recent").is_some(),
+                recent_window_ms: None,
             },
             ["remote", "enable", workspace] => Command::RemoteEnable {
                 workspace_id: (*workspace).into(),
@@ -3126,13 +3128,14 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             // them accept them (`dashboard`: `--open`, `--allow-network`;
             // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
-            // `graph symbol`: `--detail`).
+            // `graph symbol`: `--detail`; `brief`: `--recent`).
             "--open"
             | "--allow-network"
             | "--check-again"
             | "--publish-as-branch"
             | "--mine"
             | "--detail"
+            | "--recent"
             | "--all"
             | "--skill"
             | "--off" => {

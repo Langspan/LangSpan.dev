@@ -146,6 +146,8 @@ fn delivered(state: &mut State, session: &str, id: &str) -> Vec<String> {
             max_peers: 6,
             deliver: true,
             mid_turn: true,
+            recent: false,
+            recent_window_ms: None,
         },
         20,
     ) {
@@ -290,6 +292,8 @@ fn a_reported_result_is_a_check_record_and_is_delivered_once_to_each_session() {
             max_peers: 6,
             deliver: false,
             mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
         },
         15,
     );

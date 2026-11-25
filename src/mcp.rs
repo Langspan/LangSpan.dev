@@ -1129,6 +1129,8 @@ impl McpAdapter {
                 max_peers: args.max_peers,
                 deliver: true,
                 mid_turn: false,
+                recent: false,
+                recent_window_ms: None,
             },
         )
         .await

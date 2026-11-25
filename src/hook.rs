@@ -1133,13 +1133,16 @@ fn lifecycle(
             );
         }
     }
-    let briefing = match step(
+    let mut briefing = match step(
         "brief",
         Command::Brief {
             session_id: ids.session_id.clone(),
             max_peers: BRIEF_PEERS,
             deliver: true,
             mid_turn: false,
+            // What changed recently goes only into a starting context.
+            recent: starting,
+            recent_window_ms: None,
         },
     ) {
         Ok(Response {
@@ -1149,6 +1152,18 @@ fn lifecycle(
         Ok(other) => return Reply::none("unknown", format!("unexpected outcome {other:?}")),
         Err(failure) => return failure_reply(failure),
     };
+    // The work ended sessions left uncommitted is confirmed against the line
+    // journal within a quarter of the budget; past it, the recent section
+    // is left out and the rest of the briefing is sent.
+    if let Some(recent) = briefing.recent.as_mut() {
+        let share = (Instant::now() + config.budget / 4).min(deadline);
+        if let Err(reason) =
+            crate::recent::confirm_left(&config.state_dir, &ids.session_id, recent, share)
+        {
+            briefing.recent = None;
+            targets_note.push_str(&format!("; recent changes left out: {reason}"));
+        }
+    }
     // A new or resumed context has lost any earlier briefing; a prompt in a
     // continuing context gets one only when the situation changed.
     let deliver = has_content(&briefing) && (starting || briefing.changed);
@@ -1593,6 +1608,25 @@ fn definitions_text(change: &langspan_core::InterfaceChange) -> String {
     }
 }
 
+/// One interface change in words, its names and signatures quoted.
+pub(crate) fn interface_change_text(change: &langspan_core::InterfaceChange) -> String {
+    match (&change.before, &change.after) {
+        _ if change.before_count.is_some() => definitions_text(change),
+        (Some(before), Some(after)) => format!(
+            "{} {} changed from {} to {}",
+            clean(&change.kind, 16),
+            quoted(&change.name),
+            quoted(before),
+            quoted(after)
+        ),
+        _ => format!(
+            "{} {} was removed or renamed",
+            clean(&change.kind, 16),
+            quoted(&change.name)
+        ),
+    }
+}
+
 /// An automatic check's results first: each is delivered once, so they are
 /// always shown, and the peer lines take the room that is left.
 fn render_briefing_within(briefing: &langspan_core::Briefing, limit: usize) -> String {
@@ -1689,6 +1723,22 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
             text.push_str(&reader);
         }
     }
+    // What changed recently (roadmap C3), at a session's start only: its
+    // room is set aside here, after the messages, and it is placed after
+    // the peer lines. What does not fit is counted.
+    let (recent, recent_unshown) = match &briefing.recent {
+        Some(recent) => crate::recent::render(
+            recent,
+            crate::recent::LIMIT.min(limit.saturating_sub(text.len() + footer.len() + 160)),
+        ),
+        None => (String::new(), 0),
+    };
+    skipped += recent_unshown;
+    let limit = limit.saturating_sub(if recent.is_empty() {
+        0
+    } else {
+        recent.len() + 1
+    });
     if !briefing.stale_reads.is_empty() {
         let stale: Vec<String> = briefing
             .stale_reads
@@ -1763,25 +1813,7 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
         }
     }
     for impact in &briefing.interface_changes {
-        let changes: Vec<String> = impact
-            .changes
-            .iter()
-            .map(|change| match (&change.before, &change.after) {
-                _ if change.before_count.is_some() => definitions_text(change),
-                (Some(before), Some(after)) => format!(
-                    "{} {} changed from {} to {}",
-                    clean(&change.kind, 16),
-                    quoted(&change.name),
-                    quoted(before),
-                    quoted(after)
-                ),
-                _ => format!(
-                    "{} {} was removed or renamed",
-                    clean(&change.kind, 16),
-                    quoted(&change.name)
-                ),
-            })
-            .collect();
+        let changes: Vec<String> = impact.changes.iter().map(interface_change_text).collect();
         let by = impact
             .by_session
             .as_deref()
@@ -1928,6 +1960,10 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
             continue;
         }
         text.push_str(&line);
+    }
+    if !recent.is_empty() {
+        text.push_str(&recent);
+        text.push('\n');
     }
     if unshown > 0 {
         text.push_str(&format!("({unshown} more message(s) not shown.)\n"));
@@ -2659,6 +2695,10 @@ fn has_peer_content(briefing: &langspan_core::Briefing) -> bool {
         || !briefing.notes.is_empty()
         || !briefing.messages.is_empty()
         || !briefing.checkout_changes.is_empty()
+        || briefing
+            .recent
+            .as_ref()
+            .is_some_and(|recent| !recent.is_empty())
 }
 
 impl Session<'_> {
@@ -2676,6 +2716,8 @@ impl Session<'_> {
                     max_peers: BRIEF_PEERS,
                     deliver: true,
                     mid_turn: true,
+                    recent: false,
+                    recent_window_ms: None,
                 },
             )
             .ok()?;
@@ -3898,6 +3940,7 @@ mod briefing_text {
             messages: Vec::new(),
             checkout_changes: Vec::new(),
             checks: Vec::new(),
+            recent: None,
         }
     }
 
@@ -4547,6 +4590,7 @@ mod code_briefing_text {
             messages: Vec::new(),
             checkout_changes: Vec::new(),
             checks: Vec::new(),
+            recent: None,
         }
     }
 

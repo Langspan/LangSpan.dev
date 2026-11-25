@@ -15,6 +15,7 @@ mod local;
 pub mod local_day;
 pub mod mcp;
 pub mod protocol;
+pub mod recent;
 mod reformat;
 pub mod regions;
 mod sha1;
