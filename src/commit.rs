@@ -14,7 +14,12 @@
 //! sessions' lines could be in more than one order (issue #106); a partial
 //! patch must keep this session's lines in their one place among the other
 //! sessions' and apply exactly to the index it is staged in, or nothing is
-//! committed. A hunk is this session's when each of its
+//! committed. A line both this session and another wrote (a blank line, a
+//! closing brace) goes with the lines on either side of it in the hunk when
+//! they are one side's, or with the only side next to it at the hunk's edge;
+//! it goes with another session's lines only while this session's writes
+//! still account for each copy of it elsewhere in the file's diff (issue
+//! #141). A hunk is this session's when each of its
 //! lines is, and not every line is also another's; another session's when
 //! none of its lines is this session's and some are that session's; nobody's
 //! when no session wrote any of it. Anything else is not known, and
@@ -458,12 +463,15 @@ fn hunk_owner(me: &str, hunk: &Hunk, path: Option<&journal::FileLines<'_>>) -> O
             path.and_then(|p| p.added.get(key.as_str()))
                 .unwrap_or(&empty)
         }));
+    // A piece split off as other sessions' takes the lines this session
+    // wrote too with it (`split_hunk`).
+    let theirs_piece = hunk.piece.is_some_and(|piece| piece.side == Side::Theirs);
     let (mut total, mut own, mut shared) = (0, 0, 0);
     let mut others = BTreeSet::new();
     for claimants in lines {
         total += 1;
-        let mine = claimants.iter().any(|s| is_own(me, s));
         let theirs: Vec<&&str> = claimants.iter().filter(|s| !is_own(me, s)).collect();
+        let mine = claimants.iter().any(|s| is_own(me, s)) && !(theirs_piece && !theirs.is_empty());
         if mine {
             own += 1;
             if !theirs.is_empty() {
@@ -655,18 +663,132 @@ fn pieces(removed: &[Side], added: &[Side]) -> Result<Vec<(Side, usize, usize)>,
 /// sessions' lines, and no line no session wrote, at the boundaries between
 /// them (issue #106), as `git add -p` lets a person split a hunk. Per hunk
 /// after the split: why it was left whole although it holds both, if so.
+#[cfg(test)]
 fn split_between_sessions(
     me: &str,
     file: &mut FileDiff,
     path: Option<&journal::FileLines<'_>>,
 ) -> Vec<Option<&'static str>> {
+    split_counted(me, file, path, None)
+}
+
+/// Per line key, how many more copies this session's journaled writes of
+/// `path` added than removed.
+fn own_copies(me: &str, path: &str, entries: &[Entry]) -> BTreeMap<String, i64> {
+    let mut net: BTreeMap<String, i64> = BTreeMap::new();
+    for entry in entries
+        .iter()
+        .filter(|e| e.path == path && is_own(me, &e.session_id))
+    {
+        for (keys, sign) in entry
+            .lines
+            .iter()
+            .flat_map(|lines| [(&lines.added, 1), (&lines.removed, -1)])
+        {
+            for key in keys {
+                *net.entry(key.clone()).or_default() += sign;
+            }
+        }
+    }
+    net
+}
+
+/// The copies of each line key a file's diff adds and removes, and how many
+/// of them have gone with other sessions' pieces: what tells whether a line
+/// both this session and another wrote may go with the other's lines.
+struct Shared<'a> {
+    own: &'a BTreeMap<String, i64>,
+    added: BTreeMap<String, i64>,
+    removed: BTreeMap<String, i64>,
+}
+
+impl<'a> Shared<'a> {
+    fn new(own: &'a BTreeMap<String, i64>, hunks: &[Hunk]) -> Self {
+        let mut shared = Self {
+            own,
+            added: BTreeMap::new(),
+            removed: BTreeMap::new(),
+        };
+        for hunk in hunks {
+            for key in &hunk.added {
+                *shared.added.entry(key.clone()).or_default() += 1;
+            }
+            for key in &hunk.removed {
+                *shared.removed.entry(key.clone()).or_default() += 1;
+            }
+        }
+        shared
+    }
+
+    /// Give `added` and `removed` (keys of lines both wrote) to other
+    /// sessions' pieces, if every copy this session's writes account for is
+    /// still left for its own: `false`, and nothing given, if not.
+    fn give(&mut self, added: &[&String], removed: &[&String]) -> bool {
+        let own = |key: &str| self.own.get(key).copied().unwrap_or_default();
+        let mut added_left = self.added.clone();
+        let mut removed_left = self.removed.clone();
+        for key in added {
+            let left = added_left.entry((*key).clone()).or_default();
+            *left -= 1;
+            if *left < own(key) {
+                return false;
+            }
+        }
+        for key in removed {
+            let left = removed_left.entry((*key).clone()).or_default();
+            *left -= 1;
+            if *left < -own(key) {
+                return false;
+            }
+        }
+        (self.added, self.removed) = (added_left, removed_left);
+        true
+    }
+}
+
+/// Each line's side where its claimants decide it: `None` for a line this
+/// session and another both wrote. Such a line takes the side of the lines
+/// next to it in its list (another line both wrote is skipped): the one
+/// side on both ends, or the only end there is. Lines between the two
+/// sides, or with none, stay this session's.
+fn sides_around(claimed: &[Option<Side>]) -> Vec<Side> {
+    let mut before = Vec::with_capacity(claimed.len());
+    let mut last = None;
+    for side in claimed {
+        before.push(last);
+        last = side.or(last);
+    }
+    let mut out = vec![Side::Mine; claimed.len()];
+    let mut next = None;
+    for index in (0..claimed.len()).rev() {
+        out[index] = match (claimed[index], before[index], next) {
+            (Some(side), _, _) => side,
+            (None, Some(a), Some(b)) if a == b => a,
+            (None, Some(a), None) | (None, None, Some(a)) => a,
+            (None, _, _) => Side::Mine,
+        };
+        next = claimed[index].or(next);
+    }
+    out
+}
+
+/// `split_between_sessions`; with `own`, the copies of each line this
+/// session's writes account for, a line both it and another session wrote
+/// may go with the other session's lines around it (issue #141).
+fn split_counted(
+    me: &str,
+    file: &mut FileDiff,
+    path: Option<&journal::FileLines<'_>>,
+    own: Option<&BTreeMap<String, i64>>,
+) -> Vec<Option<&'static str>> {
     let (Some(path), false) = (path, splits_only_whole(file)) else {
         return vec![None; file.hunks.len()];
     };
+    let mut shared = own.map(|own| Shared::new(own, &file.hunks));
     let mut hunks = Vec::with_capacity(file.hunks.len());
     let mut why = Vec::with_capacity(file.hunks.len());
     for (of, hunk) in std::mem::take(&mut file.hunks).into_iter().enumerate() {
-        match split_hunk(me, of, &hunk, path) {
+        match split_hunk(me, of, &hunk, path, shared.as_mut()) {
             Ok(Some(split)) => {
                 why.extend(split.iter().map(|_| None));
                 hunks.extend(split);
@@ -687,11 +809,12 @@ fn split_between_sessions(
 
 /// One hunk's pieces, or `None` when it is not split. `of` is its index in
 /// its file's diff.
-fn split_hunk(
+fn split_hunk<'a>(
     me: &str,
     of: usize,
-    hunk: &Hunk,
+    hunk: &'a Hunk,
     path: &journal::FileLines<'_>,
+    shared: Option<&mut Shared<'_>>,
 ) -> Result<Option<Vec<Hunk>>, &'static str> {
     let sides = |keys: &[String], claims: &BTreeMap<&str, BTreeSet<&str>>| {
         keys.iter()
@@ -699,19 +822,77 @@ fn split_hunk(
             .collect::<Option<Vec<Side>>>()
     };
     // A line no session wrote keeps the hunk whole: it is not known.
-    let (Some(removed), Some(added)) = (
+    let (Some(mut removed), Some(mut added)) = (
         sides(&hunk.removed, &path.removed),
         sides(&hunk.added, &path.added),
     ) else {
         return Ok(None);
     };
+    // Lines both this session and another wrote go with the lines around
+    // them, while this session's own copies of them are left elsewhere.
+    let mut given = false;
+    if let Some(shared) = shared {
+        let both = |keys: &[String], claims: &BTreeMap<&str, BTreeSet<&str>>| -> Vec<bool> {
+            keys.iter()
+                .map(|key| {
+                    claims.get(key.as_str()).is_some_and(|c| {
+                        c.iter().any(|s| is_own(me, s)) && c.iter().any(|s| !is_own(me, s))
+                    })
+                })
+                .collect()
+        };
+        let resolve = |sides: &[Side], both: &[bool]| -> Vec<Side> {
+            let claimed: Vec<Option<Side>> = sides
+                .iter()
+                .zip(both)
+                .map(|(side, both)| (!both).then_some(*side))
+                .collect();
+            sides_around(&claimed)
+        };
+        let (both_removed, both_added) = (
+            both(&hunk.removed, &path.removed),
+            both(&hunk.added, &path.added),
+        );
+        let (to_removed, to_added) = (
+            resolve(&removed, &both_removed),
+            resolve(&added, &both_added),
+        );
+        // The lines both wrote that go with other sessions' lines.
+        let given_of = |keys: &'a [String], both: &[bool], to: &[Side]| -> Vec<&'a String> {
+            keys.iter()
+                .zip(both.iter().zip(to))
+                .filter(|(_, (both, side))| **both && **side == Side::Theirs)
+                .map(|(key, _)| key)
+                .collect()
+        };
+        let given_removed = given_of(&hunk.removed, &both_removed, &to_removed);
+        let given_added = given_of(&hunk.added, &both_added, &to_added);
+        if shared.give(&given_added, &given_removed) {
+            given = !given_added.is_empty() || !given_removed.is_empty();
+            (removed, added) = (to_removed, to_added);
+        }
+    }
     let all: Vec<Side> = removed.iter().chain(&added).copied().collect();
     let lines = body_lines(&hunk.body);
     let (minus, plus) = lines.split_at(hunk.removed.len().min(lines.len()));
     let as_listed = lines.len() == all.len()
         && minus.iter().all(|l| l.first() == Some(&b'-'))
         && plus.iter().all(|l| l.first() == Some(&b'+'));
-    if !(all.contains(&Side::Mine) && all.contains(&Side::Theirs)) || !as_listed {
+    if !as_listed {
+        return Ok(None);
+    }
+    if !all.contains(&Side::Mine) {
+        // Wholly other sessions' once the lines both wrote go with them:
+        // one piece, so that those lines are not counted as this session's.
+        return Ok(given.then(|| {
+            cut(
+                hunk,
+                of,
+                &[(Side::Theirs, hunk.removed.len(), hunk.added.len())],
+            )
+        }));
+    }
+    if !all.contains(&Side::Theirs) {
         return Ok(None);
     }
     if replaced_across(me, path) {
@@ -1072,7 +1253,8 @@ fn file_owners(
     let unseen: BTreeSet<String> = path
         .map(|p| p.unknown.iter().map(|s| (*s).to_owned()).collect())
         .unwrap_or_default();
-    let unsplit = split_between_sessions(me, file, path);
+    let own = own_copies(me, &file.path, entries);
+    let unsplit = split_counted(me, file, path, Some(&own));
     let file = &*file;
     let mut copies: Option<Copies> = None;
     let mut owners = Vec::new();
@@ -1115,7 +1297,7 @@ fn file_owners(
 }
 
 /// Whether `session`, or the session it is a subagent of, is live.
-fn is_live(live: &BTreeSet<String>, session: &str) -> bool {
+pub(crate) fn is_live(live: &BTreeSet<String>, session: &str) -> bool {
     let mut name = session;
     loop {
         if live.contains(name) {
@@ -1313,7 +1495,10 @@ pub enum Guarded {
 
 /// The other sessions of the workspace that are live: registered, not
 /// ended and not known to have exited.
-fn live_sessions(config: &Config, deadline: Instant) -> Result<BTreeSet<String>, String> {
+pub(crate) fn live_sessions(
+    config: &Config,
+    deadline: Instant,
+) -> Result<BTreeSet<String>, String> {
     let request = crate::protocol::Request {
         version: crate::protocol::PROTOCOL_VERSION,
         request_id: "read".into(),

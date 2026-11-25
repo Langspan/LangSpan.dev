@@ -26,6 +26,11 @@ pub fn wall_now_ms() -> u64 {
 /// the 64 KiB frame for the envelope and JSON escaping of the envelope.
 pub const PAGE_BUDGET_BYTES: usize = 48 * 1024;
 
+/// The smallest status-records page a reader can ask for. It leaves room for
+/// at least one part of a record however its text escapes, so every page
+/// moves the cursor on.
+pub const MIN_PAGE_BYTES: usize = 1024;
+
 /// A generation marker: a `booted` or `clock_anchored` event. One owner for
 /// the index over them and the lookup that must match it to use it.
 macro_rules! generation_marker {
@@ -174,7 +179,19 @@ pub struct Execution {
 pub struct Store {
     connection: Connection,
     state: State,
+    tap: Option<Tap>,
 }
+
+/// Events committed since the tap was last drained that its filter keeps,
+/// at most `TAP_LIMIT`: a consumer reads facts already recorded, after they
+/// are durable, and never changes what is committed.
+struct Tap {
+    keep: fn(&Event) -> bool,
+    events: Vec<Event>,
+}
+
+/// The most events a tap holds between drains; later ones are not kept.
+const TAP_LIMIT: usize = 64;
 
 /// A check record written before check commands were redacted can still
 /// hold a command line as typed. It is redacted wherever it is read back:
@@ -280,7 +297,11 @@ impl Store {
             .generation
             .checked_add(1)
             .ok_or("authority generation exhausted; refusing to reuse a generation")?;
-        let mut store = Self { connection, state };
+        let mut store = Self {
+            connection,
+            state,
+            tap: None,
+        };
         // The generation's clock against the wall clock, so times can be
         // placed on a day (the status line and `today`).
         let anchor = ClockAnchor {
@@ -300,6 +321,23 @@ impl Store {
 
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    /// From now on, keep each committed event `keep` accepts, for
+    /// `take_tapped`. Events replayed when the store opened are not kept.
+    pub fn tap(&mut self, keep: fn(&Event) -> bool) {
+        self.tap = Some(Tap {
+            keep,
+            events: Vec::new(),
+        });
+    }
+
+    /// The events kept since the last call, oldest first.
+    pub fn take_tapped(&mut self) -> Vec<Event> {
+        self.tap
+            .as_mut()
+            .map(|tap| std::mem::take(&mut tap.events))
+            .unwrap_or_default()
     }
 
     pub fn refresh(&mut self, now_ms: u64) -> StoreResult<()> {
@@ -541,9 +579,11 @@ impl Store {
                 | Command::RemoteOutbox { .. }
                 | Command::RemoteSent { .. }
                 | Command::CheckStatus { .. }
+                | Command::FlakyTests { .. }
                 | Command::LandingReadiness { .. }
                 | Command::TurnQueue { .. }
                 | Command::Recap { .. }
+                | Command::Recall { .. }
                 | Command::Today { .. }
                 | Command::Count { .. }
                 | Command::StatusLine { .. }
@@ -609,6 +649,10 @@ impl Store {
         prepared: &Command,
         now_ms: u64,
     ) -> StoreResult<Execution> {
+        // Refused before a receipt or an event could hold it.
+        if let Some(refused) = crate::hook::refuse_secret(original) {
+            return Ok(self.execution(refused, false, now_ms));
+        }
         if let Some(replayed) = self.replay(request_id, original, now_ms)? {
             return Ok(replayed);
         }
@@ -630,21 +674,40 @@ impl Store {
                 }
                 outcome => outcome,
             },
-            Command::StatusRecords { after } => self.status_records(after.as_deref()),
+            Command::StatusRecords { after, page_bytes } => self.status_records(
+                after.as_deref(),
+                page_bytes.map_or(PAGE_BUDGET_BYTES, |bytes| {
+                    usize::try_from(bytes)
+                        .unwrap_or(PAGE_BUDGET_BYTES)
+                        .clamp(MIN_PAGE_BYTES, PAGE_BUDGET_BYTES)
+                }),
+            ),
             // A read: decided by the core, never recorded.
             Command::RemoteOutbox { .. }
             | Command::CheckStatus { .. }
+            | Command::FlakyTests { .. }
             | Command::LandingReadiness { .. }
             | Command::TurnQueue { .. }
             | Command::StatusLine { .. }
-            | Command::Recap { .. } => {
+            | Command::Recap { .. }
+            | Command::Recall { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
-                    // A recap must fit one frame with room for the envelope.
+                    // A recap or a recall must fit one frame with room for
+                    // the envelope.
                     Outcome::Recap { mut recap } => {
                         recap.shrink_until(|recap| {
                             serde_json::to_vec(recap).is_ok_and(|bytes| bytes.len() <= 48 * 1024)
                         });
                         Outcome::Recap { recap }
+                    }
+                    // Within the daemon's frame. The MCP result carries the
+                    // answer twice, once escaped again as text, so the MCP
+                    // adapter trims it once more against its encoded result.
+                    Outcome::Recall { mut recall } => {
+                        recall.shrink_until(|recall| {
+                            serde_json::to_vec(recall).is_ok_and(|bytes| bytes.len() <= 28 * 1024)
+                        });
+                        Outcome::Recall { recall }
                     }
                     outcome => outcome,
                 }
@@ -799,12 +862,13 @@ impl Store {
         ))
     }
 
-    /// One page of state records from `after`, within `PAGE_BUDGET_BYTES`.
-    /// A record that fits a page is never split; one that does not (an
-    /// entry at its limits can be larger than a frame) is given as parts of
-    /// its JSON, so that every valid state can be read. A page holds at
-    /// least one record or part when any remain.
-    fn status_records(&self, after: Option<&str>) -> Outcome {
+    /// One page of state records from `after`, within `budget` bytes
+    /// (`PAGE_BUDGET_BYTES` unless the reader asked for less, never under
+    /// `MIN_PAGE_BYTES`). A record that fits a page is never split; one that
+    /// does not (an entry at its limits can be larger than a frame) is given
+    /// as parts of its JSON, so that every valid state can be read. A page
+    /// holds at least one record or part when any remain.
+    fn status_records(&self, after: Option<&str>, budget: usize) -> Outcome {
         let (mut resume, records) = match status_records(&self.state, after) {
             Ok(read) => read,
             Err(error) => {
@@ -840,8 +904,8 @@ impl Store {
                 }
                 _ => 0,
             };
-            if start == 0 && text.len() < PAGE_BUDGET_BYTES {
-                if bytes + text.len() + 1 > PAGE_BUDGET_BYTES {
+            if start == 0 && text.len() < budget {
+                if bytes + text.len() + 1 > budget {
                     return Outcome::StatusRecords {
                         records: page,
                         next,
@@ -852,7 +916,7 @@ impl Store {
                 next = Some(position.after());
                 continue;
             }
-            let end = part_end(&text, start, PAGE_BUDGET_BYTES.saturating_sub(bytes));
+            let end = part_end(&text, start, budget.saturating_sub(bytes));
             if end == start {
                 return Outcome::StatusRecords {
                     records: page,
@@ -1225,6 +1289,17 @@ impl Store {
         }
         transaction.commit()?;
         self.state = next_state;
+        if let Some(tap) = &mut self.tap {
+            let room = TAP_LIMIT.saturating_sub(tap.events.len());
+            let keep = tap.keep;
+            tap.events.extend(
+                events
+                    .iter()
+                    .filter(|event| keep(event))
+                    .take(room)
+                    .cloned(),
+            );
+        }
         Ok(())
     }
 

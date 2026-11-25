@@ -11,7 +11,7 @@ pub async fn run(_state_dir: PathBuf) -> Result<(), crate::Error> {
 #[cfg(unix)]
 mod unix {
     use crate::{
-        auto_check, local,
+        auto_check, local, notify,
         protocol::{self, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response},
         store::{Execution, Store},
     };
@@ -44,6 +44,19 @@ mod unix {
         /// How long a workspace's sessions must stop writing before its
         /// automatic check starts, so one burst of batches runs one check.
         auto_check_debounce_ms: u64,
+        /// A failing automatic check that took at most this long is run once
+        /// more on the same tree, to learn which tests flip; 0 turns it off.
+        flaky_rerun_max_s: u64,
+        /// Desktop notices (roadmap H3): off unless switched on.
+        notify: bool,
+        /// A sound with each notice: off unless switched on.
+        notify_sound: bool,
+        /// At most one notice of a kind this often.
+        notify_kind_interval_ms: u64,
+        /// At most this many notices in any hour.
+        notify_hourly_limit: u32,
+        /// A handoff not taken up this long gets a notice.
+        notify_handoff_after_ms: u64,
         /// How often the agent hosts on this machine are checked for a
         /// LangSpan install (roadmap A7). The first check is at start.
         host_check_ms: u64,
@@ -56,6 +69,12 @@ mod unix {
                 max_clients: 32,
                 remote_pass_ms: 5000,
                 auto_check_debounce_ms: 2000,
+                flaky_rerun_max_s: 30,
+                notify: false,
+                notify_sound: false,
+                notify_kind_interval_ms: 300_000,
+                notify_hourly_limit: 10,
+                notify_handoff_after_ms: 600_000,
                 host_check_ms: 3_600_000,
             }
         }
@@ -86,14 +105,26 @@ mod unix {
                 || !(1..=128).contains(&result.max_clients)
                 || !(200..=600_000).contains(&result.remote_pass_ms)
                 || !(50..=60_000).contains(&result.auto_check_debounce_ms)
+                || result.flaky_rerun_max_s > 3600
+                || !(1000..=86_400_000).contains(&result.notify_kind_interval_ms)
+                || !(1..=60).contains(&result.notify_hourly_limit)
+                || !(1000..=86_400_000).contains(&result.notify_handoff_after_ms)
                 || !(100..=86_400_000).contains(&result.host_check_ms)
             {
                 return Err(
-                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, host_check_ms 100..86400000"
+                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000"
                         .into(),
                 );
             }
             Ok(result)
+        }
+        fn notice_settings(&self) -> notify::Settings {
+            notify::Settings {
+                on: self.notify,
+                sound: self.notify_sound,
+                kind_interval: Duration::from_millis(self.notify_kind_interval_ms),
+                hourly_limit: self.notify_hourly_limit,
+            }
         }
     }
     struct Job {
@@ -200,10 +231,21 @@ mod unix {
         if !(1..=crate::graph::MAX_RESULTS).contains(&limit) {
             return Err("limit must be between 1 and 200".into());
         }
+        let depth = match command {
+            Command::GraphImpact { depth, .. } => *depth,
+            _ => 1,
+        };
+        if !(1..=langspan_core::MAX_IMPACT_DEPTH).contains(&depth) {
+            return Err(format!(
+                "depth must be between 1 and {}",
+                langspan_core::MAX_IMPACT_DEPTH
+            ));
+        }
         let graph = graph.ok_or("the index is not available yet; try again shortly")?;
         let failed = |error: Box<dyn std::error::Error + Send + Sync>| error.to_string();
         let detail = matches!(command, Command::GraphSymbol { detail: true, .. });
-        let ((mut symbols, mut references), coverage) = graph
+        let started = Instant::now();
+        let ((mut symbols, mut references, levels), coverage) = graph
             .with_coverage(workspace_id, |graph| match command {
                 Command::GraphSymbol { name, .. } => {
                     let mut symbols = graph.symbol(workspace_id, name, limit)?;
@@ -212,13 +254,22 @@ mod unix {
                             graph.add_detail(workspace_id, symbol)?;
                         }
                     }
-                    Ok((symbols, Vec::new()))
+                    Ok((symbols, Vec::new(), None))
                 }
                 Command::GraphReferences { name, .. } => Ok((
                     Vec::new(),
                     graph.references(workspace_id, name, None, limit)?,
+                    None,
                 )),
-                Command::GraphImpact { path, .. } => graph.impact(workspace_id, path, limit),
+                Command::GraphImpact { path, .. } => {
+                    let (symbols, references) = graph.impact(workspace_id, path, limit)?;
+                    let levels = (depth > 1)
+                        .then(|| {
+                            graph.impact_levels(workspace_id, path, depth, started + IMPACT_BUDGET)
+                        })
+                        .transpose()?;
+                    Ok((symbols, references, levels))
+                }
                 _ => unreachable!("matched above"),
             })
             .map_err(failed)?;
@@ -229,13 +280,60 @@ mod unix {
             add_notes_and_checks(state, workspace_id, &mut symbols);
             truncated |= fit_frame(&mut symbols, &coverage);
         }
+        let levels = levels.map(|mut levels| {
+            fit_levels(&mut levels, &(&symbols, &references, &coverage));
+            truncated |= levels.iter().any(|level| level.truncated);
+            levels
+        });
         Ok(Outcome::Graph {
             symbols,
             references,
-            resolution: detail.then(|| "name".into()),
+            resolution: (detail || levels.is_some()).then(|| "name".into()),
             coverage,
             truncated,
+            levels,
         })
+    }
+
+    /// How long `graph impact` may spend on its levels: well inside the
+    /// client's 5 s call timeout, and short because requests behind it
+    /// (hooks among them) wait. At most 150 indexed lookups usually take
+    /// far less. Past it the levels so far are returned, marked truncated.
+    const IMPACT_BUDGET: Duration = Duration::from_millis(500);
+
+    /// Keep the leading impact files whose answer fits one response frame
+    /// beside `rest` (the outcome's other lists); a level losing files and
+    /// every level after it are marked `truncated`.
+    fn fit_levels(levels: &mut [langspan_core::ImpactLevel], rest: &impl serde::Serialize) {
+        // The envelope, the request ID and the outcome's scalar fields.
+        const ROOM: usize = 1024;
+        // A level's own fields, beside its files.
+        const LEVEL: usize = 64;
+        fn size(value: &impl serde::Serialize) -> usize {
+            serde_json::to_vec(value).map_or(usize::MAX / 2, |bytes| bytes.len())
+        }
+        let mut used = ROOM.saturating_add(size(rest));
+        let mut cut = false;
+        for level in levels {
+            used = used.saturating_add(LEVEL);
+            let keep = if cut {
+                0
+            } else {
+                level
+                    .files
+                    .iter()
+                    .take_while(|file| {
+                        used = used.saturating_add(size(file) + 1);
+                        used < MAX_FRAME_BYTES
+                    })
+                    .count()
+            };
+            if keep < level.files.len() {
+                level.files.truncate(keep);
+                level.truncated = true;
+                cut = true;
+            }
+        }
     }
 
     /// What the coordinator, not the index, knows about each definition's
@@ -607,23 +705,57 @@ mod unix {
                 .spawn(move || index_worker(index_receiver, sender, graph_path))?;
         }
         let (check_sender, check_receiver) = mpsc::sync_channel::<auto_check::Message>(256);
+        let write_counts = auto_check::WriteCounts::default();
         {
             let sender = sender.clone();
             let check_sender = check_sender.clone();
-            let debounce = Duration::from_millis(config.auto_check_debounce_ms);
+            let write_counts = write_counts.clone();
+            let timing = auto_check::Timing {
+                debounce: Duration::from_millis(config.auto_check_debounce_ms),
+                rerun_max: Duration::from_secs(config.flaky_rerun_max_s),
+            };
             std::thread::Builder::new()
                 .name("langspan-auto-checks".into())
                 .spawn(move || {
-                    auto_check::worker(check_sender, check_receiver, debounce, |id, command| {
-                        ask(&sender, id, command)
+                    auto_check::worker(
+                        check_sender,
+                        check_receiver,
+                        timing,
+                        write_counts,
+                        |id, command| ask(&sender, id, command),
+                    )
+                })?;
+        }
+        let (notice_sender, notice_receiver) = mpsc::sync_channel::<notify::Notice>(notify::QUEUE);
+        {
+            // Read again for each notice, so `langspan notify on|off` needs
+            // no restart.
+            let directory = directory.clone();
+            std::thread::Builder::new()
+                .name("langspan-notices".into())
+                .spawn(move || {
+                    notify::worker(notice_receiver, || {
+                        Config::read(&directory)
+                            .map(|config| config.notice_settings())
+                            .map_err(|error| error.to_string())
                     })
                 })?;
         }
+        let handoff_after = Duration::from_millis(config.notify_handoff_after_ms);
+        store.tap(notify::relevant);
         std::thread::Builder::new()
             .name("langspan-owner".into())
             .spawn(move || {
                 // Holding the file handle keeps ownership for exactly the writer's lifetime.
                 let _lock = lock;
+                let mut handoffs = notify::Handoffs::default();
+                // Never waits: a notice that finds the queue full is dropped.
+                let raise = |notice: notify::Notice| {
+                    let kind = notice.kind.name();
+                    if notice_sender.try_send(notice).is_err() {
+                        eprintln!("{}", serde_json::json!({"level":"info","event":"notice_dropped","kind":kind,"reason":"queue_full"}));
+                    }
+                };
                 let mut scan_pending = false;
                 let mut graph_reader: Option<crate::graph::Index> = None;
                 let mut next_scan = Instant::now();
@@ -721,7 +853,16 @@ mod unix {
                     }
                     if Instant::now() >= next_liveness {
                         observe_processes(&mut store, &mut previous_session, now);
+                        for notice in handoffs.due(store.state(), Instant::now(), handoff_after) {
+                            raise(notice);
+                        }
                         next_liveness = Instant::now() + Duration::from_secs(1);
+                    }
+                    // Facts already committed, whoever asked for them.
+                    for event in store.take_tapped() {
+                        if let Some(notice) = notify::notice_for(store.state(), &event) {
+                            raise(notice);
+                        }
                     }
                     if !scan_pending && (!urgent.is_empty() || Instant::now() >= next_scan) {
                         let workspace = std::iter::from_fn(|| urgent.pop_front())
@@ -743,6 +884,14 @@ mod unix {
                             }
                         }
                         next_scan = Instant::now() + Duration::from_secs(2);
+                    }
+                    // What the automatic-check worker marks a run with. Only
+                    // ever behind the state, so a stale mark refuses a
+                    // comparison and never allows one.
+                    let counts = &store.state().writes;
+                    let mut published = write_counts.lock().unwrap_or_else(|e| e.into_inner());
+                    if *published != *counts {
+                        published.clone_from(counts);
                     }
                 }
             })?;
@@ -2083,6 +2232,46 @@ mod unix {
                     resolution: Some("name".into()),
                     coverage,
                     truncated: true,
+                    levels: None,
+                },
+            };
+            protocol::encode(&response).expect("fits one frame");
+        }
+
+        #[test]
+        fn impact_levels_with_long_paths_are_cut_to_one_frame_and_say_so() {
+            use langspan_core::{ImpactFile, ImpactLevel};
+            let file = |level: u32, n: u32| ImpactFile {
+                path: format!("src/{level}/{n:03}/{}.rs", "x".repeat(200)),
+                via: "name".into(),
+                from: format!("src/{}.rs", "y".repeat(200)),
+            };
+            let mut levels: Vec<ImpactLevel> = (1..=3)
+                .map(|level| ImpactLevel {
+                    level,
+                    files: (0..100).map(|n| file(level, n)).collect(),
+                    truncated: false,
+                })
+                .collect();
+            let coverage = GraphCoverage::default();
+            fit_levels(&mut levels, &(&coverage,));
+            assert!(!levels[0].truncated, "the first level fits whole");
+            assert!(levels[1].truncated && levels[2].truncated);
+            assert!(levels[1].files.len() < 100);
+            assert_eq!(levels[2].files, []);
+            let response = Response {
+                version: PROTOCOL_VERSION,
+                request_id: "r".repeat(128),
+                replayed: false,
+                generation: u64::MAX,
+                lease_valid: None,
+                outcome: Outcome::Graph {
+                    symbols: Vec::new(),
+                    references: Vec::new(),
+                    resolution: Some("name".into()),
+                    coverage,
+                    truncated: true,
+                    levels: Some(levels),
                 },
             };
             protocol::encode(&response).expect("fits one frame");

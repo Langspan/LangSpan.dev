@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod redact;
-pub use redact::{contains_secret, redact, redact_check, redact_command};
+pub use redact::{contains_secret, redact, redact_check, redact_command, refuse_secret};
 pub const MAX_EVENT_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const REASON_LIMIT: usize = 600;
 #[derive(Debug, Clone)]
@@ -323,6 +323,7 @@ pub fn execute(operation: Operation, config: &Config, deadline: Instant) -> Repl
             unknown,
             background,
             operation.shell.as_ref(),
+            operation.pre_tool_context,
         ),
         Phase::ShellPost => session.shell_post(&ids, &identity),
     };
@@ -645,16 +646,50 @@ pub fn lifecycle_event(
 /// What a submitted prompt contributes, within the settings of the workspace
 /// it resolved to: its summary, if shared, and the names to look up, if code
 /// briefing is on.
-fn prompt_parts(prompt: Option<&str>, config: &Config) -> (Option<String>, Vec<String>) {
+fn prompt_parts(prompt: Option<&str>, config: &Config) -> (Option<PromptLines>, Vec<String>) {
     (
         prompt
             .filter(|_| config.share_prompt)
-            .and_then(prompt_summary),
+            .map(PromptLines::new)
+            .filter(|lines| lines.summary().is_some()),
         prompt
             .filter(|_| config.code_briefing)
             .map(prompt_identifiers)
             .unwrap_or_default(),
     )
+}
+
+/// Record a prompt's summary and line digests. A prompt without a task line
+/// whose leading lines a live peer's prompt in the repository begins with
+/// too, as when several sessions start from one template, is recorded again
+/// under its first line that differs, so that briefings tell them apart.
+fn record_prompt(
+    step: &impl Fn(&str, Command) -> Result<Response, Failure>,
+    session_id: &str,
+    lines: &PromptLines,
+) -> Result<(), Failure> {
+    let Some(summary) = lines.summary() else {
+        return Ok(());
+    };
+    let line_digests = lines.digests();
+    let command = |summary: String| Command::SessionPrompt {
+        session_id: session_id.to_owned(),
+        summary,
+        line_digests: line_digests.clone(),
+    };
+    let response = step("prompt", command(summary.clone()))?;
+    let Outcome::SessionPrompted { shared_lines, .. } = response.outcome else {
+        return Ok(());
+    };
+    if lines.task_line().is_some() || shared_lines == 0 {
+        return Ok(());
+    }
+    match lines.0.get(shared_lines as usize) {
+        Some(differs) if *differs != summary => {
+            step("prompt-differs", command(differs.clone())).map(drop)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// A lifecycle event a vendor adapter has already parsed, for a host whose
@@ -693,25 +728,89 @@ pub fn lifecycle_parsed(
     )
 }
 
-/// The first non-empty line of the owner's prompt: likely secrets redacted,
+/// The marker of a prompt's own task line, compared without regard to case.
+const TASK_MARKER: &str = "task:";
+
+/// The owner's prompt in one line: its task line, the first of its leading
+/// `MAX_PROMPT_LINES` non-empty lines that starts with `Task:`, without the
+/// marker; otherwise its first non-empty line. Likely secrets redacted,
 /// whitespace collapsed, control and invisible characters dropped, capped at
 /// `SUMMARY_LIMIT` bytes. Redaction comes before the cap, so a cut never
-/// leaves part of a secret behind. Later lines never leave the session. A
-/// slash command yields nothing.
+/// leaves part of a secret behind. Other lines never leave the session,
+/// except the one `prompt_line` picks when a live peer's prompt began the
+/// same way. A slash command yields nothing.
 pub fn prompt_summary(prompt: &str) -> Option<String> {
-    let line = redact(prompt.lines().find(|line| !line.trim().is_empty())?);
-    let text = clean(
-        &line.split_whitespace().collect::<Vec<_>>().join(" "),
-        SUMMARY_LIMIT,
-    );
-    let command = text
-        .split(' ')
-        .next()
-        .is_some_and(|word| word.starts_with('/') && word.matches('/').count() == 1);
-    if text.is_empty() || command {
-        return None;
+    PromptLines::new(prompt).summary()
+}
+
+/// Digests of the summaries of `prompt`'s leading non-empty lines, at most
+/// `MAX_PROMPT_LINES`: what the coordinator compares with live peers'
+/// prompts, never their words. Nothing for a slash command.
+pub fn prompt_line_digests(prompt: &str) -> Vec<String> {
+    PromptLines::new(prompt).digests()
+}
+
+/// The summary of `prompt`'s non-empty line at `index`, counting from zero.
+pub fn prompt_line(prompt: &str, index: usize) -> Option<String> {
+    PromptLines::new(prompt).0.into_iter().nth(index)
+}
+
+/// The summaries of a prompt's leading non-empty lines, each redacted,
+/// collapsed and capped: at most `MAX_PROMPT_LINES` of them, and lines after
+/// the first only within `PROMPT_SCAN_BYTES` of the prompt. None for a
+/// prompt that starts with a slash command.
+struct PromptLines(Vec<String>);
+
+impl PromptLines {
+    fn new(prompt: &str) -> Self {
+        let mut scanned = 0;
+        let lines: Vec<String> = prompt
+            .lines()
+            .take_while(|line| {
+                let first = scanned == 0;
+                scanned += line.len() + 1;
+                first || scanned <= PROMPT_SCAN_BYTES
+            })
+            .filter(|line| !line.trim().is_empty())
+            .take(langspan_core::MAX_PROMPT_LINES)
+            .map(|line| {
+                clean(
+                    &redact(line)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    SUMMARY_LIMIT,
+                )
+            })
+            .filter(|line| !line.is_empty())
+            .collect();
+        let command = lines.first().is_some_and(|line| {
+            line.split(' ')
+                .next()
+                .is_some_and(|word| word.starts_with('/') && word.matches('/').count() == 1)
+        });
+        Self(if command { Vec::new() } else { lines })
     }
-    Some(text)
+
+    /// The text of the first line marked `Task:`, without the marker.
+    fn task_line(&self) -> Option<String> {
+        self.0.iter().find_map(|line| {
+            let head = line.get(..TASK_MARKER.len())?;
+            let task = line[TASK_MARKER.len()..].trim_start();
+            (head.eq_ignore_ascii_case(TASK_MARKER) && !task.is_empty()).then(|| task.to_owned())
+        })
+    }
+
+    fn summary(&self) -> Option<String> {
+        self.task_line().or_else(|| self.0.first().cloned())
+    }
+
+    fn digests(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .map(|line| sha256::hex(&sha256::digest(line.as_bytes()))[..32].to_owned())
+            .collect()
+    }
 }
 
 /// Only this much of a prompt is searched for identifiers.
@@ -995,16 +1094,10 @@ fn lifecycle(
             };
         }
         LifecycleKind::Prompt { prompt } => {
-            let (summary, names) = prompt_parts(prompt.as_deref(), config);
-            let recorded = summary.is_some();
-            if let Some(summary) = summary
-                && let Err(failure) = step(
-                    "prompt",
-                    Command::SessionPrompt {
-                        session_id: ids.session_id.clone(),
-                        summary,
-                    },
-                )
+            let (lines, names) = prompt_parts(prompt.as_deref(), config);
+            let recorded = lines.is_some();
+            if let Some(lines) = lines
+                && let Err(failure) = record_prompt(&step, &ids.session_id, &lines)
             {
                 return failure_reply(failure);
             }
@@ -1418,6 +1511,10 @@ fn render_checks(checks: &[langspan_core::CheckNotice]) -> String {
             notice.duration_ms as f64 / 1000.0,
             clean(&notice.check_id, 64),
         );
+        if let Some(failures) = render_failures(&notice.failures) {
+            section.push('\n');
+            section.push_str(&failures);
+        }
         let lines: Vec<String> = notice
             .tail
             .lines()
@@ -1451,6 +1548,54 @@ fn render_checks(checks: &[langspan_core::CheckNotice]) -> String {
         text.push_str(&section);
     }
     text
+}
+
+/// Room for the names of an automatic check's failing tests.
+const FAILURES_LIMIT: usize = 480;
+pub const FLAKY_LABEL: &str = "known to flip on unchanged code";
+
+/// `2 failures named in its output: a (known to flip on unchanged code, 2
+/// of 14 runs), b.` Every failure stays a failure; when all of them are of
+/// tests known to flip, a second sentence says so and that the check still
+/// failed.
+fn render_failures(failures: &[langspan_core::TestFailure]) -> Option<String> {
+    if failures.is_empty() {
+        return None;
+    }
+    let mut names = Vec::new();
+    let mut size = 0;
+    for failure in failures {
+        let mut name = clean(&failure.test, langspan_core::MAX_TEST_NAME_BYTES);
+        if let Some(count) = &failure.flaky {
+            name.push_str(&format!(
+                " ({FLAKY_LABEL}, {} of {} runs)",
+                count.flips, count.runs
+            ));
+        }
+        if size + name.len() + 2 > FAILURES_LIMIT && !names.is_empty() {
+            break;
+        }
+        size += name.len() + 2;
+        names.push(name);
+    }
+    let left = failures.len() - names.len();
+    let mut text = format!(
+        "{} failure{} named in its output: {}{}.",
+        failures.len(),
+        if failures.len() == 1 { "" } else { "s" },
+        names.join(", "),
+        if left > 0 {
+            format!(", and {left} more")
+        } else {
+            String::new()
+        }
+    );
+    if failures.iter().all(|failure| failure.flaky.is_some()) {
+        text.push_str(&format!(
+            " Every one is of a test {FLAKY_LABEL}; the check still failed."
+        ));
+    }
+    Some(text)
 }
 
 pub(crate) fn quoted(text: &str) -> String {
@@ -2086,9 +2231,7 @@ pub fn install_at(
     state_dir: &Path,
     dir: &Path,
 ) -> Option<(PathBuf, crate::install::Registration)> {
-    // The state directory may not exist yet: no coordinator has started.
     let canonical = |dir: &Path| fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let state_dir = canonical(state_dir);
     vendor.project_hook_files().iter().find_map(|file| {
         let path = dir.join(file);
         let Ok(Some(settings)) = crate::install::read(&path) else {
@@ -2102,7 +2245,8 @@ pub fn install_at(
                 registration
             })
             .find(|registration| {
-                registration.root == dir && canonical(&registration.state_dir) == state_dir
+                registration.root == dir
+                    && crate::install::same_directory(&registration.state_dir, state_dir)
             })
             .map(|registration| (path, registration))
     })
@@ -2775,6 +2919,8 @@ impl Session<'_> {
 /// runs, the files it will write are named only when the whole command
 /// parsed and every target is a file inside this workspace; otherwise there
 /// is no decision before it, and what it changed is compared after.
+/// `pre_tool_context`: the host gives the model context from the pre-tool
+/// reply, so a formatter notice can reach it (issue #126).
 #[allow(clippy::too_many_arguments)]
 pub fn shell_operation(
     source: &str,
@@ -2787,6 +2933,7 @@ pub fn shell_operation(
     background: bool,
     root: &Path,
     mid_turn_context: bool,
+    pre_tool_context: bool,
 ) -> Operation {
     let (paths, phase) = if pre {
         match shell_keys(root, cwd, command) {
@@ -2829,8 +2976,9 @@ pub fn shell_operation(
             cwd: cwd.map(str::to_owned),
         }),
         contents: Vec::new(),
-        // Shell writes are not checked for breaks.
-        pre_tool_context: false,
+        // Shell writes are not checked for breaks (`shell_pre` asks for no
+        // break check); the context carries a formatter notice.
+        pre_tool_context,
     }
 }
 
@@ -2851,6 +2999,7 @@ fn shell_keys(root: &Path, cwd: Option<&str>, command: &str) -> Result<Vec<Strin
 }
 
 impl Session<'_> {
+    #[allow(clippy::too_many_arguments)]
     fn shell_pre(
         &mut self,
         ids: &Identities,
@@ -2859,6 +3008,7 @@ impl Session<'_> {
         unknown: Option<&'static str>,
         background: bool,
         call: Option<&ShellCall>,
+        pre_tool_context: bool,
     ) -> Reply {
         // A commit that would carry another live session's lines is held
         // once, before anything else (ADR 0026).
@@ -2936,6 +3086,27 @@ impl Session<'_> {
         let mut reply = self.shell_decided(decided, note, started, &record);
         if let Some(detail) = guarded {
             reply.detail = format!("{}; {detail}", reply.detail);
+        }
+        // A formatter that may rewrite another session's uncommitted files:
+        // said once, never refused (issue #126). Only where the host gives
+        // the model pre-tool context, so the notice is not spent unread.
+        let formatter = match (call, &record.before) {
+            (Some(call), Ok(before)) if pre_tool_context => {
+                crate::formatter::notice(self.config, &ids.session_id, call, before, self.deadline)
+            }
+            _ => None,
+        };
+        if let Some(notice) = formatter {
+            reply.detail = format!("{}; {}", reply.detail, notice.detail);
+            if let Some(context) = notice.context.filter(|_| reply.stdout.is_empty()) {
+                reply.stdout = json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": context,
+                    }
+                })
+                .to_string();
+            }
         }
         reply
     }
@@ -3051,17 +3222,21 @@ impl Session<'_> {
                                 run.contested.extend(changed.iter().cloned());
                                 noted.clear();
                             } else {
-                                // What only reformats this session's own
-                                // lines is its own, whatever ran alongside
-                                // (issue #124).
-                                let candidates: Vec<String> = overlapped
+                                // A line the command only reformatted keeps
+                                // its author, whatever ran alongside (issues
+                                // #124 and #141); a change of tokens is
+                                // still credited to no session.
+                                let candidates: Vec<crate::journal::Candidate> = overlapped
                                     .into_iter()
-                                    .filter(|path| {
-                                        !rewritten.contains(path)
-                                            && !run.edited_elsewhere.contains(path)
+                                    .map(|path| (path, true))
+                                    .chain(rewritten.iter().map(|path| (path.clone(), false)))
+                                    .filter(|(path, _)| !run.edited_elsewhere.contains(path))
+                                    .map(|(path, overlapped)| crate::journal::Candidate {
+                                        path,
+                                        overlapped,
                                     })
                                     .collect();
-                                let reformats = crate::journal::own_reformats(
+                                let reformats = crate::journal::reformat_authors(
                                     state_dir,
                                     self.root,
                                     &ids.session_id,
@@ -3076,14 +3251,17 @@ impl Session<'_> {
                             }
                             run.contested.sort();
                             run.contested.dedup();
+                            noted.sort();
+                            noted.dedup();
                             self.note_shell_changes(&run, &noted);
                             run.reformatted =
-                                partial.iter().map(|(path, _)| path.clone()).collect();
+                                partial.iter().map(|(path, _, _)| path.clone()).collect();
+                            run.reformatted.dedup();
                             if let Err(error) = crate::journal::record_partial(
                                 state_dir,
                                 self.root,
-                                &ids.session_id,
                                 &partial,
+                                run.started_ms,
                             ) {
                                 eprintln!(
                                     "{}",
@@ -3099,6 +3277,7 @@ impl Session<'_> {
                                 crate::journal::Origin::Shell {
                                     snapshot: before,
                                     deadline: self.deadline,
+                                    started_ms: run.started_ms,
                                 },
                             ) {
                                 eprintln!(
@@ -3255,7 +3434,7 @@ impl Session<'_> {
         let partly = match run.reformatted.len() {
             0 => String::new(),
             partly => format!(
-                " ({partly} of them partly this session's: the lines its command only reformatted)"
+                " ({partly} of them keep the authors of the lines the command only reformatted)"
             ),
         };
         Ok(if run.contested.is_empty() {
@@ -3416,7 +3595,7 @@ fn located_files(
 }
 
 /// `session_id` as a reason names it: `claude-code session <id>`.
-fn session_label(session_id: &str) -> String {
+pub(crate) fn session_label(session_id: &str) -> String {
     match session_id.split_once('.') {
         Some((host, id)) => format!("{} session {}", clean(host, 32), clean(id, 64)),
         None => format!("session {}", clean(session_id, 64)),
@@ -4035,6 +4214,54 @@ mod briefing_text {
     }
 
     #[test]
+    fn a_task_line_names_the_task_wherever_it_is_in_the_prompt() {
+        let template = "You are a coding agent.\n\nRead the guide.\nTask: fix   issue #12\nmore";
+        assert_eq!(prompt_summary(template).as_deref(), Some("fix issue #12"));
+        assert_eq!(
+            prompt_summary("Intro\n  task: lower case marker").as_deref(),
+            Some("lower case marker")
+        );
+        // An empty marker is no task line; the first line is used as before.
+        assert_eq!(
+            prompt_summary("Intro\nTask:   \nmore").as_deref(),
+            Some("Intro")
+        );
+        // A slash command is never shared, whatever follows it.
+        assert_eq!(prompt_summary("/review\nTask: something"), None);
+        // A secret on the task line is redacted before the cap.
+        let key = format!("sk_live_{}", "4eC39HqLyjWDarjtT1zdp7dc".repeat(12));
+        let summary = prompt_summary(&format!("Intro\nTask: deploy STRIPE_KEY={key}")).unwrap();
+        assert_eq!(summary, "deploy STRIPE_KEY=[redacted]");
+        let long = prompt_summary(&format!("Intro\nTask: {}", "é".repeat(400))).unwrap();
+        assert!(long.len() <= SUMMARY_LIMIT && long.ends_with('…'));
+    }
+
+    #[test]
+    fn a_prompts_lines_are_compared_by_digest_and_a_later_line_can_summarise_it() {
+        let one = "Shared brief\n\nRead   the guide.\nFix the retry loop\nTOKEN=secret";
+        let two = "Shared brief\nRead the guide.\nRename the gate module";
+        let (a, b) = (prompt_line_digests(one), prompt_line_digests(two));
+        assert_eq!(a.len(), 4, "non-empty lines only: {a:?}");
+        assert_eq!(a[..2], b[..2], "whitespace does not tell lines apart");
+        assert_ne!(a[2], b[2]);
+        assert!(a.iter().all(
+            |digest| digest.len() == 32 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        ));
+        assert_eq!(
+            prompt_line(two, 2).as_deref(),
+            Some("Rename the gate module")
+        );
+        assert_eq!(prompt_line(one, 3).as_deref(), Some("TOKEN=[redacted]"));
+        assert_eq!(prompt_line(two, 3), None);
+        let long: String = (0..100).map(|line| format!("line {line}\n")).collect();
+        assert_eq!(
+            prompt_line_digests(&long).len(),
+            langspan_core::MAX_PROMPT_LINES
+        );
+        assert_eq!(prompt_line_digests("/compact\nmore"), Vec::<String>::new());
+    }
+
+    #[test]
     fn a_secret_on_the_first_line_of_a_prompt_is_redacted_before_the_cap() {
         let key = format!("sk_live_{}", "4eC39HqLyjWDarjtT1zdp7dc".repeat(12));
         let summary = prompt_summary(&format!("STRIPE_KEY={key} then deploy\nmore")).unwrap();
@@ -4416,7 +4643,48 @@ mod code_briefing_text {
             duration_ms: 2300,
             timed_out_s: None,
             tail: tail.into(),
+            failures: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_flaky_failure_is_labelled_and_the_section_stays_within_its_bound() {
+        use langspan_core::{FlakyCount, TestFailure};
+        let failure = |test: &str, flaky: Option<(u32, u32)>| TestFailure {
+            test: test.into(),
+            flaky: flaky.map(|(flips, runs)| FlakyCount { flips, runs }),
+        };
+        let mut check = failed_check("test net::times_out ... FAILED");
+        check.failures = vec![failure("net::times_out", Some((2, 14)))];
+        let text = render_checks(std::slice::from_ref(&check));
+        assert!(
+            text.contains(
+                "1 failure named in its output: net::times_out (known to flip on unchanged code, 2 of 14 runs). Every one is of a test known to flip on unchanged code; the check still failed."
+            ),
+            "{text}"
+        );
+        assert!(text.contains("tests failed (exit 101)"), "{text}");
+        // One that is not known to flip: no label, and no "every one".
+        check.failures.push(failure("parser::rejects_empty", None));
+        let text = render_checks(std::slice::from_ref(&check));
+        assert!(
+            text.contains("2 failures named in its output: net::times_out (known to flip on unchanged code, 2 of 14 runs), parser::rejects_empty."),
+            "{text}"
+        );
+        assert!(!text.contains("Every one"), "{text}");
+        // 100 long names: counted, cut, and the section within its share.
+        check.failures = (0..100)
+            .map(|n| failure(&format!("{n:03}{}", "x".repeat(197)), Some((2, 20))))
+            .collect();
+        check.tail = (0..20)
+            .map(|n| format!("line {n} {}", "y".repeat(60)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = render_checks(std::slice::from_ref(&check));
+        assert!(text.len() <= CHECKS_LIMIT, "{}", text.len());
+        assert!(text.contains("100 failures named in its output"), "{text}");
+        assert!(text.contains("more."), "{text}");
+        assert!(text.contains("line 19"), "{text}");
     }
 
     #[test]

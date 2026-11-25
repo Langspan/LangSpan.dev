@@ -644,7 +644,8 @@ fn a_line_the_other_sessions_command_also_changed_is_credited_to_no_session() {
     let post = f.bash(ALICE, "PostToolUse", "alice-2", &alice_command);
     assert_eq!(post.coverage, "contested", "{post:?}");
     assert!(
-        post.detail.contains("1 of them partly this session's"),
+        post.detail
+            .contains("1 of them keep the authors of the lines the command only reformatted"),
         "{post:?}"
     );
     assert!(f.credited(ALICE, "Bash").is_empty());
@@ -1112,4 +1113,216 @@ fn a_file_a_session_creates_stays_its_own_when_its_formatter_overlaps_another_ed
         "fn alice(x, y) { x }\n"
     );
     assert_eq!(f.status(), " M b.txt\n");
+}
+
+/// The committed, formatted library both sessions add to in the issue #141
+/// tests.
+const LIB: &str = "pub fn shared() -> u32 {\n    1\n}\n\npub fn middle() -> u32 {\n    2\n}\n\npub fn end() -> u32 {\n    3\n}\n";
+
+/// A Cargo package with `LIB` as its library, committed: what `cargo fmt
+/// --all` formats.
+fn cargo_package(f: &Fixture) {
+    let work = f.work();
+    fs::write(
+        work.join("Cargo.toml"),
+        "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    fs::write(work.join(".gitignore"), "/target\nCargo.lock\n").unwrap();
+    fs::create_dir_all(work.join("src")).unwrap();
+    fs::write(work.join("src/lib.rs"), LIB).unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-q", "-m", "package"]);
+}
+
+/// `cargo fmt --all`, as the test's own toolchain runs it.
+fn cargo_fmt() -> String {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    format!("'{cargo}' fmt --all")
+}
+
+/// Issue #141, the acceptance run's case: two sessions in one checkout each
+/// write code with the edit tool, in a shared file and in a new file of
+/// their own. Alice runs `cargo fmt --all` while Bob's shell command is
+/// running, and the real rustfmt re-indents and re-wraps both sessions'
+/// code. Each reformatted line keeps the author it had: Bob's new file stays
+/// his and is not Alice's, and each session's `commit --mine` commits its
+/// own hunks and refuses none.
+#[test]
+fn cargo_fmt_during_another_sessions_command_keeps_each_sessions_lines_its_own() {
+    let f = Fixture::new();
+    cargo_package(&f);
+    f.read(ALICE, "alice-read", "src/lib.rs");
+    let edit = f.edit(
+        ALICE,
+        "alice-1",
+        "src/lib.rs",
+        "    1\n}\n",
+        "    1\n}\n\npub fn alice(x:u32,y:u32)->u32{x+y}\n",
+    );
+    assert_eq!(edit.coverage, "admitted", "{edit:?}");
+    f.read(BOB, "bob-read", "src/lib.rs");
+    let edit = f.edit(
+        BOB,
+        "bob-1",
+        "src/lib.rs",
+        "    3\n}\n",
+        "    3\n}\n\npub fn bob(first_argument: u32, second_argument: u32, third_argument: u32, fourth_argument: u32) -> u32 {\nlet z = first_argument;\n      z\n}\n",
+    );
+    assert_eq!(edit.coverage, "admitted", "{edit:?}");
+    f.write(
+        ALICE,
+        "alice-2",
+        "tests/alice.rs",
+        "#[test]\nfn alice_test(){assert_eq!(1,1);}\n",
+    );
+    f.write(
+        BOB,
+        "bob-2",
+        "tests/bob.rs",
+        "#[test]\nfn bob_test(){\nlet first = 1; let second = 2;\n        assert_eq!(first,second-1);}\n",
+    );
+
+    // Bob's command (a test run, say) is still going while Alice formats.
+    let (bob, bob_command) = f.start_held(BOB, "bob-3", "true");
+    let post = f.run_shell(ALICE, "alice-3", &cargo_fmt());
+    let lib = fs::read_to_string(f.work().join("src/lib.rs")).unwrap();
+    let alice_fn = "pub fn alice(x: u32, y: u32) -> u32 {\n    x + y\n}\n";
+    let bob_fn = "pub fn bob(\n    first_argument: u32,\n    second_argument: u32,\n    third_argument: u32,\n    fourth_argument: u32,\n) -> u32 {\n    let z = first_argument;\n    z\n}\n";
+    assert!(lib.contains(alice_fn) && lib.contains(bob_fn), "{lib}");
+    let bob_test = "#[test]\nfn bob_test() {\n    let first = 1;\n    let second = 2;\n    assert_eq!(first, second - 1);\n}\n";
+    assert_eq!(
+        fs::read_to_string(f.work().join("tests/bob.rs")).unwrap(),
+        bob_test
+    );
+    // Only Alice's own new file is her command's change; the shared file
+    // and Bob's file are not hers.
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert_eq!(f.credited(ALICE, "Bash"), ["tests/alice.rs"]);
+    assert!(
+        post.detail
+            .contains("2 of them keep the authors of the lines the command only reformatted"),
+        "{post:?}"
+    );
+    bob.release();
+    f.bash(BOB, "PostToolUse", "bob-3", &bob_command);
+
+    let ran = f.commit_mine(ALICE, "alice-4", "Alice: formatted");
+    assert!(ran.status.success(), "{}", said(&ran));
+    let head = f.head_files();
+    assert!(
+        head.contains("src/lib.rs")
+            && head.contains("tests/alice.rs")
+            && !head.contains("tests/bob.rs"),
+        "{head}"
+    );
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:src/lib.rs"]),
+        LIB.replacen("    1\n}\n", &format!("    1\n}}\n\n{alice_fn}"), 1)
+    );
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:tests/alice.rs"]),
+        "#[test]\nfn alice_test() {\n    assert_eq!(1, 1);\n}\n"
+    );
+
+    let ran = f.commit_mine(BOB, "bob-4", "Bob: formatted");
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(git(&f.work(), &["show", "HEAD:src/lib.rs"]), lib);
+    assert_eq!(git(&f.work(), &["show", "HEAD:tests/bob.rs"]), bob_test);
+    assert_eq!(f.status(), "");
+}
+
+/// Issue #141 without an overlapping command: Alice's formatter only
+/// reformats Bob's uncommitted new file. Its lines stay Bob's, so Alice's
+/// `commit --mine` does not take them and Bob's commits them.
+#[test]
+fn a_new_file_another_sessions_formatter_reformats_stays_its_writers() {
+    let f = Fixture::new();
+    cargo_package(&f);
+    f.write(
+        BOB,
+        "bob-1",
+        "tests/bob.rs",
+        "#[test]\nfn bob_test(){assert_eq!(1,1);}\n",
+    );
+    let post = f.run_shell(ALICE, "alice-1", &cargo_fmt());
+    assert_eq!(
+        fs::read_to_string(f.work().join("tests/bob.rs")).unwrap(),
+        "#[test]\nfn bob_test() {\n    assert_eq!(1, 1);\n}\n"
+    );
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert!(f.credited(ALICE, "Bash").is_empty());
+
+    let ran = f.commit_mine(ALICE, "alice-2", "Alice: nothing of hers");
+    assert!(
+        said(&ran).contains("Nothing of this session's is uncommitted"),
+        "{}",
+        said(&ran)
+    );
+    assert!(f.head_files().starts_with("package\n"));
+    let ran = f.commit_mine(BOB, "bob-2", "Bob: formatted");
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert!(f.head_files().contains("tests/bob.rs"));
+    assert_eq!(f.status(), "");
+}
+
+/// Issue #141 keeps #124's rule for a change of tokens: while Bob's command
+/// runs, Alice's command renames a variable in her own line and adds a line.
+/// Either could be Bob's command's work, so neither is credited to anyone,
+/// and Alice's `commit --mine` refuses the hunk.
+#[test]
+fn a_token_change_during_another_sessions_command_is_credited_to_no_session() {
+    let f = Fixture::new();
+    f.write(ALICE, "alice-1", "a.txt", "a line\nlet total = 1;\n");
+    let (bob, bob_command) = f.start_held(BOB, "bob-1", "true");
+    let scratch = f.base.join("renamed");
+    let post = f.run_shell(
+        ALICE,
+        "alice-2",
+        &format!(
+            "for f in a.txt; do sed 's/total/sum/' $f > '{0}' && printf 'sum;\\n' >> '{0}' && cat '{0}' > $f; done",
+            scratch.display()
+        ),
+    );
+    assert_eq!(
+        fs::read_to_string(f.work().join("a.txt")).unwrap(),
+        "a line\nlet sum = 1;\nsum;\n"
+    );
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert!(f.credited(ALICE, "Bash").is_empty());
+    assert!(!post.detail.contains("keep the authors"), "{post:?}");
+    bob.release();
+    f.bash(BOB, "PostToolUse", "bob-1", &bob_command);
+
+    // The renamed and the added line are no session's, so Alice's
+    // `commit --mine` leaves them.
+    let ran = f.commit_mine(ALICE, "alice-3", "Alice: renamed");
+    assert!(
+        said(&ran).contains("a.txt (no session's)"),
+        "{}",
+        said(&ran)
+    );
+    assert_eq!(f.head_files(), "start\n\na.txt\nb.txt\n");
+    assert_eq!(f.status(), " M a.txt\n");
+}
+
+/// A shell change made again after the session reverted it is still the
+/// session's to commit: an overlapping run's credit of the same change is
+/// skipped (issue #141), and this one is not taken for it.
+#[test]
+fn the_same_shell_change_made_again_after_a_revert_is_still_the_sessions() {
+    let f = Fixture::new();
+    let command = "for f in a.txt; do printf 'more\\n' >> $f; done";
+    let post = f.run_shell(ALICE, "alice-1", command);
+    assert_eq!(post.coverage, "shell_observed", "{post:?}");
+    f.read(ALICE, "alice-read", "a.txt");
+    let revert = f.edit(ALICE, "alice-2", "a.txt", "a line\nmore\n", "a line\n");
+    assert_eq!(revert.coverage, "admitted", "{revert:?}");
+    let post = f.run_shell(ALICE, "alice-3", command);
+    assert_eq!(post.coverage, "shell_observed", "{post:?}");
+
+    let ran = f.commit_mine(ALICE, "alice-4", "Alice: more");
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(git(&f.work(), &["show", "HEAD:a.txt"]), "a line\nmore\n");
+    assert_eq!(f.status(), "");
 }

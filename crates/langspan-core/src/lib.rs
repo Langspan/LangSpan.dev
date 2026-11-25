@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 
 mod count;
 mod dashboard;
+mod flaky;
 mod lines;
+mod recall;
 mod status;
 mod status_line;
 mod today;
@@ -21,6 +23,14 @@ pub use dashboard::{
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
     LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow, PublishRow, RecentFile, ScanRow,
     WorkspaceRow, dashboard_denials,
+};
+pub use flaky::{
+    FLAKY_DECAY_RUNS, FLAKY_MIN_FLIPS, FLAKY_WINDOW_RUNS, FlakyCount, FlakyTest, LastTests,
+    MAX_FLAKY_LISTED, MAX_LEARNED_CHECKS, MAX_LEARNED_TESTS, MAX_TEST_NAME_BYTES, MAX_TEST_NAMES,
+    MAX_TEST_RESULT_BYTES, TestFailure, TestHistory, TestLearning, TestResults,
+};
+pub use recall::{
+    RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
@@ -501,7 +511,17 @@ pub struct SessionActivity {
     /// the source index (roadmap C8). Paths only; never the prompt's words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_targets: Option<PromptTargets>,
+    /// Digests of the leading non-empty lines of the session's last prompt,
+    /// at most `MAX_PROMPT_LINES`: compared with live peers' to tell prompts
+    /// started from one template apart (issue #114). Never the words.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub line_digests: Vec<String>,
 }
+
+/// At most this many leading prompt lines are compared by digest.
+pub const MAX_PROMPT_LINES: usize = 32;
+/// Hex characters in one prompt line digest, at most.
+pub const MAX_PROMPT_LINE_DIGEST: usize = 64;
 
 /// The definition paths a prompt's code briefing found, and when. Compared
 /// with other sessions' targets and work while within `BRIEF_HORIZON_MS`;
@@ -527,6 +547,14 @@ fn is_zero_u64(value: &u64) -> bool {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn one() -> u32 {
+    1
+}
+
+fn is_one(value: &u32) -> bool {
+    *value == 1
 }
 
 /// The signature of a briefing with nothing in it.
@@ -823,6 +851,10 @@ pub struct CheckNotice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timed_out_s: Option<u32>,
     pub tail: String,
+    /// The failing tests its output named, each labelled when it is known
+    /// to flip on unchanged code. Empty when no test was named.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<TestFailure>,
 }
 
 /// A push of an integrated result that LangSpan made at the owner's command.
@@ -1034,6 +1066,33 @@ pub struct NameRef {
     pub name: String,
     pub line: u32,
     pub digest: String,
+}
+
+/// The deepest `graph impact` level a client may ask for (roadmap D2).
+pub const MAX_IMPACT_DEPTH: u32 = 3;
+
+/// One level of a multi-level impact answer (roadmap D2): the files that
+/// mention a name the previous level's files export. Found by name, not
+/// resolved, so each level compounds the false positives of the one before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ImpactLevel {
+    /// From 1: level 1 mentions an export of the queried file.
+    pub level: u32,
+    pub files: Vec<ImpactFile>,
+    /// A bound, the frame size or the request deadline cut this level.
+    pub truncated: bool,
+}
+
+/// A file reached at its first level, and how.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ImpactFile {
+    pub path: String,
+    /// The exported name of `from` that this file mentions.
+    pub via: String,
+    /// The file at the previous level (the queried file for level 1).
+    pub from: String,
 }
 
 /// How much of a workspace the index covers, so a short answer is not read
@@ -1496,6 +1555,9 @@ pub struct State {
     /// Automatic check results not yet delivered, per session, newest first.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub check_notices: BTreeMap<String, Vec<CheckNotice>>,
+    /// Tests that flip on unchanged code, learned per workspace.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub test_learning: BTreeMap<String, TestLearning>,
     /// Agent hosts present on this machine with no LangSpan install that
     /// covers them, by host name (roadmap A7). For the owner; agents are
     /// not told.
@@ -1509,6 +1571,13 @@ pub struct State {
     /// line (roadmap H2). Derived on replay; not part of the status reply.
     #[serde(skip)]
     pub refusals: Vec<RecentRefusal>,
+    /// Writes recorded per workspace since the event log was replayed: the
+    /// write generation a check run takes before its tree and carries with
+    /// its test results (`record_check.writes_before`). Derived on replay;
+    /// in the status reply, one count per workspace, so that `check run`
+    /// can read it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub writes: BTreeMap<String, u64>,
 }
 
 /// Checkout changes kept per workspace.
@@ -1626,6 +1695,8 @@ pub enum Event {
     SessionPrompted {
         session_id: String,
         summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        line_digests: Vec<String>,
         at_ms: u64,
         generation: u64,
     },
@@ -1722,6 +1793,32 @@ pub enum Event {
     CheckDelivered {
         session_id: String,
         check_id: String,
+    },
+    /// Which tests one run of check `name` failed and passed on `tree_oid`:
+    /// names only, no output. Follows the `CheckRecorded` of record
+    /// `check_id`; `rerun` for the run made again on the same tree, which is
+    /// no record of its own. Compared with the check's last such result of
+    /// the same `command_id`, unless a write was recorded in the workspace
+    /// since.
+    TestsRecorded {
+        workspace_id: String,
+        check_id: String,
+        name: String,
+        tree_oid: String,
+        command: String,
+        command_id: String,
+        results: TestResults,
+        #[serde(default, skip_serializing_if = "is_false")]
+        rerun: bool,
+        at_ms: u64,
+    },
+    /// The owner cleared what was learned about `test`, in check `name` or
+    /// in every check.
+    FlakyTestForgotten {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        test: String,
     },
     Landed {
         landing: Landing,
@@ -1997,6 +2094,40 @@ pub enum Command {
         /// end.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         report: Option<CheckReport>,
+        /// The tests its output named, for a working-tree check that passed
+        /// or failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tests: Option<TestResults>,
+        /// The tests of a second run on the same tree, made to learn which
+        /// tests flip; its result is not recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rerun: Option<TestResults>,
+        /// With `rerun`: the workspace's [`State::writes`] when the first
+        /// run's tree was taken. The rerun is compared only if no write was
+        /// recorded since, even one the tree no longer shows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        writes_before: Option<u64>,
+        /// With `tests`: the command's identity, 64 lowercase hex digits
+        /// that differ for any two argument vectors. `command` is a cut and
+        /// redacted summary, which two commands can share; results are
+        /// compared only when this is equal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+    },
+    /// Read-only: the tests known to flip on unchanged code, of check `name`
+    /// or of every check.
+    FlakyTests {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Clear what was learned about `test`, in check `name` or in every
+    /// check.
+    ForgetFlakyTest {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        test: String,
     },
     /// Run `argv` automatically after a session's writes in the workspace,
     /// recorded as check `name`. Replaces any earlier automatic check.
@@ -2130,6 +2261,16 @@ pub enum Command {
     Recap {
         workspace_id: String,
     },
+    /// Read-only: the held notes of one workspace that hold every word of
+    /// `query`, about `path` or the whole workspace when a path is given
+    /// (roadmap E2). Never recorded, never counted as delivered.
+    Recall {
+        workspace_id: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+    },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
     /// every workspace when none is named, and what is still open.
@@ -2190,6 +2331,12 @@ pub enum Command {
         limit: u32,
         #[serde(default, skip_serializing_if = "is_false")]
         blind_in_scope: bool,
+        /// Levels to follow, 1 to `MAX_IMPACT_DEPTH` (roadmap D2). Above 1
+        /// the answer adds `levels`; at 1 the field is absent from the
+        /// request, which is then the one earlier builds send, and the
+        /// answer is theirs too.
+        #[serde(default = "one", skip_serializing_if = "is_one")]
+        depth: u32,
     },
     /// Read-only: the files the index cannot answer for, by reason, at
     /// most `limit` paths per list (roadmap D8).
@@ -2260,6 +2407,8 @@ pub enum Command {
     SessionPrompt {
         session_id: String,
         summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        line_digests: Vec<String>,
     },
     /// Where the definitions the session's prompt named are, from the
     /// source index: replaces the session's earlier prompt targets. Paths
@@ -2307,6 +2456,11 @@ pub enum Command {
     StatusRecords {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after: Option<String>,
+        /// A smaller page than the store's own bound, in bytes; absent for
+        /// the store's bound. The MCP adapter asks for one when a full page
+        /// does not fit its reply, which carries the page twice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_bytes: Option<u32>,
     },
     /// Read-only: a bounded view of every session on every machine heard
     /// from, with what is held, what overlaps, evidence and health.
@@ -2450,6 +2604,40 @@ enum CommandWire {
         /// end.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         report: Option<CheckReport>,
+        /// The tests its output named, for a working-tree check that passed
+        /// or failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tests: Option<TestResults>,
+        /// The tests of a second run on the same tree, made to learn which
+        /// tests flip; its result is not recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rerun: Option<TestResults>,
+        /// With `rerun`: the workspace's [`State::writes`] when the first
+        /// run's tree was taken. The rerun is compared only if no write was
+        /// recorded since, even one the tree no longer shows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        writes_before: Option<u64>,
+        /// With `tests`: the command's identity, 64 lowercase hex digits
+        /// that differ for any two argument vectors. `command` is a cut and
+        /// redacted summary, which two commands can share; results are
+        /// compared only when this is equal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
+    },
+    /// Read-only: the tests known to flip on unchanged code, of check `name`
+    /// or of every check.
+    FlakyTests {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Clear what was learned about `test`, in check `name` or in every
+    /// check.
+    ForgetFlakyTest {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        test: String,
     },
     /// Run `argv` automatically after a session's writes in the workspace,
     /// recorded as check `name`. Replaces any earlier automatic check.
@@ -2583,6 +2771,16 @@ enum CommandWire {
     Recap {
         workspace_id: String,
     },
+    /// Read-only: the held notes of one workspace that hold every word of
+    /// `query`, about `path` or the whole workspace when a path is given
+    /// (roadmap E2). Never recorded, never counted as delivered.
+    Recall {
+        workspace_id: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+    },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
     /// every workspace when none is named, and what is still open.
@@ -2643,6 +2841,12 @@ enum CommandWire {
         limit: u32,
         #[serde(default, skip_serializing_if = "is_false")]
         blind_in_scope: bool,
+        /// Levels to follow, 1 to `MAX_IMPACT_DEPTH` (roadmap D2). Above 1
+        /// the answer adds `levels`; at 1 the field is absent from the
+        /// request, which is then the one earlier builds send, and the
+        /// answer is theirs too.
+        #[serde(default = "one", skip_serializing_if = "is_one")]
+        depth: u32,
     },
     /// Read-only: the files the index cannot answer for, by reason, at
     /// most `limit` paths per list (roadmap D8).
@@ -2713,6 +2917,8 @@ enum CommandWire {
     SessionPrompt {
         session_id: String,
         summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        line_digests: Vec<String>,
     },
     /// Where the definitions the session's prompt named are, from the
     /// source index: replaces the session's earlier prompt targets. Paths
@@ -2755,6 +2961,8 @@ enum CommandWire {
     StatusRecords {
         #[serde(default)]
         after: Option<String>,
+        #[serde(default)]
+        page_bytes: Option<u32>,
     },
     Dashboard {},
     Events {
@@ -2774,6 +2982,9 @@ impl<'de> Deserialize<'de> for Command {
     }
 }
 
+// One reply per request, built and sent once: its size does not matter, and
+// boxing `Status`'s state would only add an allocation to every status read.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Outcome {
@@ -2836,6 +3047,10 @@ pub enum Outcome {
     },
     SessionPrompted {
         session_id: String,
+        /// Leading prompt lines a live peer's latest prompt in the same
+        /// repository shares with this one, by digest.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        shared_lines: u32,
     },
     PromptTargets {
         session_id: String,
@@ -2909,6 +3124,19 @@ pub enum Outcome {
     },
     Checks {
         checks: Vec<CheckView>,
+    },
+    /// Known-flaky tests, newest flip first; `more` when some were left out.
+    FlakyTests {
+        workspace_id: String,
+        tests: Vec<FlakyTest>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        more: bool,
+    },
+    /// `forgotten` is false when nothing was learned about the test.
+    FlakyTestForgotten {
+        workspace_id: String,
+        test: String,
+        forgotten: bool,
     },
     /// `ready` only when a passing check of that name exists for exactly
     /// the tree asked about. `reason` says what is missing otherwise.
@@ -2997,6 +3225,9 @@ pub enum Outcome {
     Recap {
         recap: Recap,
     },
+    Recall {
+        recall: Recall,
+    },
     Today {
         today: Today,
     },
@@ -3023,6 +3254,10 @@ pub enum Outcome {
         resolution: Option<String>,
         coverage: GraphCoverage,
         truncated: bool,
+        /// `graph impact` with a depth above 1: each level's files, from
+        /// the same index snapshot as `coverage`. Absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        levels: Option<Vec<ImpactLevel>>,
     },
     /// Only names with at least one definition, in the order asked.
     GraphContext {
@@ -3587,21 +3822,28 @@ fn decide_checked(
                 outcome: Outcome::WorkspaceGit { git },
             })
         }
+        // The summary is the adapter's one line; the digests let it learn,
+        // without any peer's words, whether a live peer's prompt began the
+        // same way, so that it can name this prompt by where it differs.
         Command::SessionPrompt {
             session_id,
             summary,
+            line_digests,
         } => {
             current_session(state, session_id)?;
             validate_prompt_summary(summary)?;
+            validate_line_digests(line_digests)?;
             Ok(Decision {
                 events: vec![Event::SessionPrompted {
                     session_id: session_id.clone(),
                     summary: summary.clone(),
+                    line_digests: line_digests.clone(),
                     at_ms: now_ms,
                     generation: state.generation,
                 }],
                 outcome: Outcome::SessionPrompted {
                     session_id: session_id.clone(),
+                    shared_lines: shared_prompt_lines(state, session_id, line_digests),
                 },
             })
         }
@@ -3986,6 +4228,10 @@ fn decide_checked(
             result,
             duration_ms,
             report,
+            tests,
+            rerun,
+            writes_before,
+            command_id,
         } => {
             let check = CheckRecord {
                 check_id: request_id.into(),
@@ -4005,6 +4251,83 @@ fn decide_checked(
             let mut events = vec![Event::CheckRecorded {
                 check: check.clone(),
             }];
+            // What this record teaches about tests that flip, learned on a
+            // copy so that its notice is labelled with it.
+            let mut learning = state
+                .test_learning
+                .get(workspace_id)
+                .cloned()
+                .unwrap_or_default();
+            if rerun.is_some() && tests.is_none() {
+                return Err(error(
+                    "invalid_test_results",
+                    "A rerun's test results come with the record's own",
+                ));
+            }
+            if tests.is_some() && writes_before.is_none() {
+                return Err(error(
+                    "invalid_test_results",
+                    "Test results come with the workspace's write generation taken before the run's tree (writes_before)",
+                ));
+            }
+            let command_id = match (tests, command_id) {
+                (None, None) => "",
+                (Some(_), Some(id)) if flaky::is_command_id(id) => id.as_str(),
+                _ => {
+                    return Err(error(
+                        "invalid_test_results",
+                        "Test results come with the command's identity (command_id: 64 lowercase hex digits), and only they do",
+                    ));
+                }
+            };
+            // The write generation the run took before its tree. A write
+            // recorded since, even one undone before the run (or its rerun)
+            // ended, means its results are not of unchanged code: they are
+            // checked but learned from by neither this record nor a later
+            // one.
+            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
+            let unchanged = *writes_before == Some(writes);
+            let runs = tests
+                .iter()
+                .map(|results| (results, false))
+                .chain(rerun.iter().map(|results| (results, true)));
+            for (results, again) in runs {
+                if !inputs.is_empty() || matches!(result, CheckResult::Inconclusive {}) {
+                    return Err(error(
+                        "invalid_test_results",
+                        "Test results belong to a working-tree check that passed or failed",
+                    ));
+                }
+                let passed = if again {
+                    results.all_passed
+                } else {
+                    matches!(result, CheckResult::Passed {})
+                };
+                flaky::validate_test_results(results, passed)?;
+                if !unchanged {
+                    continue;
+                }
+                learning.learn(name, tree_oid, command_id, writes, results, now_ms);
+                events.push(Event::TestsRecorded {
+                    workspace_id: workspace_id.clone(),
+                    check_id: check.check_id.clone(),
+                    name: name.clone(),
+                    tree_oid: tree_oid.clone(),
+                    command: command.clone(),
+                    command_id: command_id.to_owned(),
+                    results: results.clone(),
+                    rerun: again,
+                    at_ms: now_ms,
+                });
+            }
+            let failures = tests
+                .iter()
+                .flat_map(|results| &results.failed)
+                .map(|test| TestFailure {
+                    test: test.clone(),
+                    flaky: learning.label(name, test),
+                })
+                .collect();
             if let Some(report) = report {
                 let reported = Event::CheckReported {
                     session_ids: report.session_ids.clone(),
@@ -4016,6 +4339,7 @@ fn decide_checked(
                         duration_ms: check.duration_ms,
                         timed_out_s: report.timed_out_s,
                         tail: report.tail.clone(),
+                        failures,
                     },
                 };
                 validate_check_report(state, &check.workspace_id, &reported)?;
@@ -4024,6 +4348,50 @@ fn decide_checked(
             Ok(Decision {
                 events,
                 outcome: Outcome::CheckRecorded { check },
+            })
+        }
+        Command::FlakyTests { workspace_id, name } => {
+            validate_known_workspace(state, workspace_id)?;
+            let (tests, more) = state
+                .test_learning
+                .get(workspace_id)
+                .map(|learning| learning.flaky(name.as_deref(), now_ms))
+                .unwrap_or_default();
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::FlakyTests {
+                    workspace_id: workspace_id.clone(),
+                    tests,
+                    more,
+                },
+            })
+        }
+        Command::ForgetFlakyTest {
+            workspace_id,
+            name,
+            test,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            validate_forget_flaky(name.as_deref(), test)?;
+            let forgotten = state
+                .test_learning
+                .get(workspace_id)
+                .is_some_and(|learning| learning.follows(name.as_deref(), test));
+            Ok(Decision {
+                events: if forgotten {
+                    vec![Event::FlakyTestForgotten {
+                        workspace_id: workspace_id.clone(),
+                        name: name.clone(),
+                        test: test.clone(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                outcome: Outcome::FlakyTestForgotten {
+                    workspace_id: workspace_id.clone(),
+                    test: test.clone(),
+                    forgotten,
+                },
             })
         }
         Command::AutoCheckEnable {
@@ -4711,6 +5079,17 @@ fn decide_checked(
                 },
             })
         }
+        Command::Recall {
+            workspace_id,
+            query,
+            path,
+            limit,
+        } => Ok(Decision {
+            events: Vec::new(),
+            outcome: Outcome::Recall {
+                recall: recall_notes(state, workspace_id, query, path.as_deref(), *limit)?,
+            },
+        }),
         Command::StatusLine { root, from_ms } => {
             if !root.starts_with('/') || root.len() > 4096 {
                 return Err(error(
@@ -5937,8 +6316,11 @@ fn brief(
                 branch_ref: peer_git.and_then(|git| git.branch_ref.clone()),
                 liveness,
                 ended: activity.is_some_and(|activity| activity.ended),
+                // A declared intent is the session's own account of its
+                // task: it replaces the line taken from the prompt.
                 summary: activity
                     .filter(|activity| fresh && !activity.ended && !task_known)
+                    .filter(|_| intent.is_none_or(|intent| intent.summary.is_empty()))
                     .and_then(|activity| activity.summary.clone()),
                 intent: intent
                     .filter(|_| !task_known)
@@ -6321,6 +6703,33 @@ fn validate_check_report(
     Ok(())
 }
 
+/// A write was recorded in the workspace: its write generation moves on, so
+/// no check result is compared with one from before it to learn which tests
+/// flip.
+fn wrote_in(state: &mut State, workspace_id: &str) {
+    let writes = state.writes.entry(workspace_id.to_owned()).or_default();
+    *writes = writes.saturating_add(1);
+}
+
+fn validate_forget_flaky(name: Option<&str>, test: &str) -> Result<(), CoreError> {
+    if let Some(name) = name {
+        validate_id(name, "check name")?;
+    }
+    if test.is_empty()
+        || test.len() > MAX_TEST_NAME_BYTES
+        || test.trim() != test
+        || test.chars().any(char::is_control)
+    {
+        return Err(error(
+            "invalid_test_name",
+            &format!(
+                "A test name is 1 to {MAX_TEST_NAME_BYTES} bytes on one line without surrounding spaces"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_prompt_summary(summary: &str) -> Result<(), CoreError> {
     if summary.is_empty()
         || summary.len() > MAX_PROMPT_SUMMARY_BYTES
@@ -6334,6 +6743,68 @@ fn validate_prompt_summary(summary: &str) -> Result<(), CoreError> {
         ));
     }
     Ok(())
+}
+
+fn validate_line_digests(digests: &[String]) -> Result<(), CoreError> {
+    if digests.len() > MAX_PROMPT_LINES
+        || digests.iter().any(|digest| {
+            digest.is_empty()
+                || digest.len() > MAX_PROMPT_LINE_DIGEST
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err(error(
+            "invalid_line_digests",
+            &format!(
+                "Prompt line digests are at most {MAX_PROMPT_LINES} lower-case hex strings of 1 to {MAX_PROMPT_LINE_DIGEST} characters"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// How many leading lines of `digests` the latest prompt of another live
+/// session in `session_id`'s checkout or repository begins with, at most:
+/// a session registered in this generation, not ended and not known to have
+/// exited. Zero when the session is unknown or nobody shares a line.
+fn shared_prompt_lines(state: &State, session_id: &str, digests: &[String]) -> u32 {
+    let Some(me) = state.sessions.get(session_id) else {
+        return 0;
+    };
+    let repository = |workspace_id: &str| {
+        state
+            .workspace_git
+            .get(workspace_id)
+            .map(|git| git.repository_id.as_str())
+    };
+    let mine = repository(&me.workspace_id);
+    state
+        .sessions
+        .values()
+        .filter(|peer| peer.session_id != session_id && peer.generation == state.generation)
+        .filter(|peer| {
+            peer.workspace_id == me.workspace_id
+                || (mine.is_some() && repository(&peer.workspace_id) == mine)
+        })
+        .filter(|peer| {
+            state
+                .session_liveness
+                .get(&peer.session_id)
+                .is_none_or(|liveness| liveness.status != LivenessStatus::Exited)
+        })
+        .filter_map(|peer| state.activity.get(&peer.session_id))
+        .filter(|activity| activity.generation == state.generation && !activity.ended)
+        .map(|activity| {
+            digests
+                .iter()
+                .zip(&activity.line_digests)
+                .take_while(|(mine, theirs)| mine == theirs)
+                .count()
+        })
+        .max()
+        .unwrap_or(0) as u32
 }
 
 fn validate_workspace_git(state: &State, git: &WorkspaceGit) -> Result<(), CoreError> {
@@ -6825,6 +7296,9 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             // same-session holders differently; preserve those historical
             // decisions rather than rejecting an existing event log.
             if observation.result == ToolResult::Succeeded {
+                if !observation.paths.is_empty() {
+                    wrote_in(state, &observation.workspace_id);
+                }
                 let activity = activity_mut(state, &observation.session_id);
                 activity.wrote_since_boundary |= !observation.paths.is_empty();
                 // The file is no longer the version the session knew. Until
@@ -6856,11 +7330,13 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::SessionPrompted {
             session_id,
             summary,
+            line_digests,
             at_ms,
             generation,
         } => {
             current_session(state, session_id)?;
             validate_prompt_summary(summary)?;
+            validate_line_digests(line_digests)?;
             if *generation != state.generation {
                 return Err(error(
                     "invalid_event",
@@ -6869,6 +7345,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             }
             let activity = activity_mut(state, session_id);
             activity.summary = Some(summary.clone());
+            activity.line_digests = line_digests.clone();
             activity.last_ms = activity.last_ms.max(*at_ms);
         }
         Event::PromptTargetsSet {
@@ -7248,6 +7725,81 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 }
             }
         }
+        Event::TestsRecorded {
+            workspace_id,
+            check_id,
+            name,
+            tree_oid,
+            command,
+            command_id,
+            results,
+            rerun,
+            at_ms,
+        } => {
+            if !flaky::is_command_id(command_id) {
+                return Err(error(
+                    "invalid_event",
+                    "Test results name their command's identity",
+                ));
+            }
+            let Some(record) = state
+                .checks
+                .get(workspace_id)
+                .and_then(|records| records.iter().find(|record| record.check_id == *check_id))
+            else {
+                return Err(error(
+                    "invalid_event",
+                    "Test results follow the record they belong to",
+                ));
+            };
+            if record.name != *name
+                || record.tree_oid != *tree_oid
+                || record.command != *command
+                || !record.inputs.is_empty()
+            {
+                return Err(error(
+                    "invalid_event",
+                    "Test results must match the working-tree record they belong to",
+                ));
+            }
+            let passed = match (&record.result, rerun) {
+                (_, true) => results.all_passed,
+                (CheckResult::Passed {}, false) => true,
+                (CheckResult::Failed { .. }, false) => false,
+                (CheckResult::Inconclusive {}, _) => {
+                    return Err(error(
+                        "invalid_event",
+                        "An inconclusive record has no test results",
+                    ));
+                }
+            };
+            flaky::validate_test_results(results, passed)?;
+            // Recorded only when no write came during the run: the write
+            // generation now is the one the run took.
+            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
+            state
+                .test_learning
+                .entry(workspace_id.clone())
+                .or_default()
+                .learn(name, tree_oid, command_id, writes, results, *at_ms);
+        }
+        Event::FlakyTestForgotten {
+            workspace_id,
+            name,
+            test,
+        } => {
+            validate_forget_flaky(name.as_deref(), test)?;
+            let Some(learning) = state.test_learning.get_mut(workspace_id) else {
+                return Err(error(
+                    "invalid_event",
+                    "Nothing was learned about tests in this workspace",
+                ));
+            };
+            learning.forget(name.as_deref(), test);
+            if learning.is_empty() {
+                state.test_learning.remove(workspace_id);
+            }
+        }
         Event::Landed { landing } => {
             validate_request_id(&landing.landing_id)?;
             validate_known_workspace(state, &landing.workspace_id)?;
@@ -7435,12 +7987,14 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             validate_disk_observation(state, observation)?;
             // A first baseline is not a change. Anything else means the
             // working tree a check ran on is no longer the working tree.
-            if observation
+            let changed = observation
                 .before
                 .as_ref()
-                .is_some_and(|before| before != &observation.after)
-                && let Some(records) = state.checks.get_mut(&observation.workspace_id)
-            {
+                .is_some_and(|before| before != &observation.after);
+            if changed {
+                wrote_in(state, &observation.workspace_id);
+            }
+            if changed && let Some(records) = state.checks.get_mut(&observation.workspace_id) {
                 for record in records.iter_mut().filter(|record| record.inputs.is_empty()) {
                     record.changed_since = true;
                 }
