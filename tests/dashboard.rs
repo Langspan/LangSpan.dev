@@ -408,3 +408,58 @@ fn a_network_address_is_refused_without_allow_network() {
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("IP address and port"));
 }
+
+#[test]
+fn the_dashboard_install_advice_names_this_coordinator_state_directory() {
+    let mut f = Fixture::new();
+    // A home with Cursor and no LangSpan install: the daemon's host check
+    // holds it as not installed.
+    let home = f.base.join("home");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    fs::create_dir(f.state_dir()).unwrap();
+    fs::set_permissions(f.state_dir(), fs::Permissions::from_mode(0o700)).unwrap();
+    let config = f.state_dir().join("config.json");
+    fs::write(&config, r#"{"host_check_ms": 200}"#).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    f.daemon = Some(
+        Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .args(["daemon", "--state-dir"])
+            .arg(f.state_dir())
+            .env("HOME", &home)
+            .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+            .env("CODEX_HOME", home.join(".codex"))
+            .env("GEMINI_CLI_HOME", &home)
+            .env_remove("LANGSPAN_STATE_DIR")
+            .env_remove("XDG_STATE_HOME")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let (port, token) = f.start_dashboard();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let body = loop {
+        let reply = get(port, &format!("/api/state?t={token}"), "");
+        if reply.status == 200 {
+            let body: Value = serde_json::from_str(&reply.body).unwrap();
+            if body["dashboard"]["uninstalled_hosts"] == json!(["cursor"]) {
+                break body;
+            }
+        }
+        assert!(Instant::now() < deadline, "cursor never shown");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let advice = body["install_advice"]["cursor"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{body}"));
+    assert_eq!(
+        advice,
+        format!(
+            "langspan install --hosts cursor --state-dir '{}'",
+            f.state_dir().display()
+        )
+    );
+    // The page shows the coordinator's command rather than building one.
+    let page = get(port, &format!("/?t={token}"), "").body;
+    assert!(page.contains("install_advice"), "the page uses the advice");
+}

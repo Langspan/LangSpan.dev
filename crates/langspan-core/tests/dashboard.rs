@@ -281,6 +281,8 @@ fn evidence_and_risks_are_carried_with_their_applicability() {
                 after: Some("pub fn upload(retries: u8)".into()),
                 before_arity: None,
                 after_arity: None,
+                before_count: None,
+                after_count: None,
             }],
             dependents: vec!["src/main.rs".into()],
         },

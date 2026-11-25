@@ -160,6 +160,75 @@ fn a_signature_change_a_removal_and_a_rename_are_told_apart_from_a_body_edit() {
 }
 
 #[test]
+fn a_second_same_named_definition_is_an_addition_and_losing_one_is_a_removal() {
+    let version = |source: &str| extract(Language::Rust, source.as_bytes()).unwrap();
+    let one = version(
+        "pub struct A;\npub struct B;\nimpl A {\n    pub fn text(&self) -> String { String::new() }\n}\n",
+    );
+    let two = version(
+        "pub struct A;\npub struct B;\nimpl A {\n    pub fn text(&self) -> String { String::new() }\n}\nimpl B {\n    pub fn text(&self) -> String { \"b\".into() }\n}\n",
+    );
+    let text = |changes: Vec<langspan_graph::SymbolChange>| {
+        changes
+            .into_iter()
+            .filter(|change| change.name == "text")
+            .map(|change| change.change)
+            .collect::<Vec<_>>()
+    };
+    // The same signature twice is not a changed signature: one more
+    // definition has that name.
+    assert_eq!(
+        text(diff(&one, &two)),
+        [Change::DefinitionsAdded {
+            signatures: "pub fn text(&self) -> String".into(),
+            before: 1,
+            after: 2,
+        }]
+    );
+    assert_eq!(
+        text(diff(&two, &one)),
+        [Change::DefinitionsRemoved {
+            signatures: "pub fn text(&self) -> String".into(),
+            before: 2,
+            after: 1,
+        }]
+    );
+    // Order is not a change, and bodies are not interfaces.
+    let swapped = version(
+        "pub struct A;\npub struct B;\nimpl B {\n    pub fn text(&self) -> String { String::new() }\n}\nimpl A {\n    pub fn text(&self) -> String { \"x\".into() }\n}\n",
+    );
+    assert_eq!(text(diff(&two, &swapped)), []);
+    // An added definition with its own signature keeps every earlier one:
+    // still an addition, naming only the new signature.
+    let other = version(
+        "pub struct A;\npub struct B;\nimpl A {\n    pub fn text(&self) -> String { String::new() }\n}\nimpl B {\n    pub fn text(&self, limit: usize) -> String { String::new() }\n}\n",
+    );
+    assert_eq!(
+        text(diff(&one, &other)),
+        [Change::DefinitionsAdded {
+            signatures: "pub fn text(&self, limit: usize) -> String".into(),
+            before: 1,
+            after: 2,
+        }]
+    );
+    // A real change to one of two is still a changed signature.
+    let changed = version(
+        "pub struct A;\npub struct B;\nimpl A {\n    pub fn text(&self) -> String { String::new() }\n}\nimpl B {\n    pub fn text(&self, limit: usize) -> String { String::new() }\n}\n",
+    );
+    assert_eq!(
+        text(diff(&two, &changed)),
+        [Change::SignatureChanged {
+            before: "pub fn text(&self) -> String | pub fn text(&self) -> String".into(),
+            after: "pub fn text(&self) -> String | pub fn text(&self, limit: usize) -> String"
+                .into(),
+        }]
+    );
+    // From two to none is a removal of the name, as for one.
+    let none = version("pub struct A;\npub struct B;\n");
+    assert_eq!(text(diff(&two, &none)), [Change::Removed]);
+}
+
+#[test]
 fn broken_oversized_and_hostile_input_is_bounded_and_never_panics() {
     let broken = extract(Language::Rust, b"pub fn ok() {}\npub fn broken( {{{ \n").unwrap();
     assert!(broken.partial, "a syntax error is reported");

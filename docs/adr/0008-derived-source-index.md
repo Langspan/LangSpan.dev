@@ -188,6 +188,27 @@ Tests:
 and `a_one_element_tuple_losing_its_comma_is_a_signature_change_and_a_wrapped_one_is_not`
 in `crates/langspan-graph/tests/extract.rs`.
 
+Several definitions can share a name and kind in one file, such as a `text`
+method on each of two types; the comparison takes their signatures as a set
+with repeats (added 25 November 2026, issue #118). When a definition is added
+and every earlier signature is still there, the change is
+`definition_added`; when one goes and every remaining signature was there
+before, it is `definition_removed`. Either carries the signatures that came
+or went, each shown once, and two counts, `before_count` and `after_count`
+(at most 65,535), so the notice reads "a second method "text" was added: …
+(now 2 definitions with that name)" or "one of 2 methods "text" was
+removed: … (now 1 definition with that name)", never a signature "changed"
+to itself. Reordering same-named definitions is no change. Any other
+difference is a changed signature, as before, with every signature of that
+name before and after; losing the last definition is a removal. Older
+notices have no counts and read as they did. A store holding one of these
+changes does not open in an earlier build
+([ADR 0015](0015-version-tolerance.md)); the protocol stays at version 3.
+Tests: `a_second_same_named_definition_is_an_addition_and_losing_one_is_a_removal`
+in `crates/langspan-graph/tests/extract.rs`,
+`a_second_same_named_definition_is_told_as_added_and_losing_it_as_removed`
+in `tests/graph.rs`, and `crates/langspan-core/tests/interface_counts.rs`.
+
 **Code briefing at a prompt (added later).** At `UserPromptSubmit`, for both
 hosts, the hook process takes candidate names from the prompt: ASCII words of
 3 to 64 letters, digits and underscores not starting with a digit, a fixed
