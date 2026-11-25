@@ -1034,9 +1034,9 @@ impl Store {
     /// messages after that point, and every generation's anchor, decided by
     /// the core. Reads only, through the `events_history` index, and the
     /// forgettings of the notes read through `events_forgotten`, by note and
-    /// not within a capped window; it writes nothing and delivers nothing. When the log holds older events than
-    /// those read, the answer says `truncated` with a `next_seq` that reads
-    /// on from there.
+    /// not within a capped window; it writes nothing and delivers nothing.
+    /// When the log holds older events than those read, the answer says
+    /// `truncated` with a `next_seq` that reads on from there.
     pub fn history(
         &self,
         (workspace_id, name, path): (&str, &str, Option<&str>),
@@ -1496,19 +1496,22 @@ mod tests {
             generation: store.state.generation,
         };
         let text = "the retry loop deadlocks under load";
+        let kept = "retries are capped at three";
+        let remembered = |note_id: &str, text: &str| Event::Remembered {
+            note: Note {
+                note_id: note_id.into(),
+                workspace_id: "work".into(),
+                author: None,
+                text: text.into(),
+                paths: vec!["src/save.rs".into()],
+            },
+            at: Some(at),
+        };
         store
             .commit(
                 &[
-                    Event::Remembered {
-                        note: Note {
-                            note_id: "note-1".into(),
-                            workspace_id: "work".into(),
-                            author: None,
-                            text: text.into(),
-                            paths: vec!["src/save.rs".into()],
-                        },
-                        at: Some(at),
-                    },
+                    remembered("note-1", text),
+                    remembered("note-2", kept),
                     Event::InterfaceChanged {
                         notice: InterfaceNotice {
                             notice_id: "n-1".into(),
@@ -1575,7 +1578,13 @@ mod tests {
             panic!("{outcome:?}");
         };
         assert_eq!(history.entries.len(), 1, "{history:?}");
-        assert!(history.entries[0].notes.is_empty(), "{history:?}");
+        // The note never forgotten still shows; the forgotten one does not.
+        let notes: Vec<&str> = history.entries[0]
+            .notes
+            .iter()
+            .map(|note| note.note_id.as_str())
+            .collect();
+        assert_eq!(notes, ["note-2"], "{history:?}");
         assert!(
             !serde_json::to_string(&history).unwrap().contains(text),
             "{history:?}"
