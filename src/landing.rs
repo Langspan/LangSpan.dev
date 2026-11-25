@@ -463,9 +463,11 @@ fn shell_word(text: &str) -> String {
     }
 }
 
-/// The command as it is recorded: one line of at most 120 characters.
+/// The command as it is recorded: redacted like check output, then one line
+/// of at most 120 characters. Redaction comes first, so the cut cannot leave
+/// part of a secret too short to be recognised.
 pub fn command_line(argv: &[String]) -> String {
-    argv.join(" ")
+    crate::hook::redact(&argv.join(" "))
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .take(120)

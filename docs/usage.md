@@ -622,6 +622,10 @@ output) says which. Inexact renames are looked for among at most 1000 files on
 each side; exact renames are always found. Combining is a merge, never a rebase:
 the branches' commits are pushed as they are (see ADR 0007). Check commands run with your
 environment; environment identity and ignored files are outside the record.
+A check's recorded command line is redacted like its output: a `--token`
+value or a key-shaped argument is stored and shown as `[redacted]`, while the
+check's name and program stay readable. Prefer passing secrets through the
+environment, which is never recorded.
 
 Tests use real daemons, CLI commands and local file remotes. Hosted branch
 protection and native-agent workflows remain unverified. See

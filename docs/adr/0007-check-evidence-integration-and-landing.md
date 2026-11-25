@@ -17,7 +17,10 @@ that moved this morning.
 
 **A check record names its tree.** `langspan check run WORKSPACE --name NAME
 -- COMMAND...` records the command, its exit status, its duration and the Git
-tree of everything the command could read. For a working directory that tree
+tree of everything the command could read. The command line is recorded with
+the same secret redaction as check output, so a token passed on it is not
+stored; the check's name and program still identify it, and a record stored
+before this redaction is redacted when it is shown. For a working directory that tree
 is built through a private index from every tracked and every untracked,
 unignored file, so it is exact even with uncommitted changes. The tree is taken
 before and after the command. If they differ, or the command did not finish,

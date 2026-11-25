@@ -1,8 +1,8 @@
 //! Redaction of likely secrets from owner and agent text before it is
 //! recorded. Every client applies `redact_command` before a request reaches
 //! the daemon, and the daemon applies it again on receipt, so a secret typed
-//! into a prompt, note, message, handoff or intent summary never reaches the
-//! event log, a briefing or a publication.
+//! into a prompt, note, message, handoff, intent summary or check command
+//! line never reaches the event log, a briefing or a publication.
 
 //!
 //! What is replaced with `[redacted]`:
@@ -58,8 +58,15 @@ pub fn redact_command(command: &mut Command) {
         Command::Remember { text, .. }
         | Command::SendMessage { text, .. }
         | Command::Handoff { text, .. } => *text = redact(text),
+        Command::RecordCheck { command, .. } => *command = redact(command),
         _ => {}
     }
+}
+
+/// Redact the command line of a check record that may have been stored
+/// before check commands were redacted, so it is never shown as typed.
+pub fn redact_check(check: &mut langspan_core::CheckRecord) {
+    check.command = redact(&check.command);
 }
 
 fn redact_with_home(text: &str, home: Option<&str>) -> String {

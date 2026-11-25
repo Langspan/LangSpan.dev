@@ -27,6 +27,25 @@ pub struct Store {
     state: State,
 }
 
+/// A check record written before check commands were redacted can still
+/// hold a command line as typed. It is redacted wherever it is read back:
+/// into state, into an event page and from a receipt.
+fn redact_event(event: &mut Event) {
+    if let Event::CheckRecorded { check } = event {
+        crate::hook::redact_check(check);
+    }
+}
+
+/// `event` as it may be shown, with the JSON its page budget is measured by.
+fn shown_event(mut event: Event, stored: String) -> StoreResult<(Event, String)> {
+    if !matches!(event, Event::CheckRecorded { .. }) {
+        return Ok((event, stored));
+    }
+    redact_event(&mut event);
+    let json = serde_json::to_string(&event)?;
+    Ok((event, json))
+}
+
 impl Store {
     pub fn open(path: &Path) -> StoreResult<Self> {
         let mut connection = Connection::open(path)?;
@@ -395,9 +414,12 @@ impl Store {
                 now_ms,
             )));
         }
-        let Ok(outcome) = serde_json::from_str(&outcome_json) else {
+        let Ok(mut outcome) = serde_json::from_str(&outcome_json) else {
             return unreadable();
         };
+        if let Outcome::CheckRecorded { check } = &mut outcome {
+            crate::hook::redact_check(check);
+        }
         Ok(Some(self.execution(outcome, true, now_ms)))
     }
 
@@ -593,7 +615,8 @@ impl Store {
         let mut page_bytes = 0;
         while let Some(row) = rows.next()? {
             let sequence: i64 = row.get(0)?;
-            let json: String = row.get(1)?;
+            let stored: String = row.get(1)?;
+            let (event, json) = shown_event(serde_json::from_str(&stored)?, stored)?;
             if page_bytes + json.len() + 64 > 48 * 1024 {
                 if events.is_empty() {
                     return Err("one event exceeds the transport page budget".into());
@@ -603,7 +626,7 @@ impl Store {
             page_bytes += json.len() + 64;
             events.push(RecordedEvent {
                 seq: u64::try_from(sequence)?,
-                event: serde_json::from_str(&json)?,
+                event,
             });
         }
         Ok(Outcome::Events { events })
@@ -782,9 +805,10 @@ impl Store {
                 return Err("event history contains a non-positive sequence".into());
             }
             let json: String = row.get(1)?;
-            let event: Event = serde_json::from_str(&json).map_err(|error| {
+            let mut event: Event = serde_json::from_str(&json).map_err(|error| {
                 format!("invalid persisted event at sequence {sequence}: {error}")
             })?;
+            redact_event(&mut event);
             apply(&mut state, &event).map_err(|error| {
                 format!("invalid persisted transition at sequence {sequence}: {error}")
             })?;

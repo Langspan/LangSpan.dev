@@ -883,3 +883,62 @@ fn stores_written_by_earlier_releases_still_open() {
     }
     assert!(opened >= 2, "the golden stores are missing");
 }
+
+#[test]
+fn a_check_command_recorded_before_redaction_is_redacted_when_shown() {
+    let database = Database::new();
+    let token = format!("ghp_{}", "aB3".repeat(12));
+    let record = Command::RecordCheck {
+        workspace_id: "workspace".into(),
+        name: "deploy".into(),
+        command: format!("./deploy-test --token {token}"),
+        tree_oid: "a".repeat(40),
+        head_oid: None,
+        inputs: Vec::new(),
+        result: langspan_core::CheckResult::Passed {},
+        duration_ms: 5,
+        report: None,
+    };
+    {
+        // As an earlier build stored it: the store itself does not redact.
+        let mut store = Store::open(&database.path()).unwrap();
+        register(&mut store);
+        execute(&mut store, "old-check", record.clone(), 1);
+    }
+    let stored: String = database
+        .connection()
+        .query_row(
+            "SELECT event_json FROM events
+             WHERE json_extract(event_json, '$.type') = 'check_recorded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(stored.contains(&token), "the fixture holds the old form");
+
+    let mut store = Store::open(&database.path()).unwrap();
+    let status = Command::CheckStatus {
+        workspace_id: "workspace".into(),
+        tree_oid: None,
+    };
+    let events = Command::Events {
+        after: 0,
+        limit: 1000,
+    };
+    let replayed = store.replay("old-check", &record, 2).unwrap().unwrap();
+    let shown = [
+        serde_json::to_string(&execute(&mut store, "read", status, 2)).unwrap(),
+        serde_json::to_string(&execute(&mut store, "read", events, 2)).unwrap(),
+        serde_json::to_string(&execute(&mut store, "read", Command::Dashboard, 2)).unwrap(),
+        // A retry of the old request answers from its stored receipt.
+        serde_json::to_string(&replayed.outcome).unwrap(),
+    ];
+    for shown in &shown {
+        assert!(!shown.contains(&token), "{shown}");
+    }
+    assert!(
+        shown[0].contains("./deploy-test --token [redacted]"),
+        "the program is still named: {}",
+        shown[0]
+    );
+}
