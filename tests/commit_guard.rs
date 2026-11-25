@@ -1657,6 +1657,91 @@ fn a_line_that_replaced_another_sessions_line_next_to_its_own_is_refused_saying_
     }
 }
 
+/// The three lines one session changes and the other deletes one of, with
+/// lines around them that no session touches.
+const ABC: &str = "A\nB\nC\n";
+
+/// Where in `abc.txt` the three lines are: the whole file, its start, its
+/// end, and its middle.
+fn around_abc() -> [(&'static str, &'static str); 4] {
+    [
+        ("", ""),
+        ("", "keep 1\nkeep 2\n"),
+        ("keep 1\nkeep 2\n", ""),
+        ("keep 1\n", "keep 2\n"),
+    ]
+}
+
+#[test]
+fn a_replaced_line_that_could_pair_with_either_of_two_removed_runs_is_refused_not_moved() {
+    // The first session changes "A B C" to "B X" (it replaced C with X and
+    // deleted A); the second then deletes B. Git's one hunk removes A
+    // (first's), B (second's), C (first's) and adds X (first's): X could
+    // have taken A's place or C's, so its place next to the second
+    // session's uncommitted B is not known. Splitting it as if X replaced A
+    // committed "X B" for the first session, moving X across B.
+    for (first, second) in [(ALICE, BOB), (BOB, ALICE)] {
+        for (before, after) in around_abc() {
+            let f = Fixture::new();
+            let start = format!("{before}{ABC}{after}");
+            fs::write(f.work().join("abc.txt"), &start).unwrap();
+            git(&f.work(), &["add", "abc.txt"]);
+            git(&f.work(), &["commit", "-q", "-m", "abc"]);
+            f.reread_and_edit(first, "first-1", "abc.txt", ABC, "B\nX\n");
+            f.reread_and_edit(second, "second-1", "abc.txt", "B\nX\n", "X\n");
+            let content = f.read("abc.txt");
+            assert_eq!(content, format!("{before}X\n{after}"));
+            let one_hunk = git(&f.work(), &["diff", "-U0"]);
+            assert_eq!(one_hunk.matches("@@ -").count(), 1, "{one_hunk}");
+            let index = fs::read(f.work().join(".git/index")).unwrap();
+            let head = git(&f.work(), &["rev-parse", "HEAD"]);
+
+            for session in [first, second] {
+                let output = f.commit_mine(session, "mine");
+                let text = said(&output);
+                let case = format!("{first} first, {before:?}/{after:?}, committing {session}");
+                assert!(!output.status.success(), "{case}: {text}");
+                assert!(text.contains("nothing was committed"), "{case}: {text}");
+                assert!(text.contains("more than one order"), "{case}: {text}");
+            }
+            assert_eq!(git(&f.work(), &["rev-parse", "HEAD"]), head);
+            assert_eq!(git(&f.work(), &["show", "HEAD:abc.txt"]), start);
+            assert_eq!(fs::read(f.work().join(".git/index")).unwrap(), index);
+            assert_eq!(f.read("abc.txt"), content);
+        }
+    }
+}
+
+#[test]
+fn a_replaced_line_with_one_removed_run_of_its_session_is_still_split_in_place() {
+    // The first session replaces C with X; the second deletes B above it.
+    // X can only have taken C's place: the first session's commit is
+    // "A B X", B still in it, and the second's then removes B.
+    for (first, second) in [(ALICE, BOB), (BOB, ALICE)] {
+        for (before, after) in around_abc() {
+            let f = Fixture::new();
+            let start = format!("{before}{ABC}{after}");
+            fs::write(f.work().join("abc.txt"), &start).unwrap();
+            git(&f.work(), &["add", "abc.txt"]);
+            git(&f.work(), &["commit", "-q", "-m", "abc"]);
+            f.reread_and_edit(first, "first-1", "abc.txt", "C\n", "X\n");
+            f.reread_and_edit(second, "second-1", "abc.txt", "B\nX\n", "X\n");
+            let content = f.read("abc.txt");
+            let case = format!("{first} first, {before:?}/{after:?}");
+
+            let output = f.commit_mine(first, "first");
+            assert!(output.status.success(), "{case}: {}", said(&output));
+            assert_eq!(
+                git(&f.work(), &["show", "HEAD:abc.txt"]),
+                format!("{before}A\nB\nX\n{after}"),
+                "{case}"
+            );
+            assert_eq!(f.read("abc.txt"), content);
+            assert_eq!(git(&f.work(), &["diff", "--cached"]), "");
+        }
+    }
+}
+
 #[test]
 fn a_hunk_with_a_line_no_session_wrote_next_to_another_sessions_is_still_refused() {
     let f = Fixture::new();

@@ -66,13 +66,25 @@ attribution, a hunk whose every line some session wrote, and that holds both
 this session's lines and other sessions' lines, is split where they meet, as
 `git add -p` lets a person split a hunk, and each piece is attributed as a
 hunk. A zero-context hunk lists all its removed lines before all its added
-ones, so a piece pairs a run of one side's removed lines with the same side's
-run of added lines, in order. The hunk is not split, and is not known with the
-reason that one session's line replaced another's, when that pairing has more
-than one answer (one side removed lines where the other added its own), or
-when the journal shows a line one of them added that the other removed: the
-replaced line is no longer in the diff, and the replacing line makes sense
-only on top of it. Lines are known by text, not place, so that last check
+ones, so where an added line goes among the other session's removed lines is
+not in the diff. A piece takes a whole run of one side's removed lines, a
+whole run of the same side's added lines, or both; pieces alternate between
+the sides. Of every order of pieces the hunk allows, LangSpan takes those
+where the most pieces both remove and add (an added run takes the place of a
+removed run of its side), searching them all. The hunk is split only when
+exactly one order is likeliest. Otherwise it is not known, with the reason
+that the sessions' lines could be in more than one order: for example, when
+one session changed "A B C" to "B X" and the other then removed B, X could
+have taken A's place or C's, so it could go above B or below it, and a split
+that guessed would commit X on the wrong side of the other session's
+uncommitted B. The same holds when one session removed a line where the
+other added its own, or when an added run of one side could take the place
+of its side's one removed run from either side of the other's lines. The
+search's table is bounded (65,536 pairs of removed and added runs); a hunk
+past it is not split. The hunk is also not split, and is not known with the
+reason that one session's line replaced another's, when the journal shows a
+line one of them added that the other removed: the replaced line is no
+longer in the diff, and the replacing line makes sense only on top of it. Lines are known by text, not place, so that last check
 holds for the whole file, and a common line (a blank line, a lone brace) one
 session added and the other removed elsewhere keeps the file's mixed hunks
 unsplit; that errs toward refusing. A hunk with a line no session wrote is not
@@ -161,12 +173,20 @@ untracked files); the hook detail says which.
    of its own is added with `git update-index`). A new or removed file that
    also holds others' changes is refused: it can only be committed whole.
    Chosen pieces of a split hunk that touch are made one hunk of the patch.
-   Before the patch is applied, LangSpan applies each file's hunks itself to
+   Before the patch is applied, LangSpan checks each split hunk's pieces
+   again, from the pieces themselves: the session takes every piece of its
+   side and none of the other's, and the pieces are the one likeliest order
+   of the two sides' lines. A patch that would move this session's lines
+   across another session's uncommitted lines is never staged, even if it
+   would apply. It then applies each file's hunks itself to
    the version in that index, each where its header says and byte for byte,
    with none of the searching for an offset `git apply` may do; after, the
-   index must hold exactly that result. If either fails, nothing is
-   committed, and the error names the file and says the patch does not apply
-   exactly. The same check guards step 7 on the shared index.
+   index must hold exactly that result. So the version committed is the
+   index's with exactly this session's changes, each in its one place. If a
+   check fails, nothing is committed, and the error names the file and says
+   the patch does not keep this session's lines in place among another
+   session's, or does not apply exactly. The same checks guard step 7 on the
+   shared index.
 5. Commit atomically, with plumbing, keeping the owner's hooks. The hooks
    run as `git commit -m` runs them, with `GIT_INDEX_FILE` naming the private
    index: `pre-commit`, `prepare-commit-msg FILE message`, `commit-msg FILE`;

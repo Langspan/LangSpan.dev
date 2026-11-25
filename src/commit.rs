@@ -10,9 +10,11 @@
 //! A line belongs to the sessions whose journaled writes added it (or, for
 //! a removed line, removed it). A hunk Git joined from this session's lines
 //! and other sessions' lines is first split where they meet, unless one of
-//! its lines is no session's, or one session's line replaced another's
-//! (issue #106); a partial patch must apply exactly to the index it is
-//! staged in, or nothing is committed. A hunk is this session's when each of its
+//! its lines is no session's, one session's line replaced another's, or the
+//! sessions' lines could be in more than one order (issue #106); a partial
+//! patch must keep this session's lines in their one place among the other
+//! sessions' and apply exactly to the index it is staged in, or nothing is
+//! committed. A hunk is this session's when each of its
 //! lines is, and not every line is also another's; another session's when
 //! none of its lines is this session's and some are that session's; nobody's
 //! when no session wrote any of it. Anything else is not known, and
@@ -66,6 +68,17 @@ pub struct Hunk {
     pub added: Vec<String>,
     /// The hunk's lines as Git printed them, after its `@@` line.
     body: Vec<u8>,
+    /// For a piece of a hunk split between sessions: which hunk of the
+    /// file's diff it came from, and whose it is.
+    piece: Option<Piece>,
+}
+
+/// Where a piece of a split hunk came from (issue #106).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Piece {
+    /// The index, in the file's diff before the split, of its hunk.
+    of: usize,
+    side: Side,
 }
 
 /// One file's changes.
@@ -148,6 +161,7 @@ pub fn parse_diff(bytes: &[u8]) -> Result<Vec<FileDiff>, String> {
                 removed: Vec::new(),
                 added: Vec::new(),
                 body: Vec::new(),
+                piece: None,
             });
             last = None;
             continue;
@@ -344,6 +358,68 @@ fn apply_exactly(base: &[u8], file: &FileDiff, chosen: &[usize]) -> Result<Vec<u
     Ok(out)
 }
 
+/// For each hunk split between sessions that `chosen` takes pieces of: the
+/// pieces it takes must be every piece of one side and none of the other's,
+/// and the hunk's pieces must be the one likeliest order of its sides'
+/// lines (`pieces`), worked out again from the pieces themselves. With
+/// `apply_exactly`, the version staged is then the index's with exactly
+/// this session's changes in their one place: never one where its lines
+/// were moved across another session's uncommitted lines.
+fn in_one_order(file: &FileDiff, chosen: &[usize]) -> Result<(), String> {
+    let split: BTreeSet<usize> = chosen
+        .iter()
+        .filter_map(|&index| Some(file.hunks.get(index)?.piece?.of))
+        .collect();
+    for of in split {
+        let members: Vec<(usize, &Hunk, Side)> = file
+            .hunks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, hunk)| match hunk.piece {
+                Some(piece) if piece.of == of => Some((index, hunk, piece.side)),
+                _ => None,
+            })
+            .collect();
+        let line = members.first().map_or(0, |(_, hunk, _)| old_first(hunk));
+        let taken: BTreeSet<Side> = members
+            .iter()
+            .filter(|(index, _, _)| chosen.contains(index))
+            .map(|(_, _, side)| *side)
+            .collect();
+        let whole_side = taken.len() == 1
+            && members
+                .iter()
+                .all(|(index, _, side)| chosen.contains(index) == taken.contains(side));
+        if !whole_side {
+            return Err(format!(
+                "of the hunk at line {line}, it takes some of one session's pieces or some of each session's"
+            ));
+        }
+        let lines = |count: fn(&Hunk) -> usize| -> Vec<Side> {
+            members
+                .iter()
+                .flat_map(|(_, hunk, side)| std::iter::repeat_n(*side, count(hunk)))
+                .collect()
+        };
+        let removed = lines(|hunk| hunk.removed.len());
+        let added = lines(|hunk| hunk.added.len());
+        let layout: Vec<(Side, usize, usize)> = members
+            .iter()
+            .map(|(_, hunk, side)| (*side, hunk.removed.len(), hunk.added.len()))
+            .collect();
+        match pieces(&removed, &added) {
+            Ok(order) if order == layout => {}
+            Ok(_) => {
+                return Err(format!(
+                    "the hunk at line {line} is not split in the one order its sessions' lines can be in"
+                ));
+            }
+            Err(why) => return Err(format!("at line {line}, {why}")),
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Attribution
 // ---------------------------------------------------------------------------
@@ -422,7 +498,7 @@ fn hunk_owner(me: &str, hunk: &Hunk, path: Option<&journal::FileLines<'_>>) -> O
 const REPLACED: &str = "here a line of one session's replaced another session's, so this hunk cannot be split between them";
 
 /// Whose one line of a hunk is, for splitting it between sessions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Side {
     /// This session's (another's too, perhaps).
     Mine,
@@ -465,48 +541,114 @@ fn replaced_across(me: &str, path: &journal::FileLines<'_>) -> bool {
     })
 }
 
-/// A hunk's pieces, in order, by how many lines each removes and adds: each
-/// takes one run of a side from its removed lines and the same side's run
-/// from its added lines, either perhaps empty. A zero-context hunk lists
-/// every removed line before every added one, so which removed lines an
-/// added run takes the place of is told only by side; where that has not one
-/// answer (one side removed lines where the other added its own), `REPLACED`.
-fn pieces(removed: &[Side], added: &[Side]) -> Result<Vec<(usize, usize)>, &'static str> {
+/// Why a hunk whose sessions' lines can be ordered more than one way is not
+/// split between them.
+const ORDER: &str = "here this session's lines and another session's could be in more than one order, so this hunk cannot be split between them";
+
+/// The most runs of removed lines times runs of added lines in one hunk
+/// that `pieces` orders; past it, the hunk is not split. It bounds the
+/// search's table (three entries per pair) to a few megabytes.
+const MAX_RUN_PAIRS: usize = 1 << 16;
+
+/// A hunk's pieces, in order: each piece's side and how many lines it
+/// removes and adds. A zero-context hunk lists every removed line before
+/// every added one, so where an added run goes among the other session's
+/// removed lines is not in the diff. Each piece takes one whole run of
+/// removed lines, one whole run of added lines of the same side, or both;
+/// pieces alternate between the sides. Of every such order, those where the
+/// most pieces both remove and add (an added run takes the place of its
+/// side's removed run) are the likely ones. Only when exactly one order is
+/// likeliest is the hunk split; otherwise `ORDER`. For example, when this
+/// session's added run could take the place of either of two of its removed
+/// runs, one before another session's removed line and one after it, the
+/// pairing has two answers, and which is right decides on which side of the
+/// other session's line this session's line goes.
+fn pieces(removed: &[Side], added: &[Side]) -> Result<Vec<(Side, usize, usize)>, &'static str> {
     let (r, a) = (runs(removed), runs(added));
-    let (mut i, mut j) = (0, 0);
-    let mut out = Vec::new();
-    loop {
-        let piece = match (r.get(i), a.get(j)) {
-            (None, None) => return Ok(out),
-            (Some(x), Some(y)) if x.0 == y.0 => {
-                (i, j) = (i + 1, j + 1);
-                (x.1, y.1)
-            }
-            // Runs alternate between the two sides: the next run on the
-            // other list is the only later one of this run's side.
-            (Some(x), Some(y)) => match (a.get(j + 1).is_some(), r.get(i + 1).is_some()) {
-                // `x`'s side adds nothing more; `y`'s removes lines after `x`.
-                (false, true) => {
-                    i += 1;
-                    (x.1, 0)
-                }
-                (true, false) => {
-                    j += 1;
-                    (0, y.1)
-                }
-                _ => return Err(REPLACED),
-            },
-            (Some(x), None) => {
-                i += 1;
-                (x.1, 0)
-            }
-            (None, Some(y)) => {
-                j += 1;
-                (0, y.1)
-            }
-        };
-        out.push(piece);
+    let (rn, an) = (r.len(), a.len());
+    if (rn + 1).saturating_mul(an + 1) > MAX_RUN_PAIRS {
+        return Err(ORDER);
     }
+    // `best[(i, j, last)]`: from runs `r[i..]` and `a[j..]`, after a piece
+    // of side `last` (0: none yet, 1: Mine, 2: Theirs), the most pieces
+    // that both remove and add, how many orders reach it (2 meaning two or
+    // more), and the first piece of one of them. Filled from the end.
+    #[derive(Clone, Copy)]
+    struct Best {
+        pairs: usize,
+        orders: u8,
+        next: Option<(Side, bool, bool)>,
+    }
+    let none = Best {
+        pairs: 0,
+        orders: 0,
+        next: None,
+    };
+    let at = |i: usize, j: usize, last: usize| (i * (an + 1) + j) * 3 + last;
+    let code = |side: Side| match side {
+        Side::Mine => 1,
+        Side::Theirs => 2,
+    };
+    let mut best = vec![none; (rn + 1) * (an + 1) * 3];
+    for i in (0..=rn).rev() {
+        for j in (0..=an).rev() {
+            for last in 0..3 {
+                if i == rn && j == an {
+                    best[at(i, j, last)] = Best {
+                        pairs: 0,
+                        orders: 1,
+                        next: None,
+                    };
+                    continue;
+                }
+                let mut here = none;
+                for side in [Side::Mine, Side::Theirs] {
+                    if code(side) == last {
+                        continue;
+                    }
+                    let can_remove = r.get(i).is_some_and(|run| run.0 == side);
+                    let can_add = a.get(j).is_some_and(|run| run.0 == side);
+                    for (take_r, take_a) in [(true, true), (true, false), (false, true)] {
+                        if (take_r && !can_remove) || (take_a && !can_add) {
+                            continue;
+                        }
+                        let then =
+                            best[at(i + usize::from(take_r), j + usize::from(take_a), code(side))];
+                        if then.orders == 0 {
+                            continue;
+                        }
+                        let pairs = then.pairs + usize::from(take_r && take_a);
+                        if here.orders == 0 || pairs > here.pairs {
+                            here = Best {
+                                pairs,
+                                orders: then.orders,
+                                next: Some((side, take_r, take_a)),
+                            };
+                        } else if pairs == here.pairs {
+                            here.orders = (here.orders + then.orders).min(2);
+                        }
+                    }
+                }
+                best[at(i, j, last)] = here;
+            }
+        }
+    }
+    match best[at(0, 0, 0)].orders {
+        0 => return Err(REPLACED),
+        1 => {}
+        _ => return Err(ORDER),
+    }
+    let (mut i, mut j, mut last) = (0, 0, 0);
+    let mut out = Vec::new();
+    while let Some((side, take_r, take_a)) = best[at(i, j, last)].next {
+        out.push((
+            side,
+            if take_r { r[i].1 } else { 0 },
+            if take_a { a[j].1 } else { 0 },
+        ));
+        (i, j, last) = (i + usize::from(take_r), j + usize::from(take_a), code(side));
+    }
+    Ok(out)
 }
 
 /// Split each of `file`'s hunks that holds this session's lines and other
@@ -523,8 +665,8 @@ fn split_between_sessions(
     };
     let mut hunks = Vec::with_capacity(file.hunks.len());
     let mut why = Vec::with_capacity(file.hunks.len());
-    for hunk in std::mem::take(&mut file.hunks) {
-        match split_hunk(me, &hunk, path) {
+    for (of, hunk) in std::mem::take(&mut file.hunks).into_iter().enumerate() {
+        match split_hunk(me, of, &hunk, path) {
             Ok(Some(split)) => {
                 why.extend(split.iter().map(|_| None));
                 hunks.extend(split);
@@ -543,9 +685,11 @@ fn split_between_sessions(
     why
 }
 
-/// One hunk's pieces, or `None` when it is not split.
+/// One hunk's pieces, or `None` when it is not split. `of` is its index in
+/// its file's diff.
 fn split_hunk(
     me: &str,
+    of: usize,
     hunk: &Hunk,
     path: &journal::FileLines<'_>,
 ) -> Result<Option<Vec<Hunk>>, &'static str> {
@@ -573,12 +717,22 @@ fn split_hunk(
     if replaced_across(me, path) {
         return Err(REPLACED);
     }
+    Ok(Some(cut(hunk, of, &pieces(&removed, &added)?)))
+}
+
+/// `hunk`, the `of`th of its file's diff, cut into `layout`'s pieces: each
+/// a side and how many of the hunk's removed and added lines it takes, in
+/// order. The hunk lists its removed lines, then its added ones.
+fn cut(hunk: &Hunk, of: usize, layout: &[(Side, usize, usize)]) -> Vec<Hunk> {
+    let lines = body_lines(&hunk.body);
+    let (minus, plus) = lines.split_at(hunk.removed.len().min(lines.len()));
     let new_first = hunk.new_start + u32::from(hunk.new_len == 0);
     let (mut rs, mut as_) = (0, 0);
     let mut out = Vec::new();
-    for (rc, ac) in pieces(&removed, &added)? {
+    for &(side, rc, ac) in layout {
         let (old_at, new_at) = (old_first(hunk) + rs as u32, new_first + as_ as u32);
         out.push(Hunk {
+            piece: Some(Piece { of, side }),
             old_start: old_at - u32::from(rc == 0),
             old_len: rc as u32,
             new_start: new_at - u32::from(ac == 0),
@@ -593,7 +747,7 @@ fn split_hunk(
         });
         (rs, as_) = (rs + rc, as_ + ac);
     }
-    Ok(Some(out))
+    out
 }
 
 /// The owner of a file attributed whole: the session whose journaled write
@@ -1082,6 +1236,7 @@ fn untracked(
                 removed: Vec::new(),
                 added,
                 body: Vec::new(),
+                piece: None,
             });
         }
         files.push(file);
@@ -1698,6 +1853,12 @@ fn stage(
             Choice::Whole => (0..file.hunks.len()).collect(),
             Choice::Hunks(hunks) => hunks.clone(),
         };
+        in_one_order(file, &chosen).map_err(|why| {
+            format!(
+                "the patch of {} does not keep this session's lines in place among another session's: {why}",
+                file.path
+            )
+        })?;
         let base = if file.created {
             Vec::new()
         } else {
@@ -2669,22 +2830,46 @@ mod tests {
 
     #[test]
     fn a_hunk_is_not_split_where_one_sessions_line_replaced_anothers_or_no_session_wrote_one() {
-        assert_eq!(pieces(&[Side::Theirs], &[Side::Mine]), Err(REPLACED));
+        use Side::{Mine as M, Theirs as T};
+        // Another session's removed line and this session's added one: the
+        // added line could go before or after it.
+        assert_eq!(pieces(&[T], &[M]), Err(ORDER));
+        assert_eq!(pieces(&[M, T], &[T, M]), Err(ORDER));
+        assert_eq!(pieces(&[M, T], &[M, T]), Ok(vec![(M, 1, 1), (T, 1, 1)]));
+        assert_eq!(pieces(&[T, M], &[M]), Ok(vec![(T, 1, 0), (M, 1, 1)]));
+        assert_eq!(pieces(&[M, T], &[M]), Ok(vec![(M, 1, 1), (T, 1, 0)]));
         assert_eq!(
-            pieces(&[Side::Mine, Side::Theirs], &[Side::Theirs, Side::Mine]),
-            Err(REPLACED)
+            pieces(&[], &[T, M, T]),
+            Ok(vec![(T, 0, 1), (M, 0, 1), (T, 0, 1)])
         );
         assert_eq!(
-            pieces(&[Side::Mine, Side::Theirs], &[Side::Mine, Side::Theirs]),
-            Ok(vec![(1, 1), (1, 1)])
+            pieces(&[M, T, M], &[]),
+            Ok(vec![(M, 1, 0), (T, 1, 0), (M, 1, 0)])
+        );
+        // Each session's changed line next to the other's, three in a row.
+        assert_eq!(
+            pieces(&[M, T, M], &[M, T, M]),
+            Ok(vec![(M, 1, 1), (T, 1, 1), (M, 1, 1)])
         );
         assert_eq!(
-            pieces(&[Side::Theirs, Side::Mine], &[Side::Mine]),
-            Ok(vec![(1, 0), (1, 1)])
+            pieces(&[T, M, T], &[M]),
+            Ok(vec![(T, 1, 0), (M, 1, 1), (T, 1, 0)])
         );
+
+        // The review's case: "A B C" became "B X" by this session, then
+        // another removed B. X could have taken A's place or C's, so it
+        // could go before B or after it.
+        assert_eq!(pieces(&[M, T, M], &[M]), Err(ORDER));
+        // The same with the sessions the other way round.
+        assert_eq!(pieces(&[T, M, T], &[T]), Err(ORDER));
+        // One removed run and two added runs of a side, with the other's
+        // between: which added run took the removed run's place is not known.
+        assert_eq!(pieces(&[M], &[M, T, M]), Err(ORDER));
+        assert_eq!(pieces(&[T], &[T, M, T]), Err(ORDER));
+        // Where the other session's added run fixes the order, it is split.
         assert_eq!(
-            pieces(&[], &[Side::Theirs, Side::Mine, Side::Theirs]),
-            Ok(vec![(0, 1), (0, 1), (0, 1)])
+            pieces(&[M, T, M], &[M, T]),
+            Ok(vec![(M, 1, 1), (T, 1, 1), (M, 1, 0)])
         );
 
         // Another session removed a line this session added: the journal
@@ -2787,6 +2972,78 @@ mod tests {
         assert!(error.contains("f.txt"), "{error}");
         assert_eq!(fs::read(&index).unwrap(), before);
         assert_eq!(repo.git(&["diff", "--cached", "--stat"]), b"");
+    }
+
+    /// The review's case: "A B C" in `HEAD`, "X" now. This session removed
+    /// A and C and added X; another session removed B.
+    const ABC: &str = "diff --git a/f.txt b/f.txt\nindex 1111111..2222222 100644\n--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,1 @@\n-A\n-B\n-C\n+X\n";
+
+    #[test]
+    fn a_patch_that_moves_this_sessions_line_across_anothers_is_never_staged() {
+        use Side::{Mine as M, Theirs as T};
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let repo = Repo::new("A\nB\nC\n");
+        let git_dir = repo.0.join(".git");
+        let index = git_dir.join("private.index");
+        git_in(&repo.0, &["read-tree", "HEAD"], Some(&index), deadline).unwrap();
+        let before = fs::read(&index).unwrap();
+        let whole = parse_diff(ABC.as_bytes()).unwrap().remove(0);
+
+        // Split as if X took A's place: this session's pieces would stage
+        // "X B", X moved above the other session's uncommitted B. And as if
+        // it took C's place: "B X". Neither is the one order, so neither is
+        // staged, and the split itself refuses it.
+        let entries = vec![
+            entry("me", &[b"X\n"], &[b"A\n", b"C\n"]),
+            entry("them", &[], &[b"B\n"]),
+        ];
+        let claims = journal::by_file(&entries);
+        let mut split = whole.clone();
+        let why = split_between_sessions("me", &mut split, claims.get("f.txt"));
+        assert_eq!(why, vec![Some(ORDER)]);
+        for layout in [
+            [(M, 1, 1), (T, 1, 0), (M, 1, 0)],
+            [(M, 1, 0), (T, 1, 0), (M, 1, 1)],
+        ] {
+            let mut file = whole.clone();
+            file.hunks = cut(&whole.hunks[0], 0, &layout);
+            // The patch would apply exactly where it says: only the order
+            // check stops it.
+            assert!(apply_exactly(b"A\nB\nC\n", &file, &[0, 2]).is_ok());
+            let staged = vec![(file, Choice::Hunks(vec![0, 2]))];
+            let error = stage(&repo.0, &git_dir, &staged, Some(&index), deadline).unwrap_err();
+            assert!(
+                error.contains("f.txt does not keep this session's lines in place"),
+                "{error}"
+            );
+            assert!(error.contains("more than one order"), "{error}");
+            assert_eq!(fs::read(&index).unwrap(), before);
+        }
+
+        // One piece of this session's two, or a piece of each session's,
+        // is not this session's change in place either.
+        let mut file = parse_diff(ADJACENT.as_bytes()).unwrap().remove(0);
+        let entries = adjacent_entries();
+        let claims = journal::by_file(&entries);
+        split_between_sessions("me", &mut file, claims.get("f.txt"));
+        for chosen in [vec![0], vec![0, 1, 2, 4], vec![2, 4]] {
+            let error = in_one_order(&file, &chosen).unwrap_err();
+            assert!(error.contains("some of one session's pieces"), "{error}");
+        }
+        assert_eq!(in_one_order(&file, &[0, 2, 4]), Ok(()));
+        assert_eq!(in_one_order(&file, &[1, 3]), Ok(()));
+        // A split not in the one order is refused, though it is
+        // otherwise this session's whole side.
+        let mut moved = file.clone();
+        moved.hunks.truncate(3);
+        let wrong = cut(
+            &parse_diff(ADJACENT.as_bytes()).unwrap().remove(0).hunks[1],
+            1,
+            &[(T, 1, 0), (M, 1, 0), (T, 0, 1), (M, 0, 1)],
+        );
+        moved.hunks.extend(wrong);
+        let error = in_one_order(&moved, &[0, 2, 4, 6]).unwrap_err();
+        assert!(error.contains("not split in the one order"), "{error}");
     }
 
     #[test]
