@@ -546,6 +546,10 @@ impl Store {
         prepared: &Command,
         now_ms: u64,
     ) -> StoreResult<Execution> {
+        // Refused before a receipt or an event could hold it.
+        if let Some(refused) = crate::hook::refuse_secret(original) {
+            return Ok(self.execution(refused, false, now_ms));
+        }
         if let Some(replayed) = self.replay(request_id, original, now_ms)? {
             return Ok(replayed);
         }

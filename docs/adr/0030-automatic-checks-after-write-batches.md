@@ -201,7 +201,9 @@ known to flip, newest flip first, at most 100: test, check name, runs, flips
 and the age of the last flip (from the daemon's wall clock, for people).
 `--forget TEST [--name NAME] --request-id ID` records `flaky_test_forgotten`
 and clears it, with its result in each check's last result, so no flip is
-counted against a result from before and its next failure is unlabelled. Forgetting is the owner's
+counted against a result from before and its next failure is unlabelled. A
+test or check name that looks like a secret is refused before a receipt or an
+event holds it, since such a name is never learned. Forgetting is the owner's
 choice, so there is no MCP tool for it. Names stay in the local event log;
 nothing is published (the remote payload of
 [ADR 0006](0006-remote-awareness-through-git-refs.md) is unchanged).

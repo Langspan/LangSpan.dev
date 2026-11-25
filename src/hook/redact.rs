@@ -51,6 +51,25 @@ pub fn contains_secret(text: &str) -> bool {
     redact_with_home(text, None) != text
 }
 
+/// Why `command` is refused before anything of it is recorded: a field that
+/// names something, which redaction cannot rewrite without naming another
+/// thing, looks like a secret. `None` for every other command.
+pub fn refuse_secret(command: &Command) -> Option<langspan_core::Outcome> {
+    match command {
+        // A secret-looking test name is left out of every recorded result
+        // (see `redact_command`), so there is nothing to forget under it.
+        Command::ForgetFlakyTest { name, test, .. }
+            if contains_secret(test) || name.as_deref().is_some_and(contains_secret) =>
+        {
+            Some(langspan_core::Outcome::Error {
+                code: "secret_in_test_name".into(),
+                message: "The test or check name looks like a secret, so it was not recorded; a test whose name looks like a secret is never learned about, so there is nothing to forget".into(),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Redact every field of `command` that carries owner or agent text.
 pub fn redact_command(command: &mut Command) {
     match command {

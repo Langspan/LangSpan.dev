@@ -803,6 +803,77 @@ fn after_two_flips_the_briefing_labels_the_failure_which_stays_failed_until_forg
 }
 
 #[test]
+fn forgetting_a_secret_looking_test_name_is_refused_and_never_stored() {
+    let f = Fixture::new(100);
+    let secret = "test_login[password=hunter2-is-the-pass]";
+    let token = ["ghp_", "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"].concat();
+    // Through the CLI, which redacts before it sends.
+    let (code, stdout, stderr) = f.cli(&[
+        "check",
+        "flaky",
+        "work",
+        "--forget",
+        secret,
+        "--request-id",
+        "forget-secret-cli",
+    ]);
+    assert_ne!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("looks like a secret") && !stderr.contains("hunter2"),
+        "{stdout}{stderr}"
+    );
+    // A client that sends the request unredacted: a secret-looking test
+    // name, then a secret-looking check name.
+    for (id, name, test) in [
+        ("forget-secret-raw", None, secret.to_owned()),
+        ("forget-secret-name", Some(token.clone()), "ok::test".into()),
+    ] {
+        let reply = client::call(
+            &f.state_dir(),
+            &Request {
+                version: PROTOCOL_VERSION,
+                request_id: id.into(),
+                command: Command::ForgetFlakyTest {
+                    workspace_id: "work".into(),
+                    name,
+                    test,
+                },
+            },
+        )
+        .unwrap();
+        let Outcome::Error { code, message } = &reply.outcome else {
+            panic!("{:?}", reply.outcome)
+        };
+        assert_eq!(code, "secret_in_test_name", "{message}");
+        assert!(!message.contains("hunter2") && !message.contains(&token));
+    }
+    let database = rusqlite::Connection::open(f.state_dir().join("state.sqlite3")).unwrap();
+    let stored: String = database
+        .query_row(
+            "SELECT coalesce(group_concat(request_id || command_json || outcome_json), '') FROM receipts",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains("forget-secret"), "{stored}");
+    assert!(
+        !stored.contains("hunter2") && !stored.contains(&token),
+        "{stored}"
+    );
+    let events: String = database
+        .query_row(
+            "SELECT coalesce(group_concat(event_json), '') FROM events",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !events.contains("hunter2") && !events.contains(&token),
+        "{events}"
+    );
+}
+
+#[test]
 fn two_check_runs_on_one_tree_with_no_write_between_record_a_flip() {
     let f = Fixture::new(100);
     let log = f.log();

@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod redact;
-pub use redact::{contains_secret, redact, redact_check, redact_command};
+pub use redact::{contains_secret, redact, redact_check, redact_command, refuse_secret};
 pub const MAX_EVENT_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const REASON_LIMIT: usize = 600;
 #[derive(Debug, Clone)]

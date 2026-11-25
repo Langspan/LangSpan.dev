@@ -1011,7 +1011,9 @@ langspan check flaky WORKSPACE --forget net::times_out [--name NAME] --request-i
 ```
 
 `--forget` clears what was learned about a test, including its last result,
-so its next failure is not labelled. The MCP tool `langspan_flaky_tests` reads the same list. Only test
+so its next failure is not labelled. A test or check name that looks like a
+secret is refused (`secret_in_test_name`) before anything is recorded: such a
+name is never learned, so there is nothing to forget. The MCP tool `langspan_flaky_tests` reads the same list. Only test
 names are kept, in the local event log; no output, and nothing is published.
 Names are read from at most 4 MiB of output (at most 100 names and 10 KiB per
 run); a runner LangSpan does not recognise teaches nothing.
