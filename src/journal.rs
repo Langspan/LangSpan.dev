@@ -535,8 +535,29 @@ pub fn record(
 /// A file's content in `HEAD`, empty when `HEAD` does not have it, `None`
 /// when Git cannot say in time.
 fn head_content(root: &Path, path: &str, head: Option<&str>, deadline: Instant) -> Option<Vec<u8>> {
+    head_blob(root, path, head, deadline).map(Option::unwrap_or_default)
+}
+
+/// A file's version in `HEAD` (missing when `HEAD` does not have it), `None`
+/// when Git cannot say in time or the file is over the journal's bound.
+pub fn head_state(
+    root: &Path,
+    path: &str,
+    head: Option<&str>,
+    deadline: Instant,
+) -> Option<FileState> {
+    head_blob(root, path, head, deadline).map(|content| state_of(content.as_deref()))
+}
+
+/// A file's content in `HEAD`, `Some(None)` when `HEAD` does not have it.
+fn head_blob(
+    root: &Path,
+    path: &str,
+    head: Option<&str>,
+    deadline: Instant,
+) -> Option<Option<Vec<u8>>> {
     let Some(head) = head else {
-        return Some(Vec::new());
+        return Some(None);
     };
     let listed = crate::git::output(
         root,
@@ -546,7 +567,7 @@ fn head_content(root: &Path, path: &str, head: Option<&str>, deadline: Instant) 
     )
     .ok()?;
     if listed.is_empty() {
-        return Some(Vec::new());
+        return Some(None);
     }
     let text = std::str::from_utf8(&listed).ok()?;
     let (meta, _) = text.split_once('\t')?;
@@ -562,7 +583,7 @@ fn head_content(root: &Path, path: &str, head: Option<&str>, deadline: Instant) 
         MAX_FILE_BYTES as usize,
     )
     .ok()?;
-    Some(bytes)
+    Some(Some(bytes))
 }
 
 fn write_entry(directory: &Path, operation: &str, entry: &Entry) -> Result<(), String> {

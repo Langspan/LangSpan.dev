@@ -704,6 +704,23 @@ pub struct Record {
     /// command may take its session from this record (ADR 0026).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub commit_mine: bool,
+    /// Once finished: of `changed`, the paths another session's hooked edit
+    /// tool made what they are now while this run was going. They are that
+    /// session's (its own hooks recorded them), not this run's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edited_elsewhere: Vec<String>,
+}
+
+impl Record {
+    /// Of `changed`, the paths this run's session is credited with: neither
+    /// contested nor another session's edit.
+    pub fn attributed(&self, changed: &[String]) -> Vec<String> {
+        changed
+            .iter()
+            .filter(|path| !self.contested.contains(path) && !self.edited_elsewhere.contains(path))
+            .cloned()
+            .collect()
+    }
 }
 
 /// Whether a shell command runs `langspan commit --mine`.
@@ -970,6 +987,283 @@ pub fn contested(
     contested.into_iter().collect()
 }
 
+// ---------------------------------------------------------------------------
+// Edit marks: hooked edits a shell run must not take for its own
+// ---------------------------------------------------------------------------
+
+/// One file of an edit tool call: its version just before the call and, once
+/// it finished, after it. `None` is a version that is not known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkedFile {
+    pub before: Option<FileState>,
+    pub after: Option<FileState>,
+}
+
+/// An edit tool call (Edit, Write, a patch) admitted in a workspace, kept so
+/// that a shell run going at the same time can tell that call's changes from
+/// its command's. Written by the call's pre-tool hook and finished by its
+/// post-tool hook; a call whose post never arrives is closed with its result
+/// unknown when its session's reply or the session ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditMark {
+    pub session_id: String,
+    pub workspace: PathBuf,
+    pub started_ms: u64,
+    pub finished_ms: Option<u64>,
+    pub files: BTreeMap<String, MarkedFile>,
+}
+
+fn marks(state_dir: &Path) -> PathBuf {
+    records(state_dir).join("edits")
+}
+
+fn mark_path(state_dir: &Path, operation_id: &str) -> PathBuf {
+    marks(state_dir).join(format!("{operation_id}.json"))
+}
+
+#[cfg(unix)]
+fn write_mark(path: &Path, mark: &EditMark) -> Result<(), String> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec(mark).map_err(|e| e.to_string())?;
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    let _ = fs::remove_file(&temporary);
+    let mut file =
+        crate::local::private_file(&temporary, true).map_err(|e| format!("edit mark: {e}"))?;
+    file.write_all(&bytes)
+        .map_err(|e| format!("edit mark: {e}"))?;
+    fs::rename(&temporary, path).map_err(|e| format!("edit mark: {e}"))
+}
+
+#[cfg(not(unix))]
+fn write_mark(_: &Path, _: &EditMark) -> Result<(), String> {
+    Err("edit marks require Unix".into())
+}
+
+#[cfg(unix)]
+fn read_mark(path: &Path) -> Option<EditMark> {
+    use std::io::Read;
+    let file = crate::local::private_file(path, false).ok()?;
+    let mut bytes = Vec::new();
+    file.take(RECORD_LIMIT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > RECORD_LIMIT_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+#[cfg(not(unix))]
+fn read_mark(_: &Path) -> Option<EditMark> {
+    None
+}
+
+/// Every mark file with its modification time, up to `MAX_RECORDS + 1`.
+fn mark_listing(state_dir: &Path) -> Vec<(PathBuf, u64)> {
+    let Ok(entries) = fs::read_dir(marks(state_dir)) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
+        .take(MAX_RECORDS + 1)
+        .filter_map(|entry| {
+            let modified = entry
+                .metadata()
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_millis() as u64;
+            Some((entry.path(), modified))
+        })
+        .collect()
+}
+
+/// Before an edit tool call runs, once it is not refused: keep the versions
+/// of its files. Old marks go first: those no running shell run can still
+/// need, and anything older than a day.
+pub fn edit_started(
+    state_dir: &Path,
+    operation_id: &str,
+    session_id: &str,
+    root: &Path,
+    before: BTreeMap<String, Option<FileState>>,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    crate::local::private_directory(&marks(state_dir)).map_err(|e| format!("edit marks: {e}"))?;
+    let now = now_ms();
+    // The earliest start of a shell run that may still be going.
+    let earliest_running = listing(state_dir)
+        .iter()
+        .filter(|(_, _, modified)| now.saturating_sub(*modified) < ABANDONED_MS)
+        .filter_map(|(path, _, _)| read_record(path))
+        .filter(|record| record.finished_ms.is_none() || record.background)
+        .map(|record| record.started_ms)
+        .min()
+        .unwrap_or(now);
+    let mut kept = 0;
+    for (path, modified) in mark_listing(state_dir) {
+        let expired = now.saturating_sub(modified) > DAY_MS
+            || (modified + 2_000 < earliest_running.min(now.saturating_sub(60_000))
+                && read_mark(&path).is_none_or(|mark| mark.finished_ms.is_some()));
+        if expired {
+            let _ = fs::remove_file(path);
+        } else {
+            kept += 1;
+        }
+    }
+    if kept >= MAX_RECORDS {
+        return Err("too many edit tool calls are recorded".into());
+    }
+    let mark = EditMark {
+        session_id: session_id.into(),
+        workspace: workspace_identity(root),
+        started_ms: now,
+        finished_ms: None,
+        files: before
+            .into_iter()
+            .map(|(path, before)| {
+                (
+                    path,
+                    MarkedFile {
+                        before,
+                        after: None,
+                    },
+                )
+            })
+            .collect(),
+    };
+    write_mark(&mark_path(state_dir, operation_id), &mark)
+}
+
+/// After an edit tool call: its files as they are now. A call whose start was
+/// not kept is marked as starting now from versions that are not known.
+pub fn edit_finished(
+    state_dir: &Path,
+    operation_id: &str,
+    session_id: &str,
+    root: &Path,
+    after: BTreeMap<String, Option<FileState>>,
+) -> Result<(), String> {
+    let path = mark_path(state_dir, operation_id);
+    let now = now_ms();
+    let mut mark = read_mark(&path)
+        .filter(|mark| mark.session_id == session_id)
+        .unwrap_or_else(|| EditMark {
+            session_id: session_id.into(),
+            workspace: workspace_identity(root),
+            started_ms: now,
+            finished_ms: None,
+            files: BTreeMap::new(),
+        });
+    if mark.finished_ms.is_some() {
+        return Ok(());
+    }
+    mark.finished_ms = Some(now);
+    for (file, state) in after {
+        mark.files
+            .entry(file)
+            .or_insert(MarkedFile {
+                before: None,
+                after: None,
+            })
+            .after = state;
+    }
+    #[cfg(unix)]
+    crate::local::private_directory(&marks(state_dir)).map_err(|e| format!("edit marks: {e}"))?;
+    write_mark(&path, &mark)
+}
+
+/// Close `session_id`'s edit calls whose result never arrived: finished now,
+/// with what they left unknown. Returns how many were closed.
+pub fn close_edits(state_dir: &Path, session_id: &str) -> usize {
+    let now = now_ms();
+    let mut closed = 0;
+    for (path, _) in mark_listing(state_dir) {
+        let Some(mut mark) = read_mark(&path) else {
+            continue;
+        };
+        if mark.session_id != session_id || mark.finished_ms.is_some() {
+            continue;
+        }
+        mark.finished_ms = Some(now);
+        if write_mark(&path, &mark).is_ok() {
+            closed += 1;
+        }
+    }
+    closed
+}
+
+/// Every kept edit mark of another session than `run`'s, in its workspace,
+/// that overlapped it in time: finished after it started, or still going
+/// and not abandoned.
+pub fn overlapping_edits(state_dir: &Path, run: &Record) -> Vec<EditMark> {
+    let now = now_ms();
+    mark_listing(state_dir)
+        .into_iter()
+        .filter_map(|(path, _)| read_mark(&path))
+        .filter(|mark| {
+            mark.session_id != run.session_id
+                && run
+                    .workspace
+                    .as_ref()
+                    .is_none_or(|ours| *ours == mark.workspace)
+                && match mark.finished_ms {
+                    Some(finished) => finished >= run.started_ms,
+                    None => now.saturating_sub(mark.started_ms) < ABANDONED_MS,
+                }
+        })
+        .collect()
+}
+
+/// Of `changed`, the paths other sessions' edit calls (`marks`) touched while
+/// the run was going: `(theirs, unknown)`.
+///
+/// A path is theirs when its edits, in the order they started, form one
+/// chain of known versions from the file before the run (`before`) to the
+/// file now (`current`): no other change came between them, so the command
+/// did not change it. Otherwise both the command and an edit may have
+/// changed it, or an edit is still going and the order cannot be known: it
+/// is unknown, and the run's session is not credited with it.
+pub fn classify_edits(
+    marks: &[EditMark],
+    changed: &[String],
+    before: impl Fn(&str) -> Option<FileState>,
+    current: impl Fn(&str) -> Option<FileState>,
+) -> (Vec<String>, Vec<String>) {
+    let mut theirs = Vec::new();
+    let mut unknown = Vec::new();
+    for path in changed {
+        let mut edits: Vec<(&EditMark, &MarkedFile)> = marks
+            .iter()
+            .filter_map(|mark| mark.files.get(path).map(|file| (mark, file)))
+            .collect();
+        if edits.is_empty() {
+            continue;
+        }
+        edits.sort_by_key(|(mark, _)| mark.started_ms);
+        let chain = || -> Option<()> {
+            let mut version = before(path)?;
+            for (mark, file) in &edits {
+                mark.finished_ms?;
+                if file.before.as_ref()? != &version {
+                    return None;
+                }
+                version = file.after.clone()?;
+            }
+            (current(path)? == version).then_some(())
+        };
+        if chain().is_some() {
+            theirs.push(path.clone());
+        } else {
+            unknown.push(path.clone());
+        }
+    }
+    (theirs, unknown)
+}
+
 #[cfg(test)]
 mod parser {
     use super::*;
@@ -1200,6 +1494,92 @@ mod diff {
         assert!(
             changed(&before, &after, |_| None).is_err(),
             "unreadable now: unknown"
+        );
+    }
+
+    fn edit(
+        started_ms: u64,
+        finished: Option<u64>,
+        files: &[(&str, Option<&str>, Option<&str>)],
+    ) -> EditMark {
+        EditMark {
+            session_id: "peer".into(),
+            workspace: PathBuf::from("/w"),
+            started_ms,
+            finished_ms: finished,
+            files: files
+                .iter()
+                .map(|(path, before, after)| {
+                    (
+                        (*path).to_owned(),
+                        MarkedFile {
+                            before: before.map(present),
+                            after: after.map(present),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_edit_that_alone_explains_a_change_is_the_editors_and_anything_else_is_unknown() {
+        let marks = [
+            // Edited from the run's "before" to what is on disk now.
+            edit(1, Some(2), &[("theirs.txt", Some("0"), Some("1"))]),
+            // Two edits in a row, each from the last one's result.
+            edit(1, Some(2), &[("chain.txt", Some("0"), Some("1"))]),
+            edit(3, Some(4), &[("chain.txt", Some("1"), Some("2"))]),
+            // Changed again after the edit: by the command, or someone.
+            edit(1, Some(2), &[("after.txt", Some("0"), Some("1"))]),
+            // Changed before the edit started.
+            edit(1, Some(2), &[("before.txt", Some("5"), Some("1"))]),
+            // Still going.
+            edit(1, None, &[("going.txt", Some("0"), None)]),
+            // Finished with what it left unknown (closed with no result).
+            edit(1, Some(2), &[("closed.txt", Some("0"), None)]),
+            // A start that was not kept.
+            edit(1, Some(2), &[("unkept.txt", None, Some("1"))]),
+        ];
+        let changed: Vec<String> = [
+            "after.txt",
+            "before.txt",
+            "chain.txt",
+            "closed.txt",
+            "going.txt",
+            "mine.txt",
+            "theirs.txt",
+            "unkept.txt",
+        ]
+        .map(String::from)
+        .into();
+        let now = |path: &str| {
+            Some(present(match path {
+                "chain.txt" => "2",
+                "after.txt" => "9",
+                _ => "1",
+            }))
+        };
+        let (theirs, unknown) = classify_edits(&marks, &changed, |_| Some(present("0")), now);
+        assert_eq!(theirs, ["chain.txt", "theirs.txt"]);
+        assert_eq!(
+            unknown,
+            [
+                "after.txt",
+                "before.txt",
+                "closed.txt",
+                "going.txt",
+                "unkept.txt"
+            ]
+        );
+        // The version before the run is not known: no chain can be shown.
+        let (theirs, unknown) = classify_edits(&marks[..1], &changed, |_| None, now);
+        assert!(theirs.is_empty());
+        assert_eq!(unknown, ["theirs.txt"]);
+        // No edit touched a path: nothing is said about it.
+        assert_eq!(
+            classify_edits(&[], &changed, |_| None, now),
+            (vec![], vec![])
         );
     }
 

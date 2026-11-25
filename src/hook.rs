@@ -268,6 +268,16 @@ pub fn execute(operation: Operation, config: &Config, deadline: Instant) -> Repl
     // The line journal (ADR 0026): the files an edit starts from, and what
     // it changed in them. Kept on this machine whatever the daemon answers.
     let mut journaled = None;
+    // The edit's files as they are before it runs, for a shell run of
+    // another session going at the same time (ADR 0011).
+    let versions = |paths: &[String]| -> std::collections::BTreeMap<_, _> {
+        paths
+            .iter()
+            .map(|path| (path.clone(), file_state(&config.root, path)))
+            .collect()
+    };
+    let marked_before = matches!(operation.phase, Phase::Pre).then(|| versions(&operation.paths));
+    let marked_paths = operation.paths.clone();
     match operation.phase {
         Phase::Pre => crate::journal::before_edit(
             &config.state_dir,
@@ -314,6 +324,29 @@ pub fn execute(operation: Operation, config: &Config, deadline: Instant) -> Repl
     };
     if let Some(Err(error)) = journaled {
         reply.detail = format!("{}; line journal: {error}", reply.detail);
+    }
+    // An edit that is refused does not run, so it is not marked.
+    let marked = match (operation.phase, marked_before) {
+        (Phase::Pre, Some(before)) if !reply.coverage.starts_with("denied") => {
+            Some(crate::shell::edit_started(
+                &config.state_dir,
+                &ids.operation_id,
+                &ids.session_id,
+                &config.root,
+                before,
+            ))
+        }
+        (Phase::Post(_), _) => Some(crate::shell::edit_finished(
+            &config.state_dir,
+            &ids.operation_id,
+            &ids.session_id,
+            &config.root,
+            versions(&marked_paths),
+        )),
+        _ => None,
+    };
+    if let Some(Err(error)) = marked {
+        reply.detail = format!("{}; edit mark: {error}", reply.detail);
     }
     if let (Some(report), Some(request_id)) = (report, report_id)
         && session.unreachable.get()
@@ -1034,9 +1067,13 @@ pub fn own_session(
 /// Close `session_id`'s shell runs that got no result, for a hook's detail:
 /// empty when there were none.
 fn closed_runs(state_dir: &Path, session_id: &str, why: &str) -> String {
-    match crate::shell::close_session(state_dir, session_id, why) {
+    let edits = match crate::shell::close_edits(state_dir, session_id) {
         0 => String::new(),
-        closed => format!("; {closed} shell run(s) that got no result closed"),
+        closed => format!("; {closed} edit call(s) that got no result closed"),
+    };
+    match crate::shell::close_session(state_dir, session_id, why) {
+        0 => edits,
+        closed => format!("; {closed} shell run(s) that got no result closed{edits}"),
     }
 }
 
@@ -2708,6 +2745,7 @@ impl Session<'_> {
             },
             background,
             commit_mine: call.is_some_and(|call| crate::shell::runs_commit_mine(&call.command)),
+            edited_elsewhere: Vec::new(),
         };
         if let Ok(before) = &record.before {
             crate::journal::before_shell(
@@ -2814,11 +2852,27 @@ impl Session<'_> {
                         run.contested =
                             crate::shell::contested(state_dir, &ids.operation_id, &run, &changed);
                         if let Ok(before) = &run.before {
-                            let attributed: Vec<String> = changed
-                                .iter()
-                                .filter(|path| !run.contested.contains(path))
-                                .cloned()
-                                .collect();
+                            // Another session's hooked edits while the
+                            // command ran are that session's, or unknown.
+                            let (theirs, unknown) = crate::shell::classify_edits(
+                                &crate::shell::overlapping_edits(state_dir, &run),
+                                &changed,
+                                |path| match before.files.get(path) {
+                                    Some(entry) => Some(entry.state.clone()),
+                                    None => crate::journal::head_state(
+                                        self.root,
+                                        path,
+                                        before.head.as_deref(),
+                                        self.deadline,
+                                    ),
+                                },
+                                |path| file_state(self.root, path),
+                            );
+                            run.edited_elsewhere = theirs;
+                            run.contested.extend(unknown);
+                            run.contested.sort();
+                            run.contested.dedup();
+                            let attributed = run.attributed(&changed);
                             if let Err(error) = crate::journal::record(
                                 state_dir,
                                 self.root,
@@ -2900,11 +2954,7 @@ impl Session<'_> {
                 "the command changed no file; nothing recorded",
             ));
         }
-        let attributed: Vec<String> = changed
-            .iter()
-            .filter(|path| !run.contested.contains(path))
-            .cloned()
-            .collect();
+        let attributed = run.attributed(changed);
         if attributed.len() > 64 {
             self.release(ids, run)?;
             return Ok(Reply::none(
@@ -2953,11 +3003,17 @@ impl Session<'_> {
             );
         }
         self.release(ids, run)?;
+        let elsewhere = match run.edited_elsewhere.len() {
+            0 => String::new(),
+            theirs => format!(
+                "; {theirs} to another session's edit made while the command ran, recorded by that session's hooks"
+            ),
+        };
         Ok(if run.contested.is_empty() {
             Reply::none(
                 "shell_observed",
                 format!(
-                    "{} changed file(s) attributed to this session{relation}",
+                    "{} changed file(s) attributed to this session{elsewhere}{relation}",
                     attributed.len()
                 ),
             )
@@ -2965,7 +3021,7 @@ impl Session<'_> {
             Reply::none(
                 "contested",
                 format!(
-                    "{} changed file(s) attributed to this session; {} attributed to no session, because another session's shell run overlapped and could have written them{relation}",
+                    "{} changed file(s) attributed to this session{elsewhere}; {} attributed to no session, because another session's shell run or edit overlapped and could have written them{relation}",
                     attributed.len(),
                     run.contested.len()
                 ),
