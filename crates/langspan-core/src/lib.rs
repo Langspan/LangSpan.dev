@@ -3043,6 +3043,9 @@ impl<'de> Deserialize<'de> for Command {
     }
 }
 
+// One reply per request, built and sent once: its size does not matter, and
+// boxing `Status`'s state would only add an allocation to every status read.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Outcome {
