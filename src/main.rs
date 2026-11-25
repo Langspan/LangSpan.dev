@@ -2160,29 +2160,30 @@ fn doctor(
         let mut shell_hooks = false;
         for vendor in Vendor::ALL {
             let path = root.join(vendor.project_hook_files()[0]);
-            let (managed, missing): (Vec<String>, Vec<&str>) = match install::read(&path) {
-                Err(error) => {
-                    note(false, format!("{}: {error}", path.display()));
-                    continue;
-                }
-                Ok(None) => (Vec::new(), Vec::new()),
-                Ok(Some(settings)) => {
-                    let ours = |hook: &serde_json::Value| install::is_managed_for(vendor, hook);
-                    (
-                        install::managed_hooks(&settings, ours)
-                            .iter()
-                            .filter_map(|hook| hook["command"].as_str().map(str::to_owned))
-                            .collect(),
-                        install::missing_events(vendor, &settings, ours),
-                    )
-                }
-            };
+            let (managed, missing): (Vec<install::Registration>, Vec<&str>) =
+                match install::read(&path) {
+                    Err(error) => {
+                        note(false, format!("{}: {error}", path.display()));
+                        continue;
+                    }
+                    Ok(None) => (Vec::new(), Vec::new()),
+                    Ok(Some(settings)) => {
+                        let ours = |hook: &serde_json::Value| install::is_managed_for(vendor, hook);
+                        (
+                            install::managed_hooks(&settings, ours)
+                                .iter()
+                                .filter_map(|hook| install::parse_project_hook(vendor, hook))
+                                .collect(),
+                            install::missing_events(vendor, &settings, ours),
+                        )
+                    }
+                };
             // Cursor and Gemini CLI are newer and optional: their absence is
             // not a problem.
             if managed.is_empty() && matches!(vendor, Vendor::Cursor | Vendor::Gemini) {
                 continue;
             }
-            let Some(command) = managed.first() else {
+            let Some(first) = managed.first() else {
                 note(
                     false,
                     format!(
@@ -2195,9 +2196,8 @@ fn doctor(
                 );
                 continue;
             };
-            let here = std::path::absolute(state_dir)?;
-            let points_here = command.contains(&install::quote(&here.to_string_lossy()));
-            let exists = install::executable_of(vendor, command).is_some_and(|path| path.is_file());
+            let points_here = install::same_directory(&first.state_dir, state_dir);
+            let exists = first.executable.is_file();
             note(
                 points_here && exists && missing.is_empty(),
                 format!(
@@ -2265,7 +2265,8 @@ fn doctor(
                         ),
                     ),
                     Ok(Some(Some(server))) => note(
-                        server.state_dir == here && server.executable.is_file(),
+                        install::same_directory(&server.state_dir, state_dir)
+                            && server.executable.is_file(),
                         format!(
                             "cursor: MCP server `langspan` registered in {}, state directory {}.",
                             mcp.display(),
@@ -2456,14 +2457,13 @@ fn user_level_findings(
     in_use: Option<&InUse>,
 ) -> Result<Vec<(bool, String)>, langspan::Error> {
     use langspan::{install, install::Vendor, user_install};
-    let here = std::path::absolute(state_dir)?;
     let mut findings = Vec::new();
     let check = |executable: &std::path::Path, dir: &std::path::Path| -> String {
         let mut problems = String::new();
         if !executable.is_file() {
             problems.push_str("; its executable no longer exists, so it does nothing: run `langspan install --apply` again");
         }
-        if dir != here {
+        if !install::same_directory(dir, state_dir) {
             problems.push_str("; it uses a different state directory than this command, so it talks to a different coordinator");
         }
         problems

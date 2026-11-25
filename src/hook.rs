@@ -2179,9 +2179,7 @@ pub fn install_at(
     state_dir: &Path,
     dir: &Path,
 ) -> Option<(PathBuf, crate::install::Registration)> {
-    // The state directory may not exist yet: no coordinator has started.
     let canonical = |dir: &Path| fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let state_dir = canonical(state_dir);
     vendor.project_hook_files().iter().find_map(|file| {
         let path = dir.join(file);
         let Ok(Some(settings)) = crate::install::read(&path) else {
@@ -2195,7 +2193,8 @@ pub fn install_at(
                 registration
             })
             .find(|registration| {
-                registration.root == dir && canonical(&registration.state_dir) == state_dir
+                registration.root == dir
+                    && crate::install::same_directory(&registration.state_dir, state_dir)
             })
             .map(|registration| (path, registration))
     })

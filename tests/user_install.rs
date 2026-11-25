@@ -1644,3 +1644,47 @@ fn following_the_status_advice_verbatim_installs_for_this_coordinator() {
     );
     home.held("cursor", false);
 }
+
+/// Issue #130: a user-level install whose state directory was named through
+/// a symbolic link is the same coordinator as `doctor` run with its real
+/// path; a genuinely different state directory still warns.
+#[test]
+fn doctor_takes_a_user_level_state_directory_named_through_a_link_for_the_same_one() {
+    let home = Home::new();
+    home.claude_and_codex();
+    fs::create_dir(home.state_dir()).unwrap();
+    let link = home.base.join("state-link");
+    std::os::unix::fs::symlink(home.state_dir(), &link).unwrap();
+    let other = home.base.join("other");
+    fs::create_dir(&other).unwrap();
+    let run = |state_dir: &Path, args: &[&str]| -> String {
+        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .args(args)
+            .arg("--home")
+            .arg(home.home())
+            .arg("--state-dir")
+            .arg(state_dir)
+            .env_remove("CLAUDE_PROJECT_DIR")
+            .output()
+            .unwrap();
+        assert!(output.status.success() || args[0] == "doctor", "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let warning = "different state directory";
+    run(
+        &link,
+        &["install", "--hosts", "claude-code,codex", "--apply"],
+    );
+    let text = run(&home.state_dir(), &["doctor"]);
+    assert!(
+        text.contains("ok claude-code: user-level hooks installed")
+            && text.contains("ok codex: MCP server `langspan` registered")
+            && !text.contains(warning),
+        "{text}"
+    );
+    let text = run(&other, &["doctor"]);
+    assert!(
+        text.contains("FIX claude-code: user-level hooks installed") && text.contains(warning),
+        "{text}"
+    );
+}

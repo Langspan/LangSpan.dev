@@ -78,6 +78,15 @@ get `--state-dir`. The task asked for it only when non-default; it is always
 written because a host may start the MCP server with a different environment
 than the one `install` ran in, and a `LANGSPAN_STATE_DIR` or `XDG_STATE_HOME`
 there would point the MCP server at a different coordinator than the hooks.
+It is written as given, not resolved: an install made before this rule is
+judged the same way as one made after it. Every check that compares an
+installed state directory with the one in use (`doctor`, `hosts`, the
+daemon's host check, a project hook finding a linked worktree's own install)
+compares canonical forms
+through `install::same_directory`, resolving a directory that does not exist
+yet through its nearest existing ancestor. A path through a symbolic link
+(`/tmp` and `/private/tmp` on macOS) is therefore the same coordinator; only a
+genuinely different directory is reported as one (issue #130).
 
 **Claude Code's `~/.claude.json` is never created.** Claude Code writes it for
 itself and keeps account and per-project state in it. When it is missing,
