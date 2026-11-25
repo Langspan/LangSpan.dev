@@ -2365,6 +2365,11 @@ pub enum Command {
     StatusRecords {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after: Option<String>,
+        /// A smaller page than the store's own bound, in bytes; absent for
+        /// the store's bound. The MCP adapter asks for one when a full page
+        /// does not fit its reply, which carries the page twice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_bytes: Option<u32>,
     },
     /// Read-only: a bounded view of every session on every machine heard
     /// from, with what is held, what overlaps, evidence and health.
@@ -2825,6 +2830,8 @@ enum CommandWire {
     StatusRecords {
         #[serde(default)]
         after: Option<String>,
+        #[serde(default)]
+        page_bytes: Option<u32>,
     },
     Dashboard {},
     Events {

@@ -3006,6 +3006,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             },
             ["status"] if options.remove("--all").is_some() => Command::StatusRecords {
                 after: options.remove("--after"),
+                page_bytes: None,
             },
             ["status"] => Command::Status,
             ["changes", workspace] => Command::Changes {

@@ -1196,7 +1196,20 @@ Timeout values accept 100–5000 ms; client count accepts 1–128;
 coordinator looks for agent hosts with no LangSpan install, accepts
 100–86400000. IPC and MCP frames
 are limited to 64 KiB. The MCP SDK discards oversized input lines without replying
-to that line. File admission accepts up to 64 distinct normalized keys, 512 bytes
+to that line. An MCP tool result carries each answer twice, as structured
+content and as JSON text that escapes every quotation mark and backslash
+again, so the adapter measures the whole encoded result and keeps it, with
+512 bytes left for the JSON-RPC envelope, within one frame. An MCP page can
+therefore be shorter than the CLI's: a page of `langspan_events`,
+`langspan_changes` or `langspan_status` with `all` that would not fit is cut,
+and the result ends with a text note starting "LangSpan cut this page to fit
+one MCP reply" that names the `after` to call again with for the rest. The
+`status` view and `langspan_recap` leave more out instead, counted as the
+CLI's answer counts it (`summary`, `omitted_items`); every record is in
+`langspan_status` with `all`. A result no rule can cut, such as an oversized
+landing report, is replaced by the error `reply_too_large`, which keeps the
+operation's `exit_code` and outcome; the CLI's `--json` gives the whole
+answer. The CLI's answers are unchanged. File admission accepts up to 64 distinct normalized keys, 512 bytes
 per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit
 and prompt summaries a 512-byte one. Summaries are redacted on receipt, and
 redaction never makes one longer than its limit: a summary that would outgrow
