@@ -406,7 +406,7 @@ A message is text one session or the owner addresses to another session of the s
 | Repudiation | `workspace_moved` (with the old and new root) and `workspace_removed` are events; every earlier event stays in the log. |
 | Information disclosure | `workspace list` shows roots, counts and two settings, as `status` already does. Both events are local only and never published. |
 | Denial of service | A move or removal is refused while a session holds a current admission there or a landing holds or waits for its push turn, so it cannot end work in progress. A removal ends the workspace's sessions, notes, messages and automatic check in the derived state; a same-user process can do this to any idle workspace, as it could already forget its notes. |
-| Elevation of privilege | A move or removal grants nothing. Remote sharing must be off first, and a removal also waits until the published ref is gone, so neither leaves a published ref the daemon no longer withdraws. |
+| Elevation of privilege | A move or removal grants nothing. Remote sharing must be off first, and both wait until the published ref is gone, so neither leaves a published ref the daemon no longer withdraws, or withdraws through another checkout's remote. |
 
 ## Source index
 

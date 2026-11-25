@@ -1089,7 +1089,9 @@ history. A hook event from that root later registers it again, empty.
 Moving and removing are refused while a session holds an admission there or a
 landing holds or waits for its push turn (`workspace_busy`), and while remote
 sharing is on (`remote_sharing_on`): run `langspan remote disable ID` first,
-so the published ref is removed. A removal also waits until that ref is gone.
+so the published ref is removed, and wait until that ref is gone (`langspan
+doctor` shows its progress): the daemon removes it through the old checkout's
+remote.
 A refusal is recorded under its request ID; retry with a new one.
 
 ## Retries and recovery

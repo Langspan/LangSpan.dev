@@ -460,14 +460,15 @@ fn remote_sharing_refuses_removal_until_disabled_and_withdrawn() {
         },
         12,
     );
-    // The published ref is not yet gone: removing now would leave it there.
-    let outcome = run(&mut state, "r2", remove(true), 13);
-    assert_eq!(error_code(&outcome).0, "remote_sharing_on");
-    // A move keeps the link, so the daemon still withdraws from the new root.
-    assert!(matches!(
-        run(&mut state, "m2", move_to("/work/app", false), 13),
-        Outcome::WorkspaceMoved { .. }
-    ));
+    // The published ref is not yet gone: removing now would leave it there,
+    // and moving now would send the withdrawal to the new root's remote,
+    // which may not be the one the ref was published to.
+    for (id, command) in [("r2", remove(true)), ("m2", move_to("/work/app", false))] {
+        let outcome = run(&mut state, id, command, 13);
+        let (code, message) = error_code(&outcome);
+        assert_eq!(code, "remote_sharing_on", "{id}");
+        assert!(message.contains("not yet removed"), "{message}");
+    }
     run(
         &mut state,
         "gone",

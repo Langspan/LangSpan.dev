@@ -108,10 +108,11 @@ against, so it stays an owner command, as with `remote enable`.
   holds a current admission there (`workspace_busy`, naming the session),
   while a landing holds or waits for its push turn there (`workspace_busy`,
   naming the branch), or while remote sharing is on (`remote_sharing_on`,
-  naming `langspan remote disable ID`, so the published ref is removed). A
-  removal also waits until a disabled publication's ref is gone from the
-  remote, since the daemon removes it from the workspace's root; a move keeps
-  the link, so the daemon withdraws from the new root.
+  naming `langspan remote disable ID`, so the published ref is removed). Both
+  also wait until a disabled publication's ref is gone from the remote, since
+  the daemon removes it through the remote configured in the workspace's
+  root: after a move it would ask the new root's remote, which need not be
+  the one the ref was published to, and the ref would stay there.
 - Both events are local only, never published. A binary from before them
   cannot read a store that holds one (it refuses the unknown event kind on
   start, [ADR 0015](0015-version-tolerance.md)).

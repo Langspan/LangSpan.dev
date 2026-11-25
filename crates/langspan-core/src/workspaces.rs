@@ -115,14 +115,11 @@ fn registered<'a>(state: &'a State, workspace_id: &str) -> Result<&'a Workspace,
 
 /// Why the workspace cannot be moved or removed now, if it cannot: a
 /// session holds an admission there, a landing holds or waits for a push
-/// turn, or its work is published. `removing` also waits for a disabled
-/// publication's ref to be gone, which the daemon removes from the root.
-fn refuse_while_in_use(
-    state: &State,
-    workspace_id: &str,
-    now_ms: u64,
-    removing: bool,
-) -> Result<(), CoreError> {
+/// turn, or its work is published. A disabled publication's ref must be gone
+/// too: the daemon withdraws it through the root's configured remote, so a
+/// move before then would send the withdrawal to the new root's remote,
+/// which need not be the one the ref was published to.
+fn refuse_while_in_use(state: &State, workspace_id: &str, now_ms: u64) -> Result<(), CoreError> {
     if let Some(lease) = state.leases.values().find(|lease| {
         lease.workspace_id == workspace_id
             && lease_relation(state, lease, now_ms) == LeaseRelation::Current
@@ -171,7 +168,7 @@ fn refuse_while_in_use(
                 ),
             ));
         }
-        if removing && !link.withdrawn {
+        if !link.withdrawn {
             return Err(error(
                 "remote_sharing_on",
                 &format!(
@@ -197,7 +194,7 @@ pub(crate) fn decide_move(
             "The workspace is already registered at this root; nothing to move",
         ));
     }
-    refuse_while_in_use(state, workspace_id, now_ms, false)?;
+    refuse_while_in_use(state, workspace_id, now_ms)?;
     let links = normalized_workspace_links(verified_overlaps)?;
     let workspace = Workspace {
         workspace_id: workspace_id.to_owned(),
@@ -279,7 +276,7 @@ pub(crate) fn decide_remove(
     now_ms: u64,
 ) -> Result<Decision, CoreError> {
     registered(state, workspace_id)?;
-    refuse_while_in_use(state, workspace_id, now_ms, true)?;
+    refuse_while_in_use(state, workspace_id, now_ms)?;
     let sessions: Vec<&str> = sessions_of(state, workspace_id)
         .filter(|session| current(state, session))
         .collect();
