@@ -127,6 +127,14 @@ Any failure is a note in the diagnostic, never a decision.
   ADR 0008) are not alerted at write time; they remain in the prompt
   briefing. Keyword arguments are counted as arguments, not matched to names.
   See "Not now" below for the same-count case.
+- A definition added or removed under a name that still has others
+  (`definition_added`, `definition_removed`, ADR 0008) changes no signature
+  a call was written against, so it carries no counts and never alerts at
+  write time; it is told in the prompt briefing. A signature change among
+  several same-named definitions has no single new signature, so it does
+  not alert either (test
+  `a_second_same_named_definition_coming_or_going_is_not_a_changed_signature_at_the_write`
+  in `tests/break_alerts.rs`).
 - A notice attributed to no session (the file was changed outside any
   reported edit), or to a session that ended, does not alert.
 - Calls already in the file are checked only for `Write` and `Add File`,
