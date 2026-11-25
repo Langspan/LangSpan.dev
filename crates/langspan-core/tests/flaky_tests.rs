@@ -69,13 +69,28 @@ fn passing() -> TestResults {
 }
 
 /// One record of check `tests` on `tree`, with its per-test results and, for
-/// an automatic check, a rerun's and a notice for alice.
+/// an automatic check, a rerun's, made with no write recorded since the
+/// first run, and a notice for alice.
 fn record(
     state: &mut State,
     id: &str,
     tree: &str,
     tests: TestResults,
     rerun: Option<TestResults>,
+    now: u64,
+) -> Outcome {
+    let writes = state.writes.get("work").copied().unwrap_or(0);
+    record_marked(state, id, tree, tests, rerun, Some(writes), now)
+}
+
+/// As `record`, with the write mark the first run was taken at.
+fn record_marked(
+    state: &mut State,
+    id: &str,
+    tree: &str,
+    tests: TestResults,
+    rerun: Option<TestResults>,
+    writes_before: Option<u64>,
     now: u64,
 ) -> Outcome {
     let result = if tests.all_passed {
@@ -102,6 +117,7 @@ fn record(
             }),
             tests: Some(tests),
             rerun,
+            writes_before,
         },
         now,
     )
@@ -217,6 +233,45 @@ fn a_failure_then_a_pass_after_a_write_is_no_flip() {
         300,
     );
     assert_eq!(history(&state, "net::times_out"), None);
+}
+
+#[test]
+fn a_rerun_after_a_write_recorded_since_its_first_run_is_not_compared() {
+    let mut state = ready();
+    let mark = state.writes.get("work").copied().unwrap_or(0);
+    // Written and put back while the rerun ran: the tree is the same, the
+    // writes were recorded, and both results arrive together afterwards.
+    write(&mut state, "w1");
+    write(&mut state, "w2");
+    let outcome = record_marked(
+        &mut state,
+        "c1",
+        &tree('a'),
+        failing(&["net::times_out"], &[]),
+        Some(passing()),
+        Some(mark),
+        100,
+    );
+    assert!(
+        matches!(outcome, Outcome::CheckRecorded { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(history(&state, "net::times_out"), None);
+    // The first run's result is still learned from: the next run on this
+    // tree, with no write since, is compared with it.
+    record(&mut state, "c2", &tree('a'), passing(), None, 200);
+    assert_eq!(history(&state, "net::times_out"), Some((1, 1)));
+    // A rerun without its mark is refused.
+    let outcome = record_marked(
+        &mut state,
+        "c3",
+        &tree('a'),
+        failing(&["net::times_out"], &[]),
+        Some(passing()),
+        None,
+        300,
+    );
+    assert!(matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
 }
 
 #[test]
@@ -414,6 +469,7 @@ fn test_results_are_bounded_and_belong_to_a_conclusive_working_tree_check() {
                 report: None,
                 tests: Some(tests),
                 rerun: None,
+                writes_before: None,
             },
             1,
         );
@@ -462,12 +518,19 @@ fn the_wire_forms_of_flaky_test_commands_outcomes_and_events_are_fixed() {
         "tree_oid": tree('a'), "head_oid": null, "inputs": [], "result": {"type": "failed", "exit_code": 101},
         "duration_ms": 9,
         "tests": {"failed": ["net::times_out"], "passed": ["parser::keeps_order"]},
-        "rerun": {"all_passed": true},
+        "rerun": {"all_passed": true}, "writes_before": 0,
     }))
     .unwrap();
-    let Command::RecordCheck { tests, rerun, .. } = &command else {
+    let Command::RecordCheck {
+        tests,
+        rerun,
+        writes_before,
+        ..
+    } = &command
+    else {
         panic!("{command:?}")
     };
+    assert_eq!(*writes_before, Some(0));
     assert_eq!(
         tests.as_ref(),
         Some(&failing(&["net::times_out"], &["parser::keeps_order"]))

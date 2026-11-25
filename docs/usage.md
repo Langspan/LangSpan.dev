@@ -848,8 +848,10 @@ Two results of the same check (name and command) on the same tree, with no
 write recorded in the workspace between them, that disagree about a test are
 one flip of that test. A failing automatic check that named a failing test and
 took at most `flaky_rerun_max_s` (`config.json`, default 30, 0 turns it off)
-is run once more on the same tree, with the same limit, to get that second
-result; a longer one is not run again. The rerun is not a record: the first
+is run once more on the same tree, stopped after at most that long, to get
+that second result; a longer one is not run again, and a write recorded while
+the rerun runs, even one undone, means the two are not compared. The rerun is
+not a record: the first
 run's failure is the result, in `check status` and to `land`, whatever the
 rerun found. Two `check run`s of one tree with no write between are compared
 too. A test that flipped at least twice in its last 20 such runs is known to

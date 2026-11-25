@@ -150,13 +150,23 @@ flip; then it is forgotten. At most 500 tests are followed per workspace
 **The rerun.** A failing automatic check whose output named a failing test,
 and which took at most `flaky_rerun_max_s` (daemon `config.json`, 0 to 3,600,
 default 30, 0 turns it off), is run once more on the same tree before it is
-recorded, with the same time limit and the same cancellation: a tree change
-or a turn-off stops it like any run. A longer failure is not run again. If the
-tree held still, the rerun's names go with the record as `rerun`; its result
-is no record of its own, so the first run's failure is what `check status`
-and `land` see, and a passing rerun never replaces it. Writes made during
-the rerun get a run of their own, as before. The result reaches the agent
-later by the rerun's duration, at most `flaky_rerun_max_s` plus a snapshot.
+recorded, with the same cancellation: a tree change or a turn-off stops it
+like any run. Its own time limit is the smaller of the check's and
+`flaky_rerun_max_s`; a rerun stopped at it teaches nothing. A longer failure
+is not run again. If the tree held still, the rerun's names go with the
+record as `rerun`, with `writes_before`: the workspace's count of recorded
+writes (`State::writes`, derived on replay, not in the status reply) that the
+worker read before it took the first run's tree. The core compares the rerun
+only if its count is still that when the record arrives, so a write recorded
+between the runs keeps them uncompared even when it was undone and the tree
+ended the same; the record and its first result are kept either way. The
+worker's count is published by the state owner after each request it
+handles, so it can only lag: a stale one refuses a comparison, never allows
+one. A rerun without `writes_before` is refused. Its result is no record of
+its own, so the first run's failure is what `check status` and `land` see,
+and a passing rerun never replaces it. Writes made during the rerun get a run
+of their own, as before. The result reaches the agent later by at most
+`flaky_rerun_max_s` plus a snapshot.
 
 **What the agent sees.** The notice gains `failures`: each failing test the
 first run named, with `flaky: {flips, runs}` when it is known to flip, decided
@@ -193,9 +203,11 @@ Git and a `cargo test`-shaped program that fails on a schedule, in
 a failure, a write, then a pass records none; after two flips the briefing
 labels the failure, `check status` still says failed and a landing is not
 ready; `--forget` makes the next failure unlabelled; a failure that took
-longer than `flaky_rerun_max_s` is not run again; two `check run`s of one
-tree record a flip. Breaking the write rule or the rerun bound makes its test
-fail. **Not observed on a host:** a real Claude Code session told that a
+longer than `flaky_rerun_max_s` is not run again; a rerun that hangs is
+stopped at `flaky_rerun_max_s`, not the check's limit; a write made and undone
+while the rerun runs records no flip; two `check run`s of one tree record a
+flip. Breaking the write rule, the rerun bound or the write mark makes its
+test fail. **Not observed on a host:** a real Claude Code session told that a
 failure is of a test known to flip, and what it does next.
 
 ## Not now, with reasons

@@ -81,6 +81,8 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
+        // The automatic-check worker's write mark; not part of it either.
+        writes: _,
     } = state;
     let mut summary = StatusSummary::default();
     let mut open = BTreeMap::new();
@@ -139,6 +141,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),
+        writes: BTreeMap::new(),
     };
     (view, summary)
 }

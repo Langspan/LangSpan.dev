@@ -239,19 +239,7 @@ impl Fixture {
     }
     /// One Claude Code Write of `a.txt`, then the batch that ends with it.
     fn write_batch(&self, call: &str, content: &str) -> Run {
-        let file = self.root().join("a.txt");
-        let input = json!({"file_path": file, "content": content});
-        let tool = |name: &str| {
-            json!({"session_id": ALICE, "cwd": self.root(), "hook_event_name": name,
-                   "tool_name": "Write", "tool_use_id": call, "tool_input": input})
-        };
-        assert_eq!(
-            self.run("claude-code", tool("PreToolUse")).coverage,
-            "admitted"
-        );
-        fs::write(&file, content).unwrap();
-        let post = self.run("claude-code", tool("PostToolUse"));
-        assert_eq!(post.coverage, "observed", "{}", post.detail);
+        let (file, input, post) = self.write(call, content);
         let batch = self.run(
             "claude-code",
             json!({"session_id": ALICE, "cwd": self.root(), "hook_event_name": "PostToolBatch",
@@ -273,6 +261,24 @@ impl Fixture {
             };
         }
         batch
+    }
+    /// One Claude Code Write of `a.txt`, admitted and observed, with no
+    /// batch after it.
+    fn write(&self, call: &str, content: &str) -> (PathBuf, Value, Run) {
+        let file = self.root().join("a.txt");
+        let input = json!({"file_path": file, "content": content});
+        let tool = |name: &str| {
+            json!({"session_id": ALICE, "cwd": self.root(), "hook_event_name": name,
+                   "tool_name": "Write", "tool_use_id": call, "tool_input": input})
+        };
+        assert_eq!(
+            self.run("claude-code", tool("PreToolUse")).coverage,
+            "admitted"
+        );
+        fs::write(&file, content).unwrap();
+        let post = self.run("claude-code", tool("PostToolUse"));
+        assert_eq!(post.coverage, "observed", "{}", post.detail);
+        (file, input, post)
     }
     fn prompt(&self, id: &str) -> Run {
         self.run(
@@ -567,6 +573,11 @@ fn a_check_that_changes_the_tree_itself_is_recorded_inconclusive_and_said_so() {
 /// `failing` (from 0) report `net::times_out` failing. A run in `slow`
 /// first sleeps for 1.5 s.
 fn scheduled(failing: &[u32], slow: &[u32]) -> String {
+    scheduled_sleeping(failing, slow, "1.5")
+}
+
+/// As `scheduled`, with a run in `slow` sleeping `seconds` first.
+fn scheduled_sleeping(failing: &[u32], slow: &[u32], seconds: &str) -> String {
     let list = |runs: &[u32]| {
         if runs.is_empty() {
             "none".to_owned()
@@ -581,7 +592,7 @@ fn scheduled(failing: &[u32], slow: &[u32]) -> String {
     format!(
         concat!(
             r#"n=$(cat "$0" 2>/dev/null | wc -l | tr -d ' '); echo run >> "$0"; "#,
-            r#"case "$n" in {slow}) sleep 1.5;; esac; "#,
+            r#"case "$n" in {slow}) sleep {seconds};; esac; "#,
             r#"echo "running 2 tests"; echo "test parser::keeps_order ... ok"; "#,
             r#"case "$n" in {failing}) echo "test net::times_out ... FAILED"; "#,
             r#"echo "test result: FAILED. 1 passed; 1 failed"; exit 101;; "#,
@@ -589,6 +600,7 @@ fn scheduled(failing: &[u32], slow: &[u32]) -> String {
         ),
         failing = list(failing),
         slow = list(slow),
+        seconds = seconds,
     )
 }
 
@@ -679,6 +691,50 @@ fn a_rerun_that_would_take_longer_than_its_bound_is_not_started() {
         "the 1.5 s failure was not run again"
     );
     assert_eq!(learned(&f, "net::times_out"), None);
+}
+
+#[test]
+fn a_rerun_that_hangs_is_stopped_at_the_rerun_bound_not_the_check_timeout() {
+    let f = Fixture::with_config(json!({"auto_check_debounce_ms": 100, "flaky_rerun_max_s": 1}));
+    // The first run fails at once; its rerun would take 30 s, well inside
+    // the check's 60 s limit.
+    f.enable(60, &scheduled_sleeping(&[0], &[1], "30"));
+    let started = Instant::now();
+    f.write_batch("call-1", "one\n");
+    let checks = f.wait_for_checks(1);
+    let took = started.elapsed();
+    assert_eq!(checks[0].result, CheckResult::Failed { exit_code: 101 });
+    assert_eq!(f.log_lines().len(), 2, "the rerun started");
+    // The known failure waits at most the rerun bound (1 s) and a snapshot,
+    // not the rerun's 30 s.
+    assert!(took < Duration::from_secs(15), "took {took:?}");
+    assert_eq!(
+        learned(&f, "net::times_out"),
+        None,
+        "a stopped rerun teaches nothing"
+    );
+}
+
+#[test]
+fn a_write_undone_between_a_failure_and_its_rerun_records_no_flip() {
+    let f = Fixture::with_config(json!({"auto_check_debounce_ms": 100, "flaky_rerun_max_s": 30}));
+    // The first run fails at once; its rerun passes after 3 s, long enough
+    // for a session to write the file and put it back.
+    f.enable(60, &scheduled_sleeping(&[0], &[1], "3"));
+    f.write_batch("call-1", "one\n");
+    f.wait_for_log(2);
+    // Written and restored inside one tool batch that has not ended: the
+    // tree the rerun ends on is the one it started on.
+    f.write("call-2", "changed\n");
+    f.write("call-3", "one\n");
+    let checks = f.wait_for_checks(1);
+    assert_eq!(checks[0].result, CheckResult::Failed { exit_code: 101 });
+    assert_eq!(f.log_lines().len(), 2);
+    assert_eq!(
+        learned(&f, "net::times_out"),
+        None,
+        "recorded writes between the runs: not compared"
+    );
 }
 
 #[test]

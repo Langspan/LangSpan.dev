@@ -241,6 +241,7 @@ fn evidence_and_risks_are_carried_with_their_applicability() {
             report: None,
             tests: None,
             rerun: None,
+            writes_before: None,
         },
         100,
     );

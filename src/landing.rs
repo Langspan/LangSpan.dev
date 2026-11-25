@@ -573,6 +573,7 @@ fn run_check(
             // runs on a new temporary checkout of a combined tree.
             tests: None,
             rerun: None,
+            writes_before: None,
         },
     )?
     .outcome

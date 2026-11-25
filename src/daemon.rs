@@ -607,9 +607,11 @@ mod unix {
                 .spawn(move || index_worker(index_receiver, sender, graph_path))?;
         }
         let (check_sender, check_receiver) = mpsc::sync_channel::<auto_check::Message>(256);
+        let write_counts = auto_check::WriteCounts::default();
         {
             let sender = sender.clone();
             let check_sender = check_sender.clone();
+            let write_counts = write_counts.clone();
             let timing = auto_check::Timing {
                 debounce: Duration::from_millis(config.auto_check_debounce_ms),
                 rerun_max: Duration::from_secs(config.flaky_rerun_max_s),
@@ -617,9 +619,13 @@ mod unix {
             std::thread::Builder::new()
                 .name("langspan-auto-checks".into())
                 .spawn(move || {
-                    auto_check::worker(check_sender, check_receiver, timing, |id, command| {
-                        ask(&sender, id, command)
-                    })
+                    auto_check::worker(
+                        check_sender,
+                        check_receiver,
+                        timing,
+                        write_counts,
+                        |id, command| ask(&sender, id, command),
+                    )
                 })?;
         }
         std::thread::Builder::new()
@@ -746,6 +752,14 @@ mod unix {
                             }
                         }
                         next_scan = Instant::now() + Duration::from_secs(2);
+                    }
+                    // What the automatic-check worker marks a run with. Only
+                    // ever behind the state, so a stale mark refuses a
+                    // comparison and never allows one.
+                    let counts = &store.state().writes;
+                    let mut published = write_counts.lock().unwrap_or_else(|e| e.into_inner());
+                    if *published != *counts {
+                        published.clone_from(counts);
                     }
                 }
             })?;

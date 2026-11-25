@@ -133,6 +133,7 @@ fn record(state: &mut State, id: &str, tree: char, sessions: &[&str], tail: &str
             }),
             tests: None,
             rerun: None,
+            writes_before: None,
         },
         10,
     )
@@ -358,6 +359,7 @@ fn several_waiting_results_are_delivered_one_per_briefing_newest_first() {
                 }),
                 tests: None,
                 rerun: None,
+                writes_before: None,
             },
             11,
         )

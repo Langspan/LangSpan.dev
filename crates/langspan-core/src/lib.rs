@@ -1493,6 +1493,11 @@ pub struct State {
     /// line (roadmap H2). Derived on replay; not part of the status reply.
     #[serde(skip)]
     pub refusals: Vec<RecentRefusal>,
+    /// Writes recorded per workspace since the event log was replayed: the
+    /// mark an automatic check carries across its rerun. Derived on replay;
+    /// not part of the status reply.
+    #[serde(skip)]
+    pub writes: BTreeMap<String, u64>,
 }
 
 /// Checkout changes kept per workspace.
@@ -1986,6 +1991,11 @@ pub enum Command {
         /// tests flip; its result is not recorded.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rerun: Option<TestResults>,
+        /// With `rerun`: the workspace's [`State::writes`] when the first
+        /// run's tree was taken. The rerun is compared only if no write was
+        /// recorded since, even one the tree no longer shows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        writes_before: Option<u64>,
     },
     /// Read-only: the tests known to flip on unchanged code, of check `name`
     /// or of every check.
@@ -2442,6 +2452,11 @@ enum CommandWire {
         /// tests flip; its result is not recorded.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rerun: Option<TestResults>,
+        /// With `rerun`: the workspace's [`State::writes`] when the first
+        /// run's tree was taken. The rerun is compared only if no write was
+        /// recorded since, even one the tree no longer shows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        writes_before: Option<u64>,
     },
     /// Read-only: the tests known to flip on unchanged code, of check `name`
     /// or of every check.
@@ -3978,6 +3993,7 @@ fn decide_checked(
             report,
             tests,
             rerun,
+            writes_before,
         } => {
             let check = CheckRecord {
                 check_id: request_id.into(),
@@ -4010,6 +4026,17 @@ fn decide_checked(
                     "A rerun's test results come with the record's own",
                 ));
             }
+            if rerun.is_some() && writes_before.is_none() {
+                return Err(error(
+                    "invalid_test_results",
+                    "A rerun's test results come with the count of writes recorded before its first run",
+                ));
+            }
+            // A write recorded since the first run's tree was taken, even one
+            // undone before the rerun ended, means the two runs are not of
+            // unchanged code: the rerun is checked but not compared.
+            let unchanged =
+                *writes_before == Some(state.writes.get(workspace_id).copied().unwrap_or(0));
             let runs = tests
                 .iter()
                 .map(|results| (results, false))
@@ -4027,6 +4054,9 @@ fn decide_checked(
                     matches!(result, CheckResult::Passed {})
                 };
                 flaky::validate_test_results(results, passed)?;
+                if again && !unchanged {
+                    continue;
+                }
                 learning.learn(name, tree_oid, command, results, now_ms);
                 events.push(Event::TestsRecorded {
                     workspace_id: workspace_id.clone(),
@@ -6342,6 +6372,8 @@ fn validate_check_report(
 /// A write was recorded in the workspace: later check results are not
 /// compared with earlier ones to learn which tests flip.
 fn wrote_in(state: &mut State, workspace_id: &str) {
+    let writes = state.writes.entry(workspace_id.to_owned()).or_default();
+    *writes = writes.saturating_add(1);
     if let Some(learning) = state.test_learning.get_mut(workspace_id) {
         learning.wrote();
         if learning.is_empty() {

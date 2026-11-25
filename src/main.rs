@@ -1116,6 +1116,7 @@ fn evidence(
             report: None,
             tests,
             rerun: None,
+            writes_before: None,
         },
     )?;
     if json {

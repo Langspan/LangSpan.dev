@@ -49,6 +49,12 @@ const KEPT_BYTES: usize = 8 * 1024;
 const TAIL_BYTES: usize = 1500;
 const TAIL_LINES: usize = 20;
 
+/// The writes recorded per workspace ([`langspan_core::State::writes`]), as
+/// the state owner last published them. A run takes its workspace's count
+/// before its first tree; a rerun is compared only if the state owner's
+/// count is still that when the record arrives.
+pub type WriteCounts = Arc<Mutex<BTreeMap<String, u64>>>;
+
 /// The daemon's timing for automatic checks (`config.json`).
 #[derive(Debug, Clone, Copy)]
 pub struct Timing {
@@ -111,6 +117,8 @@ pub struct Finished {
     /// The tests its output named, and those of its rerun.
     tests: Option<TestResults>,
     rerun: Option<TestResults>,
+    /// The workspace's recorded writes before the first run's tree.
+    writes_before: u64,
 }
 
 struct Running {
@@ -187,6 +195,7 @@ pub fn worker(
     sender: mpsc::SyncSender<Message>,
     messages: mpsc::Receiver<Message>,
     timing: Timing,
+    writes: WriteCounts,
     record: impl Fn(String, Command) -> Option<Outcome>,
 ) {
     let debounce = timing.debounce;
@@ -326,16 +335,18 @@ pub fn worker(
                         .collect(),
                     check: check.clone(),
                 };
-                let (cancel, recheck, sender) = (
+                let (cancel, recheck, sender, writes) = (
                     running.cancel.clone(),
                     running.recheck.clone(),
                     sender.clone(),
+                    writes.clone(),
                 );
                 let (workspace_id, run) = (workspace_id.clone(), next_run);
                 let started = std::thread::Builder::new()
                     .name("langspan-auto-check".into())
                     .spawn(move || {
-                        let ended = run_once(&root, &check, &cancel, &recheck, timing.rerun_max);
+                        let ended =
+                            run_once(&root, &check, &cancel, &recheck, timing.rerun_max, &writes);
                         let _ = sender.send(Message::Finished {
                             workspace_id,
                             run,
@@ -421,6 +432,7 @@ fn report(
             tail: finished.tail,
             timed_out_s: finished.timed_out_s,
         }),
+        writes_before: finished.rerun.as_ref().map(|_| finished.writes_before),
         tests: finished.tests,
         rerun: finished.rerun,
     };
@@ -461,7 +473,16 @@ fn run_once(
     cancel: &AtomicBool,
     recheck: &Recheck,
     rerun_max: Duration,
+    writes: &WriteCounts,
 ) -> Ended {
+    // Taken before the tree: a write recorded after this, even one the tree
+    // no longer shows when the rerun ends, keeps the two runs uncompared.
+    let writes_before = writes
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&check.workspace_id)
+        .copied()
+        .unwrap_or(0);
     let snapshot = || integrate::working_tree(root, Instant::now() + SNAPSHOT);
     let (head, before) = match snapshot() {
         Ok(tree) => tree,
@@ -529,15 +550,16 @@ fn run_once(
         CheckResult::Inconclusive {} => None,
     };
     // A quick failure that named a failing test runs once more on the same
-    // tree, within the same limit and stopped by a tree change like any
-    // run. Only the tests it names are kept: its result is no record.
+    // tree, stopped by a tree change like any run and at the rerun bound:
+    // the known failure waits at most that long. Only the tests it names
+    // are kept: its result is no record.
     let mut rerun = None;
     if let Some(first) = &tests
         && !first.failed.is_empty()
         && !rerun_max.is_zero()
         && u128::from(duration_ms) <= rerun_max.as_millis()
     {
-        match run_command(root, &check.argv, limit, stop) {
+        match run_command(root, &check.argv, limit.min(rerun_max), stop) {
             Ok((Some(Exit::Code(code)), _, again)) => match held_still() {
                 Ok(true) => rerun = again.tests(code == 0, &first.failed),
                 // Changed while it ran again: the first result stands, and
@@ -567,6 +589,7 @@ fn run_once(
         tail: output.tail(),
         tests,
         rerun,
+        writes_before,
     });
     if held {
         Ended::Done(finished)

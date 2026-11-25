@@ -54,6 +54,7 @@ fn record(
             report: None,
             tests: None,
             rerun: None,
+            writes_before: None,
         },
         10,
     )

@@ -900,6 +900,7 @@ fn a_check_command_recorded_before_redaction_is_redacted_when_shown() {
         report: None,
         tests: None,
         rerun: None,
+        writes_before: None,
     };
     {
         // As an earlier build stored it: the store itself does not redact.
@@ -958,6 +959,7 @@ fn old_check(command: String) -> Command {
         report: None,
         tests: None,
         rerun: None,
+        writes_before: None,
     }
 }
 
