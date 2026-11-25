@@ -1057,18 +1057,31 @@ private index, no commit, and Git reads run with `--no-optional-locks`. The
 MCP tool `langspan_my_changes` does the same. Other worktrees and machines
 are not included.
 
-A formatter or other workspace-wide command (`cargo fmt --all`) run by one
-session keeps that session's own reformatted lines its own, so `commit --mine`
-still takes them. A file in which the command rewrote another session's
-uncommitted lines is credited to neither session and left for its owner,
-as is a file another session edited or a shell run of another session may
-have written while the command ran ([ADR 0011](adr/0011-shell-writes.md)).
-One exception: lines the command only reformatted (same tokens, with
-whitespace and line breaks changed) that this session wrote and has not
-committed stay its own even while another session's command ran, so
-`cargo fmt --all` during another session's test run does not stop
-`commit --mine`. A line that other command could have changed otherwise is
-still no session's.
+A formatter or other workspace-wide command (`cargo fmt --all`) does not
+change who wrote a line it only reformats. Where the command kept a line's
+tokens in order and changed only whitespace and line breaks (re-indented,
+re-wrapped, joined or split it), each line it left keeps the author of the
+uncommitted lines it came from: the session that ran the formatter, another
+session, or both sessions' own lines in one file. This holds whoever ran the
+command and whether or not another session's command ran at the same time,
+so `cargo fmt --all` during another session's test run leaves each session's
+`commit --mine` able to take its own hunks, and a new file one session wrote
+stays that session's after another session's formatter rewrites it. Tokens
+are compared by language: Rust, TypeScript and JavaScript as words and
+punctuation, with a comma just before a closing `)`, `]` or `}` ignored (a
+formatter adds and drops those when it wraps a list); Markdown as words and
+punctuation; any other file as its text with all whitespace removed.
+Whitespace inside a string literal is not told apart from formatting.
+
+A change that alters tokens (a rename, an added line) is credited as before:
+to the command's session when nothing else could have made it and it
+rewrote no other session's uncommitted line, and otherwise to no session, so
+`commit --mine` leaves or refuses it. The same holds for a file another
+session edited through its edit tool while the command ran
+([ADR 0011](adr/0011-shell-writes.md)). A line two sessions both wrote (a
+blank line, a closing brace) goes with the lines around it in a hunk, so it
+does not stop either session's `commit --mine`
+([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)).
 
 Before such a command runs, the Bash pre-tool hook on Claude Code and Codex
 tells the session, once, which other live sessions have uncommitted changes in
