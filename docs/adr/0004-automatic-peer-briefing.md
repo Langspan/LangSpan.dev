@@ -56,7 +56,11 @@ one 64 KiB frame.
 
 **Not twice.** The core stores a 64-bit fingerprint of the last briefing
 delivered to each session, computed without ages. A prompt delivers only when
-it changed. A collision would withhold one repeat briefing and nothing else.
+it changed. The fingerprint also leaves out the branch of a peer in S's own
+checkout: that is S's branch too, and the Git observer may learn it only after
+the start briefing, which would otherwise be delivered again unchanged at the
+next prompt; a switch of that branch reaches S as a checkout change. A peer in
+another worktree changing branch is news. A collision would withhold one repeat briefing and nothing else.
 Only a request marked `deliver` is remembered: the hooks and the MCP tool set
 it, and `langspan brief` from a terminal does not, so looking never suppresses
 a session's next briefing. A prompt event the host numbered (`prompt_id` or

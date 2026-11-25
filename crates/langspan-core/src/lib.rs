@@ -1033,6 +1033,66 @@ pub struct GraphCoverage {
     pub partial_files: u32,
     /// False when no complete scan exists: nothing is known.
     pub scanned: bool,
+    /// Supported-language files the index cannot read in full at their
+    /// current content (partial, waiting, too large, left out of the scan).
+    /// Every query matches names across the whole workspace, so any of them
+    /// may hold a match the answer lacks; above zero, an empty or short
+    /// answer is weak. `graph blind-spots` names them. Absent when zero,
+    /// and sent only to a client that asks for it (`blind_in_scope` on a
+    /// lookup, or `graph_blind_spots`): earlier builds read coverage
+    /// strictly and reject a field they do not know.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub blind_in_scope: u32,
+}
+
+/// A file indexed with a syntax error or a bound reached.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PartialFile {
+    pub path: String,
+    /// Wall-clock milliseconds since which its indexed versions have been
+    /// partial, on the coordinator's machine.
+    pub since_ms: u64,
+}
+
+/// Other source files the index has no grammar for, by extension.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LanguageCount {
+    pub extension: String,
+    pub files: u32,
+}
+
+/// Full counts of each blind-spot list, however many paths are returned.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BlindTotals {
+    pub partial: u32,
+    pub never_clean: u32,
+    pub waiting: u32,
+    pub too_large: u32,
+    pub unscanned: u32,
+}
+
+/// Where the index is blind, by reason. A file can be in more than one
+/// list (a partial file can also be waiting for its newer version).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BlindSpots {
+    /// Indexed with a syntax error or a bound reached.
+    pub partial: Vec<PartialFile>,
+    /// Indexed, but never parsed cleanly: no interface baseline, so no
+    /// interface notice can come from it.
+    pub never_clean: Vec<String>,
+    /// The scanned content is not indexed yet.
+    pub waiting: Vec<String>,
+    /// Over the index's 1 MiB bound (or the scan's 4 MiB one): never read.
+    pub too_large: Vec<String>,
+    /// Left out by the scan's file or byte bound.
+    pub unscanned: Vec<String>,
+    /// Other source files, most first, then by extension.
+    pub unsupported_languages: Vec<LanguageCount>,
+    pub totals: BlindTotals,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1985,17 +2045,32 @@ pub enum Command {
         limit: u32,
         #[serde(default, skip_serializing_if = "is_false")]
         detail: bool,
+        /// The client reads `GraphCoverage::blind_in_scope`. A request
+        /// without it is one an earlier build sends, and its answer keeps
+        /// the coverage shape that build knows.
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
         workspace_id: String,
         name: String,
         limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: what `path` exports and which files mention those names.
     GraphImpact {
         workspace_id: String,
         path: String,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
+    },
+    /// Read-only: the files the index cannot answer for, by reason, at
+    /// most `limit` paths per list (roadmap D8).
+    GraphBlindSpots {
+        workspace_id: String,
         limit: u32,
     },
     /// Read-only: for each name that is defined in the workspace, up to
@@ -2387,17 +2462,32 @@ enum CommandWire {
         limit: u32,
         #[serde(default, skip_serializing_if = "is_false")]
         detail: bool,
+        /// The client reads `GraphCoverage::blind_in_scope`. A request
+        /// without it is one an earlier build sends, and its answer keeps
+        /// the coverage shape that build knows.
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
         workspace_id: String,
         name: String,
         limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
     },
     /// Read-only: what `path` exports and which files mention those names.
     GraphImpact {
         workspace_id: String,
         path: String,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        blind_in_scope: bool,
+    },
+    /// Read-only: the files the index cannot answer for, by reason, at
+    /// most `limit` paths per list (roadmap D8).
+    GraphBlindSpots {
+        workspace_id: String,
         limit: u32,
     },
     /// Read-only: for each name that is defined in the workspace, up to
@@ -2769,6 +2859,18 @@ pub enum Outcome {
         breaks: Vec<CallBreak>,
         coverage: GraphCoverage,
         ready: bool,
+    },
+    /// Where the index cannot answer for the workspace's source (roadmap
+    /// D8). Each list is in path order and holds at most the request's
+    /// limit; `totals` has the full counts. Paths only, never content.
+    GraphBlindSpots {
+        blind_spots: BlindSpots,
+        coverage: GraphCoverage,
+        /// The last scan attempt failed: the lists are as of the last
+        /// complete one, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan_failure: Option<ScanFailure>,
+        truncated: bool,
     },
     InterfaceAcknowledged {
         session_id: String,
@@ -4393,6 +4495,7 @@ fn decide_checked(
         | Command::GraphSymbol { .. }
         | Command::GraphReferences { .. }
         | Command::GraphImpact { .. }
+        | Command::GraphBlindSpots { .. }
         | Command::GraphContext { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
@@ -5776,9 +5879,13 @@ fn brief(
             signature.push_str(&recent.path);
             signature.push(',');
         }
-        for text in [&peer.summary, &peer.intent, &peer.branch_ref] {
+        // A peer in this checkout is on this session's own branch, learned
+        // by the Git observer on its own thread, perhaps only after a
+        // briefing: not news. A change of that branch is a checkout change.
+        let branch = (!peer.same_workspace).then_some(&peer.branch_ref);
+        for text in [Some(&peer.summary), Some(&peer.intent), branch] {
             signature.push('|');
-            signature.push_str(text.as_deref().unwrap_or(""));
+            signature.push_str(text.and_then(Option::as_deref).unwrap_or(""));
         }
         // Only when present, so a briefing without one keeps the signature
         // it had before prompt targets existed and is not delivered again.

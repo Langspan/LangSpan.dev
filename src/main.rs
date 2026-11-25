@@ -80,7 +80,11 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   graph references WORKSPACE NAME  Where a name is mentioned
   graph impact WORKSPACE PATH    What a file exports and which files mention those names.
                                  All three match by name and report index coverage
-  recap WORKSPACE                A bounded account of one workspace: sessions, recent
+  graph blind-spots WORKSPACE [--limit N]
+                                 Files the index cannot answer for: partial, never
+                                 parsed cleanly, waiting, too large, left out of the
+                                 scan, and other languages by extension
+  recap WORKSPACE               A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
                                  messages not yet acknowledged
   remember WORKSPACE TEXT [PATH...] [--session ID]
@@ -1694,6 +1698,87 @@ fn print_combined(
     print_renames(&merged.renames);
 }
 
+/// `graph blind-spots`: one line per non-empty list, paths quoted, with the
+/// full count in parentheses.
+fn print_blind_spots(
+    spots: &langspan_core::BlindSpots,
+    coverage: &langspan_core::GraphCoverage,
+    failure: Option<&langspan_core::ScanFailure>,
+    truncated: bool,
+) {
+    if let Some(failure) = failure {
+        println!(
+            "The last scan failed ({:?}); this is as of the last complete one.",
+            failure.detail
+        );
+    }
+    if !coverage.scanned {
+        println!("No complete scan of this workspace yet: nothing is known.");
+        return;
+    }
+    let now = langspan::clock::now_ms();
+    let since = |at: u64| {
+        let seconds = now.saturating_sub(at) / 1000;
+        match seconds {
+            0..=89 => format!("{seconds}s"),
+            90..=5399 => format!("{}m", seconds / 60),
+            5400..=129_599 => format!("{}h", seconds / 3600),
+            _ => format!("{}d", seconds / 86_400),
+        }
+    };
+    let line = |label: &str, total: u32, paths: Vec<String>| {
+        if total > 0 {
+            let more = total as usize - paths.len().min(total as usize);
+            let more = if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            };
+            println!("{label} ({total}): {}{more}", paths.join(", "));
+        }
+    };
+    let quoted = |paths: &[String]| paths.iter().map(|path| format!("{path:?}")).collect();
+    let totals = &spots.totals;
+    line(
+        "partial",
+        totals.partial,
+        spots
+            .partial
+            .iter()
+            .map(|file| format!("{:?} (since {})", file.path, since(file.since_ms)))
+            .collect(),
+    );
+    line(
+        "never parsed cleanly",
+        totals.never_clean,
+        quoted(&spots.never_clean),
+    );
+    line("waiting", totals.waiting, quoted(&spots.waiting));
+    line("too large", totals.too_large, quoted(&spots.too_large));
+    line(
+        "left out of the scan",
+        totals.unscanned,
+        quoted(&spots.unscanned),
+    );
+    if !spots.unsupported_languages.is_empty() {
+        println!(
+            "not indexed, other languages: {}",
+            spots
+                .unsupported_languages
+                .iter()
+                .map(|count| format!("{} {}", count.extension, count.files))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    if coverage.blind_in_scope == 0 && spots.unsupported_languages.is_empty() {
+        println!("The index reads every supported file at its current content.");
+    }
+    if truncated {
+        println!("More paths exist than the limit allows.");
+    }
+}
+
 /// What the last completed scan did not version, in one paragraph. A
 /// partial scan is always called partial.
 fn coverage_text(coverage: &langspan_core::ScanCoverage) -> String {
@@ -1847,6 +1932,7 @@ fn doctor(
                         name: "_".into(),
                         limit: 1,
                         detail: false,
+                        blind_in_scope: true,
                     },
                 ) {
                     let behind = coverage.indexable_files - coverage.current_files;
@@ -1863,6 +1949,15 @@ fn doctor(
                             }
                         ),
                     );
+                    if coverage.blind_in_scope > 0 {
+                        note(
+                            false,
+                            format!(
+                                "Workspace {id}: the index cannot read {} supported file(s) in full; `langspan graph blind-spots {id}` names them.",
+                                coverage.blind_in_scope
+                            ),
+                        );
+                    }
                 }
                 if let Some(link) = state.remote_links.get(id) {
                     let heard = state
@@ -2652,19 +2747,27 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                         name: (*subject).into(),
                         limit,
                         detail: options.remove("--detail").is_some(),
+                        blind_in_scope: true,
                     },
                     "references" => Command::GraphReferences {
                         workspace_id,
                         name: (*subject).into(),
                         limit,
+                        blind_in_scope: true,
                     },
                     _ => Command::GraphImpact {
                         workspace_id,
                         path: (*subject).into(),
                         limit,
+                        blind_in_scope: true,
                     },
                 }
             }
+            ["graph", "blind-spots", workspace] => Command::GraphBlindSpots {
+                workspace_id: (*workspace).into(),
+                limit: u32::try_from(number(&mut options, "--limit", 50)?)
+                    .map_err(|_| "--limit is too large")?,
+            },
             ["recap", workspace] => Command::Recap {
                 workspace_id: (*workspace).into(),
             },
@@ -2731,6 +2834,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphSymbol { .. }
                 | Command::GraphReferences { .. }
                 | Command::GraphImpact { .. }
+                | Command::GraphBlindSpots { .. }
                 | Command::Recap { .. }
         ) {
             options
@@ -3247,6 +3351,12 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                 coverage.current_files, coverage.indexable_files
             );
         }
+        Outcome::GraphBlindSpots {
+            blind_spots,
+            coverage,
+            scan_failure,
+            truncated,
+        } => print_blind_spots(blind_spots, coverage, scan_failure.as_ref(), *truncated),
         Outcome::Graph {
             symbols,
             references,
@@ -3290,6 +3400,12 @@ fn print_human(response: &Response) -> Result<(), langspan::Error> {
                         String::new()
                     }
                 );
+                if coverage.blind_in_scope > 0 {
+                    println!(
+                        "{} supported file(s) cannot be read in full, so an empty answer is weak; `langspan graph blind-spots` names them.",
+                        coverage.blind_in_scope
+                    );
+                }
             }
         }
         Outcome::Remembered { note } => println!(
