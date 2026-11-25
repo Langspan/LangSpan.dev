@@ -16,6 +16,7 @@ pub mod protocol;
 pub mod regions;
 mod sha1;
 mod sha256;
+pub mod skill;
 pub mod store;
 pub mod user_install;
 

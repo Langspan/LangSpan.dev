@@ -105,7 +105,8 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   doctor [--root DIR] [--home DIR]
                                  Say what is and is not working: coordinator, scans,
                                  index, publication, the hooks installed in DIR, and
-                                 the user-level install under the home
+                                 the user-level install under the home, each with
+                                 whether the LangSpan skill is installed and current
   status                         Show workspaces, live or recent sessions, intents and
                                  open admissions; closed ones are counted per session
   status --all [--after CURSOR]  Read every record, history included, one page at a
@@ -140,22 +141,31 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  is not stored); --code-briefing off turns this off
   hooks install claude-code|codex|cursor|gemini-cli --workspace ID --root DIR
                                  [--settings FILE] [--prompt-summary off]
-                                 [--code-briefing off] [--apply]
+                                 [--code-briefing off] [--skill] [--apply]
   hooks remove claude-code|codex|cursor|gemini-cli --root DIR [--settings FILE] [--apply]
                                  Show (default) or apply the change to project Claude
                                  settings, Codex hooks, Cursor's .cursor/hooks.json and
                                  .cursor/mcp.json, or Gemini CLI settings
-                                 (.gemini/settings.json), preserving other settings
-  install [--home DIR] [--hosts claude-code,codex,cursor,gemini-cli] [--prompt-summary off] [--apply]
+                                 (.gemini/settings.json), preserving other settings.
+                                 Cursor only: --skill also writes the LangSpan skill as
+                                 the project rule .cursor/rules/langspan.mdc, which
+                                 hooks remove cursor removes
+  install [--home DIR] [--hosts claude-code,codex,cursor,gemini-cli] [--prompt-summary off]
+          [--skill] [--apply]
                                  Install the hooks once for every repository, in each
                                  host's user configuration, and register `langspan mcp`
                                  as the MCP server `langspan`. Hosts default to those
                                  whose configuration directory exists. Dry run unless
                                  --apply. --home DIR ignores HOME, CLAUDE_CONFIG_DIR,
                                  CODEX_HOME, GEMINI_CLI_HOME, LANGSPAN_STATE_DIR and
-                                 XDG_STATE_HOME
+                                 XDG_STATE_HOME. --skill (off by default) also writes
+                                 the LangSpan skill, which teaches an agent how to work
+                                 with LangSpan: Claude Code skills/langspan/SKILL.md, a
+                                 marked section of Codex's AGENTS.md and of Gemini
+                                 CLI's GEMINI.md
   uninstall [--home DIR] [--hosts ...] [--apply]
-                                 Remove only what install wrote; the state directory stays
+                                 Remove only what install wrote, the skill included;
+                                 the state directory stays
 
 Every mutation requires --request-id ID. Retry the identical ID and command after
 an unknown outcome; a new operation needs a new ID. Old grants never become fresh
@@ -369,6 +379,10 @@ fn hooks(
     } else {
         None
     };
+    let with_skill = options.remove("--skill").is_some();
+    if with_skill && !(install && vendor == install::Vendor::Cursor) {
+        return Err("--skill is valid for `hooks install cursor` only: Cursor reads the LangSpan skill as a project rule. For claude-code, codex and gemini-cli, run `langspan install --skill`; `hooks remove cursor` removes the rule without it".into());
+    }
     no_unused_options(options)?;
     if let Some(registration) = &registration {
         langspan_core::validate_request_id(&registration.workspace_id)
@@ -410,6 +424,14 @@ fn hooks(
         let unchanged = existing.as_ref() == Some(&planned) || (existing.is_none() && !install);
         planned_files.push((path, plan, original, planned, unchanged));
     }
+    // Cursor's project rule: written with --skill, removed with the hooks
+    // wherever LangSpan's is found.
+    let rule = if vendor == install::Vendor::Cursor && (with_skill || !install) {
+        let path = langspan::skill::path(vendor, &root);
+        Some(langspan::skill::plan_file(vendor, &path, install)?)
+    } else {
+        None
+    };
     let mut changed = false;
     for (path, plan, original, planned, unchanged) in planned_files {
         if unchanged {
@@ -443,6 +465,22 @@ fn hooks(
                 println!("{}", gemini_shown(&planned, false)?);
             } else {
                 println!("{}", serde_json::to_string_pretty(&planned)?);
+            }
+        }
+    }
+    if let Some(rule) = rule.filter(|rule| install || !rule.unchanged()) {
+        if rule.unchanged() {
+            println!(
+                "{} already matches; nothing to change.",
+                rule.path.display()
+            );
+        } else if !apply {
+            changed = true;
+            println!("Dry run; nothing was written. {}", rule.shown());
+        } else if rule.apply()? {
+            match rule.planned {
+                Some(_) => println!("Wrote {}.", rule.path.display()),
+                None => println!("Removed {}.", rule.path.display()),
             }
         }
     }
@@ -543,6 +581,13 @@ fn user_install(
     let state_dir = std::path::absolute(home.state_dir(options.remove("--state-dir")))?;
     let share_prompt = switch(options, "--prompt-summary")?;
     let hosts = options.remove("--hosts");
+    let with_skill = options.remove("--skill").is_some();
+    if with_skill && !install {
+        return Err(
+            "--skill is valid only for `install`; `uninstall` always removes LangSpan's skill"
+                .into(),
+        );
+    }
     no_unused_options(options)?;
     let vendors: Vec<Vendor> = match hosts {
         Some(list) => list
@@ -745,6 +790,23 @@ fn user_install(
             Vendor::Gemini => {}
         }
     }
+    // The skill: written only with --skill, removed by uninstall wherever
+    // LangSpan's is found. Someone else's file of the same name stops an
+    // install here, before anything is written.
+    let mut skills: Vec<langspan::skill::FilePlan> = Vec::new();
+    for &vendor in &vendors {
+        if !langspan::skill::USER_HOSTS.contains(&vendor) {
+            if with_skill {
+                notes.push("Cursor reads the LangSpan skill as a project rule: run `langspan hooks install cursor --workspace ID --root DIR --skill --apply` in each project.".into());
+            }
+            continue;
+        }
+        if install && !with_skill {
+            continue;
+        }
+        let path = langspan::skill::path(vendor, &home.files(vendor).config_dir);
+        skills.push(langspan::skill::plan_file(vendor, &path, install)?);
+    }
     let mut changed = 0;
     for (path, plan, original, replan) in &plans {
         let (unchanged, text) = match plan {
@@ -776,6 +838,32 @@ fn user_install(
         } else {
             println!("{} would become:", path.display());
             println!("{text}");
+        }
+    }
+    for plan in &skills {
+        if plan.unchanged() {
+            // Uninstall says nothing about a skill that is not there.
+            if install {
+                println!(
+                    "{} already matches; nothing to change.",
+                    plan.path.display()
+                );
+            }
+            continue;
+        }
+        changed += 1;
+        if !apply {
+            println!("{}", plan.shown());
+        } else if plan.apply()? {
+            match plan.planned {
+                Some(_) => println!("Wrote {}.", plan.path.display()),
+                None => println!("Removed {}.", plan.path.display()),
+            }
+        } else {
+            println!(
+                "{} already matches; nothing to change.",
+                plan.path.display()
+            );
         }
     }
     if changed > 0 && !apply {
@@ -1894,6 +1982,15 @@ fn doctor(
                         ),
                     ),
                 }
+                let (ok, text) = skill_finding(
+                    vendor,
+                    &langspan::skill::path(vendor, root),
+                    &format!(
+                        "langspan hooks install cursor --workspace ID --root {} --skill --apply",
+                        root.display()
+                    ),
+                );
+                note(ok, text);
             }
             shell_hooks = true;
         }
@@ -2085,6 +2182,19 @@ fn user_level_findings(
             continue;
         }
         let name = vendor.name();
+        if langspan::skill::USER_HOSTS.contains(&vendor) {
+            let path = langspan::skill::path(vendor, &files.config_dir);
+            findings.push(skill_finding(
+                vendor,
+                &path,
+                &format!("langspan install --skill --hosts {name} --apply"),
+            ));
+            if vendor == Vendor::Codex
+                && let Some(problem) = langspan::skill::codex_unread(&files.config_dir)
+            {
+                findings.push((false, format!("{name}: {problem}.")));
+            }
+        }
         let (hooks, missing): (Vec<install::UserRegistration>, Vec<&str>) = match install::read(
             &files.hooks,
         ) {
@@ -2205,6 +2315,48 @@ fn user_level_findings(
         }
     }
     Ok(findings)
+}
+
+/// What `doctor` says about the LangSpan skill in the file at `path`. Not
+/// installing it is a choice (it is off by default), not a problem.
+fn skill_finding(
+    vendor: langspan::install::Vendor,
+    path: &std::path::Path,
+    install: &str,
+) -> (bool, String) {
+    use langspan::skill::{State, file_state};
+    let name = vendor.name();
+    match file_state(vendor, path) {
+        Ok(State::Absent) => (
+            true,
+            format!(
+                "{name}: the LangSpan skill is not installed in {} (optional; `{install}` writes it).",
+                path.display()
+            ),
+        ),
+        Ok(State::Current) => (
+            true,
+            format!(
+                "{name}: the LangSpan skill is installed and up to date in {}.",
+                path.display()
+            ),
+        ),
+        Ok(State::Outdated) => (
+            false,
+            format!(
+                "{name}: the LangSpan skill in {} differs from this version's; run `{install}` to replace it.",
+                path.display()
+            ),
+        ),
+        Ok(State::Unmanaged) => (
+            true,
+            format!(
+                "{name}: {} is a symlink or not a regular file, so the LangSpan skill is not installed there; LangSpan leaves it alone and will not write its skill through it.",
+                path.display()
+            ),
+        ),
+        Err(error) => (false, error),
+    }
 }
 
 /// An `on`/`off` option that is on unless switched off.
@@ -2619,13 +2771,15 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             "--apply" => apply = true,
             // Flags, kept with the options so that only the commands that take
             // them accept them (`dashboard`: `--open`, `--allow-network`;
-            // `land`: `--check-again`; `remote enable`: `--publish-as-branch`).
+            // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
+            // `install` and `hooks install cursor`: `--skill`; `status`: `--all`).
             "--open"
             | "--allow-network"
             | "--check-again"
             | "--publish-as-branch"
             | "--mine"
             | "--all"
+            | "--skill"
             | "--off" => {
                 if options.insert(arg.clone(), String::new()).is_some() {
                     return Err(format!("duplicate option {arg}").into());

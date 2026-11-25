@@ -194,6 +194,15 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
             "langspan_workspace_register",
         ])
     );
+    // Every tool the LangSpan skill names is one this server lists.
+    let named = langspan::skill::tools();
+    assert!(!named.is_empty());
+    for tool in named {
+        assert!(
+            names.contains(tool),
+            "the skill names {tool}, which is not listed"
+        );
+    }
     for tool in &tools {
         assert_eq!(
             tool.input_schema.get("additionalProperties"),
