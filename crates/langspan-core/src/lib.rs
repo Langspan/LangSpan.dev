@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 mod dashboard;
 mod lines;
+mod recall;
 mod status;
 mod status_line;
 mod today;
@@ -16,6 +17,9 @@ pub use dashboard::{
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
     LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow, PublishRow, RecentFile, ScanRow,
     WorkspaceRow, dashboard_denials,
+};
+pub use recall::{
+    RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
@@ -1111,7 +1115,11 @@ pub struct BlindSpots {
 pub struct InterfaceChange {
     pub name: String,
     pub kind: String,
-    /// `removed` or `signature_changed`.
+    /// `removed`, `signature_changed`, `definition_added` or
+    /// `definition_removed`. The last two mean only the number of
+    /// definitions sharing the name and kind changed: `after` (added) or
+    /// `before` (removed) holds the signatures that came or went, and the
+    /// counts say how many there were and are.
     pub change: String,
     pub before: Option<String>,
     pub after: Option<String>,
@@ -1122,7 +1130,16 @@ pub struct InterfaceChange {
     pub before_arity: Option<Arity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_arity: Option<Arity>,
+    /// Definitions with this name and kind before and after, for
+    /// `definition_added` and `definition_removed` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_count: Option<u32>,
 }
+
+/// Definitions sharing one name and kind that a notice counts at most.
+pub const MAX_DEFINITION_COUNT: u32 = 65_535;
 
 /// How many arguments a function takes, read from its signature text.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2112,6 +2129,16 @@ pub enum Command {
     Recap {
         workspace_id: String,
     },
+    /// Read-only: the held notes of one workspace that hold every word of
+    /// `query`, about `path` or the whole workspace when a path is given
+    /// (roadmap E2). Never recorded, never counted as delivered.
+    Recall {
+        workspace_id: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+    },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
     /// every workspace when none is named, and what is still open.
@@ -2559,6 +2586,16 @@ enum CommandWire {
     Recap {
         workspace_id: String,
     },
+    /// Read-only: the held notes of one workspace that hold every word of
+    /// `query`, about `path` or the whole workspace when a path is given
+    /// (roadmap E2). Never recorded, never counted as delivered.
+    Recall {
+        workspace_id: String,
+        query: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+    },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
     /// every workspace when none is named, and what is still open.
@@ -2966,6 +3003,9 @@ pub enum Outcome {
     },
     Recap {
         recap: Recap,
+    },
+    Recall {
+        recall: Recall,
     },
     Today {
         today: Today,
@@ -4678,6 +4718,17 @@ fn decide_checked(
                 },
             })
         }
+        Command::Recall {
+            workspace_id,
+            query,
+            path,
+            limit,
+        } => Ok(Decision {
+            events: Vec::new(),
+            outcome: Outcome::Recall {
+                recall: recall_notes(state, workspace_id, query, path.as_deref(), *limit)?,
+            },
+        }),
         Command::StatusLine { root, from_ms } => {
             if !root.starts_with('/') || root.len() > 4096 {
                 return Err(error(
@@ -5030,9 +5081,35 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
             change.before.as_ref(),
             change.after.as_ref(),
         ];
+        let counts = match (change.before_count, change.after_count) {
+            (Some(before), Some(after)) => Some((before, after)),
+            (None, None) => None,
+            _ => Some((0, 0)),
+        };
+        // A count change names its counts, in the direction it says, and
+        // carries the signatures that came or went; nothing else has
+        // counts.
+        let shaped = match (change.change.as_str(), counts) {
+            ("removed" | "signature_changed", None) => true,
+            ("definition_added", Some((before, after))) => {
+                before >= 1
+                    && before < after
+                    && after <= MAX_DEFINITION_COUNT
+                    && change.before.is_none()
+                    && change.after.is_some()
+            }
+            ("definition_removed", Some((before, after))) => {
+                after >= 1
+                    && after < before
+                    && before <= MAX_DEFINITION_COUNT
+                    && change.before.is_some()
+                    && change.after.is_none()
+            }
+            _ => false,
+        };
         if change.name.is_empty()
             || change.name.len() > 128
-            || !matches!(change.change.as_str(), "removed" | "signature_changed")
+            || !shaped
             || change.kind.len() > 16
             || texts
                 .into_iter()
@@ -5041,7 +5118,7 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         {
             return Err(error(
                 "invalid_notice",
-                "An interface change has a name, a kind, `removed` or `signature_changed`, and single-line signatures of at most 256 bytes",
+                "An interface change has a name, a kind, `removed`, `signature_changed`, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
             ));
         }
     }
