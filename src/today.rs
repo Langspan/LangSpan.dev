@@ -2,17 +2,17 @@
 //! text it shows. The account itself is built by the core from the event
 //! log (`langspan_core::today`); this adapter supplies wall-clock time.
 //!
-//! The default window starts at local midnight. The local offset from UTC
-//! is read once per call from `date +%z`, the system's own time zone rules,
-//! under a deadline: the standard library has no time zone database, and
-//! parsing one here would be a second copy of the system's rules. Times in
-//! the text are shown at that one offset, so on a day the clocks change an
-//! hour before the change is shown an hour off.
+//! The default window starts at local midnight, found by `local_day` from
+//! the system's own time zone rules for that date (offsets read from `date`
+//! under a deadline): on a day the clocks change, midnight's offset is not
+//! the offset now. Times in the text are shown at the offset now, so on such
+//! a day a time before the change is shown an hour off.
 
-use std::process::{Command as Process, Stdio};
 use std::time::{Duration, Instant};
 
 use langspan_core::{Today, TodaySession};
+
+use crate::local_day;
 
 /// Lines the text shows at most, its last saying what was left out.
 pub const TEXT_LINES: usize = 40;
@@ -34,76 +34,54 @@ pub struct Since {
 
 /// Where the window starts: `--since`, or local midnight when it is absent.
 pub fn window_start(since: Option<&str>, now_ms: u64) -> Result<u64, String> {
+    window_start_in(since, now_ms, None)
+}
+
+/// `window_start` in the time zone `tz` (`None`: the inherited `TZ`).
+fn window_start_in(since: Option<&str>, now_ms: u64, tz: Option<&str>) -> Result<u64, String> {
     match since {
         Some(text) => parse_rfc3339(text),
-        None => Ok(midnight_ms(now_ms, local_offset_minutes()?)),
+        None => {
+            let deadline = Instant::now() + DATE_BUDGET;
+            let offset = local_day::offset_at(now_ms, deadline, tz).ok_or_else(|| {
+                "could not read the local time zone (`date` gave no offset within 2 s); pass --since"
+                    .to_owned()
+            })?;
+            Ok(midnight_in(now_ms, offset, deadline, tz))
+        }
     }
+}
+
+/// The local midnight before `now_ms`, from the zone's rules for that date:
+/// `offset` (minutes east of UTC at `now_ms`) is not always midnight's.
+fn midnight_in(now_ms: u64, offset: i32, deadline: Instant, tz: Option<&str>) -> u64 {
+    local_day::local_midnight_ms(now_ms, |at| {
+        if at == now_ms {
+            Some(offset)
+        } else {
+            local_day::offset_at(at, deadline, tz)
+        }
+    })
 }
 
 /// How to show an answer's window: at the local offset (UTC when it cannot
 /// be read), and as "since 00:00" when it starts at that day's midnight.
 pub fn shown(window: &langspan_core::TodayWindow) -> Since {
-    let offset_minutes = local_offset_minutes().unwrap_or(0);
+    shown_in(window, None)
+}
+
+fn shown_in(window: &langspan_core::TodayWindow, tz: Option<&str>) -> Since {
+    let deadline = Instant::now() + DATE_BUDGET;
+    let offset = local_day::offset_at(window.to_ms, deadline, tz);
     Since {
         from_ms: window.from_ms,
-        offset_minutes,
-        midnight: window.from_ms == midnight_ms(window.to_ms, offset_minutes),
+        offset_minutes: offset.unwrap_or(0),
+        midnight: window.from_ms
+            == match offset {
+                Some(offset) => midnight_in(window.to_ms, offset, deadline, tz),
+                None => local_day::local_midnight_ms(window.to_ms, |_| None),
+            },
     }
-}
-
-/// The local offset from UTC in minutes, from `date +%z` (`+0100`, `-0530`).
-pub fn local_offset_minutes() -> Result<i32, String> {
-    let failed = |why: String| format!("could not read the local time zone ({why}); pass --since");
-    let mut child = Process::new("date")
-        .arg("+%z")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| failed(format!("`date` did not start: {error}")))?;
-    let deadline = Instant::now() + DATE_BUDGET;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(failed("`date` did not answer within 2 s".into()));
-            }
-            Err(error) => return Err(failed(error.to_string())),
-        }
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| failed(error.to_string()))?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_offset(text.trim()).ok_or_else(|| failed(format!("`date` printed {:?}", text.trim())))
-}
-
-/// `+HHMM` or `-HHMM`, at most 18 hours.
-fn parse_offset(text: &str) -> Option<i32> {
-    let (sign, digits) = match text.as_bytes().first()? {
-        b'+' => (1, &text[1..]),
-        b'-' => (-1, &text[1..]),
-        _ => return None,
-    };
-    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let hours: i32 = digits[..2].parse().ok()?;
-    let minutes: i32 = digits[2..].parse().ok()?;
-    (hours <= 18 && minutes < 60).then_some(sign * (hours * 60 + minutes))
-}
-
-/// The last local midnight at or before `now_ms`.
-pub fn midnight_ms(now_ms: u64, offset_minutes: i32) -> u64 {
-    let offset = i64::from(offset_minutes) * 60_000;
-    let local = i64::try_from(now_ms)
-        .unwrap_or(i64::MAX)
-        .saturating_add(offset);
-    let midnight = local - local.rem_euclid(86_400_000) - offset;
-    u64::try_from(midnight).unwrap_or(0)
 }
 
 /// Days since 1970-01-01 of a civil date (Howard Hinnant's algorithm).
@@ -208,7 +186,7 @@ pub fn parse_rfc3339(text: &str) -> Result<u64, String> {
     let offset_minutes = match rest {
         "Z" | "z" => 0,
         _ if rest.len() == 6 && rest.as_bytes()[3] == b':' => {
-            parse_offset(&format!("{}{}", &rest[..3], &rest[4..])).ok_or_else(invalid)?
+            local_day::parse_offset(&format!("{}{}", &rest[..3], &rest[4..])).ok_or_else(invalid)?
         }
         _ => return Err(invalid()),
     };
@@ -465,25 +443,34 @@ mod tests {
     }
 
     #[test]
-    fn local_midnight_is_at_the_offset() {
-        let utc_midnight = 1_795_564_800_000;
-        let at = utc_midnight + 9 * 3_600_000;
-        assert_eq!(midnight_ms(at, 0), utc_midnight);
-        // 09:00 UTC is 10:00 at +01:00, whose midnight was 23:00 UTC.
-        assert_eq!(midnight_ms(at, 60), utc_midnight - 3_600_000);
-        // 09:00 UTC is 23:00 the day before at -10:00.
-        assert_eq!(midnight_ms(at, -600), utc_midnight - 14 * 3_600_000);
-        assert_eq!(clock(at, 60), "10:00");
-        assert_eq!(date_time(at, -600), "2026-11-24 23:00");
+    fn the_default_window_starts_at_midnight_on_both_daylight_saving_changes() {
+        const HOUR: u64 = 3_600_000;
+        // 2026-11-01T00:00:00Z and 2026-03-08T00:00:00Z: New York puts its
+        // clocks back at 06:00 UTC and forward at 07:00 UTC.
+        const NOVEMBER_1: u64 = 1_793_491_200_000;
+        const MARCH_8: u64 = 1_772_928_000_000;
+        let tz = Some("America/New_York");
+        for (now, midnight) in [
+            // Noon EST: the day began at 00:00 EDT, 04:00 UTC, not 05:00.
+            (NOVEMBER_1 + 17 * HOUR, NOVEMBER_1 + 4 * HOUR),
+            // Noon EDT: the day began at 00:00 EST, 05:00 UTC, not 04:00.
+            (MARCH_8 + 16 * HOUR, MARCH_8 + 5 * HOUR),
+        ] {
+            assert_eq!(window_start_in(None, now, tz), Ok(midnight), "{now}");
+            let window = langspan_core::TodayWindow {
+                from_ms: midnight,
+                to_ms: now,
+            };
+            assert!(shown_in(&window, tz).midnight, "{now}");
+        }
     }
 
     #[test]
-    fn offsets_are_signed_hours_and_minutes() {
-        assert_eq!(parse_offset("+0000"), Some(0));
-        assert_eq!(parse_offset("-0530"), Some(-330));
-        assert_eq!(parse_offset("+1345"), Some(825));
-        for bad in ["0100", "+01", "+0160", "+2000", "UTC"] {
-            assert_eq!(parse_offset(bad), None, "{bad}");
-        }
+    fn times_are_shown_at_the_offset() {
+        let at = 1_795_564_800_000 + 9 * 3_600_000;
+        assert_eq!(clock(at, 0), "09:00");
+        assert_eq!(clock(at, 60), "10:00");
+        // 09:00 UTC is 23:00 the day before at -10:00.
+        assert_eq!(date_time(at, -600), "2026-11-24 23:00");
     }
 }

@@ -429,11 +429,11 @@ Two things are new: the CLI and MCP adapter start one child process, `date
 
 | Concern | Behavior and remaining boundary |
 | --- | --- |
-| Spoofing | `date` is found on the owner's `PATH`, like `git`; a program placed earlier on it runs as the owner, which it could already do. Only its offset is read: anything other than `+HHMM` or `-HHMM` within 18 hours is refused, and the default window cannot be computed (`--since` still works). |
+| Spoofing | `date` is found on the owner's `PATH`, like `git`; a program placed earlier on it runs as the owner, which it could already do. Only its offset is read, at given instants (`local_day`, shared with the status line): anything other than `+HHMM` or `-HHMM` is refused. Without the offset now the default window cannot be computed (`--since` still works); without an offset near midnight, the offset now is applied to the whole day. |
 | Tampering (prompt injection) | The MCP answer places session IDs, file paths and intent text, written by other sessions and the repository, in a model's context. It starts with a line saying they are coordination data, not instructions; paths and intent text are quoted with escapes, intent text is cut to 120 characters, each line to 240 bytes and the whole to 2,400 bytes, the same cap as a briefing. No message text is included, only message IDs and recipients. |
 | Repudiation | Reading leaves no trace: the command is answered from the store, records no event or receipt, and acknowledges no message. A refusal's event carries the session, workspace, paths, kind and time; a same-user process could already cause refusals by holding files. |
 | Information disclosure | Nothing new is stored beyond the two event kinds, which hold IDs, paths, a kind and two clock readings. Nothing leaves the machine. |
-| Denial of service | One answer reads at most the newest 50,000 events and parses each, then one backward search for the generation's anchor; the cost is bounded by that count, not by history, and the answer says `truncated` when the window reaches past it. `date` has a 2 s deadline and is killed at it. The answer fits one 48 KiB frame: listed files, then sessions, are dropped and counted. |
+| Denial of service | One answer reads at most the newest 50,000 events and parses each, then one backward search for the generation's anchor; the cost is bounded by that count, not by history, and the answer says `truncated` when the window reaches past it. `date` runs at most five times for each midnight found, all within one 2 s deadline, and is killed at it. The answer fits one 48 KiB frame: listed files, then sessions, are dropped and counted. |
 | Elevation of privilege | It grants nothing and decides nothing; a failure is an error answer. |
 
 ## Region admission

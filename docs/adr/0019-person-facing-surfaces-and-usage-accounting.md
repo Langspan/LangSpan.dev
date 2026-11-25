@@ -70,7 +70,9 @@ acknowledgement. Three choices were needed:
   nothing in the daemon, so `commit_held` is not counted; recording it would
   need a new command from the hook.
 - *Bounds.* One answer reads at most the newest 50,000 events and says
-  `truncated` when the window may reach past them. The anchor of the oldest
+  `truncated` when the window may reach past them: the first event read
+  that carries its own time (or an anchor) bounds the ones left out, since an
+  event without one only inherits an older time. The anchor of the oldest
   event read is found through a partial index of `booted` and
   `clock_anchored` rows (`events_generation_marker`, created when a store
   opens), so its cost does not grow with the generation's history: behind
@@ -78,8 +80,10 @@ acknowledgement. Three choices were needed:
   debug build, arm64 macOS); building the index added about 40 ms to
   the first open of that store. The text is at most 40
   lines and eight files per session; the MCP text, labelled as data, at most
-  2,400 bytes, as a briefing. The local offset comes from `date +%z` (2 s
-  deadline), shown at one offset for the whole window.
+  2,400 bytes, as a briefing. Local midnight is found by `local_day` from the
+  zone's offsets near that date's 00:00, read from `date` (2 s deadline), so
+  a day the clocks change starts at its own midnight; times are shown at the
+  offset now for the whole window.
 
 Both new event kinds are read by this build only: an older build that opens a
 store holding them stops at the first, as for any event kind it does not know

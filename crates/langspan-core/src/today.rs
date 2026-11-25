@@ -309,9 +309,13 @@ pub fn today(state: &State, query: &TodayQuery<'_>) -> Today {
     let mut checks = TodayChecks::default();
     let mut landings = TodayLandings::default();
     let mut undated = 0u32;
-    let mut first_wall: Option<Option<u64>> = None;
+    // The wall time of the first event read that carries one of its own (an
+    // anchor included): every event left out is older. An event before it
+    // only inherits a time, which may be far older than its own.
+    let mut bound: Option<Option<u64>> = None;
     for recorded in query.events {
         let event = &recorded.event;
+        let mut timed = false;
         match event {
             Event::Booted { .. } => {
                 anchor = None;
@@ -320,17 +324,27 @@ pub fn today(state: &State, query: &TodayQuery<'_>) -> Today {
             Event::ClockAnchored { anchor: new } => {
                 anchor = Some(*new);
                 clock = Some(new.clock_ms);
+                timed = true;
             }
             _ => {}
         }
         let (session, own) = event_facts(event);
-        if let (Some(current), Some((at_ms, generation))) = (anchor, own)
-            && generation == current.generation
-        {
-            clock = Some(at_ms);
+        if let Some((at_ms, generation)) = own {
+            match anchor {
+                Some(current) if generation == current.generation => {
+                    clock = Some(at_ms);
+                    timed = true;
+                }
+                // Undated: no time to compare, so nothing is known.
+                None => timed = true,
+                // Another generation's time: only an inherited wall here.
+                Some(_) => {}
+            }
         }
         let wall = anchor.zip(clock).map(|(anchor, clock)| anchor.wall(clock));
-        first_wall.get_or_insert(wall);
+        if timed {
+            bound.get_or_insert(wall);
+        }
         let Some(wall) = wall else {
             if !matches!(event, Event::Booted { .. }) {
                 undated = undated.saturating_add(1);
@@ -391,7 +405,7 @@ pub fn today(state: &State, query: &TodayQuery<'_>) -> Today {
     }
     // The older part of the log may hold part of the window.
     let truncated = query.earlier
-        && match first_wall {
+        && match bound {
             Some(Some(first)) => first >= window.from_ms,
             _ => true,
         };

@@ -1,8 +1,9 @@
 //! The daily account (roadmap H4), across a simulated midnight: every time
 //! is injected, on the daemon's clock and on the wall clock.
 use langspan_core::{
-    AttemptResult, ClockAnchor, Command, Event, LandingAttempt, Outcome, RecordedEvent, State,
-    TODAY_SESSIONS, Today, TodayQuery, TodayWindow, ToolResult, apply, decide, today,
+    AttemptResult, CheckResult, ClockAnchor, Command, Event, LandingAttempt, Outcome,
+    RecordedEvent, State, TODAY_SESSIONS, Today, TodayQuery, TodayWindow, ToolResult, TurnQueueing,
+    apply, decide, today,
 };
 
 /// Midnight, wall clock, in Unix milliseconds (2026-11-25T00:00:00Z).
@@ -438,6 +439,140 @@ fn a_landing_today_on_yesterdays_check_evidence_is_counted_today() {
         },
     );
     assert_eq!(yesterday.landings.landed, 0, "{yesterday:?}");
+}
+
+#[test]
+fn a_queued_landing_today_after_yesterdays_prompt_edit_and_check_is_dated_today() {
+    let mut log = Log::ready();
+    // Yesterday: the last prompt, edit and passing check.
+    log.prompted("claude-code.alice", at(MIDNIGHT - 30 * 60_000));
+    log.edited("claude-code.alice", "src/a.rs", at(MIDNIGHT - 20 * 60_000));
+    let recorded = log.run(
+        "check-1",
+        Command::RecordCheck {
+            workspace_id: "work".into(),
+            name: "test".into(),
+            command: "cargo test".into(),
+            tree_oid: "c".repeat(40),
+            head_oid: None,
+            inputs: Vec::new(),
+            result: CheckResult::Passed {},
+            duration_ms: 900,
+            report: None,
+        },
+        at(MIDNIGHT - 10 * 60_000),
+    );
+    assert!(
+        matches!(recorded, Outcome::CheckRecorded { .. }),
+        "{recorded:?}"
+    );
+    // Today: `langspan land` waits in line, holds the turn, renews it, finds
+    // the passing check for the combined tree and pushes. Nothing else is
+    // recorded: the landing reuses yesterday's evidence.
+    let now = at(MIDNIGHT + 60_000);
+    let take = |queue, turn_id| Command::TakeTurn {
+        workspace_id: "work".into(),
+        onto: "main".into(),
+        session_id: Some("claude-code.alice".into()),
+        ttl_ms: 60_000,
+        turn_id,
+        queue,
+    };
+    let taken = log.run(
+        "land-1-wait",
+        take(
+            Some(TurnQueueing {
+                ticket: "land-1".into(),
+                wait_ms: 60_000,
+                joined: false,
+            }),
+            None,
+        ),
+        now,
+    );
+    assert!(matches!(taken, Outcome::Turn { .. }), "{taken:?}");
+    log.run("land-1-renew", take(None, Some("land-1".into())), now + 100);
+    let released = log.run(
+        "land-1-release",
+        Command::ReleaseTurn {
+            workspace_id: "work".into(),
+            onto: "main".into(),
+            turn_id: "land-1".into(),
+            attempts: vec![LandingAttempt {
+                target_oid: Some("a".repeat(40)),
+                commit_oid: Some("b".repeat(40)),
+                result: AttemptResult::Landed {},
+            }],
+        },
+        now + 1_000,
+    );
+    assert!(
+        matches!(released, Outcome::TurnReleased { released: true, .. }),
+        "{released:?}"
+    );
+    let kinds: Vec<&str> = log.events[log.events.len() - 3..]
+        .iter()
+        .map(|recorded| match recorded.event {
+            Event::TurnTaken { .. } => "taken",
+            Event::TurnRenewed { .. } => "renewed",
+            Event::TurnReleased { .. } => "released",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, ["taken", "renewed", "released"]);
+    let summary = log.today_from(MIDNIGHT, false, now + 2_000);
+    assert_eq!(summary.landings.landed, 1, "{summary:?}");
+    assert_eq!(summary.checks.passed, 0, "the check was yesterday's");
+    assert!(summary.sessions.is_empty(), "{summary:?}");
+}
+
+#[test]
+fn a_read_that_starts_on_an_event_without_a_time_says_truncated() {
+    let mut log = Log::ready();
+    log.edited("claude-code.alice", "src/old.rs", at(MIDNIGHT + 60_000));
+    // Today: an admission (lease_granted carries no time), then an edit.
+    log.run(
+        "hold",
+        Command::Admit {
+            session_id: "codex.bob".into(),
+            paths: vec!["src/lib.rs".into()],
+            ttl_ms: 60_000,
+        },
+        at(MIDNIGHT + 2 * 60_000),
+    );
+    log.edited("codex.bob", "src/lib.rs", at(MIDNIGHT + 3 * 60_000));
+    // The cut fell on the grant: today's first edit was left out.
+    let first = log
+        .events
+        .iter()
+        .position(|recorded| matches!(recorded.event, Event::LeaseGranted { .. }))
+        .unwrap();
+    // The generation started yesterday, an hour before midnight.
+    let anchor = ClockAnchor {
+        generation: 1,
+        clock_ms: START,
+        wall_ms: MIDNIGHT - HOUR,
+    };
+    let read = |from_ms| {
+        today(
+            &log.state,
+            &TodayQuery {
+                workspace_id: Some("work"),
+                window: TodayWindow {
+                    from_ms,
+                    to_ms: MIDNIGHT + HOUR,
+                },
+                events: &log.events[first..],
+                anchor: Some(anchor),
+                earlier: true,
+                now_ms: at(MIDNIGHT + HOUR),
+            },
+        )
+    };
+    assert!(read(MIDNIGHT).truncated, "{:?}", read(MIDNIGHT));
+    // The first event with a time of its own bounds what was left out: a
+    // window that starts after it misses nothing.
+    assert!(!read(MIDNIGHT + 30 * 60_000).truncated);
 }
 
 #[test]

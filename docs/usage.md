@@ -605,7 +605,9 @@ handoffs not taken up, checks whose latest result failed).
 ```
 
 Without a workspace it covers every workspace. The window starts at local
-midnight, read from the system's `date +%z`, or at an RFC 3339 `--since` time;
+midnight, found from the system's time zone rules for that date (offsets read
+from `date`, so a day the clocks change still starts at its 00:00), or at an
+RFC 3339 `--since` time;
 a time before the first event covers everything. Times in the text are shown
 at the current local offset, so on a day the clocks change, times before the
 change are an hour off. The text is at most 40 lines and lists at most eight
@@ -623,7 +625,8 @@ that places that run's times on the wall clock; events recorded by a build
 before this one have no such anchor and are counted only as `undated`. A
 landing is placed at the time it took its turn to land. A
 window with more than 50,000 events is summarised from the newest 50,000 and
-says `truncated: true`. With the daemon down it exits 1 with "coordination
+says `truncated: true`; when the oldest of those carries no time of its own,
+the first that does decides whether the window may reach past them. With the daemon down it exits 1 with "coordination
 unavailable".
 
 ## Look up symbols and affected files
