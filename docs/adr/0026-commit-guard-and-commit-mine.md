@@ -195,6 +195,30 @@ outside the sandbox or make the Git directory writable (added from issue #4;
 tests `a_read_only_git_directory_is_named_with_gits_own_words_and_the_fix`
 and `a_failed_git_read_in_the_commit_guard_says_what_git_said`).
 
+**3. `langspan status --mine` and `langspan_my_changes`** (roadmap B27,
+issue #40, added after launch). Both run `commit::status_mine`: steps 1 and 2
+of `commit --mine` without the merge check, the same `file_owners`
+attribution, and nothing after. No private index is built, nothing is staged
+or committed, and every Git read runs with `--no-optional-locks`, so the
+shared index file is not rewritten either (test
+`status_mine_lists_this_sessions_files_and_hunks_and_changes_nothing`
+compares the index bytes, `git status` and every file before and after).
+Each changed file that holds a hunk this session owns, or one whose owner is
+not known, is listed by path: `mine` when `commit --mine` would commit all
+of it, `mixed` when only its own hunks, `unknown` when it would refuse (a hunk
+not known, or a new or removed file that also holds others' changes). Each
+hunk carries its first line and line count (in the working file, or where it
+was in `HEAD`'s when it only removes lines) and its owner: `mine`, `others`
+with the sessions, `none` or `unknown` with the reason. A file attributed
+whole has no hunks and `whole: true`. `staged` says the shared index holds
+some of the file's changes. `others` counts the changed files holding other
+sessions' lines, including lines in a hunk whose owner is `unknown`; a file with nothing of this session's is not listed. At most
+200 files are listed, then `truncated`. The session is found as for
+`commit --mine`: the pre-tool hook marks a running `status --mine` command's
+record as it marks `commit --mine`'s, and the same missing-record error names
+the state directory. Other worktrees and machines are out of scope. The
+Claude Code run calling it before `commit --mine` is still to be retained.
+
 ## Never covered
 
 - The hook fallback for Git before 2.36 (running files from the hooks
@@ -263,7 +287,8 @@ Writes are recorded only by the hooks (`before_edit`, `before_shell`,
   for the journal.
 - The shared index is written only by `commit --mine`, which the agent runs
   for that purpose, and only for the files it commits.
-- A new MCP tool, `langspan_commit_mine` (21 tools).
+- A new MCP tool, `langspan_commit_mine` (21 tools); later
+  `langspan_my_changes`, read-only (issue #40).
 
 ## Design input adopted
 

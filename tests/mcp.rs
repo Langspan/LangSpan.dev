@@ -184,6 +184,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
             "langspan_land_cancel",
             "langspan_land_queue",
             "langspan_intent_set",
+            "langspan_my_changes",
             "langspan_recap",
             "langspan_references",
             "langspan_remember",
@@ -299,7 +300,7 @@ async fn stdio_supports_current_discovery_lifecycle() {
         .await
         .expect("discovery-lifecycle tools/list timed out")
         .expect("discovery-lifecycle tools/list failed");
-    assert_eq!(tools.len(), 23);
+    assert_eq!(tools.len(), 24);
     let result = call_tool(&client, "langspan_status", json!({})).await;
     assert_eq!(result.is_error, Some(true));
     assert_eq!(
