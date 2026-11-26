@@ -1253,8 +1253,8 @@ fn lifecycle(
     // Delivering a briefing acknowledges its messages and check results, so
     // with less than the whole limit left (a reply joining several
     // workspaces) it is first looked at without delivery, and delivered
-    // only if it fits the room. Otherwise it waits for the next event.
-    // A delivered briefing that has grown since its preview is shown whole.
+    // only if it fits the room, every in-flight line included. Otherwise it
+    // waits for the next event. A delivered briefing that has grown since its preview is shown whole.
     let preview = if room >= BRIEFING_LIMIT {
         None
     } else {
@@ -1267,7 +1267,7 @@ fn lifecycle(
         Some(None) => None,
         Some(Some(preview))
             if compose_context_within(Some(&preview), code_part(), room)
-                .is_none_or(|text| text.len() > room) =>
+                .is_none_or(|text| text.len() > room || !shows_all_inflight(&preview, &text)) =>
         {
             targets_note.push_str("; peer briefing deferred: no room left in this reply");
             None
@@ -1954,6 +1954,17 @@ fn inflight_line(notice: &langspan_core::InflightNotice) -> String {
         langspan_core::INFLIGHT_BYTES - 1 - LABEL.len(),
     );
     format!("{line}{LABEL}")
+}
+
+/// Whether `text` holds the line of every in-flight notice in `briefing`.
+/// Delivering a briefing records its notices as told, so one whose line
+/// did not fit must wait for a later briefing instead (review comment
+/// 4704149464).
+fn shows_all_inflight(briefing: &langspan_core::Briefing, text: &str) -> bool {
+    briefing
+        .inflight
+        .iter()
+        .all(|notice| text.contains(&inflight_line(notice)))
 }
 
 /// An automatic check's results first: each is delivered once, so they are

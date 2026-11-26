@@ -285,7 +285,12 @@ impl World {
     /// A linked worktree of the checkout on branch `feature`, registered as
     /// workspace `tree`.
     fn linked_tree(&self) -> PathBuf {
-        let tree = self.base.join("tree");
+        self.linked_tree_named("tree", "feature")
+    }
+    /// A linked worktree of the checkout on a new `branch`, registered as
+    /// workspace `workspace`.
+    fn linked_tree_named(&self, workspace: &str, branch: &str) -> PathBuf {
+        let tree = self.base.join(workspace);
         git(
             &self.work(),
             &[
@@ -293,7 +298,7 @@ impl World {
                 "add",
                 "--quiet",
                 "-b",
-                "feature",
+                branch,
                 tree.to_str().unwrap(),
             ],
         );
@@ -301,10 +306,10 @@ impl World {
         let (code, text) = self.cli(&[
             "workspace",
             "add",
-            "tree",
+            workspace,
             tree.to_str().unwrap(),
             "--request-id",
-            "ws-tree",
+            &format!("ws-{workspace}"),
         ]);
         assert_eq!(code, 0, "{text}");
         tree
@@ -1935,6 +1940,113 @@ fn an_empty_inflight_answer_still_reports_the_asking_workspaces_coverage() {
     assert!(
         text.contains("No other worktree of this repository has an uncommitted signature"),
         "{text}"
+    );
+}
+
+/// `count` exported Rust functions named `{prefix}_000` and on, one line each.
+fn definitions(prefix: &str, count: usize) -> String {
+    (0..count)
+        .map(|n| format!("pub fn {prefix}_{n:03}() -> u8 {{ 0 }}\n"))
+        .collect()
+}
+
+/// A worktree with more in-flight signatures than one worktree's candidate
+/// limit: `graph inflight` lists what it read and says the answer is
+/// partial, while a worktree exactly at the limit is complete (review
+/// comment 4704149471).
+#[test]
+fn inflight_reports_truncation_when_one_worktree_has_more_than_its_candidate_limit() {
+    let w = World::new();
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let calls: String = (0..129)
+        .map(|n| format!("    let _ = many_{n:03}();\n"))
+        .collect();
+    w.edits(
+        "bob",
+        "b1",
+        "src/main.rs",
+        &format!("mod upload;\nfn main() {{\n{calls}}}\n"),
+    );
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a1",
+        "src/many.rs",
+        &definitions("many", 128),
+    );
+    let full = w.wait_for_inflight("128 in flight", "app", |outcome| {
+        inflight_names(outcome).len() == 128
+    });
+    assert_eq!(full["truncated"], false, "exactly at the limit is complete");
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a2",
+        "src/many.rs",
+        &definitions("many", 129),
+    );
+    let cut = w.wait_for_inflight("the 129th cut", "app", |outcome| {
+        outcome["truncated"] == true
+    });
+    assert_eq!(inflight_names(&cut).len(), 128, "{cut:#}");
+}
+
+/// Worktrees left out by the candidate limit across all worktrees make the
+/// answer partial even when nothing that was read is mentioned (review
+/// comment 4704149471).
+#[test]
+fn inflight_reports_truncation_when_worktrees_are_left_out_by_the_total_candidate_limit() {
+    let w = World::new();
+    // Workspaces are read in name order: `wa` and `wb` fill the total
+    // limit with names nothing mentions, and `wc`, read last, is left out.
+    let a = w.linked_tree_named("wa", "feature-a");
+    let b = w.linked_tree_named("wb", "feature-b");
+    let c = w.linked_tree_named("wc", "feature-c");
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    w.edits(
+        "bob",
+        "b1",
+        "src/main.rs",
+        "mod upload;\nfn main() {\n    let _ = wanted_000();\n}\n",
+    );
+    w.edits_in(
+        "wa",
+        &a,
+        "alice",
+        "a1",
+        "src/a.rs",
+        &definitions("alpha", 128),
+    );
+    w.edits_in(
+        "wb",
+        &b,
+        "carol",
+        "c1",
+        "src/b.rs",
+        &definitions("beta", 128),
+    );
+    w.edits_in(
+        "wc",
+        &c,
+        "dave",
+        "d1",
+        "src/c.rs",
+        &definitions("wanted", 1),
+    );
+    let partial = w.wait_for_inflight("a partial comparison", "app", |outcome| {
+        outcome["truncated"] == true
+    });
+    assert_eq!(
+        inflight_names(&partial),
+        Vec::<String>::new(),
+        "{partial:#}"
     );
 }
 

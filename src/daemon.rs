@@ -601,7 +601,9 @@ mod unix {
     /// `among` for a briefing, any file for `graph inflight`. Neither a
     /// worktree without a complete scan nor an asking workspace without one
     /// says anything. `keep` decides which items count toward `limit`; the
-    /// flag says more were found. The coverage is the asking workspace's.
+    /// flag says more were found, or that a candidate limit left some
+    /// unread, so the comparison was partial. The coverage is the asking
+    /// workspace's.
     fn inflight_mentioned(
         graph: &crate::graph::Index,
         state: &State,
@@ -625,6 +627,10 @@ mod unix {
             return nothing;
         };
         let mut offered = Vec::new();
+        // Whether a candidate limit left rows of another worktree unread
+        // (review comment 4704149471). One more row than the limit is read
+        // to tell a full worktree from a cut one.
+        let mut capped = false;
         for (other, other_git) in &state.workspace_git {
             if other == workspace_id || other_git.repository_id != git.repository_id {
                 continue;
@@ -632,13 +638,20 @@ mod unix {
             let Some(at) = Registration::of(state, other) else {
                 continue;
             };
-            let (rows, coverage) =
-                graph.with_coverage(&at, |graph| graph.inflight(other, INFLIGHT_PER_WORKTREE))?;
-            if coverage.scanned {
-                offered.extend(rows.into_iter().map(|row| (other.clone(), row)));
+            let (mut rows, coverage) = graph.with_coverage(&at, |graph| {
+                graph.inflight(other, INFLIGHT_PER_WORKTREE + 1)
+            })?;
+            if !coverage.scanned {
+                continue;
             }
-            if offered.len() >= INFLIGHT_OFFERED {
+            if rows.len() > INFLIGHT_PER_WORKTREE {
+                rows.truncate(INFLIGHT_PER_WORKTREE);
+                capped = true;
+            }
+            offered.extend(rows.into_iter().map(|row| (other.clone(), row)));
+            if offered.len() > INFLIGHT_OFFERED {
                 offered.truncate(INFLIGHT_OFFERED);
+                capped = true;
                 break;
             }
         }
@@ -683,7 +696,7 @@ mod unix {
         if !coverage.scanned {
             return Ok((Vec::new(), coverage, false));
         }
-        Ok((found, coverage, more))
+        Ok((found, coverage, more || capped))
     }
 
     /// `Brief` with what the index finds in flight in other worktrees for
