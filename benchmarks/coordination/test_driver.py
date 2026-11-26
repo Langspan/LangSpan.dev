@@ -1170,6 +1170,21 @@ class DriverUnitTests(Temporary):
         driver.validate(record, driver.load_schema())
         self.assertEqual(record["cost"]["total"], {"tokens": None, "turns": None, "cost_usd": None})
         self.assertIsNone(record["cost"]["cost_per_accepted_task"])
+        # A repair whose tool guard failed keeps its evidence, but its result
+        # is a host configuration failure, not a correct or incorrect result.
+        failed_guard = dict(guard, status="failed", unexpected=["Bash"])
+        (repair_runner / "q" / "agent-repair.stdout").write_text(
+            self.transcript([init, result(4, 0.125, (5, 6, 7, 8)), failed_guard]))
+        (repair_runner / "q" / "oracle.json").write_text(json.dumps(dict(
+            verdict, integrated_tests="passed", semantic_conflicts=[],
+            tasks=[{"completed": True, "accepted": True, "detail": "ok"}] * 2)))
+        record = driver.build_record(plan, final, runner_dir, run_dir, None, "t", 0.0, repair=repair)
+        driver.validate(record, driver.load_schema())
+        self.assertEqual((record["repair"]["tool_check"], record["repair"]["succeeded"],
+                          record["repair"]["cost_usd"], record["tool_check"]["status"]),
+                         ({"status": "failed", "unexpected": ["Bash"]}, True, 0.125, "passed"))
+        self.assertIsNone(record["cost"]["correct_result"])
+        self.assertEqual(driver.excluded_as(record), "repair_tool_check_failed")
 
         # A tree that passed needs no repair: its repair figures are zero.
         verdict["integrated_tests"] = "passed"
@@ -1186,7 +1201,7 @@ class DriverUnitTests(Temporary):
         self.assertEqual((record["cost"]["correct_result"], record["cost"]["cost_per_accepted_task"]), (True, 0.375))
 
     def summary_record(self, arm, run_cost, repair_status, repair_cost=None, succeeded=None, accepted=2,
-                       change="made", status="succeeded", tool_check="passed"):
+                       change="made", status="succeeded", tool_check="passed", repair_tool_check=None):
         def figures(cost):
             if cost is None:
                 return {"tokens": None, "turns": None, "cost_usd": None}
@@ -1204,7 +1219,10 @@ class DriverUnitTests(Temporary):
         return {"schema_version": driver.SCHEMA_VERSION, "arm": arm, "family": "discovered_change", "sessions": 2,
                 "agent": "claude-code", "stagger_s": 0, "status": status, "interface_change": change,
                 "tool_check": {"status": tool_check, "failed_sessions": [1] if tool_check == "failed" else []},
-                "tasks_total": 2, "repair": {"status": repair_status, "succeeded": succeeded},
+                "tasks_total": 2, "repair": {
+                    "status": repair_status, "succeeded": succeeded,
+                    "tool_check": None if repair_status != "ran" else
+                    {"status": repair_tool_check or "passed", "unexpected": []}},
                 "cost": {"run": run, "repair": repair, "total": total, "tasks_accepted": accepted,
                          "correct_result": correct,
                          "cost_per_accepted_task": total["cost_usd"] / accepted if total["cost_usd"] and accepted else None}}
@@ -1255,6 +1273,32 @@ class DriverUnitTests(Temporary):
         self.assertEqual((group["trials"], group["tool_check_failed"], group["compared"], group["correct_results"],
                           group["tasks_total"], group["tasks_accepted"], group["total"]["cost_usd"],
                           group["repairs_not_run"]), (3, 1, 2, 2, 4, 4, 2.5, 0))
+
+    def test_the_summary_counts_a_failed_repair_tool_check_apart_from_the_arm_comparison(self):
+        # The sessions' guard passed but the repair session's failed: a host
+        # configuration failure in the repair, so the trial does not count,
+        # whether the repaired tree passed, failed or its cost went unreported.
+        for succeeded, cost in ((True, 0.5), (False, 0.5), (True, None)):
+            with self.subTest(succeeded=succeeded, cost=cost):
+                records = [self.summary_record("worktrees", 1.0, "ran", 0.25, True),
+                           self.summary_record("worktrees", 1.0, "ran", cost, succeeded,
+                                               repair_tool_check="failed")]
+                group = driver.summarize(records)[0]
+                self.assertEqual((group["trials"], group["repair_tool_check_failed"], group["tool_check_failed"],
+                                  group["compared"], group["repairs"], group["repairs_succeeded"],
+                                  group["correct_results"], group["tasks_total"], group["total"]["cost_usd"],
+                                  group["unreported"]), (2, 1, 0, 1, 1, 1, 1, 2, 1.25, 0))
+        # A repair guard that wrote no verdict (a session stopped from
+        # outside) is not a failed check: the trial counts, as for the sessions.
+        records = [self.summary_record("worktrees", 1.0, "ran", 0.25, True, repair_tool_check="unknown")]
+        group = driver.summarize(records)[0]
+        self.assertEqual((group["repair_tool_check_failed"], group["compared"]), (0, 1))
+        # A failed session guard and a failed repair guard count once, as the first.
+        records = [self.summary_record("worktrees", 1.0, "ran", 0.25, True, tool_check="failed",
+                                       repair_tool_check="failed")]
+        group = driver.summarize(records)[0]
+        self.assertEqual((group["tool_check_failed"], group["repair_tool_check_failed"], group["compared"]),
+                         (1, 0, 0))
 
     def test_the_summary_command_reads_record_files_and_refuses_an_older_record(self):
         good = self.root / "a"

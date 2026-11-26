@@ -239,7 +239,9 @@ Read the record's `cost` this way:
   is the repair session's, zero when no repair was needed. `total` is their
   sum.
 - `correct_result` is `true` when the combined result passed, or its repair
-  did.
+  did. It is `null` when the repair session's tool check failed: that is a
+  host configuration failure, and the repair's evidence and figures stay in
+  `repair`.
 - `tasks_accepted` counts the tasks accepted in the final tree, the repaired
   one when a round ran, and `cost_per_accepted_task` is the total cost over
   it.
@@ -260,7 +262,8 @@ python3 benchmarks/coordination/driver.py summarize /path/to/k1/*/
 
 It groups trials by agent, family, session count, stagger and arm, so
 staggered trials stay apart, and gives per group the trials, those refused,
-those whose tool check failed (`tool_check_failed`) and those
+those whose sessions' tool check failed (`tool_check_failed`), those whose
+repair session's tool check failed (`repair_tool_check_failed`) and those
 `change_not_made` (each counted, contributing no task, result or figure), those passed without
 repair, repairs run and succeeded, correct results, tasks total and accepted,
 the summed `run`, `repair` and `total` figures, the cost per accepted task,
