@@ -452,6 +452,8 @@ fn tool_call(
             // `PreToolUse` takes no context either, so a break alert there
             // would never reach the model (ADR 0029).
             pre_tool_context: false,
+            // Nor does `PostToolUse`, so no calls are kept for after it.
+            breaks_after: false,
         },
         config,
     ))

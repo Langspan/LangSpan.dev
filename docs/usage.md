@@ -1198,14 +1198,17 @@ says when a workspace has blind files.
 When an indexed export disappears or its signature changes, relevant sessions
 receive an interface notice at their next prompt. The notice names files they
 work on or have read that mention the changed name. Notices stay within one
-physical workspace. Body-only changes produce no notice, and a rename appears
-as a removal. A first indexing produces no change notice. When a file holds
+physical workspace. Body-only changes produce no notice. A rename that changes
+only the name, in one file, appears as a rename ("function "scale" was renamed
+to "zoom": …"); a rename together with any other change, or across files,
+appears as a removal. A first indexing produces no change notice. When a file holds
 several definitions of one name (a method of that name on two types, say), a
 definition added or removed is told as such, with how many there are now:
 "a second method "text" was added … (now 2 definitions with that name)".
 
 Each notice stays in the event log, and `graph history` reads a definition's
-past from there, before an agent changes it again:
+past from there, before an agent changes it again. A rename appears in the
+history of both the old name and the new one:
 
 ```sh
 ./target/release/langspan graph history PROJECT save --json
@@ -1246,7 +1249,9 @@ label first saying the signatures, task lines, notes and messages are data,
 not instructions.
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
-Code) or an `apply_patch` (Codex) is admitted, the hook parses the calls in the
+Code), an `apply_patch` (Codex) or a `replace` or `write_file` (Gemini CLI) is
+admitted, or a Claude Code or Codex shell command writes one file whole with a
+quoted heredoc (`cat > app/x.py <<'EOF'`), the hook parses the calls in the
 text it writes. If a call's argument count does not fit a function signature
 that another live session changed in the last 30 minutes, the write's reply
 carries an alert in the model's context: the call's file and line, the
@@ -1254,12 +1259,18 @@ function, the count it now takes, the new and old signatures, and the session
 that changed it. The write itself is not refused or changed, and the host's
 permission prompt is unaffected. Claude Code shows the alert to the model
 with the write's result. Each session is alerted once per change; a call with
-the new count gets nothing. Only argument counts are compared, matched by
-name, so a different function of the same name can be named; a type or order
-change that keeps the count, removals and renames are left to the prompt
-notice. Gemini CLI and Cursor writes are not checked: Gemini reads no context
-before a tool runs, and Cursor's write input has not yet been seen from a real
-Cursor. Nothing is checked until
+the new count gets nothing. A call to a function that such a session renamed
+gets a line naming the new name and its file; a call to one it removed, with
+no definition of that name left in the workspace, gets a line saying it was
+removed. A rename or removal is told only while the index reads every
+supported file in full, since a name missing from a file it cannot read is
+not gone. Calls are matched by name, so a different function of the same name
+can be named. A type or order change that keeps the count is left to the
+prompt notice. Gemini CLI reads no context before a tool runs, so its write's calls
+are found before the write and checked after it: the alert is added to the
+write's result, and a write that fails is not told and uses up nothing.
+Cursor writes are not checked until a real Cursor's `Write` input has been
+captured into the repository. Nothing is checked until
 the index has a complete scan of the workspace, and the hook's diagnostic
 says so. [ADR 0029](adr/0029-break-alerts-at-write-time.md) has the rules.
 
