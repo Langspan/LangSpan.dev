@@ -3039,6 +3039,39 @@ fn a_symbol_lookup_with_renamed_answers_an_old_name_a_new_file_defines_again() {
     );
 }
 
+/// Roadmap D7: a definition of another kind under the old name does not
+/// erase a remembered rename. After `upload` the function becomes `send`,
+/// adding `pub struct upload` to the same indexed file tells an addition
+/// of a type, and `graph symbol upload --renamed` still follows the
+/// function's rename to `send`.
+#[test]
+fn a_symbol_lookup_with_renamed_keeps_a_rename_when_another_kind_takes_the_old_name() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    let renamed = original.replace("pub fn upload(", "pub fn send(");
+    w.edits("bob", "b1", "src/upload.rs", &renamed);
+    history(&w, "upload", 1);
+    w.edits(
+        "bob",
+        "b2",
+        "src/upload.rs",
+        &format!("{renamed}\n#[allow(non_camel_case_types)]\npub struct upload;\n"),
+    );
+    w.wait_for("the struct", "symbol", "upload", |outcome| {
+        outcome["symbols"]
+            .as_array()
+            .is_some_and(|symbols| symbols.iter().any(|symbol| symbol["kind"] == "type"))
+    });
+    let (code, text) = w.cli(&["graph", "symbol", "app", "upload", "--renamed", "--json"]);
+    assert_eq!(code, 0, "{text}");
+    let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+    assert_eq!(outcome["renamed"][0]["after_name"], "send", "{outcome:#}");
+    assert_eq!(outcome["renamed"][0]["kind"], "function", "{outcome:#}");
+}
+
 /// Roadmap D7: after `git mv src/upload.rs src/transfer.rs`, the file's
 /// notes and its definitions' history are found under the new path.
 #[test]

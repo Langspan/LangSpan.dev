@@ -7741,8 +7741,9 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
 }
 
 /// What a notice's renames and moves change in the state (roadmap D7). A
-/// rename is remembered under its old name; a name that comes back (added,
-/// or the new name of another rename) is forgotten as renamed. A file moved
+/// rename is remembered under its old name; a name that comes back as the
+/// same kind (added, or the new name of another rename) is forgotten as
+/// renamed. A file moved
 /// whole takes its notes along: each note about the old path is about the
 /// new one instead.
 fn follow_renames(state: &mut State, notice: &InterfaceNotice) {
@@ -7758,7 +7759,9 @@ fn follow_renames(state: &mut State, notice: &InterfaceNotice) {
             _ => None,
         };
         if let Some(back) = back {
-            renames.retain(|rename| rename.name != *back);
+            // Only a definition of the renamed one's kind takes its name
+            // back, as the lookup's own check does.
+            renames.retain(|rename| rename.name != *back || rename.kind != change.kind);
         }
         if let ("renamed", Some(to), false) = (change.change.as_str(), &change.after_name, moved) {
             renames.retain(|rename| rename.name != change.name);
