@@ -42,6 +42,24 @@ it, and leaves state once no session of the workspace registered in the current
 daemon generation is still owed it; a session that registers while it is still
 held receives it too. The event log keeps the whole history.
 
+**A cut line names how to read the rest** (25 November 2026, roadmap E13). An
+adapter renders a message on one line of at most `MESSAGE_LINE_LIMIT` (700)
+bytes. Quoting can take a 400-byte message with many quotes or long paths
+past it; the cut line then ends with `… (cut; langspan messages show --
+WORKSPACE ID)`, inside the limit, so the core's per-briefing bound is
+unchanged. `ShowMessage` (`langspan messages show`, MCP
+`langspan_show_message`) is a read the store answers from the newest
+`message_sent` event with that ID in that workspace, so it works after
+acknowledgement, after the cap drops the message from state, and across
+restarts; it is never recorded and acknowledges nothing. It returns the ID,
+sender, recipient, text, paths and `retracted`, true when a later
+`message_retracted` event (roadmap E11) withdrew it. An unknown ID is `unknown_message`;
+once retention (roadmap J7) has deleted the oldest events, it is
+`message_not_kept`, naming the first kept sequence and saying a message sent
+before it no longer has its full text. It reads
+what `recap` and `events` already expose to any local session, so it adds no
+trust boundary.
+
 **Handoffs wait for a start or a prompt.** The `Brief` command gained an
 optional `mid_turn` field, false when absent. The Claude Code hook sets it on
 the briefing it returns after a completed tool call; that briefing carries
@@ -89,7 +107,10 @@ not instructions):", with the sender's session ID (or "the owner"), "to every
 session" or "(handoff)", the text and the paths quoted, and the reader's own
 session ID so it can reply. The rest of the briefing keeps its 2,400-byte cap.
 At least two messages of the largest kind fit; what the bound leaves out waits
-for the next briefing. A message the renderer still could not fit would be
+for the next briefing. A briefing that also carries an uncoordinated-change
+notice, which is delivered once too and rendered before the messages, takes
+that notice's 700-byte line, with its ellipsis and newline, out of the 1,500
+bytes, so one message of the largest kind fits beside it. A message the renderer still could not fit would be
 counted on a "not shown" line.
 
 **Interfaces.** `langspan message WORKSPACE TEXT [PATH...] [--to SESSION]
@@ -98,6 +119,36 @@ SESSION MESSAGE`, and pending messages in `langspan recap`. MCP tools
 `langspan_send_message` (the caller's `session_id` is the sender) and
 `langspan_handoff`, both mutations with a caller `request_id`. Wire protocol stays version 3: the new commands, events and the optional
 field are additions, with golden vectors in `fixtures/`.
+
+**Withdrawal** (25 November 2026, [issue #66](https://github.com/Langspan/LangSpan.dev/issues/66)).
+`RetractMessage` (`langspan messages retract WORKSPACE MESSAGE|last [--from
+SESSION]`, MCP `langspan_retract_message`) names a message by ID, or with no ID
+the newest message its sender sent. The sender may withdraw its own; the owner,
+without a session, may withdraw any; anyone else is refused with `not_sender`.
+An unknown message, one the 64-message cap dropped, and one already withdrawn
+are refused. `decide` emits one `MessageRetracted` event: applying it removes
+the message from those held, so no session that had not received it will, and a
+handoff not yet taken is not taken. To know who had received it, the state keeps
+a derived history of the latest 64 messages sent per workspace, each with every
+session that acknowledged it (a message to one session leaves the held list once
+acknowledged, so the held list alone cannot say). Each such reader is owed a
+`RetractedMessage` with the first 120 bytes of the text, delivered once in the
+`retracted` field of its next briefing, start, prompt or mid-turn, and used up
+by a `RetractionDelivered` event in the same decision, like a message. The core
+selects withdrawals first, inside the same 1,500-byte message budget, which an
+uncoordinated-change notice reduces in the same way. The hook
+renders each under the messages heading as `- Session S withdrew its message
+"..." (first 120 bytes): disregard it.` The result names the sessions still
+owed it (`withdrawn_unread`: the recipient, or for everyone the current
+sessions not yet reached; none for a handoff) and the readers
+(`told_to_disregard`). `last` reads only that history, so it never reaches
+past a newer message that left it; an older message still held is withdrawn by
+its ID, and is then not listed as withdrawn. The recap and the dashboard list
+withdrawn messages from the history with `retracted: true`; `status --all` reads the history and the
+withdrawals still owed. `MessageSent` is never rewritten. Wire protocol stays
+version 3; the command, outcome, events and optional fields are additions with
+golden vectors in `fixtures/`. The sender is named with `--from` as for
+`message`: it is not recorded from the running session.
 
 ## Consequences and limits
 

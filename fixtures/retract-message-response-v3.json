@@ -1,0 +1,1 @@
+{"version":3,"request_id":"r-1","replayed":false,"generation":2,"lease_valid":null,"outcome":{"type":"message_retracted","message_id":"m-9","withdrawn_unread":["codex.carol"],"told_to_disregard":["claude-code.alice"]}}

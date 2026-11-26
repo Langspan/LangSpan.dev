@@ -88,6 +88,43 @@ fn mutation_requires_an_explicit_request_identity_before_connecting() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("--request-id"));
 }
 
+/// Issue #129: Codex trusts project hooks at the exact path it was started
+/// in, so a session resumed under another path for the same directory runs
+/// none of them. The install names the resolved root to start Codex in.
+#[cfg(unix)]
+#[test]
+fn codex_hook_install_names_the_resolved_root_to_start_codex_in() {
+    let base = std::env::temp_dir().join(format!("ls-codex-root-{}", std::process::id()));
+    std::fs::create_dir_all(base.join("real")).unwrap();
+    std::os::unix::fs::symlink(base.join("real"), base.join("link")).unwrap();
+    let resolved = std::fs::canonicalize(base.join("real")).unwrap();
+    let run = |vendor: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_langspan"))
+            .args(["hooks", "install", vendor, "--workspace", "demo"])
+            .args(["--root", base.join("link").to_str().unwrap()])
+            .args(["--state-dir", base.join("state").to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let text = run("codex");
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("Codex: "))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        line.contains(&format!("'{}'", resolved.display())),
+        "{line}"
+    );
+    assert!(line.contains("resume"), "{line}");
+    assert!(
+        !run("claude-code").contains("Codex: "),
+        "only Codex keys trust to the path"
+    );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
 #[test]
 fn hook_install_is_a_dry_run_unless_applied_and_remove_restores_settings() {
     let base = std::env::temp_dir().join(format!("ls-install-{}", std::process::id()));

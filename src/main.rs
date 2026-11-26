@@ -20,8 +20,24 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  is refused without --allow-network; from a phone, use
                                  an SSH tunnel or a VPN to this machine instead
   workspace add ID ROOT          Register a physical workspace
+  workspace list [--after ID]    Every workspace: root and whether it exists, current
+                                 sessions, notes, pending messages, check records,
+                                 automatic check and remote sharing; a page at a
+                                 time, in ID order, naming the next page's command
+  workspace move ID NEW_ROOT [--switch] --request-id ID
+                                 Rebind a workspace to a checkout you moved (the old
+                                 root is gone), or with --switch to another checkout of
+                                 the same repository. Notes, messages, checks,
+                                 landings and settings are kept. Prints the project
+                                 hook installs to rerun; edits no host configuration
+  workspace remove ID [--apply] [--request-id ID]
+                                 Dry run: what would end. With --apply, take the
+                                 workspace out of status, recap, briefings and the
+                                 dashboard; its events stay. Refused while a session
+                                 holds an admission there, a landing holds or waits
+                                 for its push turn, or remote sharing is on
   session start ID WORKSPACE      Register or reattach a logical session
-  session attach-pid SESSION PID  Observe an owned process incarnation (Linux)
+  session attach-pid SESSION PID  Observe an owned process incarnation (Linux, macOS)
   intent set SESSION PATH...     Declare work; optional --summary TEXT
   intent end SESSION             End a work intention
   admit SESSION PATH...          Request a whole file set; --ttl-ms defaults to 5000
@@ -92,7 +108,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  scan, and other languages by extension
   recap WORKSPACE               A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
-                                 messages not yet acknowledged
+                                 messages not yet acknowledged, then withdrawn ones
   today [WORKSPACE] [--since RFC3339]
                                  What each session did since local midnight (or the
                                  time given), refusals by kind, checks, landings, and
@@ -124,6 +140,17 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   handoff SESSION TEXT [PATH...] Leave one line for the next other session that starts
                                  or is prompted in SESSION's workspace
   ack SESSION MESSAGE            Mark a message seen so it is not delivered again
+  messages show WORKSPACE MESSAGE
+                                 One message in full, as it was sent, also after it
+                                 was acknowledged: what a briefing line marked
+                                 "(cut; ...)" left out. Read-only
+  messages retract WORKSPACE MESSAGE|last [--from SESSION]
+                                 Withdraw a message or handoff: copies not yet
+                                 delivered are removed, and each session that received
+                                 it is told once, at its next briefing, to disregard
+                                 it. `last` is the sender's newest message. Without
+                                 --from it is the owner, who may withdraw any message;
+                                 a session may withdraw only its own
   doctor [--root DIR] [--home DIR]
                                  Say what is and is not working: coordinator, scans,
                                  index, publication, the hooks installed in DIR, and
@@ -154,6 +181,15 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  session's, no session's or not known; at most 200
                                  files. What commit --mine would commit and refuse;
                                  changes nothing. Session found as for commit --mine
+  notify on|off|status [--sound on|off]
+                                 Desktop notices for the person (off by default): a
+                                 refusal, a failed automatic check, a handoff not taken
+                                 up for 10 minutes. Shown by osascript (macOS) or
+                                 notify-send, at most one of a kind per 5 minutes and
+                                 10 an hour; workspace, session and paths only, at most
+                                 200 bytes. Sound off unless --sound on. Kept as notify
+                                 and notify_sound in config.json; status names the
+                                 notifier found on this PATH, or says none was
   statusline [--root DIR] [--deadline-ms N]
                                  One line for the person: current sessions of this
                                  repository and refusals since local midnight, as
@@ -169,9 +205,9 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   request JSON                   Send a complete version 3 request envelope
   hook claude-code|codex|cursor|gemini-cli [--workspace ID --root DIR]
                                  PreToolUse/PostToolUse(Failure) adapter for Edit,
-                                 Write, MultiEdit, NotebookEdit, Read and Bash
+                                 Write, MultiEdit, NotebookEdit, Read, Grep and Bash
                                  (Codex: apply_patch and Bash; Cursor: Write, Delete,
-                                 Shell and Read; Gemini CLI: BeforeTool and AfterTool
+                                 Shell, Read and Grep; Gemini CLI: BeforeTool and AfterTool
                                  for write_file, replace, read_file and
                                  run_shell_command. Cursor and Gemini CLI are built
                                  from documentation and not yet verified on a real
@@ -190,10 +226,16 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  mentions that the source index defines are listed
                                  with their files and signatures (matched by name;
                                  the prompt is used for that local lookup only and
-                                 is not stored); --code-briefing off turns this off
+                                 is not stored); --code-briefing off turns this off.
+                                 Reads, a search's path and the files a shell command
+                                 reads are shown to peers as where the session is
+                                 looking (never a pattern or command text);
+                                 --presence off stops that, --presence-minutes N
+                                 (1-30, default 10) is how old a peer's is shown
   hooks install claude-code|codex|cursor|gemini-cli --workspace ID --root DIR
                                  [--settings FILE] [--prompt-summary off]
-                                 [--code-briefing off] [--skill] [--apply]
+                                 [--code-briefing off] [--presence off]
+                                 [--presence-minutes N] [--skill] [--apply]
   hooks remove claude-code|codex|cursor|gemini-cli --root DIR [--settings FILE] [--apply]
                                  Show (default) or apply the change to project Claude
                                  settings, Codex hooks, Cursor's .cursor/hooks.json and
@@ -203,7 +245,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  the project rule .cursor/rules/langspan.mdc, which
                                  hooks remove cursor removes
   install [--home DIR] [--hosts claude-code,codex,cursor,gemini-cli] [--prompt-summary off]
-          [--skill] [--statusline on|off] [--apply]
+          [--presence off] [--presence-minutes N] [--skill] [--statusline on|off] [--apply]
                                  Install the hooks once for every repository, in each
                                  host's user configuration, and register `langspan mcp`
                                  as the MCP server `langspan`. Hosts default to those
@@ -307,6 +349,7 @@ fn hook(input: Vec<String>) -> ExitCode {
                     );
                 }
             };
+        let presence = presence(&mut options)?;
         let config = langspan::claude_code::Config {
             state_dir: state_dir(&mut options)?,
             workspace_id,
@@ -317,6 +360,8 @@ fn hook(input: Vec<String>) -> ExitCode {
             budget: std::time::Duration::from_millis(number(&mut options, "--budget-ms", 1500)?),
             share_prompt: switch(&mut options, "--prompt-summary")?,
             code_briefing: switch(&mut options, "--code-briefing")?,
+            presence: presence.shown,
+            presence_window_ms: presence.window_ms(),
         };
         no_unused_options(&options)?;
         if !(1..=60_000).contains(&config.ttl_ms)
@@ -429,6 +474,7 @@ fn hooks(
             root: root.clone(),
             share_prompt: switch(options, "--prompt-summary")?,
             code_briefing: switch(options, "--code-briefing")?,
+            presence: presence(options)?,
         })
     } else {
         None
@@ -544,6 +590,15 @@ fn hooks(
     if vendor == install::Vendor::Cursor && install {
         println!(
             "Cursor: built from documentation, not yet verified on a real Cursor (ADR 0032). Cursor runs project hooks only in a trusted workspace. These files hold paths on this machine; Cursor's project files are often committed, so keep LangSpan's entries out of a commit."
+        );
+    }
+    if vendor == install::Vendor::Codex && install {
+        // Codex trusts project hooks by the exact path of their file: a
+        // session resumed under another path for the same directory runs
+        // none of them (issue #129).
+        println!(
+            "Codex: start and resume Codex in '{}', the resolved root with no symbolic links. Codex trusts a project's hooks only at the exact path they were trusted at, so a session started or resumed under another path for the same directory (a symbolic link, or /tmp for /private/tmp on macOS) runs none of LangSpan's hooks, without a warning.",
+            root.display()
         );
     }
     if vendor == install::Vendor::Gemini && install {
@@ -714,6 +769,7 @@ fn user_install(
     let home = UserHome::new(options.remove("--home").map(PathBuf::from))?;
     let state_dir = std::path::absolute(home.state_dir(options.remove("--state-dir")))?;
     let share_prompt = switch(options, "--prompt-summary")?;
+    let presence = presence(options)?;
     let hosts = options.remove("--hosts");
     let with_skill = options.remove("--skill").is_some();
     if with_skill && !install {
@@ -782,6 +838,7 @@ fn user_install(
         executable: executable.clone(),
         state_dir: state_dir.clone(),
         share_prompt,
+        presence,
     });
     let server = install.then(|| user_install::McpServer {
         executable: executable.clone(),
@@ -1360,6 +1417,53 @@ fn status_line(
         println!("{}", answer.json());
     } else {
         println!("{}", answer.text());
+    }
+    Ok(0)
+}
+
+/// `notify on|off|status [--sound on|off]`: desktop notices (H3). Writes
+/// only `notify` and `notify_sound` in `config.json`; the daemon reads them
+/// at each notice.
+fn notify(
+    state_dir: &std::path::Path,
+    action: &str,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    use langspan::notify;
+    let sound = match options.remove("--sound").as_deref() {
+        None => None,
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        Some(other) => return Err(format!("--sound takes on or off, not {other:?}").into()),
+    };
+    no_unused_options(options)?;
+    let (on, sound) = match (action, sound) {
+        ("on" | "off", sound) => notify::configure(state_dir, action == "on", sound)?,
+        ("status", None) => notify::configured(state_dir)?,
+        ("status", Some(_)) => {
+            return Err("--sound is valid with `notify on` and `notify off`".into());
+        }
+        _ => return Err(format!("notify takes on, off or status, not {action:?}").into()),
+    };
+    let found = notify::find(std::env::var_os("PATH").as_deref());
+    let program = notify::Program::here().name();
+    if json {
+        let notifier = found.as_ref().map(|(program, path)| {
+            serde_json::json!({"name": program.name(), "path": path.to_string_lossy()})
+        });
+        println!(
+            "{}",
+            serde_json::json!({"notify": on, "notify_sound": sound, "notifier": notifier})
+        );
+        return Ok(0);
+    }
+    let word = |on: bool| if on { "on" } else { "off" };
+    println!("notices: {}", word(on));
+    println!("sound: {}", word(sound));
+    match &found {
+        Some((program, path)) => println!("notifier: {} ({})", program.name(), path.display()),
+        None => println!("notifier: none found (no {program} on PATH); no notice can be shown"),
     }
     Ok(0)
 }
@@ -2908,6 +3012,19 @@ fn switch(options: &mut BTreeMap<String, String>, name: &str) -> Result<bool, la
     }
 }
 
+/// `--presence on|off` and `--presence-minutes N` (roadmap A13).
+fn presence(
+    options: &mut BTreeMap<String, String>,
+) -> Result<langspan::install::Presence, langspan::Error> {
+    Ok(langspan::install::Presence {
+        shown: switch(options, "--presence")?,
+        minutes: match options.remove("--presence-minutes") {
+            Some(value) => langspan::install::Presence::minutes(&value)?,
+            None => None,
+        },
+    })
+}
+
 fn number(
     options: &mut BTreeMap<String, String>,
     name: &str,
@@ -3002,6 +3119,9 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             );
         }
         ["statusline"] => return status_line(&state_dir, &mut options, json),
+        ["notify", action] if command.is_empty() => {
+            return notify(&state_dir, action, &mut options, json);
+        }
         ["commit"] => return commit_mine(&state_dir, &mut options, json),
         ["status"] if options.remove("--mine").is_some() => {
             return status_mine(&state_dir, &mut options, json);
@@ -3027,9 +3147,10 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     {
         return hooks(vendor, *action == "install", state_dir, &mut options, apply);
     }
-    if apply {
+    let removes_workspace = matches!(words.as_slice(), ["workspace", "remove", _]);
+    if apply && !removes_workspace {
         return Err(
-            "--apply is valid only for `install`, `uninstall`, `hooks install|remove` and `land`"
+            "--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land` and `workspace remove`"
                 .into(),
         );
     }
@@ -3086,6 +3207,19 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             ["workspace", "add", id, root] => Command::WorkspaceRegister {
                 workspace_id: (*id).into(),
                 root: (*root).into(),
+            },
+            ["workspace", "list"] => Command::WorkspaceList {
+                after: options.remove("--after"),
+            },
+            ["workspace", "move", id, root] => Command::WorkspaceMove {
+                workspace_id: (*id).into(),
+                // The daemon runs elsewhere: a relative root is this shell's.
+                root: std::path::absolute(root)?.to_string_lossy().into_owned(),
+                switch: options.remove("--switch").is_some(),
+            },
+            ["workspace", "remove", id] => Command::WorkspaceRemove {
+                workspace_id: (*id).into(),
+                apply,
             },
             ["session", "start", id, workspace] => Command::SessionRegister {
                 session_id: (*id).into(),
@@ -3241,6 +3375,15 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 session_id: (*session).into(),
                 message_id: (*message).into(),
             },
+            ["messages", "show", workspace, message] => Command::ShowMessage {
+                workspace_id: (*workspace).into(),
+                message_id: (*message).into(),
+            },
+            ["messages", "retract", workspace, message] => Command::RetractMessage {
+                workspace_id: (*workspace).into(),
+                from: options.remove("--from"),
+                message_id: (*message != "last").then(|| (*message).into()),
+            },
             ["status"] if options.remove("--all").is_some() => Command::StatusRecords {
                 after: options.remove("--after"),
                 page_bytes: None,
@@ -3281,8 +3424,11 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphImpact { .. }
                 | Command::GraphBlindSpots { .. }
                 | Command::Recap { .. }
+                | Command::ShowMessage { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
+                | Command::WorkspaceList { .. }
+                | Command::WorkspaceRemove { apply: false, .. }
         ) {
             options
                 .remove("--request-id")
@@ -3322,6 +3468,14 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         println!("{}", serde_json::to_string(&response)?);
     } else {
         print_human(&response, &state_dir)?;
+        if let Outcome::WorkspaceMoved {
+            workspace,
+            from_root,
+            ..
+        } = &response.outcome
+        {
+            print_project_hook_reruns(&state_dir, workspace, from_root);
+        }
     }
     Ok(match response.outcome {
         Outcome::Error { .. } => 1,
@@ -3373,6 +3527,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--all"
             | "--skill"
             | "--create"
+            | "--switch"
             | "--off" => {
                 if options.insert(arg.clone(), String::new()).is_some() {
                     return Err(format!("duplicate option {arg}").into());
@@ -3380,11 +3535,11 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             }
             "--state-dir" | "--request-id" | "--summary" | "--ttl-ms" | "--after" | "--limit"
             | "--workspace" | "--root" | "--budget-ms" | "--settings" | "--prompt-summary"
-            | "--code-briefing" | "--max-peers" | "--remote" | "--name" | "--share-task"
-            | "--onto" | "--timeout-s" | "--wait-s" | "--session" | "--to" | "--from"
-            | "--home" | "--hosts" | "--listen" | "-m" | "--message" | "--statusline"
-            | "--deadline-ms" | "--forget" | "--since" | "--depth" | "--path" | "--format"
-            | "--file" => {
+            | "--code-briefing" | "--presence" | "--presence-minutes" | "--max-peers"
+            | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s" | "--wait-s"
+            | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen" | "-m"
+            | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
+            | "--sound" | "--depth" | "--path" | "--format" | "--file" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -3459,6 +3614,62 @@ fn print_symbol_detail(symbol: &langspan_core::SymbolRef) {
     }
 }
 
+/// After `workspace move`: the hosts whose project-level hooks, in the new
+/// checkout or the old one, still name the old root for this workspace and
+/// state directory, with the command that installs them for the new root.
+/// Host configuration is never edited here. User-level hooks need nothing:
+/// they adopt the moved ID from the new root on their next event.
+fn print_project_hook_reruns(
+    state_dir: &std::path::Path,
+    workspace: &langspan_core::Workspace,
+    from_root: &str,
+) {
+    use langspan::install::{self, Vendor};
+    let canonical =
+        |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let state = canonical(state_dir);
+    let dirs = [
+        std::path::Path::new(&workspace.root),
+        std::path::Path::new(from_root),
+    ];
+    let hosts: Vec<Vendor> = Vendor::ALL
+        .into_iter()
+        .filter(|vendor| {
+            dirs.iter()
+                .flat_map(|dir| {
+                    vendor
+                        .project_hook_files()
+                        .iter()
+                        .map(|file| dir.join(file))
+                })
+                .filter_map(|path| install::read(&path).ok().flatten())
+                .any(|settings| {
+                    install::managed_hooks(&settings, |_| true)
+                        .iter()
+                        .filter_map(|hook| install::parse_project_hook(*vendor, hook))
+                        .any(|registration| {
+                            registration.workspace_id == workspace.workspace_id
+                                && canonical(&registration.state_dir) == state
+                                && registration.root != std::path::Path::new(&workspace.root)
+                        })
+                })
+        })
+        .collect();
+    if hosts.is_empty() {
+        return;
+    }
+    println!("Project hooks name the old root; rerun:");
+    for vendor in hosts {
+        println!(
+            "  langspan hooks install {} --workspace {} --root {} --state-dir {} --apply",
+            vendor.name(),
+            install::quote(&workspace.workspace_id),
+            install::quote(&workspace.root),
+            install::quote(&state.to_string_lossy()),
+        );
+    }
+}
+
 fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), langspan::Error> {
     if response.replayed {
         println!(
@@ -3471,6 +3682,85 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             "Workspace {} registered at {:?}.",
             workspace.workspace_id, workspace.root
         ),
+        Outcome::Workspaces { workspaces, next } => {
+            if workspaces.is_empty() {
+                println!("No workspaces are registered.");
+            }
+            for workspace in workspaces {
+                let mut extras = Vec::new();
+                if workspace.auto_check {
+                    extras.push(", automatic check on");
+                }
+                if workspace.remote_sharing {
+                    extras.push(", remote sharing on");
+                }
+                println!(
+                    "{} {:?}{}: {} current sessions, {} notes, {} pending messages, {} check records{}",
+                    workspace.workspace_id,
+                    workspace.root,
+                    if workspace.root_exists {
+                        ""
+                    } else {
+                        " (root missing)"
+                    },
+                    workspace.sessions_current,
+                    workspace.notes,
+                    workspace.messages_pending,
+                    workspace.checks,
+                    extras.concat()
+                );
+            }
+            if let Some(next) = next {
+                println!("More: langspan workspace list --after {next}");
+            }
+        }
+        Outcome::WorkspaceMoved {
+            workspace, kept, ..
+        } => println!(
+            "Workspace {} now at {}. Kept: {} notes, {} pending messages, {} check records, {} landings.",
+            workspace.workspace_id,
+            workspace.root,
+            kept.notes,
+            kept.messages_pending,
+            kept.checks,
+            kept.landings
+        ),
+        Outcome::WorkspaceRemoval {
+            workspace_id,
+            applied,
+            ending,
+        } => {
+            let mut sessions = ending.sessions.join(", ");
+            if ending.more_sessions > 0 {
+                sessions.push_str(&format!(" and {} more", ending.more_sessions));
+            }
+            let check = ending
+                .auto_check
+                .as_ref()
+                .map(|name| format!(", the automatic check {name:?}"))
+                .unwrap_or_default();
+            let ends = format!(
+                "{} sessions{}, {} intents, {} notes, {} pending messages{check}",
+                ending.sessions.len() + ending.more_sessions as usize,
+                if sessions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({sessions})")
+                },
+                ending.intents,
+                ending.notes,
+                ending.messages_pending,
+            );
+            if *applied {
+                println!(
+                    "Workspace {workspace_id} removed. Ended: {ends}. Its history stays in `langspan events`."
+                );
+            } else {
+                println!(
+                    "Dry run, nothing changed. Removing workspace {workspace_id} would end: {ends}. Its history would stay in `langspan events`. Add --apply to remove it."
+                );
+            }
+        }
         Outcome::Session { session } => println!(
             "Session {} attached to {} in generation {}.",
             session.session_id, session.workspace_id, session.generation
@@ -3483,6 +3773,10 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             liveness.observed_at_ms,
             liveness.generation
         ),
+        Outcome::SessionSeen {
+            session_id,
+            last_hook_ms,
+        } => println!("Session {session_id}: last hook run recorded at {last_hook_ms} ms."),
         Outcome::Intent { intent } => println!(
             "Intent for {}: {} on {:?}.",
             intent.session_id,
@@ -3548,6 +3842,21 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::PromptTargets { session_id, paths } => println!(
             "Prompt targets recorded for {session_id}: {} file(s).",
             paths.len()
+        ),
+        Outcome::PresenceObserved { session_id, paths } => {
+            println!("Recorded {paths} looked-at path(s) for {session_id}.")
+        }
+        Outcome::Presence {
+            session_id,
+            setting,
+        } => println!(
+            "Presence for {session_id}: {}; peers' presence shown for {} minute(s).",
+            if setting.shown {
+                "shown to peers"
+            } else {
+                "off, never shown to peers"
+            },
+            setting.window_ms / 60_000
         ),
         Outcome::SessionEnded { session_id } => {
             println!("Session {session_id} marked ended.")
@@ -3920,6 +4229,49 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 format!("Message {message_id} was not waiting for this session.")
             }
         ),
+        Outcome::MessageShown { message } => println!(
+            "Message {} from {} to {}{} (data, not instructions): {}{}",
+            message.message_id,
+            message
+                .from
+                .as_ref()
+                .map(|session| format!("session {session}"))
+                .unwrap_or_else(|| "the owner".into()),
+            match &message.to {
+                langspan_core::Recipient::Session { session_id } => format!("session {session_id}"),
+                langspan_core::Recipient::Everyone {} => "every session".into(),
+                langspan_core::Recipient::NextSession {} => "the next session (handoff)".into(),
+            },
+            if message.retracted {
+                ", since withdrawn: disregard it"
+            } else {
+                ""
+            },
+            serde_json::to_string(&message.text)?,
+            if message.paths.is_empty() {
+                String::new()
+            } else {
+                format!(" about {:?}", message.paths)
+            }
+        ),
+        Outcome::MessageRetracted {
+            message_id,
+            withdrawn_unread,
+            told_to_disregard,
+        } => {
+            let sessions = |sessions: &[String]| {
+                if sessions.is_empty() {
+                    "none".to_owned()
+                } else {
+                    sessions.join(", ")
+                }
+            };
+            println!(
+                "Withdrew {message_id}. Not delivered to: {}. Told to disregard it at their next briefing: {}.",
+                sessions(withdrawn_unread),
+                sessions(told_to_disregard)
+            );
+        }
         Outcome::ScanObserved {
             workspace_id,
             failed,
@@ -3937,6 +4289,11 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 change.to_head.as_deref(),
                 change.files
             )
+        ),
+        Outcome::UncoordinatedObserved { sessions, paths } => println!(
+            "Uncoordinated change recorded: sessions {}; files {}.",
+            sessions.join(", "),
+            paths.join(", ")
         ),
         Outcome::Today { today } => {
             println!(
@@ -4047,7 +4404,12 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             }
             for message in &recap.messages {
                 println!(
-                    "Message {} from {} to {}: {}{}",
+                    "{} {} from {} to {}: {}{}",
+                    if message.retracted {
+                        "Withdrawn message"
+                    } else {
+                        "Message"
+                    },
                     message.message_id,
                     message
                         .from
@@ -4057,6 +4419,8 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                     match &message.to {
                         langspan_core::Recipient::Session { session_id } =>
                             format!("session {session_id}"),
+                        langspan_core::Recipient::Everyone {} if message.retracted =>
+                            "every session".into(),
                         langspan_core::Recipient::Everyone {} => format!(
                             "every session ({} acknowledged so far)",
                             message.acknowledged.len()
@@ -4161,6 +4525,13 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                     None => {
                         println!("  Process liveness: unknown; registration is not a heartbeat.")
                     }
+                }
+                match summary
+                    .as_ref()
+                    .and_then(|summary| summary.last_hook_age_ms.get(&session.session_id))
+                {
+                    Some(age) => println!("  Last hook run: {} s ago.", age / 1000),
+                    None => println!("  Last hook run: none recorded in this generation."),
                 }
             }
             for intent in state.intents.values() {
