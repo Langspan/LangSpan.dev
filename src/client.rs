@@ -40,7 +40,9 @@ mod unix {
         // same request in the version it names cannot take effect twice.
         // Requests are the same in every version it answers, except the one
         // version 6 changed (`protocol::fits`), which is not sent at all to
-        // a daemon of version 5 or earlier.
+        // a daemon of version 5 or earlier, and a briefing of changes only,
+        // asked of an earlier daemon as the full view
+        // (`protocol::for_version`).
         if request.version == PROTOCOL_VERSION
             && (OLDEST_PROTOCOL_VERSION..PROTOCOL_VERSION).contains(&response.version)
             && matches!(&response.outcome, Outcome::Error { code, .. } if code == "unsupported_version")
@@ -49,6 +51,7 @@ mod unix {
                 return Err(crate::protocol::older_daemon(response.version).into());
             }
             request.version = response.version;
+            crate::protocol::for_version(response.version, &mut request.command);
             response = exchange(state_dir, &request, deadline)?;
         }
         if response.version != request.version {
@@ -420,7 +423,17 @@ mod unix {
             let request = crate::protocol::Request {
                 version: crate::protocol::PROTOCOL_VERSION,
                 request_id: "read".into(),
-                command: langspan_core::Command::Dashboard,
+                command: langspan_core::Command::Brief {
+                    session_id: "s".into(),
+                    max_peers: 8,
+                    deliver: true,
+                    mid_turn: false,
+                    left: Vec::new(),
+                    recent: false,
+                    recent_window_ms: None,
+                    mcp: false,
+                    changes_only: true,
+                },
             };
             let response = call(&dir, &request).unwrap();
             let asked = peer.join().unwrap();
@@ -435,7 +448,13 @@ mod unix {
                     serde_json::json!(version)
                 ]
             );
-            assert_eq!(asked[0]["command"], asked[1]["command"]);
+            // The same request, except that a briefing of changes only,
+            // which an earlier daemon cannot read, is asked for as the full
+            // view (review follow-up #259).
+            assert_eq!(asked[0]["command"]["changes_only"], true);
+            let mut full = asked[0]["command"].clone();
+            full.as_object_mut().unwrap().shift_remove("changes_only");
+            assert_eq!(full, asked[1]["command"]);
             assert_eq!(asked[1]["request_id"], "read");
             assert_eq!(response.version, version);
             assert!(

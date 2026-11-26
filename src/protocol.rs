@@ -16,8 +16,9 @@ use std::io::{self, BufRead, BufReader, Read};
 /// H9's `refusal_outcomes` in a report's counts and issue #214's
 /// `interface_notice_ids` in a briefing. Version 4 is version 3 with
 /// roadmap D7's rename fields in interface changes, history entries and
-/// in-flight symbols. Apart from recording a rebased or adapted landing,
-/// requests of an earlier version are requests of this one.
+/// in-flight symbols. Apart from recording a rebased or adapted landing
+/// (`fits`) and a briefing of changes only (`for_version`), requests of an
+/// earlier version are requests of this one.
 pub const PROTOCOL_VERSION: u16 = 7;
 /// Roadmap F5's version, answered in its own shape.
 pub const PROTOCOL_VERSION_6: u16 = 6;
@@ -143,6 +144,18 @@ pub fn fits(version: u16, command: &Command) -> bool {
             rebased, adapted, ..
         } => version >= REWRITES_SINCE || (rebased.is_empty() && adapted.is_empty()),
         _ => true,
+    }
+}
+
+/// `command` as a daemon answering `version` reads it. A briefing of
+/// changes only (issue #222) is new in version 7, and an earlier daemon
+/// refuses the field as unknown: it is asked for the full view instead,
+/// which is all that daemon gives.
+pub fn for_version(version: u16, command: &mut Command) {
+    if version < PROTOCOL_VERSION
+        && let Command::Brief { changes_only, .. } = command
+    {
+        *changes_only = false;
     }
 }
 
