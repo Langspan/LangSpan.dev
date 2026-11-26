@@ -24,7 +24,8 @@
 #
 # Every Codex run uses `-s workspace-write` and the `exec` default approval
 # policy, under which Codex never asks and a refused command fails. Raw events
-# go to DIR/capture (0600), `langspan status` after each turn to DIR/*.json,
+# go to DIR/capture (0600), `codex --version` to DIR/codex-version.txt,
+# `langspan status` after each turn to DIR/*.json,
 # and every coordinator event this run recorded, from its first, to
 # DIR/events.txt. They contain local paths and model text: clean them before
 # committing them under fixtures/codex-<version>/.
@@ -84,6 +85,8 @@ RUN=$(basename "$REPO" | tr -c 'A-Za-z0-9\n' '-')
 WORKSPACE="capture-$RUN"
 mkdir -p "$CAPTURE"
 chmod 700 "$CAPTURE"
+# The hook events do not say which Codex sent them; the fixtures are named for it.
+codex --version > "$DIR/codex-version.txt" || echo "codex --version failed; record the version by hand" >&2
 
 git -C "$REPO" init --quiet -b main
 printf 'alpha\nbeta\n' > "$REPO/notes.txt"
@@ -142,6 +145,6 @@ turn -s workspace-write -C "$REPO" "Use apply_patch to change the line 'alpha' i
 snap status status-after-turn-3
 events_after "$START" "$DIR/events.txt" >/dev/null || echo "langspan events failed; $DIR/events.txt holds the pages read before it"
 
-chmod 600 "$CAPTURE"/* "$DIR"/*.json "$DIR/events.txt" 2>/dev/null || true
+chmod 600 "$CAPTURE"/* "$DIR"/*.json "$DIR/events.txt" "$DIR/codex-version.txt" 2>/dev/null || true
 echo "== $(find "$CAPTURE" -type f | wc -l | tr -d ' ') event(s) in $CAPTURE"
 echo "Clean them (home paths, transcript_path, model text beyond the prompts) before committing them under fixtures/codex-<version>/."
