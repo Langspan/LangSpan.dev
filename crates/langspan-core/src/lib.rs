@@ -1328,6 +1328,22 @@ pub struct Landing {
     pub inputs: Vec<String>,
     /// The passing check on exactly `tree_oid` that the landing relied on.
     pub check_id: String,
+    /// With a rebase landing: each branch commit and the commit that
+    /// replays it onto the target, oldest first (roadmap F5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rebased: Vec<Rewritten>,
+    /// With `--adapt-renames`: the commits LangSpan added on top of a
+    /// branch to use the target's new names (roadmap F5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adapted: Vec<String>,
+}
+
+/// A branch commit and the commit a rebase landing made from it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Rewritten {
+    pub from: String,
+    pub to: String,
 }
 
 /// The right to push to one target branch of one workspace's remote. One
@@ -2622,6 +2638,8 @@ pub const MAX_LANDINGS: usize = 32;
 pub const MAX_TURN_TTL_MS: u64 = 4 * 60 * 60 * 1000;
 /// Tries at landing within one turn, when the target keeps moving.
 pub const MAX_LANDING_ATTEMPTS: usize = 3;
+/// Commits one landing may rebase, and adapt, at most (roadmap F5).
+pub const MAX_REWRITTEN: usize = 64;
 /// Landings waiting for one target's push turn, at most.
 pub const MAX_TURN_QUEUE: usize = 8;
 /// The longest a landing may wait for the push turn.
@@ -2926,7 +2944,7 @@ pub const CODEX_HOST: &str = "codex";
 /// The host names that start the other hooked hosts' session IDs.
 pub const CLAUDE_CODE_HOST: &str = "claude-code";
 pub const CURSOR_HOST: &str = "cursor";
-pub const GEMINI_HOST: &str = "gemini";
+pub const ANTIGRAVITY_HOST: &str = "antigravity";
 /// The tool name of a shell call on every host, as the hooks record it.
 pub const SHELL_TOOL: &str = "Bash";
 
@@ -3809,6 +3827,10 @@ pub enum Command {
         tree_oid: String,
         inputs: Vec<String>,
         check_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rebased: Vec<Rewritten>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        adapted: Vec<String>,
     },
     /// Take the push turn for `onto`, or be told who holds it. With
     /// `queue`, wait in line for it instead.
@@ -4636,6 +4658,10 @@ enum CommandWire {
         tree_oid: String,
         inputs: Vec<String>,
         check_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rebased: Vec<Rewritten>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        adapted: Vec<String>,
     },
     /// Take the push turn for `onto`, or be told who holds it. With
     /// `queue`, wait in line for it instead.
@@ -7129,6 +7155,8 @@ fn decide_checked(
             tree_oid,
             inputs,
             check_id,
+            rebased,
+            adapted,
         } => {
             let landing = Landing {
                 landing_id: request_id.into(),
@@ -7138,6 +7166,8 @@ fn decide_checked(
                 tree_oid: tree_oid.clone(),
                 inputs: inputs.clone(),
                 check_id: check_id.clone(),
+                rebased: rebased.clone(),
+                adapted: adapted.clone(),
             };
             validate_landing(state, &landing)?;
             Ok(Decision {
@@ -8932,6 +8962,20 @@ fn validate_landing(state: &State, landing: &Landing) -> Result<(), CoreError> {
     validate_oid(&landing.commit_oid)?;
     validate_oid(&landing.tree_oid)?;
     validate_inputs(&landing.inputs)?;
+    if landing.rebased.len() > MAX_REWRITTEN || landing.adapted.len() > MAX_REWRITTEN {
+        return Err(error(
+            "invalid_landing",
+            "A landing records at most 64 rebased and 64 adapted commits",
+        ));
+    }
+    for oid in landing
+        .rebased
+        .iter()
+        .flat_map(|rewritten| [&rewritten.from, &rewritten.to])
+        .chain(&landing.adapted)
+    {
+        validate_oid(oid)?;
+    }
     validate_request_id(&landing.check_id)?;
     validate_branch_name(&landing.onto)?;
     // A landing is recorded only on the evidence the core itself holds.
@@ -13500,7 +13544,7 @@ fn validate_branch_observation(
 }
 
 /// A host's command-line name: lower-case letters and hyphens, as the
-/// adapters name them (`claude-code`, `gemini-cli`).
+/// adapters name them (`claude-code`, `antigravity`).
 fn validate_host_name(host: &str) -> Result<(), CoreError> {
     if host.is_empty()
         || host.len() > 32

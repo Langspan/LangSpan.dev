@@ -142,13 +142,11 @@ impl Fixture {
         Run {
             coverage: diagnostic["coverage"].as_str().unwrap().into(),
             detail: diagnostic["detail"].as_str().unwrap_or_default().into(),
-            // Each host's own denial field: Claude Code and Codex, Cursor,
-            // Gemini CLI.
+            // Each host's own denial field: Claude Code and Codex, Cursor.
             reason: reply.and_then(|reply| {
                 [
                     &reply["hookSpecificOutput"]["permissionDecisionReason"],
                     &reply["agent_message"],
-                    &reply["reason"],
                 ]
                 .into_iter()
                 .find_map(|value| value.as_str().map(str::to_owned))
@@ -168,11 +166,6 @@ impl Fixture {
                 "hook_event_name": "preToolUse", "cursor_version": "1.7.2",
                 "workspace_roots": [work], "tool_name": "Shell", "tool_use_id": call,
                 "tool_input": {"command": command, "cwd": work}, "cwd": work,
-            }),
-            "gemini-cli" => json!({
-                "session_id": session, "cwd": work, "hook_event_name": "BeforeTool",
-                "timestamp": "2026-11-24T23:15:04.000Z", "tool_name": "run_shell_command",
-                "tool_input": {"command": command, "description": "test command"},
             }),
             "codex" => json!({
                 "session_id": session, "turn_id": "turn", "cwd": work,
@@ -198,10 +191,6 @@ impl Fixture {
         assert!(status.success(), "{command}");
         match vendor {
             "cursor" => event["hook_event_name"] = json!("postToolUse"),
-            "gemini-cli" => {
-                event["hook_event_name"] = json!("AfterTool");
-                event["tool_response"] = json!({"llmContent": "", "returnDisplay": ""});
-            }
             "codex" => {
                 event["hook_event_name"] = json!("PostToolUse");
                 event["tool_response"] = json!("");
@@ -238,25 +227,6 @@ impl Fixture {
         fs::write(self.path(), content).unwrap();
         event["hook_event_name"] = json!("postToolUse");
         assert_eq!(self.run("cursor", &event).coverage, "observed");
-        pre
-    }
-    /// A complete Gemini CLI `write_file` of the whole file, in its contract
-    /// event shape (`fixtures/gemini-cli-contract/before-write-file.json`).
-    fn gemini_write(&self, session: &str, content: &str) -> Run {
-        let mut event = json!({
-            "session_id": session, "cwd": self.base.join("work"),
-            "hook_event_name": "BeforeTool", "timestamp": "2026-11-24T23:15:03.000Z",
-            "tool_name": "write_file",
-            "tool_input": {"file_path": self.path(), "content": content},
-        });
-        let pre = self.run("gemini-cli", &event);
-        if pre.coverage != "admitted" {
-            return pre;
-        }
-        fs::write(self.path(), content).unwrap();
-        event["hook_event_name"] = json!("AfterTool");
-        event["tool_response"] = json!({"llmContent": "Successfully wrote the file."});
-        assert_eq!(self.run("gemini-cli", &event).coverage, "observed");
         pre
     }
     /// Every line journal entry under the state directory made `ms` older,
@@ -579,9 +549,8 @@ fn a_shell_overwrite_of_a_peers_fresh_line_is_refused_once_naming_the_writer() {
 }
 
 /// The other shell forms on the other hosts: `tee` (Cursor `Shell`) and
-/// `sed -i` (Gemini CLI `run_shell_command`) may change any line, so every
-/// recent line of the peer is named; a Claude Code `Bash` session is
-/// refused for `>` too.
+/// `sed -i` (Codex `Bash`) may change any line, so every recent line of the
+/// peer is named; a Claude Code `Bash` session is refused for `>` too.
 #[test]
 fn tee_and_sed_on_every_host_shell_are_refused_once_over_a_peers_fresh_lines() {
     let f = Fixture::new();
@@ -589,7 +558,7 @@ fn tee_and_sed_on_every_host_shell_are_refused_once_over_a_peers_fresh_lines() {
     assert_eq!(f.edit(ALICE, "line 5", "alice 5").coverage, "admitted");
     for (vendor, session, command) in [
         ("cursor", CAROL, "printf 'x\\n' | tee a.txt"),
-        ("gemini-cli", DAVE, "sed -i.bak 's/line 1/one/' a.txt"),
+        ("codex", BOB, "sed -i.bak 's/line 1/one/' a.txt"),
         ("claude-code", ERIN, "printf 'x\\n' > a.txt"),
     ] {
         let refused = f.shell(vendor, session, command);
@@ -632,28 +601,6 @@ fn a_cursor_write_that_keeps_a_peers_lines_and_appends_is_admitted() {
     let refused = f.cursor_write(DAVE, "dave's file\n");
     assert_eq!(refused.coverage, "denied_unread", "{refused:?}");
     assert!(refused.reason.unwrap().contains(&claude_session(ALICE)));
-}
-
-/// Gemini CLI `write_file` replacing another session's recent line is
-/// refused once, naming the writer and the line; the retry is admitted.
-#[test]
-fn a_gemini_write_file_over_a_peers_fresh_line_is_refused_once() {
-    let f = Fixture::new();
-    assert_eq!(f.edit(ALICE, "line 3", "alice 3").coverage, "admitted");
-    // Compared with the file as a `Write` is: keeping her line exactly and
-    // changing another, from a session that has not read it, is admitted.
-    let keeping = f.gemini_write(ERIN, &f.content().replace("line 6", "erin 6"));
-    assert_eq!(keeping.coverage, "admitted", "{keeping:?}");
-    let content = f.content().replace("alice 3", "gemini 3");
-    let refused = f.gemini_write(BOB, &content);
-    assert_eq!(refused.coverage, "denied_unread", "{refused:?}");
-    let reason = refused.reason.unwrap();
-    assert!(reason.contains(&claude_session(ALICE)), "{reason}");
-    assert!(reason.contains("\"a.txt\": line 3,"), "{reason}");
-    assert!(f.content().contains("alice 3"));
-    let retried = f.gemini_write(BOB, &content);
-    assert_eq!(retried.coverage, "admitted", "{retried:?}");
-    assert_eq!(f.content(), content);
 }
 
 #[test]

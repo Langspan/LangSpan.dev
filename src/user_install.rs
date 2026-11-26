@@ -1,10 +1,11 @@
 //! User-level installation: where each host keeps its user configuration,
 //! and LangSpan's MCP server entry in it.
 //!
-//! Hooks reuse the planning in `install`. The MCP entry is recognised by its
+//! Hooks reuse the planning in `install`. The MCP entry is recognized by its
 //! exact generated shape in JSON (Claude Code's `~/.claude.json`, whose
-//! tolerance of unknown keys is not documented, and Gemini CLI's
-//! `~/.gemini/settings.json`, which holds its hooks too) and by marker comments
+//! tolerance of unknown keys is not documented, Cursor's and Antigravity's
+//! MCP files, and the `~/.gemini/settings.json` of an earlier Gemini CLI
+//! install, which `uninstall` cleans) and by marker comments
 //! around a LangSpan-owned table in TOML (Codex's `config.toml`). Any other
 //! entry named `langspan` belongs to the user: install refuses rather than
 //! replace it, and uninstall leaves it alone.
@@ -30,7 +31,8 @@ pub struct HostFiles {
 /// Locate a host's user files under `home`. `override_dir` is the host's own
 /// relocation variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`)
 /// when the caller honours it; each host documents that it moves every user
-/// file. `GEMINI_CLI_HOME` names a home: the files are in its `.gemini`.
+/// file. `GEMINI_CLI_HOME` names a home: the files are in its `.gemini`. It
+/// is read only to remove an earlier Gemini CLI install.
 pub fn host_files(vendor: Vendor, home: &Path, override_dir: Option<PathBuf>) -> HostFiles {
     match vendor {
         Vendor::ClaudeCode => {
@@ -149,10 +151,9 @@ impl McpServer {
         })
     }
 
-    /// Gemini CLI's stdio entry: `command` and `args` (its configuration
-    /// reference, `mcpServers`). No `trust`, so its tool calls are confirmed
-    /// as Gemini's own settings say. Antigravity's entry has the same shape.
-    pub fn gemini_entry(&self) -> Value {
+    /// Antigravity's stdio entry: `command` and `args`
+    /// (<https://antigravity.google/docs/mcp/>).
+    pub fn antigravity_entry(&self) -> Value {
         json!({
             "command": self.executable.to_string_lossy(),
             "args": self.args(),
@@ -212,18 +213,15 @@ pub fn plan_claude(existing: Value, server: Option<&McpServer>) -> Result<Value,
     plan_json(Vendor::ClaudeCode, existing, server)
 }
 
-/// The same for Gemini CLI's user settings. An entry is recognised as
-/// LangSpan's by the same exact shape as Claude Code's.
+/// Gemini CLI's user settings with the MCP entry an earlier release wrote
+/// removed. Gemini CLI support is removed (issue #246), so nothing writes
+/// one; `server` must be `None`. The entry is recognized as LangSpan's by
+/// the same exact shape as Claude Code's.
 pub fn plan_gemini(existing: Value, server: Option<&McpServer>) -> Result<Value, String> {
-    if let Some(server) = server {
-        for path in [&server.executable, &server.state_dir] {
-            let text = path.to_string_lossy();
-            if text.contains('$') {
-                return Err(crate::install::unexpandable(&text));
-            }
-        }
+    if server.is_some() {
+        return Err(crate::install::GEMINI_REMOVED.into());
     }
-    plan_json(Vendor::Gemini, existing, server)
+    plan_json(Vendor::Gemini, existing, None)
 }
 
 /// The same for Antigravity's `mcp_config.json`, which holds only MCP
@@ -261,8 +259,8 @@ fn plan_json(vendor: Vendor, existing: Value, server: Option<&McpServer>) -> Res
             "`mcpServers.{SERVER_NAME}` exists and was not written by LangSpan; nothing was changed. Rename or remove that entry, then run this again"
         )),
         (Some(server), _) => {
-            let entry = if matches!(vendor, Vendor::Gemini | Vendor::Antigravity) {
-                server.gemini_entry()
+            let entry = if vendor == Vendor::Antigravity {
+                server.antigravity_entry()
             } else {
                 server.claude_entry()
             };

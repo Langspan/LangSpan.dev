@@ -5,8 +5,9 @@
 (source versions). Builds on the line journal of
 [ADR 0026](0026-commit-guard-and-commit-mine.md) and the edit placement of
 [ADR 0012](0012-region-admission.md). Tested with the real daemon and hook
-executables; not yet observed on a host. Shell writes on all four hosts and
-the whole-content writes of Cursor and Gemini CLI added 26 November 2026
+executables; not yet observed on a host. Shell writes on the Claude Code,
+Codex and Cursor shell tools and Cursor's whole-content `Write` added 26
+November 2026
 (issue #23).
 
 ## Context
@@ -36,9 +37,9 @@ same bytes as the admission's base version.
 | Tool | Changed lines found as |
 | --- | --- |
 | Claude Code `Edit`, `MultiEdit` | The replacements applied in memory as the host applies them, then the two versions compared line by line. A replacement must match exactly once, or every match with `replace_all`. The comparison is Myers' algorithm with the common head and tail cut first, within at most 256 edits, 4,000,000 line comparisons and 64 MiB of compared bytes; past any of these, the middle is one change. |
-| Claude Code `Write`, Cursor `Write`, Gemini CLI `write_file` | The new content compared with the file in the same way. Only lines that differ are changed, so a whole-file write that keeps another session's line exactly does not replace it. |
+| Claude Code `Write`, Cursor `Write` | The new content compared with the file in the same way. Only lines that differ are changed, so a whole-file write that keeps another session's line exactly does not replace it. |
 | Codex `apply_patch`, `Update File` | Each hunk placed as ADR 0012 places it (one match under its loose comparison). Its `-` lines are the changed lines. A hunk that matches only once its trailing empty lines are dropped (the host's retry) is not located. |
-| A shell write whose targets the parser names (`> path`, `>> path`, `tee path`, `sed -i path`), through the `Bash`, `Shell` and `run_shell_command` pre-tool hooks | Not located: the command may change any line of each target. |
+| A shell write whose targets the parser names (`> path`, `>> path`, `tee path`, `sed -i path`), through the `Bash` and `Shell` pre-tool hooks | Not located: the command may change any line of each target. |
 | Anything else (`NotebookEdit`, Codex add, delete or move), an edit that does not apply exactly, or a file over 1 MiB or not UTF-8 | Not located: the edit may change any line. |
 | Any edit, with less than half the hook budget left | Not looked up: no written lines are sent, so nothing is refused for them. |
 
@@ -150,9 +151,9 @@ explicitly:
 **Shell writes and whole-content hosts** (added 26 November 2026, issue
 #23). A shell command whose targets the parser names is admitted through the
 same path as an edit, with no stated edit, so each target may change any line
-and every recent line of another live session in it is named. This holds on
-all four hosts' shell tools, and is refused once as any edit is. Cursor
-`Write` and Gemini CLI `write_file` state their content as an edit, as Claude
+and every recent line of another live session in it is named. This is tested on
+the Claude Code, Codex and Cursor shell tools, and is refused once as any edit
+is. Cursor `Write` states its content as an edit, as Claude
 Code `Write` does, so a whole-file write that keeps another session's lines
 exactly, or only appends, refuses nothing. Three choices the issue left open
 were taken at their smallest:
@@ -250,9 +251,8 @@ were taken at their smallest:
 Tests:
 
 - `tests/line_ownership.rs`: real daemon and hook executables, a real Git
-  checkout, shell commands run between their hooks on the Codex, Claude Code,
-  Cursor and Gemini CLI shell tools, and constructed Cursor `Write` and Gemini
-  CLI `write_file` events.
+  checkout, shell commands run between their hooks on the Codex, Claude Code
+  and Cursor shell tools, and constructed Cursor `Write` events.
 - `src/hook.rs` (`journal_lookup`): no written lines past the locating
   deadline.
 - `crates/langspan-core/tests/line_ownership.rs`: the rule and its bounds.
