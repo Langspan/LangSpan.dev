@@ -120,7 +120,9 @@ explicitly:
   cannot be adopted again. So the answer also names `earlier`: every
   session whose adoptions lead to `from`, of the same workspace, at most 64
   (`adoption_chain` refuses more). The adapter credits their entries too,
-  and `live` covers their subagents as well.
+  and `live` covers their subagents as well. A session in that chain that
+  has resumed since its adoption is left out, along with the sessions its
+  own adoptions lead to: what it writes again is its own.
 - Entries are rewritten whole, so a line both `from` and a third session
   wrote is the adopter's and that session's: a `mixed` file stays mixed, and
   the third session's lines stay its own.

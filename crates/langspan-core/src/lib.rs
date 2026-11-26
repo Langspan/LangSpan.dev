@@ -8145,7 +8145,9 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
     // An adopter that ended after its adoption was recorded, before its
     // adapter credited the lines, leaves them under the session it adopted;
     // that session cannot be adopted again. Passing the adoption on credits
-    // them too: every session whose adoptions lead to `from`.
+    // them too: every session whose adoptions lead to `from`. A session that
+    // has resumed since it was adopted owns what it writes again, so it is
+    // left out, and so is what its own adoptions lead to.
     let mut earlier: Vec<String> = Vec::new();
     let mut pending = vec![from.to_owned()];
     while let Some(adopter) = pending.pop() {
@@ -8154,6 +8156,7 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
                 || adoption.workspace_id != me.workspace_id
                 || adoption.from == from
                 || earlier.contains(&adoption.from)
+                || !finished(state, &adoption.from)
             {
                 continue;
             }

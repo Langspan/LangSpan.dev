@@ -650,3 +650,35 @@ fn adopting_an_adopter_that_ended_mid_transfer_credits_the_original_sessions_lin
     assert!(committed.status.success(), "{}", said(&committed));
     assert_eq!(f.status(), "");
 }
+
+/// Bob adopts Alice; Alice resumes and writes more; Bob ends. Carol's
+/// adoption of Bob credits Bob's lines, and Alice's new lines stay hers:
+/// a session that has resumed is not an earlier source (review of #176).
+#[test]
+fn adopting_an_adopter_leaves_a_resumed_earlier_sessions_new_lines_with_it() {
+    let f = Fixture::new();
+    f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
+    f.lifecycle(ALICE, "SessionEnd", None);
+    f.lifecycle(BOB, "SessionStart", None);
+    let first = adopt_json(&f, BOB, ALICE, "bob-adopts");
+    assert!(first.status.success(), "{}", said(&first));
+
+    // Alice resumes and writes another file; then Bob ends.
+    f.lifecycle(ALICE, "UserPromptSubmit", Some("carry on"));
+    f.edit(ALICE, "alice-2", "b.txt", "beta", "beta, by Alice");
+    f.lifecycle(BOB, "SessionEnd", None);
+
+    f.lifecycle(CAROL, "SessionStart", None);
+    let adopted = adopt_json(&f, CAROL, BOB, "carol-adopts");
+    assert!(adopted.status.success(), "{}", said(&adopted));
+    let report: Value = serde_json::from_slice(&adopted.stdout).unwrap();
+    assert_eq!(report["paths"], json!(["a.txt"]), "{report}");
+    assert_eq!(
+        owners(&f.status_mine(CAROL, "carol-1")),
+        vec![pair("a.txt", "mine")]
+    );
+    assert_eq!(
+        owners(&f.status_mine(ALICE, "alice-3")),
+        vec![pair("b.txt", "mine")]
+    );
+}
