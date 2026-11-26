@@ -270,6 +270,28 @@ fn a_restore_after_a_commit_that_changed_no_file_is_not_its_own() {
     assert_eq!(notices(&mut state, "alice", 3_100), []);
 }
 
+/// Commits add checkout runs but no checkout change, so the two lists move
+/// independently. Later runs do not push out the run that explains a change
+/// still held.
+#[test]
+fn later_commits_keep_the_run_that_explains_a_held_change() {
+    let mut state = ready();
+    checkout(&mut state, "c1", MAIN, 'b', 1_000);
+    merged(&mut state, "alice", 'b', 300, 1_100);
+    for i in 0..langspan_core::MAX_CHECKOUT_RUNS as u64 + 2 {
+        committed(&mut state, "bob", 'c', 100, 2_000 + i * 1_000);
+    }
+    assert_eq!(notices(&mut state, "alice", 20_000), []);
+    let bob = notices(&mut state, "bob", 20_000);
+    assert_eq!(bob.len(), 1, "{bob:?}");
+    assert_eq!(bob[0].by_session.as_deref(), Some("alice"));
+    let runs = &state.checkout_runs["work"];
+    assert!(
+        runs.len() <= langspan_core::MAX_CHECKOUT_RUNS + langspan_core::MAX_CHECKOUTS,
+        "{runs:?}"
+    );
+}
+
 #[test]
 fn a_change_the_command_did_not_leave_or_that_came_too_late_or_too_early_is_told() {
     // At another HEAD than the command left.

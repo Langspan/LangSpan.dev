@@ -1650,7 +1650,8 @@ pub struct State {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub checkouts: BTreeMap<String, Vec<CheckoutChange>>,
     /// Sessions' shell runs that moved the checkout, per workspace, newest
-    /// first, at most `MAX_CHECKOUT_RUNS`.
+    /// first: the newest `MAX_CHECKOUT_RUNS`, and any older run that
+    /// explains a held checkout change (at most `MAX_CHECKOUTS` more).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub checkout_runs: BTreeMap<String, Vec<CheckoutRun>>,
     /// The automatic check per workspace, for the workspaces where the owner
@@ -8291,7 +8292,23 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 .entry(run.workspace_id.clone())
                 .or_default();
             runs.insert(0, run.clone());
-            runs.truncate(MAX_CHECKOUT_RUNS);
+            // Commits add runs and no change, so the two lists move apart.
+            // An older run stays while it explains a change still held, so
+            // that change keeps its attribution.
+            let changes = state
+                .checkouts
+                .get(&run.workspace_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let explaining: BTreeSet<usize> = changes
+                .iter()
+                .filter_map(|change| runs.iter().position(|run| run.explains(change, changes)))
+                .collect();
+            let mut index = 0;
+            runs.retain(|_| {
+                index += 1;
+                index <= MAX_CHECKOUT_RUNS || explaining.contains(&(index - 1))
+            });
         }
         Event::InterfaceChanged { notice } => {
             validate_notice(notice)?;
