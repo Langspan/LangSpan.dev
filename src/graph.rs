@@ -1183,7 +1183,7 @@ pub const MAX_UNREAD: usize = 4096;
 /// Extensions of source languages the index has no grammar for. Other
 /// files (documentation, data, images) are not counted.
 const OTHER_SOURCE: &[&str] = &[
-    "c", "cc", "clj", "cljs", "cpp", "cs", "cxx", "dart", "elm", "erl", "ex", "exs", "fs", "fsx",
+    "c", "cc", "clj", "cljs", "cpp", "cxx", "dart", "elm", "erl", "ex", "exs", "fs", "fsx",
     "groovy", "h", "hh", "hpp", "hrl", "hs", "jl", "kt", "kts", "lua", "m", "ml", "mli", "mm",
     "nim", "php", "pl", "pm", "r", "rb", "scala", "svelte", "swift", "vue", "zig",
 ];
@@ -1653,6 +1653,10 @@ mod review_regressions {
         assert_eq!(
             Language::for_path("src/main/java/shop/Orders.java"),
             Some(Language::Java)
+        );
+        assert_eq!(
+            Language::for_path("src/Shop/Orders.cs"),
+            Some(Language::CSharp)
         );
     }
 

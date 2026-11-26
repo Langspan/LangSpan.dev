@@ -122,6 +122,50 @@ fn java_method_calls_and_constructor_calls_count_their_arguments() {
     assert_eq!((wrapped[0].line, wrapped[0].lines), (3, (3, 5)));
 }
 
+#[test]
+fn csharp_method_calls_and_constructor_calls_count_their_arguments() {
+    let source = r#"class Checkout
+{
+    Order Submit()
+    {
+        var order = orders.Place(cart);
+        Helper(a, /* note */ b);
+        Orders made = new Orders(cart);
+        this.Log();
+        Enumerable.Empty<string>();
+        base.Close();
+        new System.Collections.Generic.List<string>(4);
+        store?.Save(order, true);
+        Convert<int>(x: 1, y: out var z);
+        Orders implicitly = new(cart);
+        var shape = new Shape { Size = 1 };
+    }
+}
+"#;
+    assert_eq!(
+        found(Language::CSharp, source),
+        [
+            call("Place", 5, Some(1), true),
+            call("Helper", 6, Some(2), false),
+            call("Orders", 7, Some(1), false),
+            call("Log", 8, Some(0), true),
+            call("Empty", 9, Some(0), true),
+            call("Close", 10, Some(0), true),
+            call("List", 11, Some(1), false),
+            call("Save", 12, Some(2), true),
+            call("Convert", 13, Some(2), false),
+        ],
+        "a target-typed `new(...)` and an initializer without arguments name no constructor's count"
+    );
+    // A call split over several lines spans all of them.
+    let wrapped = calls(
+        Language::CSharp,
+        b"class A\n{\n    void F()\n    {\n        orders.Place(\n            cart,\n            coupon);\n    }\n}\n",
+    )
+    .unwrap();
+    assert_eq!((wrapped[0].line, wrapped[0].lines), (5, (5, 7)));
+}
+
 fn counts(language: Language, signature: &str) -> Option<(u32, Option<u32>, bool)> {
     arity(language, signature).map(|Arity { min, max, receiver }| (min, max, receiver))
 }
@@ -227,6 +271,55 @@ fn parameter_counts_of_signatures_as_the_index_stores_them() {
         ),
         (Java, "public class Orders", None),
         (Java, "public static final int LIMIT", None),
+        (
+            CSharp,
+            "public Order Place(Cart cart)",
+            Some((1, Some(1), false)),
+        ),
+        (
+            CSharp,
+            "public Order Place(Cart cart, Coupon coupon)",
+            Some((2, Some(2), false)),
+        ),
+        // A default makes a parameter optional; `params` takes any number.
+        (
+            CSharp,
+            "public static List<T> Of<T>(string name, int limit = 10, params T[] items) where T : class",
+            Some((1, None, false)),
+        ),
+        (
+            CSharp,
+            "public bool TryGet(in Key key, ref int hint, out Value value)",
+            Some((3, Some(3), false)),
+        ),
+        (
+            CSharp,
+            "public Orders(Cart cart)",
+            Some((1, Some(1), false)),
+        ),
+        (CSharp, "Order Place(Cart cart)", Some((1, Some(1), false))),
+        (
+            CSharp,
+            "public async Task<Order> PlaceAsync([NotNull] Cart cart)",
+            Some((1, Some(1), false)),
+        ),
+        (
+            CSharp,
+            "void IPlacer.Cancel(Order order)",
+            Some((1, Some(1), false)),
+        ),
+        // An extension method is called as `cart.Total()` or as
+        // `Carts.Total(cart)`, and both are member calls: no single count.
+        (CSharp, "public static int Total(this Cart cart)", None),
+        (
+            CSharp,
+            "public Order Place(Cart cart) | public Order Place(Cart cart, Coupon c)",
+            None,
+        ),
+        (CSharp, "public class Orders", None),
+        (CSharp, "public record Line(string Sku, int Quantity)", None),
+        (CSharp, "public const int Limit", None),
+        (CSharp, "public int Count { get; set; }", None),
         // Two definitions of one name, or a signature cut at its bound,
         // have no single count.
         (Rust, "pub fn f(a: u8) | pub fn f(a: u8, b: u8)", None),

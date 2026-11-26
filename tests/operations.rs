@@ -176,7 +176,9 @@ fn doctor_names_each_thing_that_is_not_working_and_stops_when_it_is_fixed() {
     // The indexed languages are a fact of this build, known without a
     // coordinator.
     assert!(
-        text.contains("ok Source index languages: rust, python, typescript, tsx, go, java."),
+        text.contains(
+            "ok Source index languages: rust, python, typescript, tsx, go, java, csharp."
+        ),
         "{text}"
     );
     assert!(

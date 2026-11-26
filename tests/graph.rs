@@ -802,6 +802,120 @@ fn a_java_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_sess
     assert!(!context.contains("Report.java"), "{context}");
 }
 
+/// Roadmap D6, C#: an SDK-style project is indexed, looked up and counted,
+/// and the issue's example notice, in C#, reaches the session whose file
+/// calls the changed method.
+#[test]
+fn a_csharp_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_session() {
+    let orders = "namespace Shop;\n\npublic class Orders\n{\n    [Obsolete]\n    public Order Place(Cart cart)\n    {\n        return new Order(cart);\n    }\n\n    private void Audit() { }\n}\n";
+    let checkout = "using System;\n\nnamespace Shop;\n\npublic class Checkout\n{\n    public Order Submit(Orders orders, Cart cart)\n    {\n        return orders.Place(cart);\n    }\n}\n";
+    let w = World::with_files(
+        Vec::new(),
+        &[
+            ("src/Shop/Orders.cs", orders),
+            ("src/Shop/Checkout.cs", checkout),
+            (
+                "src/Shop/Report.cs",
+                "namespace Shop;\n\ninternal class Report\n{\n    int Total() => 0;\n}\n",
+            ),
+            (
+                "src/Shop/Shop.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\" />\n",
+            ),
+        ],
+    );
+    let found = w.wait_for("the definition of Place", "symbol", "Place", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    assert_eq!(found["coverage"]["indexable_files"], 3, "{found:#}");
+    let symbol = &found["symbols"][0];
+    assert_eq!(symbol["path"], "src/Shop/Orders.cs");
+    assert_eq!(
+        (symbol["line"].as_u64(), symbol["kind"].as_str()),
+        (Some(6), Some("method"))
+    );
+    assert_eq!(symbol["signature"], "public Order Place(Cart cart)");
+    assert_eq!(symbol["exported"], true);
+    assert_eq!(
+        paths(&w.graph("references", "Place")["references"]),
+        ["src/Shop/Checkout.cs:9"]
+    );
+    let impact = w.graph("impact", "src/Shop/Orders.cs");
+    assert!(
+        paths(&impact["references"])
+            .iter()
+            .any(|path| path.starts_with("src/Shop/Checkout.cs")),
+        "{impact:#}"
+    );
+    // C# is indexed, so it is not reported as another language.
+    let (_, text) = w.cli(&["graph", "blind-spots", "app", "--json"]);
+    let spots: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        spots["outcome"]["blind_spots"]["unsupported_languages"],
+        json!([]),
+        "{spots:#}"
+    );
+
+    // Bob works on Checkout.cs; Alice changes Orders.Place.
+    w.edits(
+        "bob",
+        "b1",
+        "src/Shop/Checkout.cs",
+        &format!("{checkout}// touched\n"),
+    );
+    w.wait_for("bob's edit indexed", "references", "Place", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    // A private method's change is not an interface change.
+    w.edits(
+        "alice",
+        "a1",
+        "src/Shop/Orders.cs",
+        &orders.replace("Audit()", "Audit(int level)"),
+    );
+    w.wait_for("the private change indexed", "symbol", "Audit", |outcome| {
+        outcome["symbols"][0]["signature"] == "private void Audit(int level)"
+    });
+    assert!(
+        w.prompt("bob")
+            .is_none_or(|context| !context.contains("Interface change")),
+        "a private method is no one's interface"
+    );
+    w.edits(
+        "alice",
+        "a2",
+        "src/Shop/Orders.cs",
+        &orders
+            .replace("Audit()", "Audit(int level)")
+            .replace("Place(Cart cart)", "Place(Cart cart, Coupon coupon)"),
+    );
+    let deadline = Instant::now() + WAIT;
+    let context = loop {
+        if let Some(context) = w
+            .prompt("bob")
+            .filter(|context| context.contains("Interface change"))
+        {
+            break context;
+        }
+        assert!(Instant::now() < deadline, "bob was never told");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        context.contains(r#"Interface change in "src/Shop/Orders.cs""#),
+        "{context}"
+    );
+    assert!(context.contains("claude-code.alice"), "{context}");
+    assert!(
+        context.contains(r#"method "Place" changed from "public Order Place(Cart cart)" to "public Order Place(Cart cart, Coupon coupon)""#),
+        "{context}"
+    );
+    assert!(context.contains(r#""src/Shop/Checkout.cs""#), "{context}");
+    assert!(
+        !context.contains("Report.cs"),
+        "a file that shares only the namespace is not told: {context}"
+    );
+}
+
 /// A workspace removed, changed while unregistered, and registered again
 /// under the same ID and root is a new start: its next scan is a baseline,
 /// not a comparison with what was indexed before the removal.
