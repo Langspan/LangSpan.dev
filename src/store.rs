@@ -2606,7 +2606,11 @@ mod tests {
             })
             .collect();
         store.commit(&history, None).unwrap();
-        let from_ms = wall_now_ms();
+        // The window starts now as the report places events: on the
+        // daemon's clock through this generation's anchor, which a long test
+        // may see drift from the wall clock.
+        let anchor = store.state.clock_anchor.unwrap();
+        let from_ms = anchor.wall_ms + (crate::clock::now_ms() - anchor.clock_ms);
         run(
             &mut store,
             "p",
@@ -2616,7 +2620,7 @@ mod tests {
                 line_digests: Vec::new(),
             },
         );
-        let outcome = store.report("work", from_ms, wall_now_ms() + 1).unwrap();
+        let outcome = store.report("work", from_ms, from_ms + 60_000).unwrap();
         drop(store);
         std::fs::remove_dir_all(&directory).unwrap();
         let Outcome::Report { report } = outcome else {
