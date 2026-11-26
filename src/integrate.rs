@@ -223,11 +223,29 @@ pub struct Merged {
     /// when the others were already contained in it.
     pub commit: String,
     pub tree: String,
-    /// The target commit first, then each combined branch's commit.
+    /// The target commit first, then each combined branch's commit, as the
+    /// owner's branch has it (before any adapting or rebasing).
     pub inputs: Vec<String>,
     /// Files the target renamed after a branch started, which the branch
     /// edits under the old name: its edits are in the new file.
     pub renames: Vec<Rename>,
+    /// Identifier renames, adapted and rebased commits: reported beside
+    /// `combined` in each result, not inside it.
+    #[serde(skip)]
+    pub notes: crate::rewrite::Notes,
+}
+
+/// How branches are combined (roadmap F5). The default merges each branch
+/// unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Shape {
+    /// Replay each branch's commits onto the result so far instead of
+    /// merging it: linear history, with new commits.
+    pub rebase: bool,
+    /// Add one commit on top of a branch that uses the target's new names
+    /// where the branch's added lines still use the old ones, when that is
+    /// certain; otherwise stop.
+    pub adapt_renames: bool,
 }
 
 /// A rename that had already landed, followed while combining `branch`.
@@ -293,11 +311,25 @@ pub struct ConflictFile {
 pub enum Combination {
     Clean(Merged),
     /// Combining stopped at `branch`: these paths conflict, and `files`
-    /// shows the hunks of the first `CONFLICT_FILES` of them.
+    /// shows the hunks of the first `CONFLICT_FILES` of them. With a
+    /// rebase, `commit` is the branch commit whose replay conflicted.
     Conflict {
         branch: String,
+        commit: Option<String>,
         paths: Vec<String>,
         files: Vec<ConflictFile>,
+    },
+    /// `--adapt-renames` could not rewrite `branch` with certainty.
+    NotAdapted {
+        branch: String,
+        reason: String,
+        notes: crate::rewrite::Notes,
+    },
+    /// `--rebase` does not replay `branch`.
+    NotRebased {
+        branch: String,
+        reason: String,
+        notes: crate::rewrite::Notes,
     },
 }
 
@@ -320,45 +352,121 @@ const COMBINE_CONFIG: [&str; 8] = [
 /// Combine `branches` onto `onto` in order, entirely inside the object
 /// database. A branch already contained is skipped, a branch that contains
 /// the result so far fast-forwards, anything else is a true merge, with
-/// renames followed (see `COMBINE_CONFIG`).
+/// renames followed (see `COMBINE_CONFIG`); a merge that would change
+/// nothing is not made. With `shape.rebase`, a branch is replayed instead
+/// of merged (see `replay`). Identifier renames the target made since a
+/// branch started are looked for in every diverged branch (see
+/// `rewrite::find`), and with `shape.adapt_renames` its uses are rewritten
+/// in one new commit on top of the branch, or the combination stops.
 pub fn combine(
     root: &Path,
     onto: &str,
     branches: &[String],
+    shape: Shape,
     deadline: Instant,
 ) -> Result<Combination, String> {
+    use crate::rewrite;
     if branches.is_empty() || branches.len() > 15 {
         return Err("name between 1 and 15 branches to combine".into());
     }
     let mut current = onto.to_owned();
     let mut inputs = vec![current.clone()];
     let mut renames = Vec::new();
+    let mut notes = rewrite::Notes::default();
     for branch in branches {
-        let theirs = commit(root, branch, deadline)?;
-        inputs.push(theirs.clone());
-        if is_ancestor(root, &theirs, &current, deadline)? {
+        let named = commit(root, branch, deadline)?;
+        inputs.push(named.clone());
+        if is_ancestor(root, &named, &current, deadline)? {
             continue;
+        }
+        let mut theirs = named;
+        if !is_ancestor(root, &current, &theirs, deadline)? {
+            let base = oid(text(root, &["merge-base", &current, &theirs], deadline)?)?;
+            let mut found = rewrite::find(root, &base, &current, branch, &theirs, deadline)?;
+            let room = rewrite::MAX_RENAMES - notes.identifier_renames.len();
+            if found.renames.len() > room {
+                found.renames.truncate(room);
+                found.incomplete.get_or_insert(format!(
+                    "more than {} renames on the target are still used; only the first {} are listed",
+                    rewrite::MAX_RENAMES,
+                    rewrite::MAX_RENAMES
+                ));
+            }
+            if notes.identifier_renames_incomplete.is_none() {
+                notes.identifier_renames_incomplete = found
+                    .incomplete
+                    .as_ref()
+                    .map(|why| format!("{branch}: {why}"));
+            }
+            if shape.adapt_renames && !found.renames.is_empty() {
+                if let Some(reason) = rewrite::refusal(&found) {
+                    notes.identifier_renames.extend(found.renames);
+                    return Ok(Combination::NotAdapted {
+                        branch: branch.clone(),
+                        reason,
+                        notes,
+                    });
+                }
+                match rewrite::adapt(root, &theirs, &found.renames, deadline) {
+                    Ok(adapted) => {
+                        theirs = adapted;
+                        notes.adapted.push(rewrite::Adapted {
+                            branch: branch.clone(),
+                            commit: theirs.clone(),
+                        });
+                    }
+                    Err(why) => {
+                        notes.identifier_renames.extend(found.renames);
+                        return Ok(Combination::NotAdapted {
+                            branch: branch.clone(),
+                            reason: format!("{why}; nothing was pushed"),
+                            notes,
+                        });
+                    }
+                }
+            }
+            notes.identifier_renames.extend(found.renames);
         }
         if is_ancestor(root, &current, &theirs, deadline)? {
             current = theirs;
             continue;
         }
-        let mut arguments = COMBINE_CONFIG.to_vec();
-        arguments.extend([
-            "merge-tree",
-            "--write-tree",
-            "--name-only",
-            "-z",
-            &current,
-            &theirs,
-        ]);
-        let (status, output) = git::run_with_env(root, &arguments, &[], deadline, 1024 * 1024)?;
-        let output = String::from_utf8(output).map_err(|_| "Git output is not UTF-8")?;
-        let mut fields = output.split('\0');
-        let tree = fields.next().unwrap_or_default().to_owned();
-        match status.code() {
-            Some(0) => {
-                let tree = oid(tree)?;
+        if shape.rebase {
+            renames.extend(renames_followed(root, &current, &theirs, branch, deadline)?);
+            match replay(root, &current, &theirs, deadline)? {
+                Replayed::Done { tip, rewritten } => {
+                    current = tip;
+                    notes.rebased.extend(rewritten);
+                }
+                Replayed::Conflict {
+                    commit,
+                    paths,
+                    files,
+                } => {
+                    return Ok(Combination::Conflict {
+                        branch: branch.clone(),
+                        commit: Some(commit),
+                        paths,
+                        files,
+                    });
+                }
+                Replayed::Refused(reason) => {
+                    return Ok(Combination::NotRebased {
+                        branch: branch.clone(),
+                        reason,
+                        notes,
+                    });
+                }
+            }
+            continue;
+        }
+        match merge_tree(root, &current, &theirs, None, deadline)? {
+            Merge::Clean(tree) => {
+                // A branch whose changes are all on the target already, as
+                // after a rebase landing of it: nothing to merge.
+                if tree == tree_of(root, &current, deadline)? {
+                    continue;
+                }
                 renames.extend(renames_followed(root, &current, &theirs, branch, deadline)?);
                 let message = format!("Merge {branch} (langspan integrate)");
                 current = oid(text(
@@ -379,30 +487,14 @@ pub fn combine(
                     format!("{e}; a merge commit needs your Git user.name and user.email")
                 })?)?;
             }
-            Some(1) => {
-                let tree = oid(tree)?;
-                // The conflicted paths, up to an empty field; then Git's
-                // messages, each: a path count, the paths, a type, a text.
-                let paths: Vec<String> = fields
-                    .by_ref()
-                    .take_while(|field| !field.is_empty())
-                    .map(str::to_owned)
-                    .collect();
-                let kinds = conflict_kinds(fields);
-                let files = paths
-                    .iter()
-                    .take(CONFLICT_FILES)
-                    .map(|path| {
-                        conflict_file(root, &tree, [&current, &theirs], path, &kinds, deadline)
-                    })
-                    .collect::<Result<_, _>>()?;
+            Merge::Conflict { paths, files } => {
                 return Ok(Combination::Conflict {
                     branch: branch.clone(),
-                    paths: paths.into_iter().take(CONFLICT_PATHS).collect(),
+                    commit: None,
+                    paths,
                     files,
                 });
             }
-            _ => return Err(format!("Git could not combine {branch:?}")),
         }
     }
     Ok(Combination::Clean(Merged {
@@ -410,7 +502,184 @@ pub fn combine(
         commit: current,
         inputs,
         renames,
+        notes,
     }))
+}
+
+enum Merge {
+    Clean(String),
+    Conflict {
+        paths: Vec<String>,
+        files: Vec<ConflictFile>,
+    },
+}
+
+/// Merge `theirs` into `ours` in the object database: from their merge
+/// base, or from `base` when given (a cherry-pick of `theirs` onto `ours`
+/// when `base` is its parent).
+fn merge_tree(
+    root: &Path,
+    ours: &str,
+    theirs: &str,
+    base: Option<&str>,
+    deadline: Instant,
+) -> Result<Merge, String> {
+    let base = base.map(|base| format!("--merge-base={base}"));
+    let mut arguments = COMBINE_CONFIG.to_vec();
+    arguments.extend(["merge-tree", "--write-tree", "--name-only", "-z"]);
+    arguments.extend(base.as_deref());
+    arguments.extend([ours, theirs]);
+    let (status, output) = git::run_with_env(root, &arguments, &[], deadline, 1024 * 1024)?;
+    let output = String::from_utf8(output).map_err(|_| "Git output is not UTF-8")?;
+    let mut fields = output.split('\0');
+    let tree = oid(fields.next().unwrap_or_default().to_owned());
+    match status.code() {
+        Some(0) => Ok(Merge::Clean(tree?)),
+        Some(1) => {
+            let tree = tree?;
+            // The conflicted paths, up to an empty field; then Git's
+            // messages, each: a path count, the paths, a type, a text.
+            let paths: Vec<String> = fields
+                .by_ref()
+                .take_while(|field| !field.is_empty())
+                .map(str::to_owned)
+                .collect();
+            let kinds = conflict_kinds(fields);
+            let files = paths
+                .iter()
+                .take(CONFLICT_FILES)
+                .map(|path| conflict_file(root, &tree, [ours, theirs], path, &kinds, deadline))
+                .collect::<Result<_, _>>()?;
+            Ok(Merge::Conflict {
+                paths: paths.into_iter().take(CONFLICT_PATHS).collect(),
+                files,
+            })
+        }
+        _ => Err(format!("Git could not combine {theirs}")),
+    }
+}
+
+/// A commit of `tree` on `parent`, with the message in `message_file` and
+/// `env` (an original author, when replaying). The committer is the owner's
+/// Git identity, as for a merge.
+pub fn new_commit(
+    root: &Path,
+    tree: &str,
+    parent: &str,
+    message_file: &Path,
+    env: &[(&str, String)],
+    deadline: Instant,
+) -> Result<String, String> {
+    let env: Vec<(&str, &OsStr)> = env
+        .iter()
+        .map(|(name, value)| (*name, OsStr::new(value.as_str())))
+        .collect();
+    let file = message_file.to_str().ok_or("temporary path is not UTF-8")?;
+    let bytes = git::output_with_env(
+        root,
+        &["commit-tree", tree, "-p", parent, "-F", file],
+        &env,
+        deadline,
+        128,
+    )
+    .map_err(|e| format!("{e}; a new commit needs your Git user.name and user.email"))?;
+    oid(String::from_utf8_lossy(&bytes).trim().to_owned())
+}
+
+enum Replayed {
+    Done {
+        tip: String,
+        rewritten: Vec<langspan_core::Rewritten>,
+    },
+    /// Replaying `commit` conflicted.
+    Conflict {
+        commit: String,
+        paths: Vec<String>,
+        files: Vec<ConflictFile>,
+    },
+    Refused(String),
+}
+
+/// Replay the commits of `theirs` that `onto` lacks onto `onto`, oldest
+/// first, as `git rebase` would, entirely in the object database: each is
+/// a merge of the commit onto the result so far from the commit's parent,
+/// keeping its author and message. A commit whose change `onto` already has
+/// (`git cherry`) or that changes nothing once replayed is left out. A
+/// branch with merge commits, or more than `MAX_REWRITTEN` commits, is not
+/// replayed.
+fn replay(root: &Path, onto: &str, theirs: &str, deadline: Instant) -> Result<Replayed, String> {
+    use langspan_core::MAX_REWRITTEN;
+    let range = format!("{onto}..{theirs}");
+    let count = |extra: &[&str]| -> Result<usize, String> {
+        let mut arguments = vec!["rev-list", "--count"];
+        arguments.extend_from_slice(extra);
+        arguments.push(&range);
+        text(root, &arguments, deadline)?
+            .parse()
+            .map_err(|_| "Git did not count the commits".to_owned())
+    };
+    if count(&["--merges"])? > 0 {
+        return Ok(Replayed::Refused(
+            "it has merge commits, and a rebase landing replays only a linear branch; land it without --rebase, or make it linear first".into(),
+        ));
+    }
+    if count(&[])? > MAX_REWRITTEN {
+        return Ok(Replayed::Refused(format!(
+            "it has more than {MAX_REWRITTEN} commits the target lacks; land it without --rebase"
+        )));
+    }
+    // `-` marks a commit whose change the target already has.
+    let cherry = text(root, &["cherry", onto, theirs], deadline)?;
+    let present: std::collections::BTreeSet<&str> = cherry
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .collect();
+    let listing = text(
+        root,
+        &["rev-list", "--reverse", "--topo-order", &range],
+        deadline,
+    )?;
+    let scratch = crate::rewrite::Scratch::new()?;
+    let (mut tip, mut rewritten) = (onto.to_owned(), Vec::new());
+    for commit in listing.lines().filter(|line| !line.is_empty()) {
+        if present.contains(commit) {
+            continue;
+        }
+        let Ok(parent) = text(
+            root,
+            &["rev-parse", "--verify", "--quiet", &format!("{commit}^1")],
+            deadline,
+        )
+        .and_then(oid) else {
+            return Ok(Replayed::Refused(format!(
+                "its commit {commit} has no parent; land it without --rebase"
+            )));
+        };
+        let original = match crate::rewrite::original(root, commit, deadline) {
+            Ok(original) => original,
+            Err(why) => return Ok(Replayed::Refused(why)),
+        };
+        let tree = match merge_tree(root, &tip, commit, Some(&parent), deadline)? {
+            Merge::Clean(tree) => tree,
+            Merge::Conflict { paths, files } => {
+                return Ok(Replayed::Conflict {
+                    commit: commit.to_owned(),
+                    paths,
+                    files,
+                });
+            }
+        };
+        if tree == tree_of(root, &tip, deadline)? {
+            continue;
+        }
+        let message = scratch.file("message", &original.message)?;
+        tip = new_commit(root, &tree, &tip, &message, &original.author, deadline)?;
+        rewritten.push(langspan_core::Rewritten {
+            from: commit.to_owned(),
+            to: tip.clone(),
+        });
+    }
+    Ok(Replayed::Done { tip, rewritten })
 }
 
 /// The renames between the merge base and `ours` of files `theirs` changed.

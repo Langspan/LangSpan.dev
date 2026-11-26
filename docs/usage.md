@@ -1906,8 +1906,42 @@ Combining always follows renames, whatever `merge.renames` is set to: when the
 target renamed a file after a branch started, the branch's edits to the old name
 are combined into the new file, and the result's `renames` (and the printed
 output) says which. Inexact renames are looked for among at most 1000 files on
-each side; exact renames are always found. Combining is a merge, never a rebase:
-the branches' commits are pushed as they are (see ADR 0007). Check commands run with your
+each side; exact renames are always found. By default combining is a merge:
+the branches' commits are pushed as they are (see ADR 0007).
+
+When the target renamed a function in the same file after a branch started
+(same body, new name), and the branch's added lines still mention the old
+name, `integrate check` and `land` list it in `identifier_renames`: `from`,
+`to`, the defining `path`, and each use as a path and line in the branch's own
+version (at most 16 renames and 32 uses each). Names are matched as whole
+words, not resolved. `identifier_renames_incomplete` says when they could not
+all be looked for, for example because a changed source file does not parse.
+
+```sh
+langspan land app --onto main --name tests my-branch --apply --adapt-renames --check-again -- cargo test
+langspan land app --onto main --name tests my-branch --apply --rebase --check-again -- cargo test
+```
+
+`--adapt-renames` adds one commit on top of your branch, without checking it
+out, that replaces each listed use of the old name with the new one, and lands
+that tree only on its own passing check. The result's `adapted` names the
+commit; your branch is not changed, so fetch that commit to keep it. When the
+rewrite is not certain (for example, your branch already mentions the new name,
+changed the old definition, or the target still defines the old name
+elsewhere), nothing is rewritten or pushed: the result is `not_adapted`, exit
+code 2, with the reason, and each rename's `uncertain` says why.
+
+`--rebase` replays your branch's commits onto the target instead of merging,
+for linear history: the new commits keep their author, date and message, only
+the final tree is checked, and `rebased` lists each original and new commit. A
+commit whose replay conflicts stops the landing as `not_combinable` with that
+`commit` and its hunks; a branch with merge commits or more than 64 commits to
+replay is `not_rebased`. Landing the same branch again afterwards finds its
+changes on the target and reports nothing to land. Neither flag ever forces a
+push or changes your checkout. Both also work on `integrate check`, so a check
+recorded with the same flags is the evidence a later `land` with them uses;
+through MCP, pass `rebase` and `adapt_renames` to `langspan_integrate_check`
+and then to `langspan_land`. Check commands run with your
 environment; environment identity and ignored files are outside the record.
 A check's recorded command line is redacted like its output: a `--token`
 value or a key-shaped argument is stored and shown as `[redacted]`, while the

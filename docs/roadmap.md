@@ -47,7 +47,7 @@ as done is in its row.
 | L4. Shared-checkout commit guard and commit of only this session's hunks | B6, B7 | Built ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)); observed with real Claude Code sessions, and `commit --mine` with a real Codex session ([evidence](evidence/codex-real-host/README.md)). The guard and `commit --mine` are tested with Codex, Cursor and Gemini CLI events; the guard is not yet observed on those hosts |
 | L5. Interface-break alerts at write time, with the lines to fix and the argument count | B9, B10 | Built for Claude Code, Codex and Gemini CLI writes and quoted-heredoc shell writes, for argument counts, renames and removals, including those made in another worktree of the repository, committed or not, until the commit reaches the writer's branch ([ADR 0029](adr/0029-break-alerts-at-write-time.md)); observed once on Claude Code. Not yet observed on Codex or Gemini CLI; Cursor waits for a captured write input |
 | L6. Checks after write batches, run detached and reported in the next briefing | F1 | Built, off by default, with failures classified against each session's baseline ([ADR 0030](adr/0030-automatic-checks-after-write-batches.md)). Not yet observed on a host |
-| L7. Landing depth: a bounded queue for the push turn, hunk-level conflict reports, and following renames that landed | F5 | Built ([ADR 0007](adr/0007-check-evidence-integration-and-landing.md)). Not yet called by an agent on a host |
+| L7. Landing depth: a bounded queue for the push turn, hunk-level conflict reports, and following renames that landed | F5 | Built ([ADR 0007](adr/0007-check-evidence-integration-and-landing.md)), with F5's identifier renames, opt-in `--adapt-renames` and opt-in `--rebase`. Not yet called by an agent on a host: a Claude Code and a Codex session landing on one target is still to be retained |
 | L8. Release pipeline: versioned releases with prebuilt binaries for the supported platforms | I6 | Built ([ADR 0031](adr/0031-releases.md)); no release has been produced yet |
 | L9. Cursor adapter: hooks and MCP registration | A4 | Built from documentation ([ADR 0032](adr/0032-cursor-adapter.md)); waits for a capture from a real Cursor (`scripts/capture-cursor.sh`) |
 | L10. Gemini CLI adapter: hooks and MCP registration | A6 | Built from documentation ([ADR 0033](adr/0033-gemini-cli-adapter.md)); no live Gemini CLI session yet |
@@ -119,7 +119,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## F. Checks and landing
 
-- [F5: Rebase landings and adapt identifier renames](https://github.com/Langspan/LangSpan.dev/issues/72): a landing refused over a rename leaves every use to fix by hand, and there is no linear-history landing.
 - [F8: An integration branch every session lands on](https://github.com/Langspan/LangSpan.dev/issues/73): each agent's own branch leaves the person merging six branches by hand to see the work together.
 - [F9: A LangSpan mark in pull requests](https://github.com/Langspan/LangSpan.dev/issues/74): a reviewer might want to know a pull request's tree was checked through LangSpan.
 

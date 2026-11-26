@@ -3,7 +3,9 @@
 **Status:** Implementation decision for the owner-directed coordination work,
 24 November 2026; push turn, retries and MCP tools added the same day; the
 landing queue, conflict hunks, followed renames and the merge-versus-rebase and
-attempt-count decisions added 24 November 2026. Independent of the admission guarantee in
+attempt-count decisions added 24 November 2026; identifier renames, opt-in
+rename adaptation and opt-in rebase landings (roadmap F5) added 26 November
+2026. Independent of the admission guarantee in
 [ADR 0001](0001-local-coordination.md).
 
 ## Context
@@ -122,7 +124,10 @@ The remote's own answer decides, never a match on its message text. After
 three moves the landing gives up (exit 2). Branch history is preserved: a
 branch that already contains the target is pushed as it is, and anything else
 becomes an ordinary merge commit with both parents, authored with the owner's
-Git identity. There is no rebase: the branches' commits are never rewritten.
+Git identity. A merge whose tree would equal the result so far is not made:
+the branch's changes are all there already, as after a rebase landing of it.
+Without `--rebase` or `--adapt-renames` the branches' commits are never
+rewritten.
 
 **Merge, not rebase (decided 24 November 2026).** A lander could rebase the
 agent's commits onto the moved target; LangSpan keeps merging, with no rebase
@@ -139,9 +144,10 @@ rebase replays commit by commit, so it can stop at a conflict in an
 intermediate commit that neither final tree has, and every replayed commit is
 a tree that was never checked. A merge is one combination whose single result
 is the tree that was checked, the same thing `git merge` and a hosted merge
-button do. An opt-in rebase is not added: nobody has asked for linear history
-here. If it is added, it must record the rewritten commits as the landing's
-inputs and keep the check on the final tree.
+button do. Merge stays the default. An opt-in rebase was added on 26 November
+2026 (roadmap F5, below) for a team that wants linear history; it records the
+rewritten commits and keeps the check on the final tree, and it answers the
+containment problem with `git cherry`.
 
 **Three attempts, not four (decided 24 November 2026).** A lander without a
 queue needs more attempts, because every lap of its loop is a race with the
@@ -178,8 +184,92 @@ the old name are combined into the new file, and the result's `renames` lists
 each such rename (`branch`, `from`, `to`): the renames between the merge base
 and the target whose old path the branch changed. Inexact renames are looked
 for among at most 1000 files on each side; exact renames are always found.
-This is Git's file rename detection. Identifier renames rewritten into the
-agent's commits are not done, since LangSpan never rewrites commits (`a_rename_that_already_landed_is_followed_and_said`).
+This is Git's file rename detection (`a_rename_that_already_landed_is_followed_and_said`).
+
+**Identifier renames (roadmap F5, added 26 November 2026).** For each branch
+that diverged from the result so far, the combination compares every source
+file the target changed between the merge base and the target (at most 64,
+in the languages of the source index), parsed from Git's objects at both
+versions with the source index's extractor and body digests (ADR 0008, D7).
+A function or method that the extractor's `diff` reports as renamed with the
+**same body** (`same_body` evidence: one exported definition went, one came
+with the same signature but for the name and the same block digest, each the
+other's only candidate) is a candidate. It is reported when the branch's
+added lines (Git's diff from the merge base to the branch, no context) still
+mention the old name as a whole word: `identifier_renames`, each with
+`branch`, `from`, `to`, `path` and `uses` (path and line in the branch's own
+version), at most 16 renames and 32 uses each, on `checked`, `not_ready`,
+`check_failed`, `ready` and `landed` results. A `not_ready` reason says to
+land again with `--adapt-renames`. A rename with the same lines but a changed
+body (`same_signature`), a rename across files, and a private definition are
+not candidates. When renames cannot all be looked for (more than 64 changed
+source files, a file over 1 MiB or one that does not parse completely, a
+branch diff over 8 MiB), none are reported and
+`identifier_renames_incomplete` says why
+(`a_changed_file_that_does_not_parse_makes_rename_detection_say_so`). Test:
+`a_target_rename_is_reported_with_each_use_the_branch_adds`.
+
+**Adapting a branch to them (`--adapt-renames`, opt-in).** LangSpan adds one
+commit on top of the branch, written to the object database through a private
+index, never checked out: on exactly each listed line, every whole-word
+`from` becomes `to`. The combination then uses that commit, so the landed
+tree needs its own passing check (`--check-again`, or an
+`integrate check --adapt-renames` of the same tree first); the result's
+`adapted` names the commit, and the landing record keeps it. The agent's
+branch, checkout and index are not changed; the agent can fetch the commit.
+The rewrite is made only when it is certain by these rules, and otherwise the
+landing stops as `not_adapted` (exit 2) with the reason, having rewritten,
+checked and pushed nothing, and each rename's `uncertain` says why:
+
+- renames were not all looked for, or there are more than 16;
+- the branch adds more than 32 lines that mention the old name;
+- the branch's added lines already mention the new name;
+- the branch changed, moved or removed the old definition itself (its body
+  digest on the branch differs from the merge base's);
+- a listed line is itself a definition of the old name that the branch adds;
+- the target still defines the old name in some source file (`git grep -w`,
+  at most 16 files parsed), so a use could mean that one;
+- a file to rewrite is not UTF-8 text, not a regular file, or over 1 MiB, or
+  a listed line no longer holds the old name.
+
+Names are matched as words, not resolved: a use of another definition with the
+same name in a scope the rules cannot see would be rewritten too. The check of
+the adapted tree is what stands between such a rewrite and the target. Tests:
+`adapt_renames_pushes_the_new_name_at_each_use_only_on_its_own_passing_check`,
+`a_rename_that_cannot_be_applied_with_certainty_stops_the_landing`,
+`without_adapt_renames_the_branch_is_pushed_unchanged_or_not_at_all`.
+
+**Rebase landings (`--rebase`, opt-in).** Each branch's commits that the
+result so far lacks are replayed onto it, oldest first, entirely in the object
+database: each is `git merge-tree --write-tree --merge-base=PARENT` of the
+commit onto the replayed tip, committed with `git commit-tree` keeping the
+commit's author, date and message (the committer is the owner's Git
+identity, as for a merge; a signature is not kept). A commit whose change the
+result already has (`git cherry` marks it `-`), or that changes nothing once
+replayed, is left out. A replay that conflicts stops with `not_combinable`
+naming that `commit` and its hunks, and nothing is pushed. A branch with merge
+commits, a root commit, a commit encoded other than as UTF-8 or more than 64
+commits to replay is not rebased (`not_rebased`, exit 2). Only the final tree
+is checked; the intermediate commits are trees that were never checked, which
+the result says by listing them in `rebased` (`from`, `to`) and the landing
+record keeps. The push is a fast-forward of the target, never forced. A
+later landing of the same branch finds every patch already on the target and
+reports `nothing_to_land`, with or without `--rebase`. Tests:
+`a_rebase_landing_pushes_linear_history_whose_tree_is_the_checked_tree`,
+`a_rebase_that_conflicts_in_an_intermediate_commit_names_it_and_pushes_nothing`,
+`a_branch_with_a_merge_commit_is_not_rebased_and_nothing_is_pushed`.
+
+**Safety rules for both.** No force push, ever: a rewritten result reaches the
+remote only as a fast-forward of the fetched target. No rewrite without its
+flag. No push without a passing check of exactly the pushed tree, the same
+rule as every landing. The owner's checkout, index, `HEAD`, branches and
+configuration are not changed, and no ref is written for a rewritten commit;
+the new commits are objects until a landing pushes them. Published history is
+never rewritten: the target only moves forward, and the agent's own branch
+stays where it was. The MCP tools take `rebase` and `adapt_renames`; a landing
+through MCP checks the rewritten tree first with `langspan_integrate_check`
+and the same values. Verified with real Git, a real daemon and local file
+remotes only; no agent has called these on a host yet.
 
 **One implementation, two interfaces.** `integrate check` and `land` are
 application operations in `src/landing.rs`. The CLI and the MCP tools
@@ -212,7 +302,9 @@ the design; here a landing that does not get the turn pushes nothing, and the
 line is first come, first served, bounded in length and time, visible,
 cancellable, and kept across retries by request ID.
 
-**What is touched.** Git objects; refs under `refs/langspan/`; a temporary
+**What is touched.** Git objects (with `--rebase` and `--adapt-renames`, new
+commits, trees and blobs, written through a private index in a private
+temporary directory); refs under `refs/langspan/`; a temporary
 worktree that is removed; on landing, the remote branch, and the
 remote-tracking ref Git itself updates after a push. Never the working tree,
 index, `HEAD`, local branches or configuration.

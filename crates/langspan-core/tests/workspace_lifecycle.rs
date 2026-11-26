@@ -135,6 +135,8 @@ fn ready() -> State {
                 tree_oid: oid('1'),
                 inputs: Vec::new(),
                 check_id: check.check_id,
+                rebased: Vec::new(),
+                adapted: Vec::new(),
             },
             4,
         ),

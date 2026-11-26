@@ -2030,3 +2030,570 @@ async fn agents_see_the_landing_queue_and_conflict_hunks_and_cancel_a_wait_throu
     assert_eq!(code, 0, "{text}");
     client.cancel().await.unwrap();
 }
+
+// Roadmap F5: identifier renames on the target, adapting a branch to them,
+// and rebase landings. Each runs on real Git with a local file remote and a
+// real daemon.
+
+const USERS: &str = "pub fn fetch_user(id: u32) -> u32 {\n    id + 1\n}\n";
+const RENAMED: &str = "pub fn load_user(id: u32) -> u32 {\n    id + 1\n}\n";
+const API: &str = "pub fn api() {}\n";
+/// The branch's version: new calls to `fetch_user` at lines 3 and 6.
+const API_CALLS: &str = "pub fn api() {}\n\npub fn one() -> u32 { fetch_user(1) }\n\n// between\npub fn two() -> u32 { fetch_user(2) + fetch_user(3) }\n";
+
+impl World {
+    /// `main` holds `src/users.rs` with `fetch_user`; branch `calls` adds
+    /// calls to it; then the target renames it to `load_user`, same body.
+    fn renamed_target(&self) {
+        let work = self.work();
+        fs::create_dir_all(work.join("src")).unwrap();
+        self.commit_on(
+            "main",
+            "main",
+            &[("src/users.rs", USERS.into()), ("src/api.rs", API.into())],
+        );
+        git(&work, &["push", "--quiet", "origin", "main"]);
+        self.commit_on("calls", "main", &[("src/api.rs", API_CALLS.into())]);
+        self.commit_on("main", "main", &[("src/users.rs", RENAMED.into())]);
+        git(&work, &["push", "--quiet", "origin", "main"]);
+    }
+    fn hub_main(&self) -> String {
+        git(&self.hub(), &["rev-parse", "refs/heads/main"])
+    }
+}
+
+fn uses(lines: &[u64]) -> serde_json::Value {
+    lines
+        .iter()
+        .map(|line| serde_json::json!({"path": "src/api.rs", "line": line}))
+        .collect()
+}
+
+#[test]
+fn a_target_rename_is_reported_with_each_use_the_branch_adds() {
+    let w = World::new();
+    w.renamed_target();
+    let expected = serde_json::json!([{
+        "branch": "calls", "from": "fetch_user", "to": "load_user",
+        "path": "src/users.rs", "uses": uses(&[3, 6]),
+    }]);
+    let (code, report) = w.json(&[
+        "integrate",
+        "check",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "calls",
+        "--json",
+        "--",
+        "true",
+    ]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["identifier_renames"], expected, "{report}");
+    // The dry run says what to do about it.
+    let (code, report) = w.json(&[
+        "land", "app", "--onto", "main", "--name", "other", "calls", "--json",
+    ]);
+    assert_eq!(code, 6, "{report}");
+    assert_eq!(report["result"], "not_ready", "{report}");
+    assert_eq!(report["identifier_renames"], expected, "{report}");
+    let reason = report["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("the target renamed fetch_user, which this branch still calls")
+            && reason.contains("--adapt-renames"),
+        "{report}"
+    );
+    // A branch that does not mention the old name reports none.
+    let (code, report) = w.json(&[
+        "integrate",
+        "check",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "feature-b",
+        "--json",
+        "--",
+        "true",
+    ]);
+    assert_eq!(code, 0, "{report}");
+    assert!(report.get("identifier_renames").is_none(), "{report}");
+}
+
+#[test]
+fn without_adapt_renames_the_branch_is_pushed_unchanged_or_not_at_all() {
+    let w = World::new();
+    w.renamed_target();
+    let original = w.hub_main();
+    let branch = git(&w.work(), &["rev-parse", "calls"]);
+    // A check that needs the new name fails, and nothing is pushed.
+    let (code, report) = w.json(&land_args(
+        "calls",
+        &[
+            "--json",
+            "--check-again",
+            "--",
+            "sh",
+            "-c",
+            "! grep -qw fetch_user src/api.rs",
+        ],
+    ));
+    assert_eq!(code, 1, "{report}");
+    assert_eq!(report["result"], "check_failed", "{report}");
+    assert_eq!(
+        report["identifier_renames"][0]["from"], "fetch_user",
+        "{report}"
+    );
+    assert_eq!(w.hub_main(), original, "nothing was pushed");
+    // A check that passes lands the branch's own commit, unchanged, by merge.
+    let (code, report) = w.json(&land_args(
+        "calls",
+        &["--json", "--check-again", "--", "true"],
+    ));
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+    assert!(report.get("adapted").is_none(), "{report}");
+    let landed = w.hub_main();
+    git(&w.hub(), &["merge-base", "--is-ancestor", &branch, &landed]);
+    assert_eq!(
+        git(&w.hub(), &["show", &format!("{landed}:src/api.rs")]),
+        API_CALLS.trim_end()
+    );
+    assert_eq!(report["identifier_renames"][0]["uses"], uses(&[3, 6]));
+}
+
+#[test]
+fn adapt_renames_pushes_the_new_name_at_each_use_only_on_its_own_passing_check() {
+    let w = World::new();
+    w.renamed_target();
+    let before = w.checkout();
+    let original = w.hub_main();
+    let branch = git(&w.work(), &["rev-parse", "calls"]);
+    let verify =
+        "test $(grep -o load_user src/api.rs | wc -l) -eq 3 && ! grep -qw fetch_user src/api.rs";
+    // Without a check of the adapted tree it is not landed.
+    let (code, report) = w.json(
+        &land_args("calls", &["--json", "--adapt-renames"])
+            .into_iter()
+            .filter(|arg| *arg != "--apply")
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(code, 6, "{report}");
+    assert_eq!(report["result"], "not_ready", "{report}");
+    assert_eq!(w.hub_main(), original, "nothing was pushed");
+    // A failing check of the adapted tree lands nothing either.
+    let (code, report) = w.json(&land_args(
+        "calls",
+        &["--json", "--adapt-renames", "--check-again", "--", "false"],
+    ));
+    assert_eq!(code, 1, "{report}");
+    assert_eq!(w.hub_main(), original, "nothing was pushed");
+
+    let (code, report) = w.json(&land_args(
+        "calls",
+        &[
+            "--json",
+            "--adapt-renames",
+            "--check-again",
+            "--",
+            "sh",
+            "-c",
+            verify,
+        ],
+    ));
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+    let landed = w.hub_main();
+    let api = git(&w.hub(), &["show", &format!("{landed}:src/api.rs")]);
+    assert_eq!(api, API_CALLS.replace("fetch_user", "load_user").trim_end());
+    // The adapted commit sits on top of the branch, and is named.
+    let adapted = report["adapted"][0]["commit"].as_str().unwrap().to_owned();
+    assert_eq!(report["adapted"][0]["branch"], "calls", "{report}");
+    assert_eq!(
+        git(&w.hub(), &["rev-parse", &format!("{adapted}^")]),
+        branch
+    );
+    git(
+        &w.hub(),
+        &["merge-base", "--is-ancestor", &adapted, &landed],
+    );
+    // The pushed tree is the checked tree.
+    let tree = git(&w.hub(), &["rev-parse", &format!("{landed}^{{tree}}")]);
+    assert_eq!(report["landing"]["tree_oid"], tree.as_str(), "{report}");
+    let events = w.events();
+    let check = events
+        .iter()
+        .find(|event| {
+            event["type"] == "check_recorded"
+                && event["check"]["check_id"] == report["landing"]["check_id"]
+        })
+        .unwrap();
+    assert_eq!(check["check"]["tree_oid"], tree.as_str());
+    assert_eq!(check["check"]["result"]["type"], "passed");
+    let recorded = events
+        .iter()
+        .find(|event| event["type"] == "landed")
+        .unwrap();
+    assert_eq!(
+        recorded["landing"]["adapted"][0],
+        adapted.as_str(),
+        "{recorded}"
+    );
+    // The owner's branch and checkout did not move.
+    assert_eq!(w.checkout(), before);
+    assert_eq!(git(&w.work(), &["rev-parse", "calls"]), branch);
+}
+
+#[test]
+fn a_rename_that_cannot_be_applied_with_certainty_stops_the_landing() {
+    let w = World::new();
+    w.renamed_target();
+    // The branch already mentions the new name as well: which `load_user`
+    // a rewritten call would reach is not certain.
+    git(&w.work(), &["checkout", "--quiet", "calls"]);
+    fs::write(
+        w.work().join("src/api.rs"),
+        format!("{API_CALLS}pub fn load_user() {{}}\n"),
+    )
+    .unwrap();
+    git(&w.work(), &["commit", "--quiet", "-am", "own load_user"]);
+    git(&w.work(), &["checkout", "--quiet", "main"]);
+    let original = w.hub_main();
+    let (code, report) = w.json(&land_args(
+        "calls",
+        &["--json", "--adapt-renames", "--check-again", "--", "true"],
+    ));
+    assert_eq!(code, 2, "{report}");
+    assert_eq!(report["result"], "not_adapted", "{report}");
+    let reason = report["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("load_user") && reason.contains("by hand"),
+        "{report}"
+    );
+    assert_eq!(w.hub_main(), original, "nothing was pushed");
+}
+
+impl World {
+    /// Branch `linear`: two commits, adding c.txt and then d.txt; then a
+    /// teammate lands a commit on b.txt.
+    fn diverged(&self) -> Vec<String> {
+        let work = self.work();
+        git(&work, &["checkout", "--quiet", "-b", "linear", "main"]);
+        let mut commits = Vec::new();
+        for file in ["c.txt", "d.txt"] {
+            fs::write(work.join(file), format!("{file}\n")).unwrap();
+            git(&work, &["add", file]);
+            git(&work, &["commit", "--quiet", "-m", &format!("add {file}")]);
+            commits.push(git(&work, &["rev-parse", "HEAD"]));
+        }
+        git(&work, &["checkout", "--quiet", "main"]);
+        let other = self.teammate("b.txt");
+        git(&other, &["push", "--quiet", "origin", "main"]);
+        commits
+    }
+}
+
+#[test]
+fn a_rebase_landing_pushes_linear_history_whose_tree_is_the_checked_tree() {
+    let w = World::new();
+    let commits = w.diverged();
+    let before = w.checkout();
+    let target = w.hub_main();
+    let (code, report) = w.json(&land_args(
+        "linear",
+        &[
+            "--json",
+            "--rebase",
+            "--check-again",
+            "--",
+            "sh",
+            "-c",
+            "test -f c.txt && test -f d.txt && grep -q theirs b.txt",
+        ],
+    ));
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+    let landed = w.hub_main();
+    let range = format!("{target}..{landed}");
+    assert_eq!(
+        git(&w.hub(), &["rev-list", "--merges", &range]),
+        "",
+        "no merge commit"
+    );
+    assert_eq!(git(&w.hub(), &["rev-list", &range]).lines().count(), 2);
+    assert_eq!(
+        git(&w.hub(), &["rev-parse", &format!("{landed}~2")]),
+        target
+    );
+    let rebased = report["rebased"].as_array().unwrap();
+    assert_eq!(rebased.len(), 2, "{report}");
+    assert_eq!(rebased[0]["from"], commits[0].as_str());
+    assert_eq!(rebased[1]["from"], commits[1].as_str());
+    assert_eq!(rebased[1]["to"], landed.as_str());
+    assert_eq!(
+        git(&w.hub(), &["rev-parse", &format!("{landed}~1")]),
+        rebased[0]["to"].as_str().unwrap()
+    );
+    // The author and message are the branch's own.
+    assert_eq!(
+        git(&w.hub(), &["log", "-1", "--format=%an %s", &landed]),
+        "Dev add d.txt"
+    );
+    let tree = git(&w.hub(), &["rev-parse", &format!("{landed}^{{tree}}")]);
+    assert_eq!(report["landing"]["tree_oid"], tree.as_str());
+    let recorded = w
+        .events()
+        .into_iter()
+        .find(|event| event["type"] == "landed")
+        .unwrap();
+    assert_eq!(
+        recorded["landing"]["rebased"], report["rebased"],
+        "{recorded}"
+    );
+    assert_eq!(w.checkout(), before, "the owner's branch was not rewritten");
+
+    // Landing the same branch again finds its patches on the target.
+    for extra in [&["--rebase"][..], &[][..]] {
+        let (code, report) = w.json(&land_args(
+            "linear",
+            &[&["--json"][..], extra, &["--check-again", "--", "true"]].concat(),
+        ));
+        assert_eq!(code, 0, "{extra:?}: {report}");
+        assert_eq!(report["result"], "nothing_to_land", "{extra:?}: {report}");
+        assert_eq!(w.hub_main(), landed);
+    }
+}
+
+#[test]
+fn a_rebase_that_conflicts_in_an_intermediate_commit_names_it_and_pushes_nothing() {
+    let w = World::new();
+    let work = w.work();
+    // The branch changes a.txt and then changes it back: as a merge it is
+    // clean, but its first commit conflicts with the target's a.txt.
+    git(&work, &["checkout", "--quiet", "-b", "wobble", "main"]);
+    fs::write(work.join("a.txt"), "X\n").unwrap();
+    git(&work, &["commit", "--quiet", "-am", "x"]);
+    let first = git(&work, &["rev-parse", "HEAD"]);
+    fs::write(work.join("a.txt"), "base\n").unwrap();
+    fs::write(work.join("e.txt"), "e\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "--quiet", "-m", "back"]);
+    git(&work, &["checkout", "--quiet", "main"]);
+    let other = w.teammate("a.txt");
+    git(&other, &["push", "--quiet", "origin", "main"]);
+    let original = w.hub_main();
+    // As a merge it combines cleanly.
+    let (code, report) = w.json(&[
+        "integrate",
+        "check",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "wobble",
+        "--json",
+        "--",
+        "true",
+    ]);
+    assert_eq!(code, 0, "{report}");
+    let (code, report) = w.json(&land_args(
+        "wobble",
+        &["--json", "--rebase", "--check-again", "--", "true"],
+    ));
+    assert_eq!(code, 2, "{report}");
+    assert_eq!(report["result"], "not_combinable", "{report}");
+    assert_eq!(report["commit"], first.as_str(), "{report}");
+    assert_eq!(report["paths"], serde_json::json!(["a.txt"]), "{report}");
+    assert_eq!(
+        report["conflicts"][0]["hunks"][0]["branch"]["text"],
+        serde_json::json!(["X"]),
+        "{report}"
+    );
+    assert_eq!(w.hub_main(), original, "nothing was pushed");
+}
+
+#[test]
+fn a_branch_with_a_merge_commit_is_not_rebased_and_nothing_is_pushed() {
+    let w = World::new();
+    let work = w.work();
+    git(&work, &["checkout", "--quiet", "-b", "merged", "feature-a"]);
+    git(
+        &work,
+        &["merge", "--quiet", "--no-ff", "-m", "merge b", "feature-b"],
+    );
+    git(&work, &["checkout", "--quiet", "main"]);
+    let other = w.teammate("c.txt");
+    git(&other, &["push", "--quiet", "origin", "main"]);
+    let original = w.hub_main();
+    let (code, report) = w.json(&land_args(
+        "merged",
+        &["--json", "--rebase", "--check-again", "--", "true"],
+    ));
+    assert_eq!(code, 2, "{report}");
+    assert_eq!(report["result"], "not_rebased", "{report}");
+    assert!(
+        report["reason"]
+            .as_str()
+            .unwrap()
+            .contains("without --rebase"),
+        "{report}"
+    );
+    assert_eq!(w.hub_main(), original, "nothing was pushed");
+}
+
+#[test]
+fn a_changed_file_that_does_not_parse_makes_rename_detection_say_so() {
+    let w = World::new();
+    w.renamed_target();
+    // The target also changes a source file into one that does not parse.
+    w.commit_on("main", "main", &[("src/broken.rs", "pub fn a( {\n".into())]);
+    git(&w.work(), &["push", "--quiet", "origin", "main"]);
+    let (code, report) = w.json(&[
+        "integrate",
+        "check",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "calls",
+        "--json",
+        "--",
+        "true",
+    ]);
+    assert_eq!(code, 0, "{report}");
+    assert!(report.get("identifier_renames").is_none(), "{report}");
+    let why = report["identifier_renames_incomplete"].as_str().unwrap();
+    assert!(why.contains("src/broken.rs"), "{report}");
+    // Adapting stops only when there is something it would rewrite; here
+    // there is nothing it found, so the branch lands as it is.
+    let (code, report) = w.json(&land_args(
+        "calls",
+        &["--json", "--adapt-renames", "--check-again", "--", "true"],
+    ));
+    assert_eq!(code, 0, "{report}");
+    assert!(report.get("adapted").is_none(), "{report}");
+}
+
+#[tokio::test]
+async fn two_agent_sessions_landing_through_mcp_land_in_arrival_order() {
+    use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+    type Client = rmcp::service::RunningService<rmcp::RoleClient, ()>;
+    async fn call(
+        client: &Client,
+        name: &'static str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let request =
+            CallToolRequestParams::new(name).with_arguments(arguments.as_object().unwrap().clone());
+        let result = tokio::time::timeout(Duration::from_secs(90), client.call_tool(request))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        result.structured_content.unwrap()
+    }
+    let w = World::new();
+    let original = w.hub_main();
+    let connect = || async {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+        command.env("LANGSPAN_AUTOSTART", "off");
+        command
+            .arg("mcp")
+            .arg("--state-dir")
+            .arg(w.base.join("state"));
+        ().serve(TokioChildProcess::new(command).unwrap())
+            .await
+            .unwrap()
+    };
+    let (one, two) = (connect().await, connect().await);
+    // Evidence for each tree either landing can push: A alone, then A and B.
+    for (id, branches) in [
+        ("c-a", vec!["feature-a"]),
+        ("c-ab", vec!["feature-a", "feature-b"]),
+    ] {
+        let checked = call(
+            &one,
+            "langspan_integrate_check",
+            serde_json::json!({
+                "request_id": id, "workspace_id": "app", "onto": "main", "name": "unit",
+                "branches": branches, "command": ["true"], "timeout_s": 60,
+            }),
+        )
+        .await;
+        assert_eq!(checked["exit_code"], 0, "{checked}");
+    }
+    w.pre_push("sleep 3");
+    let land = |id: &str, branch: &str, session: &str| {
+        serde_json::json!({
+            "request_id": id, "workspace_id": "app", "onto": "main", "name": "unit",
+            "branches": [branch], "apply": true, "session_id": session, "wait_s": 60,
+        })
+    };
+    let first = call(
+        &one,
+        "langspan_land",
+        land("agent-1", "feature-a", "session-1"),
+    );
+    let second = async {
+        // Polled on a blocking thread so the first call keeps running.
+        let state = w.base.join("state");
+        tokio::task::spawn_blocking(move || {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+                    .env("LANGSPAN_AUTOSTART", "off")
+                    .arg("--state-dir")
+                    .arg(&state)
+                    .args(["land-queue", "app", "--onto", "main", "--json"])
+                    .output()
+                    .unwrap();
+                let queue: serde_json::Value =
+                    serde_json::from_slice(&output.stdout).unwrap_or_default();
+                if holds(&queue, "agent-1") {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "the first never took the turn");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+        .await
+        .unwrap();
+        call(
+            &two,
+            "langspan_land",
+            land("agent-2", "feature-b", "session-2"),
+        )
+        .await
+    };
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first["result"], "landed", "{first}");
+    assert_eq!(second["result"], "landed", "{second}");
+    assert!(second["waited_ms"].as_u64().unwrap() > 0, "{second}");
+    let (a, b) = (
+        first["landing"]["commit_oid"].as_str().unwrap(),
+        second["landing"]["commit_oid"].as_str().unwrap(),
+    );
+    assert_eq!(second["landing"]["inputs"][0], a, "{second}");
+    assert_eq!(w.hub_main(), b);
+    git(&w.hub(), &["merge-base", "--is-ancestor", &original, a]);
+    git(&w.hub(), &["merge-base", "--is-ancestor", a, b]);
+    let taken: Vec<String> = w
+        .events()
+        .into_iter()
+        .filter(|event| event["type"] == "turn_taken")
+        .map(|event| {
+            event["turn"]["session_id"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(taken, ["session-1", "session-2"]);
+    one.cancel().await.unwrap();
+    two.cancel().await.unwrap();
+}
