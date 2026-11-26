@@ -2087,8 +2087,17 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
             .split_once('.')
             .unwrap_or(("agent", &peer.session_id));
         let short = |id: &str| id.chars().take(8).collect::<String>();
-        let mut line = match id.split_once('.') {
-            // A subagent's ID is its parent's joined to its own.
+        // A subagent's ID is its parent's joined to its own. An Antigravity
+        // conversation's is joined to its workspace's scope, not an agent
+        // (`antigravity::scoped_session`): it is named by the conversation.
+        let subagent = id
+            .split_once('.')
+            .filter(|_| host != crate::antigravity::SOURCE);
+        let id = match host {
+            crate::antigravity::SOURCE => id.split_once('.').map_or(id, |(head, _)| head),
+            _ => id,
+        };
+        let mut line = match subagent {
             Some((parent, agent)) => format!(
                 "- {} session {} subagent {}",
                 clean(host, 32),
