@@ -5,6 +5,10 @@ on:
     types: [opened, edited, reopened, synchronize]
   push:
     branches: [main]
+  # release.yml starts it on the release branch: the release bot's pull
+  # request gets no pull_request run that can pass without approval. Like a
+  # push, a dispatched run checks only the tree.
+  workflow_dispatch:
 # No token permission unless a job asks for it; the job reads only.
 permissions: {}
 concurrency:

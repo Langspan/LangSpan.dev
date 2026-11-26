@@ -1,7 +1,8 @@
 //! The coordination report (roadmap H8): for each session and each host
 //! kind, how its edits were admitted, what was seen only after a shell
 //! command, what it read, how it declared and ended intent, what was refused
-//! and how often a refused call came back unchanged, from the event log.
+//! and how often a refused call came back unchanged, and what each session
+//! did after a refusal (H9, `refusal_outcome`), from the event log.
 //!
 //! Every figure is a count of recorded events. A share is always given as a
 //! count beside the count it is out of (`edits_base_unknown` of
@@ -13,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::dashboard::host_and_prefix;
+use crate::refusal_outcome::Settler;
 use crate::today::{Placement, event_facts};
 use crate::{
     ANTIGRAVITY_HOST, CLAUDE_CODE_HOST, CODEX_HOST, CURSOR_HOST, ClockAnchor, Event, LeaseRelation,
@@ -53,6 +55,11 @@ pub struct ReportCounts {
     /// tool call (same input digest).
     pub retried_unchanged: u32,
     pub briefings_delivered: u32,
+    /// What the session did after its edit refusals (H9): one outcome per
+    /// session, kind and path set refused, by outcome name
+    /// (`RefusalOutcome::name`), and `pending` for those not settled yet.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub refusal_outcomes: BTreeMap<String, u32>,
 }
 
 impl ReportCounts {
@@ -77,6 +84,12 @@ impl ReportCounts {
         }
         sum(&mut self.retried_unchanged, other.retried_unchanged);
         sum(&mut self.briefings_delivered, other.briefings_delivered);
+        for (outcome, count) in &other.refusal_outcomes {
+            sum(
+                self.refusal_outcomes.entry(outcome.clone()).or_default(),
+                *count,
+            );
+        }
     }
 }
 
@@ -165,6 +178,9 @@ pub struct ReportQuery<'a> {
     /// folded only the newest `REPORT_HISTORY_EVENTS` of them, and only
     /// the sessions these name are known; `known_sessions` folds it.
     pub known: Option<&'a ReportKnown>,
+    /// How long a refused session has to write a refused path before the
+    /// refusal is settled `abandoned`: `REFUSAL_WINDOW_MS` but in tests.
+    pub refusal_window_ms: u64,
 }
 
 /// The most intent and registration events before those a report reads
@@ -320,9 +336,11 @@ pub fn report(query: &ReportQuery<'_>) -> Report {
     let mut known: Option<ReportKnown> = query.known.cloned();
     let mut partial = false;
     let mut undated = 0u32;
+    let mut settler = Settler::new(query.refusal_window_ms);
     for recorded in query.events {
         let event = &recorded.event;
         let wall = placement.place(event);
+        settler.observe(event, wall);
         let session = event_session(event);
         let in_window = wall.is_some_and(|wall| wall >= window.from_ms && wall <= window.to_ms);
         let ours = event_workspace(&members, event, session) == Some(query.workspace_id);
@@ -407,9 +425,19 @@ pub fn report(query: &ReportQuery<'_>) -> Report {
                 if let Some(digest) = input_digest {
                     refused.insert((session.into(), digest.clone()));
                 }
+                let reads = !not_reported(host_kind(session)).contains(&"reads_reported");
+                settler.open(event, reads, wall);
             }
             Event::BriefingDelivered { .. } => one(&mut counts.briefings_delivered),
             _ => {}
+        }
+    }
+    for (session, outcomes) in settler.finish(window.to_ms) {
+        // Every refusal opened was counted, so its session has a tally.
+        if let Some(tally) = sessions.get_mut(&session) {
+            for (outcome, count) in outcomes {
+                tally.counts.refusal_outcomes.insert(outcome.into(), count);
+            }
         }
     }
     let mut hosts: BTreeMap<&'static str, ReportHost> = BTreeMap::new();

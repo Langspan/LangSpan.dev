@@ -84,8 +84,9 @@ Where LangSpan has a recorded version, it also checks whether the file changed
 before the edit. [Region admission and its limits](adr/0012-region-admission.md)
 describe which edits can proceed together. A refusal is scoped to the supported
 operation and current hold or recorded source. The agent can reread, retry or
-choose another task. Waiting and revalidating an active edit hold is proposed
-in [B28](https://github.com/Langspan/LangSpan.dev/issues/171), not a shipped edit queue.
+choose another task. A workspace can instead wait briefly for an active hold
+and then revalidate the file ([coordination policies](usage.md#coordination-policies));
+this is off by default and is not an edit queue.
 
 ### See what happened
 

@@ -1064,3 +1064,43 @@ fn a_removed_name_is_not_told_while_the_index_cannot_read_every_file() {
     let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
     assert!(!events.contains("interface_alerted"), "{events}");
 }
+
+/// Advisory, whatever the conflict policy (roadmap B28, ADR 0036): with
+/// the workspace waiting for holders, a peer's signature change is told at
+/// the write, which is admitted without a wait.
+#[test]
+fn a_break_alert_admits_the_write_with_the_wait_policy_on() {
+    let w = World::new(true);
+    let (code, text) = w.cli(&[
+        "policy",
+        "set",
+        "app",
+        "conflict",
+        "wait",
+        "--request-id",
+        "p1",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    w.wait_for_index();
+    quiet(&w.writes("bob", "b0", "src/extra.rs", "pub fn extra() {}\n"));
+    w.rewrites(
+        "alice",
+        "a1",
+        "src/api.rs",
+        "pub fn resize(width: u32, height: u32) -> u32 {\n    width * height\n}\n",
+    );
+    w.wait_for_notice("resize", "height: u32");
+    let run = w.writes(
+        "bob",
+        "b1",
+        "src/main.rs",
+        "mod api;\nfn main() {\n    api::resize(3);\n}\n",
+    );
+    let context = alert(&run);
+    assert!(context.contains("it now takes 2"), "{context}");
+    assert!(!run.detail.contains("waiting"), "{}", run.detail);
+    let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
+    assert!(events.contains("interface_alerted"), "{events}");
+    assert!(!events.contains("write_waited"), "{events}");
+    assert!(!events.contains("write_refused"), "{events}");
+}

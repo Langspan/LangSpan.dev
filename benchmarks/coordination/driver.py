@@ -39,6 +39,7 @@ ARMS = ("worktrees", "awareness_only", "langspan")
 AGENTS = ("standin", "claude")
 STANDIN_MODES = ("follow", "ignore", "hedge", "workaround")
 SCHEMA_VERSION = 6
+MAX_SOCKET_PATH = 100
 GIT_IDENTITY = ["-c", "user.name=Benchmark", "-c", "user.email=benchmark@example.invalid",
                 "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
 MAX_TIME_LIMIT = 3600
@@ -544,21 +545,34 @@ class Coordinator:
     """One LangSpan daemon, in its own process group."""
 
     def __init__(self, langspan, state_dir, log_path):
+        # The daemon refuses a socket path longer than this many bytes once
+        # links are resolved (src/local.rs); macOS allows 104 with the
+        # terminator. Say so here rather than "did not start".
+        socket = os.fsencode(os.path.join(os.path.realpath(state_dir), "daemon.sock"))
+        if len(socket) > MAX_SOCKET_PATH:
+            raise RuntimeError("the LangSpan coordinator's socket path is %d bytes, over the %d a Unix socket "
+                               "allows: %s; choose a shorter state folder" % (len(socket), MAX_SOCKET_PATH,
+                                                                            os.fsdecode(socket)))
         self.langspan, self.state_dir = langspan, state_dir
         self.log = open(log_path, "ab")
         self.process = subprocess.Popen([str(langspan), "daemon", "--state-dir", str(state_dir)],
                                         stdin=subprocess.DEVNULL, stdout=self.log, stderr=self.log,
                                         start_new_session=True)
-        deadline = time.monotonic() + DAEMON_START_SECONDS
-        while True:
-            probe = subprocess.run([str(langspan), "status", "--state-dir", str(state_dir)],
-                                   capture_output=True, timeout=10)
-            if probe.returncode == 0:
-                return
-            if self.process.poll() is not None or time.monotonic() > deadline:
-                self.stop()
-                raise RuntimeError("the LangSpan coordinator did not start; see " + str(log_path))
-            time.sleep(.1)
+        # Until this returns, no caller holds the coordinator to stop it, so
+        # any exception here, even an interrupt, stops it first (issue #239).
+        try:
+            deadline = time.monotonic() + DAEMON_START_SECONDS
+            while True:
+                probe = subprocess.run([str(langspan), "status", "--state-dir", str(state_dir)],
+                                       capture_output=True, timeout=10)
+                if probe.returncode == 0:
+                    return
+                if self.process.poll() is not None or time.monotonic() > deadline:
+                    raise RuntimeError("the LangSpan coordinator did not start; see " + str(log_path))
+                time.sleep(.1)
+        except BaseException:
+            self.stop()
+            raise
 
     def events(self):
         """Every persisted event, in order, page by page."""

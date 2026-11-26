@@ -104,6 +104,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         workspace_revisions: _,
         // Derived for `graph symbol --renamed`; likewise.
         renames: _,
+        trails: _,
         // The write generation check runs carry: one count per workspace,
         // never trimmed.
         writes,
@@ -112,6 +113,10 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         kept_tests: _,
         first_writes: _,
         write_runs: _,
+        // Derived for coordination policies (roadmap B28); read through
+        // their own requests, never part of the status reply.
+        conflict_waits: _,
+        unsettled: _,
     } = state;
     let mut summary = StatusSummary::default();
     let mut open = BTreeMap::new();
@@ -195,10 +200,13 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         path_refusals: Vec::new(),
         workspace_revisions: BTreeMap::new(),
         renames: BTreeMap::new(),
+        trails: BTreeMap::new(),
         writes: writes.clone(),
         kept_tests: BTreeMap::new(),
         first_writes: BTreeMap::new(),
         write_runs: BTreeMap::new(),
+        conflict_waits: BTreeMap::new(),
+        unsettled: BTreeMap::new(),
     };
     (view, summary)
 }

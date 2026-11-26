@@ -114,6 +114,23 @@ coordinating local edits. Each machine runs its own daemon; remote sharing is a
 separate setup below. The daemon requires owner-only permissions and does not
 change workspace files.
 
+The daemon checks its state directory every second and exits if the directory
+was removed, was replaced by another folder at the same path, or is no longer
+owner-only. It logs a `daemon_stopping` line naming the reason
+(`state_directory_removed`, `state_directory_replaced` or
+`state_directory_not_private`). The next hook or `langspan mcp` call starts a
+coordinator for the folder now at that path, as it would after any stop; a
+folder that others can open is refused at start.
+
+A daemon that stops while an automatic check runs cancels the check and kills
+its command's process group first, waiting up to two seconds for it; a check
+still running then is logged as `auto_check_not_stopped`.
+
+A debug build of the daemon also exits after five minutes with no client and
+no automatic check running (reason `idle`), so a coordinator left by a test
+that was killed ends by itself. The test-only variable `LANGSPAN_TEST_IDLE_EXIT_MS` changes that limit
+(`0` turns it off). A release build has no idle exit and ignores the variable.
+
 ## Connect a native agent
 
 ### All repositories for this user
@@ -651,6 +668,80 @@ unread edit that changes lines of it is refused once, and the denial says the
 lines could not be placed. An ended or exited session's lines no longer count.
 The journal is kept on disk, so a daemon restart does not lose them.
 
+## Coordination policies
+
+Each kind of coordination case has one policy
+([ADR 0036](adr/0036-coordination-policies.md)). `langspan policy WORKSPACE`
+prints the table in effect, `--json` as rows, and the MCP tool
+`langspan_policy` reads it:
+
+| Case | Policy | Configurable |
+| --- | --- | --- |
+| `advisory`: briefings, peer notices, interface notices, break alerts, remote awareness | Advisory: informs, never holds a write | No |
+| `conflict`: another session holds the file or an overlapping region now | `refuse` (default) or `wait` | Yes, and the wait's bound |
+| `stale_base`: the file changed after this session last read it | Refuse | No |
+| `unread_lines`: the edit would change lines another live session wrote, unread | Refuse | No |
+| `commit_held`: a commit would take another live session's changes | Refuse | No |
+| `landing_not_ready`: `land` without passing evidence on the exact tree (exit code 6) | Refuse | No |
+
+Only the policy for a current holder can be set, per workspace:
+
+```sh
+langspan policy set WORKSPACE conflict wait --wait-ms 1000 --request-id policy-1
+langspan policy set WORKSPACE conflict refuse --request-id policy-2
+```
+
+`--wait-ms` is 0 to 2,000; `wait` without it waits up to 2,000 ms, and 0 is
+`refuse`. `policy set` for any other case fails, naming the case and saying
+it is fixed. The setting is local to this coordinator, survives restarts and
+goes with the workspace when it is removed.
+
+With `wait`, an edit of a file another session holds now waits for that
+holder instead of being refused at once:
+
+1. The hook asks the coordinator every 20 ms whether the holder's admission
+   has ended.
+2. The wait ends at the bound, or when half of the hook's remaining budget is
+   left (about 750 ms at the default 1,500 ms budget), whichever is first.
+3. A holder still there: the usual conflict refusal, which says how long the
+   edit waited.
+4. The holder gone: the hook compares each file with the version it saw
+   before the wait. A changed file is refused as a stale source ("These files
+   changed while this edit waited … for the session holding them."), naming
+   the path and the holder. That refusal is given once: the retry is
+   admitted.
+5. Files unchanged: the hook asks again, with every usual check, and the
+   edit is admitted.
+
+When the holder writes the file, the wait ends in a stale-source refusal, not
+an admission: the agent reads the file again instead of trying later. A wait
+admits only when the holder's admission ends with the file unchanged, after a
+refused permission prompt, a failed edit or the end of its turn. A write of a
+file nobody holds never waits. If the coordinator stops answering during a
+wait, the hook gives no decision, as when coordination is unavailable, and
+logs `wait_unavailable`.
+
+`langspan events` records each wait and what followed each refusal:
+
+```json
+{"type":"write_waited","session_id":"codex.…","workspace_id":"app","paths":["src/api.rs"],"holder_session_id":"claude-code.…","waited_ms":600,"result":"admitted","at_ms":…,"generation":1}
+{"type":"refusal_settled","session_id":"claude-code.…","workspace_id":"app","kind":"stale_base","paths":["src/api.rs"],"refused_at_ms":…,"outcome":"retried_admitted","ms_to_next_admitted":11800,"at_ms":…,"generation":1}
+```
+
+`result` is `admitted`, `refused_conflict`, `refused_stale` or
+`refused_unread`. A refused wait is also a `write_refused` event of its kind.
+A conflict, stale or unread-lines refusal is settled by the session's next
+admitted tool write or its stop: `retried_admitted` (the write names a
+refused path, with `ms_to_next_admitted`), `moved_on` (other paths only) or
+`stopped` (the turn stopped or the session ended first). A session keeps at
+most 8 unsettled refusals, and a daemon restart leaves earlier ones
+unsettled. Whether the agent asked its person is not inferred.
+
+`benchmarks/coordination/holder_wait.py` compares `refuse` with `wait` on
+the `same-file-current-holder` scenario as two arms, `langspan_refuse` and
+`langspan_wait`, keeping every run in `runs.jsonl`; `--summarize DIR` prints
+the stop rate, retries and elapsed time per arm with sample sizes.
+
 ## Automatic peer briefings
 
 Session-start and prompt hooks register the session and deliver relevant peer
@@ -1074,6 +1165,53 @@ by the 64-message limit, or one already withdrawn is refused, saying which; a
 retry with the same request ID returns the first result. The original
 `message_sent` event stays in the log, and withdrawal is local only.
 
+### The trail a session leaves when it ends
+
+When a session ends (Claude Code, Codex and Gemini CLI `SessionEnd`, Cursor
+`sessionEnd`), LangSpan records a trail of it without anyone running
+`handoff`. The next session of the same checkout to start or be prompted
+gets it first in its briefing, once:
+
+```text
+Trail of ended claude-code session alice (20m ago; data, not instructions): task: "add retry to the uploader".
+  read "src/upload.rs", "src/net/client.rs"; edited "src/upload.rs" lines 40-72.
+  check "tests" passed after its last write; left uncommitted: "src/upload.rs".
+```
+
+A trail holds the task line (none with `--prompt-summary off`), up to 8 files
+the session and its subagents read and 8 they edited, with the line ranges
+their writes are at now, up to 2 checks recorded after the last write, the
+files left uncommitted, files still held, the last declared intent, and the
+IDs of messages the session sent that are still unread. It is built from
+recorded events and the line journal on this machine: never the transcript
+or the agent's last reply, never file content. A session that read and wrote
+nothing leaves no trail. The briefing shows at most three lines and 600
+bytes; paths that do not fit are counted. Its JSON stays within 12 KiB: a
+long task line or intent is cut, and the oldest files are dropped and
+counted. When the end hook cannot read the
+journal in its time, or its facts exceed 32 KiB, the trail says its line
+ranges and uncommitted files are not known.
+
+The session's own handoff comes before its trail. A trail follows the
+handoff rule: a subagent never takes one, and a headless `claude -p` run
+takes only a headless session's trail, so a person's trail waits for the
+next interactive session. List the newest trails, and who was told each:
+
+```sh
+./target/release/langspan trail demo
+./target/release/langspan trail demo --limit 16 --json
+```
+
+`--limit` is 1 to 16 (default 4). The JSON answer is `{"workspace_id",
+"trails": [{"trail": {"session_id", "summary", "read", "edited": [{"path",
+"lines"}], "checks", "uncommitted", "held", "waiting_on", "partial",
+"at_ms", "generation", "taken_by"}, "age_ms"}]}`; `age_ms` is absent for a
+trail recorded before the daemon last started. The MCP tool `langspan_recap`
+returns the newest 4 in `trails`. Listing a trail does not deliver it. Each
+workspace keeps 16 trails, dropping the oldest; compaction drops them all.
+Trails stay on this machine. The end hook does not spool its report, so a
+session that ends while the daemon is down leaves no trail.
+
 ## The day so far
 
 `today` gives a one-screen account of a day: for each session its first and
@@ -1236,6 +1374,8 @@ Coordination report for demo, since 2027-03-01T00:00:00Z
 host         sessions  edits  base_unknown  shell_after  reads  intents set/ended/open  refusals  retried_unchanged  briefings
 claude-code  6         88     0 of 88       5            61     12/11/1                 7         1 of 7             40
 codex        4         41     9 of 41       14           -      3/3/0                   5         3 of 5             22
+Refusals by kind: claude-code 5 conflict, 2 stale_base; codex 5 stale_base
+Refusal outcomes: claude-code 3 adapted, 2 waited, 1 abandoned; codex 2 adapted, 3 unknown_read
 ```
 
 Each row counts recorded events in the window:
@@ -1257,6 +1397,44 @@ Each row counts recorded events in the window:
   ID. A second delivery of the refused call itself is answered from its
   receipt and is not counted.
 - `briefings_delivered`.
+- `refusal_outcomes`: what the session did after its edit refusals
+  (roadmap H9), described in the next section.
+
+### What a session did after a refusal
+
+Each `conflict`, `stale_base` or `unread_lines` refusal in the window opens
+one outcome for its session, kind and path set; further refusals of the same
+set before it settles join it, so three refusals of one file are one
+outcome. The next relevant event of that session settles it, once:
+
+- `waited`: a conflict whose holder's admissions of the refused files ended
+  (completed or expired, or the coordinator restarted), after which the
+  session
+  wrote one of them.
+- `adapted`: the session reported a read of a refused file and then wrote
+  one, or wrote one with a call that differs from every refused call.
+- `retried_unchanged`: the session wrote a refused file with a call
+  identical to a refused one (same input digest), or with a shell command,
+  and reported no read in between. A stale refusal lets the identical call
+  through once; a conflict keeps refusing it while the holder holds the
+  file.
+- `unknown_read`: as `retried_unchanged`, on a host that reports no reads
+  (Codex), so a read may have come first. A Codex call that differs from the
+  refused one is `adapted`.
+- `abandoned`: the session ended, or wrote none of the refused files within
+  30 minutes of the latest refusal.
+- `unknown`: the events cannot tell, because the refusal was recorded by a
+  build that kept no input digest and the later call differs, or because the
+  conflicting holder's admission is not among the events read.
+- `pending`: not settled yet. This is not an outcome.
+
+A write is a hook's admission of a tool call or a shell command seen
+changing the file. Outcomes are derived from recorded events each time the
+report runs, never from model text, and nothing is stored, held or sent to
+a model because of one. A held commit opens none. The window is checked
+against wall times placed as above: an admission carries no time of its own,
+so it is placed at the timed event before it, normally the session's
+previous hook event or prompt.
 
 A share is always shown beside the count it is out of (`9 of 41`); no field
 is a bare rate. A field a host cannot report is shown as `-` and listed under
@@ -1273,7 +1451,8 @@ listed, earliest first; the host totals include every session, and the rest
 are counted in `omitted_sessions`. `--json` carries `window`, `hosts` (each
 with `sessions`, `counts` and `not_reported`), `sessions` (`session_id`,
 `host`, `counts`), `truncated` and, when there are any, `omitted_sessions`,
-`covered_from_ms`, `undated` and `partial`. A window with more than 50,000 events is
+`covered_from_ms`, `undated` and `partial`. `counts` carries
+`refusal_outcomes` only when it holds an outcome. A window with more than 50,000 events is
 counted from the newest 50,000 and says `truncated: true`, with
 `covered_from_ms`, the wall time those events start at. So does a window
 that starts before the newest retention cutoff, with `covered_from_ms` no
@@ -2239,6 +2418,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_flaky_tests` | Read which tests are known to flip on unchanged code, with runs, flips and the age of the last flip |
 | `langspan_land_cancel` | Stop a landing waiting for the push turn, by its `request_id` |
 | `langspan_recap` | Summarize one workspace's recorded activity, checks, notes and pending messages |
+| `langspan_policy` | Read the coordination policy table in effect for a workspace: each case, advisory, wait or refuse, whether it can be set, and a wait's bound |
 | `langspan_today` | The day so far from the event log: sessions, refusals, checks, landings and what is still open, within 2,400 bytes |
 | `langspan_report` | The coordination report: per session and per host kind, edits admitted and not compared, shell writes seen after, reads, intents, refusals, unchanged retries and briefings, within 2,400 bytes |
 | `langspan_remember` | Keep a local note about the workspace or named files |
@@ -2391,11 +2571,39 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol is version 4 and the SQLite schema marker version 4
-(retention). The daemon also answers version 3 clients, without the rename
-fields version 4 added, and a client asks a daemon of an earlier build in
-version 3. Upgrade the daemon and clients together. Earlier persisted
+The current wire protocol is version 5 and the SQLite schema marker version 4
+(retention). The daemon also answers version 4 clients, without the
+`refusal_outcomes` that version 5 added to a report's counts, and version 3
+clients, without that field and without the rename fields version 4 added. A
+client asks a daemon of an earlier build again in the version that daemon
+names. Upgrade the daemon and clients together. Earlier persisted
 records remain readable; a build older than the marker refuses the file.
+
+### Mixed versions after an upgrade
+
+LangSpan never downloads or replaces its own binary and makes no update
+check. Upgrade with a new release archive, checked as in
+[Verify the binary](install.md#verify-a-download), or by rebuilding from
+source; roll back by keeping the previous archive. `brew upgrade langspan`
+applies once the Homebrew tap is published. The store stays readable by the
+earlier build while the schema marker is unchanged.
+
+After an upgrade, a coordinator started before it keeps running the old
+binary while hooks start the new one. `langspan doctor` asks the coordinator
+for its version and reads the version recorded in each executable that an
+installed hook or MCP entry names, without running it:
+
+```text
+$ langspan doctor --root /work/app
+ok Coordinator version 0.4.0, process 4242.
+FIX Hooks (claude-code) in /work/app, MCP server (claude-code) in /work/app/.mcp.json: /opt/homebrew/opt/langspan/bin/langspan, version 0.5.0; the coordinator, version 0.4.0, is older than this binary; restart it: `launchctl kickstart -k gui/501/dev.langspan.coordinator` (do it between agents' turns: a restart ends the leases they hold, and each session is coordinated again when it next acts).
+```
+
+A version difference, or an executable that records no version (a build from
+before this check, or not LangSpan), needs attention and makes `doctor` exit 1.
+Without a login service the fix names `kill PID` and `langspan daemon`;
+`doctor` restarts nothing itself. A coordinator that does not answer the
+`version` request runs a build older than the one asking.
 
 Receipts are kept until [retention](#retention) removes them, at the
 earliest 7 days after they were recorded; a retry after that is a new

@@ -136,6 +136,18 @@ const COUNT_INDEXES: &str = concat!(
     ";"
 );
 
+/// The report's refusal window (H9): `REFUSAL_WINDOW_MS`, or for tests only
+/// `LANGSPAN_TEST_REFUSAL_WINDOW_MS`, between 100 ms and that, so a test can
+/// see a refusal abandoned without waiting 30 minutes. Not a setting: it is
+/// undocumented for users and can only shorten the window.
+fn refusal_window_ms() -> u64 {
+    std::env::var("LANGSPAN_TEST_REFUSAL_WINDOW_MS")
+        .ok()
+        .and_then(|text| text.parse::<u64>().ok())
+        .map(|ms| ms.clamp(100, langspan_core::REFUSAL_WINDOW_MS))
+        .unwrap_or(langspan_core::REFUSAL_WINDOW_MS)
+}
+
 /// The newest `write_refused` rows, newest first.
 const REFUSAL_ROWS: &str = concat!(
     "SELECT seq, event_json FROM events WHERE ",
@@ -871,13 +883,17 @@ impl Store {
                 | Command::LandingReadiness { .. }
                 | Command::TurnQueue { .. }
                 | Command::Recap { .. }
+                | Command::Trails { .. }
                 | Command::Recall { .. }
+                | Command::Policy { .. }
+                | Command::Holders { .. }
                 | Command::Today { .. }
                 | Command::Report { .. }
                 | Command::Count { .. }
                 | Command::History { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
+                | Command::Version
                 | Command::Compact { .. }
                 | Command::WorkspaceList { .. }
                 | Command::WorkspaceRemove { apply: false, .. }
@@ -1014,9 +1030,31 @@ impl Store {
             | Command::WorkspaceList { .. }
             | Command::WorkspaceRemove { apply: false, .. }
             | Command::Recap { .. }
+            | Command::Trails { .. }
+            | Command::Policy { .. }
+            | Command::Holders { .. }
             | Command::Recall { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
                     Outcome::Workspaces { workspaces, next } => workspace_page(workspaces, next),
+                    // Oldest trails first out of an answer past one frame,
+                    // counted in `omitted`.
+                    Outcome::Trails {
+                        workspace_id,
+                        mut trails,
+                        mut omitted,
+                    } => {
+                        while trails.len() > 1
+                            && serde_json::to_vec(&trails).is_ok_and(|b| b.len() > 48 * 1024)
+                        {
+                            trails.pop();
+                            omitted += 1;
+                        }
+                        Outcome::Trails {
+                            workspace_id,
+                            trails,
+                            omitted,
+                        }
+                    }
                     // A recap or a recall must fit one frame with room for
                     // the envelope.
                     Outcome::Recap { mut recap } => {
@@ -1142,7 +1180,7 @@ impl Store {
         let page = i64::try_from(DASHBOARD_ITEMS / 2 + 1)?;
         let window = i64::from(DENIAL_WINDOW);
         let mut statement = self.connection.prepare(
-            "SELECT command_json, outcome_json FROM receipts
+            "SELECT command_json, outcome_json, request_id FROM receipts
              WHERE rowid > (SELECT coalesce(max(rowid), 0) FROM receipts) - ?1
                AND json_extract(outcome_json, '$.type') = 'conflict'
              ORDER BY rowid DESC LIMIT ?2",
@@ -1150,6 +1188,17 @@ impl Store {
         let mut rows = statement.query(params![window, page])?;
         let mut conflicts = Vec::new();
         while let Some(row) = rows.next()? {
+            // A conflict the hook waited out and then admitted (ADR 0036)
+            // was never a refusal.
+            let waited: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM receipts WHERE request_id = ?1
+                   AND json_extract(outcome_json, '$.type') = 'admitted')",
+                [crate::wait::admission_id(&row.get::<_, String>(2)?)],
+                |found| found.get(0),
+            )?;
+            if waited {
+                continue;
+            }
             // A receipt this build cannot read is no denial it can show.
             let (Ok(command), Ok(outcome)) = (
                 serde_json::from_str::<Command>(&row.get::<_, String>(0)?),
@@ -1503,10 +1552,10 @@ impl Store {
         Ok((open, members, known))
     }
 
-    /// The coordination report (roadmap H8): the newest `TODAY_EVENTS`
-    /// events at most, placed in wall time as `today` places them, counted
-    /// by the core. Reads only; it writes nothing and acknowledges no
-    /// message.
+    /// The coordination report (roadmap H8, with H9's refusal outcomes):
+    /// the newest `TODAY_EVENTS` events at most, placed in wall time as
+    /// `today` places them, counted by the core. Reads only; it writes
+    /// nothing and acknowledges no message.
     pub fn report(&self, workspace_id: &str, from_ms: u64, wall_ms: u64) -> StoreResult<Outcome> {
         if let Some(refused) = self.refused_window(Some(workspace_id), from_ms, wall_ms) {
             return Ok(refused);
@@ -1528,6 +1577,7 @@ impl Store {
             open_intents: &open_intents,
             session_workspaces: &session_workspaces,
             known: known.as_ref(),
+            refusal_window_ms: refusal_window_ms(),
         });
         report.shrink_until(|report| {
             serde_json::to_vec(report).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
@@ -2557,6 +2607,7 @@ mod tests {
             "e",
             Command::SessionEnd {
                 session_id: "claude-code.alice".into(),
+                trail: None,
             },
         );
         let outcome = store.report("work", from_ms, wall_now_ms() + 1).unwrap();

@@ -12,13 +12,16 @@ mod dashboard;
 mod flaky;
 mod history;
 mod lines;
+mod policy;
 mod rank;
 mod recall;
 mod recent;
+mod refusal_outcome;
 mod report;
 mod status;
 mod status_line;
 mod today;
+mod trail;
 mod workspaces;
 mod write_check;
 pub use classes::{
@@ -44,6 +47,10 @@ pub use history::{
     HISTORY_RELATED, HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote,
     HistoryQuery, history as definition_history,
 };
+pub use policy::{
+    DEFAULT_WAIT_MS, MAX_UNSETTLED, MAX_WAIT_MS, Policy, PolicyCase, PolicyRow, SettledOutcome,
+    UnsettledRefusal, WaitResult,
+};
 pub use rank::{
     Dependent, QUALIFIER_BYTES, RANK_CANDIDATES, RankInputs, RankReason, is_qualifier,
     rank_definitions, rank_dependents, rank_inputs, validate_rank,
@@ -57,6 +64,7 @@ pub use recent::{
     RECENT_INTERFACES, RECENT_LEFT, RECENT_LEFT_CANDIDATES, RECENT_NOTICE_CHANGES,
     RECENT_WINDOW_MS, RecentChanges, RecentInterfaceChange,
 };
+pub use refusal_outcome::{PENDING, REFUSAL_WINDOW_MS, RefusalOutcome};
 pub use report::{
     OTHER_HOST, REPORT_HISTORY_EVENTS, REPORT_SESSIONS, Report, ReportCounts, ReportHost,
     ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
@@ -74,6 +82,10 @@ pub use today::{
     OpenAdmission, OpenCheck, OpenIntent, OpenMessage, TODAY_EVENTS, TODAY_FILES, TODAY_OPEN,
     TODAY_SESSIONS, Today, TodayChecks, TodayLandings, TodayOpen, TodayQuery, TodaySession,
     TodayWindow, today,
+};
+pub use trail::{
+    MAX_TRAIL_FACTS, MAX_TRAILS, TRAIL_BYTES, TRAIL_CHECKS, TRAIL_FILES, TRAIL_JSON_BYTES,
+    TRAIL_RANGES, TRAIL_WAITING, Trail, TrailCheck, TrailFacts, TrailFile, TrailView,
 };
 pub use workspaces::{
     MAX_ENDING_SESSIONS, MAX_WORKSPACE_PAGE, WorkspaceEnding, WorkspaceKept, WorkspaceSummary,
@@ -656,6 +668,7 @@ pub fn acting_session(command: &Command) -> Option<&str> {
         | Command::AckMessage { session_id, .. }
         | Command::Handoff { session_id, .. }
         | Command::RecordRefusal { session_id, .. }
+        | Command::RecordWait { session_id, .. }
         | Command::CheckCalls { session_id, .. }
         | Command::Complete { session_id, .. }
         | Command::Observe { session_id, .. }
@@ -2370,6 +2383,10 @@ pub struct Recap {
     /// recently withdrawn ones (`retracted`), newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<Message>,
+    /// The newest trails ended sessions left here, at most `RECAP_TRAILS`
+    /// (roadmap C9), whether or not a session was told them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trails: Vec<TrailView>,
     pub teammates: Vec<RemotePeer>,
     pub publishing: Option<RemoteLink>,
     /// Present when the last scan attempt failed.
@@ -2383,6 +2400,8 @@ pub const MAX_NOTES: usize = 64;
 pub const NOTE_BYTES: usize = 400;
 pub const RECAP_SESSIONS: usize = 16;
 const RECAP_ITEMS: usize = 8;
+/// Trails in a recap; `langspan trail` lists up to `MAX_TRAILS`.
+pub const RECAP_TRAILS: usize = 4;
 
 /// Unacknowledged messages held per workspace; the oldest go first.
 pub const MAX_MESSAGES: usize = 64;
@@ -2512,6 +2531,11 @@ pub struct Briefing {
     /// `BRIEF_LEFT_WORK`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left_work: Vec<LeftWork>,
+    /// The trail an ended session of this checkout left, at a start or a
+    /// prompt, taken once (roadmap C9). Shown first, after that session's
+    /// own handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail: Option<TrailView>,
     /// What changed recently in the repository, only in a briefing asked
     /// for at session start (roadmap C3). Never part of the signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2620,6 +2644,11 @@ pub struct State {
     /// again is dropped. Derived on replay; not part of the status reply.
     #[serde(skip)]
     pub renames: BTreeMap<String, Vec<Rename>>,
+    /// Trails of ended sessions per workspace, newest first, at most
+    /// `MAX_TRAILS` (roadmap C9). Derived on replay; not part of the status
+    /// reply.
+    #[serde(skip)]
+    pub trails: BTreeMap<String, Vec<Trail>>,
     /// The current generation's clock anchor, once recorded. Derived from
     /// the events on replay; not part of the status reply.
     #[serde(skip)]
@@ -2663,6 +2692,16 @@ pub struct State {
     /// status reply.
     #[serde(skip)]
     pub write_runs: BTreeMap<String, Vec<WriteRun>>,
+    /// The wait for a current holder per workspace, for the workspaces
+    /// whose conflict policy is `wait` (roadmap B28). Derived on replay;
+    /// not part of the status reply.
+    #[serde(skip)]
+    pub conflict_waits: BTreeMap<String, u32>,
+    /// Each session's write refusals not yet settled by an admitted write or
+    /// a stop, oldest first, at most `MAX_UNSETTLED`, of the current
+    /// generation only. Derived on replay; not part of the status reply.
+    #[serde(skip)]
+    pub unsettled: BTreeMap<String, Vec<UnsettledRefusal>>,
 }
 
 /// Checkout changes kept per workspace.
@@ -2884,6 +2923,43 @@ pub enum Event {
         at_ms: u64,
         generation: u64,
     },
+    /// A hook waited for a current holder instead of refusing at once
+    /// (roadmap B28), and how the wait ended.
+    WriteWaited {
+        session_id: String,
+        workspace_id: String,
+        /// At most `REFUSAL_PATHS`, sorted.
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_session_id: Option<String>,
+        waited_ms: u64,
+        result: WaitResult,
+        at_ms: u64,
+        generation: u64,
+    },
+    /// What the session did after a write refusal: its next admitted tool
+    /// write, or its stop (roadmap B28). `ms_to_next_admitted` is the time
+    /// from the refusal to an admitted write of one of its paths.
+    RefusalSettled {
+        session_id: String,
+        workspace_id: String,
+        kind: RefusalKind,
+        paths: Vec<String>,
+        refused_at_ms: u64,
+        outcome: SettledOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ms_to_next_admitted: Option<u64>,
+        at_ms: u64,
+        generation: u64,
+    },
+    /// The owner set a workspace's policy for a current holder (roadmap
+    /// B28). `wait_ms` is zero for `refuse`.
+    PolicySet {
+        workspace_id: String,
+        case: PolicyCase,
+        policy: Policy,
+        wait_ms: u32,
+    },
     WorkspaceRegistered {
         workspace: Workspace,
     },
@@ -2978,6 +3054,17 @@ pub enum Event {
     /// #161).
     SessionAdopted {
         adoption: Adoption,
+    },
+    /// What a session left as it ended (roadmap C9). Replaces an earlier
+    /// trail of the same session.
+    TrailRecorded {
+        trail: Trail,
+    },
+    /// `session_id` was told the trail `from` left.
+    TrailTaken {
+        workspace_id: String,
+        from: String,
+        session_id: String,
     },
     /// The host said the session finished its reply (Stop, StopFailure or
     /// SubagentStop). `released` are the tool admissions still open then,
@@ -3702,6 +3789,13 @@ pub enum Command {
     Recap {
         workspace_id: String,
     },
+    /// Read-only: the newest trails ended sessions left in one workspace
+    /// (roadmap C9), at most `limit` (1 to `MAX_TRAILS`, default 4).
+    Trails {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
     /// Read-only: the held notes of one workspace that hold every word of
     /// `query`, about `path` or the whole workspace when a path is given
     /// (roadmap E2). Never recorded, never counted as delivered.
@@ -3761,6 +3855,44 @@ pub enum Command {
         paths: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer_session_id: Option<String>,
+    },
+    /// Read-only: the policy table in effect for a workspace (roadmap B28).
+    Policy {
+        workspace_id: String,
+    },
+    /// The owner sets the policy for a current holder. Every other case is
+    /// fixed and refused with `policy_fixed`.
+    SetPolicy {
+        workspace_id: String,
+        case: PolicyCase,
+        policy: Policy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_ms: Option<u32>,
+    },
+    /// Read-only: the current holders an admission of these paths would
+    /// meet now, polled by a hook that waits for them.
+    Holders {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        base: Vec<ObservedFile>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        regions: Vec<PathRegions>,
+    },
+    /// A hook's wait for a current holder and how it ended, recorded as
+    /// `WriteWaited`, with the refusal it ended in. `changed` are the paths
+    /// whose version changed during the wait, as they are now.
+    RecordWait {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_session_id: Option<String>,
+        waited_ms: u64,
+        result: WaitResult,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changed: Vec<ObservedFile>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_digest: Option<String>,
     },
     /// Read-only, answered from the derived index: where `name` is defined.
     /// With `detail`, each definition also carries its body digest, calls,
@@ -3953,6 +4085,11 @@ pub enum Command {
     },
     SessionEnd {
         session_id: String,
+        /// What the end hook read from the line journal for the trail
+        /// (roadmap C9). Absent from an older client: the trail has no line
+        /// ranges and no uncommitted files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trail: Option<TrailFacts>,
     },
     /// The session finished a reply: complete what its tool calls still
     /// hold. `failure` is the host's error type (lower-case letters and
@@ -4042,6 +4179,10 @@ pub enum Command {
     /// Read-only: a bounded view of every session on every machine heard
     /// from, with what is held, what overlaps, evidence and health.
     Dashboard,
+    /// Read-only: the version the running coordinator was built as and its
+    /// process ID, for `doctor` (roadmap I5). Answered by the daemon, never
+    /// recorded. A daemon from before it answers with an error.
+    Version,
     Events {
         after: u64,
         limit: u32,
@@ -4444,6 +4585,13 @@ enum CommandWire {
     Recap {
         workspace_id: String,
     },
+    /// Read-only: the newest trails ended sessions left in one workspace
+    /// (roadmap C9), at most `limit` (1 to `MAX_TRAILS`, default 4).
+    Trails {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
     /// Read-only: the held notes of one workspace that hold every word of
     /// `query`, about `path` or the whole workspace when a path is given
     /// (roadmap E2). Never recorded, never counted as delivered.
@@ -4503,6 +4651,44 @@ enum CommandWire {
         paths: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer_session_id: Option<String>,
+    },
+    /// Read-only: the policy table in effect for a workspace (roadmap B28).
+    Policy {
+        workspace_id: String,
+    },
+    /// The owner sets the policy for a current holder. Every other case is
+    /// fixed and refused with `policy_fixed`.
+    SetPolicy {
+        workspace_id: String,
+        case: PolicyCase,
+        policy: Policy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_ms: Option<u32>,
+    },
+    /// Read-only: the current holders an admission of these paths would
+    /// meet now, polled by a hook that waits for them.
+    Holders {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        base: Vec<ObservedFile>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        regions: Vec<PathRegions>,
+    },
+    /// A hook's wait for a current holder and how it ended, recorded as
+    /// `WriteWaited`, with the refusal it ended in. `changed` are the paths
+    /// whose version changed during the wait, as they are now.
+    RecordWait {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_session_id: Option<String>,
+        waited_ms: u64,
+        result: WaitResult,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changed: Vec<ObservedFile>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_digest: Option<String>,
     },
     /// Read-only, answered from the derived index: where `name` is defined.
     /// With `detail`, each definition also carries its body digest, calls,
@@ -4683,6 +4869,11 @@ enum CommandWire {
     },
     SessionEnd {
         session_id: String,
+        /// What the end hook read from the line journal for the trail
+        /// (roadmap C9). Absent from an older client: the trail has no line
+        /// ranges and no uncommitted files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trail: Option<TrailFacts>,
     },
     /// The session finished a reply: complete what its tool calls still
     /// hold. `failure` is the host's error type (lower-case letters and
@@ -4734,6 +4925,7 @@ enum CommandWire {
         page_bytes: Option<u32>,
     },
     Dashboard {},
+    Version {},
     Events {
         after: u64,
         limit: u32,
@@ -5088,6 +5280,13 @@ pub enum Outcome {
     Recap {
         recap: Recap,
     },
+    Trails {
+        workspace_id: String,
+        trails: Vec<TrailView>,
+        /// Trails left out so that the answer fits one frame.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted: u32,
+    },
     Recall {
         recall: Recall,
     },
@@ -5109,8 +5308,23 @@ pub enum Outcome {
     RefusalRecorded {
         session_id: String,
     },
+    Policy {
+        workspace_id: String,
+        rows: Vec<PolicyRow>,
+    },
+    Holders {
+        holders: Vec<Conflict>,
+    },
+    WaitRecorded {
+        session_id: String,
+    },
     Dashboard {
         dashboard: Dashboard,
+    },
+    /// The answer to `Command::Version`.
+    Version {
+        version: String,
+        pid: u32,
     },
     /// Every list is a name match bounded by the request's limit. `coverage`
     /// says how much of the workspace was indexed when it was answered.
@@ -5215,7 +5429,11 @@ pub struct Decision {
 /// them. Receipt replay and request-id ownership are storage responsibilities.
 pub fn decide(state: &State, command: &Command, request_id: &str, now_ms: u64) -> Decision {
     match decide_checked(state, command, request_id, now_ms) {
-        Ok(decision) => decision,
+        Ok(mut decision) => {
+            let settled = policy::settle(state, &decision.events, now_ms);
+            decision.events.extend(settled);
+            decision
+        }
         Err(error) => Decision {
             events: Vec::new(),
             outcome: Outcome::Error {
@@ -5440,17 +5658,7 @@ fn decide_checked(
             let session = current_session(state, session_id)?;
             let paths = normalized_paths(paths)?;
             lines::validate_overwrites(overwrites, &paths)?;
-            let regions = normalized_regions(regions, &paths)?
-                .into_iter()
-                // Regions are trusted only for the version the hook saw on
-                // disk when it asked; otherwise the path is held whole.
-                .filter(|located| {
-                    base.iter().flatten().any(|file| {
-                        file.path == located.path
-                            && matches!(&file.state, FileState::Present { digest, .. } if *digest == located.digest)
-                    })
-                })
-                .collect::<Vec<_>>();
+            let regions = trusted_regions(regions, &paths, base.iter().flatten())?;
             if !(1..=60_000).contains(ttl_ms) {
                 return Err(error(
                     "invalid_ttl",
@@ -5476,18 +5684,15 @@ fn decide_checked(
             // expires helps nobody. A manual admission stays exclusive, as
             // ADR 0001 defines.
             let tool_call = operation.is_some();
-            let holders: Vec<Conflict> =
-                conflicts(state, &session.workspace_id, &paths, &regions, now_ms)
-                    .into_iter()
-                    .filter(|holder| {
-                        !(tool_call
-                            && holder.session_id == *session_id
-                            && state
-                                .leases
-                                .get(&holder.lease_id)
-                                .is_some_and(|lease| lease.operation.is_some()))
-                    })
-                    .collect();
+            let holders = holders_of(
+                state,
+                session_id,
+                &session.workspace_id,
+                &paths,
+                &regions,
+                tool_call,
+                now_ms,
+            );
             // Each refusal is one event, stored with the refusal's receipt:
             // the same request again is answered from it and adds none.
             let refused = |kind, peer: Option<&String>| Event::WriteRefused {
@@ -5504,8 +5709,11 @@ fn decide_checked(
             };
             if !holders.is_empty() {
                 // A hook's tool call; a manual `admit` refused is not a write.
+                // Where the workspace waits for a holder, the hook records
+                // the refusal when its wait ends without an admission.
+                let waits = policy::conflict_wait_ms(state, &session.workspace_id) > 0;
                 return Ok(Decision {
-                    events: tool_call
+                    events: (tool_call && !waits)
                         .then(|| {
                             refused(
                                 RefusalKind::Conflict,
@@ -5876,20 +6084,26 @@ fn decide_checked(
                 },
             })
         }
-        Command::SessionEnd { session_id } => {
-            known_session(state, session_id)?;
-            let events = if state
+        Command::SessionEnd { session_id, trail } => {
+            let session = known_session(state, session_id)?;
+            if let Some(facts) = trail {
+                trail::validate_facts(facts)?;
+            }
+            let ending = state
                 .activity
                 .get(session_id)
-                .is_none_or(|activity| !activity.ended)
-                || state.intents.contains_key(session_id)
-            {
+                .is_none_or(|activity| !activity.ended);
+            let mut events = if ending || state.intents.contains_key(session_id) {
                 vec![Event::SessionEnded {
                     session_id: session_id.clone(),
                 }]
             } else {
                 Vec::new()
             };
+            // A trail is built once per end, from the state before it.
+            if ending && let Some(trail) = trail::build(state, session, trail.as_ref(), now_ms) {
+                events.push(Event::TrailRecorded { trail });
+            }
             Ok(Decision {
                 events,
                 outcome: Outcome::SessionEnded {
@@ -6886,7 +7100,8 @@ fn decide_checked(
                 || !briefing.uncoordinated.is_empty()
                 || !briefing.retracted.is_empty()
                 || !briefing.checks.is_empty()
-                || !briefing.left_work.is_empty();
+                || !briefing.left_work.is_empty()
+                || briefing.trail.is_some();
             let mut events = Vec::new();
             if *deliver {
                 if signature != previous && briefing.changed {
@@ -6919,6 +7134,11 @@ fn decide_checked(
                         session_id: session_id.clone(),
                         message_id: retracted.message_id.clone(),
                     }
+                }));
+                events.extend(briefing.trail.iter().map(|view| Event::TrailTaken {
+                    workspace_id: view.trail.workspace_id.clone(),
+                    from: view.trail.session_id.clone(),
+                    session_id: session_id.clone(),
                 }));
                 events.extend(briefing.checks.iter().map(|notice| Event::CheckDelivered {
                     session_id: session_id.clone(),
@@ -7366,6 +7586,27 @@ fn decide_checked(
                 },
             })
         }
+        Command::Trails {
+            workspace_id,
+            limit,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            let limit = limit.unwrap_or(4);
+            if !(1..=MAX_TRAILS as u32).contains(&limit) {
+                return Err(error(
+                    "invalid_limit",
+                    "A trail listing names between 1 and 16 trails",
+                ));
+            }
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Trails {
+                    workspace_id: workspace_id.clone(),
+                    trails: trail::listed(state, workspace_id, limit as usize, now_ms),
+                    omitted: 0,
+                },
+            })
+        }
         Command::Recall {
             workspace_id,
             query,
@@ -7391,6 +7632,68 @@ fn decide_checked(
                 },
             })
         }
+        Command::Policy { workspace_id } => {
+            validate_known_workspace(state, workspace_id)?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Policy {
+                    workspace_id: workspace_id.clone(),
+                    rows: policy::table(state, workspace_id),
+                },
+            })
+        }
+        Command::SetPolicy {
+            workspace_id,
+            case,
+            policy,
+            wait_ms,
+        } => policy::decide_set(state, workspace_id, *case, *policy, *wait_ms),
+        Command::Holders {
+            session_id,
+            paths,
+            base,
+            regions,
+        } => {
+            let session = current_session(state, session_id)?;
+            let paths = normalized_paths(paths)?;
+            let base = normalized_files(base)?;
+            let regions = trusted_regions(regions, &paths, base.iter())?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Holders {
+                    holders: holders_of(
+                        state,
+                        session_id,
+                        &session.workspace_id,
+                        &paths,
+                        &regions,
+                        true,
+                        now_ms,
+                    ),
+                },
+            })
+        }
+        Command::RecordWait {
+            session_id,
+            paths,
+            holder_session_id,
+            waited_ms,
+            result,
+            changed,
+            input_digest,
+        } => policy::decide_wait(
+            state,
+            policy::WaitReport {
+                session_id,
+                paths,
+                holder_session_id: holder_session_id.as_ref(),
+                waited_ms: *waited_ms,
+                result: *result,
+                changed,
+                input_digest: input_digest.as_ref(),
+            },
+            now_ms,
+        ),
         Command::RecordRefusal {
             session_id,
             kind,
@@ -7523,6 +7826,7 @@ fn decide_checked(
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
         | Command::Compact { .. }
+        | Command::Version
         | Command::ShowMessage { .. }
         | Command::MessageStatus { .. }
         | Command::GraphSymbol { .. }
@@ -7926,6 +8230,7 @@ fn recap(state: &State, workspace_id: &str, now_ms: u64) -> Recap {
             )
             .cloned()
             .collect(),
+        trails: trail::listed(state, workspace_id, RECAP_TRAILS, now_ms),
         teammates: state
             .remote_peers
             .values()
@@ -9021,7 +9326,13 @@ fn brief(
     let total = peers.len();
     // Peers are chosen by their work within the byte budget first; where
     // they look is added after, in the space left, first peers first, so
-    // presence never takes the place of another peer's work.
+    // presence never takes the place of another peer's work. A trail this
+    // briefing may tell takes its encoding out of that budget, so the
+    // reply holds both within its frame.
+    let peer_bytes = BRIEF_BYTES
+        - trail::owed(state, me, handoffs).map_or(0, |trail| {
+            trail::json_cost(trail).min(trail::TRAIL_JSON_BYTES)
+        });
     let mut bytes = 0;
     let mut peers: Vec<PeerWork> = peers
         .into_iter()
@@ -9046,7 +9357,7 @@ fn brief(
                     .map(|path| recent::json_len(path) + 32)
                     .sum::<usize>();
             bytes += cost;
-            if bytes > BRIEF_BYTES {
+            if bytes > peer_bytes {
                 bytes -= cost;
                 return false;
             }
@@ -9061,7 +9372,7 @@ fn brief(
             .iter()
             .map(|looked| recent::json_len(&looked.path) + 32)
             .sum();
-        if bytes + presence <= BRIEF_BYTES {
+        if bytes + presence <= peer_bytes {
             bytes += presence;
             return true;
         }
@@ -9225,6 +9536,32 @@ fn brief(
             ..message.clone()
         })
         .collect();
+    // An ended session's trail (roadmap C9) shares the messages' room and
+    // follows that session's own handoff: while the handoff is owed here
+    // and waits for room, so does the trail.
+    let used = retracted.iter().map(retracted_cost).sum::<usize>()
+        + messages.iter().map(message_cost).sum::<usize>();
+    let trail = trail::owed(state, me, handoffs)
+        .filter(|_| used + TRAIL_BYTES < message_bytes)
+        .filter(|trail| {
+            state
+                .messages
+                .get(&me.workspace_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .filter(|message| {
+                    message.from.as_deref() == Some(trail.session_id.as_str())
+                        && matches!(message.to, Recipient::NextSession {})
+                        && owed_to(message, session_id, takes_handoff(state, me, message))
+                })
+                .all(|handoff| {
+                    messages
+                        .iter()
+                        .any(|shown| shown.message_id == handoff.message_id)
+                })
+        })
+        .map(|trail| trail::view(state, trail, now_ms));
     // A checkout change matters to a session that read or edited files
     // here before it: what it knows may no longer be on disk.
     // A change a session's own shell command explains is not news to it;
@@ -9284,6 +9621,7 @@ fn brief(
     // only for a briefing with nothing else used up on delivery, whose
     // text is sure to hold it; otherwise every one is counted and waits.
     let quiet = messages.is_empty()
+        && trail.is_none()
         && retracted.is_empty()
         && uncoordinated.is_empty()
         && !state.check_notices.contains_key(session_id);
@@ -9413,6 +9751,7 @@ fn brief(
             uncoordinated,
             // Filled in by the request that names the sessions (`Brief::left`).
             left_work: Vec::new(),
+            trail,
             // One result per briefing, the newest: it always fits the
             // rendered text, and each delivered one is removed, so the rest
             // follow at the next briefings.
@@ -10444,6 +10783,50 @@ fn decide_observation(
     })
 }
 
+/// The regions of `regions` that name the version `base` gives for their
+/// path. Regions are trusted only for the version the hook saw on disk when
+/// it asked; any other path is held whole.
+fn trusted_regions<'a>(
+    regions: &[PathRegions],
+    paths: &[String],
+    base: impl Iterator<Item = &'a ObservedFile> + Clone,
+) -> Result<Vec<PathRegions>, CoreError> {
+    Ok(normalized_regions(regions, paths)?
+        .into_iter()
+        .filter(|located| {
+            base.clone().any(|file| {
+                file.path == located.path
+                    && matches!(&file.state, FileState::Present { digest, .. } if *digest == located.digest)
+            })
+        })
+        .collect())
+}
+
+/// The current admissions an admission of `paths` by `session_id` would
+/// meet. A host's tool call is never held back by an earlier tool call of
+/// the same session.
+fn holders_of(
+    state: &State,
+    session_id: &str,
+    workspace_id: &str,
+    paths: &[String],
+    regions: &[PathRegions],
+    tool_call: bool,
+    now_ms: u64,
+) -> Vec<Conflict> {
+    conflicts(state, workspace_id, paths, regions, now_ms)
+        .into_iter()
+        .filter(|holder| {
+            !(tool_call
+                && holder.session_id == session_id
+                && state
+                    .leases
+                    .get(&holder.lease_id)
+                    .is_some_and(|lease| lease.operation.is_some()))
+        })
+        .collect()
+}
+
 fn conflicts(
     state: &State,
     workspace_id: &str,
@@ -10623,6 +11006,8 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             state.generation = *generation;
             // The new generation's anchor, if any, is the next event.
             state.clock_anchor = None;
+            // A refusal is settled within the run it was given in.
+            state.unsettled.clear();
             for lease in state.leases.values_mut() {
                 if lease.status == LeaseStatus::Active {
                     lease.status = LeaseStatus::Invalidated;
@@ -10657,12 +11042,12 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::WriteRefused {
             session_id,
             workspace_id,
+            kind,
             paths,
             peer_session_id,
             input_digest,
             at_ms,
             generation,
-            ..
         } => {
             known_session(state, session_id)?;
             validate_known_workspace(state, workspace_id)?;
@@ -10682,7 +11067,36 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             }
             status_line::remember(state, workspace_id, *at_ms, *generation);
             recent::remember_refusal(state, workspace_id, paths, *at_ms, *generation);
+            policy::remember_refusal(state, session_id, *kind, paths, *at_ms, *generation);
         }
+        Event::WriteWaited {
+            session_id,
+            workspace_id,
+            paths,
+            holder_session_id,
+            waited_ms,
+            ..
+        } => policy::validate_waited(
+            state,
+            session_id,
+            workspace_id,
+            paths,
+            holder_session_id.as_ref(),
+            *waited_ms,
+        )?,
+        Event::RefusalSettled {
+            session_id,
+            kind,
+            paths,
+            refused_at_ms,
+            ..
+        } => policy::apply_settled(state, session_id, *kind, paths, *refused_at_ms)?,
+        Event::PolicySet {
+            workspace_id,
+            case,
+            policy,
+            wait_ms,
+        } => policy::apply_set(state, workspace_id, *case, *policy, *wait_ms)?,
         Event::WorkspaceRegistered { workspace } => {
             validate_workspace(state, workspace)?;
             state
@@ -10966,6 +11380,29 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             state
                 .adoptions
                 .insert(adoption.from.clone(), adoption.clone());
+        }
+        Event::TrailRecorded { trail } => {
+            trail::validate_trail(state, trail)?;
+            let trails = state.trails.entry(trail.workspace_id.clone()).or_default();
+            trails.retain(|kept| kept.session_id != trail.session_id);
+            trails.insert(0, trail.clone());
+            trails.truncate(MAX_TRAILS);
+        }
+        Event::TrailTaken {
+            workspace_id,
+            from,
+            session_id,
+        } => {
+            known_session(state, session_id)?;
+            // A trail the cap already dropped has nothing left to mark.
+            if let Some(trail) = state
+                .trails
+                .get_mut(workspace_id)
+                .and_then(|trails| trails.iter_mut().find(|trail| &trail.session_id == from))
+                && trail.taken_by.is_none()
+            {
+                trail.taken_by = Some(session_id.clone());
+            }
         }
         // Boundaries in the log. The admissions a stop released ended in
         // their own `LeaseCompleted` events.
@@ -13026,6 +13463,7 @@ impl Recap {
     pub fn shrink_until(&mut self, mut fits: impl FnMut(&Recap) -> bool) {
         while !fits(self) {
             let dropped = self.notes.pop().is_some()
+                || self.trails.pop().is_some()
                 || self.teammates.pop().is_some()
                 || self.checks.pop().is_some()
                 || self.landings.pop().is_some()

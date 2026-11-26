@@ -3,6 +3,7 @@
 pub mod adopt;
 pub mod auto_check;
 pub mod autostart;
+pub mod binary_version;
 pub mod breaks;
 pub mod claude_code;
 pub mod client;
@@ -32,7 +33,9 @@ pub mod status_line;
 pub mod store;
 pub mod test_output;
 pub mod today;
+pub mod trail;
 pub mod user_install;
+mod wait;
 mod zone;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;

@@ -3,9 +3,10 @@
 use std::collections::BTreeMap;
 
 use langspan_core::{
-    ClockAnchor, Command, Event, FileKind, FileState, ObservedFile, Outcome, REPORT_SESSIONS,
-    RecordedEvent, RefusalKind, Report, ReportCounts, ReportKnown, ReportQuery, SourceOrigin,
-    State, TodayWindow, ToolIdentity, apply, decide, known_sessions, open_intents, report,
+    ClockAnchor, Command, Event, FileKind, FileState, LeaseRelation, Observation, ObservedFile,
+    Outcome, PENDING, REFUSAL_WINDOW_MS, REPORT_SESSIONS, RecordedEvent, RefusalKind, Report,
+    ReportCounts, ReportKnown, ReportQuery, SHELL_TOOL, SourceOrigin, State, TodayWindow,
+    ToolIdentity, ToolResult, apply, decide, known_sessions, open_intents, report,
     session_workspaces,
 };
 
@@ -176,6 +177,7 @@ impl Log {
             open_intents: &BTreeMap::new(),
             session_workspaces: &BTreeMap::new(),
             known: None,
+            refusal_window_ms: REFUSAL_WINDOW_MS,
         })
     }
 }
@@ -264,6 +266,7 @@ fn a_session_that_ends_with_its_intent_set_leaves_one_open() {
     };
     let end = |session: &str| Command::SessionEnd {
         session_id: session.into(),
+        trail: None,
     };
     // Alice sets an intent twice (an update) and ends the session with it.
     log.run("i-a1", intent(alice, "rework the parser"), START + MINUTE);
@@ -330,6 +333,7 @@ fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
         "e-a",
         Command::SessionEnd {
             session_id: alice.into(),
+            trail: None,
         },
         START + 30 * MINUTE,
     );
@@ -361,6 +365,7 @@ fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
         open_intents: &before,
         session_workspaces: &members_before(&log.events[..start]),
         known: None,
+        refusal_window_ms: REFUSAL_WINDOW_MS,
     });
     assert!(!cut.truncated, "{cut:#?}");
     let a = row(&cut, alice);
@@ -408,6 +413,7 @@ fn a_removed_workspace_ends_its_intents_for_the_report() {
         "e-a",
         Command::SessionEnd {
             session_id: alice.into(),
+            trail: None,
         },
         START + 30 * MINUTE,
     );
@@ -430,6 +436,7 @@ fn a_removed_workspace_ends_its_intents_for_the_report() {
         open_intents: &BTreeMap::new(),
         session_workspaces: &BTreeMap::new(),
         known: None,
+        refusal_window_ms: REFUSAL_WINDOW_MS,
     });
     assert_eq!(row(&whole, alice).intents_left_open, 0, "{whole:#?}");
     // Read from the first prompt on: the removal is in the older events.
@@ -453,6 +460,7 @@ fn a_removed_workspace_ends_its_intents_for_the_report() {
         open_intents: &before,
         session_workspaces: &members_before(&log.events[..start]),
         known: None,
+        refusal_window_ms: REFUSAL_WINDOW_MS,
     });
     assert_eq!(row(&cut, alice).intents_left_open, 0, "{cut:#?}");
 }
@@ -704,6 +712,7 @@ fn the_window_leaves_out_older_events_and_says_what_it_covered() {
         open_intents: &BTreeMap::new(),
         session_workspaces: &members_before(&log.events[..start]),
         known: None,
+        refusal_window_ms: REFUSAL_WINDOW_MS,
     });
     assert!(cut.truncated, "{cut:#?}");
     assert_eq!(cut.covered_from_ms, Some(WALL));
@@ -793,6 +802,7 @@ fn a_session_registered_again_elsewhere_keeps_its_earlier_events_in_its_old_work
             open_intents: &none,
             session_workspaces: &members,
             known: None,
+            refusal_window_ms: REFUSAL_WINDOW_MS,
         };
         let work = report(&query("work"));
         let old = row(&work, alice);
@@ -844,6 +854,7 @@ fn a_window_before_the_retention_cutoff_is_truncated_though_every_event_left_was
         open_intents: &none,
         session_workspaces: &none,
         known: None,
+        refusal_window_ms: REFUSAL_WINDOW_MS,
     };
     let before = report(&query(WALL + 10 * MINUTE));
     assert!(before.truncated, "{before:#?}");
@@ -897,6 +908,7 @@ fn the_report_and_the_refusal_count_read_the_retention_cutoff_alike() {
             open_intents: &none,
             session_workspaces: &none,
             known: None,
+            refusal_window_ms: REFUSAL_WINDOW_MS,
         });
         let count = langspan_core::count_refusals(
             &langspan_core::CountQuery {
@@ -949,6 +961,7 @@ fn a_session_unknown_to_a_partial_history_is_not_counted_and_the_report_is_parti
         "e-a",
         Command::SessionEnd {
             session_id: alice.into(),
+            trail: None,
         },
         START + 30 * MINUTE,
     );
@@ -977,6 +990,7 @@ fn a_session_unknown_to_a_partial_history_is_not_counted_and_the_report_is_parti
             open_intents: open,
             session_workspaces: members,
             known,
+            refusal_window_ms: REFUSAL_WINDOW_MS,
         })
     };
     // Nothing of the older history folded.
@@ -999,4 +1013,456 @@ fn a_session_unknown_to_a_partial_history_is_not_counted_and_the_report_is_parti
     assert!(!full.partial, "{full:#?}");
     assert_eq!(row(&full, alice).intents_left_open, 1, "{full:#?}");
     assert_eq!(full, cut(&open, &members, None));
+}
+
+// What a session did after a refusal (H9).
+
+/// The report runs in the daemon's single store worker, so settling
+/// refusals must cost each event index lookups, not a scan of what is
+/// pending. As many events as a report reads (`TODAY_EVENTS`): 25,000
+/// conflicts of distinct paths pending at once, then 12,500 edits of the
+/// holder, each ending an admission. Scanning the pending refusals at each
+/// took 65 s here (Apple silicon, debug build); the indexes 1.2 s for the
+/// whole report. The limit is far from both.
+#[test]
+fn settling_refusals_costs_each_event_a_lookup_not_a_scan_of_those_pending() {
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
+    let (alice, bob) = ("claude-code.alice", "codex.bob");
+    let mut log = Log::ready(&[alice, bob]);
+    for i in 0..25_000 {
+        log.refused(
+            alice,
+            RefusalKind::Conflict,
+            &format!("src/f{i}.rs"),
+            Some(bob),
+            Some('c'),
+            START + MINUTE,
+        );
+    }
+    for i in 0..12_500 {
+        let call = format!("b{i}");
+        log.edit(
+            bob,
+            &call,
+            "src/bob.rs",
+            present('a'),
+            'b',
+            START + MINUTE + 1,
+        );
+        log.complete(bob, &call, START + MINUTE + 1);
+    }
+    let started = std::time::Instant::now();
+    let outcomes = log.outcomes(alice);
+    let took = started.elapsed();
+    eprintln!("{} events, report {took:?}", log.events.len());
+    // Bob never held a refused path, and Alice wrote none of them.
+    assert_eq!(outcomes, BTreeMap::from([("abandoned".to_owned(), 25_000)]));
+    assert!(took < LIMIT, "the report took {took:?}");
+}
+
+impl Log {
+    /// A `write_refused` of `path` recorded at `now` on the daemon's clock.
+    fn refused(
+        &mut self,
+        session: &str,
+        kind: RefusalKind,
+        path: &str,
+        peer: Option<&str>,
+        input: Option<char>,
+        now: u64,
+    ) {
+        self.record(Event::WriteRefused {
+            session_id: session.into(),
+            workspace_id: "work".into(),
+            kind,
+            paths: vec![path.into()],
+            peer_session_id: peer.map(str::to_owned),
+            input_digest: input.map(digest),
+            at_ms: now,
+            generation: 1,
+        });
+    }
+
+    /// A shell command of `session` that wrote `path`, seen after it ran.
+    fn shell_wrote(&mut self, session: &str, path: &str, now: u64) {
+        self.record(Event::OperationObserved {
+            observation: Observation {
+                observation_id: format!("obs-{}", self.events.len()),
+                session_id: session.into(),
+                workspace_id: "work".into(),
+                operation_id: format!("sh-{}", self.events.len()),
+                source: "test".into(),
+                tool: SHELL_TOOL.into(),
+                paths: vec![path.into()],
+                result: ToolResult::Succeeded,
+                lease_id: None,
+                lease_relation: LeaseRelation::NotAdmitted,
+                concurrent_holders: Vec::new(),
+                observed_at_ms: now,
+                generation: 1,
+            },
+        });
+    }
+
+    fn outcomes_at(&self, session: &str, from_ms: u64, to_ms: u64) -> BTreeMap<String, u32> {
+        let report = report(&ReportQuery {
+            workspace_id: "work",
+            window: TodayWindow { from_ms, to_ms },
+            events: &self.events,
+            anchor: None,
+            earlier: false,
+            retained_from_ms: None,
+            open_intents: &BTreeMap::new(),
+            session_workspaces: &BTreeMap::new(),
+            known: None,
+            refusal_window_ms: REFUSAL_WINDOW_MS,
+        });
+        report
+            .sessions
+            .iter()
+            .find(|row| row.session_id == session)
+            .map(|row| row.counts.refusal_outcomes.clone())
+            .unwrap_or_default()
+    }
+
+    fn outcomes(&self, session: &str) -> BTreeMap<String, u32> {
+        self.outcomes_at(session, 0, WALL + 600 * MINUTE)
+    }
+}
+
+fn only(name: &str) -> BTreeMap<String, u32> {
+    BTreeMap::from([(name.to_owned(), 1)])
+}
+
+#[test]
+fn a_write_one_millisecond_inside_the_window_settles_it_and_one_at_its_end_does_not() {
+    let alice = "claude-code.alice";
+    for (gap, expected) in [
+        (REFUSAL_WINDOW_MS - 1, "retried_unchanged"),
+        (REFUSAL_WINDOW_MS, "abandoned"),
+    ] {
+        let mut log = Log::ready(&[alice]);
+        let at = START + MINUTE;
+        log.refused(
+            alice,
+            RefusalKind::StaleBase,
+            "src/lib.rs",
+            None,
+            Some('c'),
+            at,
+        );
+        // The admission has no time of its own: the prompt places it.
+        log.prompt(alice, at + gap);
+        log.edit(alice, "1", "src/lib.rs", present('a'), 'c', at + gap);
+        assert_eq!(log.outcomes(alice), only(expected), "gap {gap}");
+    }
+    // Not settled yet while the window is open; abandoned once it closes.
+    let mut log = Log::ready(&[alice]);
+    log.refused(
+        alice,
+        RefusalKind::StaleBase,
+        "src/lib.rs",
+        None,
+        Some('c'),
+        START + MINUTE,
+    );
+    let deadline = WALL + MINUTE + REFUSAL_WINDOW_MS;
+    assert_eq!(log.outcomes_at(alice, 0, deadline - 1), only(PENDING));
+    assert_eq!(log.outcomes_at(alice, 0, deadline), only("abandoned"));
+}
+
+#[test]
+fn a_shell_write_is_retried_unchanged_unless_read_and_unknown_read_on_codex() {
+    let (alice, bob) = ("claude-code.alice", "codex.bob");
+    let mut log = Log::ready(&[alice, bob]);
+    for session in [alice, bob] {
+        log.refused(
+            session,
+            RefusalKind::StaleBase,
+            "src/lib.rs",
+            None,
+            Some('c'),
+            START + MINUTE,
+        );
+        log.shell_wrote(session, "src/lib.rs", START + 2 * MINUTE);
+    }
+    assert_eq!(log.outcomes(alice), only("retried_unchanged"));
+    assert_eq!(log.outcomes(bob), only("unknown_read"));
+    // After a reported read, a shell write is adapted.
+    log.refused(
+        alice,
+        RefusalKind::StaleBase,
+        "src/api.rs",
+        None,
+        Some('c'),
+        START + 3 * MINUTE,
+    );
+    log.source(alice, "src/api.rs", present('b'), SourceOrigin::Read);
+    log.shell_wrote(alice, "src/api.rs", START + 4 * MINUTE);
+    assert_eq!(
+        log.outcomes(alice),
+        BTreeMap::from([("adapted".into(), 1), ("retried_unchanged".into(), 1)])
+    );
+}
+
+#[test]
+fn a_conflict_written_after_a_restart_is_waited_and_one_before_it_is_settled_by_its_events() {
+    let (alice, bob) = ("claude-code.alice", "codex.bob");
+    let mut log = Log::ready(&[alice, bob]);
+    log.edit(bob, "hold", "src/lib.rs", present('a'), 'b', START + MINUTE);
+    let refused = log.edit(
+        alice,
+        "try",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE + 1,
+    );
+    assert!(matches!(refused, Outcome::Conflict { .. }), "{refused:?}");
+    // The daemon restarts: Bob's admission is not carried over.
+    log.record(Event::Booted { generation: 2 });
+    log.record(Event::ClockAnchored {
+        anchor: ClockAnchor {
+            generation: 2,
+            clock_ms: START,
+            wall_ms: WALL + 5 * MINUTE,
+        },
+    });
+    log.register(alice, "work");
+    log.prompt(alice, START + MINUTE);
+    let retry = log.edit(
+        alice,
+        "again",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE,
+    );
+    assert!(matches!(retry, Outcome::Admitted { .. }), "{retry:?}");
+    assert_eq!(log.outcomes(alice), only("waited"));
+}
+
+#[test]
+fn what_the_events_cannot_tell_is_unknown() {
+    let alice = "claude-code.alice";
+    // A refusal recorded before digests were kept, then a different call.
+    let mut log = Log::ready(&[alice]);
+    log.refused(
+        alice,
+        RefusalKind::StaleBase,
+        "src/lib.rs",
+        None,
+        None,
+        START + MINUTE,
+    );
+    log.edit(
+        alice,
+        "1",
+        "src/lib.rs",
+        present('a'),
+        'd',
+        START + 2 * MINUTE,
+    );
+    assert_eq!(log.outcomes(alice), only("unknown"));
+    // A conflict whose holder's admission is not in the events read.
+    let mut log = Log::ready(&[alice]);
+    log.refused(
+        alice,
+        RefusalKind::Conflict,
+        "src/lib.rs",
+        Some("codex.bob"),
+        Some('c'),
+        START + MINUTE,
+    );
+    log.edit(
+        alice,
+        "1",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + 2 * MINUTE,
+    );
+    assert_eq!(log.outcomes(alice), only("unknown"));
+}
+
+#[test]
+fn a_held_commit_a_refusal_before_the_window_and_other_files_open_or_settle_nothing() {
+    let alice = "claude-code.alice";
+    let mut log = Log::ready(&[alice]);
+    log.refused(
+        alice,
+        RefusalKind::CommitHeld,
+        "src/lib.rs",
+        None,
+        None,
+        START + MINUTE,
+    );
+    assert_eq!(log.outcomes(alice), BTreeMap::new());
+    // Refused before the window starts: not counted, so no outcome.
+    log.refused(
+        alice,
+        RefusalKind::StaleBase,
+        "src/api.rs",
+        None,
+        Some('c'),
+        START + MINUTE,
+    );
+    log.prompt(alice, START + 3 * MINUTE);
+    log.edit(
+        alice,
+        "1",
+        "src/api.rs",
+        present('a'),
+        'c',
+        START + 3 * MINUTE,
+    );
+    assert_eq!(
+        log.outcomes_at(alice, WALL + 2 * MINUTE, WALL + 600 * MINUTE),
+        BTreeMap::new()
+    );
+    // A write of another file leaves the refusal pending.
+    let mut log = Log::ready(&[alice]);
+    log.refused(
+        alice,
+        RefusalKind::StaleBase,
+        "src/lib.rs",
+        None,
+        Some('c'),
+        START + MINUTE,
+    );
+    log.edit(
+        alice,
+        "1",
+        "src/api.rs",
+        present('a'),
+        'c',
+        START + 2 * MINUTE,
+    );
+    assert_eq!(log.outcomes_at(alice, 0, WALL + 2 * MINUTE), only(PENDING));
+}
+
+impl Log {
+    fn end(&mut self, session: &str) {
+        let outcome = self.run(
+            &format!("end-{}", self.events.len()),
+            Command::SessionEnd {
+                session_id: session.into(),
+                trail: None,
+            },
+            START,
+        );
+        assert!(
+            matches!(outcome, Outcome::SessionEnded { .. }),
+            "{outcome:?}"
+        );
+    }
+}
+
+/// Ending a session releases none of its admissions: they stay enforced
+/// until completed, expired or a restart. A conflict whose ended holder
+/// still holds the path is therefore not `waited`, and a conflict refused
+/// after the holder ended still knows its holder.
+#[test]
+fn a_holder_ending_its_session_is_not_its_admission_ending() {
+    let (alice, bob) = ("claude-code.alice", "codex.bob");
+    // Bob holds src/lib.rs, Alice is refused, Bob's session ends, and Alice
+    // writes the path through a shell while Bob's admission is still open.
+    let mut log = Log::ready(&[alice, bob]);
+    log.edit(bob, "hold", "src/lib.rs", present('a'), 'b', START + MINUTE);
+    let refused = log.edit(
+        alice,
+        "try",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE,
+    );
+    assert!(matches!(refused, Outcome::Conflict { .. }), "{refused:?}");
+    log.end(bob);
+    log.shell_wrote(alice, "src/lib.rs", START + 2 * MINUTE);
+    assert_eq!(log.outcomes(alice), only("retried_unchanged"));
+
+    // The same, with a read before the shell write: adapted, not waited.
+    let mut log = Log::ready(&[alice, bob]);
+    log.edit(bob, "hold", "src/lib.rs", present('a'), 'b', START + MINUTE);
+    log.edit(
+        alice,
+        "try",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE,
+    );
+    log.end(bob);
+    log.source(alice, "src/lib.rs", present('a'), SourceOrigin::Read);
+    log.shell_wrote(alice, "src/lib.rs", START + 2 * MINUTE);
+    assert_eq!(log.outcomes(alice), only("adapted"));
+
+    // Bob's admission then expires, and Alice writes: waited.
+    let mut log = Log::ready(&[alice, bob]);
+    log.edit(bob, "hold", "src/lib.rs", present('a'), 'b', START + MINUTE);
+    log.edit(
+        alice,
+        "try",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE,
+    );
+    log.end(bob);
+    log.record(Event::LeaseExpired {
+        lease_id: "admit-codex.bob-hold".into(),
+    });
+    log.prompt(alice, START + 2 * MINUTE);
+    let retry = log.edit(
+        alice,
+        "again",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + 2 * MINUTE,
+    );
+    assert!(matches!(retry, Outcome::Admitted { .. }), "{retry:?}");
+    assert_eq!(log.outcomes(alice), only("waited"));
+
+    // Refused only after Bob's session ended: the holder is still known,
+    // and when the admission completes, Alice's write is waited.
+    let mut log = Log::ready(&[alice, bob]);
+    log.edit(bob, "hold", "src/lib.rs", present('a'), 'b', START + MINUTE);
+    log.end(bob);
+    let refused = log.edit(
+        alice,
+        "try",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE,
+    );
+    assert!(matches!(refused, Outcome::Conflict { .. }), "{refused:?}");
+    log.complete(bob, "hold", START + MINUTE + 1);
+    log.prompt(alice, START + 2 * MINUTE);
+    let retry = log.edit(
+        alice,
+        "again",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + 2 * MINUTE,
+    );
+    assert!(matches!(retry, Outcome::Admitted { .. }), "{retry:?}");
+    assert_eq!(log.outcomes(alice), only("waited"));
+
+    // The ending session's own refusals still settle abandoned at once.
+    let mut log = Log::ready(&[alice, bob]);
+    log.edit(bob, "hold", "src/lib.rs", present('a'), 'b', START + MINUTE);
+    log.edit(
+        alice,
+        "try",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE,
+    );
+    log.end(alice);
+    assert_eq!(log.outcomes(alice), only("abandoned"));
 }
