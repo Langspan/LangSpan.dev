@@ -1953,14 +1953,21 @@ run); a runner LangSpan does not recognise teaches nothing.
 ## Commits in a shared checkout
 
 When several sessions work in one checkout they share one Git index, and a
-commit takes whole files. The `Bash` hook holds a command that would stage or
-commit another live session's uncommitted changes: `git add -A`, `git add .`,
+commit takes whole files. The shell pre-tool hook (Claude Code and Codex
+`Bash`, Cursor `Shell`, Gemini CLI `run_shell_command`) holds a command that
+would stage or commit another live session's uncommitted changes: `git add -A`, `git add .`,
 `git add -u`, `git add PATH…`, `git commit -a`, `git commit PATH…`, or a plain
 `git commit` while the index already holds such changes. The reason names the
 other session and its files and lines, and gives the options. The same command
 run again is not held: each is held once, so the choice stays with the agent
 and the owner. Changes no session made (your own editor), this session's own
-changes, and changes of sessions that have ended never hold a commit.
+changes, and changes of sessions that have ended never hold a commit. The
+hold has the same text and coverage, `denied_commit`, on every host. The
+guard reads the line journal only for the files the command would take, so
+its time grows with those files, not with the journal. With the coordinator
+down, a Git listing over its bounds (16 MiB of diff, 1,024 untracked files)
+or the hook deadline reached, it makes no decision, and the hook's detail
+says which.
 
 To commit only what this session wrote:
 
