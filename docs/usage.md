@@ -1339,8 +1339,8 @@ set before it settles join it, so three refusals of one file are one
 outcome. The next relevant event of that session settles it, once:
 
 - `waited`: a conflict whose holder's admissions of the refused files ended
-  (completed or expired, its session ended, or the coordinator restarted),
-  after which the session
+  (completed or expired, or the coordinator restarted), after which the
+  session
   wrote one of them.
 - `adapted`: the session reported a read of a refused file and then wrote
   one, or wrote one with a call that differs from every refused call.

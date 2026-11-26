@@ -280,8 +280,9 @@ refusals in the window were settled. Each `conflict`, `stale_base` or
 `unread_lines` refusal opens one pending outcome per session, workspace, kind
 and path set; a refusal of the same set before it settles joins it. The next
 relevant event of that session settles it once. A conflict whose holder's
-admissions of the refused paths ended before the session wrote one is
-`waited`. Otherwise, a reported read of a refused path followed by a write is
+admissions of the refused paths ended (completed, expired or a restart)
+before the session wrote one is `waited`. The holder's session ending ends
+none of its admissions, as they are still enforced. Otherwise, a reported read of a refused path followed by a write is
 `adapted`. A write identical to a refused call (same input digest) or a
 shell write is `retried_unchanged`, or `unknown_read` on Codex, which reports
 no reads. A write whose call differs from every refused one is `adapted`. No

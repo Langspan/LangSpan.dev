@@ -384,16 +384,10 @@ impl Settler {
                     }
                 }
             }
+            // Ending a session releases none of its admissions: they are
+            // still enforced until completed, expired or a restart. Only the
+            // session's own refusals settle.
             Event::SessionEnded { session_id } => {
-                let ids: Vec<String> = self
-                    .leases
-                    .iter()
-                    .filter(|(_, (session, _))| session == session_id)
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                for id in ids {
-                    self.lease_ended(&id);
-                }
                 if wall_ms.is_some() {
                     let groups: Vec<GroupKey> = self
                         .pending

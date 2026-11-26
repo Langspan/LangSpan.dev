@@ -1331,3 +1331,128 @@ fn a_held_commit_a_refusal_before_the_window_and_other_files_open_or_settle_noth
     );
     assert_eq!(log.outcomes_at(alice, 0, WALL + 2 * MINUTE), only(PENDING));
 }
+
+impl Log {
+    fn end(&mut self, session: &str) {
+        let outcome = self.run(
+            &format!("end-{}", self.events.len()),
+            Command::SessionEnd {
+                session_id: session.into(),
+            },
+            START,
+        );
+        assert!(
+            matches!(outcome, Outcome::SessionEnded { .. }),
+            "{outcome:?}"
+        );
+    }
+}
+
+/// Ending a session releases none of its admissions: they stay enforced
+/// until completed, expired or a restart. A conflict whose ended holder
+/// still holds the path is therefore not `waited`, and a conflict refused
+/// after the holder ended still knows its holder.
+#[test]
+fn a_holder_ending_its_session_is_not_its_admission_ending() {
+    let (alice, bob) = ("claude-code.alice", "codex.bob");
+    // Bob holds src/lib.rs, Alice is refused, Bob's session ends, and Alice
+    // writes the path through a shell while Bob's admission is still open.
+    let mut log = Log::ready(&[alice, bob]);
+    log.edit(bob, "hold", "src/lib.rs", present('a'), 'b', START + MINUTE);
+    let refused = log.edit(
+        alice,
+        "try",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE,
+    );
+    assert!(matches!(refused, Outcome::Conflict { .. }), "{refused:?}");
+    log.end(bob);
+    log.shell_wrote(alice, "src/lib.rs", START + 2 * MINUTE);
+    assert_eq!(log.outcomes(alice), only("retried_unchanged"));
+
+    // The same, with a read before the shell write: adapted, not waited.
+    let mut log = Log::ready(&[alice, bob]);
+    log.edit(bob, "hold", "src/lib.rs", present('a'), 'b', START + MINUTE);
+    log.edit(
+        alice,
+        "try",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE,
+    );
+    log.end(bob);
+    log.source(alice, "src/lib.rs", present('a'), SourceOrigin::Read);
+    log.shell_wrote(alice, "src/lib.rs", START + 2 * MINUTE);
+    assert_eq!(log.outcomes(alice), only("adapted"));
+
+    // Bob's admission then expires, and Alice writes: waited.
+    let mut log = Log::ready(&[alice, bob]);
+    log.edit(bob, "hold", "src/lib.rs", present('a'), 'b', START + MINUTE);
+    log.edit(
+        alice,
+        "try",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE,
+    );
+    log.end(bob);
+    log.record(Event::LeaseExpired {
+        lease_id: "admit-codex.bob-hold".into(),
+    });
+    log.prompt(alice, START + 2 * MINUTE);
+    let retry = log.edit(
+        alice,
+        "again",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + 2 * MINUTE,
+    );
+    assert!(matches!(retry, Outcome::Admitted { .. }), "{retry:?}");
+    assert_eq!(log.outcomes(alice), only("waited"));
+
+    // Refused only after Bob's session ended: the holder is still known,
+    // and when the admission completes, Alice's write is waited.
+    let mut log = Log::ready(&[alice, bob]);
+    log.edit(bob, "hold", "src/lib.rs", present('a'), 'b', START + MINUTE);
+    log.end(bob);
+    let refused = log.edit(
+        alice,
+        "try",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE,
+    );
+    assert!(matches!(refused, Outcome::Conflict { .. }), "{refused:?}");
+    log.complete(bob, "hold", START + MINUTE + 1);
+    log.prompt(alice, START + 2 * MINUTE);
+    let retry = log.edit(
+        alice,
+        "again",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + 2 * MINUTE,
+    );
+    assert!(matches!(retry, Outcome::Admitted { .. }), "{retry:?}");
+    assert_eq!(log.outcomes(alice), only("waited"));
+
+    // The ending session's own refusals still settle abandoned at once.
+    let mut log = Log::ready(&[alice, bob]);
+    log.edit(bob, "hold", "src/lib.rs", present('a'), 'b', START + MINUTE);
+    log.edit(
+        alice,
+        "try",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE,
+    );
+    log.end(alice);
+    assert_eq!(log.outcomes(alice), only("abandoned"));
+}
