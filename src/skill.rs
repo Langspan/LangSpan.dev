@@ -51,11 +51,22 @@ pub const MAX_BYTES: usize = 8 * 1024;
 
 /// The hosts `langspan install --skill` writes the skill for, at user level.
 /// Cursor's form is a project rule: `hooks install cursor --skill` writes it.
-pub const USER_HOSTS: [Vendor; 3] = [Vendor::ClaudeCode, Vendor::Codex, Vendor::Gemini];
+/// Antigravity reads it as a rule at either level.
+pub const USER_HOSTS: [Vendor; 4] = [
+    Vendor::ClaudeCode,
+    Vendor::Codex,
+    Vendor::Gemini,
+    Vendor::Antigravity,
+];
+
+/// The hosts `hooks install HOST --skill` writes the skill for, in the
+/// project.
+pub const PROJECT_HOSTS: [Vendor; 2] = [Vendor::Cursor, Vendor::Antigravity];
 
 /// Where `vendor` reads the skill. `dir` is the host's user configuration
-/// directory (`~/.claude`, `~/.codex`, `~/.gemini`, or where the host's own
-/// variable moves it), or for Cursor the project root.
+/// directory (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/config`, or
+/// where the host's own variable moves it), or for Cursor the project root.
+/// For a project's Antigravity rule, see [`project_path`].
 pub fn path(vendor: Vendor, dir: &Path) -> PathBuf {
     match vendor {
         Vendor::ClaudeCode => dir.join("skills").join(NAME).join("SKILL.md"),
@@ -65,12 +76,26 @@ pub fn path(vendor: Vendor, dir: &Path) -> PathBuf {
             .join(".cursor")
             .join("rules")
             .join(format!("{NAME}.mdc")),
+        // `~/.gemini/config/rules/*.md` and `.agents/rules/*.md`
+        // (<https://antigravity.google/docs/rules/>).
+        Vendor::Antigravity => dir.join("rules").join(format!("{NAME}.md")),
+    }
+}
+
+/// Where `vendor` reads the skill as a rule of the project at `root`.
+pub fn project_path(vendor: Vendor, root: &Path) -> PathBuf {
+    match vendor {
+        Vendor::Antigravity => path(vendor, &root.join(".agents")),
+        _ => path(vendor, root),
     }
 }
 
 /// Whether LangSpan owns the whole file, rather than a section of it.
 fn whole(vendor: Vendor) -> bool {
-    matches!(vendor, Vendor::ClaudeCode | Vendor::Cursor)
+    matches!(
+        vendor,
+        Vendor::ClaudeCode | Vendor::Cursor | Vendor::Antigravity
+    )
 }
 
 fn note(vendor: Vendor) -> &'static str {
@@ -83,6 +108,9 @@ fn note(vendor: Vendor) -> &'static str {
         }
         Vendor::Codex | Vendor::Gemini => {
             "<!-- Written by `langspan install --skill`; `langspan uninstall` removes this section. -->"
+        }
+        Vendor::Antigravity => {
+            "<!-- Written by `langspan install --skill` or `langspan hooks install antigravity --skill`; `langspan uninstall` or `langspan hooks remove antigravity` removes this file. -->"
         }
     }
 }
@@ -99,6 +127,11 @@ pub fn render(vendor: Vendor) -> String {
             "---\ndescription: \"{DESCRIPTION}\"\nalwaysApply: true\n---\n{MARK}\n{note}\n\n{SOURCE}"
         ),
         Vendor::Codex | Vendor::Gemini => format!("{BEGIN}\n{note}\n\n{SOURCE}{END}\n"),
+        // A rule file without valid frontmatter and a known `trigger` is
+        // discarded silently; `always_on` puts it in every turn.
+        Vendor::Antigravity => format!(
+            "---\ntrigger: always_on\ndescription: \"{DESCRIPTION}\"\n---\n{MARK}\n{note}\n\n{SOURCE}"
+        ),
     }
 }
 
@@ -537,7 +570,7 @@ mod tests {
 
     #[test]
     fn whole_files_are_written_replaced_and_removed_only_when_ours() {
-        for vendor in [Vendor::ClaudeCode, Vendor::Cursor] {
+        for vendor in [Vendor::ClaudeCode, Vendor::Cursor, Vendor::Antigravity] {
             let written = plan(vendor, None, true).unwrap().unwrap();
             assert_eq!(state(vendor, Some(&written)), Ok(State::Current));
             // An older or edited copy of LangSpan's is replaced.
@@ -616,5 +649,29 @@ mod tests {
             path(Vendor::Cursor, dir),
             Path::new("/c/.cursor/rules/langspan.mdc")
         );
+        assert_eq!(
+            path(Vendor::Antigravity, Path::new("/h/.gemini/config")),
+            Path::new("/h/.gemini/config/rules/langspan.md")
+        );
+        assert_eq!(
+            project_path(Vendor::Antigravity, Path::new("/r")),
+            Path::new("/r/.agents/rules/langspan.md")
+        );
+        assert_eq!(project_path(Vendor::Cursor, dir), path(Vendor::Cursor, dir));
+    }
+
+    #[test]
+    fn antigravitys_rule_has_the_frontmatter_without_which_it_is_discarded() {
+        // A rule file without valid frontmatter and a known trigger is
+        // silently discarded (<https://antigravity.google/docs/rules/>).
+        let text = render(Vendor::Antigravity);
+        assert!(
+            text.starts_with("---\ntrigger: always_on\ndescription: \""),
+            "{text}"
+        );
+        let frontmatter = text.split("\n---\n").next().unwrap();
+        assert_eq!(frontmatter.lines().count(), 3, "{frontmatter}");
+        // Antigravity truncates a rule file past 24,000 bytes.
+        assert!(text.len() <= 24_000);
     }
 }
