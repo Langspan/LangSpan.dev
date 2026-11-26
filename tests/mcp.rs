@@ -208,6 +208,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_recall"
                 | "langspan_history"
                 | "langspan_today"
+                | "langspan_report"
                 | "langspan_land_queue"
                 | "langspan_flaky_tests"
         ) {

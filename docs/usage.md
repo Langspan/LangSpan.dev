@@ -1088,8 +1088,9 @@ that places that run's times on the wall clock; events recorded by a build
 before this one have no such anchor and are counted only as `undated`. A
 landing is placed at the time it took its turn to land. A
 window with more than 50,000 events is summarised from the newest 50,000 and
-says `truncated: true`, as does a window that reaches before events retention
-removed; when the oldest of those carries no time of its own,
+says `truncated: true`, as does a window that starts before the newest
+retention cutoff, even though the generation markers retention keeps are
+older than it; when the oldest of those carries no time of its own,
 the first that does decides whether the window may reach past them. With the
 daemon down it exits 1 with "coordination unavailable".
 
@@ -1196,6 +1197,75 @@ could not be read. With the daemon down it exits 1 with "coordination
 unavailable"; no earlier figure is kept or shown. The local page (`langspan dashboard`)
 shows the same count for the current month, and its `/api/state` view
 carries it as `refusals_this_month`.
+
+## The coordination report
+
+`report` shows, for each session and in total for each host kind, how it
+followed coordination: whether a new host version or model still reads before
+editing, declares and ends intent, and what it does after a refusal.
+
+```sh
+./target/release/langspan report demo
+./target/release/langspan report demo --since 2027-03-01T00:00:00Z --json
+```
+
+The text looks like this (the figures are an example, not a measurement):
+
+```text
+Coordination report for demo, since 2027-03-01T00:00:00Z
+host         sessions  edits  base_unknown  shell_after  reads  intents set/ended/open  refusals  retried_unchanged  briefings
+claude-code  6         88     0 of 88       5            61     12/11/1                 7         1 of 7             40
+codex        4         41     9 of 41       14           -      3/3/0                   5         3 of 5             22
+```
+
+Each row counts recorded events in the window:
+
+- `edits_admitted`: tool calls a hook had admitted before they ran.
+- `edits_base_unknown`: of those, admissions with a file whose version was
+  not compared, because no read or earlier version of it was recorded. A
+  Codex session's first edit of an existing file is one, since Codex reports
+  no reads.
+- `shell_writes_after`: shell runs whose changed files were seen only after
+  the command ran, because no admission covered them first
+  ([ADR 0011](adr/0011-shell-writes.md)).
+- `reads_reported`: completed reads the host reported.
+- `intents_set`, `intents_ended` and `intents_left_open` (sessions that ended
+  with an intent still set, including an intent set before the events read).
+- `refusals`: `write_refused` events by kind, as `today` counts them.
+- `retried_unchanged`: refusals followed by an admission of the same
+  session's identical tool call (same input digest), under a new tool-call
+  ID. A second delivery of the refused call itself is answered from its
+  receipt and is not counted.
+- `briefings_delivered`.
+
+A share is always shown beside the count it is out of (`9 of 41`); no field
+is a bare rate. A field a host cannot report is shown as `-` and listed under
+`not_reported` in that host's total (Codex: `reads_reported`), so its zero is
+not read as behavior. Hosts are `claude-code`, `codex`, `cursor`, `gemini`
+and `other` (a session whose ID names none of them). The counts say nothing
+about time or rework saved.
+
+Without `--since` the report covers every recorded event; events are placed
+in wall time as `today` places them, and those of a build before
+`clock_anchored` are counted only as `undated`. At most 16 sessions are
+listed, earliest first; the host totals include every session, and the rest
+are counted in `omitted_sessions`. `--json` carries `window`, `hosts` (each
+with `sessions`, `counts` and `not_reported`), `sessions` (`session_id`,
+`host`, `counts`), `truncated` and, when there are any, `omitted_sessions`,
+`covered_from_ms`, `undated` and `partial`. A window with more than 50,000 events is
+counted from the newest 50,000 and says `truncated: true`, with
+`covered_from_ms`, the wall time those events start at. So does a window
+that starts before the newest retention cutoff, with `covered_from_ms` no
+earlier than that cutoff. Each session's workspace and open intent where
+those events start come from at most the newest 10,000 intent and
+registration events before them; when an event in the window needed an
+older one, it is left out of every count and the report says
+`partial: true` ("Partial: ..." in the text). The MCP tool
+`langspan_report` (`workspace_id`, and `since`, optional) returns the same
+text, labelled as data, within 2,400 bytes: session rows are left out, last
+first, until it fits, and the host totals keep them. It is a read: it
+refuses, holds and acknowledges nothing. With the daemon down it exits 1
+with "coordination unavailable".
 
 ## Desktop notices
 
@@ -1951,6 +2021,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_land_cancel` | Stop a landing waiting for the push turn, by its `request_id` |
 | `langspan_recap` | Summarize one workspace's recorded activity, checks, notes and pending messages |
 | `langspan_today` | The day so far from the event log: sessions, refusals, checks, landings and what is still open, within 2,400 bytes |
+| `langspan_report` | The coordination report: per session and per host kind, edits admitted and not compared, shell writes seen after, reads, intents, refusals, unchanged retries and briefings, within 2,400 bytes |
 | `langspan_remember` | Keep a local note about the workspace or named files |
 | `langspan_forget` | Remove a remembered note by ID |
 | `langspan_recall` | Search a workspace's remembered notes: every query word in a note's text or paths, without case; best first, at most 50 |

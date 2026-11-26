@@ -24,6 +24,7 @@ pub mod protocol;
 pub mod recent;
 mod reformat;
 pub mod regions;
+pub mod report;
 pub mod service;
 mod sha1;
 mod sha256;

@@ -3832,7 +3832,7 @@ pub fn shell_operation(
 }
 
 /// The hook-facing name of a shell call on both hosts.
-pub const SHELL_TOOL: &str = "Bash";
+pub const SHELL_TOOL: &str = langspan_core::SHELL_TOOL;
 
 /// The existing paths in this workspace that a shell command named as what
 /// it reads (`shell::looked_at`), at most `PRESENCE_PATHS`. Never the
