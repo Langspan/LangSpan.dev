@@ -92,6 +92,8 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
+        // Derived for the source index; never part of the status reply.
+        workspace_revisions: _,
         // The write generation check runs carry: one count per workspace,
         // never trimmed.
         writes,
@@ -166,6 +168,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),
+        workspace_revisions: BTreeMap::new(),
         writes: writes.clone(),
     };
     (view, summary)
