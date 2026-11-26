@@ -139,7 +139,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [I7: A LangSpan block for AGENTS.md and rules files](https://github.com/Langspan/LangSpan.dev/issues/86): an agent without trusted hooks does not know LangSpan coordinates the repository.
 - [I8: A LangSpan skill that teaches agents how to work with it](https://github.com/Langspan/LangSpan.dev/issues/87): part 1, the general skill for every host, is built ([ADR 0034](adr/0034-langspan-skill.md), [usage](usage.md#the-langspan-skill)) and still needs a real-host run; part 2, task skills for landing, recovery and shared commits, is planned.
 - [I10: Setup through MCP tools](https://github.com/Langspan/LangSpan.dev/issues/88): an agent asked to set up LangSpan has no MCP tool for it.
-- [I11: A shorter MCP tool list on hooked hosts](https://github.com/Langspan/LangSpan.dev/issues/89): every session carries all tool descriptions, including bookkeeping tools the hooks already call.
 
 ## J. Privacy, audit, configuration and robustness
 

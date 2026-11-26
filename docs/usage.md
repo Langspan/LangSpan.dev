@@ -252,6 +252,21 @@ midnight, so on a day the clocks change the count still starts at that day's
 00:00. No `date` program is started. If the rules cannot be read, midnight
 UTC is used. A day of more than 1024 refusals shows 1024.
 
+#### A shorter MCP tool list
+
+`langspan install --mcp-tools hooked` writes the Claude Code and Codex MCP
+entries as `mcp --state-dir DIR --tools hooked --host claude-code` (or
+`codex`). Such a server leaves `langspan_admit`, `langspan_complete`,
+`langspan_session_register` and `langspan_workspace_register` out of its tool
+list while that host's hooks report for the workspace the host started the
+server in; see [the MCP section](#mcp). Other hosts keep every tool until
+their hooks are verified on a real host, and the dry run says so. Like every
+install, it writes nothing until `--apply`. `--mcp-tools all`, or installing
+again without the option, writes the plain entry back; `uninstall --apply`
+removes the entry with its flags. The default is `all`, and LangSpan never
+switches it by itself. The measured saving is about 2.6 KB of the 32 KB list
+([benchmarks/mcp-tools](../benchmarks/mcp-tools/README.md)).
+
 User-level installation has been tested with a temporary home and real daemon,
 Git and hook executable. It has not been observed in a native Claude Code or
 Codex session. Claude's user-scope MCP key remains inferred from its documentation;
@@ -2011,6 +2026,30 @@ checkout, inside the `langspan mcp` process rather than the daemon; its output
 goes to that process's standard error. `langspan_land` with `apply` pushes as
 you, and `langspan_commit_mine` commits as you, running your Git hooks. Deny
 any of them in your host's permission settings if agents should not do this.
+
+### A shorter list on hooked hosts
+
+`langspan mcp` lists every tool by default (`--tools all`). With
+`--tools hooked --host claude-code` (or `--host codex`, the hosts whose hooks
+report reliably), it leaves out `langspan_admit`, `langspan_complete`,
+`langspan_session_register` and `langspan_workspace_register`, which the hooks
+call for the agent, but only while that host's hooks report:
+
+- The server asks the daemon's status when the client is initialized and then
+  every 6 seconds, each with the client's bounded IPC deadline.
+- It shortens the list once a session of that host (told by its ID prefix,
+  `claude-code.` or `codex.`), in the registered workspace whose root is the
+  deepest one holding the server's working directory, has hook activity in
+  the daemon's current generation within the last 10 minutes.
+- When that stops being true (10 minutes without a hook event, a new daemon
+  generation, or the daemon not answering), every tool is listed again.
+- Each change sends `notifications/tools/list_changed`; the server declares
+  the `listChanged` capability only in this mode.
+- Every tool answers when called by name, listed or not. The server
+  instructions name the hidden tools and say the hooks call them.
+
+Nothing new is stored: the decision is made from `status`. A server started
+outside any registered workspace, or before any hook event, lists every tool.
 
 ## Move, switch and remove a workspace
 

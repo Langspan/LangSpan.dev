@@ -20,7 +20,7 @@ an edit, and nothing tells LangSpan whether the agent followed it.
 | A7 | Detecting agent tools installed after setup | Superseded: built (see below) | Install is still an explicit owner step ([ADR 0010](0010-user-level-install.md)); LangSpan now tells the owner when a host it would install is present and uncovered |
 | I7 | An AGENTS.md block and rules-file text | Not now | Comes with the rules-file hosts; it changes files in the owner's repository |
 | I8 | A LangSpan skill that teaches agents how to work with it: a general skill for every host, then task skills | Superseded: planned, part 1 built ([ADR 0034](0034-langspan-skill.md)) | The maintainers asked for it, and running LangSpan on its own development showed every agent needed the same instructions by hand |
-| I11 | MCP menu trimming: tools hidden from read-only members, and bookkeeping tools hidden once hooks report (added by the second review) | Not now | Every tool is always listed. Hiding tools once hooks run needs to know, per host, that they do, and the cost of their descriptions has not been measured |
+| I11 | MCP menu trimming: tools hidden from read-only members, and bookkeeping tools hidden once hooks report (added by the second review) | Superseded: hooked-host part built (see below); role-based hiding not now | The cost was measured first ([benchmarks/mcp-tools](../../benchmarks/mcp-tools/README.md)); the list is shortened only on an owner's opt-in and only while the host's hooks are seen reporting. There are still no read-only members to hide tools from ([ADR 0016](0016-hosted-service-features-out-of-scope.md)) |
 
 The Gemini CLI part of row A6 is launch track L10, not this ADR.
 
@@ -58,6 +58,34 @@ it never installs, upgrades or edits a host's configuration.
   install needs LangSpan's entries in the host's hook file, so the check reads
   them, bounded, and keeps nothing from the file but the host's name.
 
+### I11, as built
+
+The hooked-host part of row I11 is built, after measuring what it saves:
+about 2.6 KB of a 32 KB tool list (8.1% of the full list in `TOOL_NAMES` at the time), as recorded in
+[benchmarks/mcp-tools](../../benchmarks/mcp-tools/README.md).
+
+- `langspan mcp --tools all|hooked --host claude-code|codex`. The default is
+  `all`. `hooked` is accepted only for Claude Code and Codex; Gemini CLI and
+  Cursor follow once their adapters are verified on a real host.
+  `install --mcp-tools hooked` writes the flags into those two hosts' entries,
+  as a dry run until `--apply`; `uninstall --apply` removes them with the
+  entry. LangSpan never switches the mode by itself.
+- With `hooked`, the server leaves out `langspan_admit`, `langspan_complete`,
+  `langspan_session_register` and `langspan_workspace_register` only while a
+  session of that host (told by its ID prefix) in the server's workspace (the
+  deepest registered root holding its working directory) has hook activity in
+  the current daemon generation within the last 10 minutes. It asks `status`
+  every 6 seconds; nothing new is stored.
+- No hook event, a quiet period of 10 minutes, a new generation or a daemon
+  that does not answer all mean every tool is listed. Each change sends the
+  MCP list-changed notification.
+- Every tool still answers when called by name. The server instructions name
+  the hidden tools and say the hooks call them.
+- Not established: a real Claude Code session showing the shorter list in
+  `/mcp`, and whether hosts that defer tool schemas gain anything. Integration
+  tests use a real daemon and hook events recorded from Claude Code 2.1.331
+  and Codex 0.171.0.
+
 ## Consequences
 
 - At launch, LangSpan coordinates only the four hooked hosts. The README and
@@ -69,4 +97,4 @@ it never installs, upgrades or edits a host's configuration.
 
 These rows are on the public roadmap. They are worked on in the open after the first
 release of `Langspan/LangSpan.dev`, by many agent sessions developing LangSpan with
-LangSpan itself; the release does not wait for them. What would change it: a host that gains hooks moves into the adapter work; rules-file hosts start once the four hooked hosts are released and their advice-only limit is written down. A7 is built, as recorded above. I8 is no longer decided here: [ADR 0034](0034-langspan-skill.md) records its first part, and its issue holds the specification.
+LangSpan itself; the release does not wait for them. What would change it: a host that gains hooks moves into the adapter work; rules-file hosts start once the four hooked hosts are released and their advice-only limit is written down. A7 is built, as recorded above, and so is the hooked-host part of I11. I8 is no longer decided here: [ADR 0034](0034-langspan-skill.md) records its first part, and its issue holds the specification.
