@@ -44,8 +44,15 @@ def expected(function, value):
     return value
 
 
-def run_checks(task):
+def run_checks(task, checkout):
     """Import the task's module from the integrated tree and check it."""
+    if task["role"] == "new_caller":
+        # The new caller must use the new name, not reach the parser through
+        # an alias or a wrapper the rename was told not to keep.
+        source = checkout / (task["module"].replace(".", "/") + ".py")
+        text = source.read_text(encoding="utf-8", errors="replace") if source.is_file() else ""
+        if re.search(r"\bparse_config\b", text) or not re.search(r"\bload_config\b", text):
+            return False, "%s does not call load_config, or still names parse_config" % source.relative_to(checkout)
     module = importlib.import_module(task["module"])
     call = getattr(module, task["function"])
     if "checks" in task:
@@ -77,19 +84,9 @@ def python_sources(checkout):
             for path in sorted(root.rglob("*.py"))}
 
 
-def mentions(text, value):
-    """Whether TEXT names VALUE as a whole token: 10 is not in 100 or 10.5."""
-    return re.search(r"(?<![\w.])%s(?!\.?\w)" % re.escape(str(value)), text) is not None
-
-
-def reports_contradiction(text, key, members):
-    """A note reports a pair's contradiction when it names the setting and
-    every value the pair's tasks asked for: the incompatible requirements
-    themselves, not only the setting or the functions involved."""
-    return mentions(text, key) and all(mentions(text, task["value"]) for _, task in members)
-
-
 def judge(plan, checkout):
+    """The verdict on one combined tree. Success is what tasks.SUCCESS states
+    for the family; notes sessions wrote are kept as evidence, never judged."""
     sys.path.insert(0, str(checkout))
     merged = {entry["session"] for entry in plan["integration"] if entry["merged"]}
     tasks = []
@@ -105,7 +102,7 @@ def judge(plan, checkout):
             entry = {"completed": ok, "detail": detail}
         else:
             try:
-                ok, detail = run_checks(task)
+                ok, detail = run_checks(task, checkout)
             except Exception as error:  # Agent code can fail in any way; record it.
                 ok, detail = False, "%s: %s" % (type(error).__name__, error)
                 if "--traceback" in sys.argv:
@@ -115,7 +112,6 @@ def judge(plan, checkout):
         tasks.append(entry)
 
     conflicts = []
-    reports = []
     if plan["family"] == "rename_vs_new_caller":
         config = load("shelf.config")
         defined = {name for name in ("parse_config", "load_config") if hasattr(config, name)}
@@ -126,20 +122,22 @@ def judge(plan, checkout):
         for entry in tasks:
             entry["accepted"] = entry["completed"]
     else:
-        notes = checkout / "notes"
-        texts = [path.read_text(encoding="utf-8", errors="replace") for path in sorted(notes.glob("conflict-*.md"))] if notes.is_dir() else []
+        # The reconciliation every contradiction task defines: each function
+        # gets its own value, and the shared default stays as it was.
+        defaults = getattr(load("shelf.settings"), "DEFAULTS", None)
         pairs = {}
         for entry, task in zip(tasks, plan["tasks"]):
             if "pair" in task:
                 pairs.setdefault(task["pair"], []).append((entry, task))
         for key, members in sorted(pairs.items()):
-            reconciled = all(entry["completed"] for entry, _ in members)
-            reported = any(reports_contradiction(text, key, members) for text in texts)
-            if reported:
-                reports.append(key)
+            old = members[0][1]["old"]
+            kept = isinstance(defaults, dict) and key in defaults and defaults[key] == old
+            reconciled = kept and all(entry["completed"] for entry, _ in members)
             for entry, _ in members:
-                entry["accepted"] = reconciled or reported
-            if all(entry["merged"] for entry, _ in members) and not reconciled and not reported:
+                entry["accepted"] = reconciled
+                if entry["completed"] and not kept:
+                    entry["detail"] += "; the shared default %s is no longer %s" % (key, json.dumps(old))
+            if all(entry["merged"] for entry, _ in members) and not all(entry["completed"] for entry, _ in members):
                 lost = [task["function"] for entry, task in members if not entry["completed"]]
                 conflicts.append("%s: both changes merged cleanly, but %s no longer gets what its task asked for" % (key, ", ".join(lost)))
         for entry in tasks:
@@ -162,7 +160,6 @@ def judge(plan, checkout):
         "integrated_tests": "passed" if accepted else "failed",
         "tasks": tasks,
         "semantic_conflicts": conflicts,
-        "contradictions_reported": reports,
         "fixture_tests": fixture_tests,
         "fixture_tests_output_tail": fixture_output,
     }

@@ -83,6 +83,7 @@ impl Fixture {
     fn start_daemon(&mut self) {
         self.child = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state())
                 .stdout(Stdio::null())
@@ -112,6 +113,7 @@ impl Fixture {
 
     fn hook(&self, event: Value) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.state())
             .args(["--workspace", "work", "--root"])
@@ -204,6 +206,7 @@ impl Fixture {
             return (pre, None);
         }
         let output = Process::new("/bin/sh")
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["-c", command])
             .current_dir(self.work())
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -616,6 +619,7 @@ impl Fixture {
     /// `langspan commit --mine` for `session`, from a terminal.
     fn commit_mine(&self, session: &str, message: &str) -> Output {
         Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.state())
             .args([
@@ -850,6 +854,7 @@ fn commit_mine_with_an_explicit_session_needs_no_hook_and_says_when_nothing_is_i
     let f = Fixture::new();
     f.edit(BOB, "bob-1", "b.txt", "beta", "beta, by Bob");
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .arg("--state-dir")
         .arg(f.state())
         .args([
@@ -881,6 +886,7 @@ async fn the_mcp_tool_commits_only_the_sessions_own_changes() {
     f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
     f.edit(BOB, "bob-1", "b.txt", "beta", "beta, by Bob");
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.env("LANGSPAN_AUTOSTART", "off");
     command
         .arg("mcp")
         .arg("--state-dir")
@@ -976,6 +982,7 @@ impl Fixture {
     /// somewhere else.
     fn commit_mine_default_state(&self) -> String {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["commit", "--mine", "-m", "default"])
             .current_dir(self.work())
             .env_remove("LANGSPAN_STATE_DIR")
@@ -1001,6 +1008,7 @@ fn commit_mine_in_the_wrong_state_directory_names_it_and_the_installed_one() {
     assert!(said.contains("pass the same --state-dir"), "{said}");
 
     let installed = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["hooks", "install", "claude-code", "--workspace", "work"])
         .arg("--root")
         .arg(f.work())
@@ -1472,6 +1480,7 @@ fn status_mine_counts_another_sessions_lines_in_an_unknown_hunk() {
 fn status_mine_without_a_running_call_names_the_state_directory() {
     let f = Fixture::new();
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .arg("--state-dir")
         .arg(f.state())
         .args(["status", "--mine", "--root"])
@@ -1491,6 +1500,7 @@ fn status_mine_without_a_running_call_names_the_state_directory() {
     // With --session, it runs from anywhere.
     f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .arg("--state-dir")
         .arg(f.state())
         .args(["status", "--mine", "--json", "--session"])
@@ -1514,6 +1524,7 @@ async fn the_mcp_tool_lists_the_sessions_own_changes() {
     f.edit(BOB, "bob-1", "b.txt", "beta", "beta, by Bob");
     let before = f.snapshot();
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.env("LANGSPAN_AUTOSTART", "off");
     command
         .arg("mcp")
         .arg("--state-dir")

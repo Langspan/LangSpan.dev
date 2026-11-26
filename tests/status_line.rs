@@ -46,6 +46,7 @@ fn base(name: &str) -> PathBuf {
 fn status_line(state: &Path, args: &[&str], input: Option<&str>) -> (Output, Duration) {
     let started = Instant::now();
     let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .arg("--state-dir")
         .arg(state)
         .arg("statusline")
@@ -102,6 +103,7 @@ impl Fixture {
         fs::create_dir(base.join("work")).unwrap();
         fs::write(base.join("work/a.txt"), "line 1\nline 2\nline 3\n").unwrap();
         let daemon = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["daemon", "--state-dir"])
             .arg(base.join("state"))
             .stdout(Stdio::null())
@@ -135,6 +137,7 @@ impl Fixture {
     }
     fn hook(&self, event: &Value) -> String {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.state())
             .args(["--workspace", "work", "--root"])
@@ -386,6 +389,7 @@ impl Home {
     }
     fn langspan(&self, args: &[&str]) -> String {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(args)
             .args(["--hosts", "claude-code", "--home"])
             .arg(self.base.join("home"))
@@ -455,6 +459,7 @@ fn install_adds_the_status_line_and_uninstall_removes_only_it() {
     // The written command runs as the host runs it, and with no daemon
     // prints the unavailable line.
     let output = Process::new("/bin/sh")
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["-c", command])
         .stdin(Stdio::null())
         .output()
