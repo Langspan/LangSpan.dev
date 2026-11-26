@@ -10,7 +10,8 @@ use langspan::{
     protocol::{PROTOCOL_VERSION, Request},
 };
 use langspan_core::{
-    CheckRecord, CheckResult, Command, DiskObservation, Event, Outcome, RecordedEvent, State,
+    CheckRecord, CheckResult, Command, DiskObservation, Event, Outcome, RecordedEvent, ScanSummary,
+    State,
 };
 use serde_json::{Value, json};
 use std::{
@@ -243,8 +244,22 @@ impl Fixture {
         );
         assert!(!start.coverage.is_empty(), "{}", start.detail);
     }
-    /// Commit `files` to the checkout, as the state before any session.
+    /// Commit `files` to the checkout, as the state before any session, and
+    /// return once the Git observer has scanned the commit.
+    ///
+    /// The observer scans every 2 s, and each file a scan finds changed or
+    /// new adds one to the write generation. A check run that takes the
+    /// generation before that scan lands and ends after it keeps no test
+    /// results (ADR 0030), so it is no baseline: a `go test` that builds
+    /// for longer than one scan lost its baseline that way on CI. Waiting
+    /// for the first scan before committing makes the commit a change every
+    /// time, as it was there, instead of only when that scan comes late.
     fn commit(&self, files: &[(&str, &str)]) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.scanned_head().is_none() {
+            assert!(Instant::now() < deadline, "the observer never scanned");
+            std::thread::sleep(Duration::from_millis(50));
+        }
         for (path, content) in files {
             let file = self.root().join(path);
             fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -252,28 +267,27 @@ impl Fixture {
         }
         git(&self.root(), &["add", "-A"]);
         git(&self.root(), &["commit", "--quiet", "-m", "project"]);
-        // The daemon scans the checkout every two seconds. A scan that first
-        // sees these files while the owner's baseline check runs counts as a
-        // write during that run, so the baseline is rightly not kept. Wait
-        // until a scan has seen the commit, as the state before any session.
         let head = Process::new("git")
             .arg("-C")
             .arg(self.root())
             .args(["rev-parse", "HEAD"])
             .output()
             .unwrap();
-        let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
-        let deadline = Instant::now() + Duration::from_secs(30);
+        assert!(head.status.success());
+        let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+        // A scan's events and its summary are stored together: a summary at
+        // the new HEAD means the commit's files are counted.
         loop {
-            let (_, stdout, stderr) =
-                self.cli(&["changes", "work", "--after", "0", "--limit", "1", "--json"]);
-            let changes: Value = serde_json::from_str(&stdout).unwrap_or_default();
-            if changes["outcome"]["scan"]["head_oid"] == head.as_str() {
-                return;
+            let scanned = self.scanned_head();
+            if scanned
+                .as_ref()
+                .is_some_and(|seen| seen.as_deref() == Some(head.as_str()))
+            {
+                break;
             }
             assert!(
                 Instant::now() < deadline,
-                "no scan of {head}: {stdout}{stderr}"
+                "the observer never scanned commit {head}; last scan saw {scanned:?}"
             );
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -385,6 +399,15 @@ impl Fixture {
     }
     /// A page of the workspace's change events after sequence `after`.
     fn changes(&self, after: u64) -> Vec<RecordedEvent> {
+        self.changes_and_scan(after).0
+    }
+    /// The HEAD that the observer's last completed scan of the workspace
+    /// saw, or `None` before its first scan.
+    fn scanned_head(&self) -> Option<Option<String>> {
+        self.changes_and_scan(u64::MAX).1.map(|scan| scan.head_oid)
+    }
+    /// As `changes`, with the summary of the observer's last completed scan.
+    fn changes_and_scan(&self, after: u64) -> (Vec<RecordedEvent>, Option<ScanSummary>) {
         let request = Request {
             version: PROTOCOL_VERSION,
             request_id: "changes".into(),
@@ -395,7 +418,7 @@ impl Fixture {
             },
         };
         match client::call(&self.state_dir(), &request).unwrap().outcome {
-            Outcome::Changes { events, .. } => events,
+            Outcome::Changes { events, scan } => (events, scan),
             other => panic!("{other:?}"),
         }
     }
@@ -1508,6 +1531,39 @@ fn two_hundred_failing_tests_keep_the_check_section_within_its_bound() {
     assert!(context.contains(" new failures: parser::"), "{context}");
     assert!(
         context.contains("more failing tests than LangSpan keeps"),
+        "{context}"
+    );
+}
+
+/// `go test -v` lines for calc.go as committed (TestNet and TestReady fail)
+/// or as broken (TestAdd and TestNet fail), after 3 s: longer than the Git
+/// observer's 2 s scan, as a cold `go test` build is on CI.
+const SLOW_GO_TEST: &str = concat!(
+    "sleep 3; ",
+    "if grep -q 'a - b' calc.go; then add=FAIL ready=PASS; else add=PASS ready=FAIL; fi; ",
+    r"printf '=== RUN   TestAdd\n--- %s: TestAdd (0.00s)\n=== RUN   TestNet\n    calc_test.go:11: timed out\n--- FAIL: TestNet (0.00s)\n=== RUN   TestReady\n--- %s: TestReady (0.00s)\nFAIL\nFAIL\texample.com/calc\t0.001s\nFAIL\n' ",
+    r#""$add" "$ready"; exit 1"#,
+);
+
+#[test]
+fn a_baseline_that_runs_longer_than_a_scan_after_a_commit_is_compared() {
+    let f = Fixture::with_config(json!({"auto_check_debounce_ms": 100, "flaky_rerun_max_s": 0}));
+    let calc = "package calc\n\nfunc Add(a, b int) int { return a + b }\n";
+    f.commit(&[("calc.go", calc)]);
+    let argv = ["sh", "-c", SLOW_GO_TEST];
+    let baseline = f.check_run(&argv);
+    assert!(baseline.contains("tests failed (exit 1)"), "{baseline}");
+    f.enable_argv(&argv);
+    f.write_file_batch(ALICE, "call-1", "calc.go", &calc.replace("a + b", "a - b"));
+    f.wait_for_slow_checks(2);
+    let context = f.prompt("p1").context().expect("delivered");
+    assert!(context.contains("1 new failure: TestAdd."), "{context}");
+    assert!(
+        context.contains("1 already failing before your writes: TestNet."),
+        "{context}"
+    );
+    assert!(
+        context.contains("1 fixed since before your writes: TestReady."),
         "{context}"
     );
 }
