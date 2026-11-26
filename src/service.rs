@@ -406,7 +406,7 @@ mod tests {
         let text = Manager::Launchd
             .render(
                 Path::new("/opt/bin/langspan"),
-                Path::new("/Users/a & b/.local/state/langspan"),
+                Path::new("/srv/a & b/.local/state/langspan"),
             )
             .unwrap();
         let expected = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -421,7 +421,7 @@ mod tests {
 		<string>/opt/bin/langspan</string>
 		<string>daemon</string>
 		<string>--state-dir</string>
-		<string>/Users/a &amp; b/.local/state/langspan</string>
+		<string>/srv/a &amp; b/.local/state/langspan</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -433,16 +433,16 @@ mod tests {
 	<key>ProcessType</key>
 	<string>Background</string>
 	<key>StandardOutPath</key>
-	<string>/Users/a &amp; b/.local/state/langspan/daemon.log</string>
+	<string>/srv/a &amp; b/.local/state/langspan/daemon.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/a &amp; b/.local/state/langspan/daemon.log</string>
+	<string>/srv/a &amp; b/.local/state/langspan/daemon.log</string>
 </dict>
 </plist>
 "#;
         assert_eq!(text, expected);
         assert_eq!(
             Manager::Launchd.state_dir_of(&text),
-            Some(PathBuf::from("/Users/a & b/.local/state/langspan"))
+            Some(PathBuf::from("/srv/a & b/.local/state/langspan"))
         );
     }
 

@@ -47,6 +47,7 @@ impl Base {
     fn home(&self) -> PathBuf {
         self.0.join("home")
     }
+    #[cfg(target_os = "linux")]
     fn state_dir(&self) -> PathBuf {
         self.home().join(".local/state/langspan")
     }
@@ -195,6 +196,7 @@ fn setup_refuses_apply_and_json() {
 /// A stand-in `systemctl` in `bin` that records its arguments in `calls`
 /// and keeps `active`/`enabled` marks next to it. `restart` runs the unit's
 /// `ExecStart` in the background, as the user manager would.
+#[cfg(target_os = "linux")]
 fn stand_in_systemctl(bin: &Path, unit: &Path) {
     fs::create_dir_all(bin).unwrap();
     let script = format!(
@@ -358,6 +360,7 @@ fn setup_refuses_a_unit_langspan_did_not_write() {
     assert!(unit.is_file());
 }
 
+#[cfg(target_os = "linux")]
 fn wait_until_gone(base: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !daemons_for(base).is_empty() {
