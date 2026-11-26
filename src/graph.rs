@@ -97,6 +97,16 @@ impl Index {
             )?;
             transaction.commit()?;
         }
+        // The root each workspace was last indexed at, and its registration
+        // revision then: how many times its ID had been moved or removed
+        // (roadmap G6). Added without a schema change: an index without it
+        // is kept, and each workspace in it starts again at its next pass
+        // (see `start_again_at`).
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS roots (
+                workspace_id TEXT NOT NULL PRIMARY KEY, root TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;",
+        )?;
         Ok(Self { connection })
     }
 
@@ -177,11 +187,46 @@ impl Index {
                     && arity.max.is_none_or(|max| max <= langspan_core::MAX_ARITY)
             })
         };
+        // The exported signatures a version gives one name and kind, as a
+        // notice shows several: each as written, joined by " | ", as many as
+        // fit a notice's 256 bytes (one signature is at most 240), so that
+        // they never make the core refuse the notice and the changes in it.
+        let written = |graph: &FileGraph, name: &str, kind| {
+            let mut signatures: Vec<&str> = graph
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.exported && symbol.name == name && symbol.kind == kind)
+                .map(|symbol| symbol.signature.as_str())
+                .filter(|signature| !signature.chars().any(char::is_control))
+                .collect();
+            signatures.sort_unstable();
+            signatures.dedup();
+            let mut shown = String::new();
+            for signature in signatures {
+                let joined = if shown.is_empty() {
+                    signature.to_owned()
+                } else {
+                    format!("{shown} | {signature}")
+                };
+                if joined.len() > 256 {
+                    break;
+                }
+                shown = joined;
+            }
+            (!shown.is_empty()).then_some(shown)
+        };
         let changes: Vec<InterfaceChange> = langspan_graph::diff(&before, after)
             .into_iter()
-            .filter_map(|change| {
+            .map(|change| {
                 let (label, before, after, number) = match change.change {
-                    Change::Removed => ("removed", None, None, None),
+                    // The signature that went, for a definition's history
+                    // (roadmap D4) to see it come back.
+                    Change::Removed => (
+                        "removed",
+                        written(&before, &change.name, change.kind),
+                        None,
+                        None,
+                    ),
                     Change::SignatureChanged { before, after } => {
                         ("signature_changed", Some(before), Some(after), None)
                     }
@@ -207,16 +252,25 @@ impl Index {
                         None,
                         Some((before, after)),
                     ),
-                    Change::Added => return None,
+                    // A new name: history only, never told to anyone
+                    // (roadmap D4), so no parameter counts.
+                    Change::Added => (
+                        "added",
+                        None,
+                        written(after, &change.name, change.kind),
+                        None,
+                    ),
                 };
+                // Counts only for a signature change, the one change the
+                // write-time break check reads (ADR 0029).
                 let arity = |signature| {
-                    if number.is_some() {
-                        None
-                    } else {
+                    if label == "signature_changed" {
                         counts(signature)
+                    } else {
+                        None
                     }
                 };
-                Some(InterfaceChange {
+                InterfaceChange {
                     name: change.name,
                     kind: change.kind.name().into(),
                     change: label.into(),
@@ -226,7 +280,7 @@ impl Index {
                     after_count: number.map(|(_, after)| after),
                     before,
                     after,
-                })
+                }
             })
             .take(langspan_core::NOTICE_CHANGES)
             .collect();
@@ -268,6 +322,69 @@ impl Index {
             .collect())
     }
 
+    /// A workspace now at another root than it was indexed at (`workspace
+    /// move`) is another checkout: what was indexed for the old one is
+    /// forgotten, so differences between the two checkouts are not reported
+    /// as interface changes. So is a workspace in a later registration
+    /// revision, even at the same root: removed and registered again, or
+    /// switched away and back. What changed while that root was not this
+    /// registration's is not news from the earlier one. A workspace
+    /// with no root record (indexed by a build before roots were kept) is of
+    /// an unknown checkout: what it holds is forgotten too, so its first
+    /// pass after the upgrade is a baseline that reports nothing.
+    fn start_again_at(
+        &mut self,
+        workspace_id: &str,
+        root: &Path,
+        revision: u32,
+    ) -> Result<(), Failure> {
+        if self.indexed_as(workspace_id, root, revision)? {
+            return Ok(());
+        }
+        let root = root.to_string_lossy();
+        let transaction = self.connection.transaction()?;
+        for table in [
+            "files",
+            "unread",
+            "scan_summary",
+            "symbols",
+            "refs",
+            "imports",
+            "baselines",
+            "calls",
+        ] {
+            transaction.execute(
+                &format!("DELETE FROM {table} WHERE workspace_id = ?1"),
+                [workspace_id],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO roots(workspace_id, root, revision) VALUES (?1, ?2, ?3)
+             ON CONFLICT(workspace_id) DO UPDATE SET root = excluded.root,
+                revision = excluded.revision",
+            params![workspace_id, root, revision],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Whether what the index holds for the workspace was indexed at this
+    /// root and registration revision: of this registration, not an
+    /// earlier one.
+    fn indexed_as(&self, workspace_id: &str, root: &Path, revision: u32) -> Result<bool, Failure> {
+        let indexed: Option<(String, u32)> = self
+            .connection
+            .query_row(
+                "SELECT root, revision FROM roots WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(indexed.is_some_and(|(at, indexed_revision)| {
+            at == root.to_string_lossy().as_ref() && indexed_revision == revision
+        }))
+    }
+
     /// Bring one workspace's index up to `scan.files`, the indexable paths
     /// of its latest complete scan with their content digests. A path in
     /// `scan.unobserved` was listed but not versioned by that scan (a
@@ -275,15 +392,19 @@ impl Index {
     /// already holds for it and is not treated as removed. Parses at most
     /// `FILES_PER_PASS` files and stops at `deadline`; what is left is picked
     /// up by the next call. `now_ms` (wall clock) dates a file that becomes
-    /// partial. Returns the interface changes it found.
+    /// partial. `revision` is the workspace's registration revision when
+    /// the scan was taken (`daemon::Registration`). Returns the interface
+    /// changes it found.
     pub fn update(
         &mut self,
         workspace_id: &str,
         root: &Path,
+        revision: u32,
         scan: &ScanView,
         now_ms: u64,
         deadline: Instant,
     ) -> Result<Vec<Notice>, Failure> {
+        self.start_again_at(workspace_id, root, revision)?;
         let (files, unobserved) = (&scan.files, &scan.unobserved);
         // Each path's indexed digest, and the scanned digest at which it was
         // found too large to parse: that version is not tried again.
@@ -470,17 +591,26 @@ impl Index {
     /// separate reads could pair results from before a commit with coverage
     /// from after it and claim more than the results hold. This is the only
     /// way to get coverage, so every answer's coverage describes its rows.
-    pub fn with_coverage<T>(
+    ///
+    /// The answer is for `of`, the workspace's current registration. Until
+    /// the indexer has started that registration's index, what the index
+    /// holds is of an earlier one (another root, or before a removal):
+    /// `reads` is not run, and the answer is empty and not scanned.
+    pub fn with_coverage<T: Default>(
         &self,
-        workspace_id: &str,
+        of: &crate::daemon::Registration,
         reads: impl FnOnce(&Self) -> Result<T, Failure>,
     ) -> Result<(T, GraphCoverage), Failure> {
         // A deferred transaction in WAL mode reads one snapshot, fixed at
         // its first read, until it ends. It only reads, so ending it on an
         // error by dropping it (a rollback) loses nothing.
         let snapshot = self.connection.unchecked_transaction()?;
+        if !self.indexed_as(&of.workspace_id, &of.root, of.revision)? {
+            snapshot.commit()?;
+            return Ok((T::default(), GraphCoverage::default()));
+        }
         let answer = reads(self)?;
-        let coverage = self.coverage(workspace_id)?;
+        let coverage = self.coverage(&of.workspace_id)?;
         snapshot.commit()?;
         Ok((answer, coverage))
     }
@@ -1054,8 +1184,8 @@ pub const MAX_UNREAD: usize = 4096;
 /// files (documentation, data, images) are not counted.
 const OTHER_SOURCE: &[&str] = &[
     "c", "cc", "clj", "cljs", "cpp", "cs", "cxx", "dart", "elm", "erl", "ex", "exs", "fs", "fsx",
-    "groovy", "h", "hh", "hpp", "hrl", "hs", "java", "jl", "kt", "kts", "lua", "m", "ml", "mli",
-    "mm", "nim", "php", "pl", "pm", "r", "rb", "scala", "svelte", "swift", "vue", "zig",
+    "groovy", "h", "hh", "hpp", "hrl", "hs", "jl", "kt", "kts", "lua", "m", "ml", "mli", "mm",
+    "nim", "php", "pl", "pm", "r", "rb", "scala", "svelte", "swift", "vue", "zig",
 ];
 
 /// What the last complete scan listed but the index cannot read. It is kept
@@ -1208,24 +1338,105 @@ mod review_regressions {
             ..ScanView::default()
         };
         index
-            .update("w", &dir.0, &scan, now_ms, Instant::now() + budget)
+            .update("w", &dir.0, 0, &scan, now_ms, Instant::now() + budget)
             .unwrap()
     }
 
-    fn blind(index: &Index, limit: u32) -> (langspan_core::BlindSpots, GraphCoverage) {
+    /// Workspace `w` at `root`, never moved or removed: what `pass` indexes.
+    fn of(root: &Path) -> crate::daemon::Registration {
+        crate::daemon::Registration {
+            workspace_id: "w".into(),
+            root: root.to_path_buf(),
+            revision: 0,
+        }
+    }
+
+    fn blind(index: &Index, root: &Path, limit: u32) -> (langspan_core::BlindSpots, GraphCoverage) {
         index
-            .with_coverage("w", |index| index.blind_spots("w", limit))
+            .with_coverage(&of(root), |index| index.blind_spots("w", limit))
             .unwrap()
+    }
+
+    /// Answers are for the workspace's current registration: until the
+    /// indexer starts its index, the index of another root or of the
+    /// registration before a removal is not read.
+    #[test]
+    fn an_answer_for_another_registration_reads_nothing() {
+        let (dir, mut index) = setup("registration");
+        pass(&dir, &mut index, &[("src/api.rs", "pub fn upload() {}\n")]);
+        let (symbols, coverage) = index
+            .with_coverage(&of(&dir.0), |index| index.symbol("w", "upload", 10))
+            .unwrap();
+        assert_eq!((symbols.len(), coverage.scanned), (1, true));
+        let moved = crate::daemon::Registration {
+            root: dir.0.join("elsewhere"),
+            ..of(&dir.0)
+        };
+        // Removed and registered again, or switched away and back.
+        let removed = crate::daemon::Registration {
+            revision: 1,
+            ..of(&dir.0)
+        };
+        for other in [moved, removed] {
+            let (symbols, coverage) = index
+                .with_coverage(&other, |index| index.symbol("w", "upload", 10))
+                .unwrap();
+            assert!(symbols.is_empty(), "{other:?}: {symbols:?}");
+            assert_eq!(coverage, GraphCoverage::default(), "{other:?}");
+        }
     }
 
     const BROKEN: (&str, &str) = ("src/broken.rs", "pub fn half( {{{\n");
+
+    #[test]
+    fn a_workspace_indexed_at_another_root_starts_again_without_notices() {
+        // Roadmap G6: `workspace move --switch` binds the ID to another
+        // checkout. Its files differ from the old one's without anyone
+        // changing an interface, so the index starts that root afresh.
+        let (dir, mut index) = setup("moved-root");
+        let api = ("src/api.rs", "pub fn upload() {}\n");
+        assert!(pass(&dir, &mut index, &[api, CALLER]).is_empty());
+        let other = setup("moved-root-other").0;
+        let changed = ("src/api.rs", "pub fn upload(x: u8) {}\n");
+        let notices = pass(&other, &mut index, &[changed, CALLER]);
+        assert!(notices.is_empty(), "{notices:?}");
+        let found = index.symbol("w", "upload", 10).unwrap();
+        assert_eq!(found[0].signature, "pub fn upload(x: u8)");
+        // At the same root, a changed signature is still a notice.
+        let again = ("src/api.rs", "pub fn upload(x: u16) {}\n");
+        assert_eq!(pass(&other, &mut index, &[again, CALLER]).len(), 1);
+    }
+
+    #[test]
+    fn an_index_written_before_roots_were_kept_starts_again_at_its_next_pass() {
+        // The previous version's schema-4 file: the same tables without
+        // `roots`, holding one checkout's files and baselines.
+        let (dir, mut index) = setup("unrooted");
+        let api = ("src/api.rs", "pub fn upload() {}\n");
+        assert!(pass(&dir, &mut index, &[api, CALLER]).is_empty());
+        index.connection.execute_batch("DROP TABLE roots;").unwrap();
+        drop(index);
+        let mut index = Index::open(&dir.0.join("graph.sqlite3")).unwrap();
+        // The workspace was moved before the first pass after the upgrade:
+        // the other checkout's differences are not interface changes.
+        let other = setup("unrooted-other").0;
+        let changed = ("src/api.rs", "pub fn upload(x: u8) {}\n");
+        let notices = pass(&other, &mut index, &[changed, CALLER]);
+        assert!(notices.is_empty(), "{notices:?}");
+        let found = index.symbol("w", "upload", 10).unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].signature, "pub fn upload(x: u8)");
+        // From then on, a changed signature at that root is a notice.
+        let again = ("src/api.rs", "pub fn upload(x: u16) {}\n");
+        assert_eq!(pass(&other, &mut index, &[again, CALLER]).len(), 1);
+    }
 
     #[test]
     fn blind_spots_name_partial_never_clean_and_waiting_files() {
         let (dir, mut index) = setup("blind");
         let api = ("src/api.rs", "pub fn upload() {}\n");
         pass(&dir, &mut index, &[api, BROKEN, CALLER]);
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &dir.0, 10);
         assert_eq!(
             spots.partial,
             [langspan_core::PartialFile {
@@ -1246,12 +1457,12 @@ mod review_regressions {
             NOW + 60_000,
             Duration::from_secs(10),
         );
-        assert_eq!(blind(&index, 10).0.partial[0].since_ms, NOW);
+        assert_eq!(blind(&index, &dir.0, 10).0.partial[0].since_ms, NOW);
 
         // Fixed: in no list, and the count says so.
         let fixed = ("src/broken.rs", "pub fn half() {}\n");
         pass(&dir, &mut index, &[api, fixed, CALLER]);
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &dir.0, 10);
         assert_eq!(spots, langspan_core::BlindSpots::default());
         assert_eq!(coverage.blind_in_scope, 0);
 
@@ -1264,11 +1475,11 @@ mod review_regressions {
             NOW,
             Duration::ZERO,
         );
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &dir.0, 10);
         assert_eq!(spots.waiting, ["src/api.rs"]);
         assert_eq!((spots.totals.waiting, coverage.blind_in_scope), (1, 1));
         pass(&dir, &mut index, &[changed, fixed, CALLER]);
-        assert!(blind(&index, 10).0.waiting.is_empty());
+        assert!(blind(&index, &dir.0, 10).0.waiting.is_empty());
     }
 
     #[test]
@@ -1276,7 +1487,7 @@ mod review_regressions {
         let (dir, mut index) = setup("oversize");
         let big = format!("// {}\n", "x".repeat(MAX_SOURCE_BYTES));
         pass(&dir, &mut index, &[("src/big.rs", &big), CALLER]);
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &dir.0, 10);
         assert_eq!(spots.too_large, ["src/big.rs"]);
         assert!(spots.waiting.is_empty(), "{spots:?}");
         assert_eq!(coverage.blind_in_scope, 1);
@@ -1296,7 +1507,7 @@ mod review_regressions {
             &mut index,
             &[("src/big.rs", "pub fn small() {}\n"), CALLER],
         );
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &dir.0, 10);
         assert!(spots.too_large.is_empty(), "{spots:?}");
         assert_eq!(coverage.blind_in_scope, 0);
     }
@@ -1314,7 +1525,7 @@ mod review_regressions {
             ..ScanView::default()
         };
         let far = Instant::now() + Duration::from_secs(10);
-        index.update("w", &dir.0, &scan, NOW, far).unwrap();
+        index.update("w", &dir.0, 0, &scan, NOW, far).unwrap();
         let oversize: Option<String> = index
             .connection
             .query_row(
@@ -1330,8 +1541,8 @@ mod review_regressions {
         // Back to the scanned content: that version is indexed.
         fs::write(dir.0.join("src/api.rs"), small).unwrap();
         let far = Instant::now() + Duration::from_secs(10);
-        index.update("w", &dir.0, &scan, NOW, far).unwrap();
-        let (spots, coverage) = blind(&index, 10);
+        index.update("w", &dir.0, 0, &scan, NOW, far).unwrap();
+        let (spots, coverage) = blind(&index, &dir.0, 10);
         assert_eq!(spots, langspan_core::BlindSpots::default());
         assert_eq!(coverage.blind_in_scope, 0);
     }
@@ -1342,8 +1553,8 @@ mod review_regressions {
         let names: Vec<String> = (0..5).map(|n| format!("src/b{n}.rs")).collect();
         let files: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), BROKEN.1)).collect();
         pass(&dir, &mut index, &files);
-        let first = blind(&index, 2).0;
-        assert_eq!(first, blind(&index, 2).0);
+        let first = blind(&index, &dir.0, 2).0;
+        assert_eq!(first, blind(&index, &dir.0, 2).0);
         let paths: Vec<&str> = first
             .partial
             .iter()
@@ -1360,7 +1571,7 @@ mod review_regressions {
         let user = ("src/user.rs", "fn caller() { lonely(); }\nfn half( {{{\n");
         pass(&dir, &mut index, &[api, user]);
         let ((_, references), coverage) = index
-            .with_coverage("w", |index| index.impact("w", "src/api.rs", 10))
+            .with_coverage(&of(&dir.0), |index| index.impact("w", "src/api.rs", 10))
             .unwrap();
         assert_eq!(coverage.partial_files, 1);
         assert_eq!(coverage.blind_in_scope, 1);
@@ -1389,7 +1600,7 @@ mod review_regressions {
         }
         fs::create_dir_all(root.join("z")).unwrap();
         for n in 0..10 {
-            fs::write(root.join(format!("z/C{n}.java")), "class C {}\n").unwrap();
+            fs::write(root.join(format!("z/C{n}.kt")), "class C {}\n").unwrap();
         }
         fs::write(root.join("z/README.md"), "notes\n").unwrap();
         let limits = crate::observer::Limits {
@@ -1408,23 +1619,41 @@ mod review_regressions {
             .update(
                 "w",
                 &root,
+                0,
                 &scan,
                 NOW,
                 Instant::now() + Duration::from_secs(10),
             )
             .unwrap();
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &root, 10);
         assert_eq!(spots.too_large, ["src/0huge.rs"]);
         assert_eq!(spots.unscanned, ["src/c.rs"]);
         assert_eq!(
             spots.unsupported_languages,
             [langspan_core::LanguageCount {
-                extension: ".java".into(),
+                extension: ".kt".into(),
                 files: 10
             }]
         );
         assert_eq!((spots.totals.too_large, spots.totals.unscanned), (1, 1));
         assert_eq!(coverage.blind_in_scope, 2);
+    }
+
+    /// A language gains a grammar: its files are indexed and counted in
+    /// coverage, so they are no longer reported as another language.
+    #[test]
+    fn no_indexed_extension_is_reported_as_another_language() {
+        for extension in OTHER_SOURCE {
+            assert_eq!(
+                Language::for_path(&format!("src/a.{extension}")),
+                None,
+                ".{extension} is indexed"
+            );
+        }
+        assert_eq!(
+            Language::for_path("src/main/java/shop/Orders.java"),
+            Some(Language::Java)
+        );
     }
 
     const NOW: u64 = 1_700_000_000_000;
@@ -1583,7 +1812,7 @@ mod review_regressions {
         // The writer adds a file between the reader's levels and its
         // coverage: neither the levels nor the coverage see it.
         let (two, coverage) = reader
-            .with_coverage("w", |reader| {
+            .with_coverage(&of(&dir.0), |reader| {
                 let two = reader.impact_levels(
                     "w",
                     "src/a.rs",
@@ -1598,7 +1827,7 @@ mod review_regressions {
         assert_eq!(reached(&two[1]), [("src/c.rs", "beta", "src/b.rs")]);
         assert_eq!(coverage.indexable_files, 3, "{coverage:?}");
         let (after, coverage) = reader
-            .with_coverage("w", |reader| {
+            .with_coverage(&of(&dir.0), |reader| {
                 reader.impact_levels("w", "src/a.rs", 2, Instant::now() + Duration::from_secs(10))
             })
             .unwrap();
@@ -1668,7 +1897,7 @@ mod review_regressions {
         pass(&dir, &mut writer, &[CALLER]);
         let reader = Index::open_reader(&dir.0.join("graph.sqlite3")).unwrap();
         let (symbols, coverage) = reader
-            .with_coverage("w", |reader| {
+            .with_coverage(&of(&dir.0), |reader| {
                 let symbols = reader.symbol("w", "upload", 10)?;
                 pass(
                     &dir,
@@ -1686,7 +1915,7 @@ mod review_regressions {
         );
         // A later answer sees both.
         let (symbols, coverage) = reader
-            .with_coverage("w", |reader| reader.symbol("w", "upload", 10))
+            .with_coverage(&of(&dir.0), |reader| reader.symbol("w", "upload", 10))
             .unwrap();
         assert_eq!(symbols.len(), 1);
         assert_eq!((coverage.indexable_files, coverage.current_files), (2, 2));

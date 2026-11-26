@@ -85,7 +85,7 @@ fn ordinary_overlaps_same_root_aliases_and_incomplete_proofs_are_rejected() {
     for event in [
         verified_event("alias", "/repo", &["parent"]),
         verified_event("child", "/repo/.worktrees/child", &["missing"]),
-        verified_event("child", "/repo/.worktrees/child", &["other", "parent"]),
+        verified_event("child", "/repo/.worktrees/child", &["child", "parent"]),
     ] {
         let before = state.clone();
         assert!(apply(&mut state, &event).is_err());
@@ -264,6 +264,78 @@ fn expired_or_invalidated_parent_claims_do_not_block_nested_registration() {
         decide(&state, &nested_registration(), "nested", 20).outcome,
         Outcome::Workspace { .. }
     ));
+}
+
+/// A registered root kept as given can be a link, `/old -> /new`, so the
+/// adapter verifies a worktree at `/new/.worktrees/child` against it though
+/// the two roots do not overlap as text. The core records that link and,
+/// unable to tell which of the parent's paths the worktree covers, waits
+/// while the parent holds any current admission. A move to such a root is
+/// accepted the same way.
+#[test]
+fn a_verified_link_need_not_overlap_as_text_and_waits_for_any_parent_claim() {
+    let linked = || Command::WorkspaceRegisterVerified {
+        workspace_id: "child".into(),
+        root: "/new/.worktrees/child".into(),
+        verified_overlaps: vec!["parent".into()],
+    };
+    let mut state = ready();
+    register(&mut state, "parent", "/old");
+    lease_in(&mut state, "parent", "src/api.rs");
+    let blocked = decide(&state, &linked(), "linked", 20);
+    assert!(
+        matches!(blocked.outcome, Outcome::Error { ref code, .. } if code == "workspace_in_use"),
+        "{:?}",
+        blocked.outcome
+    );
+    assert!(blocked.events.is_empty());
+    let complete = decide(
+        &state,
+        &Command::Complete {
+            session_id: "alice".into(),
+            lease_id: "lease".into(),
+        },
+        "complete",
+        20,
+    );
+    for event in complete.events {
+        apply(&mut state, &event).unwrap();
+    }
+    let decision = decide(&state, &linked(), "linked", 21);
+    assert!(
+        matches!(decision.outcome, Outcome::Workspace { .. }),
+        "{:?}",
+        decision.outcome
+    );
+    for event in &decision.events {
+        apply(&mut state, event).unwrap();
+    }
+    assert_eq!(state.workspaces["child"].verified_overlaps, ["parent"]);
+
+    apply(
+        &mut state,
+        &verified_event("nested", "/old/.worktrees/nested", &["parent"]),
+    )
+    .unwrap();
+    let moved = decide(
+        &state,
+        &Command::WorkspaceMoveVerified {
+            workspace_id: "nested".into(),
+            root: "/new/.worktrees/nested".into(),
+            verified_overlaps: vec!["parent".into()],
+        },
+        "move",
+        22,
+    );
+    assert!(
+        !matches!(moved.outcome, Outcome::Error { .. }),
+        "{:?}",
+        moved.outcome
+    );
+    for event in &moved.events {
+        apply(&mut state, event).unwrap();
+    }
+    assert_eq!(state.workspaces["nested"].root, "/new/.worktrees/nested");
 }
 
 #[test]

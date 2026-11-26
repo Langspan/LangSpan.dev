@@ -573,6 +573,45 @@ def helper():
     }
 
     #[test]
+    fn a_java_method_holds_its_annotations_and_javadoc() {
+        const JAVA: &str = "package shop;
+
+public class Orders {
+    /** Places one order. */
+    @Override
+    public Order place(Cart cart) {
+        return null;
+    }
+
+    private int count() {
+        return 0;
+    }
+}
+";
+        let java = |edit: &Edit| {
+            locate("src/main/java/shop/Orders.java", JAVA.as_bytes(), edit)
+                .map(|located| keys(&located))
+        };
+        assert_eq!(
+            java(&replace("return null;", "return new Order();")).unwrap(),
+            ["Orders::place"]
+        );
+        assert_eq!(
+            java(&replace("@Override", "@Deprecated")).unwrap(),
+            ["Orders::place"]
+        );
+        assert_eq!(
+            java(&replace("Places one order.", "Places an order.")).unwrap(),
+            ["Orders::place"]
+        );
+        assert_eq!(
+            java(&replace("return 0;", "return 1;")).unwrap(),
+            ["Orders::count"]
+        );
+        assert_eq!(java(&replace("package shop;", "package store;")), None);
+    }
+
+    #[test]
     fn ambiguity_or_an_edit_outside_any_definition_is_the_whole_file() {
         for edit in [
             replace("absent text", "x"),

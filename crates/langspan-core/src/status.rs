@@ -5,9 +5,10 @@
 
 use crate::{
     AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CoreError, Intent, InterfaceNotice,
-    Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, RemoteLink, RemotePeer,
-    RetractedMessage, ScanCoverage, ScanFailure, Session, SessionActivity, SessionLiveness, State,
-    TestLearning, Turn, TurnWaiter, UninstalledHost, Workspace, WorkspaceGit, error,
+    Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, PresenceSetting, RemoteLink,
+    RemotePeer, RetractedMessage, ScanCoverage, ScanFailure, Session, SessionActivity,
+    SessionLiveness, State, TestLearning, Turn, TurnWaiter, UninstalledHost, Workspace,
+    WorkspaceGit, error,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -80,6 +81,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         scan_failures,
         scan_coverage,
         checkouts,
+        uncoordinated,
         auto_checks,
         check_notices,
         test_learning,
@@ -88,9 +90,14 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         // bounded view shows what is held, and `status --all` has these.
         message_history: _,
         retracted_notices: _,
+        // Read by a message status query only.
+        dropped_messages: _,
+        presence,
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
+        // Derived for the source index; never part of the status reply.
+        workspace_revisions: _,
         // The write generation check runs carry: one count per workspace,
         // never trimmed.
         writes,
@@ -155,15 +162,19 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         scan_failures: scan_failures.clone(),
         scan_coverage: scan_coverage.clone(),
         checkouts: checkouts.clone(),
+        uncoordinated: uncoordinated.clone(),
         auto_checks: auto_checks.clone(),
         check_notices: keep(check_notices, of_shown),
         test_learning: test_learning.clone(),
         uninstalled_hosts: uninstalled_hosts.clone(),
         retracted_notices: BTreeMap::new(),
         message_history: BTreeMap::new(),
+        dropped_messages: BTreeMap::new(),
+        presence: keep(presence, of_shown),
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),
+        workspace_revisions: BTreeMap::new(),
         writes: writes.clone(),
     };
     (view, summary)
@@ -225,7 +236,7 @@ macro_rules! activity {
 /// Parts of the view left out, in this order, while it does not fit: the
 /// bulkiest histories first, current coordination last. Each name is the one
 /// `StatusSummary::omitted` gives.
-const TRIMS: [Trim; 15] = [
+const TRIMS: [Trim; 17] = [
     activity!("activity.known", known),
     // `check flaky` reads it through its own command.
     field!("test_learning", test_learning),
@@ -233,11 +244,13 @@ const TRIMS: [Trim; 15] = [
     field!("landings", landings),
     field!("interface_notices", interface_notices),
     field!("checkouts", checkouts),
+    field!("uncoordinated", uncoordinated),
     field!("notes", notes),
     field!("remote_peers", remote_peers),
     activity!("activity.touched", touched),
     activity!("activity.alerted", alerted),
     activity!("activity.prompt_targets", prompt_targets),
+    activity!("activity.looking", looking),
     // Only the shown sessions' notices are in the view.
     Trim {
         name: "check_notices",
@@ -458,6 +471,10 @@ pub enum StatusRecord {
         key: String,
         notice: RetractedMessage,
     },
+    Presence {
+        key: String,
+        setting: PresenceSetting,
+    },
     /// Part of one record too large for a page: `text` is its JSON from
     /// byte `offset`. The parts of a record come in order, the last with
     /// `last`, and joined they are that record's JSON. A part at offset 0
@@ -470,7 +487,7 @@ pub enum StatusRecord {
 }
 
 /// Record kinds in page order. The cursor names one of these.
-const KINDS: [&str; 25] = [
+const KINDS: [&str; 26] = [
     "workspace",
     "session",
     "intent",
@@ -496,6 +513,7 @@ const KINDS: [&str; 25] = [
     "uninstalled_host",
     "sent_message",
     "retracted_notice",
+    "presence",
 ];
 
 impl StatusRecord {
@@ -547,6 +565,7 @@ impl StatusRecord {
             Self::RetractedNotice { key, notice } => {
                 state.retracted_notices.entry(key).or_default().push(notice)
             }
+            Self::Presence { key, setting } => drop(state.presence.insert(key, setting)),
         }
         Ok(())
     }
@@ -733,7 +752,7 @@ pub fn status_records<'a>(
         .as_ref()
         .and_then(|after| Some((after.position.clone(), after.within?)));
     let after = after.as_ref();
-    let pages: [Page<'a>; 25] = [
+    let pages: [Page<'a>; 26] = [
         entries(0, &state.workspaces, after, |key, workspace| {
             StatusRecord::Workspace { key, workspace }
         }),
@@ -812,6 +831,9 @@ pub fn status_records<'a>(
         }),
         lists(24, &state.retracted_notices, after, |key, notice| {
             StatusRecord::RetractedNotice { key, notice }
+        }),
+        entries(25, &state.presence, after, |key, setting| {
+            StatusRecord::Presence { key, setting }
         }),
     ];
     Ok((resume, pages.into_iter().flatten()))

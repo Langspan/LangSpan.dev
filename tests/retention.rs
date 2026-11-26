@@ -1229,3 +1229,59 @@ fn a_daily_summary_reaching_before_removed_history_says_it_is_truncated() {
     // A window that starts after the oldest event left is complete.
     assert!(!today_truncated(&store, u64::MAX / 4));
 }
+
+/// A workspace's registration revision (how many times it was moved or
+/// removed) is derived outside the status reply. A compaction must keep it,
+/// so that what was derived during an earlier registration is still started
+/// again or refused after a restart from the snapshot.
+#[test]
+fn a_compaction_keeps_the_registration_revision_of_a_moved_workspace() {
+    let directory = Directory::new();
+    let path = directory.file("state.sqlite3");
+    let wall = Wall::at(START_MS);
+    let mut store = wall.open(&path);
+    run(
+        &mut store,
+        "workspace",
+        Command::WorkspaceRegister {
+            workspace_id: "w".into(),
+            root: "/retention-workspace".into(),
+        },
+        0,
+    );
+    let moved = store
+        .execute(
+            "move",
+            &Command::WorkspaceMove {
+                workspace_id: "w".into(),
+                root: "/retention-workspace-moved".into(),
+                switch: false,
+            },
+            &Command::WorkspaceMoveVerified {
+                workspace_id: "w".into(),
+                root: "/retention-workspace-moved".into(),
+                verified_overlaps: Vec::new(),
+            },
+            1000,
+        )
+        .unwrap();
+    assert!(
+        !matches!(moved.outcome, Outcome::Error { .. }),
+        "{:?}",
+        moved.outcome
+    );
+    let revisions = store.state().workspace_revisions.clone();
+    assert_eq!(revisions.get("w"), Some(&1), "{revisions:?}");
+
+    wall.set(START_MS + 100 * DAY_MS);
+    let applied = report(store.compact(30, true).unwrap());
+    assert!(applied.applied && applied.events > 0, "{applied:?}");
+    assert_eq!(store.state().workspace_revisions, revisions);
+    drop(store);
+    let store = wall.open(&path);
+    assert_eq!(
+        store.state().workspace_revisions,
+        revisions,
+        "a start from the snapshot lost the registration revision"
+    );
+}

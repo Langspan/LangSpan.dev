@@ -17,9 +17,36 @@ needs to know what each file defines and what each file mentions.
 Tree-sitter and returns the symbols it defines (name, kind, line range,
 signature text up to the body, whether exported by the language's own rule),
 the names it mentions and what it imports. Rust, Python, TypeScript/JavaScript
-(including TSX/JSX) and Go, chosen by file extension. It does no I/O. Inputs
+(including TSX/JSX), Go and Java, chosen by file extension. It does no I/O. Inputs
 over 1 MiB are refused; a file with a syntax error is indexed as far as it
 parsed and marked partial.
+
+**Java** (`.java`, added 25 November 2026 for roadmap D6,
+[issue #55](https://github.com/Langspan/LangSpan.dev/issues/55)). Classes,
+records and enums are types; interfaces and annotation types are interfaces;
+methods, constructors and annotation elements are methods, since Java has no
+free functions; enum
+constants and `static final` fields (every interface field) are constants, one
+per declarator; a `module-info.java` module is a module. Packages are not
+symbols. The export rule is what another package can reach: `public` or
+`protected`; an interface's or annotation type's members unless `private`;
+every enum constant and module. Package-private and `private` are not
+exported, nor is a method of an anonymous class or of an enum constant's body.
+Each declaration is judged alone, so a `public` method of a package-private
+class is exported, as a `pub fn` in a private Rust module is. A definition
+starts after the annotations and comments that lead its modifiers, and its
+signature leaves those annotations out: adding `@Override` or `@Deprecated`
+changes no caller. A constant's signature is its modifiers, type, name and
+any array dimensions after the name (`int IDS[][]`). An annotation element's
+signature ends before its `default` value. An
+import is recorded as written after `import` or `import static`, with any
+`.*`. References are identifiers and type names. Calls are method calls,
+member calls (`a.f(x)`, `this.f()`, `super.f()`) and constructor calls
+(`new T(x)`, named by the type's last identifier); `this(x)` and `super(x)`
+are not. Tests: the Java tests in `crates/langspan-graph/tests/extract.rs`
+and `calls.rs`, and
+`a_java_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_session`
+in `tests/graph.rs`.
 
 **Everything is a name match.** Nothing resolves scopes, types, modules or
 imports. A mention of `open` matches every symbol called `open`. Every
@@ -52,6 +79,7 @@ every answer:
 | `graph references WORKSPACE NAME` | `langspan_references` | Mentions of that name |
 | `graph impact WORKSPACE PATH [--depth N]` | `langspan_impact` (`depth`) | What the file exports, and other files mentioning those names; with a depth of 2 or 3, those files level by level (below) |
 | `graph blind-spots WORKSPACE` | `langspan_blind_spots` | The files the index cannot answer for, by reason (below) |
+| `graph history WORKSPACE NAME` | `langspan_history` | The recorded interface changes of that name, from the event log (below) |
 
 **Symbol lookup with detail (added 25 November 2026, roadmap D1).** The
 indexer also stores, per definition, `body_digest`: the SHA-256 of the
@@ -134,8 +162,9 @@ daemon is refused as an unknown field, like `detail`; restart the daemon
 after upgrading. Test: `blind_spots_name_the_files_the_index_cannot_answer_for`
 (`tests/graph.rs`) reads every such answer with a strict copy of the earlier
 coverage, over the daemon's socket; it failed before the change. Paths only; nothing
-guesses what a blind file contains. With no complete scan the answer has
-`scanned: false`, and the last scan failure, if one is recorded, is in
+guesses what a blind file contains. With no complete scan of the workspace's
+current registration ([ADR 0025](0025-distribution-lifecycle-and-store-beyond-the-first-release.md))
+the answer has `scanned: false`, and the last scan failure, if one is recorded, is in
 `scan_failure`. Lists past one 64 KiB frame are cut to the longest common
 prefix that fits, with `truncated`.
 
@@ -211,9 +240,11 @@ punctuation and drops a trailing comma before a closing bracket or at the end,
 so a rustfmt, black, prettier or gofmt rewrap of a parameter list, a magic
 trailing comma, a rewrapped `where` clause or spacing inside braces is not a
 changed signature, while whitespace between two words, and any change to a
-name, type or default, still is. The same rule holds for all four languages,
-since in each a trailing comma in those lists is optional and spacing around
-punctuation means nothing. One trailing comma is kept: the only comma of a
+name, type or default, still is. The same rule holds for every indexed
+language, since in each a trailing comma in those lists is optional or, in
+Java's parameter lists, not allowed, and spacing around punctuation means
+nothing. A google-java-format rewrap of a parameter list is therefore not a
+changed signature, and a changed parameter type is. One trailing comma is kept: the only comma of a
 parenthesised group that is not a parameter or argument list (a parenthesis
 not right after a name or a closing `>`), because it makes a one-element
 tuple: Python's `(1,)` and `(1)`, or Rust's `(u32,)` and `(u32)`, differ.
@@ -242,6 +273,79 @@ Tests: `a_second_same_named_definition_is_an_addition_and_losing_one_is_a_remova
 in `crates/langspan-graph/tests/extract.rs`,
 `a_second_same_named_definition_is_told_as_added_and_losing_it_as_removed`
 in `tests/graph.rs`, and `crates/langspan-core/tests/interface_counts.rs`.
+
+**A definition's history (added 25 November 2026, roadmap D4).** The index
+keeps only a file's current version and baseline, but every notice is an
+`interface_changed` event in the append-only log. `graph history WORKSPACE
+NAME [--path PATH] [--limit N] [--before SEQ]` (MCP `langspan_history`, op
+`history`) reads them back for one name, newest first, at most 50 entries
+(default 10). It is answered by the daemon's store from the log, not by the
+index, and decided by the core (`crates/langspan-core/src/history.rs`): it
+records nothing and delivers nothing. Each entry is one change of that name
+in one notice: `seq`, `age_ms`, `change`, `kind`, `path`, `before`, `after`,
+`by_session`, `task`, `notes`, `messages` and `reverted`.
+
+- `by_session` is what the notice already holds: the last session that
+  reported editing the file before the change was indexed. Every answer's
+  `attribution` says it is a correlation, not proof of authorship.
+- `task` is that session's newest `session_prompted` summary before the
+  change. A session with prompt summaries off records none, so none is shown.
+- `notes` and `messages`, up to 4 each, are `remembered` and `message_sent`
+  events of the workspace whose paths include the file or whose text names
+  it, placed within 30 minutes either side of the change. Placing them needs
+  a time, which those events did not carry: they now record `at` (the
+  daemon's clock and generation) as an optional field, so earlier records
+  still replay and are simply never placed. Two times of one generation are
+  compared on its clock; of two generations, in wall time through each
+  generation's `clock_anchored` event, as `today` does. A note with a later
+  `forgotten` event is not shown.
+- `reverted` is true when `after` equals the `before` or `after` of an
+  earlier recorded change of the same name and kind in the same file: the
+  change put back a signature the definition had. Only the events one answer
+  reads are compared.
+
+Two notice changes serve it. A new exported name is now recorded as `added`,
+with its signature in `after` and no parameter counts; it is never news to a
+dependent, so replay does not hold it in the briefing state (briefings,
+recap, break alerts and the dashboard are unchanged), and a notice of
+additions alone does not replace the file's held notice. A removal now
+carries the removed signatures in `before`, so a definition removed and then
+added back is marked reverted; parameter counts stay on signature changes
+only (ADR 0029). The signatures that come or go are joined as a notice shows
+several, as many as fit its 256 bytes, so they never make the core refuse
+the notice and the changes in it. As with `definition_added`, a store
+holding an `added` change, or a note or message with `at`, does not open in
+an earlier build ([ADR 0015](0015-version-tolerance.md)); the protocol stays
+at version 3.
+
+The store reads the newest 20,000 events of the five kinds a history uses
+before `before_seq` through a partial index, `events_history` (created when
+a store opens, like the generation-marker index), the notes, forgettings and
+messages after that point when paging, and every clock anchor. Whether a note
+it read was forgotten is looked up by the note's ID through a second partial
+index, `events_forgotten`, never within those capped reads, so a forgotten
+note's text does not come back however many events follow it. Likewise
+whether a message it read was withdrawn is looked up by the message's ID
+through `events_retracted`, and a withdrawn message is left out. An answer is
+cut, a whole event's entries at a time and oldest first, with `truncated`
+and a `next_seq` to pass as `before_seq`: past the limit, past 28 KiB (the
+MCP result carries it twice, and the adapter trims again against one frame,
+as recall does), or when the log holds older events than those read. Events
+have no retention policy; when one is set, history follows it. Body-only
+changes, changes before LangSpan watched the repository and commit messages
+are out of scope, and Git is not read. Tests: the history tests at the end
+of `crates/langspan-core/tests/recap.rs` over constructed logs, and
+`a_definitions_history_shows_who_changed_it_why_and_that_it_was_reverted` and
+`history_requests_match_the_committed_golden_vector`
+(`fixtures/history-request-v3.json`) in `tests/graph.rs`, with a real daemon,
+index and repository changed across several scans, the CLI and the MCP tool;
+`history_reads_only_the_events_it_uses` in `src/store.rs` checks that the
+query plans use the partial indexes, and
+`paging_into_old_history_never_shows_a_forgotten_note` there pages into a
+change whose note is forgotten after 20,000 following messages, and
+`history_never_shows_a_withdrawn_message` does the same for a message
+withdrawn straight after the change and after 20,000 following messages. Not yet called
+on a native host.
 
 **Code briefing at a prompt (added later).** At `UserPromptSubmit`, for both
 hosts, the hook process takes candidate names from the prompt: ASCII words of

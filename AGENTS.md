@@ -36,6 +36,7 @@ The broader product proof is two developers' existing agents coordinating across
 
 - [docs/mission.md](docs/mission.md): mission, problem, hypothesis, intended workflow and team-level success criteria.
 - [README.md](README.md): product overview and repository entry point.
+- [docs/positioning.md](docs/positioning.md): canonical public messaging and claim boundaries.
 - [docs/usage.md](docs/usage.md): setup, native hooks, CLI, MCP and configuration.
 - [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md): what is built, retained evidence and pending acceptance.
 - [docs/roadmap.md](docs/roadmap.md): the launch bar and an index of the [roadmap issues](https://github.com/Langspan/LangSpan.dev/issues?q=label%3Aroadmap), which hold each item's specification.

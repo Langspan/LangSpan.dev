@@ -32,6 +32,8 @@ struct SnapshotRecord {
     clock_anchor: Option<ClockAnchor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     refusals: Vec<RecentRefusal>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workspace_revisions: BTreeMap<String, u32>,
 }
 
 impl SnapshotRecord {
@@ -40,12 +42,14 @@ impl SnapshotRecord {
             state: state.clone(),
             clock_anchor: state.clock_anchor,
             refusals: state.refusals.clone(),
+            workspace_revisions: state.workspace_revisions.clone(),
         }
     }
     fn into_state(self) -> State {
         let mut state = self.state;
         state.clock_anchor = self.clock_anchor;
         state.refusals = self.refusals;
+        state.workspace_revisions = self.workspace_revisions;
         state
     }
 }
@@ -148,7 +152,7 @@ fn opening(event: &Event) -> Option<(&'static str, String)> {
         Event::LeaseGranted { lease } => Some(("lease", lease.lease_id.clone())),
         Event::TurnTaken { turn } => Some(("turn", turn.turn_id.clone())),
         Event::TurnQueueJoined { waiter } => Some(("waiter", waiter.ticket.clone())),
-        Event::MessageSent { message } => Some(("message", message.message_id.clone())),
+        Event::MessageSent { message, .. } => Some(("message", message.message_id.clone())),
         _ => None,
     }
 }

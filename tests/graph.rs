@@ -19,6 +19,8 @@ const WAIT: Duration = Duration::from_secs(60);
 struct World {
     base: PathBuf,
     daemon: Option<Child>,
+    /// Added to the daemon's environment.
+    daemon_env: Vec<(&'static str, String)>,
 }
 
 fn git(root: &Path, args: &[&str]) {
@@ -38,6 +40,27 @@ fn git(root: &Path, args: &[&str]) {
 
 impl World {
     fn new() -> Self {
+        Self::with_daemon_env(Vec::new())
+    }
+    fn with_daemon_env(daemon_env: Vec<(&'static str, String)>) -> Self {
+        Self::with_files(
+            daemon_env,
+            &[
+                (
+                    "src/upload.rs",
+                    "pub fn upload(path: &str) -> bool {\n    !path.is_empty()\n}\n\npub fn gate(user: &str) -> bool {\n    user == \"admin\"\n}\n",
+                ),
+                (
+                    "src/main.rs",
+                    "mod upload;\nfn main() {\n    if upload::gate(\"admin\") {\n        upload::upload(\"a.txt\");\n    }\n}\n",
+                ),
+                ("src/other.py", "def unrelated():\n    return 1\n"),
+                ("README.md", "upload gate\n"),
+            ],
+        )
+    }
+    /// A repository holding `files`, committed, registered as `app`.
+    fn with_files(daemon_env: Vec<(&'static str, String)>, files: &[(&str, &str)]) -> Self {
         let base = fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
@@ -46,30 +69,22 @@ impl World {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
         let work = base.join("work");
-        fs::create_dir_all(work.join("src")).unwrap();
-        fs::write(
-            work.join("src/upload.rs"),
-            "pub fn upload(path: &str) -> bool {\n    !path.is_empty()\n}\n\npub fn gate(user: &str) -> bool {\n    user == \"admin\"\n}\n",
-        )
-        .unwrap();
-        fs::write(
-            work.join("src/main.rs"),
-            "mod upload;\nfn main() {\n    if upload::gate(\"admin\") {\n        upload::upload(\"a.txt\");\n    }\n}\n",
-        )
-        .unwrap();
-        fs::write(
-            work.join("src/other.py"),
-            "def unrelated():\n    return 1\n",
-        )
-        .unwrap();
-        fs::write(work.join("README.md"), "upload gate\n").unwrap();
+        for (path, content) in files {
+            let path = work.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
         git(&work, &["init", "--quiet", "--initial-branch=main"]);
         git(&work, &["add", "."]);
         git(&work, &["commit", "--quiet", "-m", "init"]);
         let state = base.join("state");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-        let mut world = Self { base, daemon: None };
+        let mut world = Self {
+            base,
+            daemon: None,
+            daemon_env,
+        };
         world.start_daemon();
         let root = world.work();
         assert_eq!(
@@ -92,6 +107,7 @@ impl World {
             Process::new(env!("CARGO_BIN_EXE_langspan"))
                 .args(["daemon", "--state-dir"])
                 .arg(self.base.join("state"))
+                .envs(self.daemon_env.iter().map(|(key, value)| (key, value)))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -176,12 +192,17 @@ impl World {
     /// message: its detail (which ends with the hook's own elapsed ms) and
     /// the process's wall time.
     fn hook(&self, event: Value) -> (String, Option<String>, String) {
+        self.hook_with(event, &[])
+    }
+    /// The same, with more hook options (`--prompt-summary off`).
+    fn hook_with(&self, event: Value, options: &[&str]) -> (String, Option<String>, String) {
         let started = Instant::now();
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.base.join("state"))
             .args(["--workspace", "app", "--root"])
             .arg(self.work())
+            .args(options)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -670,6 +691,395 @@ fn a_changed_exported_signature_is_reported_to_the_session_whose_files_mention_i
     assert!(w.prompt("alice").is_none());
 }
 
+/// Roadmap D6, Java: a Maven-layout repository is indexed, looked up and
+/// counted, and the issue's example notice reaches the session whose file
+/// calls the changed method.
+#[test]
+fn a_java_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_session() {
+    let orders = "package shop;\n\npublic class Orders {\n    @Override\n    public Order place(Cart cart) {\n        return new Order(cart);\n    }\n\n    private void audit() {}\n}\n";
+    let checkout = "package shop;\n\nimport shop.Orders;\n\npublic class Checkout {\n    public Order submit(Orders orders, Cart cart) {\n        return orders.place(cart);\n    }\n}\n";
+    let w = World::with_files(
+        Vec::new(),
+        &[
+            ("src/main/java/shop/Orders.java", orders),
+            ("src/main/java/shop/Checkout.java", checkout),
+            (
+                "src/main/java/shop/Report.java",
+                "package shop;\n\nclass Report {\n    int total() { return 0; }\n}\n",
+            ),
+            ("pom.xml", "<project/>\n"),
+        ],
+    );
+    let found = w.wait_for("the definition of place", "symbol", "place", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    assert_eq!(found["coverage"]["indexable_files"], 3, "{found:#}");
+    let symbol = &found["symbols"][0];
+    assert_eq!(symbol["path"], "src/main/java/shop/Orders.java");
+    assert_eq!(
+        (symbol["line"].as_u64(), symbol["kind"].as_str()),
+        (Some(5), Some("method"))
+    );
+    assert_eq!(symbol["signature"], "public Order place(Cart cart)");
+    assert_eq!(symbol["exported"], true);
+    assert_eq!(
+        paths(&w.graph("references", "place")["references"]),
+        ["src/main/java/shop/Checkout.java:7"]
+    );
+    let impact = w.graph("impact", "src/main/java/shop/Orders.java");
+    assert!(
+        paths(&impact["references"])
+            .iter()
+            .any(|path| path.starts_with("src/main/java/shop/Checkout.java")),
+        "{impact:#}"
+    );
+    // Java is indexed, so it is not reported as another language.
+    let (_, text) = w.cli(&["graph", "blind-spots", "app", "--json"]);
+    let spots: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        spots["outcome"]["blind_spots"]["unsupported_languages"],
+        json!([]),
+        "{spots:#}"
+    );
+
+    // Bob works on Checkout.java; Alice changes Orders.place.
+    w.edits(
+        "bob",
+        "b1",
+        "src/main/java/shop/Checkout.java",
+        &format!("{checkout}// touched\n"),
+    );
+    w.wait_for("bob's edit indexed", "references", "place", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    // A private method's change is not an interface change.
+    w.edits(
+        "alice",
+        "a1",
+        "src/main/java/shop/Orders.java",
+        &orders.replace("audit()", "audit(int level)"),
+    );
+    w.wait_for("the private change indexed", "symbol", "audit", |outcome| {
+        outcome["symbols"][0]["signature"] == "private void audit(int level)"
+    });
+    assert!(
+        w.prompt("bob")
+            .is_none_or(|context| !context.contains("Interface change")),
+        "a private method is no one's interface"
+    );
+    w.edits(
+        "alice",
+        "a2",
+        "src/main/java/shop/Orders.java",
+        &orders
+            .replace("audit()", "audit(int level)")
+            .replace("place(Cart cart)", "place(Cart cart, Coupon coupon)"),
+    );
+    let deadline = Instant::now() + WAIT;
+    let context = loop {
+        if let Some(context) = w
+            .prompt("bob")
+            .filter(|context| context.contains("Interface change"))
+        {
+            break context;
+        }
+        assert!(Instant::now() < deadline, "bob was never told");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        context.contains(r#"Interface change in "src/main/java/shop/Orders.java""#),
+        "{context}"
+    );
+    assert!(context.contains("claude-code.alice"), "{context}");
+    assert!(
+        context.contains(r#"method "place" changed from "public Order place(Cart cart)" to "public Order place(Cart cart, Coupon coupon)""#),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#""src/main/java/shop/Checkout.java""#),
+        "{context}"
+    );
+    assert!(!context.contains("Report.java"), "{context}");
+}
+
+/// A workspace removed, changed while unregistered, and registered again
+/// under the same ID and root is a new start: its next scan is a baseline,
+/// not a comparison with what was indexed before the removal.
+#[test]
+fn a_workspace_registered_again_after_removal_is_not_compared_with_its_earlier_index() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let (code, text) = w.cli(&[
+        "workspace",
+        "remove",
+        "app",
+        "--apply",
+        "--request-id",
+        "r1",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    fs::write(
+        w.work().join("src/upload.rs"),
+        "pub fn upload(path: &str, retries: u32) -> bool {\n    retries > 0 && path.len() > 0\n}\n",
+    )
+    .unwrap();
+    let root = w.work();
+    let (code, text) = w.cli(&[
+        "workspace",
+        "add",
+        "app",
+        root.to_str().unwrap(),
+        "--request-id",
+        "ws-again",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    w.wait_for("the new signature indexed", "symbol", "upload", |outcome| {
+        outcome["symbols"].as_array().is_some_and(|symbols| {
+            symbols
+                .iter()
+                .any(|symbol| symbol["signature"].as_str().unwrap().contains("retries"))
+        })
+    });
+    // A later pass indexed: the earlier one has delivered any notices.
+    // Only an addition, which is never a notice.
+    fs::write(
+        w.work().join("src/other.py"),
+        "def unrelated():\n    return 1\n\ndef later():\n    return 1\n",
+    )
+    .unwrap();
+    w.wait_for("a later pass", "symbol", "later", |outcome| {
+        outcome["symbols"]
+            .as_array()
+            .is_some_and(|symbols| !symbols.is_empty())
+    });
+    let (_, status) = w.cli(&["status", "--json"]);
+    let status: Value = serde_json::from_str(&status).unwrap();
+    let notices = &status["outcome"]["state"]["interface_notices"];
+    assert!(notices.get("app").is_none(), "{notices:#}");
+}
+
+/// How long the daemon holds the indexer's notices after a pass, for the
+/// tests below: far longer than the switch or removal they make meanwhile.
+const REPORT_DELAY_MS: u64 = 3000;
+
+/// A world whose indexer reports `REPORT_DELAY_MS` after each pass.
+fn slow_reporting_world() -> World {
+    let w = World::with_daemon_env(vec![(
+        "LANGSPAN_TEST_INDEX_REPORT_DELAY_MS",
+        REPORT_DELAY_MS.to_string(),
+    )]);
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    w
+}
+
+/// Change `upload`'s signature to take `parameter`, and wait until the
+/// index holds it: its notice is then on its way to the state owner.
+fn change_upload(w: &World, parameter: &str) {
+    fs::write(
+        w.work().join("src/upload.rs"),
+        format!("pub fn upload(path: &str, {parameter}) -> bool {{\n    !path.is_empty()\n}}\n"),
+    )
+    .unwrap();
+    w.wait_for("the new signature indexed", "symbol", "upload", |outcome| {
+        outcome["symbols"].as_array().is_some_and(|symbols| {
+            symbols
+                .iter()
+                .any(|symbol| symbol["signature"].as_str().unwrap().contains(parameter))
+        })
+    });
+}
+
+/// The `upload` signatures the workspace's interface notices hold.
+fn noticed(w: &World) -> String {
+    let (_, status) = w.cli(&["status", "--json"]);
+    let status: Value = serde_json::from_str(&status).unwrap();
+    status["outcome"]["state"]["interface_notices"]
+        .get("app")
+        .map(Value::to_string)
+        .unwrap_or_default()
+}
+
+/// The control for the two tests below: with nothing changed meanwhile, a
+/// delayed notice is recorded.
+fn a_delayed_notice_is_recorded(w: &World) {
+    change_upload(w, "first: u8");
+    let deadline = Instant::now() + WAIT;
+    while !noticed(w).contains("first: u8") {
+        assert!(Instant::now() < deadline, "the notice never arrived");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// An index pass of the old checkout that reports after `workspace move
+/// --switch` has bound the ID to another checkout: its notice is about a
+/// checkout the workspace no longer is, and the state owner refuses it.
+#[test]
+fn an_index_pass_reporting_after_a_switch_records_no_notice() {
+    let w = slow_reporting_world();
+    a_delayed_notice_is_recorded(&w);
+    change_upload(&w, "stale: u16");
+    let clone = w.base.join("clone");
+    git(
+        &w.base,
+        &[
+            "clone",
+            "--quiet",
+            w.work().to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    let (code, text) = w.cli(&[
+        "workspace",
+        "move",
+        "app",
+        clone.to_str().unwrap(),
+        "--switch",
+        "--request-id",
+        "switch-1",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    std::thread::sleep(Duration::from_millis(REPORT_DELAY_MS + 1500));
+    let notices = noticed(&w);
+    assert!(!notices.contains("stale: u16"), "{notices}");
+}
+
+/// The same for a workspace removed and registered again at the same root:
+/// the pass was of its earlier lifetime.
+#[test]
+fn an_index_pass_reporting_after_removal_and_registration_again_records_no_notice() {
+    let w = slow_reporting_world();
+    a_delayed_notice_is_recorded(&w);
+    change_upload(&w, "stale: u16");
+    let (code, text) = w.cli(&[
+        "workspace",
+        "remove",
+        "app",
+        "--apply",
+        "--request-id",
+        "r1",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let root = w.work();
+    let (code, text) = w.cli(&[
+        "workspace",
+        "add",
+        "app",
+        root.to_str().unwrap(),
+        "--request-id",
+        "ws-again",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    std::thread::sleep(Duration::from_millis(REPORT_DELAY_MS + 1500));
+    let notices = noticed(&w);
+    assert!(!notices.contains("stale: u16"), "{notices}");
+}
+
+/// The original `src/upload.rs` of `World::new`.
+const ORIGINAL_UPLOAD: &str = "pub fn upload(path: &str) -> bool {\n    !path.is_empty()\n}\n\npub fn gate(user: &str) -> bool {\n    user == \"admin\"\n}\n";
+
+/// The same interface change in two lifetimes of a workspace: a change
+/// from version A to version B, then removal, A restored, registration
+/// again at the same root, and A to B once more. The second notice is news
+/// for the new registration and is recorded, not taken for a retry of the
+/// first one.
+#[test]
+fn the_same_change_in_a_later_registration_is_noticed_again() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    a_delayed_notice_is_recorded(&w);
+    let (code, text) = w.cli(&[
+        "workspace",
+        "remove",
+        "app",
+        "--apply",
+        "--request-id",
+        "r1",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(noticed(&w), "", "removal forgets the notice");
+    fs::write(w.work().join("src/upload.rs"), ORIGINAL_UPLOAD).unwrap();
+    let root = w.work();
+    let (code, text) = w.cli(&[
+        "workspace",
+        "add",
+        "app",
+        root.to_str().unwrap(),
+        "--request-id",
+        "ws-again",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    w.wait_for("version A indexed again", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+            && outcome["symbols"].as_array().is_some_and(|symbols| {
+                symbols.iter().any(|symbol| {
+                    symbol["signature"].as_str().unwrap() == "pub fn upload(path: &str) -> bool"
+                })
+            })
+    });
+    a_delayed_notice_is_recorded(&w);
+}
+
+/// After removal, an ID registered again at a root the observer cannot
+/// scan (not a Git checkout) is never indexed. Index answers for it hold
+/// nothing from the earlier registration and say it is not scanned.
+#[test]
+fn an_unscanned_registration_again_is_not_answered_from_the_earlier_index() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let (code, text) = w.cli(&[
+        "workspace",
+        "remove",
+        "app",
+        "--apply",
+        "--request-id",
+        "r1",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let plain = w.base.join("plain");
+    fs::create_dir_all(plain.join("src")).unwrap();
+    fs::write(plain.join("src/upload.rs"), ORIGINAL_UPLOAD).unwrap();
+    let (code, text) = w.cli(&[
+        "workspace",
+        "add",
+        "app",
+        plain.to_str().unwrap(),
+        "--request-id",
+        "ws-plain",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    for args in [
+        &["graph", "symbol", "app", "upload", "--json"][..],
+        &["graph", "references", "app", "upload", "--json"][..],
+        &["graph", "blind-spots", "app", "--json"][..],
+    ] {
+        let (code, text) = w.cli(args);
+        assert_eq!(code, 0, "{args:?}: {text}");
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        assert_eq!(
+            outcome["coverage"]["scanned"], false,
+            "{args:?}: {outcome:#}"
+        );
+        assert_eq!(
+            outcome["coverage"]["indexable_files"], 0,
+            "{args:?}: {outcome:#}"
+        );
+        for list in ["symbols", "references"] {
+            assert!(
+                outcome[list].as_array().is_none_or(Vec::is_empty),
+                "{args:?}: {outcome:#}"
+            );
+        }
+    }
+}
+
 /// Wait until `session`'s next prompt carries an interface notice holding
 /// `text`.
 fn told(w: &World, session: &str, text: &str) -> String {
@@ -742,6 +1152,233 @@ fn a_second_same_named_definition_is_told_as_added_and_losing_it_as_removed() {
         "alice",
         r#"method "text" changed from "pub fn text(&self) -> String" to "pub fn text(&self, limit: usize) -> String""#,
     );
+}
+
+/// `graph history app NAME --json`, waiting until it holds `count` entries.
+fn history(w: &World, name: &str, count: usize) -> Value {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, text) = w.cli(&["graph", "history", "app", name, "--json"]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome["history"]["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.len() >= count)
+        {
+            return outcome["history"].clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never saw {count} entries for {name}: {outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_definitions_history_shows_who_changed_it_why_and_that_it_was_reverted() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    let before = "pub fn upload(path: &str) -> bool";
+    let after = "pub fn upload(path: &str, retries: u32) -> bool";
+
+    // Alice, with prompt summaries on, adds a parameter.
+    w.hook(
+        json!({"session_id": "alice", "cwd": w.work(), "hook_event_name": "UserPromptSubmit",
+                  "prompt": "add retries to upload"}),
+    );
+    w.edits(
+        "alice",
+        "a1",
+        "src/upload.rs",
+        &original.replace(before, after),
+    );
+    history(&w, "upload", 1);
+    // Her reason, remembered just after the change.
+    let (code, _) = w.cli(&[
+        "remember",
+        "app",
+        "retries make the uploader deadlock under load",
+        "src/upload.rs",
+        "--request-id",
+        "note-1",
+    ]);
+    assert_eq!(code, 0);
+
+    // Bob, with prompt summaries off, puts the old signature back.
+    w.hook_with(
+        json!({"session_id": "bob", "cwd": w.work(), "hook_event_name": "UserPromptSubmit",
+               "prompt": "put upload back the way it was"}),
+        &["--prompt-summary", "off"],
+    );
+    // He reads Alice's lines first, as LangSpan asks before changing them.
+    let (coverage, _, detail) = w.hook(json!({
+        "session_id": "bob", "cwd": w.work(), "hook_event_name": "PostToolUse",
+        "tool_name": "Read", "tool_use_id": "b0",
+        "tool_input": {"file_path": w.work().join("src/upload.rs")},
+    }));
+    assert_eq!(coverage, "read_recorded", "Read b0: {detail}");
+    w.edits("bob", "b1", "src/upload.rs", &original);
+    let found = history(&w, "upload", 2);
+    let entries = found["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{found:#}");
+    let (newest, oldest) = (&entries[0], &entries[1]);
+    assert!(newest["seq"].as_u64() > oldest["seq"].as_u64());
+
+    assert_eq!(newest["change"], "signature_changed");
+    assert_eq!(newest["before"], after);
+    assert_eq!(newest["after"], before);
+    assert!(
+        newest["by_session"].as_str().unwrap().ends_with("bob"),
+        "{newest:#}"
+    );
+    assert_eq!(newest["reverted"], true);
+    assert_eq!(newest["task"], Value::Null, "Bob recorded no task line");
+
+    assert_eq!(oldest["before"], before);
+    assert_eq!(oldest["after"], after);
+    assert!(
+        oldest["by_session"].as_str().unwrap().ends_with("alice"),
+        "{oldest:#}"
+    );
+    assert_eq!(oldest["reverted"], false);
+    assert_eq!(oldest["task"], "add retries to upload");
+    assert_eq!(
+        oldest["notes"][0]["text"],
+        "retries make the uploader deadlock under load"
+    );
+    assert!(oldest["age_ms"].as_u64().is_some());
+    assert!(
+        found["attribution"]
+            .as_str()
+            .unwrap()
+            .contains("not proof of authorship")
+    );
+
+    // The person's view says the same, quoted, and names what a session is.
+    let (code, text) = w.cli(&["graph", "history", "app", "upload"]);
+    assert_eq!(code, 0, "{text}");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines[0].contains(&format!(
+            r#""src/upload.rs" function signature changed from {after:?} to {before:?} by session "#
+        )) && lines[0].contains("(reverted: back to an earlier signature)")
+            && !lines[0].contains("task:"),
+        "{text}"
+    );
+    // The note was made within 30 minutes of both changes, so both show it.
+    let note = r#"  note (note-1): "retries make the uploader deadlock under load""#;
+    assert_eq!(lines[1], note, "{text}");
+    assert!(
+        lines[2].contains(&format!(
+            r#""src/upload.rs" function signature changed from {before:?} to {after:?} by session "#
+        )) && lines[2].contains(r#"; task: "add retries to upload""#),
+        "{text}"
+    );
+    assert_eq!(lines[3], note, "{text}");
+    assert_eq!(
+        lines.last().copied(),
+        Some("Sessions are the last reported editors of the file, not proof of authorship.")
+    );
+    // A page of one says where to read on, and reading on gives the rest.
+    let (_, text) = w.cli(&[
+        "graph", "history", "app", "upload", "--limit", "1", "--json",
+    ]);
+    let page = serde_json::from_str::<Value>(&text).unwrap()["outcome"]["history"].clone();
+    assert_eq!(page["truncated"], true);
+    assert_eq!(page["next_seq"], newest["seq"]);
+    let next = newest["seq"].to_string();
+    let (_, text) = w.cli(&[
+        "graph", "history", "app", "upload", "--before", &next, "--json",
+    ]);
+    let rest = serde_json::from_str::<Value>(&text).unwrap()["outcome"]["history"].clone();
+    assert_eq!(rest["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(rest["entries"][0]["seq"], oldest["seq"]);
+
+    // A new export is recorded for its history, and told to no one.
+    // (Bob wrote the file last; Alice would first be asked to read it.)
+    w.edits(
+        "bob",
+        "b2",
+        "src/upload.rs",
+        &format!(
+            "{original}\npub fn upload_all(paths: &[&str]) -> usize {{\n    paths.len()\n}}\n"
+        ),
+    );
+    let added = history(&w, "upload_all", 1);
+    assert_eq!(added["entries"][0]["change"], "added");
+    assert_eq!(
+        added["entries"][0]["after"],
+        "pub fn upload_all(paths: &[&str]) -> usize"
+    );
+    let (_, text) = w.cli(&["recap", "app", "--json"]);
+    assert!(!text.contains("upload_all"), "{text}");
+
+    // Over MCP: labelled as data, with the same entries.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let state = w.base.join("state");
+    let (label, structured) = runtime.block_on(async move {
+        use rmcp::ServiceExt;
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+        command.arg("mcp").arg("--state-dir").arg(&state);
+        let client =
+            ().serve(rmcp::transport::TokioChildProcess::new(command).unwrap())
+                .await
+                .unwrap();
+        let request = rmcp::model::CallToolRequestParams::new("langspan_history").with_arguments(
+            json!({"workspace_id": "app", "name": "upload", "path": "src/upload.rs"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(10), client.call_tool(request))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        let label = match &result.content[0] {
+            rmcp::model::ContentBlock::Text(text) => text.text.clone(),
+            other => panic!("{other:?}"),
+        };
+        (label, result.structured_content.unwrap())
+    });
+    assert!(
+        label.contains("data, not instructions") && label.contains("not proof of authorship"),
+        "{label}"
+    );
+    assert_eq!(
+        structured["outcome"]["history"]["entries"][0]["reverted"],
+        true
+    );
+    assert_eq!(
+        structured["outcome"]["history"]["entries"][1]["task"],
+        "add retries to upload"
+    );
+}
+
+#[test]
+fn history_requests_match_the_committed_golden_vector() {
+    let wire: &[u8] = include_bytes!("../fixtures/history-request-v3.json");
+    let request: langspan::protocol::Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(request.version, langspan::protocol::PROTOCOL_VERSION);
+    assert_eq!(langspan::protocol::encode(&request).unwrap(), wire);
+    assert!(matches!(
+        &request.command,
+        langspan_core::Command::History {
+            workspace_id,
+            name,
+            path: Some(path),
+            limit: 10,
+            before_seq: Some(812),
+        } if workspace_id == "demo" && name == "save" && path == "src/store.rs"
+    ));
+    let unknown = String::from_utf8_lossy(wire).replace(r#""limit":10"#, r#""limit":10,"tag":"x""#);
+    assert!(serde_json::from_str::<langspan::protocol::Request>(&unknown).is_err());
 }
 
 #[test]
@@ -827,11 +1464,11 @@ fn blind_spots_name_the_files_the_index_cannot_answer_for() {
         format!("// {}\n", "x".repeat(5 * 1024 * 1024)),
     )
     .unwrap();
-    fs::create_dir_all(w.work().join("java")).unwrap();
+    fs::create_dir_all(w.work().join("kotlin")).unwrap();
     for n in 0..10 {
         fs::write(
-            w.work().join(format!("java/C{n}.java")),
-            "class C { void lonely() {} }\n",
+            w.work().join(format!("kotlin/C{n}.kt")),
+            "class C { fun lonely() {} }\n",
         )
         .unwrap();
     }
@@ -859,7 +1496,7 @@ fn blind_spots_name_the_files_the_index_cannot_answer_for() {
     assert_eq!(lists["waiting"], json!([]), "too large is not waiting");
     assert_eq!(
         lists["unsupported_languages"],
-        json!([{"extension": ".java", "files": 10}])
+        json!([{"extension": ".kt", "files": 10}])
     );
     assert_eq!(spots["coverage"]["blind_in_scope"], 3);
     assert_eq!(spots["truncated"], false);
@@ -885,7 +1522,7 @@ fn blind_spots_name_the_files_the_index_cannot_answer_for() {
         "{human}"
     );
     assert!(
-        human.contains("not indexed, other languages: .java 10"),
+        human.contains("not indexed, other languages: .kt 10"),
         "{human}"
     );
     for args in [

@@ -81,10 +81,12 @@ With the default host configuration locations, installation updates:
 | Codex | `~/.codex/hooks.json` | A marked `[mcp_servers.langspan]` table in `~/.codex/config.toml` |
 | Cursor (built from documentation, not yet verified on a real Cursor) | `~/.cursor/hooks.json` | `mcpServers.langspan` in `~/.cursor/mcp.json` |
 | Gemini CLI (built from documentation, not yet verified on a real Gemini CLI) | `~/.gemini/settings.json` | `mcpServers.langspan` in the same file |
+| Antigravity (built from documentation, not yet verified on a real Antigravity) | `~/.gemini/config/hooks.json` | `mcpServers.langspan` in `~/.gemini/config/mcp_config.json` |
 
 By default, the installer selects hosts whose configuration directory exists.
-Gemini CLI is installed only when named: `--hosts gemini-cli` (or
-`--hosts claude-code,codex,cursor,gemini-cli`);
+Gemini CLI and Antigravity, which share `~/.gemini`, are installed only when
+named: `--hosts gemini-cli`, `--hosts antigravity` (or
+`--hosts claude-code,codex,cursor,gemini-cli,antigravity`);
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME` are honored. Gemini CLI
 keeps hooks and MCP servers in one file, so LangSpan plans both together and
 writes that file once; its dry run shows only LangSpan's entries, because the
@@ -122,8 +124,9 @@ LangSpan hooks, so its edits are neither checked nor shown to other sessions.
 `name`, `config_dir`, `present` (its configuration directory exists; `null`
 with an `error` when it could not be looked at), `user_install` (`none`,
 `current`, `outdated`, `other_state_dir` or `unknown`) and `next_step`, the
-install command, where one is proposed. It only reads. Gemini CLI is listed but
-never proposed: install it by naming it, as above.
+install command, where one is proposed. It only reads. Gemini CLI and
+Antigravity are listed but never proposed: install them by naming them, as
+above.
 
 The coordinator checks the same at start and then every hour
 (`host_check_ms` in `config.json`). A host that is present, has no user-level
@@ -207,6 +210,7 @@ the project your agent is editing:
 ./target/release/langspan hooks install codex --workspace demo --root /path/to/checkout
 ./target/release/langspan hooks install cursor --workspace demo --root /path/to/checkout
 ./target/release/langspan hooks install gemini-cli --workspace demo --root /path/to/checkout
+./target/release/langspan hooks install antigravity --workspace demo --root /path/to/checkout
 ```
 
 These commands are dry runs. Once reviewed, add `--apply` to write the entries.
@@ -220,6 +224,45 @@ session-end handling. Claude Code and Codex get end-of-reply handling
 `PostToolBatch` ([ADR 0027](adr/0027-turn-and-batch-events.md)). Existing unrelated settings and hooks are preserved. The
 host's own folder and hook trust requirements still apply. For Codex, review the
 project hooks through its native hook-trust flow.
+
+#### Codex: start and resume at the resolved path
+
+Codex keys its hook trust to the exact path of the project's hooks file. A
+session whose hooks were trusted with Codex started at `/tmp/work` and that is
+later reopened with `codex exec resume` at `/private/tmp/work` (the same
+directory on macOS, by another path) counts them as untrusted there: Codex runs
+none of LangSpan's hooks, prints no warning, and the session edits
+uncoordinated. A symbolic link anywhere in the path does the same. To avoid it:
+
+- Start Codex, trust LangSpan's hooks, and resume Codex in the checkout's
+  resolved path, with no symbolic links. `langspan hooks install codex` prints
+  it:
+
+  ```text
+  Codex: start and resume Codex in '/private/tmp/work', the resolved root with no symbolic links. ...
+  ```
+
+- If a session must be resumed under another path, trust the hooks again there
+  with `/hooks` before it edits.
+
+LangSpan cannot see a hook that never runs, but it notices the result. When
+the coordinator's scan sees a file's content change in a checkout and no
+session of the checkout reported it, while a Codex session is registered there, it records an
+`uncoordinated_changed` event naming up to two of the checkout's Codex
+sessions, most recently active first, as the likely cause (not a proven
+author: a hand edit looks the same). Files held by an admitted edit, versions a
+session read or wrote, and files a checkout change (a branch switch, reset or
+stash) accounts for are left out. The next briefing to each session of that
+checkout carries one line, once per session:
+
+```text
+LangSpan: edits not coordinated. Files in this checkout changed 12s ago and no session reported the edit. codex session 0198c0de may be running without LangSpan's hooks: ... Read these files again before changing them: "src/a.rs"
+```
+
+A Codex session named is not named again while that notice is held (the
+briefing horizon), and a file a session reports at that version afterwards
+drops out of the line. Without a registered Codex session nothing is recorded.
+`langspan status --json` shows the held notices under `uncoordinated`.
 
 Cursor: built from documentation, not yet verified on a real Cursor. Its
 installer writes `.cursor/hooks.json` (`preToolUse`, `postToolUse` and
@@ -242,6 +285,7 @@ Remove the managed entries with the matching vendor:
 ./target/release/langspan hooks remove codex --root /path/to/checkout --apply
 ./target/release/langspan hooks remove cursor --root /path/to/checkout --apply
 ./target/release/langspan hooks remove gemini-cli --root /path/to/checkout --apply
+./target/release/langspan hooks remove antigravity --root /path/to/checkout --apply
 ```
 
 A hook returns a labelled denial for a fresh current conflict or a fresh
@@ -273,8 +317,8 @@ install for the same host and state directory. Claude Code runs both that
 install and the main checkout's there, so the main checkout's hook logs
 `deferred_to_worktree` and does nothing else. Codex 0.171.0 runs only the
 main checkout's hooks there, so that hook coordinates the session under the
-worktree install's workspace ID instead; Cursor and Gemini CLI, whose
-behavior there has not been observed, are treated the same way, so an event
+worktree install's workspace ID instead; Cursor, Gemini CLI and Antigravity,
+whose behavior there has not been observed, are treated the same way, so an event
 is never left undecided. `langspan doctor --root DIR` names each linked
 worktree whose install the host will not run, and fails when nothing covers
 it. The per-host rules are in
@@ -305,6 +349,50 @@ Gemini reads `.gemini/settings.json` only from the directory it was started
 in, so a project install covers sessions started at the checkout's root. [ADR 0033](adr/0033-gemini-cli-adapter.md) lists
 these limits.
 
+### Antigravity
+
+The Antigravity adapter is built from Antigravity's documentation and
+corrected against the events of a real Antigravity 1.5.14 run; a repeat run
+with these corrections is pending. `hooks install antigravity` writes
+`.agents/hooks.json` and registers `langspan mcp` in `.agents/mcp_config.json`;
+`install --hosts antigravity` writes `~/.gemini/config/hooks.json` and
+`~/.gemini/config/mcp_config.json`. An empty `mcp_config.json`, which
+Antigravity leaves at both levels, is taken as an empty configuration.
+Antigravity's App, CLI and IDE all read these files. Its `hooks.json` maps
+hook names to definitions, so LangSpan's entries are the definition named
+`langspan`, beside your own. Each installed command names its event with
+`--event`. Each has a 5-second timeout:
+
+| Event | Matcher | What LangSpan does |
+| --- | --- | --- |
+| `PreToolUse` | `edit_file`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` | Admission; a conflict or stale source is `{"decision":"deny"}` with a labelled reason, anything else `{"decision":"allow"}` |
+| `PostToolUse` | the same, and `read_file` and `view_file` | Records the result, the version read, or the shell command's changes |
+| `SessionStart` | none | Registers the session and adds the briefing as a system message in `injectSteps` |
+| `PreInvocation` | none | Before each model call: news from peers since the session was last told, as a system message; at the first call of an execution, the prompt summary and code briefing too |
+
+Antigravity 1.5.14 edits with `edit_file` and reads with `read_file`; the
+other tool names are the documented ones, kept in case another version uses
+them. If `doctor` reports that a matcher does not name the tools this version
+handles, an earlier install wrote it: run the install command again.
+
+On `PreToolUse`, Antigravity 1.5.14 reads `{}` as a refusal, so the hook
+answers `{"decision":"allow"}` whenever it does not deny, including when it
+cannot decide. `allow` passes the call on to the next hook or Antigravity's
+own permission policy; the hook never answers `auto_approve` or `ask`. Every
+other event's answer, other than a briefing, is `{}`. A conversation is one
+session in each workspace it works in, appearing as
+`antigravity.<conversationId>.w<digest of the workspace>`; with several
+workspace folders, each is registered and briefed at `SessionStart` and
+`PreInvocation`. A tool call is identified by its `stepIdx`. A user-level
+hook steps aside for the workspace's `.agents/hooks.json` only while that
+file's `langspan` definition is not `"enabled": false`.
+Antigravity has no session-end event, and its `Stop` requires a decision, so
+neither is registered. An `edit_file` or `replace_file_content` holds the
+region it replaces; `write_to_file` and `multi_replace_file_content` hold the
+whole file.
+[ADR 0035](adr/0035-antigravity-adapter.md) lists the sources and what the
+documentation leaves unverified.
+
 ### The LangSpan skill
 
 The LangSpan skill teaches an agent how to work with LangSpan from its first
@@ -319,6 +407,7 @@ use `status`, `commit --mine`, `integrate check` and `land` (or the matching
 ./target/release/langspan install --skill                 # dry run: shows each file and its size
 ./target/release/langspan install --skill --apply
 ./target/release/langspan hooks install cursor --workspace demo --root /path/to/checkout --skill --apply
+./target/release/langspan hooks install antigravity --workspace demo --root /path/to/checkout --skill --apply
 ```
 
 | Host | Written as | Removed by |
@@ -327,6 +416,10 @@ use `status`, `commit --mine`, `integrate check` and `land` (or the matching
 | Codex | A marked section of `~/.codex/AGENTS.md` | `langspan uninstall --apply` |
 | Gemini CLI | A marked section of `~/.gemini/GEMINI.md` | `langspan uninstall --apply --hosts gemini-cli` |
 | Cursor | The project rule `.cursor/rules/langspan.mdc` | `langspan hooks remove cursor --root DIR --apply` |
+| Antigravity | The rule `~/.gemini/config/rules/langspan.md` (`--hosts antigravity`), or the project rule `.agents/rules/langspan.md` (`hooks install antigravity --skill`), with `trigger: always_on` | `langspan uninstall --apply --hosts antigravity`, or `langspan hooks remove antigravity --root DIR --apply` |
+
+Antigravity also reads `~/.gemini/GEMINI.md`, so with the Gemini CLI skill
+installed as well it reads the skill twice.
 
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME` move these files as
 they move the hooks. In `AGENTS.md` and `GEMINI.md`, every line outside
@@ -483,6 +576,45 @@ never counts as an admission and is never published through the remote setup.
 Nothing is recorded with `--prompt-summary off` or `--code-briefing off`, or
 while the source index has no complete scan. `langspan status --json` shows
 each session's `prompt_targets` under its activity.
+
+A session that has read and searched but not written yet is still shown: its
+peer line ends with where it is looking, for example
+`task: "Rework token refresh"; looking at "src/auth.rs", "src/session.rs";`.
+This presence comes from Claude Code `Read` and `Grep`, Cursor `Read` and
+`Grep`, Gemini CLI `read_file`, and on every host the files a shell command
+reads: each operand of `cat`, `head`, `tail`, `less`, `more`, `wc`, `nl`,
+`ls`, `stat`, `file`, `diff`, `tree` or `du`, and the operands after the
+pattern of a `grep`, `egrep`, `fgrep` or `rg` whose options are all flags
+that program takes without a value (any other option, such as `rg -E` or
+`grep -e`, records nothing for that command). After `cd`, `pushd`, `popd`,
+`source`, `.` or `eval`, only absolute paths are taken. Only paths that exist inside the checkout are kept, at most 4
+per command. A search records only the path it was scoped to (its `path`
+input, else its working directory, never the whole checkout); its pattern,
+glob and type, and a shell command's text, are never recorded. Codex reports
+no reads, so a Codex session is shown only through its shell commands.
+
+At most 4 paths are shown per peer, newest first, within the 700-byte peer line
+and the 2,400-byte briefing, and only paths looked at in the last 10 minutes
+that the peer is not editing and has not edited. A peer known only by where it
+looked is listed after every peer with work. When the briefing is full, the
+clause is the first thing left out: every peer's line, local and remote, is
+placed without it, and it is added only where room is left. A peer seen
+reading a path it had not been shown reading is news at a session start or
+prompt, never mid-turn after a tool call; paths ageing out, or read again,
+are not news. Presence never
+holds, refuses or delays a read, search or shell call, and it is not published
+through the remote setup. The briefing JSON (`langspan brief --json`,
+`langspan_brief`) gives each peer a `looking` list of
+`{"path": "src/auth.rs", "kind": "read"|"search"|"shell", "age_s": 42}`, and
+`langspan status --json` (`langspan_status`) each session's `looking` with the
+times it was recorded.
+
+To keep a session's reads, searches and shell paths from peers, install with
+`--presence off` (for `install` and `hooks install`). Its reads are still
+recorded as versions for its own stale checks; nothing looked at while it is
+off is shown later. `--presence-minutes N` (1 to 30, default 10) sets how old a
+peer's presence that session is shown. When the coordinator is down, nothing
+is recorded and the host's call is unchanged.
 
 Relevant peers share the same checkout or a Git repository identified by the
 observer. Linked worktrees can share briefings while keeping separate physical
@@ -725,10 +857,55 @@ does not change leases, intents or recorded activity.
 
 Delivery acknowledges a message; it does not establish that the model acted on
 it. Terminal `brief` and `recap` are peeks and acknowledge nothing. To acknowledge
-one explicitly, use `langspan ack bob MESSAGE_ID --request-id ack-1`. Notes and
+one explicitly, use `langspan ack bob MESSAGE_ID --request-id ack-1`.
+
+A briefing renders each message on one line of at most 700 bytes. Quoting can
+take a 400-byte message with many quotes or long paths past that; the line is
+then cut and ends with `… (cut; langspan messages show -- WORKSPACE MESSAGE_ID)`,
+inside the 700 bytes. `langspan messages show demo m-9 [--json]` (MCP
+`langspan_show_message`) returns that message in full as it was sent: its ID,
+sender (`null` for the owner), recipient, whole text, every path and
+`retracted` (true once `langspan messages retract` withdrew it, in which case
+disregard it). It is read from the
+message's `message_sent` event, so it also works after the message was
+acknowledged or dropped from the pending list, and across daemon restarts. It is
+read-only and acknowledges nothing. An ID not sent in that workspace is the
+error `unknown_message`. Once retention has deleted the oldest events, an ID not
+found is `message_not_kept` instead: the message says from which event sequence
+the log is kept and that a message sent before then no longer has its full text
+(the log cannot tell such an ID from one never sent). With the daemon down the
+command reports coordination
+unavailable. Any local session or the owner can read any message, as with
+`recap`. Notes and
 messages stay local; remote Git-ref sharing does not publish them. Treat their
 text as data and leave secrets out. [ADR 0009](adr/0009-agent-messages-and-handoff.md)
 describes delivery, retention and the local identity boundary.
+
+A sender can ask which sessions were given a message:
+
+```text
+$ langspan messages status demo m-9
+m-9 from codex.bob to every session, sent 4m ago
+- claude-code.alice  delivered 3m ago (briefing)
+- codex.carol        pending
+Delivered means placed in the session's context, not that it acted on it.
+```
+
+`langspan messages status WORKSPACE MESSAGE|last [--from SESSION] [--json]`
+(MCP `langspan_message_status`, with `session_id` for `last`) is read-only. `last`
+is the newest message SESSION sent, or the owner's without `--from`. The JSON
+answer has `state` (`pending` while held, `done` once every session owed it
+was given it, `retracted`, or `dropped` when newer messages pushed it out
+unread) and up to 64 `recipients`, then `more_recipients`. Each recipient is
+`delivered`, with `age_ms` and `via` (`briefing`, `mid_turn`, `mcp_brief` or
+`ack`), `pending`, or `ended` when the session ended first. A message to
+everyone lists every current session but its sender until it is done; a
+handoff lists the session that took it, and none before. Terminal `brief` is a
+peek and leaves a recipient `pending`. Ages are `null` for records from before
+the daemon last started. `partial: true` means part of the record is no longer
+kept, for example after retention removed the message's sent event. Delivered
+means the text was placed in the session's context; it does not show that the
+model read or acted on it.
 
 A message or handoff that no longer holds can be withdrawn:
 
@@ -849,7 +1026,10 @@ already waiting when the coordinator starts is timed from that start.
 ## Look up symbols and affected files
 
 The source index finds definitions and name mentions in Rust, Python,
-TypeScript/JavaScript (including TSX/JSX), and Go. It updates after complete Git
+TypeScript/JavaScript (including TSX/JSX), Go and Java; `langspan doctor`
+lists them. A Java definition is exported when another package can reach it:
+`public` or `protected`, or a member of an interface that is not `private`.
+It updates after complete Git
 scans and can lag changes on disk. Replace `PROJECT` with a registered workspace,
 `upload` with the name to look up, and `src/api.rs` with the file to inspect:
 
@@ -925,7 +1105,7 @@ not be read in full, so an empty or short answer is weak. Ask which ones:
 partial (2): "src/legacy/parse.rs" (since 3h), "web/src/app.tsx" (since 10m)
 waiting (1): "src/api.rs"
 too large (1): "src/generated/schema.rs"
-not indexed, other languages: .java 10, .rb 3
+not indexed, other languages: .kt 10, .rb 3
 ```
 
 The lists are `partial` (a syntax error or a bound reached, with since when),
@@ -946,6 +1126,47 @@ as a removal. A first indexing produces no change notice. When a file holds
 several definitions of one name (a method of that name on two types, say), a
 definition added or removed is told as such, with how many there are now:
 "a second method "text" was added … (now 2 definitions with that name)".
+
+Each notice stays in the event log, and `graph history` reads a definition's
+past from there, before an agent changes it again:
+
+```sh
+./target/release/langspan graph history PROJECT save --json
+./target/release/langspan graph history PROJECT save --path src/store.rs --limit 5
+```
+
+```text
+seq 812, 2h ago: "src/store.rs" function signature changed from "fn save(x: &Item, sync: bool)" to "fn save(x: &Item)" by session codex.bob (reverted: back to an earlier signature)
+  note (note-7, by codex.bob): "sync deadlocks under load; keep it off"
+seq 640, 1d ago: "src/store.rs" function signature changed from "fn save(x: &Item)" to "fn save(x: &Item, sync: bool)" by session claude-code.alice; task: "add a sync option to save"
+Sessions are the last reported editors of the file, not proof of authorship.
+```
+
+Entries are newest first, at most `--limit` (1 to 50, default 10). Each has
+`seq`, `age_ms`, `change` (`added`, `removed`, `signature_changed`,
+`definition_added` or `definition_removed`), `kind`, `path`, `before` and
+`after`, and `by_session`: the last session that reported editing the file
+before the change was indexed, a correlation and not proof of who wrote it
+(the answer's `attribution` says so). `task` is that session's last prompt
+summary before the change, absent when it recorded none (prompt summaries
+off). `notes` and `messages` (up to 4 each) are those that named the file, in
+their paths or text, within 30 minutes either side of the change; forgotten
+notes, withdrawn messages, and notes or messages recorded before they kept
+their time, are not shown. `reverted: true` means the change put back a signature that the
+definition, in that file, had at an earlier recorded change. A new exported
+name is recorded as `added` for this history and told to no session; a removal
+records the signature that went, so a definition removed and added back is
+marked reverted. Notices recorded before this did not carry those signatures.
+
+`truncated: true` with a `next_seq` says more is recorded than one answer
+holds: more entries than `--limit`, an answer over 28 KiB, or a log with
+more than 20,000 events of the kinds a history reads before that point. Ask
+again with `--before NEXT_SEQ` (MCP: `before_seq`). Only changes the index
+observed are known: body-only changes, changes before LangSpan watched the
+repository, and commit messages are not part of it. A history is a read: it
+records and delivers nothing. MCP: `langspan_history`, whose result puts a
+label first saying the signatures, task lines, notes and messages are data,
+not instructions.
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
 Code) or an `apply_patch` (Codex) is admitted, the hook parses the calls in the
@@ -1078,6 +1299,45 @@ prompts: code an agent writes runs without the host asking. A command that
 looks like it holds a secret is refused; pass secrets through the environment.
 See [ADR 0030](adr/0030-automatic-checks-after-write-batches.md).
 
+#### The wider check after an interface change
+
+A fast check often builds only the package a session changed, so a broken
+caller in another package shows up later, in someone else's work. Give the
+automatic check a second, wider command:
+
+```sh
+langspan check auto WORKSPACE --name fast -- cargo test -p core \
+  --on-interface-change all --timeout-s 1800 -- cargo test --workspace
+```
+
+The first `--timeout-s` (before the first `--`) is the regular command's; the
+one after `--on-interface-change NAME` is the wider command's (default 1800 s).
+Both commands are refused if they look like they hold a secret.
+
+When the source index reports that a session's writes changed an exported
+name that other files mention (an interface notice), the wider command runs
+after the regular one finishes, on the same tree, with the same rules: no
+shell, its own process group, cancelled and restarted with the regular
+command when a session writes again and the tree changes. LangSpan runs the
+owner's whole command and never adds paths to it, so a dependency the index
+misses still gets tested. A body-only change produces no notice and runs only
+the regular command. A change no other file mentions runs nothing extra.
+
+The wider result is an ordinary check record under its own name, graded
+`kept` when it passed and `broke` when it failed. The session that made the
+change, and any session working on or having read a mentioning file, are told
+at their next briefing:
+
+```text
+LangSpan: the automatic check ran its wider command. Interface change to parse_upload in core/src/lib.rs: "pub fn parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) -> u32": the wider check all failed (exit 101); files that mention it: cli/src/main.rs (a name lookup, not resolved uses). On working tree ...
+```
+
+The mentioning files come from the index's name lookup. The line shows at
+most 8 of them and counts the rest; a session working on any of them, shown
+or not, is told. The line also says how many source files the index could not read in full. If the
+index has no complete scan of the workspace, no interface change can be found:
+the regular result says so and the wider command does not run.
+
 #### Tests that flip on unchanged code
 
 Two results of the same check (name and command, compared by its whole
@@ -1203,10 +1463,17 @@ so `cargo fmt --all` during another session's test run leaves each session's
 `commit --mine` able to take its own hunks, and a new file one session wrote
 stays that session's after another session's formatter rewrites it. Tokens
 are compared by language: Rust, TypeScript and JavaScript as words and
-punctuation, with a comma just before a closing `)`, `]` or `}` ignored (a
-formatter adds and drops those when it wraps a list); Markdown as words and
-punctuation; any other file as its text with all whitespace removed.
-Whitespace inside a string literal is not told apart from formatting.
+punctuation, each string or character literal one token whitespace and all,
+with a comma just before a closing `)`, `]` or `}` ignored (a formatter adds
+and drops those when it wraps a list); Markdown as words and punctuation;
+Python as words, punctuation and strings, with the indentation of each line
+that starts a statement as content, so re-wrapping a call inside its
+parentheses is formatting but re-indenting a block is not; YAML, Makefiles
+and other indentation-sensitive files (`.haml`, `.pug`, `.sass`, `.styl`,
+`.nim`, `.fs` and the others ADR 0011 lists) as words and punctuation with
+every line's indentation as content; any other file as its text with all
+whitespace removed. Trailing whitespace and blank lines are always
+formatting.
 
 A change that alters tokens (a rename, an added line) is credited as before:
 to the command's session when nothing else could have made it and it
@@ -1276,6 +1543,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
+| `langspan_history` | A definition's recorded interface changes, newest first, with the last reported editor, its task line, nearby notes and messages, and changes back to an earlier signature; at most 50 |
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |
@@ -1287,6 +1555,8 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_forget` | Remove a remembered note by ID |
 | `langspan_recall` | Search a workspace's remembered notes: every query word in a note's text or paths, without case; best first, at most 50 |
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |
+| `langspan_show_message` | Read one message in full as it was sent, also after acknowledgement; for a briefing line marked `(cut; …)` |
+| `langspan_message_status` | Ask which sessions were given a message, by ID or `"last"`: `delivered` (with `via` and age), `pending` or `ended`; read-only |
 | `langspan_handoff` | Leave a message for the next other session to take up |
 | `langspan_retract_message` | Withdraw a message this session sent, by ID or `"last"`; its readers are told to disregard it |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |
@@ -1302,6 +1572,92 @@ checkout, inside the `langspan mcp` process rather than the daemon; its output
 goes to that process's standard error. `langspan_land` with `apply` pushes as
 you, and `langspan_commit_mine` commits as you, running your Git hooks. Deny
 any of them in your host's permission settings if agents should not do this.
+
+## Move, switch and remove a workspace
+
+These are owner commands of the CLI only; no MCP tool moves or removes a
+workspace ([ADR 0025](adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md)).
+
+```sh
+langspan workspace list
+mv /path/to/src/app /path/to/work/app
+langspan workspace move app /path/to/work/app --request-id ws-move-1
+```
+
+```text
+Workspace app now at /path/to/work/app. Kept: 6 notes, 2 pending messages, 14 check records, 3 landings.
+Project hooks name the old root; rerun:
+  langspan hooks install claude-code --workspace 'app' --root '/path/to/work/app' --state-dir '…' --apply
+```
+
+`workspace list [--after ID] [--json]` shows every workspace with its root and
+whether it exists, its current sessions, notes, pending messages, check
+records, and whether its automatic check and remote sharing are on. It answers
+a page at a time, in workspace ID order: at most 100 workspaces, and fewer when
+long roots would not fit one frame. When more remain, the page ends with
+`More: langspan workspace list --after ID` (`next` in the JSON); run that for
+the next page. A cursor whose workspace was removed since still continues after
+it.
+
+`workspace move ID NEW_ROOT` is for a checkout you moved: the old root must be
+gone and NEW_ROOT must be the top of a Git checkout. With `--switch`, the old
+root still exists and NEW_ROOT is another checkout of the same repository
+(its object database holds the old root's `HEAD` commit), for example a fresh
+clone that replaces a broken one; the old root then stops being coordinated
+under the ID. `--switch` is refused (`root_derived_id`) when the ID is the one
+user-level hooks derived from the old root, since new sessions there would
+claim it again; move or delete the old checkout and run the move without
+`--switch`, or register NEW_ROOT with `workspace add`. The ID, notes, pending
+messages, check records, landings, the automatic check and the remote setting
+are kept; an automatic check waiting or running in the old root is cancelled,
+and the next writes in NEW_ROOT are checked there. File versions sessions read
+under the old root are dropped, so a session's next edit of an existing file
+has an unknown base until it reads it again; the next scan and the source
+index start again from NEW_ROOT. A refused move changes nothing and says
+which check failed: `not_checkout_top`, `old_root_exists`,
+`old_root_missing`, `root_derived_id`, `different_repository` or
+`workspace_conflict` (NEW_ROOT
+is registered already or overlaps another workspace).
+
+A checkout reached through a symbolic link is the same checkout. LangSpan
+compares a registered root with the root Git reports by resolving links and
+checking that both name the same directory (same device and inode). If you
+move a checkout and leave a link at its old path, the workspace keeps
+scanning, and sessions started through the link join it, under the
+registered path. A link to a checkout of another repository (one without the
+commit the last scan saw) stops the scan with `Git identity changed`.
+`workspace move ID NEW_ROOT` to the link's target succeeds
+without `--switch` and records NEW_ROOT. When the old root is a link to a
+different directory, the `old_root_exists` refusal names the directory it
+leads to; use `--switch` only if that is another checkout you mean to leave.
+The checkout a registered link leads to cannot be registered, or receive a
+moved workspace, under another ID. Its linked worktrees still can, at their
+resolved paths: register a new one under the checkout's new place, or move
+one registered under the old root to its resolved path. While the workspace
+at the link holds an admission, such a registration is refused with
+`workspace_in_use`; complete the admission or wait for it to expire.
+If a registered root becomes a link to another registered workspace's
+checkout, both workspaces refuse admission until you move or remove one of
+them.
+
+User-level hooks need nothing: an event from NEW_ROOT joins the moved ID.
+Project-level hooks name their root in the host's configuration, which the
+command does not edit; it prints the `hooks install` commands to rerun for the
+hosts whose project hooks name this workspace.
+
+`workspace remove ID` is a dry run that lists what would end: sessions,
+intents, notes, pending messages and the automatic check. `workspace remove ID
+--apply --request-id ID` takes the workspace out of `status`, `recap`,
+`workspace list`, briefings and the dashboard; `langspan events` keeps its
+history. A hook event from that root later registers it again, empty.
+
+Moving and removing are refused while a session holds an admission there or a
+landing holds or waits for its push turn (`workspace_busy`), and while remote
+sharing is on (`remote_sharing_on`): run `langspan remote disable ID` first,
+so the published ref is removed, and wait until that ref is gone (`langspan
+doctor` shows its progress): the daemon removes it through the old checkout's
+remote.
+A refusal is recorded under its request ID; retry with a new one.
 
 ## Retries and recovery
 
@@ -1391,7 +1747,8 @@ landing report, is replaced by the error `reply_too_large`, which keeps the
 operation's `exit_code` and outcome; the CLI's `--json` gives the whole
 answer. The CLI's answers are unchanged. File admission accepts up to 64 distinct normalized keys, 512 bytes
 per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit
-and prompt summaries a 512-byte one. Summaries are redacted on receipt, and
+and prompt summaries a 512-byte one. A presence record names 1 to 4 paths, and
+each session keeps its 16 most recent looked-at paths. Summaries are redacted on receipt, and
 redaction never makes one longer than its limit: a summary that would outgrow
 it keeps its longest redacted prefix that fits, cut at a character boundary
 and ending in `[redacted]`, so a summary within its limit is never refused
