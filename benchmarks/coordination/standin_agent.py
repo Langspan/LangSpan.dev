@@ -15,7 +15,10 @@ its task defines (see tasks.py) in the current directory:
 Where Claude Code project hooks are installed (``.claude/settings.local.json``),
 it runs them as Claude Code would around each read and edit, so the
 LangSpan arm's dry run passes through LangSpan's real hooks, coordinators,
-event logs and Git-remote sharing. A ``follow`` session there first waits,
+event logs and Git-remote sharing. Unlike a host, it waits for each hook's
+decision past the hook's configured timeout (see HOOK_SECONDS), so the dry
+run's result does not depend on how loaded the machine is. A ``follow``
+session there first waits,
 within a bound, until LangSpan has told it every peer's task, and before it
 ends waits until every peer shows edits, so that no peer acts before it
 could have been told of this one. A refused edit is read again and retried
@@ -28,11 +31,17 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
 import uuid
 
+# How long the stand-in waits for one hook. A host gives a hook its
+# configured timeout (5 s for LangSpan's) and goes on without it; the
+# stand-in waits for its decision up to this bound instead, so a loaded
+# machine that starts a hook late does not change what the dry run does.
+# A hook still running at the bound is killed with every process it started.
 HOOK_SECONDS = 30
 BRIEF_SECONDS = 10
 # How long a following session waits to hear from its peers, per phase.
@@ -48,7 +57,24 @@ def hook_commands(settings, event, tool):
         if matcher == "*" or tool is None or re.fullmatch(matcher, tool):
             for hook in entry.get("hooks", []):
                 if hook.get("type") == "command":
-                    yield hook["command"], min(hook.get("timeout", HOOK_SECONDS), HOOK_SECONDS)
+                    yield hook["command"], hook.get("timeout", HOOK_SECONDS)
+
+
+def run_hook(command, payload, cwd):
+    """Run one hook in a process group of its own, for up to HOOK_SECONDS.
+    Returns its stdout and exit code, or ("", None) when it was killed."""
+    process = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, cwd=cwd, text=True, start_new_session=True)
+    try:
+        stdout, _ = process.communicate(payload, timeout=HOOK_SECONDS)
+        return stdout, process.returncode
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        return "", None
 
 
 class Session:
@@ -60,6 +86,8 @@ class Session:
         self.calls = 0
         self.refusals = []
         self.context = []
+        # Hooks that took longer than their host timeout.
+        self.late_hooks = 0
 
     def fire(self, event, tool=None, tool_input=None, tool_use_id=None, **extra):
         """Run every matching hook; return True when one refuses the call."""
@@ -69,12 +97,11 @@ class Session:
         denied = False
         for command, timeout in hook_commands(self.settings, event, tool):
             self.calls += 1
-            try:
-                done = subprocess.run(["/bin/sh", "-c", command], input=json.dumps(payload), cwd=self.cwd,
-                                      capture_output=True, text=True, timeout=timeout)
-                stdout, code = done.stdout, done.returncode
-            except subprocess.TimeoutExpired:
-                stdout, code = "", None
+            started = time.monotonic()
+            stdout, code = run_hook(command, json.dumps(payload), self.cwd)
+            elapsed = time.monotonic() - started
+            late = elapsed > timeout
+            self.late_hooks += late
             try:
                 output = json.loads(stdout).get("hookSpecificOutput", {}) if stdout.strip() else {}
             except (ValueError, AttributeError):
@@ -85,7 +112,8 @@ class Session:
                 self.context.append(context)
             denied |= decision == "deny" or code == 2
             self.log.write(json.dumps({"event": event, "tool": tool, "tool_use_id": tool_use_id,
-                                       "exit_code": code, "decision": decision, "stdout": stdout[:4000]}) + "\n")
+                                       "exit_code": code, "decision": decision, "stdout": stdout[:4000],
+                                       "elapsed_ms": round(elapsed * 1000, 1), "late": late}) + "\n")
         return denied
 
     def read(self, path):
@@ -197,7 +225,8 @@ def main(argv):
         "result": "Stand-in %s edit of %s." % (mode, ", ".join(edited) or "nothing"),
         "session_id": session.session_id, "permission_denials": [],
         "standin": {"mode": mode, "informed": informed, "peers_heard": sorted(heard),
-                    "hook_calls": session.calls, "refusals": session.refusals, "edited": edited},
+                    "hook_calls": session.calls, "late_hooks": session.late_hooks,
+                    "refusals": session.refusals, "edited": edited},
     }))
     return 0
 

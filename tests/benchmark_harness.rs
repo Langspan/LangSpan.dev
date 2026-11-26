@@ -48,6 +48,11 @@ fn a_real_refusal_reaches_the_run_record() {
 }
 
 #[test]
+fn standin_hooks() {
+    python_suite("test_driver.py", Some("StandinHooks"));
+}
+
+#[test]
 fn dry_run_worktrees_arm() {
     python_suite("test_driver.py", Some("dry_run_arm_worktrees"));
 }

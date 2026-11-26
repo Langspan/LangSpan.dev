@@ -12,10 +12,12 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import driver
@@ -447,6 +449,55 @@ class DriverUnitTests(Temporary):
         self.assertEqual(integrated["notes"], ["notes/s1/s1.md", "notes/s2/s2.md"])
 
 
+class StandinHooks(Temporary):
+    """How the stand-in runs a hook: to completion within its own bound,
+    whatever the host timeout, and never leaving one running."""
+
+    def session(self, command, timeout):
+        settings = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": command, "timeout": timeout}]}]}}
+        log = open(self.root / "standin.jsonl", "w", encoding="utf-8")
+        self.addCleanup(log.close)
+        return standin_agent.Session(settings, log, str(self.root)), log
+
+    def test_a_hook_slower_than_its_host_timeout_still_decides_the_call(self):
+        # On a loaded machine a hook can start late. Its decision is what the
+        # dry run measures, so the edit waits for it, and the log says it was late.
+        deny = json.dumps({"hookSpecificOutput": {"permissionDecision": "deny"}})
+        session, log = self.session("sleep 2; printf '%%s' %s" % shlex.quote(deny), 1)
+        denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
+        log.flush()
+        entry = json.loads((self.root / "standin.jsonl").read_text().splitlines()[0])
+        self.assertTrue(denied, entry)
+        self.assertEqual(entry["decision"], "deny", entry)
+        self.assertTrue(entry["late"], entry)
+        self.assertGreaterEqual(entry["elapsed_ms"], 2000, entry)
+        self.assertEqual(session.late_hooks, 1)
+
+    def test_a_hook_past_the_standin_bound_leaves_no_process_running(self):
+        # A hook the stand-in gives up on must not go on acting, for example
+        # by reading a file after the edit it was asked about was applied.
+        pid_file = self.root / "grandchild.pid"
+        command = "sleep 30 & echo $! > %s; wait" % shlex.quote(str(pid_file))
+        session, _ = self.session(command, 1)
+        original = standin_agent.HOOK_SECONDS
+        standin_agent.HOOK_SECONDS = 2
+        try:
+            denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
+        finally:
+            standin_agent.HOOK_SECONDS = original
+        self.assertFalse(denied)
+        pid = int(pid_file.read_text())
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            self.assertLess(time.monotonic(), deadline, "the hook's child %d is still running" % pid)
+            time.sleep(0.05)
+
+
 class RefusalCollection(Temporary):
     def test_a_real_refusal_is_collected_with_what_followed(self):
         """Two stand-in sessions in one clone: B edits a file after A read
@@ -493,6 +544,59 @@ class RefusalCollection(Temporary):
         self.assertEqual(len(refused), 1, logged)
         self.assertTrue(refused[0]["tool_use_id"].startswith("edit-"))
         self.assertTrue(all(entry["at"] and entry["elapsed_ms"] >= 0 for entry in logged))
+
+    def test_a_pre_tool_hook_that_starts_late_refuses_nothing(self):
+        """Issue #200: on a loaded runner a PreToolUse hook can start after
+        its 5-second host timeout. The edit waits for it, so the hook reads
+        the version the session read and LangSpan admits the edit. Before,
+        the stand-in applied the edit at the timeout and the hook, still
+        running, read the edited file and was refused as stale."""
+        work = self.root / "work"
+        work.mkdir()
+        _, _, clones = driver.prepare_fixture(work, 1, "langspan")
+        state = Path(tempfile.mkdtemp(prefix="lsb-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, state, True)
+        driver.install_hooks(langspan_binary(), state, 1, clones[0], self.root / "hook-log.jsonl")
+        coordinator = driver.Coordinator(langspan_binary(), state, self.root / "coordinator.log")
+        try:
+            settings = json.loads((clones[0] / ".claude" / "settings.local.json").read_text())
+            # LangSpan's hooks start late, behind the hook-log wrapper, as
+            # a slow start of the hook process on a loaded runner makes
+            # them: PreToolUse past its 5 s timeout, PostToolUse within it.
+            for event, delay in (("PreToolUse", 6), ("PostToolUse", 4)):
+                for entry in settings["hooks"][event]:
+                    for hook in entry["hooks"]:
+                        self.assertEqual(hook["timeout"], 5, hook)
+                        *wrapper, inner = shlex.split(hook["command"])
+                        hook["command"] = " ".join(shlex.quote(part)
+                                                   for part in wrapper + ["sleep %d; %s" % (delay, inner)])
+            target = (clones[0] / "shelf" / "report.py").resolve()
+            with open(self.root / "hooks.jsonl", "w") as log:
+                session = standin_agent.Session(settings, log, str(clones[0].resolve()))
+                session.fire("SessionStart", source="startup")
+                session.read(target)
+                edited = session.edit(target, "Edit", {"file_path": str(target), "old_string": "nobody",
+                                                       "new_string": "no owner", "replace_all": False},
+                                      lambda: target.write_text(target.read_text().replace("nobody", "no owner")))
+            # Read the log once LangSpan has decided the call, however late.
+            decided = ("lease_granted", "write_refused")
+            deadline = time.monotonic() + 60
+            while True:
+                events = coordinator.events()
+                if any(record.get("event", {}).get("type") in decided for record in events):
+                    break
+                self.assertLess(time.monotonic(), deadline, "LangSpan never decided the edit")
+                time.sleep(0.1)
+        finally:
+            coordinator.stop()
+        seen = "stand-in: %s\nevents: %s" % ((self.root / "hooks.jsonl").read_text(),
+                                             [record.get("event", {}).get("type") for record in events])
+        self.assertTrue(edited, seen)
+        self.assertEqual(session.refusals, [], seen)
+        self.assertEqual(driver.refusal_items(events), [], seen)
+        self.assertIn("lease_granted", [record.get("event", {}).get("type") for record in events], seen)
+        self.assertGreaterEqual(session.late_hooks, 1, seen)
+        self.assertIn("no owner", target.read_text())
 
 
 class DryRun(Temporary):
@@ -554,7 +658,7 @@ class DryRun(Temporary):
         if arm == "langspan":
             refusals = record["refusals"]
             self.assertEqual(refusals["status"], "reported")
-            self.assertEqual(refusals["count"], 0)
+            self.assertEqual(refusals["count"], 0, self.refusal_report(output, record))
             self.assertEqual(refusals["sessions_registered"], n)
             self.assertGreaterEqual(refusals["admissions"], n)
             self.assertEqual(record["coordinator_scans"]["status"], "reported")
@@ -566,6 +670,25 @@ class DryRun(Temporary):
             self.assertIsNone(record["refusals"]["count"])
             self.assertEqual(record["coordinator_scans"]["status"], "not_applicable")
             self.assertEqual(record["evidence"]["events"], [])
+
+    def refusal_report(self, output, record):
+        """What a failed refusal check saw: each refusal, what LangSpan told
+        the refused session, and that session's hooks slower than the host
+        timeout."""
+        lines = ["refusals: %s" % json.dumps(record["refusals"]["items"])]
+        for index, task in enumerate(record["tasks"], 1):
+            if not task["refusals"]:
+                continue
+            lines.append("session %d (%s, %s):" % (index, task["role"], task["task_id"]))
+            log = output / task["hook_log"] if task["hook_log"] else None
+            for line in log.read_text().splitlines() if log and log.is_file() else []:
+                entry = json.loads(line)
+                if '"deny"' in entry.get("stdout", ""):
+                    lines.append("  %s at %s: %s" % (entry.get("event"), entry.get("at"), entry["stdout"][:1500]))
+                elif entry.get("elapsed_ms", 0) > 5000:
+                    lines.append("  %s %s at %s took %s ms" % (entry.get("event"), entry.get("tool"),
+                                                              entry.get("at"), entry["elapsed_ms"]))
+        return "\n".join(lines)
 
     def informed(self, output_record):
         return [t["standin_informed"] for t in output_record["tasks"]]
