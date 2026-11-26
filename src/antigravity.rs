@@ -3,18 +3,21 @@
 //! `PreInvocation` ([ADR 0035](../docs/adr/0035-antigravity-adapter.md)).
 //!
 //! Built from Antigravity's documentation
-//! (<https://antigravity.google/docs/hooks/>, read 25 November 2026). It has
-//! **not** been verified against a real Antigravity run: the fixtures in
-//! `fixtures/antigravity-constructed` are constructed, not captured.
+//! (<https://antigravity.google/docs/hooks/>, read 25 November 2026) and
+//! corrected against the events of a real Antigravity 1.5.14 run, kept in
+//! `fixtures/antigravity-1.5.14` (issue #187). The fixtures in
+//! `fixtures/antigravity-constructed` follow the documented names.
 //!
-//! An Antigravity event does not say which event it is, so the installed
-//! command names it (`--event NAME`) and the caller passes it in.
+//! The installed command names its event (`--event NAME`) and the caller
+//! passes it in: the documentation lists no event name in the payload, though
+//! 1.5.14 sends `hookEventName`.
 //!
-//! Like the other adapters it never answers `allow` or `auto_approve` and
-//! never exits 2. It answers `{"decision":"deny",...}` only for a known
-//! conflict or a stale source, on `PreToolUse`. Context goes out as a system
-//! message in `injectSteps`, on the two events that take it. Every other
-//! outcome is `{}`.
+//! It never answers `auto_approve` or `ask` and never exits 2. On
+//! `PreToolUse` it answers `{"decision":"deny",...}` for a known conflict or
+//! a stale source and `{"decision":"allow"}` otherwise, which delegates to
+//! Antigravity's own policy: 1.5.14 reads `{}` there as a refusal. Context
+//! goes out as a system message in `injectSteps`, on the two events that
+//! take it. Every other outcome is `{}`.
 
 use crate::hook::{self, Config, LifecycleKind, Operation, Phase, Reply};
 use langspan_core::ToolResult;
@@ -28,25 +31,58 @@ use std::{
 
 /// The session namespace: a conversation is `antigravity.<conversationId>`.
 pub const SOURCE: &str = "antigravity";
-/// Tools admitted before they run. `write_to_file` states the whole file;
-/// the two replace tools state what they change.
-pub const EDIT_TOOLS: [&str; 3] = [
+/// Tools admitted before they run. `edit_file` is what 1.5.14 sends; the
+/// other three are the documented names, kept in case another version uses
+/// them. `write_to_file` states the whole file; `edit_file` and the replace
+/// tools state what they change.
+pub const EDIT_TOOLS: [&str; 4] = [
+    "edit_file",
     "write_to_file",
     "replace_file_content",
     "multi_replace_file_content",
 ];
 pub const SHELL_TOOL: &str = "run_command";
-/// A completed `view_file` is recorded as the version the session saw.
-pub const READ_TOOL: &str = "view_file";
-/// The answer that leaves every decision to Antigravity's own policy.
+/// A completed read is recorded as the version the session saw: `read_file`
+/// in 1.5.14, `view_file` in the documentation.
+pub const READ_TOOLS: [&str; 2] = ["read_file", "view_file"];
+/// The answer on an event that takes no decision, or whose event is unknown.
 pub const NO_DECISION: &str = "{}";
+/// `PreToolUse`'s answer when LangSpan has no objection: proceed, delegating
+/// to the next hook or Antigravity's own policy. 1.5.14 reads `{}` there as a
+/// refusal with an empty reason.
+pub const ALLOW: &str = r#"{"decision":"allow"}"#;
 
-/// The fields Antigravity documents, in its camelCase. Others are ignored.
+/// The answer for `event` when the hook has nothing to say, or cannot run:
+/// an explicit allow on `PreToolUse`, else `{}`.
+pub fn fallback(event: Option<&str>) -> &'static str {
+    if event == Some("PreToolUse") {
+        ALLOW
+    } else {
+        NO_DECISION
+    }
+}
+
+/// The argument holding a file tool's path. 1.5.14's `edit_file` and
+/// `read_file` take `Path`; the documented tools take `TargetFile` or
+/// `AbsolutePath`.
+fn path_key(tool: &str) -> &'static str {
+    match tool {
+        "edit_file" | "read_file" => "Path",
+        "view_file" => "AbsolutePath",
+        _ => "TargetFile",
+    }
+}
+
+/// The fields Antigravity documents, and `cwd`, which 1.5.14 sends, in its
+/// camelCase. Others are ignored.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HostEvent {
     conversation_id: Option<String>,
     workspace_paths: Option<Vec<String>>,
+    /// The workspace the conversation runs in. The hook process's own
+    /// working directory is `<workspace>/.agents` in 1.5.14 and never used.
+    cwd: Option<String>,
     last_user_input: Option<String>,
     tool_call: Option<ToolCall>,
     /// The index of the step in the conversation's trajectory: the only
@@ -65,13 +101,22 @@ struct ToolCall {
 }
 
 impl HostEvent {
-    /// The conversation's workspace folders that are absolute, in order.
+    /// The conversation's workspace folders that are absolute, in order;
+    /// the event's `cwd` when it lists none.
     fn folders(&self) -> impl Iterator<Item = &str> + Clone {
-        self.workspace_paths
+        let absolute = |dir: &&str| Path::new(dir).is_absolute();
+        let listed = self
+            .workspace_paths
             .iter()
             .flatten()
             .map(String::as_str)
-            .filter(|dir| Path::new(dir).is_absolute())
+            .filter(absolute);
+        let cwd = self
+            .cwd
+            .as_deref()
+            .filter(absolute)
+            .filter(|_| listed.clone().next().is_none());
+        listed.chain(cwd)
     }
 
     /// The workspace folder the event is about: the most specific one
@@ -314,18 +359,19 @@ fn tool_call(
         .as_ref()
         .ok_or_else(|| unsupported("Antigravity tool event has no toolCall"))?;
     let tool = call.name.as_deref().unwrap_or_default();
-    let reads = tool == READ_TOOL;
+    let reads = READ_TOOLS.contains(&tool);
     if !(EDIT_TOOLS.contains(&tool) || tool == SHELL_TOOL || reads) {
         return Err(unsupported(
-            "supported Antigravity tools are write_to_file, replace_file_content, multi_replace_file_content, run_command and view_file",
+            "supported Antigravity tools are edit_file, write_to_file, replace_file_content, multi_replace_file_content, run_command, read_file and view_file",
         ));
     }
     if reads && (pre || event.failed()) {
-        return Err(unsupported("only a completed view_file is recorded"));
+        return Err(unsupported("only a completed read is recorded"));
     }
-    // Antigravity documents no tool-call ID. The step index is the call's
-    // place in the conversation; that `PreToolUse` and `PostToolUse` give one
-    // call the same index is not verified (ADR 0035).
+    // The step index is the call's place in the conversation, and 1.5.14
+    // gives both events of a call the step of the call in its own output; a
+    // call's two events were not both captured (ADR 0035). `toolCall.id`,
+    // which 1.5.14 also sends, is not documented.
     let step = event
         .step_idx
         .ok_or_else(|| unsupported("Antigravity tool event has no stepIdx; no ID generated"))?;
@@ -371,9 +417,8 @@ fn tool_call(
         );
         return Ok((operation, config));
     }
-    let path_key = if reads { "AbsolutePath" } else { "TargetFile" };
     let file_path =
-        text(path_key).ok_or_else(|| unsupported("Antigravity tool call names no file"))?;
+        text(path_key(tool)).ok_or_else(|| unsupported("Antigravity tool call names no file"))?;
     let cwd = event.directory(Some(file_path));
     let config = hook::resolve_workspace(config, cwd, deadline)?;
     let key = hook::file_key(&config.root, cwd, file_path)
@@ -412,17 +457,20 @@ fn tool_call(
     ))
 }
 
-/// The string replacement a `replace_file_content` call states. `None` for
-/// the other tools, whose file is held whole: `multi_replace_file_content`'s
-/// chunk fields are not documented.
+/// The string replacement an `edit_file` (`Target`, `Replacement`) or a
+/// `replace_file_content` (`TargetContent`, `ReplacementContent`) call
+/// states. `None` for the other tools, whose file is held whole:
+/// `multi_replace_file_content`'s chunk fields are not documented.
 fn replacement(tool: &str, args: &Value) -> Option<crate::regions::Edit> {
-    if tool != "replace_file_content" {
-        return None;
-    }
+    let (old, new) = match tool {
+        "edit_file" => ("Target", "Replacement"),
+        "replace_file_content" => ("TargetContent", "ReplacementContent"),
+        _ => return None,
+    };
     Some(crate::regions::Edit::Replace(vec![
         crate::regions::Replacement {
-            old: args.get("TargetContent")?.as_str()?.to_owned(),
-            new: args.get("ReplacementContent")?.as_str()?.to_owned(),
+            old: args.get(old)?.as_str()?.to_owned(),
+            new: args.get(new)?.as_str()?.to_owned(),
             replace_all: match args.get("AllowMultiple") {
                 None | Some(Value::Null) => false,
                 Some(value) => value.as_bool()?,
@@ -434,8 +482,8 @@ fn replacement(tool: &str, args: &Value) -> Option<crate::regions::Edit> {
 /// The shared lifecycle's reply in the fields Antigravity documents for
 /// `event`: a denial as `decision` and `reason` on `PreToolUse`, context as
 /// one system message in `injectSteps` on `SessionStart` and
-/// `PreInvocation`. Anything else becomes `{}`, and what was dropped is
-/// noted in the detail.
+/// `PreInvocation`. Anything else becomes the event's `fallback`, and what
+/// was dropped is noted in the detail.
 fn answer(event: &str, reply: Reply) -> Reply {
     let output = serde_json::from_str::<Value>(&reply.stdout)
         .ok()
@@ -466,11 +514,11 @@ fn answer(event: &str, reply: Reply) -> Reply {
             ..reply
         },
         None if reply.stdout.is_empty() => Reply {
-            stdout: NO_DECISION.into(),
+            stdout: fallback(Some(event)).into(),
             ..reply
         },
         None => Reply {
-            stdout: NO_DECISION.into(),
+            stdout: fallback(Some(event)).into(),
             detail: format!(
                 "{}; a reply Antigravity has no field for on {event} was dropped",
                 reply.detail
@@ -576,7 +624,7 @@ mod tests {
             assert_eq!(event.directory(None), Some(FIXTURE_ROOT), "{name}");
             let tool = event.tool_call.as_ref().unwrap().name.as_deref().unwrap();
             assert!(
-                EDIT_TOOLS.contains(&tool) || tool == SHELL_TOOL || tool == READ_TOOL,
+                EDIT_TOOLS.contains(&tool) || tool == SHELL_TOOL || READ_TOOLS.contains(&tool),
                 "{name}"
             );
         }
@@ -692,18 +740,97 @@ mod tests {
                 name,
             );
             assert_eq!(reply.coverage, "unsupported", "{event}: {}", reply.detail);
-            assert_eq!(reply.stdout, NO_DECISION);
+            // `PreToolUse` must allow explicitly: `{}` there is a refusal.
+            let expected = if name == "PreToolUse" {
+                ALLOW
+            } else {
+                NO_DECISION
+            };
+            assert_eq!(reply.stdout, expected, "{name}");
         }
         let malformed = run(&b"{broken"[..], &s.config(), "PreToolUse");
         assert_eq!(
             (malformed.coverage, malformed.stdout.as_str()),
-            ("unknown", NO_DECISION)
+            ("unknown", ALLOW)
         );
         let expired = run_until(&b"{}"[..], &s.config(), "PreToolUse", Instant::now());
         assert_eq!(
             (expired.coverage, expired.stdout.as_str()),
-            ("timeout", NO_DECISION)
+            ("timeout", ALLOW)
         );
+        let expired = run_until(&b"{}"[..], &s.config(), "PostToolUse", Instant::now());
+        assert_eq!(expired.stdout, NO_DECISION);
+    }
+
+    #[test]
+    fn the_fallback_allows_only_on_pre_tool_use() {
+        assert_eq!(fallback(Some("PreToolUse")), ALLOW);
+        for event in [
+            None,
+            Some("PostToolUse"),
+            Some("SessionStart"),
+            Some("PreInvocation"),
+            Some("preToolUse"),
+        ] {
+            assert_eq!(fallback(event), NO_DECISION, "{event:?}");
+        }
+        let value: Value = serde_json::from_str(ALLOW).unwrap();
+        assert_eq!(value, json!({"decision": "allow"}));
+    }
+
+    #[test]
+    fn captured_1_5_14_events_parse_with_their_tool_names_and_paths() {
+        let s = Scratch::new();
+        fs::write(s.0.join("main.py"), "    print(add(2, 3))\n").unwrap();
+        fs::write(s.0.join("calc.py"), "x\n").unwrap();
+        let captured = |name: &str| -> Value {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/antigravity-1.5.14")
+                .join(name);
+            let text = fs::read_to_string(path).unwrap();
+            serde_json::from_str(&text.replace("/work/repo", s.0.to_str().unwrap())).unwrap()
+        };
+        let post = captured("post-edit-file.json");
+        let mut pre = post.clone();
+        pre.as_object_mut().unwrap().remove("error");
+        let admitted = s.parse(&pre, true).unwrap();
+        assert_eq!(admitted.tool, "edit_file");
+        assert_eq!(admitted.paths, ["main.py"]);
+        assert_eq!(admitted.tool_use_id, "step-6");
+        assert_eq!(admitted.edits.len(), 1, "an edit_file states its region");
+        let completed = s.parse(&post, false).unwrap();
+        assert!(matches!(
+            completed.phase,
+            Phase::Post(ToolResult::Succeeded)
+        ));
+        assert_eq!(completed.tool_use_id, admitted.tool_use_id);
+        assert_eq!(completed.input_fingerprint, admitted.input_fingerprint);
+        let failed = s
+            .parse(&captured("post-edit-file-failed.json"), false)
+            .unwrap();
+        assert!(matches!(failed.phase, Phase::Post(ToolResult::Failed)));
+        let read = s.parse(&captured("post-read-file.json"), false).unwrap();
+        assert!(matches!(read.phase, Phase::Read));
+        assert_eq!(read.paths, ["calc.py"]);
+        // `run_command` sends no `Cwd`: the command runs in the workspace.
+        let shell = s
+            .parse(&captured("pre-run-command-append.json"), true)
+            .unwrap();
+        assert_eq!(shell.paths, ["main.py"]);
+    }
+
+    #[test]
+    fn the_events_cwd_is_its_folder_when_it_lists_none() {
+        let only_cwd: HostEvent =
+            serde_json::from_value(json!({"cwd": "/work/repo", "workspacePaths": []})).unwrap();
+        assert_eq!(only_cwd.directory(None), Some("/work/repo"));
+        let both: HostEvent = serde_json::from_value(json!({
+            "cwd": "/work/other", "workspacePaths": ["/work/repo"],
+        }))
+        .unwrap();
+        assert_eq!(both.folders().collect::<Vec<_>>(), ["/work/repo"]);
+        let relative: HostEvent = serde_json::from_value(json!({"cwd": "repo"})).unwrap();
+        assert_eq!(relative.directory(None), None);
     }
 
     #[test]
@@ -750,10 +877,11 @@ mod tests {
         }
         for event in ["PreToolUse", "PostToolUse"] {
             let dropped = answer(event, context.clone());
-            assert_eq!(dropped.stdout, NO_DECISION, "{event}");
+            assert_eq!(dropped.stdout, fallback(Some(event)), "{event}");
             assert!(dropped.detail.contains("dropped"), "{event}");
         }
-        // An allow, or anything that is not a deny, never becomes a decision.
+        // Anything that is not a deny is the explicit allow, never another
+        // permission.
         for stdout in [
             r#"{"hookSpecificOutput":{"permissionDecision":"allow"}}"#,
             r#"{"hookSpecificOutput":{"permissionDecision":"deny"}}"#,
@@ -767,8 +895,8 @@ mod tests {
                     detail: String::new(),
                 },
             );
-            assert_eq!(reply.stdout, NO_DECISION, "{stdout}");
-            for word in ["allow", "auto_approve", "ask"] {
+            assert_eq!(reply.stdout, ALLOW, "{stdout}");
+            for word in ["auto_approve", "ask", "overwrite", "permissionOverrides"] {
                 assert!(!reply.stdout.contains(word), "{stdout}");
             }
         }
