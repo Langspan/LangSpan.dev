@@ -373,6 +373,10 @@ fn change(change: &str, before: Option<&str>, after: Option<&str>) -> InterfaceC
         before_count: None,
         after_count: None,
         after_name: None,
+        before_name: None,
+        evidence: None,
+        before_path: None,
+        private: false,
     }
 }
 
@@ -474,6 +478,7 @@ fn ask(
             limit,
             before_seq,
             events,
+            moves: &[],
             anchors,
             now_ms,
         },
@@ -849,6 +854,7 @@ fn a_history_query_is_validated() {
         limit,
         before_seq: None,
         events: &[],
+        moves: &[],
         anchors: &[],
         now_ms: 0,
     };

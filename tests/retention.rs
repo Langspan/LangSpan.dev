@@ -1772,3 +1772,65 @@ fn a_compaction_keeps_the_retained_tests_and_write_history() {
     );
     assert_eq!(after.write_runs, before.write_runs, "write_runs was lost");
 }
+
+/// A rename remembered for `graph symbol --renamed` (roadmap D7) is derived
+/// outside the status reply. A compaction past the rename's notice must keep
+/// it, or its snapshot check refuses the compaction and a workspace with an
+/// older rename never compacts its log.
+#[test]
+fn a_compaction_keeps_the_remembered_renames() {
+    use langspan_core::InterfaceChange;
+    let directory = Directory::new();
+    let path = directory.file("state.sqlite3");
+    let wall = Wall::at(START_MS);
+    let mut store = wall.open(&path);
+    run(
+        &mut store,
+        "workspace",
+        Command::WorkspaceRegister {
+            workspace_id: "w".into(),
+            root: "/retention-workspace".into(),
+        },
+        0,
+    );
+    let observed = run(
+        &mut store,
+        "rename",
+        Command::ObserveInterface {
+            workspace_id: "w".into(),
+            path: "src/users.py".into(),
+            changes: vec![InterfaceChange {
+                name: "fetch_user".into(),
+                kind: "function".into(),
+                change: "renamed".into(),
+                before: Some("def fetch_user(id)".into()),
+                after: Some("def load_user(id)".into()),
+                after_name: Some("load_user".into()),
+                before_name: Some("fetch_user".into()),
+                evidence: Some("same_body".into()),
+                before_path: None,
+                private: false,
+                before_arity: None,
+                after_arity: None,
+                before_count: None,
+                after_count: None,
+            }],
+            dependents: Vec::new(),
+        },
+        100,
+    );
+    assert!(
+        !matches!(observed.outcome, Outcome::Error { .. }),
+        "{:?}",
+        observed.outcome
+    );
+    let before = store.state().clone();
+    assert!(!before.renames.is_empty(), "no rename was remembered");
+
+    wall.set(START_MS + 100 * DAY_MS);
+    let applied = report(store.compact(30, true).unwrap());
+    assert!(applied.applied && applied.events > 0, "{applied:?}");
+    drop(store);
+    let store = wall.open(&path);
+    assert_eq!(store.state().renames, before.renames, "renames was lost");
+}

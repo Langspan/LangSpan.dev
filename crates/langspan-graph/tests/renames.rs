@@ -1,7 +1,10 @@
-//! A rename in one file transition (roadmap B10): an exported function or
-//! method that goes, and one of the same kind, parameter list and body that
-//! comes under a new name, is one rename, not a removal and an addition.
-use langspan_graph::{Change, FileGraph, Language, SymbolChange, diff, digest_blocks, extract};
+//! A rename in one file transition (roadmap B10, D7): an exported function
+//! or method that goes, and one of the same kind and parameter list that
+//! comes under a new name with the same body or at the same lines, is one
+//! rename, not a removal and an addition.
+use langspan_graph::{
+    Change, FileGraph, Language, RenameEvidence, SymbolChange, diff, digest_blocks, extract,
+};
 
 /// The caller supplies the digest; the crate never hashes. The text itself
 /// stands in for one here.
@@ -18,11 +21,22 @@ fn changes(language: Language, before: &str, after: &str) -> Vec<SymbolChange> {
 }
 
 fn renamed(to: &str, before: &str, after: &str) -> Change {
+    renamed_by(to, before, after, RenameEvidence::SameBody)
+}
+
+fn renamed_by(to: &str, before: &str, after: &str, evidence: RenameEvidence) -> Change {
     Change::Renamed {
         to: to.into(),
         before: before.into(),
         after: after.into(),
+        evidence,
     }
+}
+
+fn sorted(found: Vec<SymbolChange>) -> Vec<(String, Change)> {
+    let mut kinds: Vec<(String, Change)> = found.into_iter().map(|c| (c.name, c.change)).collect();
+    kinds.sort_by(|a, b| a.0.cmp(&b.0));
+    kinds
 }
 
 #[test]
@@ -104,37 +118,82 @@ fn a_renamed_method_and_arrow_function_are_renames_too() {
 }
 
 #[test]
-fn a_rename_with_a_changed_body_or_parameters_stays_a_removal_and_an_addition() {
-    let kinds = |found: Vec<SymbolChange>| {
-        let mut kinds: Vec<(String, Change)> =
-            found.into_iter().map(|c| (c.name, c.change)).collect();
-        kinds.sort_by(|a, b| a.0.cmp(&b.0));
-        kinds
-    };
-    let split = [
-        ("fetch_user".to_owned(), Change::Removed),
-        ("load_user".to_owned(), Change::Added),
-    ];
-    // The body changed as well as the name.
+fn a_rename_with_a_changed_body_at_the_same_lines_is_a_same_signature_rename() {
+    // Roadmap D7: the body changed as well as the name; the parameters and
+    // the lines the definition spans did not.
     assert_eq!(
-        kinds(changes(
+        sorted(changes(
             Language::Rust,
             "pub fn fetch_user(id: u32) -> u32 {\n    id + 1\n}\n",
             "pub fn load_user(id: u32) -> u32 {\n    id + 2\n}\n",
         )),
-        split
+        [(
+            "fetch_user".to_owned(),
+            renamed_by(
+                "load_user",
+                "pub fn fetch_user(id: u32) -> u32",
+                "pub fn load_user(id: u32) -> u32",
+                RenameEvidence::SameSignature
+            )
+        )]
     );
     assert_eq!(
-        kinds(changes(
+        sorted(changes(
             Language::Python,
             "def fetch_user(id):\n    return id + 1\n",
             "def load_user(id):\n    return id + 2\n",
+        )),
+        [(
+            "fetch_user".to_owned(),
+            renamed_by(
+                "load_user",
+                "def fetch_user(id)",
+                "def load_user(id)",
+                RenameEvidence::SameSignature
+            )
+        )]
+    );
+}
+
+#[test]
+fn a_rename_with_a_changed_body_and_lines_or_parameters_stays_a_removal_and_an_addition() {
+    let split = [
+        ("fetch_user".to_owned(), Change::Removed),
+        ("load_user".to_owned(), Change::Added),
+    ];
+    // The body changed and grew by a line as well as the name.
+    assert_eq!(
+        sorted(changes(
+            Language::Rust,
+            "pub fn fetch_user(id: u32) -> u32 {\n    id + 1\n}\n",
+            "pub fn load_user(id: u32) -> u32 {\n    let n = id;\n    n + 2\n}\n",
+        )),
+        split
+    );
+    // The same body moved down a line is still a body match.
+    assert_eq!(
+        sorted(changes(
+            Language::Python,
+            "def fetch_user(id):\n    return id + 1\n",
+            "\ndef load_user(id):\n    return id + 1\n",
+        )),
+        [(
+            "fetch_user".to_owned(),
+            renamed("load_user", "def fetch_user(id)", "def load_user(id)")
+        )]
+    );
+    // A changed body moved down a line is not.
+    assert_eq!(
+        sorted(changes(
+            Language::Python,
+            "def fetch_user(id):\n    return id + 1\n",
+            "\ndef load_user(id):\n    return id + 2\n",
         )),
         split
     );
     // A parameter changed as well as the name.
     assert_eq!(
-        kinds(changes(
+        sorted(changes(
             Language::TypeScript,
             "export function fetch_user(id: number): number {\n  return 1;\n}\n",
             "export function load_user(id: string): number {\n  return 1;\n}\n",
@@ -143,7 +202,7 @@ fn a_rename_with_a_changed_body_or_parameters_stays_a_removal_and_an_addition() 
     );
     // The return type changed as well as the name.
     assert_eq!(
-        kinds(changes(
+        sorted(changes(
             Language::Go,
             "package app\n\nfunc fetch_user(id int) int {\n\treturn 1\n}\n",
             "package app\n\nfunc load_user(id int) int64 {\n\treturn 1\n}\n",
@@ -152,7 +211,7 @@ fn a_rename_with_a_changed_body_or_parameters_stays_a_removal_and_an_addition() 
         0,
         "Go lower-case names are not exported"
     );
-    let go = kinds(changes(
+    let go = sorted(changes(
         Language::Go,
         "package app\n\nfunc FetchUser(id int) int {\n\treturn 1\n}\n",
         "package app\n\nfunc LoadUser(id int) int64 {\n\treturn 1\n}\n",
@@ -162,6 +221,67 @@ fn a_rename_with_a_changed_body_or_parameters_stays_a_removal_and_an_addition() 
         [
             ("FetchUser".to_owned(), Change::Removed),
             ("LoadUser".to_owned(), Change::Added)
+        ]
+    );
+}
+
+#[test]
+fn two_removed_and_two_added_functions_with_ambiguous_pairs_are_not_renames() {
+    // Each removed function has the same body and parameters as both added
+    // ones: two candidates each, so nothing is linked.
+    let split = |names: [&str; 4]| {
+        vec![
+            (names[0].to_owned(), Change::Removed),
+            (names[1].to_owned(), Change::Removed),
+            (names[2].to_owned(), Change::Added),
+            (names[3].to_owned(), Change::Added),
+        ]
+    };
+    assert_eq!(
+        sorted(changes(
+            Language::Rust,
+            "pub fn a(x: u8) -> u8 { x }\npub fn b(x: u8) -> u8 { x }\n",
+            "pub fn c(x: u8) -> u8 { x }\npub fn d(x: u8) -> u8 { x }\n",
+        )),
+        split(["a", "b", "c", "d"])
+    );
+    // `a`'s body is `d`'s and its lines are `c`'s: two candidates, and `d`
+    // has `a` by body and `b` by lines. Nothing is linked.
+    assert_eq!(
+        sorted(changes(
+            Language::Rust,
+            "pub fn a(x: u8) -> u8 { x }\npub fn b(x: u8) -> u8 { x + 1 }\n",
+            "pub fn c(x: u8) -> u8 { x + 2 }\npub fn d(x: u8) -> u8 { x }\n",
+        )),
+        split(["a", "b", "c", "d"])
+    );
+    // Different bodies, each at the lines of exactly one added function:
+    // each pair has one candidate both ways.
+    assert_eq!(
+        sorted(changes(
+            Language::Rust,
+            "pub fn a(x: u8) -> u8 { x }\npub fn b(x: u8) -> u8 { x + 1 }\n",
+            "pub fn c(x: u8) -> u8 { x + 2 }\npub fn d(x: u8) -> u8 { x + 3 }\n",
+        )),
+        [
+            (
+                "a".to_owned(),
+                renamed_by(
+                    "c",
+                    "pub fn a(x: u8) -> u8",
+                    "pub fn c(x: u8) -> u8",
+                    RenameEvidence::SameSignature
+                )
+            ),
+            (
+                "b".to_owned(),
+                renamed_by(
+                    "d",
+                    "pub fn b(x: u8) -> u8",
+                    "pub fn d(x: u8) -> u8",
+                    RenameEvidence::SameSignature
+                )
+            ),
         ]
     );
 }
@@ -181,12 +301,20 @@ fn an_ambiguous_or_undigested_pair_is_never_linked() {
             .all(|c| !matches!(c.change, Change::Renamed { .. })),
         "{found:?}"
     );
-    // Without block digests, nothing is linked.
+    // Without block digests, only the lines can link: moved down a line,
+    // nothing is linked.
     let plain = |source: &str| extract(Language::Rust, source.as_bytes()).unwrap();
     let found = diff(
         &plain("pub fn fetch_user(id: u32) -> u32 { id }\n"),
-        &plain("pub fn load_user(id: u32) -> u32 { id }\n"),
+        &plain("\npub fn load_user(id: u32) -> u32 { id }\n"),
     );
+    assert_eq!(found.len(), 2, "{found:?}");
+    // Nor without lines either: a baseline stored before lines were kept.
+    let mut before = plain("pub fn fetch_user(id: u32) -> u32 { id }\n");
+    for symbol in &mut before.symbols {
+        (symbol.line, symbol.end_line) = (0, 0);
+    }
+    let found = diff(&before, &plain("pub fn load_user(id: u32) -> u32 { id }\n"));
     assert_eq!(found.len(), 2, "{found:?}");
     // A type is never a rename: only functions and methods are.
     let found = changes(
@@ -195,16 +323,18 @@ fn an_ambiguous_or_undigested_pair_is_never_linked() {
         "pub struct B { x: u8 }\n",
     );
     assert_eq!(found.len(), 2, "{found:?}");
-    // A trait method without a body has nothing to compare.
+    // A trait method without a body has no body to compare; at the same
+    // lines with the same parameters, it is a same-signature rename.
     let found = changes(
         Language::Rust,
         "pub trait T {\n    fn a(&self);\n}\n",
         "pub trait T {\n    fn b(&self);\n}\n",
     );
     assert!(
-        found
-            .iter()
-            .all(|c| !matches!(c.change, Change::Renamed { .. })),
+        found.iter().all(|c| !matches!(
+            &c.change,
+            Change::Renamed { evidence, .. } if *evidence == RenameEvidence::SameBody
+        )),
         "{found:?}"
     );
 }
