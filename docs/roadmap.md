@@ -121,7 +121,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [E4: Messages addressed to a file or a definition](https://github.com/Langspan/LangSpan.dev/issues/63): a message can go only to everyone or to one session ID, not to whoever uses some code.
 - [E7: Sender recorded from the running session](https://github.com/Langspan/LangSpan.dev/issues/64): a shell-sent message needs `--from`, and a wrong or missing value misattributes it.
 - [E9: Messages to sessions on other machines](https://github.com/Langspan/LangSpan.dev/issues/65): agents on two machines cannot message each other, so their owners relay by hand.
-- [E12: Ask who received a message](https://github.com/Langspan/LangSpan.dev/issues/67): a sender cannot tell whether its message has reached the other session yet.
 
 ## F. Checks and landing
 

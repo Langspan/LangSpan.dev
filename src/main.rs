@@ -151,6 +151,11 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  One message in full, as it was sent, also after it
                                  was acknowledged: what a briefing line marked
                                  "(cut; ...)" left out. Read-only
+  messages status WORKSPACE MESSAGE|last [--from SESSION]
+                                 Which sessions were given a message, and how; `last`
+                                 is the newest one SESSION (or the owner) sent.
+                                 Delivered means placed in a session's context, not
+                                 that it acted on it. Read-only
   messages retract WORKSPACE MESSAGE|last [--from SESSION]
                                  Withdraw a message or handoff: copies not yet
                                  delivered are removed, and each session that received
@@ -3253,6 +3258,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 // A look from the terminal is not a delivery to the session.
                 deliver: false,
                 mid_turn: false,
+                mcp: false,
             },
             ["remote", "enable", workspace] => Command::RemoteEnable {
                 workspace_id: (*workspace).into(),
@@ -3378,6 +3384,11 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 workspace_id: (*workspace).into(),
                 message_id: (*message).into(),
             },
+            ["messages", "status", workspace, message] => Command::MessageStatus {
+                workspace_id: (*workspace).into(),
+                from: options.remove("--from"),
+                message_id: (*message != "last").then(|| (*message).into()),
+            },
             ["messages", "retract", workspace, message] => Command::RetractMessage {
                 workspace_id: (*workspace).into(),
                 from: options.remove("--from"),
@@ -3426,6 +3437,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphImport { .. }
                 | Command::Recap { .. }
                 | Command::ShowMessage { .. }
+                | Command::MessageStatus { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
                 | Command::WorkspaceList { .. }
@@ -4324,6 +4336,7 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 format!(" about {:?}", message.paths)
             }
         ),
+        Outcome::MessageStatus { status } => print_message_status(status),
         Outcome::MessageRetracted {
             message_id,
             withdrawn_unread,
@@ -4717,6 +4730,71 @@ fn utc(ms: u64) -> String {
         rest % 3600 / 60,
         rest % 60
     )
+}
+
+/// `messages status` for a person: the message, then one line per
+/// recipient, then what "delivered" means.
+fn print_message_status(status: &langspan_core::MessageStatus) {
+    use langspan_core::{Delivery, MessageState, Recipient, RecipientState};
+    let sent = status
+        .sent_age_ms
+        .map(langspan::hook::age)
+        .unwrap_or_else(|| "before the daemon last started".into());
+    let to = match &status.to {
+        Recipient::Session { session_id } => session_id.clone(),
+        Recipient::Everyone {} => "every session".into(),
+        Recipient::NextSession {} => "the next session (handoff)".into(),
+    };
+    let state = match status.state {
+        MessageState::Pending => "",
+        MessageState::Done => "; done: every session owed it was given it",
+        MessageState::Retracted => "; withdrawn: it is no longer delivered",
+        MessageState::Dropped => "; dropped unread, pushed out by newer messages",
+    };
+    println!(
+        "{} from {} to {to}, sent {sent}{state}",
+        status.message_id,
+        status.from.as_deref().unwrap_or("the owner"),
+    );
+    if status.recipients.is_empty() && matches!(status.to, Recipient::NextSession {}) {
+        println!("- no session has taken it yet");
+    }
+    let width = status
+        .recipients
+        .iter()
+        .map(|recipient| recipient.session_id.len())
+        .max()
+        .unwrap_or(0);
+    for recipient in &status.recipients {
+        let line = match recipient.status {
+            RecipientState::Delivered => {
+                let mut line = "delivered".to_owned();
+                if let Some(age) = recipient.age_ms {
+                    line.push(' ');
+                    line.push_str(&langspan::hook::age(age));
+                }
+                if let Some(via) = recipient.via {
+                    line.push_str(match via {
+                        Delivery::Briefing => " (briefing)",
+                        Delivery::MidTurn => " (mid-turn)",
+                        Delivery::McpBrief => " (langspan_brief)",
+                        Delivery::Ack => " (ack)",
+                    });
+                }
+                line
+            }
+            RecipientState::Pending => "pending".into(),
+            RecipientState::Ended => "ended before it was delivered".into(),
+        };
+        println!("- {:width$}  {line}", recipient.session_id);
+    }
+    if status.more_recipients > 0 {
+        println!("- and {} more", status.more_recipients);
+    }
+    if status.partial {
+        println!("Part of this message's record is no longer kept; this is what remains.");
+    }
+    println!("{}", status.delivered_means);
 }
 
 #[cfg(test)]

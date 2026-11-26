@@ -870,6 +870,32 @@ messages stay local; remote Git-ref sharing does not publish them. Treat their
 text as data and leave secrets out. [ADR 0009](adr/0009-agent-messages-and-handoff.md)
 describes delivery, retention and the local identity boundary.
 
+A sender can ask which sessions were given a message:
+
+```text
+$ langspan messages status demo m-9
+m-9 from codex.bob to every session, sent 4m ago
+- claude-code.alice  delivered 3m ago (briefing)
+- codex.carol        pending
+Delivered means placed in the session's context, not that it acted on it.
+```
+
+`langspan messages status WORKSPACE MESSAGE|last [--from SESSION] [--json]`
+(MCP `langspan_message_status`, with `session_id` for `last`) is read-only. `last`
+is the newest message SESSION sent, or the owner's without `--from`. The JSON
+answer has `state` (`pending` while held, `done` once every session owed it
+was given it, `retracted`, or `dropped` when newer messages pushed it out
+unread) and up to 64 `recipients`, then `more_recipients`. Each recipient is
+`delivered`, with `age_ms` and `via` (`briefing`, `mid_turn`, `mcp_brief` or
+`ack`), `pending`, or `ended` when the session ended first. A message to
+everyone lists every current session but its sender until it is done; a
+handoff lists the session that took it, and none before. Terminal `brief` is a
+peek and leaves a recipient `pending`. Ages are `null` for records from before
+the daemon last started. `partial: true` means part of the record is no longer
+kept, for example after retention removed the message's sent event. Delivered
+means the text was placed in the session's context; it does not show that the
+model read or acted on it.
+
 A message or handoff that no longer holds can be withdrawn:
 
 ```sh
@@ -1470,6 +1496,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_recall` | Search a workspace's remembered notes: every query word in a note's text or paths, without case; best first, at most 50 |
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |
 | `langspan_show_message` | Read one message in full as it was sent, also after acknowledgement; for a briefing line marked `(cut; …)` |
+| `langspan_message_status` | Ask which sessions were given a message, by ID or `"last"`: `delivered` (with `via` and age), `pending` or `ended`; read-only |
 | `langspan_handoff` | Leave a message for the next other session to take up |
 | `langspan_retract_message` | Withdraw a message this session sent, by ID or `"last"`; its readers are told to disregard it |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |

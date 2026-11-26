@@ -1,27 +1,160 @@
-# Coordination benchmark v0 harness
+# Coordination benchmark harness
 
-**Infrastructure, not a product-performance result.** This standard-library Python
-runner starts M5 alongside M3. It executes explicitly supplied commands, retains
-every attempt, and leaves unmeasured outcomes unknown. It neither chooses models
-nor installs tools. No live agent benchmark has been run in the current executor:
-Codex fails before its first model request, Claude Code is absent, and Unix
-socket listeners are denied. See [M3 evidence](../../docs/evidence/m3-codex/README.md).
+**Infrastructure, not a product-performance result.** No real agent run has
+been recorded through this harness yet. It compares three conditions for N
+parallel agent sessions on seeded tasks ([issue #172](https://github.com/Langspan/LangSpan.dev/issues/172)):
 
-The scope follows the build contract's M5 milestone and the M3 capability
-review. The contract remains labelled proposed; this harness does not resolve its owner decisions or claim
-M3/M4 acceptance.
+| Arm | Sessions get |
+| --- | --- |
+| `worktrees` | One Git worktree each and their task, nothing about peers |
+| `awareness_only` | The same, plus a fixed list in the prompt naming each peer session and its task. No LangSpan hooks |
+| `langspan` | The same worktrees with LangSpan's Claude Code project hooks and skill installed, and one coordinator for the run |
+
+Two parts do the work. `driver.py` runs one seeded trial: it prepares a fresh
+fixture repository and the worktrees, sets up the arm, and writes one run
+record. `runner.py`, the generic runner, launches the sessions and the oracle
+for it, bounds them and keeps the raw journal. The runner also still runs
+owner-written manifests, as described under [Owner manifests](#owner-manifests).
 
 ## Files
 
+- `driver.py`: one trial of an arm, task family, session count and seed.
+- `tasks.py`: the two task families, their prompts and what the oracle checks.
+- `fixture/`: the fixture repository, a small Python package with its own tests.
+- `oracle.py`: the combined-integration oracle, run on the merged result.
+- `standin_agent.py`: the dry-run agent; it makes a fixed edit and no model call.
+- `run-record.schema.json`: the driver's run record v1.
 - `runner.py`: validate-only by default; opt-in real-process execution.
 - `manifest.schema.json`: command manifest v1.
 - `manifest.template.json`: owner-filled template for the three required arms.
 - `records.schema.json`: raw per-item/per-arm/per-repetition JSONL journal v1.
 - `SCENARIOS.md`: workload, ordering, and outcome evidence requirements.
-- `test_runner.py`: real local process fixtures; no mocked model or host event.
+- `test_runner.py`, `test_driver.py`: real local processes, Git and, for the
+  LangSpan arm, the real `langspan` binary; no mocked model or host event.
 
-Python 3.9+ on POSIX is required for live runs. There are no package dependencies.
+Python 3.9+ on POSIX is required. There are no package dependencies.
 The commands below assume the repository root.
+
+## Task families
+
+Each task is a prompt one session receives. The oracle judges the result
+after every session's branch is merged, never a branch alone.
+
+| Family | Sessions | What can go wrong | The oracle accepts |
+| --- | --- | --- | --- |
+| `rename_vs_new_caller` | One session renames `parse_config` to `load_config` across the package; each other session adds a feature module that must call the parser | A new caller uses the old name: every branch passes alone, and the merge breaks | The rename done, every feature working on the merged tree, no call to a name the merged `shelf/config.py` lacks |
+| `contradictory_defaults` | Pairs of sessions; each is asked to change the same default in `shelf/settings.py` to a different value for its own caller. With N odd, one session gets an unrelated control task | Both change the default: Git refuses the second merge, or one requirement is silently lost | Per pair: both callers get the value their task asked for, or a session reported the contradiction in `notes/conflict-sN.md`: one note names the setting and both values the pair asked for |
+
+N is 2, 5 or 10. The seed chooses which features or pairs run when N is below
+the pool, and which session gets which task; the same arguments always give
+the same assignment. `python3 benchmarks/coordination/driver.py --arm worktrees
+--family rename_vs_new_caller --sessions 5 --seed 7` prints the plan and every
+prompt without running anything.
+
+## Run one trial
+
+A trial runs the N sessions at once, each in its own worktree, and then:
+
+1. commits whatever each session left uncommitted on its branch;
+2. merges the branches in session order into a fresh integration worktree,
+   recording each merge Git refuses and its files;
+3. runs the oracle there, and the fixture's own tests;
+4. reads LangSpan's event log (LangSpan arm) for refusals and what followed;
+5. writes `record.json`, validated against `run-record.schema.json`.
+
+### Dry run (no model)
+
+```sh
+cargo build --locked
+python3 benchmarks/coordination/driver.py --arm langspan --family rename_vs_new_caller \
+  --sessions 5 --seed 7 --langspan target/debug/langspan \
+  --run --output /tmp/k1-dry
+```
+
+The stand-in agent makes its task's fixed edit (`--standin-mode naive`, the
+default, or `coordinated`). In the LangSpan arm it runs the installed hooks
+with Claude Code's event shapes around each read and edit, so the run passes
+through the real hooks, coordinator and SQLite event log. A dry run shows
+that the harness works; it says nothing about agents.
+
+### Real agents (operator-started)
+
+Only an operator starts these; the test suite never does. Each session is
+`claude -p PROMPT --permission-mode default --output-format json
+--allowedTools ...`, with the tool list in `driver.py` (`CLAUDE_TOOLS`): reads
+and edits under the session's worktree, the fixture's tests and a few Git
+commands, plus a few `langspan` commands in the LangSpan arm. No flag or tool
+approves a permission prompt; a call outside the list is refused and counted.
+
+1. Choose a Claude Code configuration directory that is signed in and has no
+   LangSpan user-level hooks, skill or MCP entry. The driver refuses a
+   configuration with LangSpan hooks or the skill, because they would put
+   LangSpan into every arm.
+2. Run each trial:
+
+   ```sh
+   export LANGSPAN_BENCH_CLAUDE_CONFIG_DIR=/path/to/claude-config
+   # Optional: LANGSPAN_BENCH_CLAUDE (the claude executable), LANGSPAN_BENCH_MODEL (passed as --model)
+   python3 benchmarks/coordination/driver.py --agent claude --arm awareness_only \
+     --family contradictory_defaults --sessions 5 --seed 1 --time-limit 1200 \
+     --run --output /path/outside/the/repository/k1/awareness_only-contradictory-5-1
+   ```
+
+   The LangSpan arm also needs `--langspan target/release/langspan`.
+3. Keep every record, failed and timed-out ones included.
+
+**Cost.** One trial starts N sessions at once, each bounded by `--time-limit`
+seconds (default 1,200, at most 3,600). Both families under all three arms
+cost 3 × 2 × (2 + 5) = 42 sessions per repetition at N = 2 and 5, and 102
+with N = 10 as well.
+
+### Where records go
+
+`--output` must be a new directory outside the repository or under the ignored
+`benchmarks/coordination/runs/`; it is created with mode `0700`. It holds:
+
+| Path | Contents |
+| --- | --- |
+| `record.json` | The run record (`run-record.schema.json`) |
+| `plan.json` | Tasks, prompts and branches, as the sessions received them |
+| `runner/runs.jsonl` | The runner's raw journal; per-session stdout and stderr beside it |
+| `runner/RUN_ID/oracle.json` | The oracle's verdict per task |
+| `events.jsonl`, `coordinator.log` | LangSpan arm: the event log and the coordinator's log |
+| `work/` | The fixture repository, each session's worktree and the integration worktree |
+
+Nothing is committed automatically. Review transcripts before committing any
+record under `docs/evidence/`.
+
+### What the record measures
+
+| Field | Source |
+| --- | --- |
+| `tasks_completed`, `integrated_tests` | The oracle on the merged tree; `integrated_tests` passes only when every branch merged, every task is accepted, no semantic conflict was found and the fixture's tests pass |
+| `merge_conflicts` | Merges Git refused, with their files |
+| `semantic_conflicts` | Conflicts the oracle found in a tree Git merged cleanly: a call to a name the merged code lacks, or a pair whose changes both merged while one requirement was lost and nobody reported it |
+| `duplicate_work` | Branches that changed a code unit (a function or a file) another session's task owns |
+| `stops`, `questions`, `permission_denials` | Each session's `claude -p` result: a failed, timed-out or error result is a stop; a final answer ending in `?` is a question; refused tool calls come from `permission_denials`. Confirm them against the transcripts |
+| `refusals` | LangSpan arm: each `write_refused` event, and whether the same session was admitted to those paths later (`admitted_later`) or not (`no_later_admission`) |
+| `tokens` | The sessions' reported usage, summed only when every session reported it; otherwise `partial` or `unknown` |
+| `elapsed_s`, `total_elapsed_s` | Monotonic time of the session phase, and of the whole trial |
+| `versions` | The agent CLI's `--version`, the models a session reported, the LangSpan commit and binary digest, Git and Python |
+
+A value the run did not measure is `null`, never zero. In the arms without
+LangSpan, `refusals.status` is `not_applicable`.
+
+## Arms in owner manifests
+
+The runner accepts the three arms above and three more. `no_tool` and
+`coarse_claims` are the v0 names; manifests that use them still validate and
+run. A `no_tool` manifest with one worktree per session is the `worktrees`
+condition. `coarse_claims` is no longer a required comparison arm, so a
+manifest without `worktrees` and `awareness_only` lists them in
+`missing_comparison_arms`. `comparable_tool` stays optional.
+
+## Owner manifests
+
+The rest of this document describes `runner.py` on its own, with commands an
+owner supplies.
 
 ## Configure, validate, then opt in
 
@@ -65,9 +198,10 @@ Each item has an ID, description, and named arms:
 
 | Arm | Required configuration |
 | --- | --- |
-| `no_tool` | Same task and native-agent conditions, without a coordination tool |
-| `coarse_claims` | An explicitly described baseline using coarse file claims |
+| `worktrees` | Same task and native-agent conditions, one worktree per session, without a coordination tool |
+| `awareness_only` | The same, plus a fixed description of each peer's task in the prompt |
 | `langspan` | Exact LangSpan commit, settings, native adapters and supported surfaces |
+| `no_tool`, `coarse_claims` | v0 names, still accepted (see [Arms in owner manifests](#arms-in-owner-manifests)) |
 | `comparable_tool` | Optional owner-configured installation of another coordination tool; never installed or enabled automatically |
 
 A partial manifest is useful for debugging. Its raw rows list
@@ -233,13 +367,28 @@ mechanics tests below use real child processes to verify the harness only.
 ## Validation
 
 ```sh
-python3 -m unittest discover -s benchmarks/coordination -p test_runner.py -v
-python3 -m py_compile benchmarks/coordination/runner.py benchmarks/coordination/test_runner.py
+cargo test --locked --test benchmark_harness
 ```
 
-The deterministic fixtures use temporary directories and real Python children,
-not models, mock agents, a fake coordinator, or sockets. They test normal and
-failed output, parallel rendezvous, timeout/descendant cleanup, repetition
-retention, output bounds, spawn errors, argv literalness, the dry-run gate,
-metadata phases, and unknown/evidence-backed assessments. The output of these
-fixture tests is not committed as product benchmark data.
+`tests/benchmark_harness.rs` runs both Python suites with the `langspan`
+binary built from the checkout, so `cargo test` and CI run them on Linux and
+macOS. To run one suite by hand:
+
+```sh
+LANGSPAN_BENCH_LANGSPAN=target/debug/langspan \
+  python3 -B -m unittest discover -s benchmarks/coordination -p 'test_*.py' -v
+```
+
+`test_runner.py` uses temporary directories and real Python children. It
+tests normal and failed output, parallel rendezvous, timeout/descendant
+cleanup, repetition retention, output bounds, spawn errors, argv literalness,
+the dry-run gate, metadata phases, and unknown/evidence-backed assessments.
+
+`test_driver.py` runs the whole dry-run pipeline for every arm and both
+families at N = 2 and N = 5 (naive stand-in edits, which the oracle must catch)
+and at N = 5 with coordinated edits (which it must accept). The LangSpan arm
+goes through the real hooks, coordinator, Unix socket and SQLite store. It
+also provokes a real stale-source refusal and checks that the record keeps it
+and what followed, and checks the Claude Code command line, the seeded
+assignment, prompts, duplicate detection and the contradiction report. None
+of this output is committed as benchmark data.
