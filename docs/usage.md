@@ -1663,6 +1663,19 @@ lists, in `elsewhere` (`langspan status --json`), the files of other
 worktrees that mention the changed name, a scan or two after they are
 written.
 
+Git decides how long another worktree's change counts. While the changed
+file differs from that worktree's `HEAD`, the change is uncommitted and the
+rules above apply: within 30 minutes, while its session is live. Once it is
+committed on that worktree's branch, it counts at every later write until
+your checkout's `HEAD` contains the commit, whatever its age and even after
+its session has ended. After you merge or rebase that commit into your
+branch, the change is no longer told. The daemon asks Git with
+`merge-base --is-ancestor`, using the newest commit of that branch that
+touches the file, and spends at most 250 ms per write on it; a notice Git
+does not answer for in time keeps the uncommitted rules. A squash merge
+makes a new commit, so a change merged that way still counts until the
+daemon restarts; each session is still told it only once.
+
 Extraction and real-daemon tests exercise files changing on disk. Native-agent
 acceptance and an improvement in a real agent's work have not been demonstrated.
 [ADR 0008](adr/0008-derived-source-index.md) describes extraction, coverage and
