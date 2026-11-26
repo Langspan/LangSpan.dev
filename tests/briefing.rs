@@ -1876,6 +1876,8 @@ fn indexed(f: &Fixture, name: &str, path: &str) {
                     limit: 10,
                     detail: false,
                     blind_in_scope: true,
+                    rank: false,
+                    session_id: None,
                     renamed: false,
                 },
             },
