@@ -44,6 +44,10 @@ fn git(root: &Path, args: &[&str]) {
 
 impl World {
     fn new() -> Self {
+        Self::with(&[])
+    }
+    /// The three source files and `extra` (path, content), committed.
+    fn with(extra: &[(&str, &str)]) -> Self {
         let base = fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
@@ -57,6 +61,11 @@ impl World {
         fs::write(work.join("src/api.rs"), API).unwrap();
         fs::write(work.join("app/upload.py"), UPLOAD_PY).unwrap();
         fs::write(work.join("src/caller.rs"), CALLER).unwrap();
+        for (path, content) in extra {
+            let file = work.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, content).unwrap();
+        }
         git(&work, &["init", "--quiet", "--initial-branch=main"]);
         git(&work, &["add", "."]);
         git(&work, &["commit", "--quiet", "-m", "init"]);
@@ -127,11 +136,15 @@ impl World {
     }
     /// The index covers the three source files at their current content.
     fn wait_for_index(&self) {
+        self.wait_for_files(3);
+    }
+    /// The index covers `files` source files at their current content.
+    fn wait_for_files(&self, files: u32) {
         let deadline = Instant::now() + WAIT;
         loop {
             let outcome = self.json(&["graph", "symbol", "app", "parse_upload"]);
             let coverage = &outcome["coverage"];
-            if coverage["current_files"] == 3 && coverage["indexable_files"] == 3 {
+            if coverage["current_files"] == files && coverage["indexable_files"] == files {
                 return;
             }
             assert!(Instant::now() < deadline, "never indexed: {outcome:#}");
@@ -402,4 +415,175 @@ fn an_anchored_note_reports_its_definitions_changes_in_rust_and_python() {
     let (code, _) = w.cli(&["forget", "app", "note-7", "--request-id", "f1"]);
     assert_eq!(code, 0);
     assert_eq!(w.state_of("note-7"), None);
+}
+
+/// Review comment 4713922957: a deleted or moved file has no row in the
+/// index, and the note on its definition reads gone, not unknown forever.
+#[test]
+fn a_note_on_a_deleted_or_moved_file_reads_gone() {
+    let w = World::new();
+    w.wait_for_index();
+    for (id, path, name) in [
+        ("note-del", "src/api.rs", "parse_upload"),
+        ("note-mv", "app/upload.py", "check_size"),
+    ] {
+        let (code, out) = w.cli(&[
+            "remember",
+            "app",
+            "x",
+            path,
+            "--symbol",
+            name,
+            "--request-id",
+            id,
+        ]);
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(w.state_of(id).as_deref(), Some("current"));
+    }
+    fs::remove_file(w.work().join("src/api.rs")).unwrap();
+    w.wait_for_state("note-del", "gone");
+    fs::rename(
+        w.work().join("app/upload.py"),
+        w.work().join("app/moved.py"),
+    )
+    .unwrap();
+    w.wait_for_state("note-mv", "gone");
+}
+
+/// Review comment 4713922965: more definitions of a name than the
+/// workspace lookup's cap, all in a file that sorts earlier, hide neither
+/// a file's own definition from `remember` nor an anchored one from the
+/// recheck.
+#[test]
+fn many_definitions_elsewhere_hide_no_anchored_definition() {
+    let w = World::new();
+    w.wait_for_index();
+    let remember = |text: &str, id: &str| {
+        w.cli(&[
+            "remember",
+            "app",
+            text,
+            "src/api.rs",
+            "--symbol",
+            "parse_upload",
+            "--request-id",
+            id,
+        ])
+    };
+    let (code, out) = remember("x", "note-7");
+    assert_eq!(code, 0, "{out}");
+    let many: String = (0..205)
+        .map(|n| format!("fn parse_upload() -> u32 {{\n    {n}\n}}\n"))
+        .collect();
+    fs::create_dir_all(w.work().join("a")).unwrap();
+    fs::write(w.work().join("a/many.rs"), many).unwrap();
+    w.wait_for_files(4);
+    // A new note on the file's own definition resolves.
+    let (code, out) = remember("y", "note-8");
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(w.state_of("note-8").as_deref(), Some("current"));
+    // Without a path the name is ambiguous, counted as a lower bound.
+    let err = w.refused(&[
+        "remember",
+        "app",
+        "z",
+        "--symbol",
+        "parse_upload",
+        "--request-id",
+        "note-9",
+    ]);
+    assert!(
+        err.contains("symbol_ambiguous") && err.contains("at least 200 times"),
+        "{err}"
+    );
+    // The held note's definition is still seen: it changes, not goes.
+    fs::write(
+        w.work().join("src/api.rs"),
+        API.replace("    body.len()\n", "    body.trim().len()\n"),
+    )
+    .unwrap();
+    w.wait_for_state("note-7", "changed");
+}
+
+const PAIR: &str = "pub struct A;\nimpl A {\n    pub fn new() -> Self {\n        A\n    }\n}\n";
+const PAIR_B: &str = "pub struct B;\nimpl B {\n    pub fn new() -> Self {\n        B\n    }\n}\n";
+
+/// The note IDs `graph symbol NAME --detail` lists with each definition,
+/// by its line.
+fn detail_notes(w: &World, name: &str) -> Vec<(u64, Vec<String>)> {
+    w.json(&["graph", "symbol", "app", name, "--detail"])["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|symbol| {
+            (
+                symbol["line"].as_u64().unwrap(),
+                symbol["notes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|note| note["id"].as_str().unwrap().to_owned())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Review comment 4713922971: an anchored note made without paths is
+/// listed with its definition, found by the anchor's file and the
+/// definition's own bytes; a second definition of the name in that file
+/// does not carry it, and a plain note still goes by its paths.
+#[test]
+fn graph_symbol_detail_lists_an_anchored_note_with_only_its_own_definition() {
+    let w = World::with(&[("src/pair.rs", PAIR)]);
+    w.wait_for_files(4);
+    for args in [
+        &[
+            "remember",
+            "app",
+            "sync",
+            "--symbol",
+            "send_upload",
+            "--request-id",
+            "n-send",
+        ][..],
+        &[
+            "remember",
+            "app",
+            "a only",
+            "--symbol",
+            "new",
+            "--request-id",
+            "n-new",
+        ],
+        &[
+            "remember",
+            "app",
+            "plain",
+            "src/pair.rs",
+            "--request-id",
+            "n-plain",
+        ],
+    ] {
+        let (code, out) = w.cli(args);
+        assert_eq!(code, 0, "{out}");
+    }
+    assert_eq!(
+        detail_notes(&w, "send_upload"),
+        [(5, vec!["n-send".to_owned()])]
+    );
+    fs::write(w.work().join("src/pair.rs"), format!("{PAIR}{PAIR_B}")).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while detail_notes(&w, "new").len() != 2 {
+        assert!(Instant::now() < deadline, "B::new never indexed");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    w.wait_for_state("n-new", "current");
+    assert_eq!(
+        detail_notes(&w, "new"),
+        [
+            (3, vec!["n-plain".to_owned(), "n-new".to_owned()]),
+            (9, vec!["n-plain".to_owned()]),
+        ]
+    );
 }

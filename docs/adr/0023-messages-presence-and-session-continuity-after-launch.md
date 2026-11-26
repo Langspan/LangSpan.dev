@@ -159,9 +159,18 @@ snapshot and the core decides each state:
   syntax error, and a definition of that name and kind there has the
   recorded `body_digest`;
 - `changed`: such a definition is there with another digest;
-- `gone`: none is there; a rename or a move reads `gone`, as in the index;
-- `unknown`: the file is not indexed at its present content, or the note
-  holds only a name.
+- `gone`: none is there; a rename or a move reads `gone`, as in the index.
+  A deleted or moved file has no row in the index: once the index reads
+  every file, an anchor in a file without a row reads `gone` too;
+- `unknown`: the file has a row but is not indexed at its present content,
+  or the note holds only a name.
+
+The daemon looks each anchored name up in the files that decide it (a
+resolved anchor's own file, or the note's paths) before any cap, and across
+the workspace, capped at 200 definitions, only for a note without paths or
+for the not-found hint of `remember`. Definitions elsewhere therefore never
+hide a file's own; an ambiguous name whose workspace lookup reached the cap
+is reported as defined "at least" that many times.
 
 Each change of state is a `note_anchor_changed` event; the recorded digest
 stays, so a body put back reads `current` again. A check that changes
@@ -192,6 +201,8 @@ Decisions the issue left open, each the smallest that meets it:
   its anchors `unknown`, not `current`: the index's rows for it may be stale.
 - The anchor matches by name, path and kind; several definitions of that name
   and kind in one file are `current` if any has the recorded digest.
+  `graph symbol --detail` lists a `current` anchored note only with the
+  definition that has that digest, whatever paths the note names.
 - `--symbol` with several paths searches them all; the anchor's path is the
   definition's file.
 - A note recorded before E1 has no anchor and reads as unanchored; its

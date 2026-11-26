@@ -69,6 +69,7 @@ fn index(definitions: Vec<SymbolRef>) -> AnchorIndex {
         definitions,
         fresh,
         complete: true,
+        ..AnchorIndex::default()
     }
 }
 
@@ -569,4 +570,132 @@ fn a_definition_found_only_in_another_file_reads_gone() {
     let moved = index(vec![def("src/upload/api.rs", "parse_upload", 10, "a")]);
     observe(&mut state, "scan-1", moved);
     assert_eq!(note(&state, "note-7").anchor_state, Some(AnchorState::Gone));
+}
+
+/// Review comment 4713922957: a deleted or moved anchor file has no row in
+/// the index, so it is never fresh; a complete scan that holds no row for
+/// it reads the note gone, not unknown.
+#[test]
+fn a_deleted_or_moved_anchor_file_reads_gone_after_a_complete_scan() {
+    for (case, definitions) in [
+        ("deleted", vec![]),
+        (
+            "moved",
+            vec![def("src/upload/api.rs", "parse_upload", 10, "a")],
+        ),
+    ] {
+        let mut state = ready();
+        remember(
+            &mut state,
+            "note-7",
+            &["src/api.rs"],
+            "parse_upload",
+            &[],
+            Some(api_index("a", "b")),
+        );
+        let mut without = index(definitions);
+        without.fresh.remove("src/api.rs");
+        without.absent.insert("src/api.rs".into());
+        // Before a complete scan, a missing row may be a file not yet
+        // read: unknown.
+        let mut partial = without.clone();
+        partial.complete = false;
+        observe(&mut state, "scan-1", partial);
+        assert_eq!(
+            note(&state, "note-7").anchor_state,
+            Some(AnchorState::Unknown),
+            "{case}"
+        );
+        observe(&mut state, "scan-2", without);
+        assert_eq!(
+            note(&state, "note-7").anchor_state,
+            Some(AnchorState::Gone),
+            "{case}"
+        );
+    }
+}
+
+/// Only a confirmed absence reads gone: a file the index holds a row for
+/// but cannot read now (waiting, a syntax error, a bound reached) stays
+/// unknown after a complete scan.
+#[test]
+fn a_present_but_unreadable_anchor_file_stays_unknown_after_a_complete_scan() {
+    let mut state = ready();
+    remember(
+        &mut state,
+        "note-7",
+        &["src/api.rs"],
+        "parse_upload",
+        &[],
+        Some(api_index("a", "b")),
+    );
+    let mut stale = index(vec![]);
+    stale.fresh.remove("src/api.rs");
+    observe(&mut state, "scan-1", stale);
+    assert_eq!(
+        note(&state, "note-7").anchor_state,
+        Some(AnchorState::Unknown)
+    );
+}
+
+/// Review comment 4713922965: the daemon looks a name up in the files each
+/// note names, and workspace-wide only for a note that names none.
+#[test]
+fn anchored_lists_each_notes_own_files_and_a_workspace_lookup_only_without_them() {
+    let mut state = ready();
+    remember(
+        &mut state,
+        "resolved",
+        &["src/api.rs"],
+        "parse_upload",
+        &[],
+        Some(api_index("a", "b")),
+    );
+    remember(
+        &mut state,
+        "scoped",
+        &["app/upload.py", "lib/x.py"],
+        "check_size",
+        &[],
+        None,
+    );
+    remember(&mut state, "wide", &[], "send_upload", &[], None);
+    let lookups = langspan_core::anchored(&state, "demo");
+    let paths = |name: &str| lookups[name].paths.iter().cloned().collect::<Vec<_>>();
+    assert_eq!(paths("parse_upload"), ["src/api.rs"]);
+    assert!(!lookups["parse_upload"].workspace);
+    assert_eq!(paths("check_size"), ["app/upload.py", "lib/x.py"]);
+    assert!(!lookups["check_size"].workspace);
+    assert!(paths("send_upload").is_empty());
+    assert!(lookups["send_upload"].workspace);
+    // `remember` looks in each named file in full and, for the hint of
+    // where else a name is defined, across the workspace. A command names
+    // at most 64 paths, so one more is enough to refuse it.
+    let many: Vec<String> = (0..100).map(|n| format!("f/{n}.rs")).collect();
+    let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+    let lookup = langspan_core::remember_lookups("parse_upload", &refs);
+    assert_eq!(lookup["parse_upload"].paths.len(), 65);
+    assert!(lookup["parse_upload"].workspace);
+}
+
+/// A workspace-wide lookup that reached its cap counts what it found as a
+/// lower bound.
+#[test]
+fn a_capped_workspace_lookup_counts_its_definitions_as_a_lower_bound() {
+    let mut state = ready();
+    let mut found = index(
+        (0..5)
+            .map(|n| def(&format!("a/{n}.rs"), "parse_upload", 1, "a"))
+            .collect(),
+    );
+    found.truncated.insert("parse_upload".into());
+    let (outcome, events) = remember(&mut state, "n1", &[], "parse_upload", &[], Some(found));
+    match outcome {
+        Outcome::Error { code, message } => {
+            assert_eq!(code, "symbol_ambiguous");
+            assert!(message.contains("defined at least 5 times"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(events.is_empty());
 }

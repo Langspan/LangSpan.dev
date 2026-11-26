@@ -26,8 +26,8 @@ mod trail;
 mod workspaces;
 mod write_check;
 pub use anchors::{
-    ANCHOR_CANDIDATES, AnchorIndex, AnchorState, MAX_TAGS, NoteAnchor, SYMBOL_BYTES, TAG_BYTES,
-    anchored, validate_tag, validate_tags,
+    ANCHOR_CANDIDATES, AnchorIndex, AnchorLookup, AnchorState, MAX_TAGS, NoteAnchor, SYMBOL_BYTES,
+    TAG_BYTES, anchored, remember_lookups, validate_tag, validate_tags,
 };
 pub use classes::{
     FailureClass, KeptTests, MAX_FIXED_NAMED, MAX_WRITE_RUNS, MAX_WRITERS_NAMED, WriteRun,

@@ -102,14 +102,64 @@ impl AnchorState {
 /// What the index holds for anchored names, from one snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AnchorIndex {
-    /// Every definition of each name asked about.
+    /// Each definition of each name once: every one in each file its
+    /// `AnchorLookup` names, and for a workspace lookup the first ones in
+    /// path and line order up to the daemon's cap.
     pub definitions: Vec<SymbolRef>,
     /// Of the files asked about, those indexed at their present content
     /// without a syntax error or a bound reached.
     pub fresh: BTreeSet<String>,
+    /// Of the files asked about, those the index holds no row for: deleted,
+    /// moved or never read.
+    pub absent: BTreeSet<String>,
+    /// Names whose workspace lookup reached the cap, so more definitions
+    /// may exist than `definitions` lists.
+    pub truncated: BTreeSet<String>,
     /// The index reads every supported file of the workspace in full
     /// (`GraphCoverage::blind_in_scope` is zero).
     pub complete: bool,
+}
+
+/// Where the daemon looks one anchored name up: in each of `paths` in
+/// full, and across the workspace (capped) when `workspace` is set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnchorLookup {
+    pub paths: BTreeSet<String>,
+    pub workspace: bool,
+}
+
+/// Unique paths one command names at most (`normalized_paths`); one more
+/// is looked up so the command is still refused for naming too many.
+const LOOKUP_PATHS: usize = 64 + 1;
+
+fn add_lookup(
+    lookups: &mut std::collections::BTreeMap<String, AnchorLookup>,
+    name: &str,
+    scope: &[&str],
+) {
+    let lookup = lookups.entry(name.to_owned()).or_default();
+    if scope.is_empty() {
+        lookup.workspace = true;
+    }
+    for path in scope {
+        if lookup.paths.len() >= LOOKUP_PATHS {
+            break;
+        }
+        lookup.paths.insert((*path).to_owned());
+    }
+}
+
+/// What the daemon looks up for `remember TEXT [PATHS] --symbol NAME`:
+/// each named file in full, and the workspace as well, so a name not
+/// found there can be listed where it is defined.
+pub fn remember_lookups(
+    name: &str,
+    paths: &[&str],
+) -> std::collections::BTreeMap<String, AnchorLookup> {
+    let mut lookups = Default::default();
+    add_lookup(&mut lookups, name, paths);
+    add_lookup(&mut lookups, name, &[]);
+    lookups
 }
 
 /// Tags as recorded: each once, in order. Refused unless each is 1 to
@@ -246,7 +296,12 @@ pub(crate) fn resolve(
         several => Err(error(
             "symbol_ambiguous",
             &format!(
-                "{name:?} is defined {} times: {}; name the file it is in",
+                "{name:?} is defined {}{} times: {}; name the file it is in",
+                if scope.is_empty() && index.truncated.contains(name) {
+                    "at least "
+                } else {
+                    ""
+                },
                 several.len(),
                 listed(several)
             ),
@@ -275,19 +330,25 @@ pub(crate) fn note_reaches(
     }
 }
 
-/// The anchors of a workspace's held notes, for the daemon to look up:
-/// each name, and the files whose freshness decides a state.
-pub fn anchored(state: &crate::State, workspace_id: &str) -> (BTreeSet<String>, BTreeSet<String>) {
-    let mut names = BTreeSet::new();
-    let mut paths = BTreeSet::new();
+/// The anchors of a workspace's held notes, for the daemon to look up: a
+/// resolved anchor in its own file, an unresolved one in the files its
+/// note names, or across the workspace when it names none. Each looked-up
+/// file's freshness and presence decide a state.
+pub fn anchored(
+    state: &crate::State,
+    workspace_id: &str,
+) -> std::collections::BTreeMap<String, AnchorLookup> {
+    let mut lookups = Default::default();
     for note in state.notes.get(workspace_id).into_iter().flatten() {
         if let Some(anchor) = &note.anchor {
-            names.insert(anchor.name.clone());
-            paths.extend(anchor.path.iter().cloned());
-            paths.extend(note.paths.iter().cloned());
+            let scope: Vec<&str> = match (&anchor.path, anchor.resolved()) {
+                (Some(path), true) => vec![path.as_str()],
+                _ => note.paths.iter().map(String::as_str).collect(),
+            };
+            add_lookup(&mut lookups, &anchor.name, &scope);
         }
     }
-    (names, paths)
+    lookups
 }
 
 /// What a complete scan makes of a held anchor: the anchor (filled in
@@ -307,7 +368,18 @@ pub(crate) fn observe(
         };
     };
     if !index.fresh.contains(path) {
-        return (anchor.clone(), AnchorState::Unknown);
+        // A complete scan holds a row for every supported file it can see:
+        // without one, the file was deleted or moved (review comment
+        // 4713922957). A row it cannot read now says nothing.
+        let gone = index.complete && index.absent.contains(path);
+        return (
+            anchor.clone(),
+            if gone {
+                AnchorState::Gone
+            } else {
+                AnchorState::Unknown
+            },
+        );
     }
     let mut same = index.definitions.iter().filter(|symbol| {
         symbol.name == anchor.name

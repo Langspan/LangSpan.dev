@@ -1168,7 +1168,8 @@ records each change of state as a `note_anchor_changed` event. The note's
 - `current`: the definition is in its file and its own bytes are unchanged;
 - `changed`: it is there with different bytes;
 - `gone`: no definition of that name and kind remains in that file. A renamed
-  or moved definition reads `gone`;
+  or moved definition reads `gone`, and so does one whose file is deleted or
+  moved once the index has read every file;
 - `unknown`: not checked yet. A note recorded before the index finished its
   first scan has only the name until the next scan, and a note whose file the
   index cannot read at its present content (waiting, a syntax error, too
@@ -1177,6 +1178,12 @@ records each change of state as a `note_anchor_changed` event. The note's
 A note is `current` only when the index has read its file at its present
 content and found the definition's bytes unchanged. A `changed`, `gone` or
 `unknown` note is never deleted by LangSpan; only `forget` removes it.
+
+`graph symbol NAME --detail` lists a `current` anchored note with the one
+definition it is about, matched by file, name, kind and `body_digest`, even
+when the note names no paths; a second definition of the name in that file
+does not carry it. A plain note is listed with every definition in the files
+it names.
 
 An anchored note reaches sessions working on the definition's file or the
 note's files, and sessions whose files mention the name (a name lookup, as

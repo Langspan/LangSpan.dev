@@ -1703,20 +1703,32 @@ impl Index {
         Ok(rows)
     }
 
-    /// Definitions named `name` with the digest of each one's own bytes, at
-    /// most `limit + 1`, in path and line order (roadmap E1).
+    /// Definitions named `name` with the digest of each one's own bytes, in
+    /// the file `path` or, when `None`, the whole workspace: at most
+    /// `limit + 1`, in path and line order (roadmap E1). The path is
+    /// applied before the limit, so definitions elsewhere never crowd out
+    /// the file's own (review comment 4713922965).
     pub fn anchor_definitions(
         &self,
         workspace_id: &str,
+        path: Option<&str>,
         name: &str,
         limit: u32,
     ) -> Result<Vec<SymbolRef>, Failure> {
-        let mut statement = self.connection.prepare_cached(
-            "SELECT path, name, kind, line, end_line, body_digest FROM symbols
-             WHERE workspace_id = ?1 AND name = ?2 ORDER BY path, line LIMIT ?3",
-        )?;
+        let mut statement = self.connection.prepare_cached(match path {
+            Some(_) => {
+                "SELECT path, name, kind, line, end_line, body_digest FROM symbols
+                 WHERE workspace_id = ?1 AND name = ?2 AND path = ?4
+                 ORDER BY line LIMIT ?3"
+            }
+            None => {
+                "SELECT path, name, kind, line, end_line, body_digest FROM symbols
+                 WHERE workspace_id = ?1 AND name = ?2 AND ?4 IS NULL
+                 ORDER BY path, line LIMIT ?3"
+            }
+        })?;
         let rows = statement
-            .query_map(params![workspace_id, name, limit + 1], |row| {
+            .query_map(params![workspace_id, name, limit + 1, path], |row| {
                 Ok(SymbolRef {
                     path: row.get(0)?,
                     name: row.get(1)?,
@@ -1755,6 +1767,29 @@ impl Index {
             }
         }
         Ok(fresh)
+    }
+
+    /// Of `paths`, those the index holds no file row for: deleted, moved
+    /// out of scope or never read (roadmap E1).
+    pub fn absent(
+        &self,
+        workspace_id: &str,
+        paths: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, Failure> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT 1 FROM files WHERE workspace_id = ?1 AND path = ?2")?;
+        let mut absent = BTreeSet::new();
+        for path in paths {
+            if statement
+                .query_row(params![workspace_id, path], |_| Ok(()))
+                .optional()?
+                .is_none()
+            {
+                absent.insert(path.clone());
+            }
+        }
+        Ok(absent)
     }
 
     /// Add what the index knows around one definition: the digest of its
