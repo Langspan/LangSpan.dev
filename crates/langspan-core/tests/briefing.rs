@@ -261,6 +261,7 @@ fn stale_exited_and_ended_work_is_excluded() {
         "end",
         Command::SessionEnd {
             session_id: "carol".into(),
+            trail: None,
         },
         late + 2,
     ));
@@ -523,6 +524,7 @@ fn ending_a_session_always_labels_it_and_drops_its_task_line() {
         "end",
         Command::SessionEnd {
             session_id: "bob".into(),
+            trail: None,
         },
         30,
     ));
@@ -536,6 +538,7 @@ fn ending_a_session_always_labels_it_and_drops_its_task_line() {
         "end2",
         Command::SessionEnd {
             session_id: "carol".into(),
+            trail: None,
         },
         50,
     ));
@@ -977,6 +980,7 @@ fn old_targets_and_an_ended_sessions_targets_cause_no_notice() {
         "end",
         Command::SessionEnd {
             session_id: "carol".into(),
+            trail: None,
         },
         late + 1,
     ));
@@ -1431,6 +1435,7 @@ fn presence_belongs_to_one_generation_and_an_ended_session_has_none() {
         "end",
         Command::SessionEnd {
             session_id: "alice".into(),
+            trail: None,
         },
         1_500,
     ));
@@ -1511,6 +1516,7 @@ fn a_prompt_is_told_how_many_leading_lines_a_live_peer_in_its_repository_shares(
                 &format!("end-{session}"),
                 Command::SessionEnd {
                     session_id: session.into(),
+                    trail: None,
                 },
                 60,
             ));
@@ -1926,6 +1932,7 @@ fn end(state: &mut State, session: &str, now: u64) {
         &format!("end-{session}-{now}"),
         Command::SessionEnd {
             session_id: session.into(),
+            trail: None,
         },
         now,
     ));

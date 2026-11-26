@@ -361,7 +361,7 @@ pub(crate) fn current_file(root: &Path, path: &str) -> Option<(FileState, Option
 
 /// A workspace file's content, `Some(None)` when it does not exist, `None`
 /// when it is not a regular file within the bound.
-fn read_file(root: &Path, path: &str) -> Option<Option<Vec<u8>>> {
+pub(crate) fn read_file(root: &Path, path: &str) -> Option<Option<Vec<u8>>> {
     use std::io::Read;
     let full = root.join(path);
     let metadata = match fs::symlink_metadata(&full) {

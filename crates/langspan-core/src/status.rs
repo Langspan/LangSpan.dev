@@ -104,6 +104,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         workspace_revisions: _,
         // Derived for `graph symbol --renamed`; likewise.
         renames: _,
+        trails: _,
         // The write generation check runs carry: one count per workspace,
         // never trimmed.
         writes,
@@ -195,6 +196,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         path_refusals: Vec::new(),
         workspace_revisions: BTreeMap::new(),
         renames: BTreeMap::new(),
+        trails: BTreeMap::new(),
         writes: writes.clone(),
         kept_tests: BTreeMap::new(),
         first_writes: BTreeMap::new(),

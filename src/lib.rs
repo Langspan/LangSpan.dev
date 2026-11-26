@@ -33,6 +33,7 @@ pub mod status_line;
 pub mod store;
 pub mod test_output;
 pub mod today;
+pub mod trail;
 pub mod user_install;
 mod zone;
 
