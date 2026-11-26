@@ -81,6 +81,18 @@ remote activity informs the agent and never blocks a local edit. LangSpan's
 remote publications exclude source contents. Task text stays out unless you
 choose to share it. The agent provider's data handling is separate.
 
+### See how changes relate
+
+The local source index identifies potential relationships between files,
+including changed exported signatures and related name mentions. A supported
+Claude Code or Codex write that uses an outdated argument count can receive
+an advisory notice with the tool result. The notice does not refuse the
+write or repair the caller. Matching is by name within one checkout, not
+resolved dependencies. See the [source index](docs/adr/0008-derived-source-index.md),
+[alert limits](docs/adr/0029-break-alerts-at-write-time.md) and
+[semantic awareness illustration](https://langspan.dev/#semantic-awareness).
+Rename-aware alerts and cross-worktree symbol awareness are roadmap work.
+
 ### Catch overlapping edits
 
 For supported tools in one checkout, the hook denies edits that overlap
