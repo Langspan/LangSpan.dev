@@ -82,6 +82,46 @@ fn python_typescript_and_go_calls() {
     );
 }
 
+#[test]
+fn java_method_calls_and_constructor_calls_count_their_arguments() {
+    let source = r#"class Checkout {
+    void submit() {
+        Order order = orders.place(cart);
+        helper(a, /* note */ b);
+        Orders made = new Orders(cart);
+        this.log();
+        List.<String>of("a");
+        super.close();
+        new java.util.ArrayList<String>();
+        new Runnable() { public void run() { tick(1); } };
+        this(x);
+    }
+}
+"#;
+    assert_eq!(
+        found(Language::Java, source),
+        [
+            call("place", 3, Some(1), true),
+            call("helper", 4, Some(2), false),
+            call("Orders", 5, Some(1), false),
+            call("log", 6, Some(0), true),
+            call("of", 7, Some(1), true),
+            call("close", 8, Some(0), true),
+            call("ArrayList", 9, Some(0), false),
+            call("Runnable", 10, Some(0), false),
+            call("tick", 10, Some(1), false),
+        ],
+        "`this(x)` names no constructor by its text"
+    );
+    // A call split over several lines spans all of them.
+    let wrapped = calls(
+        Language::Java,
+        b"class A {\n  void f() {\n    orders.place(\n        cart,\n        coupon);\n  }\n}\n",
+    )
+    .unwrap();
+    assert_eq!((wrapped[0].line, wrapped[0].lines), (3, (3, 5)));
+}
+
 fn counts(language: Language, signature: &str) -> Option<(u32, Option<u32>, bool)> {
     arity(language, signature).map(|Arity { min, max, receiver }| (min, max, receiver))
 }
@@ -152,6 +192,41 @@ fn parameter_counts_of_signatures_as_the_index_stores_them() {
             Some((1, None, false)),
         ),
         (Go, "func F(int, string)", Some((2, Some(2), false))),
+        (
+            Java,
+            "public Order place(Cart cart)",
+            Some((1, Some(1), false)),
+        ),
+        (
+            Java,
+            "public Order place(Cart cart, Coupon coupon)",
+            Some((2, Some(2), false)),
+        ),
+        (
+            Java,
+            "public static <T> List<T> of(String name, T... items)",
+            Some((1, None, false)),
+        ),
+        (Java, "public Orders(Cart cart)", Some((1, Some(1), false))),
+        (
+            Java,
+            "default void f(final int a, @Nullable String b) throws IOException",
+            Some((2, Some(2), false)),
+        ),
+        (Java, "abstract int size()", Some((0, Some(0), false))),
+        // A receiver parameter names the type of `this`; it is never passed.
+        (
+            Java,
+            "void f(Orders this, int a)",
+            Some((1, Some(1), false)),
+        ),
+        (
+            Java,
+            "public Order place(Cart cart) | public Order place(Cart cart, Coupon c)",
+            None,
+        ),
+        (Java, "public class Orders", None),
+        (Java, "public static final int LIMIT", None),
         // Two definitions of one name, or a signature cut at its bound,
         // have no single count.
         (Rust, "pub fn f(a: u8) | pub fn f(a: u8, b: u8)", None),

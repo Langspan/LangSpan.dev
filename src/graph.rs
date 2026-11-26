@@ -1184,8 +1184,8 @@ pub const MAX_UNREAD: usize = 4096;
 /// files (documentation, data, images) are not counted.
 const OTHER_SOURCE: &[&str] = &[
     "c", "cc", "clj", "cljs", "cpp", "cs", "cxx", "dart", "elm", "erl", "ex", "exs", "fs", "fsx",
-    "groovy", "h", "hh", "hpp", "hrl", "hs", "java", "jl", "kt", "kts", "lua", "m", "ml", "mli",
-    "mm", "nim", "php", "pl", "pm", "r", "rb", "scala", "svelte", "swift", "vue", "zig",
+    "groovy", "h", "hh", "hpp", "hrl", "hs", "jl", "kt", "kts", "lua", "m", "ml", "mli", "mm",
+    "nim", "php", "pl", "pm", "r", "rb", "scala", "svelte", "swift", "vue", "zig",
 ];
 
 /// What the last complete scan listed but the index cannot read. It is kept
@@ -1600,7 +1600,7 @@ mod review_regressions {
         }
         fs::create_dir_all(root.join("z")).unwrap();
         for n in 0..10 {
-            fs::write(root.join(format!("z/C{n}.java")), "class C {}\n").unwrap();
+            fs::write(root.join(format!("z/C{n}.kt")), "class C {}\n").unwrap();
         }
         fs::write(root.join("z/README.md"), "notes\n").unwrap();
         let limits = crate::observer::Limits {
@@ -1631,12 +1631,29 @@ mod review_regressions {
         assert_eq!(
             spots.unsupported_languages,
             [langspan_core::LanguageCount {
-                extension: ".java".into(),
+                extension: ".kt".into(),
                 files: 10
             }]
         );
         assert_eq!((spots.totals.too_large, spots.totals.unscanned), (1, 1));
         assert_eq!(coverage.blind_in_scope, 2);
+    }
+
+    /// A language gains a grammar: its files are indexed and counted in
+    /// coverage, so they are no longer reported as another language.
+    #[test]
+    fn no_indexed_extension_is_reported_as_another_language() {
+        for extension in OTHER_SOURCE {
+            assert_eq!(
+                Language::for_path(&format!("src/a.{extension}")),
+                None,
+                ".{extension} is indexed"
+            );
+        }
+        assert_eq!(
+            Language::for_path("src/main/java/shop/Orders.java"),
+            Some(Language::Java)
+        );
     }
 
     const NOW: u64 = 1_700_000_000_000;

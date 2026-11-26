@@ -17,9 +17,36 @@ needs to know what each file defines and what each file mentions.
 Tree-sitter and returns the symbols it defines (name, kind, line range,
 signature text up to the body, whether exported by the language's own rule),
 the names it mentions and what it imports. Rust, Python, TypeScript/JavaScript
-(including TSX/JSX) and Go, chosen by file extension. It does no I/O. Inputs
+(including TSX/JSX), Go and Java, chosen by file extension. It does no I/O. Inputs
 over 1 MiB are refused; a file with a syntax error is indexed as far as it
 parsed and marked partial.
+
+**Java** (`.java`, added 25 November 2026 for roadmap D6,
+[issue #55](https://github.com/Langspan/LangSpan.dev/issues/55)). Classes,
+records and enums are types; interfaces and annotation types are interfaces;
+methods, constructors and annotation elements are methods, since Java has no
+free functions; enum
+constants and `static final` fields (every interface field) are constants, one
+per declarator; a `module-info.java` module is a module. Packages are not
+symbols. The export rule is what another package can reach: `public` or
+`protected`; an interface's or annotation type's members unless `private`;
+every enum constant and module. Package-private and `private` are not
+exported, nor is a method of an anonymous class or of an enum constant's body.
+Each declaration is judged alone, so a `public` method of a package-private
+class is exported, as a `pub fn` in a private Rust module is. A definition
+starts after the annotations and comments that lead its modifiers, and its
+signature leaves those annotations out: adding `@Override` or `@Deprecated`
+changes no caller. A constant's signature is its modifiers, type, name and
+any array dimensions after the name (`int IDS[][]`). An annotation element's
+signature ends before its `default` value. An
+import is recorded as written after `import` or `import static`, with any
+`.*`. References are identifiers and type names. Calls are method calls,
+member calls (`a.f(x)`, `this.f()`, `super.f()`) and constructor calls
+(`new T(x)`, named by the type's last identifier); `this(x)` and `super(x)`
+are not. Tests: the Java tests in `crates/langspan-graph/tests/extract.rs`
+and `calls.rs`, and
+`a_java_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_session`
+in `tests/graph.rs`.
 
 **Everything is a name match.** Nothing resolves scopes, types, modules or
 imports. A mention of `open` matches every symbol called `open`. Every
@@ -213,9 +240,11 @@ punctuation and drops a trailing comma before a closing bracket or at the end,
 so a rustfmt, black, prettier or gofmt rewrap of a parameter list, a magic
 trailing comma, a rewrapped `where` clause or spacing inside braces is not a
 changed signature, while whitespace between two words, and any change to a
-name, type or default, still is. The same rule holds for all four languages,
-since in each a trailing comma in those lists is optional and spacing around
-punctuation means nothing. One trailing comma is kept: the only comma of a
+name, type or default, still is. The same rule holds for every indexed
+language, since in each a trailing comma in those lists is optional or, in
+Java's parameter lists, not allowed, and spacing around punctuation means
+nothing. A google-java-format rewrap of a parameter list is therefore not a
+changed signature, and a changed parameter type is. One trailing comma is kept: the only comma of a
 parenthesised group that is not a parameter or argument list (a parenthesis
 not right after a name or a closing `>`), because it makes a one-element
 tuple: Python's `(1,)` and `(1)`, or Rust's `(u32,)` and `(u32)`, differ.

@@ -43,6 +43,24 @@ impl World {
         Self::with_daemon_env(Vec::new())
     }
     fn with_daemon_env(daemon_env: Vec<(&'static str, String)>) -> Self {
+        Self::with_files(
+            daemon_env,
+            &[
+                (
+                    "src/upload.rs",
+                    "pub fn upload(path: &str) -> bool {\n    !path.is_empty()\n}\n\npub fn gate(user: &str) -> bool {\n    user == \"admin\"\n}\n",
+                ),
+                (
+                    "src/main.rs",
+                    "mod upload;\nfn main() {\n    if upload::gate(\"admin\") {\n        upload::upload(\"a.txt\");\n    }\n}\n",
+                ),
+                ("src/other.py", "def unrelated():\n    return 1\n"),
+                ("README.md", "upload gate\n"),
+            ],
+        )
+    }
+    /// A repository holding `files`, committed, registered as `app`.
+    fn with_files(daemon_env: Vec<(&'static str, String)>, files: &[(&str, &str)]) -> Self {
         let base = fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
@@ -51,23 +69,11 @@ impl World {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
         let work = base.join("work");
-        fs::create_dir_all(work.join("src")).unwrap();
-        fs::write(
-            work.join("src/upload.rs"),
-            "pub fn upload(path: &str) -> bool {\n    !path.is_empty()\n}\n\npub fn gate(user: &str) -> bool {\n    user == \"admin\"\n}\n",
-        )
-        .unwrap();
-        fs::write(
-            work.join("src/main.rs"),
-            "mod upload;\nfn main() {\n    if upload::gate(\"admin\") {\n        upload::upload(\"a.txt\");\n    }\n}\n",
-        )
-        .unwrap();
-        fs::write(
-            work.join("src/other.py"),
-            "def unrelated():\n    return 1\n",
-        )
-        .unwrap();
-        fs::write(work.join("README.md"), "upload gate\n").unwrap();
+        for (path, content) in files {
+            let path = work.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
         git(&work, &["init", "--quiet", "--initial-branch=main"]);
         git(&work, &["add", "."]);
         git(&work, &["commit", "--quiet", "-m", "init"]);
@@ -683,6 +689,117 @@ fn a_changed_exported_signature_is_reported_to_the_session_whose_files_mention_i
     // that is delivered, nothing has changed and nothing is repeated.
     let _ = w.prompt("alice");
     assert!(w.prompt("alice").is_none());
+}
+
+/// Roadmap D6, Java: a Maven-layout repository is indexed, looked up and
+/// counted, and the issue's example notice reaches the session whose file
+/// calls the changed method.
+#[test]
+fn a_java_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_session() {
+    let orders = "package shop;\n\npublic class Orders {\n    @Override\n    public Order place(Cart cart) {\n        return new Order(cart);\n    }\n\n    private void audit() {}\n}\n";
+    let checkout = "package shop;\n\nimport shop.Orders;\n\npublic class Checkout {\n    public Order submit(Orders orders, Cart cart) {\n        return orders.place(cart);\n    }\n}\n";
+    let w = World::with_files(
+        Vec::new(),
+        &[
+            ("src/main/java/shop/Orders.java", orders),
+            ("src/main/java/shop/Checkout.java", checkout),
+            (
+                "src/main/java/shop/Report.java",
+                "package shop;\n\nclass Report {\n    int total() { return 0; }\n}\n",
+            ),
+            ("pom.xml", "<project/>\n"),
+        ],
+    );
+    let found = w.wait_for("the definition of place", "symbol", "place", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    assert_eq!(found["coverage"]["indexable_files"], 3, "{found:#}");
+    let symbol = &found["symbols"][0];
+    assert_eq!(symbol["path"], "src/main/java/shop/Orders.java");
+    assert_eq!(
+        (symbol["line"].as_u64(), symbol["kind"].as_str()),
+        (Some(5), Some("method"))
+    );
+    assert_eq!(symbol["signature"], "public Order place(Cart cart)");
+    assert_eq!(symbol["exported"], true);
+    assert_eq!(
+        paths(&w.graph("references", "place")["references"]),
+        ["src/main/java/shop/Checkout.java:7"]
+    );
+    let impact = w.graph("impact", "src/main/java/shop/Orders.java");
+    assert!(
+        paths(&impact["references"])
+            .iter()
+            .any(|path| path.starts_with("src/main/java/shop/Checkout.java")),
+        "{impact:#}"
+    );
+    // Java is indexed, so it is not reported as another language.
+    let (_, text) = w.cli(&["graph", "blind-spots", "app", "--json"]);
+    let spots: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        spots["outcome"]["blind_spots"]["unsupported_languages"],
+        json!([]),
+        "{spots:#}"
+    );
+
+    // Bob works on Checkout.java; Alice changes Orders.place.
+    w.edits(
+        "bob",
+        "b1",
+        "src/main/java/shop/Checkout.java",
+        &format!("{checkout}// touched\n"),
+    );
+    w.wait_for("bob's edit indexed", "references", "place", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    // A private method's change is not an interface change.
+    w.edits(
+        "alice",
+        "a1",
+        "src/main/java/shop/Orders.java",
+        &orders.replace("audit()", "audit(int level)"),
+    );
+    w.wait_for("the private change indexed", "symbol", "audit", |outcome| {
+        outcome["symbols"][0]["signature"] == "private void audit(int level)"
+    });
+    assert!(
+        w.prompt("bob")
+            .is_none_or(|context| !context.contains("Interface change")),
+        "a private method is no one's interface"
+    );
+    w.edits(
+        "alice",
+        "a2",
+        "src/main/java/shop/Orders.java",
+        &orders
+            .replace("audit()", "audit(int level)")
+            .replace("place(Cart cart)", "place(Cart cart, Coupon coupon)"),
+    );
+    let deadline = Instant::now() + WAIT;
+    let context = loop {
+        if let Some(context) = w
+            .prompt("bob")
+            .filter(|context| context.contains("Interface change"))
+        {
+            break context;
+        }
+        assert!(Instant::now() < deadline, "bob was never told");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        context.contains(r#"Interface change in "src/main/java/shop/Orders.java""#),
+        "{context}"
+    );
+    assert!(context.contains("claude-code.alice"), "{context}");
+    assert!(
+        context.contains(r#"method "place" changed from "public Order place(Cart cart)" to "public Order place(Cart cart, Coupon coupon)""#),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#""src/main/java/shop/Checkout.java""#),
+        "{context}"
+    );
+    assert!(!context.contains("Report.java"), "{context}");
 }
 
 /// A workspace removed, changed while unregistered, and registered again
@@ -1347,11 +1464,11 @@ fn blind_spots_name_the_files_the_index_cannot_answer_for() {
         format!("// {}\n", "x".repeat(5 * 1024 * 1024)),
     )
     .unwrap();
-    fs::create_dir_all(w.work().join("java")).unwrap();
+    fs::create_dir_all(w.work().join("kotlin")).unwrap();
     for n in 0..10 {
         fs::write(
-            w.work().join(format!("java/C{n}.java")),
-            "class C { void lonely() {} }\n",
+            w.work().join(format!("kotlin/C{n}.kt")),
+            "class C { fun lonely() {} }\n",
         )
         .unwrap();
     }
@@ -1379,7 +1496,7 @@ fn blind_spots_name_the_files_the_index_cannot_answer_for() {
     assert_eq!(lists["waiting"], json!([]), "too large is not waiting");
     assert_eq!(
         lists["unsupported_languages"],
-        json!([{"extension": ".java", "files": 10}])
+        json!([{"extension": ".kt", "files": 10}])
     );
     assert_eq!(spots["coverage"]["blind_in_scope"], 3);
     assert_eq!(spots["truncated"], false);
@@ -1405,7 +1522,7 @@ fn blind_spots_name_the_files_the_index_cannot_answer_for() {
         "{human}"
     );
     assert!(
-        human.contains("not indexed, other languages: .java 10"),
+        human.contains("not indexed, other languages: .kt 10"),
         "{human}"
     );
     for args in [

@@ -94,7 +94,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Who holds BRANCH's push turn and who waits for it
   land-cancel WORKSPACE --onto BRANCH --request-id ID
                                  Stop the waiting landing ID; it pushes nothing
-  graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go)
+  graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go, Java)
                                  [--detail]: with its body digest, calls, callers
                                  by name, notes on its file and last check
   graph references WORKSPACE NAME  Where a name is mentioned
@@ -2314,6 +2314,17 @@ fn doctor(
 ) -> Result<u8, langspan::Error> {
     let mut findings: Vec<(bool, String)> = Vec::new();
     let mut note = |ok: bool, text: String| findings.push((ok, text));
+    note(
+        true,
+        format!(
+            "Source index languages: {}. Other source files are listed by `langspan graph blind-spots`.",
+            langspan_graph::Language::ALL
+                .iter()
+                .map(|language| language.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
     // Registered workspace roots and the hosts whose sessions work in them.
     let mut in_use: Option<InUse> = None;
     // What doctor judges a workspace by must be complete, even when the
