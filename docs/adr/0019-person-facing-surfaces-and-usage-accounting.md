@@ -197,7 +197,9 @@ holds the text against a list of words that would claim an outcome. Choices:
   opens (`events_write_refused`; `events_grant_session` over admissions by
   session for the retry lookup; the generation markers as before), so its
   cost does not grow with the rest of the log. It says `truncated` when older
-  refusal rows exist and the oldest read is not before the month. The index
+  refusal rows exist and the oldest read is not before the month, and
+  gives `retained_since_ms` when the month starts before the cutoff of the
+  history retention kept, since the removed refusals cannot be counted. The index
   changes no stored format; building it is one pass over the log at the
   first open. Its latency has not been measured.
 - *Failure mode.* With the daemon down `count` exits 1 and shows no figure;

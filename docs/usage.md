@@ -1063,7 +1063,11 @@ milliseconds), `refusals`, `by_kind` (`conflict`, `stale_base`,
 without a clock anchor, in no month). One count reads at most the newest
 20,000 refusal records and says `truncated: true` when the month may reach
 past them; the line in `today` and on the local page then ends with
-"(truncated: counted from the newest 20000 refusal records only)". A count is
+"(truncated: counted from the newest 20000 refusal records only)". When the
+month starts before the history a compaction kept, `retained_since_ms` gives
+that cutoff and the line says "(incomplete: retention removed the records from
+before ...)": the refusals of that part are gone, so the total is not the
+month's complete count. A count is
 never shown for a month whose local day starts could not all be read from the
 time zone rules: `count` exits 1 and `today` and the local page say the count
 could not be read. With the daemon down it exits 1 with "coordination

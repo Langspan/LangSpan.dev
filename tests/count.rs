@@ -645,3 +645,60 @@ fn a_workspace_left_out_of_the_count_is_not_shown_as_zero() {
     assert_eq!(code, 0, "{today}");
     assert!(today.contains(" 1 in aa00"), "{today}");
 }
+
+/// Review 4704296756: a month whose older part retention removed is not
+/// shown as a complete total. Generation 1's refusal is placed and recorded
+/// 31 days ago, a compaction keeping 30 days removes it, and the month that
+/// held it says its count is incomplete wherever it is shown.
+#[test]
+fn a_month_reaching_before_what_retention_kept_says_its_count_is_incomplete() {
+    const DAY: u64 = 86_400_000;
+    let mut w = World::new();
+    w.start();
+    w.started("alice");
+    w.started("bob");
+    assert!(!w.write("bob", "hold", "src/lib.rs", "PreToolUse"));
+    assert!(w.write("alice", "try-1", "src/lib.rs", "PreToolUse"));
+    w.write("bob", "hold", "src/lib.rs", "PostToolUse");
+    w.stop();
+    let refused_at = langspan::store::wall_now_ms() - 31 * DAY;
+    move_first_run(&w.state(), refused_at);
+    {
+        let connection = rusqlite::Connection::open(w.state().join("state.sqlite3")).unwrap();
+        connection
+            .execute(
+                "UPDATE events SET recorded_at_ms = ?1",
+                [i64::try_from(refused_at).unwrap()],
+            )
+            .unwrap();
+    }
+    w.start();
+    let month = langspan::count::Month::of(refused_at, 0).key();
+    let before = w.count(Some(&month), Some("UTC"));
+    assert_eq!(before["refusals"], 1, "{before:#}");
+    assert!(before.get("retained_since_ms").is_none(), "{before:#}");
+
+    let (code, out, err) = w.cli(&["compact", "--keep-days", "30", "--apply", "--json"], None);
+    assert_eq!(code, 0, "{out}{err}");
+    let report: Value = serde_json::from_str(&out).unwrap();
+    let report = &report["outcome"]["report"];
+    let cutoff = report["cutoff_ms"].as_u64().unwrap();
+    assert!(report["events"].as_u64().unwrap() > 0, "{report:#}");
+
+    let after = w.count(Some(&month), Some("UTC"));
+    assert_eq!(after["refusals"], 0, "{after:#}");
+    assert_eq!(after["truncated"], false, "the cap was not reached");
+    assert_eq!(after["retained_since_ms"], cutoff, "{after:#}");
+    let (code, text, _) = w.cli(&["count", "--month", &month], Some("UTC"));
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("Incomplete: retention removed the records from before "),
+        "{text}"
+    );
+    // This month, when it starts after the cutoff, lost nothing.
+    let now = langspan::store::wall_now_ms();
+    if langspan::count::Month::of(now, 0) != langspan::count::Month::of(cutoff, 0) {
+        let later = w.count(None, Some("UTC"));
+        assert!(later.get("retained_since_ms").is_none(), "{later:#}");
+    }
+}

@@ -195,15 +195,35 @@ impl MonthCount {
         )
     }
 
-    /// `truncated: counted from ...` when the daemon counted only the
-    /// newest records: shown next to the count wherever it appears.
-    pub fn truncation(&self) -> Option<String> {
-        self.count.truncated.then(|| {
-            format!(
+    /// Why the count is partial, each shown next to it wherever it
+    /// appears: `truncated: counted from ...` when the daemon counted only
+    /// the newest records, and `incomplete: retention removed ...` when the
+    /// month reaches before the history retention kept.
+    fn qualifiers(&self) -> Vec<String> {
+        let mut qualifiers = Vec::new();
+        if self.count.truncated {
+            qualifiers.push(format!(
                 "truncated: counted from the newest {} refusal records only",
                 langspan_core::COUNT_REFUSALS
-            )
-        })
+            ));
+        }
+        if let Some(since) = self.count.retained_since_ms {
+            let minutes = i64::try_from(since / 60_000).unwrap_or(i64::MAX);
+            let (year, month, day) = today::civil_from_days(minutes.div_euclid(1440));
+            let minute = minutes.rem_euclid(1440);
+            qualifiers.push(format!(
+                "incomplete: retention removed the records from before {year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+                minute / 60,
+                minute % 60
+            ));
+        }
+        qualifiers
+    }
+
+    /// The qualifiers of a partial count in one phrase.
+    pub fn truncation(&self) -> Option<String> {
+        let qualifiers = self.qualifiers();
+        (!qualifiers.is_empty()).then(|| qualifiers.join("; "))
     }
 
     /// The headline and, when the count is partial, its truncation: the
@@ -267,8 +287,8 @@ impl MonthCount {
                 count.repeats
             ));
         }
-        if let Some(truncation) = self.truncation() {
-            let (first, rest) = truncation.split_at(1);
+        for qualifier in self.qualifiers() {
+            let (first, rest) = qualifier.split_at(1);
             lines.push(format!("{}{rest}.", first.to_uppercase()));
         }
         if count.undated > 0 {
@@ -475,6 +495,7 @@ mod tests {
                 repeats: 4,
                 truncated: true,
                 undated: 2,
+                retained_since_ms: None,
             },
         };
         let text = count.text("March 2027");

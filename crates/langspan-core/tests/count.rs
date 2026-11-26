@@ -75,6 +75,7 @@ impl Log {
                 refusals: &self.events,
                 anchors: &self.anchors,
                 earlier,
+                retained_since_ms: None,
             },
             |session, workspace, after, paths| {
                 Ok::<_, ()>(retried(session, workspace, after, paths))
@@ -306,4 +307,33 @@ fn workspaces_past_the_cap_are_counted_not_named() {
         count.by_workspace.values().sum::<u32>() + count.omitted_workspaces,
         count.refusals
     );
+}
+
+/// Review 4704296756: a window that starts before retention's cutoff may
+/// be missing refusals and says so; one that starts at or after it lost
+/// nothing and does not.
+#[test]
+fn a_window_reaching_before_the_retention_cutoff_is_marked_incomplete() {
+    let mut log = Log::new(MARCH_1);
+    log.refused("alice", RefusalKind::Conflict, &["a.rs"], 20 * DAY);
+    let count = |since: u64| {
+        count_refusals(
+            &CountQuery {
+                days: &march(),
+                refusals: &log.events,
+                anchors: &log.anchors,
+                earlier: false,
+                retained_since_ms: Some(since),
+            },
+            |_, _, _, _| Ok::<_, ()>(false),
+        )
+        .unwrap()
+    };
+    let cut = count(MARCH_1 + 10 * DAY);
+    assert_eq!(cut.refusals, 1);
+    assert_eq!(cut.retained_since_ms, Some(MARCH_1 + 10 * DAY));
+    assert!(!cut.truncated, "the cap was not reached");
+    assert_eq!(count(MARCH_1).retained_since_ms, None);
+    assert_eq!(count(MARCH_1 - DAY).retained_since_ms, None);
+    assert_eq!(log.count(&march()).retained_since_ms, None);
 }

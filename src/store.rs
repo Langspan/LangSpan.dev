@@ -1366,6 +1366,7 @@ impl Store {
                 refusals: &refusals,
                 anchors: &anchors,
                 earlier,
+                retained_since_ms: retention::since_ms(&self.connection)?,
             },
             |session, workspace, after, paths| -> StoreResult<bool> {
                 let mut rows =

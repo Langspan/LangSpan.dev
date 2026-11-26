@@ -62,6 +62,11 @@ pub struct RefusalCount {
     /// Refusals read that have no wall time; in no count.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub undated: u32,
+    /// Retention removed the records written before this wall time, and
+    /// the window starts before it: refusals of that part may be missing,
+    /// so the count is not the window's complete total.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_since_ms: Option<u64>,
 }
 
 /// What a count is asked to cover.
@@ -76,6 +81,8 @@ pub struct CountQuery<'a> {
     pub anchors: &'a [ClockAnchor],
     /// The log holds `WriteRefused` events older than the first given.
     pub earlier: bool,
+    /// Retention removed the records written before this wall time.
+    pub retained_since_ms: Option<u64>,
 }
 
 /// The day starts a count accepts: strictly increasing, between two and
@@ -218,5 +225,6 @@ pub fn count_refusals<E>(
         repeats,
         truncated,
         undated,
+        retained_since_ms: query.retained_since_ms.filter(|since| *since > from_ms),
     })
 }
