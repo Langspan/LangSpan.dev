@@ -891,6 +891,22 @@ fn v3_held_commit_report_and_refusal_event_match_the_committed_golden_vectors() 
     // An event without a peer omits it, and still reads.
     let alone = wire.replace(r#""peer_session_id":"codex.bob","#, "");
     assert!(serde_json::from_str::<langspan_core::Event>(&alone).is_ok());
+    // A refused tool call keeps its input digest, for the report (H8); the
+    // record above, written before it was kept, reads without one.
+    let wire = include_str!("../fixtures/write-refused-digest-event-v3.json");
+    let event: langspan_core::Event = serde_json::from_str(wire).unwrap();
+    assert!(matches!(
+        &event,
+        langspan_core::Event::WriteRefused {
+            kind: langspan_core::RefusalKind::StaleBase,
+            input_digest: Some(digest),
+            ..
+        } if digest.len() == 64
+    ));
+    assert_eq!(
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+        wire
+    );
 }
 
 #[test]

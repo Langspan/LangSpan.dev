@@ -129,7 +129,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 ## H. The person's view
 
 - [H6: A daily "work saved" line, once measured](https://github.com/Langspan/LangSpan.dev/issues/80): people want a savings figure, which needs measurement rather than assumptions.
-- [H8: A coordination report per session and host](https://github.com/Langspan/LangSpan.dev/issues/81): a person cannot tell whether a new host version or model still follows coordination well.
 - [H9: What an agent did after a refusal](https://github.com/Langspan/LangSpan.dev/issues/82): nobody can tell whether a refused agent reread, waited, retried blindly or gave up.
 - [H10: Local counts of Git trouble](https://github.com/Langspan/LangSpan.dev/issues/83): there is no local baseline of merge conflicts, rejected pushes and reverts.
 

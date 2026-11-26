@@ -1,0 +1,1 @@
+{"type":"write_refused","session_id":"claude-code.alice","workspace_id":"app","kind":"stale_base","paths":["src/api.rs"],"peer_session_id":"codex.bob","input_digest":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","at_ms":5000,"generation":2}

@@ -249,6 +249,7 @@ fn a_refused_admission_appends_one_write_refused_event_and_the_retry_none() {
             kind: RefusalKind::Conflict,
             paths: vec!["src/api.rs".into()],
             peer_session_id: Some("bob".into()),
+            input_digest: Some("f".repeat(64)),
             at_ms: now + 1,
             generation: 1,
         }
@@ -493,6 +494,7 @@ fn refusals_without_a_clock_anchor_are_not_placed_on_a_day() {
             kind: RefusalKind::UnreadLines,
             paths: vec!["src/a.rs".into()],
             peer_session_id: None,
+            input_digest: None,
             at_ms: 5,
             generation: 1,
         },
