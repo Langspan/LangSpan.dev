@@ -9,7 +9,7 @@
 //! `MAX_CONNECTIONS` are served at once. See ADR 0013.
 
 use crate::{
-    client,
+    client, count,
     protocol::{PROTOCOL_VERSION, Request},
 };
 use langspan_core::{Command, Outcome};
@@ -19,7 +19,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -129,6 +129,9 @@ struct Context {
     csp: String,
     page: String,
     demo: bool,
+    /// The local month last counted and its day starts, found once a month
+    /// per run.
+    month: Mutex<Option<(count::Month, Vec<u64>)>>,
 }
 
 /// Bind, print the URL, and serve until the process is stopped.
@@ -179,6 +182,7 @@ pub fn serve(state_dir: PathBuf, options: Options) -> Result<(), crate::Error> {
         csp,
         page,
         demo: options.demo,
+        month: Mutex::new(None),
     });
     let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
@@ -444,13 +448,14 @@ fn route(request: &Parsed, arrived: SocketAddr, context: &Context) -> Reply {
             "this dashboard serves simulated data only; run langspan dashboard without --demo for the coordinator's view",
         );
     }
-    state(&context.state_dir)
+    state(context)
 }
 
 /// The coordinator's view through the ordinary socket client. Markup
 /// characters are escaped even inside JSON strings, so the body cannot be
 /// read as HTML whatever a client does with it.
-fn state(state_dir: &Path) -> Reply {
+fn state(context: &Context) -> Reply {
+    let state_dir = context.state_dir.as_path();
     let request = Request {
         version: PROTOCOL_VERSION,
         request_id: "read".into(),
@@ -473,7 +478,13 @@ fn state(state_dir: &Path) -> Reply {
                     .collect();
                 (
                     200,
-                    serde_json::json!({"available": true, "dashboard": dashboard, "install_advice": advice}),
+                    serde_json::json!({
+                        "available": true,
+                        "dashboard": dashboard,
+                        "install_advice": advice,
+                        // This local month's refusals (roadmap H5).
+                        "refusals_this_month": month_count(context),
+                    }),
                 )
             }
             Outcome::Error { code, message } => (
@@ -500,6 +511,41 @@ fn state(state_dir: &Path) -> Reply {
         content_type: "application/json; charset=utf-8",
         body: json.into_bytes(),
         allow: false,
+    }
+}
+
+/// This local month's refusal count, the fields `langspan count --json`
+/// prints with its label and the disclaimer (H5), or `{"error": ...}` when it cannot be read.
+fn month_count(context: &Context) -> serde_json::Value {
+    let answer = (|| -> Result<count::MonthCount, crate::Error> {
+        let month = count::month(None, crate::store::wall_now_ms())?;
+        let mut cached = context
+            .month
+            .lock()
+            .map_err(|_| "the month cache was poisoned")?;
+        let days = match cached.as_ref() {
+            Some((seen, days)) if *seen == month => days.clone(),
+            _ => {
+                let days = count::day_starts(month)?;
+                *cached = Some((month, days.clone()));
+                days
+            }
+        };
+        drop(cached);
+        count::ask(&context.state_dir, month, days)
+    })();
+    match answer {
+        Ok(answer) => {
+            let label = count::Month::parse(&answer.month)
+                .map(count::Month::label)
+                .unwrap_or_default();
+            let mut value = serde_json::to_value(&answer).unwrap_or_default();
+            value["line"] = answer.summary(&label).into();
+            value["label"] = label.into();
+            value["note"] = count::DISCLAIMER.into();
+            value
+        }
+        Err(error) => serde_json::json!({"error": error.to_string()}),
     }
 }
 

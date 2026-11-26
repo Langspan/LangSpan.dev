@@ -421,6 +421,7 @@ const ui = {
 };
 let view = null;
 let advice = {};
+let monthCount = null;
 let lastSuccess = 0;
 let failure = '';
 let model = null;
@@ -899,6 +900,17 @@ function renderLegend() {
   byId('legend').replaceChildren(...items.map(([kind, name, text]) => add(el('span', 'mark mark-' + kind), icon(name), text)));
 }
 
+// This local month's refusals, as `langspan count` counts them (H5). The
+// demo has no count; the live page says when the coordinator could not give one.
+function monthRefusals(m) {
+  if (!LIVE) return null;
+  if (!m || typeof m !== 'object' || m.error || typeof m.line !== 'string') {
+    return el('p', 't-warn', 'This month’s refusal count could not be read' + (m && typeof m.error === 'string' ? ': ' + m.error : '.'));
+  }
+  // The daemon's own line: the count, its kinds and any truncation.
+  return el('p', 'month-refusals', m.line + ', once per session, kind and files a day. ' + str(m.note));
+}
+
 function renderFeed(d) {
   const feed = byId('feed');
   const selected = ui.selection;
@@ -924,6 +936,8 @@ function renderFeed(d) {
     notes.push(el('p', null, (denials.more_conflicts === true || denials.more_stale_refusals === true ? 'More refusals exist than are shown. ' : '')
       + 'Refusals are searched in the newest ' + count(denials.window).toLocaleString() + ' recorded events and receipts; a held-file refusal is recorded without a time.'));
   }
+  const month = monthRefusals(monthCount);
+  if (month) notes.push(month);
   notes.push(el('p', null, 'A dash means no time was recorded. This is the current view, not an event log.'));
   byId('feed-foot').replaceChildren(...notes);
 }
@@ -1249,6 +1263,7 @@ async function refresh() {
     }
     view = body.dashboard;
     advice = body.install_advice && typeof body.install_advice === 'object' ? body.install_advice : {};
+    monthCount = body.refusals_this_month;
     lastSuccess = Date.now();
     failure = '';
     setStatus('live', 'Live');

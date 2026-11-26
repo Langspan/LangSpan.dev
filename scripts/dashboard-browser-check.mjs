@@ -327,6 +327,10 @@ async function main() {
       + " if (!head) return null; head.click(); const text = document.getElementById('inspector').textContent;"
       + " return { here: text.includes('NOTE-HERE'), other: text.includes('NOTE-OTHER-REPO') }; })()");
     check(scoped && scoped.here && !scoped.other, 'live: a path lists notes from its own repository only (' + JSON.stringify(scoped) + ')');
+    // The evidence footer carries this month's refusal count, as `langspan count` reports it.
+    const month = await p.eval("document.getElementById('feed-foot').textContent");
+    check(month.includes('refusal') && month.includes('once per session, kind and files a day') && month.includes('A refusal is not proof of avoided rework.'),
+      'live: the evidence footer shows this month\'s refusal count (' + month + ')');
     // Peer identities are not unique across repositories: an overlap's members
     // join only rows in the overlap's own repository group.
     const grouped = await p.eval("(() => { const peer = (ws, group) => ({ id: 'peer:m1:claude-code:abcd1234', workspace_id: ws, group, machine: 'm1', host: 'claude-code', session: 'abcd1234' });"

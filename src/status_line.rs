@@ -118,7 +118,7 @@ pub fn run(state_dir: &Path, root: Option<PathBuf>, budget: Duration, started: I
         return Answer::Unavailable;
     };
     let now = crate::store::wall_now_ms();
-    let from_ms = crate::local_day::midnight_now_ms(now, deadline);
+    let from_ms = crate::local_day::midnight_now_ms(now);
     ask(state_dir, &dir, from_ms, deadline)
 }
 
