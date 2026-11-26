@@ -367,7 +367,7 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let previous: Option<crate::observer::Snapshot> = previous_json
+        let mut previous: Option<crate::observer::Snapshot> = previous_json
             .map(|json| serde_json::from_str(&json))
             .transpose()?;
         if previous.as_ref().is_some_and(|old| {
@@ -394,6 +394,13 @@ impl Store {
                 }))
         }) {
             return Err(IDENTITY_CHANGED.into());
+        }
+        // Accepted as the same checkout: the previous scan stays the
+        // baseline under the paths it is reached by now, so a change made
+        // while it moved is still observed with its earlier version.
+        if let Some(old) = previous.as_mut() {
+            old.root.clone_from(&snapshot.root);
+            old.common_dir.clone_from(&snapshot.common_dir);
         }
         let changes = crate::observer::diff(&previous, snapshot);
         let sequence: i64 =

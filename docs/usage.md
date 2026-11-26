@@ -1540,6 +1540,9 @@ resolved paths: register a new one under the checkout's new place, or move
 one registered under the old root to its resolved path. While the workspace
 at the link holds an admission, such a registration is refused with
 `workspace_in_use`; complete the admission or wait for it to expire.
+If a registered root becomes a link to another registered workspace's
+checkout, both workspaces refuse admission until you move or remove one of
+them.
 
 User-level hooks need nothing: an event from NEW_ROOT joins the moved ID.
 Project-level hooks name their root in the host's configuration, which the

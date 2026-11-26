@@ -1228,6 +1228,87 @@ fn a_parent_behind_a_link_refuses_its_registered_worktree_files() {
     );
 }
 
+/// Two registered clones of one repository, and the first one's root is then
+/// replaced by a link to the second. Both workspaces now resolve to one
+/// physical checkout, so neither admits a file there.
+#[test]
+fn a_registered_root_relinked_to_another_registered_clone_admits_nothing() {
+    let mut home = Home::new();
+    home.start();
+    let a = home.repo("a");
+    let b = home.base.join("b");
+    git(&home.base, &["clone", "--quiet", text(&a), text(&b)]);
+    home.ok(&["workspace", "add", "a", text(&a), "--request-id", "add-a"]);
+    home.ok(&["workspace", "add", "b", text(&b), "--request-id", "add-b"]);
+    home.wait_for_scan("a", &head(&a));
+    home.wait_for_scan("b", &head(&b));
+    fs::rename(&a, home.base.join("a-aside")).unwrap();
+    std::os::unix::fs::symlink(&b, &a).unwrap();
+    home.ok(&["session", "start", "s1", "a", "--request-id", "s1"]);
+    home.ok(&["session", "start", "s2", "b", "--request-id", "s2"]);
+    for (session, request) in [("s1", "admit-a"), ("s2", "admit-b")] {
+        let refused = home.json(&[
+            "admit",
+            session,
+            "src/a.rs",
+            "--ttl-ms",
+            "60000",
+            "--request-id",
+            request,
+        ]);
+        assert!(
+            refused["outcome"]["lease"]["lease_id"].is_null(),
+            "{session}: {refused}"
+        );
+        assert!(
+            refused.to_string().contains("another registered workspace's root"),
+            "{session}: {refused}"
+        );
+    }
+}
+
+/// A file committed between the last scan at the old path and the first
+/// scan through the link is still observed: the accepted move keeps the
+/// previous scan as the baseline.
+#[test]
+fn a_commit_made_while_the_checkout_moved_behind_a_link_is_observed() {
+    let mut home = Home::new();
+    home.start();
+    let old = home.repo("disk1/app");
+    home.ok(&["workspace", "add", "app", text(&old), "--request-id", "add"]);
+    home.wait_for_scan("app", &head(&old));
+    if let Some(mut child) = home.daemon.take() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    fs::create_dir(home.base.join("disk2")).unwrap();
+    let new = home.base.join("disk2/app");
+    fs::rename(&old, &new).unwrap();
+    std::os::unix::fs::symlink(&new, &old).unwrap();
+    fs::write(new.join("src/a.rs"), "fn a() { changed() }\n").unwrap();
+    git(
+        &new,
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--quiet",
+            "-am",
+            "change",
+        ],
+    );
+    home.start();
+    home.wait_for_scan("app", &head(&new));
+    assert!(home.status()["scan_failures"].get("app").is_none());
+    let changes = home.json(&["changes", "app", "--after", "0", "--limit", "1000"]);
+    assert!(
+        changes["outcome"]["events"].to_string().contains("src/a.rs"),
+        "{changes}"
+    );
+}
+
 fn head(root: &Path) -> String {
     let output = Process::new("git")
         .args(["rev-parse", "HEAD"])

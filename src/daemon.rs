@@ -2521,6 +2521,13 @@ mod unix {
                 fs::canonicalize(stored).unwrap_or_else(|_| stored.to_path_buf())
             })
             .collect();
+        // Another workspace ID that now resolves to this very root, as when
+        // a registered clone's root was replaced by a link to another
+        // registered clone: both would admit the same physical files while
+        // the core keeps their leases apart, so neither admits any.
+        if others.contains(&current_root) {
+            return Err("workspace root now resolves to another registered workspace's root; move or remove one of them".into());
+        }
         let mut keys = paths
             .iter()
             .map(|path| -> Result<String, crate::Error> {
