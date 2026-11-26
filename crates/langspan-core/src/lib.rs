@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 mod dashboard;
 mod flaky;
+mod history;
 mod lines;
 mod recall;
 mod status;
@@ -24,6 +25,11 @@ pub use flaky::{
     FLAKY_DECAY_RUNS, FLAKY_MIN_FLIPS, FLAKY_WINDOW_RUNS, FlakyCount, FlakyTest, LastTests,
     MAX_FLAKY_LISTED, MAX_LEARNED_CHECKS, MAX_LEARNED_TESTS, MAX_TEST_NAME_BYTES, MAX_TEST_NAMES,
     MAX_TEST_RESULT_BYTES, TestFailure, TestHistory, TestLearning, TestResults,
+};
+pub use history::{
+    HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_NAME_BYTES, HISTORY_RELATED,
+    HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote, HistoryQuery,
+    history as definition_history,
 };
 pub use recall::{
     RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
@@ -1312,8 +1318,11 @@ pub struct BlindSpots {
 pub struct InterfaceChange {
     pub name: String,
     pub kind: String,
-    /// `removed`, `signature_changed`, `definition_added` or
-    /// `definition_removed`. The last two mean only the number of
+    /// `added`, `removed`, `signature_changed`, `definition_added` or
+    /// `definition_removed`. `added` is a new exported name with its
+    /// signature in `after`: kept in the log for a definition's history
+    /// (roadmap D4), never held for briefings. A removal recorded since
+    /// then carries the removed signature in `before`. The last two mean only the number of
     /// definitions sharing the name and kind changed: `after` (added) or
     /// `before` (removed) holds the signatures that came or went, and the
     /// counts say how many there were and are.
@@ -1430,6 +1439,15 @@ pub struct InterfaceImpact {
     /// The asking session's files that mention a changed name.
     pub affected: Vec<String>,
     pub age_ms: u64,
+}
+
+/// When an event that has no time of its own was decided: the daemon's
+/// clock and the generation it belongs to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Stamp {
+    pub at_ms: u64,
+    pub generation: u64,
 }
 
 /// Something a person or an agent asked LangSpan to remember about a
@@ -2532,6 +2550,11 @@ pub enum Event {
     },
     Remembered {
         note: Note,
+        /// When it was remembered. Absent from notes recorded before it was
+        /// kept; a definition's history (roadmap D4) places notes near
+        /// interface changes by it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<Stamp>,
     },
     Forgotten {
         workspace_id: String,
@@ -3044,6 +3067,19 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
         limit: u32,
+    },
+    /// Read-only, answered from the event log: the recorded interface
+    /// changes of definitions named `name`, newest first, in `path` or in
+    /// any file, older than `before_seq` when given (roadmap D4). Never
+    /// recorded.
+    History {
+        workspace_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_seq: Option<u64>,
     },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
@@ -3635,6 +3671,19 @@ enum CommandWire {
         path: Option<String>,
         limit: u32,
     },
+    /// Read-only, answered from the event log: the recorded interface
+    /// changes of definitions named `name`, newest first, in `path` or in
+    /// any file, older than `before_seq` when given (roadmap D4). Never
+    /// recorded.
+    History {
+        workspace_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_seq: Option<u64>,
+    },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
     /// every workspace when none is named, and what is still open.
@@ -4173,6 +4222,9 @@ pub enum Outcome {
     },
     Recall {
         recall: Recall,
+    },
+    History {
+        history: History,
     },
     Today {
         today: Today,
@@ -6010,7 +6062,13 @@ fn decide_checked(
             };
             validate_note(&note)?;
             Ok(Decision {
-                events: vec![Event::Remembered { note: note.clone() }],
+                events: vec![Event::Remembered {
+                    note: note.clone(),
+                    at: Some(Stamp {
+                        at_ms: now_ms,
+                        generation: state.generation,
+                    }),
+                }],
                 outcome: Outcome::Remembered { note },
             })
         }
@@ -6325,6 +6383,7 @@ fn decide_checked(
         }
         Command::Events { .. }
         | Command::Today { .. }
+        | Command::History { .. }
         | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
@@ -6776,6 +6835,13 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         // counts.
         let shaped = match (change.change.as_str(), counts) {
             ("removed" | "signature_changed", None) => true,
+            // A new export: its signature, and no parameter counts.
+            ("added", None) => {
+                change.before.is_none()
+                    && change.after.is_some()
+                    && change.before_arity.is_none()
+                    && change.after_arity.is_none()
+            }
             ("definition_added", Some((before, after))) => {
                 before >= 1
                     && before < after
@@ -6803,7 +6869,7 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         {
             return Err(error(
                 "invalid_notice",
-                "An interface change has a name, a kind, `removed`, `signature_changed`, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
+                "An interface change has a name, a kind, `added`, `removed`, `signature_changed`, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
             ));
         }
     }
@@ -9547,7 +9613,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 link.withdrawn = true;
             }
         }
-        Event::Remembered { note } => {
+        Event::Remembered { note, .. } => {
             validate_note(note)?;
             validate_known_workspace(state, &note.workspace_id)?;
             let notes = state.notes.entry(note.workspace_id.clone()).or_default();
@@ -9821,14 +9887,22 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::InterfaceChanged { notice } => {
             validate_notice(notice)?;
             validate_known_workspace(state, &notice.workspace_id)?;
-            let notices = state
-                .interface_notices
-                .entry(notice.workspace_id.clone())
-                .or_default();
-            // A newer notice for the same file replaces the older one.
-            notices.retain(|held| held.path != notice.path);
-            notices.insert(0, notice.clone());
-            notices.truncate(MAX_NOTICES);
+            // An added export is history only (roadmap D4): a new name is
+            // news to no dependent, so it is not held for briefings, recaps,
+            // break alerts or the dashboard, and an addition alone does not
+            // replace the file's held notice or open a workspace's entry.
+            let mut held = notice.clone();
+            held.changes.retain(|change| change.change != "added");
+            if !held.changes.is_empty() {
+                let notices = state
+                    .interface_notices
+                    .entry(notice.workspace_id.clone())
+                    .or_default();
+                // A newer notice for the same file replaces the older one.
+                notices.retain(|older| older.path != held.path);
+                notices.insert(0, held);
+                notices.truncate(MAX_NOTICES);
+            }
         }
         Event::CheckRecorded { check } => {
             validate_check(state, check)?;

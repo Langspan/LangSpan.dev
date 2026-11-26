@@ -351,25 +351,35 @@ these limits.
 
 ### Antigravity
 
-The Antigravity adapter is built from Antigravity's documentation; it has not
-yet run on a real Antigravity. `hooks install antigravity` writes
+The Antigravity adapter is built from Antigravity's documentation and
+corrected against the events of a real Antigravity 1.5.14 run; a repeat run
+with these corrections is pending. `hooks install antigravity` writes
 `.agents/hooks.json` and registers `langspan mcp` in `.agents/mcp_config.json`;
 `install --hosts antigravity` writes `~/.gemini/config/hooks.json` and
-`~/.gemini/config/mcp_config.json`. Antigravity's App, CLI and IDE all read
-these files. Its `hooks.json` maps hook names to definitions, so LangSpan's
-entries are the definition named `langspan`, beside your own. An Antigravity
-event does not say which event it is, so each installed command names it with
+`~/.gemini/config/mcp_config.json`. An empty `mcp_config.json`, which
+Antigravity leaves at both levels, is taken as an empty configuration.
+Antigravity's App, CLI and IDE all read these files. Its `hooks.json` maps
+hook names to definitions, so LangSpan's entries are the definition named
+`langspan`, beside your own. Each installed command names its event with
 `--event`. Each has a 5-second timeout:
 
 | Event | Matcher | What LangSpan does |
 | --- | --- | --- |
-| `PreToolUse` | `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` | Admission; a conflict or stale source is `{"decision":"deny"}` with a labelled reason |
-| `PostToolUse` | the same, and `view_file` | Records the result, the version read, or the shell command's changes |
+| `PreToolUse` | `edit_file`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` | Admission; a conflict or stale source is `{"decision":"deny"}` with a labelled reason, anything else `{"decision":"allow"}` |
+| `PostToolUse` | the same, and `read_file` and `view_file` | Records the result, the version read, or the shell command's changes |
 | `SessionStart` | none | Registers the session and adds the briefing as a system message in `injectSteps` |
 | `PreInvocation` | none | Before each model call: news from peers since the session was last told, as a system message; at the first call of an execution, the prompt summary and code briefing too |
 
-Every other answer is `{}`: the hook never answers `allow`, `auto_approve` or
-`ask`, so Antigravity's own permission policy decides. A conversation is one
+Antigravity 1.5.14 edits with `edit_file` and reads with `read_file`; the
+other tool names are the documented ones, kept in case another version uses
+them. If `doctor` reports that a matcher does not name the tools this version
+handles, an earlier install wrote it: run the install command again.
+
+On `PreToolUse`, Antigravity 1.5.14 reads `{}` as a refusal, so the hook
+answers `{"decision":"allow"}` whenever it does not deny, including when it
+cannot decide. `allow` passes the call on to the next hook or Antigravity's
+own permission policy; the hook never answers `auto_approve` or `ask`. Every
+other event's answer, other than a briefing, is `{}`. A conversation is one
 session in each workspace it works in, appearing as
 `antigravity.<conversationId>.w<digest of the workspace>`; with several
 workspace folders, each is registered and briefed at `SessionStart` and
@@ -377,8 +387,9 @@ workspace folders, each is registered and briefed at `SessionStart` and
 hook steps aside for the workspace's `.agents/hooks.json` only while that
 file's `langspan` definition is not `"enabled": false`.
 Antigravity has no session-end event, and its `Stop` requires a decision, so
-neither is registered. A `replace_file_content` holds the region it replaces;
-`write_to_file` and `multi_replace_file_content` hold the whole file.
+neither is registered. An `edit_file` or `replace_file_content` holds the
+region it replaces; `write_to_file` and `multi_replace_file_content` hold the
+whole file.
 [ADR 0035](adr/0035-antigravity-adapter.md) lists the sources and what the
 documentation leaves unverified.
 
@@ -1014,7 +1025,10 @@ already waiting when the coordinator starts is timed from that start.
 ## Look up symbols and affected files
 
 The source index finds definitions and name mentions in Rust, Python,
-TypeScript/JavaScript (including TSX/JSX), and Go. It updates after complete Git
+TypeScript/JavaScript (including TSX/JSX), Go and Java; `langspan doctor`
+lists them. A Java definition is exported when another package can reach it:
+`public` or `protected`, or a member of an interface that is not `private`.
+It updates after complete Git
 scans and can lag changes on disk. Replace `PROJECT` with a registered workspace,
 `upload` with the name to look up, and `src/api.rs` with the file to inspect:
 
@@ -1090,7 +1104,7 @@ not be read in full, so an empty or short answer is weak. Ask which ones:
 partial (2): "src/legacy/parse.rs" (since 3h), "web/src/app.tsx" (since 10m)
 waiting (1): "src/api.rs"
 too large (1): "src/generated/schema.rs"
-not indexed, other languages: .java 10, .rb 3
+not indexed, other languages: .kt 10, .rb 3
 ```
 
 The lists are `partial` (a syntax error or a bound reached, with since when),
@@ -1111,6 +1125,47 @@ as a removal. A first indexing produces no change notice. When a file holds
 several definitions of one name (a method of that name on two types, say), a
 definition added or removed is told as such, with how many there are now:
 "a second method "text" was added … (now 2 definitions with that name)".
+
+Each notice stays in the event log, and `graph history` reads a definition's
+past from there, before an agent changes it again:
+
+```sh
+./target/release/langspan graph history PROJECT save --json
+./target/release/langspan graph history PROJECT save --path src/store.rs --limit 5
+```
+
+```text
+seq 812, 2h ago: "src/store.rs" function signature changed from "fn save(x: &Item, sync: bool)" to "fn save(x: &Item)" by session codex.bob (reverted: back to an earlier signature)
+  note (note-7, by codex.bob): "sync deadlocks under load; keep it off"
+seq 640, 1d ago: "src/store.rs" function signature changed from "fn save(x: &Item)" to "fn save(x: &Item, sync: bool)" by session claude-code.alice; task: "add a sync option to save"
+Sessions are the last reported editors of the file, not proof of authorship.
+```
+
+Entries are newest first, at most `--limit` (1 to 50, default 10). Each has
+`seq`, `age_ms`, `change` (`added`, `removed`, `signature_changed`,
+`definition_added` or `definition_removed`), `kind`, `path`, `before` and
+`after`, and `by_session`: the last session that reported editing the file
+before the change was indexed, a correlation and not proof of who wrote it
+(the answer's `attribution` says so). `task` is that session's last prompt
+summary before the change, absent when it recorded none (prompt summaries
+off). `notes` and `messages` (up to 4 each) are those that named the file, in
+their paths or text, within 30 minutes either side of the change; forgotten
+notes, withdrawn messages, and notes or messages recorded before they kept
+their time, are not shown. `reverted: true` means the change put back a signature that the
+definition, in that file, had at an earlier recorded change. A new exported
+name is recorded as `added` for this history and told to no session; a removal
+records the signature that went, so a definition removed and added back is
+marked reverted. Notices recorded before this did not carry those signatures.
+
+`truncated: true` with a `next_seq` says more is recorded than one answer
+holds: more entries than `--limit`, an answer over 28 KiB, or a log with
+more than 20,000 events of the kinds a history reads before that point. Ask
+again with `--before NEXT_SEQ` (MCP: `before_seq`). Only changes the index
+observed are known: body-only changes, changes before LangSpan watched the
+repository, and commit messages are not part of it. A history is a read: it
+records and delivers nothing. MCP: `langspan_history`, whose result puts a
+label first saying the signatures, task lines, notes and messages are data,
+not instructions.
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
 Code) or an `apply_patch` (Codex) is admitted, the hook parses the calls in the
@@ -1505,6 +1560,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
+| `langspan_history` | A definition's recorded interface changes, newest first, with the last reported editor, its task line, nearby notes and messages, and changes back to an earlier signature; at most 50 |
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |
