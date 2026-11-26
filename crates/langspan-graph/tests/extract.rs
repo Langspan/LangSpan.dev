@@ -694,3 +694,23 @@ fn a_one_element_tuple_losing_its_comma_is_a_signature_change_and_a_wrapped_one_
     let pair_wrapped = "def upload(values=(\n    1,\n    2,\n)):\n    return values\n";
     assert_eq!(changed(Language::Python, pair, pair_wrapped), []);
 }
+
+/// Review finding 4704176293: every name extracted is within the bound an
+/// import of the index accepts, including a TypeScript arrow-function or
+/// function-expression variable.
+#[test]
+fn an_over_long_function_variable_name_is_left_out_like_any_other() {
+    let long = "a".repeat(langspan_graph::NAME_BYTES + 1);
+    let fits = "b".repeat(langspan_graph::NAME_BYTES);
+    let source = format!(
+        "export const {long} = (x: number) => x;\nexport const {long}2 = function () {{}};\nexport const {fits} = () => 1;\nexport function plain(): void {{}}\n"
+    );
+    let graph = extract(Language::TypeScript, source.as_bytes()).unwrap();
+    assert_eq!(
+        names(&graph),
+        [
+            (fits.as_str(), SymbolKind::Function, true),
+            ("plain", SymbolKind::Function, true),
+        ]
+    );
+}

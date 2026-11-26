@@ -102,7 +102,18 @@ pub struct AgentRow {
     pub active_age_ms: Option<u64>,
     /// A teammate: time since this daemon last received their publication.
     pub heard_age_ms: Option<u64>,
+    /// Local: the session that took over this ended session's uncommitted
+    /// work (issue #161).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_by: Option<String>,
+    /// Local: ended sessions whose uncommitted work this session took
+    /// over, at most `ADOPTED_SHOWN`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adopted: Vec<String>,
 }
+
+/// Adopted sessions one agent row names, at most.
+pub const ADOPTED_SHOWN: usize = 4;
 
 /// A file a local session holds a current admission for.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -568,6 +579,17 @@ fn agents(state: &State, now_ms: u64) -> (Vec<AgentRow>, Vec<Touch>) {
             liveness,
             active_age_ms,
             heard_age_ms: None,
+            adopted_by: state
+                .adoptions
+                .get(id)
+                .map(|adoption| clip(&adoption.session_id)),
+            adopted: state
+                .adoptions
+                .values()
+                .filter(|adoption| &adoption.session_id == id)
+                .take(ADOPTED_SHOWN)
+                .map(|adoption| clip(&adoption.from))
+                .collect(),
         });
     }
     for peer in state.remote_peers.values() {
@@ -637,6 +659,8 @@ fn agents(state: &State, now_ms: u64) -> (Vec<AgentRow>, Vec<Touch>) {
                 liveness: None,
                 active_age_ms: None,
                 heard_age_ms,
+                adopted_by: None,
+                adopted: Vec::new(),
             });
         }
     }

@@ -401,8 +401,12 @@ fn a_reported_grade_that_disagrees_with_the_result_does_not_apply() {
         timed_out_s: None,
         tail: String::new(),
         failures: Vec::new(),
+        more_failures: false,
+        baseline_check_id: None,
+        fixed: Vec::new(),
+        writers: Vec::new(),
         interface_grade: grade,
-        interface: Some(cause(&["cli/src/main.rs"])),
+        interface: Some(Box::new(cause(&["cli/src/main.rs"]))),
         index_incomplete: false,
     };
     for grade in [Some(InterfaceGrade::Kept), None] {

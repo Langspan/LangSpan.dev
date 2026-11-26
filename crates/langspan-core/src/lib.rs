@@ -6,6 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+mod classes;
 mod count;
 mod dashboard;
 mod flaky;
@@ -17,6 +18,9 @@ mod status;
 mod status_line;
 mod today;
 mod workspaces;
+pub use classes::{
+    FailureClass, KeptTests, MAX_FIXED_NAMED, MAX_WRITE_RUNS, MAX_WRITERS_NAMED, WriteRun,
+};
 pub use count::{
     COUNT_DAYS, COUNT_KINDS, COUNT_REFUSALS, COUNT_WORKSPACES, CountQuery, RefusalCount,
     count_refusals, validate_count_days,
@@ -638,6 +642,7 @@ pub fn acting_session(command: &Command) -> Option<&str> {
         | Command::SetPromptTargets { session_id, .. }
         | Command::SessionStop { session_id, .. }
         | Command::ObserveToolBatch { session_id, .. }
+        | Command::Adopt { session_id, .. }
         | Command::Brief {
             session_id,
             deliver: true,
@@ -1111,13 +1116,29 @@ pub struct CheckNotice {
     /// to flip on unchanged code. Empty when no test was named.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<TestFailure>,
+    /// Its output named more failing tests than `failures` holds.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub more_failures: bool,
+    /// The record its failures were compared with: the session's baseline
+    /// (issue #69). `None` when nothing was compared, and then no failure
+    /// has a class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_check_id: Option<String>,
+    /// Tests that failed in the baseline and pass now, at most
+    /// `MAX_FIXED_NAMED`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixed: Vec<String>,
+    /// Other sessions that wrote between the baseline's tree and this one,
+    /// at most `MAX_WRITERS_NAMED`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writers: Vec<String>,
     /// A wider check's grade: `kept` when it passed, `broke` when it failed,
     /// absent when it was inconclusive or is no wider check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface_grade: Option<InterfaceGrade>,
     /// The interface change a wider check ran for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interface: Option<InterfaceCause>,
+    pub interface: Option<Box<InterfaceCause>>,
     /// See [`CheckReport::index_incomplete`].
     #[serde(default, skip_serializing_if = "is_false")]
     pub index_incomplete: bool,
@@ -1638,6 +1659,51 @@ pub struct Message {
     pub retracted: bool,
 }
 
+/// Why a session took over an ended session's uncommitted work, when
+/// LangSpan can tell (issue #161). Shown, never required: the person or
+/// agent decides.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AdoptReason {
+    /// The ended session sent the adopter this message: addressed to it,
+    /// or a handoff the adopter took.
+    Handoff { message_id: String },
+    /// Both sessions have the same task line.
+    SameTask {},
+}
+
+/// One session took over an ended session's journaled, uncommitted lines
+/// in the same workspace (issue #161). The line journal credits them to
+/// `session_id` from then on; this record names the transfer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Adoption {
+    /// The ended session whose lines were taken over.
+    pub from: String,
+    /// The session that took them over.
+    pub session_id: String,
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<AdoptReason>,
+    /// The daemon's clock, within `generation`.
+    pub at_ms: u64,
+    pub generation: u64,
+}
+
+/// An ended session that left uncommitted work in the briefed session's
+/// checkout and that nobody has adopted: the briefing suggests `langspan
+/// adopt` (issue #161). Its task line is data from that session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LeftWork {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+/// Ended sessions one briefing names as having left work, at most.
+pub const BRIEF_LEFT_WORK: usize = 4;
+
 /// A message a session received and that was then withdrawn: the session
 /// is told once, at its next briefing, to disregard it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1998,6 +2064,13 @@ pub struct RecapSession {
     pub intent: Option<String>,
     pub editing: Vec<String>,
     pub recent: Vec<RecentPath>,
+    /// The session that took over this ended session's uncommitted work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_by: Option<String>,
+    /// Ended sessions whose uncommitted work this session took over, at
+    /// most `RECAP_ITEMS`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adopted: Vec<String>,
 }
 
 /// A bounded account of one workspace: who is here, what changed, what is
@@ -2144,6 +2217,11 @@ pub struct Briefing {
     /// yet delivered. Each is delivered once. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckNotice>,
+    /// Ended sessions that left uncommitted work in this checkout, from the
+    /// sessions the request named (`Brief::left`). At most
+    /// `BRIEF_LEFT_WORK`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_work: Vec<LeftWork>,
     /// What changed recently in the repository, only in a briefing asked
     /// for at session start (roadmap C3). Never part of the signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2238,6 +2316,10 @@ pub struct State {
     /// Sessions whose presence setting is not the default, by session ID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub presence: BTreeMap<String, PresenceSetting>,
+    /// Ended sessions whose uncommitted work another session took over, by
+    /// the ended session's ID (issue #161). One adoption per ended session.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub adoptions: BTreeMap<String, Adoption>,
     /// The current generation's clock anchor, once recorded. Derived from
     /// the events on replay; not part of the status reply.
     #[serde(skip)]
@@ -2266,6 +2348,21 @@ pub struct State {
     /// can read it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub writes: BTreeMap<String, u64>,
+    /// Per workspace, then check ID: the per-test results of the records it
+    /// holds, for comparing a later run with them (issue #69). Derived on
+    /// replay; not part of the status reply.
+    #[serde(skip)]
+    pub kept_tests: BTreeMap<String, BTreeMap<String, KeptTests>>,
+    /// Per session, the workspace's write count just before the session's
+    /// first write since it registered. Derived on replay; not part of the
+    /// status reply.
+    #[serde(skip)]
+    pub first_writes: BTreeMap<String, u64>,
+    /// Per workspace, its sessions' runs of consecutive writes, oldest
+    /// first, at most `MAX_WRITE_RUNS`. Derived on replay; not part of the
+    /// status reply.
+    #[serde(skip)]
+    pub write_runs: BTreeMap<String, Vec<WriteRun>>,
 }
 
 /// Checkout changes kept per workspace.
@@ -2476,6 +2573,11 @@ pub enum Event {
     SessionEnded {
         session_id: String,
     },
+    /// A session took over an ended session's uncommitted work (issue
+    /// #161).
+    SessionAdopted {
+        adoption: Adoption,
+    },
     /// The host said the session finished its reply (Stop, StopFailure or
     /// SubagentStop). `released` are the tool admissions still open then,
     /// completed by this event's preceding `LeaseCompleted` events.
@@ -2541,6 +2643,10 @@ pub enum Event {
     },
     CheckRecorded {
         check: CheckRecord,
+        /// The per-test results of a working-tree record, kept to compare a
+        /// later run with (issue #69). Absent from older logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tests: Option<KeptTests>,
     },
     AutoCheckEnabled {
         check: AutoCheck,
@@ -3245,6 +3351,23 @@ pub enum Command {
         names: Vec<String>,
         limit: u32,
     },
+    /// Owner-only, CLI-only: write the workspace's source index to the
+    /// absolute path `path` as JSON Lines, created owner-only and never over
+    /// an existing file (roadmap D5). Not recorded.
+    GraphExport {
+        workspace_id: String,
+        path: String,
+    },
+    /// Owner-only, CLI-only: read an exported index from the absolute path
+    /// `path`. Only files whose content here has the exported digest, and
+    /// that the index does not hold already, are loaded, and only with
+    /// `apply`; without it nothing changes. Not recorded (roadmap D5).
+    GraphImport {
+        workspace_id: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        apply: bool,
+    },
     /// Answered by the daemon with its source index: the calls among
     /// `calls` whose argument count does not fit a signature another live
     /// session changed, from notices not yet alerted to this session. The
@@ -3370,6 +3493,19 @@ pub enum Command {
         /// delivered that way (roadmap E12).
         #[serde(default, skip_serializing_if = "is_false")]
         mcp: bool,
+        /// Sessions whose journaled lines are still uncommitted in this
+        /// session's checkout, as its adapter found them at the session's
+        /// start. The ended ones nobody adopted are named in the briefing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        left: Vec<String>,
+    },
+    /// Take over an ended session's journaled, uncommitted lines in the
+    /// same workspace (issue #161). Refused for a live session and for one
+    /// of another workspace. The line journal is the adapter's: once the
+    /// event is recorded, the adapter credits the lines to `session_id`.
+    Adopt {
+        session_id: String,
+        from: String,
     },
     /// Read-only: the bounded view of what matters now. Closed admissions
     /// are counted, not listed; the answer always fits one frame.
@@ -3863,6 +3999,16 @@ enum CommandWire {
         names: Vec<String>,
         limit: u32,
     },
+    GraphExport {
+        workspace_id: String,
+        path: String,
+    },
+    GraphImport {
+        workspace_id: String,
+        path: String,
+        #[serde(default)]
+        apply: bool,
+    },
     /// Answered by the daemon with its source index: the calls among
     /// `calls` whose argument count does not fit a signature another live
     /// session changed, from notices not yet alerted to this session. The
@@ -3983,6 +4129,12 @@ enum CommandWire {
         /// delivered that way (roadmap E12).
         #[serde(default, skip_serializing_if = "is_false")]
         mcp: bool,
+        #[serde(default)]
+        left: Vec<String>,
+    },
+    Adopt {
+        session_id: String,
+        from: String,
     },
     Status {},
     StatusRecords {
@@ -4121,6 +4273,27 @@ pub enum Outcome {
     },
     SessionEnded {
         session_id: String,
+    },
+    /// `recorded` is false when this session had already adopted `from`:
+    /// nothing new was recorded, and the adapter may finish crediting the
+    /// lines. `root` is the workspace's, whose line journal holds them.
+    /// `live` names `from`'s subagents that have not ended: their lines
+    /// (and their own subagents') stay theirs. `earlier` names the sessions
+    /// whose adoptions lead to `from`: an adopter that ended before its
+    /// lines were credited left them there, and they are credited too.
+    /// `kept` names subagents of `from` (or of an `earlier` session) that
+    /// another session adopted: their lines (and their own subagents') are
+    /// that session's to credit, so they stay where they are.
+    Adopted {
+        adoption: Adoption,
+        root: String,
+        recorded: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        live: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        earlier: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        kept: Vec<String>,
     },
     SessionStopped {
         session_id: String,
@@ -4357,6 +4530,30 @@ pub enum Outcome {
     GraphContext {
         matches: Vec<NameContext>,
         coverage: GraphCoverage,
+    },
+    /// The source index was written to a file (roadmap D5).
+    GraphExported {
+        workspace_id: String,
+        files: u32,
+        partial_files: u32,
+        bytes: u64,
+    },
+    /// What an index import found, by file line (roadmap D5). Only
+    /// `loaded` files were written, and only when `applied`.
+    GraphImported {
+        workspace_id: String,
+        applied: bool,
+        /// Same content here, and not yet indexed here: loaded, or would be.
+        loaded: u32,
+        /// Content here differs, or the file is missing or not in the last
+        /// scan: left to the indexer.
+        different: u32,
+        /// Already indexed here: the local rows are kept.
+        kept: u32,
+        /// Over a parse bound (symbols, references, imports, calls, line size).
+        over_limits: u32,
+        /// Not a valid file record, or a path seen earlier in the file.
+        malformed: u32,
     },
     /// `ready` is false when the index has no complete scan of the
     /// workspace: nothing was checked.
@@ -5440,8 +5637,27 @@ fn decide_checked(
                 changed_since: false,
             };
             validate_check(state, &check)?;
+            // Kept with the record so that a later run can be compared with
+            // it; validated with the test results below.
+            let kept = match (tests, *writes_before, command_id) {
+                (Some(results), Some(writes_before), Some(command_id)) => Some(KeptTests {
+                    results: results.clone(),
+                    writes_before,
+                    command_id: command_id.clone(),
+                }),
+                _ => None,
+            };
+            // The write generation the run took before its tree. A write
+            // recorded since, even one undone before the run (or its rerun)
+            // ended, means its results are not of unchanged code: they are
+            // checked but learned from by neither this record nor a later
+            // one, and are no baseline (a write counted between the count
+            // and the tree would be in the tree it tested).
+            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
+            let unchanged = *writes_before == Some(writes);
             let mut events = vec![Event::CheckRecorded {
                 check: check.clone(),
+                tests: kept.clone().filter(|_| unchanged),
             }];
             // What this record teaches about tests that flip, learned on a
             // copy so that its notice is labelled with it.
@@ -5472,13 +5688,6 @@ fn decide_checked(
                     ));
                 }
             };
-            // The write generation the run took before its tree. A write
-            // recorded since, even one undone before the run (or its rerun)
-            // ended, means its results are not of unchanged code: they are
-            // checked but learned from by neither this record nor a later
-            // one.
-            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
-            let unchanged = *writes_before == Some(writes);
             let runs = tests
                 .iter()
                 .map(|results| (results, false))
@@ -5512,17 +5721,46 @@ fn decide_checked(
                     at_ms: now_ms,
                 });
             }
-            let failures = tests
-                .iter()
-                .flat_map(|results| &results.failed)
-                .map(|test| TestFailure {
-                    test: test.clone(),
-                    flaky: learning.label(name, test),
-                })
-                .collect();
+            let notice = |comparison: Option<&classes::Comparison>| CheckNotice {
+                check_id: check.check_id.clone(),
+                name: check.name.clone(),
+                tree_oid: check.tree_oid.clone(),
+                result: check.result.clone(),
+                duration_ms: check.duration_ms,
+                timed_out_s: report.as_ref().and_then(|report| report.timed_out_s),
+                tail: report
+                    .as_ref()
+                    .map(|report| report.tail.clone())
+                    .unwrap_or_default(),
+                failures: tests
+                    .iter()
+                    .flat_map(|results| &results.failed)
+                    .enumerate()
+                    .map(|(at, test)| TestFailure {
+                        test: test.clone(),
+                        flaky: learning.label(name, test),
+                        class: comparison
+                            .and_then(|comparison| comparison.classes.get(at).copied()),
+                    })
+                    .collect(),
+                more_failures: tests.as_ref().is_some_and(|results| results.more_failed),
+                baseline_check_id: comparison
+                    .map(|comparison| comparison.baseline_check_id.clone()),
+                fixed: comparison.map_or_else(Vec::new, |comparison| comparison.fixed.clone()),
+                writers: comparison.map_or_else(Vec::new, |comparison| comparison.writers.clone()),
+                interface_grade: interface_grade(
+                    report
+                        .as_ref()
+                        .and_then(|report| report.interface.as_deref()),
+                    &check.result,
+                ),
+                interface: report.as_ref().and_then(|report| report.interface.clone()),
+                index_incomplete: report
+                    .as_ref()
+                    .is_some_and(|report| report.index_incomplete),
+            };
             if let Some(report) = report {
                 let mut session_ids = report.session_ids.clone();
-                let interface_grade = interface_grade(report.interface.as_deref(), &check.result);
                 validate_dependent_paths(report)?;
                 if let Some(cause) = &report.interface {
                     validate_interface_cause(cause)?;
@@ -5540,24 +5778,27 @@ fn decide_checked(
                         }
                     }
                 }
-                let reported = Event::CheckReported {
-                    session_ids,
-                    notice: CheckNotice {
-                        check_id: check.check_id.clone(),
-                        name: check.name.clone(),
-                        tree_oid: check.tree_oid.clone(),
-                        result: check.result.clone(),
-                        duration_ms: check.duration_ms,
-                        timed_out_s: report.timed_out_s,
-                        tail: report.tail.clone(),
-                        failures,
-                        interface_grade,
-                        interface: report.interface.as_deref().cloned(),
-                        index_incomplete: report.index_incomplete,
+                validate_check_report(
+                    state,
+                    &check.workspace_id,
+                    &Event::CheckReported {
+                        session_ids: session_ids.clone(),
+                        notice: notice(None),
                     },
-                };
-                validate_check_report(state, &check.workspace_id, &reported)?;
-                events.push(reported);
+                )?;
+                // Each session's failures are compared with its own baseline:
+                // one report per group of sessions told the same.
+                let groups = classes::group(&session_ids, |session| {
+                    classes::compare(state, workspace_id, name, kept.as_ref()?, session)
+                });
+                for (comparison, session_ids) in groups {
+                    let reported = Event::CheckReported {
+                        session_ids,
+                        notice: notice(comparison.as_ref()),
+                    };
+                    validate_check_report(state, &check.workspace_id, &reported)?;
+                    events.push(reported);
+                }
             }
             Ok(Decision {
                 events,
@@ -5949,11 +6190,13 @@ fn decide_checked(
                 },
             })
         }
+        Command::Adopt { session_id, from } => adopt(state, session_id, from, now_ms),
         Command::Brief {
             session_id,
             max_peers,
             deliver,
             mid_turn,
+            left,
             recent,
             recent_window_ms,
             mcp,
@@ -5973,6 +6216,7 @@ fn decide_checked(
             let window = recent::window(*recent_window_ms)?;
             let (mut briefing, signature) =
                 brief(state, session_id, *max_peers, !*mid_turn, now_ms)?;
+            briefing.left_work = left_work(state, session_id, left)?;
             // Not part of the signature: a prompt's briefing never carries
             // it, so it must not make the next one look new.
             if *recent {
@@ -5996,7 +6240,8 @@ fn decide_checked(
                 || !briefing.messages.is_empty()
                 || !briefing.uncoordinated.is_empty()
                 || !briefing.retracted.is_empty()
-                || !briefing.checks.is_empty();
+                || !briefing.checks.is_empty()
+                || !briefing.left_work.is_empty();
             let mut events = Vec::new();
             if *deliver {
                 if signature != previous && briefing.changed {
@@ -6530,6 +6775,8 @@ fn decide_checked(
         | Command::GraphImpact { .. }
         | Command::GraphBlindSpots { .. }
         | Command::GraphContext { .. }
+        | Command::GraphExport { .. }
+        | Command::GraphImport { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
             "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores",
@@ -6839,6 +7086,17 @@ fn recap(state: &State, workspace_id: &str, now_ms: u64) -> Recap {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    adopted_by: state
+                        .adoptions
+                        .get(&session.session_id)
+                        .map(|adoption| adoption.session_id.clone()),
+                    adopted: state
+                        .adoptions
+                        .values()
+                        .filter(|adoption| adoption.session_id == session.session_id)
+                        .take(RECAP_ITEMS)
+                        .map(|adoption| adoption.from.clone())
+                        .collect(),
                 },
             )
         })
@@ -8218,6 +8476,8 @@ fn brief(
             retracted,
             checkout_changes,
             uncoordinated,
+            // Filled in by the request that names the sessions (`Brief::left`).
+            left_work: Vec::new(),
             // One result per briefing, the newest: it always fits the
             // rendered text, and each delivered one is removed, so the rest
             // follow at the next briefings.
@@ -8667,11 +8927,41 @@ fn validate_check_report(
     }
     validate_request_id(&notice.check_id)?;
     validate_oid(&notice.tree_oid)?;
+    // A comparison (issue #69) is whole: a baseline, and a class for every
+    // failure, or neither.
+    let compared = notice.baseline_check_id.is_some();
+    if let Some(baseline) = &notice.baseline_check_id {
+        validate_request_id(baseline)?;
+    }
+    let names_ok = notice.fixed.len() <= MAX_FIXED_NAMED
+        && notice.fixed.iter().all(|test| {
+            !test.is_empty()
+                && test.len() <= MAX_TEST_NAME_BYTES
+                && !test.chars().any(char::is_control)
+        });
+    if !names_ok
+        || notice.writers.len() > MAX_WRITERS_NAMED
+        || (!compared && !(notice.fixed.is_empty() && notice.writers.is_empty()))
+        || notice
+            .failures
+            .iter()
+            .any(|failure| failure.class.is_some() != compared)
+    {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A check report compared with a baseline classes every failure and names at most {MAX_FIXED_NAMED} fixed tests and {MAX_WRITERS_NAMED} writers; one not compared has none of them"
+            ),
+        ));
+    }
+    for writer in &notice.writers {
+        validate_id(writer, "session ID")?;
+    }
     if let Some(cause) = &notice.interface {
         validate_interface_cause(cause)?;
     }
     // A grade is the wider check's result, and only a wider check has one.
-    if notice.interface_grade != interface_grade(notice.interface.as_ref(), &notice.result) {
+    if notice.interface_grade != interface_grade(notice.interface.as_deref(), &notice.result) {
         return Err(error(
             "invalid_check_report",
             "An interface grade is kept for a passed wider check and broke for a failed one",
@@ -8695,9 +8985,8 @@ fn interface_grade(
 /// A write was recorded in the workspace: its write generation moves on, so
 /// no check result is compared with one from before it to learn which tests
 /// flip.
-fn wrote_in(state: &mut State, workspace_id: &str) {
-    let writes = state.writes.entry(workspace_id.to_owned()).or_default();
-    *writes = writes.saturating_add(1);
+fn wrote_in(state: &mut State, workspace_id: &str, session_id: Option<&str>) {
+    classes::wrote(state, workspace_id, session_id);
 }
 
 fn validate_forget_flaky(name: Option<&str>, test: &str) -> Result<(), CoreError> {
@@ -8794,6 +9083,281 @@ fn shared_prompt_lines(state: &State, session_id: &str, digests: &[String]) -> u
         })
         .max()
         .unwrap_or(0) as u32
+}
+
+/// Whether a registered session is over: the host reported it ended, or its
+/// process is known to have exited. A session LangSpan cannot tell is over
+/// (killed while its liveness was unknown) counts as live.
+pub(crate) fn finished(state: &State, session_id: &str) -> bool {
+    state
+        .activity
+        .get(session_id)
+        .is_some_and(|activity| activity.ended)
+        || state
+            .session_liveness
+            .get(session_id)
+            .is_some_and(|liveness| liveness.status == LivenessStatus::Exited)
+}
+
+/// Sessions a briefing's `left` may name, at most.
+pub const MAX_LEFT: usize = 64;
+
+/// `session_id` takes over `from`'s uncommitted work (issue #161).
+fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Decision, CoreError> {
+    // The adopter is the caller, at work: registered, perhaps not yet again
+    // since the coordinator restarted.
+    let me = known_session(state, session_id)?;
+    let theirs = known_session(state, from)?;
+    if session_id == from {
+        return Err(error(
+            "invalid_adoption",
+            "A session cannot adopt its own work; name the ended session whose work to take over",
+        ));
+    }
+    if finished(state, session_id) {
+        return Err(error(
+            "session_ended",
+            "This session has ended; adopt from the session that continues the task",
+        ));
+    }
+    if theirs.workspace_id != me.workspace_id {
+        return Err(error(
+            "other_workspace",
+            &format!(
+                "That session worked in workspace {:?}, not this session's {:?}; only an ended session's work in the same checkout can be adopted",
+                theirs.workspace_id, me.workspace_id
+            ),
+        ));
+    }
+    if !finished(state, from) {
+        return Err(error(
+            "session_live",
+            "That session has not ended: LangSpan has neither its end nor its process's exit. Ask it to commit its own work, or adopt once it has ended",
+        ));
+    }
+    // An adopter that ended after its adoption was recorded, before its
+    // adapter credited the lines, leaves them under the session it adopted;
+    // that session cannot be adopted again. Passing the adoption on credits
+    // them too: every session whose adoptions lead to `from`. A session that
+    // has resumed since it was adopted owns what it writes again, so it is
+    // left out, and so is what its own adoptions lead to.
+    let mut earlier: Vec<String> = Vec::new();
+    let mut pending = vec![from.to_owned()];
+    while let Some(adopter) = pending.pop() {
+        for adoption in state.adoptions.values() {
+            if adoption.session_id != adopter
+                || adoption.workspace_id != me.workspace_id
+                || adoption.from == from
+                || earlier.contains(&adoption.from)
+                || !finished(state, &adoption.from)
+            {
+                continue;
+            }
+            if earlier.len() >= MAX_LEFT {
+                return Err(error(
+                    "adoption_chain",
+                    &format!(
+                        "More than {MAX_LEFT} earlier adoptions lead to that session; commit part of the work, then adopt again"
+                    ),
+                ));
+            }
+            earlier.push(adoption.from.clone());
+            pending.push(adoption.from.clone());
+        }
+    }
+    earlier.sort();
+    // Ending a session does not end its subagents: one still running keeps
+    // its lines.
+    let live: Vec<String> = state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.workspace_id == me.workspace_id
+                && [from]
+                    .into_iter()
+                    .chain(earlier.iter().map(String::as_str))
+                    .any(|source| {
+                        session.parent.as_deref() == Some(source)
+                            || session
+                                .session_id
+                                .strip_prefix(source)
+                                .is_some_and(|rest| rest.starts_with('.'))
+                    })
+                && !finished(state, &session.session_id)
+        })
+        .map(|session| session.session_id.clone())
+        .collect();
+    if live.len() > MAX_LEFT {
+        return Err(error(
+            "session_live",
+            &format!(
+                "More than {MAX_LEFT} subagents of that session have not ended; adopt once they have"
+            ),
+        ));
+    }
+    // A subagent another session adopted is that session's to credit, even
+    // when its adapter has not yet rewritten the journal.
+    let mut kept: Vec<String> = state
+        .adoptions
+        .values()
+        .filter(|adoption| {
+            adoption.workspace_id == me.workspace_id
+                && adoption.session_id != session_id
+                && !earlier.contains(&adoption.from)
+                && [from]
+                    .into_iter()
+                    .chain(earlier.iter().map(String::as_str))
+                    .any(|source| {
+                        adoption
+                            .from
+                            .strip_prefix(source)
+                            .is_some_and(|rest| rest.starts_with('.'))
+                    })
+        })
+        .map(|adoption| adoption.from.clone())
+        .collect();
+    kept.sort();
+    if kept.len() > MAX_LEFT {
+        return Err(error(
+            "adoption_chain",
+            &format!(
+                "Other sessions adopted more than {MAX_LEFT} subagents of that session; commit part of the work, then adopt again"
+            ),
+        ));
+    }
+    let root = state
+        .workspaces
+        .get(&me.workspace_id)
+        .map(|workspace| workspace.root.clone())
+        .unwrap_or_default();
+    if let Some(adoption) = state.adoptions.get(from) {
+        if adoption.session_id != session_id {
+            return Err(error(
+                "already_adopted",
+                &format!(
+                    "Session {} already adopted that session's work; adopt from {} once it has ended",
+                    adoption.session_id, adoption.session_id
+                ),
+            ));
+        }
+        return Ok(Decision {
+            events: Vec::new(),
+            outcome: Outcome::Adopted {
+                adoption: adoption.clone(),
+                root,
+                recorded: false,
+                live,
+                earlier,
+                kept,
+            },
+        });
+    }
+    let adoption = Adoption {
+        from: from.to_owned(),
+        session_id: session_id.to_owned(),
+        workspace_id: me.workspace_id.clone(),
+        reason: adopt_reason(state, &me.workspace_id, session_id, from),
+        at_ms: now_ms,
+        generation: state.generation,
+    };
+    Ok(Decision {
+        events: vec![Event::SessionAdopted {
+            adoption: adoption.clone(),
+        }],
+        outcome: Outcome::Adopted {
+            adoption,
+            root,
+            recorded: true,
+            live,
+            earlier,
+            kept,
+        },
+    })
+}
+
+/// Why `session_id` may be continuing `from`'s task, newest evidence
+/// first: a message `from` sent it (addressed to it, or a handoff it took),
+/// then the same task line.
+fn adopt_reason(
+    state: &State,
+    workspace_id: &str,
+    session_id: &str,
+    from: &str,
+) -> Option<AdoptReason> {
+    let held = state.messages.get(workspace_id).into_iter().flatten();
+    let history = state
+        .message_history
+        .get(workspace_id)
+        .into_iter()
+        .flatten();
+    let handoff = held.chain(history).find(|message| {
+        message.from.as_deref() == Some(from)
+            && !message.retracted
+            && match &message.to {
+                Recipient::Session { session_id: to } => to == session_id,
+                Recipient::NextSession {} => {
+                    message.acknowledged.iter().any(|taker| taker == session_id)
+                }
+                Recipient::Everyone {} => false,
+            }
+    });
+    if let Some(message) = handoff {
+        return Some(AdoptReason::Handoff {
+            message_id: message.message_id.clone(),
+        });
+    }
+    let task = |id: &str| {
+        state
+            .activity
+            .get(id)
+            .and_then(|activity| activity.summary.as_deref())
+    };
+    (task(from).is_some() && task(from) == task(session_id)).then_some(AdoptReason::SameTask {})
+}
+
+/// Of `left`, the sessions a briefing names as having left uncommitted
+/// work: of `session_id`'s workspace, over, not adopted, and neither the
+/// session nor one of its own subagents.
+fn left_work(state: &State, session_id: &str, left: &[String]) -> Result<Vec<LeftWork>, CoreError> {
+    if left.len() > MAX_LEFT {
+        return Err(error(
+            "invalid_left",
+            &format!("A briefing names at most {MAX_LEFT} sessions that left work"),
+        ));
+    }
+    for id in left {
+        validate_id(id, "session ID")?;
+    }
+    if left.is_empty() {
+        return Ok(Vec::new());
+    }
+    let me = known_session(state, session_id)?;
+    let mut found: Vec<LeftWork> = Vec::new();
+    for id in left {
+        let Some(session) = state.sessions.get(id) else {
+            continue;
+        };
+        if id == session_id
+            || session.parent.as_deref() == Some(session_id)
+            || session.workspace_id != me.workspace_id
+            || !finished(state, id)
+            || state.adoptions.contains_key(id)
+            || found.iter().any(|work| &work.session_id == id)
+        {
+            continue;
+        }
+        found.push(LeftWork {
+            session_id: id.clone(),
+            summary: state
+                .activity
+                .get(id)
+                .and_then(|activity| activity.summary.clone()),
+        });
+        if found.len() == BRIEF_LEFT_WORK {
+            break;
+        }
+    }
+    Ok(found)
 }
 
 fn validate_workspace_git(state: &State, git: &WorkspaceGit) -> Result<(), CoreError> {
@@ -9193,6 +9757,15 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         }
         Event::SessionRegistered { session } => {
             validate_session_registration(state, session)?;
+            // A new registration, or one in another workspace, has written
+            // nothing yet; a daemon restart's registers again in place.
+            if state
+                .sessions
+                .get(&session.session_id)
+                .is_none_or(|old| old.workspace_id != session.workspace_id)
+            {
+                state.first_writes.remove(&session.session_id);
+            }
             state
                 .sessions
                 .insert(session.session_id.clone(), session.clone());
@@ -9309,7 +9882,11 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             // decisions rather than rejecting an existing event log.
             if observation.result == ToolResult::Succeeded {
                 if !observation.paths.is_empty() {
-                    wrote_in(state, &observation.workspace_id);
+                    wrote_in(
+                        state,
+                        &observation.workspace_id,
+                        Some(&observation.session_id),
+                    );
                 }
                 let activity = activity_mut(state, &observation.session_id);
                 activity.wrote_since_boundary |= !observation.paths.is_empty();
@@ -9429,6 +10006,25 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             known_session(state, session_id)?;
             activity_mut(state, session_id).ended = true;
             state.intents.remove(session_id);
+        }
+        Event::SessionAdopted { adoption } => {
+            let adopter = known_session(state, &adoption.session_id)?;
+            let ended = known_session(state, &adoption.from)?;
+            if adoption.from == adoption.session_id
+                || adopter.workspace_id != adoption.workspace_id
+                || ended.workspace_id != adoption.workspace_id
+            {
+                return Err(error(
+                    "invalid_event",
+                    "An adoption names two different sessions of its workspace",
+                ));
+            }
+            if let Some(AdoptReason::Handoff { message_id }) = &adoption.reason {
+                validate_request_id(message_id)?;
+            }
+            state
+                .adoptions
+                .insert(adoption.from.clone(), adoption.clone());
         }
         // Boundaries in the log. The admissions a stop released ended in
         // their own `LeaseCompleted` events.
@@ -9873,14 +10469,39 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 notices.truncate(MAX_NOTICES);
             }
         }
-        Event::CheckRecorded { check } => {
+        Event::CheckRecorded { check, tests } => {
             validate_check(state, check)?;
+            if let Some(kept) = tests {
+                let passed = match check.result {
+                    CheckResult::Passed {} => true,
+                    CheckResult::Failed { .. } => false,
+                    CheckResult::Inconclusive {} => {
+                        return Err(error(
+                            "invalid_event",
+                            "An inconclusive record has no test results",
+                        ));
+                    }
+                };
+                if !check.inputs.is_empty() || !flaky::is_command_id(&kept.command_id) {
+                    return Err(error(
+                        "invalid_event",
+                        "Test results belong to a working-tree record and name their command's identity",
+                    ));
+                }
+                flaky::validate_test_results(&kept.results, passed)?;
+            }
             let records = state.checks.entry(check.workspace_id.clone()).or_default();
             // One record per name and tree: a rerun replaces the earlier result.
             records
                 .retain(|record| !(record.name == check.name && record.tree_oid == check.tree_oid));
             records.insert(0, check.clone());
             records.truncate(MAX_CHECKS);
+            // Kept only when no write was counted after the run took its
+            // count; an earlier version also stored results whose count had
+            // moved, and on replay they are no baseline either.
+            let writes = state.writes.get(&check.workspace_id).copied().unwrap_or(0);
+            let kept = tests.as_ref().filter(|tests| tests.writes_before == writes);
+            classes::keep(state, &check.workspace_id, &check.check_id, kept);
         }
         Event::AutoCheckEnabled { check } => {
             validate_auto_check(state, check)?;
@@ -10211,7 +10832,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 .as_ref()
                 .is_some_and(|before| before != &observation.after);
             if changed {
-                wrote_in(state, &observation.workspace_id);
+                wrote_in(state, &observation.workspace_id, None);
             }
             if changed && let Some(records) = state.checks.get_mut(&observation.workspace_id) {
                 for record in records.iter_mut().filter(|record| record.inputs.is_empty()) {

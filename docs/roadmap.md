@@ -46,7 +46,7 @@ as done is in its row.
 | L3. Claude Code Stop, StopFailure, SubagentStop and PostToolBatch hooks | A2 | Done: observed on Claude Code 2.1.330 ([ADR 0027](adr/0027-turn-and-batch-events.md)). Quota and usage detection from StopFailure is J11 |
 | L4. Shared-checkout commit guard and commit of only this session's hunks | B6, B7 | Built ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)); observed with real Claude Code sessions. Not yet observed with Codex |
 | L5. Interface-break alerts at write time, with the lines to fix and the argument count | B9, B10 | Built for Claude Code, Codex and Gemini CLI writes and quoted-heredoc shell writes, for argument counts, renames and removals ([ADR 0029](adr/0029-break-alerts-at-write-time.md)); observed once on Claude Code. Not yet observed on Codex or Gemini CLI; Cursor waits for a captured write input |
-| L6. Checks after write batches, run detached and reported in the next briefing | F1 | Built, off by default ([ADR 0030](adr/0030-automatic-checks-after-write-batches.md)). Not yet observed on a host |
+| L6. Checks after write batches, run detached and reported in the next briefing | F1 | Built, off by default, with failures classified against each session's baseline ([ADR 0030](adr/0030-automatic-checks-after-write-batches.md)). Not yet observed on a host |
 | L7. Landing depth: a bounded queue for the push turn, hunk-level conflict reports, and following renames that landed | F5 | Built ([ADR 0007](adr/0007-check-evidence-integration-and-landing.md)). Not yet called by an agent on a host |
 | L8. Release pipeline: versioned releases with prebuilt binaries for the supported platforms | I6 | Built ([ADR 0031](adr/0031-releases.md)); no release has been produced yet |
 | L9. Cursor adapter: hooks and MCP registration | A4 | Built from documentation ([ADR 0032](adr/0032-cursor-adapter.md)); waits for a capture from a real Cursor (`scripts/capture-cursor.sh`) |
@@ -106,7 +106,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [D2: Show a change's blast radius level by level](https://github.com/Langspan/LangSpan.dev/issues/51): `graph impact` stops at direct dependents, hiding breaks two steps away. Built with `--depth`; a real-host run remains.
 - [D3: Typed edges, paths between symbols and a repository map](https://github.com/Langspan/LangSpan.dev/issues/52): name mentions alone cannot follow a call chain or show how modules relate.
 - [D4: Show the history of a definition](https://github.com/Langspan/LangSpan.dev/issues/53): an agent cannot see who changed a definition recently, why, or who reverted the same change. Built as `langspan graph history` and `langspan_history`; a real-host run remains.
-- [D5: Export and import the source index](https://github.com/Langspan/LangSpan.dev/issues/54): a large repository's first indexing takes many passes, and the index cannot be inspected outside LangSpan.
 - [D6: Index more languages, one grammar at a time](https://github.com/Langspan/LangSpan.dev/issues/55): Java is indexed; C#, Ruby and C++ repositories get no source-index answers or interface notices.
 - [D7: Track renames so history and notices follow the new name](https://github.com/Langspan/LangSpan.dev/issues/56): a rename is reported as a removal with no new name, and history stays with the old one.
 - [D8: Report where the index is blind](https://github.com/Langspan/LangSpan.dev/issues/57): an empty impact answer does not say which files the index could not read. Built as `graph blind-spots` and `coverage.blind_in_scope`; a real-host run remains.
@@ -124,7 +123,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## F. Checks and landing
 
-- [F1: Say which tests a write broke](https://github.com/Langspan/LangSpan.dev/issues/69): a failed automatic check does not say whether this write, an earlier state or a peer broke the test.
 - [F5: Rebase landings and adapt identifier renames](https://github.com/Langspan/LangSpan.dev/issues/72): a landing refused over a rename leaves every use to fix by hand, and there is no linear-history landing.
 - [F8: An integration branch every session lands on](https://github.com/Langspan/LangSpan.dev/issues/73): each agent's own branch leaves the person merging six branches by hand to see the work together.
 - [F9: A LangSpan mark in pull requests](https://github.com/Langspan/LangSpan.dev/issues/74): a reviewer might want to know a pull request's tree was checked through LangSpan.
