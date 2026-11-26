@@ -94,6 +94,7 @@ impl Fixture {
                     mid_turn: false,
                     recent: false,
                     recent_window_ms: None,
+                    mcp: false,
                 },
             )
             .outcome

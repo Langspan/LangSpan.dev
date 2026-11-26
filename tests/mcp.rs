@@ -197,7 +197,9 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_blind_spots"
                 | "langspan_recap"
                 | "langspan_show_message"
+                | "langspan_message_status"
                 | "langspan_recall"
+                | "langspan_history"
                 | "langspan_today"
                 | "langspan_land_queue"
                 | "langspan_flaky_tests"
@@ -987,6 +989,108 @@ async fn stdio_show_message_returns_the_whole_text_after_acknowledgement() {
         other.structured_content.unwrap()["outcome"]["code"],
         "unknown_message"
     );
+    disconnect(client).await;
+}
+
+/// Roadmap E12: a sender asks who received a message. Delivery through
+/// `langspan_brief` is recorded `via: "mcp_brief"`.
+#[tokio::test]
+async fn stdio_message_status_reports_pending_then_delivered_through_the_brief_tool() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let workspace = directory.workspace();
+    let _daemon = Daemon::start(&state_dir).await;
+    let registered = call_ipc(
+        &state_dir,
+        "workspace",
+        Operation::WorkspaceRegister {
+            workspace_id: "workspace".into(),
+            root: workspace.to_string_lossy().into_owned(),
+        },
+    )
+    .await;
+    assert!(matches!(registered.outcome, Outcome::Workspace { .. }));
+    for session in ["agent-a", "agent-b"] {
+        let registered = call_ipc(
+            &state_dir,
+            session,
+            Operation::SessionRegister {
+                session_id: session.into(),
+                workspace_id: "workspace".into(),
+                parent: None,
+                headless: false,
+            },
+        )
+        .await;
+        assert!(matches!(registered.outcome, Outcome::Session { .. }));
+    }
+    let client = connect(&state_dir).await;
+    let sent = response(
+        call_tool(
+            &client,
+            "langspan_send_message",
+            json!({"request_id": "m-1", "workspace_id": "workspace", "session_id": "agent-a",
+                   "to": "agent-b", "text": "stop editing src/db.rs", "paths": ["src/db.rs"]}),
+        )
+        .await,
+    );
+    assert!(
+        matches!(sent.outcome, Outcome::MessageSent { .. }),
+        "{sent:?}"
+    );
+    let ask = || {
+        call_tool(
+            &client,
+            "langspan_message_status",
+            json!({"workspace_id": "workspace", "message_id": "last", "session_id": "agent-a"}),
+        )
+    };
+    let pending = ask().await;
+    let text = format!("{:?}", pending.content);
+    assert!(text.contains("not that it acted on it"), "{text}");
+    let Outcome::MessageStatus { status } = response(pending).outcome else {
+        panic!("not a status");
+    };
+    assert_eq!(status.message_id, "m-1");
+    assert_eq!(status.state, langspan_core::MessageState::Pending);
+    assert_eq!(status.recipients.len(), 1);
+    assert_eq!(status.recipients[0].session_id, "agent-b");
+    assert_eq!(
+        status.recipients[0].status,
+        langspan_core::RecipientState::Pending
+    );
+
+    let briefed = response(
+        call_tool(
+            &client,
+            "langspan_brief",
+            json!({"request_id": "b-1", "session_id": "agent-b", "max_peers": 4}),
+        )
+        .await,
+    );
+    assert!(matches!(briefed.outcome, Outcome::Briefing { .. }));
+    let Outcome::MessageStatus { status } = response(ask().await).outcome else {
+        panic!("not a status");
+    };
+    assert_eq!(status.state, langspan_core::MessageState::Done);
+    let recipient = &status.recipients[0];
+    assert_eq!(
+        (recipient.status, recipient.via),
+        (
+            langspan_core::RecipientState::Delivered,
+            Some(langspan_core::Delivery::McpBrief)
+        )
+    );
+    assert!(recipient.age_ms.is_some());
+
+    // Only the sender's own newest message is `last`.
+    let none = call_tool(
+        &client,
+        "langspan_message_status",
+        json!({"workspace_id": "workspace", "message_id": "last", "session_id": "agent-b"}),
+    )
+    .await;
+    assert_eq!(none.is_error, Some(true));
     disconnect(client).await;
 }
 

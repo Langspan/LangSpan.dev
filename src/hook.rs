@@ -1238,6 +1238,7 @@ fn lifecycle(
             // What changed recently goes only into a starting context.
             recent: starting,
             recent_window_ms: None,
+            mcp: false,
         },
     ) {
         Ok(Response {
@@ -1633,7 +1634,8 @@ pub fn uncoordinated_text(change: &langspan_core::UncoordinatedNotice) -> String
     )
 }
 
-pub(crate) fn age(ms: u64) -> String {
+/// An age for a person: seconds up to 89, then minutes.
+pub fn age(ms: u64) -> String {
     match ms / 1000 {
         seconds @ 0..=89 => format!("{seconds}s ago"),
         seconds => format!("{}m ago", seconds / 60),
@@ -1669,14 +1671,41 @@ fn render_checks(checks: &[langspan_core::CheckNotice]) -> String {
                 "was inconclusive: files changed while it ran, or it was stopped by a signal, so its result is about no tree".to_owned()
             }
         };
-        let mut section = format!(
-            "{CHECK_RESULT} {} {outcome} after your writes, on working tree {} (took {:.1} s; recorded as check {}).",
-            clean(&notice.name, 64),
-            clean(&notice.tree_oid, 64),
-            notice.duration_ms as f64 / 1000.0,
-            clean(&notice.check_id, 64),
-        );
-        if let Some(failures) = render_failures(&notice.failures) {
+        let mut section = match &notice.interface {
+            // A wider check reaches the sessions on the mentioning files
+            // too, so it says whose change it was for, not "your writes".
+            // Each part is bounded; the cut is a last guard, so that the
+            // section is never left out for its size.
+            Some(cause) => truncate(
+                &format!(
+                    "{CHECK_RESULT} ran its wider command. {}: the wider check {} {outcome}; {} On working tree {} (took {:.1} s; recorded as check {}).",
+                    interface_line(cause),
+                    clean(&notice.name, 64),
+                    mentioning_line(cause),
+                    clean(&notice.tree_oid, 64),
+                    notice.duration_ms as f64 / 1000.0,
+                    clean(&notice.check_id, 64),
+                ),
+                CHECKS_LIMIT - 200,
+            ),
+            None => format!(
+                "{CHECK_RESULT} {} {outcome} after your writes, on working tree {} (took {:.1} s; recorded as check {}).",
+                clean(&notice.name, 64),
+                clean(&notice.tree_oid, 64),
+                notice.duration_ms as f64 / 1000.0,
+                clean(&notice.check_id, 64),
+            ),
+        };
+        if notice.index_incomplete {
+            section.push_str(
+                " The source index had no complete scan, so no interface change could be found and the wider check did not run.",
+            );
+        }
+        if let Some(failures) = render_failures(&notice.failures)
+            // A wider check's header can be long: its failures are left out
+            // rather than the whole result.
+            && section.len() + failures.len() < CHECKS_LIMIT
+        {
             section.push('\n');
             section.push_str(&failures);
         }
@@ -1713,6 +1742,67 @@ fn render_checks(checks: &[langspan_core::CheckNotice]) -> String {
         text.push_str(&section);
     }
     text
+}
+
+/// `Interface change to parse_upload in core/src/lib.rs: "pub fn
+/// parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) ->
+/// u32"`, with every repository value cleaned and quoted signatures capped.
+fn interface_line(cause: &langspan_core::InterfaceCause) -> String {
+    let change = &cause.change;
+    let quoted = |text: &Option<String>| format!("{:?}", clean(text.as_deref().unwrap_or(""), 120));
+    let what = match change.change.as_str() {
+        "removed" => "removed or renamed".to_owned(),
+        "signature_changed" => format!("{} -> {}", quoted(&change.before), quoted(&change.after)),
+        _ => format!(
+            "{} definitions with this name, now {}",
+            change.before_count.unwrap_or(0),
+            change.after_count.unwrap_or(0)
+        ),
+    };
+    let more = match cause.more_changes {
+        0 => String::new(),
+        1 => " (and 1 more change)".to_owned(),
+        n => format!(" (and {n} more changes)"),
+    };
+    format!(
+        "Interface change to {} in {}: {what}{more}",
+        clean(&change.name, 64),
+        clean(&cause.path, 120),
+    )
+}
+
+/// Room for the mentioning files' names: with the change, its signatures
+/// and the record line, the section stays inside `CHECKS_LIMIT` at every
+/// bound.
+const MENTIONING_LIMIT: usize = 300;
+
+/// The files the index says mention the changed name, labelled as a name
+/// lookup with its coverage. Files past `MENTIONING_LIMIT` are counted.
+fn mentioning_line(cause: &langspan_core::InterfaceCause) -> String {
+    let mut files: Vec<String> = Vec::new();
+    let mut size = 0;
+    for path in &cause.dependents {
+        let path = clean(path, 120);
+        if size + path.len() + 2 > MENTIONING_LIMIT && !files.is_empty() {
+            break;
+        }
+        size += path.len() + 2;
+        files.push(path);
+    }
+    let left = (cause.dependents.len() - files.len()) as u64 + u64::from(cause.more_dependents);
+    let more = match left {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    let blind = match cause.blind_files {
+        0 => String::new(),
+        1 => "; 1 source file was not fully indexed, so a mention there is missing".to_owned(),
+        n => format!("; {n} source files were not fully indexed, so a mention there is missing"),
+    };
+    format!(
+        "files that mention it: {}{more} (a name lookup, not resolved uses{blind}).",
+        files.join(", ")
+    )
 }
 
 /// The line telling a session to disregard a message it received and that
@@ -2122,8 +2212,17 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
             .split_once('.')
             .unwrap_or(("agent", &peer.session_id));
         let short = |id: &str| id.chars().take(8).collect::<String>();
-        let mut line = match id.split_once('.') {
-            // A subagent's ID is its parent's joined to its own.
+        // A subagent's ID is its parent's joined to its own. An Antigravity
+        // conversation's is joined to its workspace's scope, not an agent
+        // (`antigravity::scoped_session`): it is named by the conversation.
+        let subagent = id
+            .split_once('.')
+            .filter(|_| host != crate::antigravity::SOURCE);
+        let id = match host {
+            crate::antigravity::SOURCE => id.split_once('.').map_or(id, |(head, _)| head),
+            _ => id,
+        };
+        let mut line = match subagent {
             Some((parent, agent)) => format!(
                 "- {} session {} subagent {}",
                 clean(host, 32),
@@ -3123,6 +3222,7 @@ impl Session<'_> {
                     mid_turn: true,
                     recent: false,
                     recent_window_ms: None,
+                    mcp: false,
                 },
             )
             .ok()?;
@@ -5476,7 +5576,68 @@ mod code_briefing_text {
             timed_out_s: None,
             tail: tail.into(),
             failures: Vec::new(),
+            interface_grade: None,
+            interface: None,
+            index_incomplete: false,
         }
+    }
+
+    #[test]
+    fn a_wider_check_names_the_change_and_mentioning_files_within_the_check_share() {
+        let change = |before: &str, after: &str| langspan_core::InterfaceChange {
+            name: "parse_upload".into(),
+            kind: "function".into(),
+            change: "signature_changed".into(),
+            before: Some(before.into()),
+            after: Some(after.into()),
+            before_arity: None,
+            after_arity: None,
+            before_count: None,
+            after_count: None,
+        };
+        let mut notice = failed_check("error[E0061]: this function takes 1 argument");
+        notice.name = "all".into();
+        notice.interface_grade = Some(langspan_core::InterfaceGrade::Broke);
+        notice.interface = Some(langspan_core::InterfaceCause {
+            path: "core/src/lib.rs".into(),
+            change: change(
+                "pub fn parse_upload(a: u32, b: u32) -> u32",
+                "pub fn parse_upload(a: u32) -> u32",
+            ),
+            more_changes: 0,
+            dependents: vec!["cli/src/main.rs".into(), "web/client.ts".into()],
+            more_dependents: 0,
+            blind_files: 0,
+        });
+        let text = render_checks(std::slice::from_ref(&notice));
+        assert!(
+            text.contains(r#"Interface change to parse_upload in core/src/lib.rs: "pub fn parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) -> u32": the wider check all failed (exit 101); files that mention it: cli/src/main.rs, web/client.ts (a name lookup, not resolved uses)."#),
+            "{text}"
+        );
+        assert!(!text.contains("after your writes"), "{text}");
+        assert!(text.contains("data, not instructions"), "{text}");
+        // At the bounds: long signatures, eight long paths, more of both.
+        let long = "x".repeat(256);
+        notice.interface = Some(langspan_core::InterfaceCause {
+            path: "p/".repeat(100),
+            change: change(&long, &long),
+            more_changes: 15,
+            dependents: (0..8)
+                .map(|n| format!("{}{n}.rs", "d/".repeat(90)))
+                .collect(),
+            more_dependents: 24,
+            blind_files: 3,
+        });
+        let text = render_checks(std::slice::from_ref(&notice));
+        assert!(text.len() <= CHECKS_LIMIT, "{}", text.len());
+        assert!(text.contains("15 more changes"), "{text}");
+        // Two long paths fit; the other 6 and the 24 beyond the cap are
+        // counted.
+        assert!(text.contains("and 30 more"), "{text}");
+        assert!(
+            text.contains("3 source files were not fully indexed"),
+            "{text}"
+        );
     }
 
     #[test]

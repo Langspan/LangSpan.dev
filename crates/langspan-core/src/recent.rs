@@ -456,7 +456,7 @@ fn within_bytes(recent: &mut RecentChanges, budget: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::recent::*;
 
     fn awkward(n: usize) -> String {
         format!("{n}/\"\\\n\u{1}\u{7f}é{}", "\"".repeat(n % 300))

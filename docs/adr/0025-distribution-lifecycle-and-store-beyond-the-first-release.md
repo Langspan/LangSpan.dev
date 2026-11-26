@@ -49,7 +49,18 @@ against, so it stays an owner command, as with `remote enable`.
   the person moved. The daemon first checks, read-only and within one
   second, that NEW_ROOT is the top of a Git checkout (`not_checkout_top`
   otherwise) and that the old root no longer exists (`old_root_exists`
-  otherwise). With `--switch`, the old root must still exist
+  otherwise). An old root that still resolves to NEW_ROOT, such as a
+  symbolic link left where the checkout used to be, counts as moved; when
+  the old root resolves to another directory through a link, the refusal
+  names that directory. Every comparison of a registered root with a
+  resolved one (the scan, a session's registration, admission) resolves
+  links and also requires the same device and inode, so a link never turns
+  one checkout into two, and two distinct checkouts are still told apart.
+  Since a link resolves every path under it, a scan reached through a
+  changed path also requires the checkout to hold the `HEAD` commit the
+  previous scan saw; a link to another repository stops the scan as an
+  identity change. The registered root is kept as given until a move
+  records a new one. With `--switch`, the old root must still exist
   (`old_root_missing`) and its `HEAD` commit must be in NEW_ROOT's object
   database (`git cat-file -e`; `different_repository` otherwise); the old
   root then stops being coordinated under the ID. `--switch` is refused

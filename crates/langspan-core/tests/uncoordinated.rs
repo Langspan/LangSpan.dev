@@ -106,6 +106,7 @@ fn brief(state: &mut State, session: &str, id: &str, now: u64) -> Briefing {
             mid_turn: false,
             recent: false,
             recent_window_ms: None,
+            mcp: false,
         },
         now,
     )) {

@@ -55,6 +55,7 @@ fn enable(state: &mut State, argv: &[&str], timeout_s: u32) -> Outcome {
             name: "test".into(),
             argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
             timeout_s,
+            on_interface_change: None,
         },
         1,
     )
@@ -126,11 +127,14 @@ fn record(state: &mut State, id: &str, tree: char, sessions: &[&str], tail: &str
             inputs: Vec::new(),
             result: CheckResult::Failed { exit_code: 101 },
             duration_ms: 900,
-            report: Some(CheckReport {
+            report: Some(Box::new(CheckReport {
                 session_ids: sessions.iter().map(|s| (*s).to_owned()).collect(),
                 tail: tail.into(),
                 timed_out_s: None,
-            }),
+                interface: None,
+                index_incomplete: false,
+                dependent_paths: Vec::new(),
+            })),
             tests: None,
             rerun: None,
             writes_before: None,
@@ -152,6 +156,7 @@ fn delivered(state: &mut State, session: &str, id: &str) -> Vec<String> {
             mid_turn: true,
             recent: false,
             recent_window_ms: None,
+            mcp: false,
         },
         20,
     ) {
@@ -186,6 +191,7 @@ fn automatic_checks_are_off_until_enabled_and_off_again_when_disabled() {
             name: "test".into(),
             argv: vec!["cargo".into(), "test".into()],
             timeout_s: 600,
+            on_interface_change: None,
         },
         "again",
         2,
@@ -231,6 +237,7 @@ fn an_automatic_check_needs_a_command_a_time_limit_and_a_known_workspace() {
             name: "test".into(),
             argv: vec!["true".into()],
             timeout_s: 60,
+            on_interface_change: None,
         },
         1,
     );
@@ -298,6 +305,7 @@ fn a_reported_result_is_a_check_record_and_is_delivered_once_to_each_session() {
             mid_turn: false,
             recent: false,
             recent_window_ms: None,
+            mcp: false,
         },
         15,
     );
@@ -357,11 +365,14 @@ fn several_waiting_results_are_delivered_one_per_briefing_newest_first() {
                 inputs: Vec::new(),
                 result: CheckResult::Passed {},
                 duration_ms: 10,
-                report: Some(CheckReport {
+                report: Some(Box::new(CheckReport {
                     session_ids: vec!["alice".into()],
                     tail: String::new(),
                     timed_out_s: None,
-                }),
+                    interface: None,
+                    index_incomplete: false,
+                    dependent_paths: Vec::new(),
+                })),
                 tests: None,
                 rerun: None,
                 writes_before: None,
@@ -407,6 +418,9 @@ fn a_report_that_disagrees_with_its_record_or_has_none_does_not_apply() {
         timed_out_s: None,
         tail: String::new(),
         failures: Vec::new(),
+        interface_grade: None,
+        interface: None,
+        index_incomplete: false,
     };
     let report = |notice: &langspan_core::CheckNotice| Event::CheckReported {
         session_ids: vec!["alice".into()],
