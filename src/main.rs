@@ -20,13 +20,15 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  prints the plan. A second run changes nothing
   daemon                         Run the local coordinator in the foreground
   mcp                            Serve MCP over stdin/stdout using the coordinator
-  dashboard [--listen 127.0.0.1:7311] [--open] [--allow-network]
+  dashboard [--listen 127.0.0.1:7311] [--open] [--allow-network] [--demo]
                                  Serve a live, read-only page of every agent on this
                                  machine and every teammate heard from, on loopback.
                                  Prints the URL with this run's access token; --open
                                  also opens it in the browser. A non-loopback address
                                  is refused without --allow-network; from a phone, use
-                                 an SSH tunnel or a VPN to this machine instead
+                                 an SSH tunnel or a VPN to this machine instead.
+                                 --demo serves the same page with fictional, labeled
+                                 simulated data and reads nothing from the coordinator
   workspace add ID ROOT          Register a physical workspace
   workspace list [--after ID]    Every workspace: root and whether it exists, current
                                  sessions, notes, pending messages, check records,
@@ -3761,11 +3763,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         };
         let open = options.remove("--open").is_some();
         let allow_network = options.remove("--allow-network").is_some();
+        let demo = options.remove("--demo").is_some();
         no_unused_options(&options)?;
         let options = langspan::dashboard::Options {
             listen,
             open,
             allow_network,
+            demo,
         };
         if json {
             return Err(
@@ -4207,12 +4211,13 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             "--json" => json = true,
             "--apply" => apply = true,
             // Flags, kept with the options so that only the commands that take
-            // them accept them (`dashboard`: `--open`, `--allow-network`;
+            // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
             // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
             // `graph symbol`: `--detail`; `brief`: `--recent`).
             "--open"
             | "--allow-network"
+            | "--demo"
             | "--check-again"
             | "--publish-as-branch"
             | "--mine"
