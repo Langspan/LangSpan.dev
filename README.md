@@ -128,6 +128,21 @@ records stay local to the coordinator.
 
 ## Get started
 
+With `langspan` on your PATH (install it below), one command connects every
+agent host it finds and keeps the coordinator running:
+
+```sh
+langspan setup
+```
+
+It shows one plan (the hosts found, the files it changes, the coordinator's
+login service and the state directory) and asks once. `--yes` skips the
+question. It installs the user-level hooks, MCP entry and skill, starts the
+coordinator as a login service (a LaunchAgent on macOS, a `systemd --user`
+unit on Linux), and runs `langspan doctor`. A second run changes nothing.
+`langspan uninstall --apply` removes all of it. See
+[Set up in one command](docs/usage.md#set-up-in-one-command).
+
 ### Install
 
 Get the archive for your operating system and processor from the
@@ -196,7 +211,9 @@ C code and the macOS linker vary between builds.
 
 ### Run
 
-Start the local coordinator and leave it running in one terminal:
+`langspan setup` starts the coordinator for you. Without setup, the first hook
+or `langspan mcp` that finds no coordinator starts one in the background. To
+run it in the foreground instead:
 
 ```sh
 langspan daemon
@@ -252,8 +269,8 @@ a Git repository it does nothing. In a repository that also has a project
 install (below), the user-level hook leaves the event to that one, so nothing
 is coordinated twice. `langspan doctor` reports both kinds of install.
 
-`langspan uninstall --apply` removes only what `install` wrote; the state
-directory stays. [ADR 0010](docs/adr/0010-user-level-install.md) records the
+`langspan uninstall --apply` removes only what `install` and `setup` wrote,
+the login service included; the state directory stays. [ADR 0010](docs/adr/0010-user-level-install.md) records the
 host documentation these locations come from and what was not verifiable.
 
 ### One project

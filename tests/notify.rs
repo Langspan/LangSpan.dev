@@ -98,6 +98,7 @@ impl Fixture {
         }
         let log = fs::File::create(base.join("daemon.log")).unwrap();
         let daemon = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["daemon", "--state-dir"])
             .arg(base.join("state"))
             .env("PATH", Self::path_with(&base.join("bin")))
@@ -184,6 +185,7 @@ impl Fixture {
     }
     fn cli(&self, args: &[&str], path: &std::ffi::OsStr) -> Output {
         Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.state())
             .args(args)
@@ -200,6 +202,7 @@ impl Fixture {
     }
     fn hook(&self, event: &Value) -> String {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.state())
             .args(["--workspace", "work", "--root"])

@@ -58,6 +58,7 @@ impl Fixture {
     fn start(&mut self) {
         self.child = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -73,6 +74,7 @@ impl Fixture {
     }
     fn cli(&self, args: &[&str]) -> (i32, String) {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.state_dir())
             .args(args)
@@ -91,6 +93,7 @@ impl Fixture {
     /// whoever runs the suite does not decide.
     fn run_as(&self, vendor: &str, event: &Value, headless: bool) -> Run {
         let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
+        command.env("LANGSPAN_AUTOSTART", "off");
         command.env_remove("CLAUDE_CODE_SESSION_ATTENDED");
         if headless {
             command.env("CLAUDE_CODE_SESSION_ATTENDED", "0");
@@ -323,6 +326,7 @@ fn a_message_cut_in_a_briefing_is_shown_in_full_even_after_it_is_acknowledged() 
         child.wait().unwrap();
     }
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .arg("--state-dir")
         .arg(f.state_dir())
         .args(["messages", "show", "work", "m-9"])

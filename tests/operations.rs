@@ -45,6 +45,7 @@ impl World {
     /// installed on the machine changes what it reports.
     fn langspan(&self) -> Process {
         let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
+        command.env("LANGSPAN_AUTOSTART", "off");
         support::in_home(&mut command, &self.base.join("home"));
         command
     }

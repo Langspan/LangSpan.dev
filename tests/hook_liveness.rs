@@ -58,6 +58,7 @@ impl Fixture {
     fn start(&mut self) {
         self.child = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -103,6 +104,7 @@ impl Fixture {
     /// One Claude Code hook run, as the host would start it.
     fn hook(&self, event: &Value) -> String {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.state_dir())
             .args(["--workspace", "work", "--root"])
@@ -218,6 +220,7 @@ fn a_host_process_that_exits_drops_its_session_from_a_peers_briefing() {
         .spawn()
         .unwrap();
     let attached = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["session", "attach-pid", &alice])
         .arg(host.id().to_string())
         .args(["--request-id", "attach-host", "--state-dir"])
@@ -294,6 +297,7 @@ fn status_shows_the_last_hook_age_and_the_probe_per_session() {
     let f = Fixture::new();
     f.prompt(ALICE, "Trace the upload failure");
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["status", "--state-dir"])
         .arg(f.state_dir())
         .output()
@@ -303,6 +307,7 @@ fn status_shows_the_last_hook_age_and_the_probe_per_session() {
     assert!(text.contains("Last hook run: "), "{text}");
     assert!(!text.contains("none recorded"), "{text}");
     let json = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["status", "--json", "--state-dir"])
         .arg(f.state_dir())
         .output()

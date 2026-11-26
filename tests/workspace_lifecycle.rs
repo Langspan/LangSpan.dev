@@ -50,6 +50,7 @@ impl Home {
     fn run(&self, args: &[&str]) -> Output {
         // Before the arguments: a check's command follows a literal `--`.
         Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.state_dir())
             .args(args)
@@ -114,6 +115,7 @@ impl Home {
             fs::write(path, text).unwrap();
         }
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["install", "--apply", "--home"])
             .arg(self.home())
             .arg("--state-dir")
@@ -125,6 +127,7 @@ impl Home {
     fn start(&mut self) {
         self.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -154,6 +157,7 @@ impl Home {
     /// Run a hook command as the host does, in `cwd`. Stdout and coverage.
     fn hook(&self, command: &str, cwd: &Path, event: &Value) -> (String, String) {
         let mut child = Process::new("/bin/sh")
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["-c", command])
             .current_dir(cwd)
             .env_remove("CLAUDE_PROJECT_DIR")

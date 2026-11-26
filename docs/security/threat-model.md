@@ -129,6 +129,26 @@ and per-project trust state.
 | **Denial of service**: a broken user-level hook affects every repository | The hook keeps the project form's budget, gives no decision on any failure, exits 0, and prints nothing outside a Git repository or when a project install covers the repository. | A missing executable makes the host report a failed hook on every event until `uninstall` or a reinstall; `doctor` names it and the command to run again. Under Homebrew the entries name the `opt` link rather than the versioned keg, so `brew upgrade` does not cause this; that link is resolved on every run, and anyone who can change it can already replace the binary in the same Homebrew prefix. |
 | **Elevation of privilege** | No permission, trust or approval setting of either host is written or weakened. Codex still requires its own review of the new hook; Claude Code's own permission flow still governs every tool call. The hook never answers `allow`. | Installing a user-level hook is the owner's grant of a command that runs on every session; it is shown before it is written. |
 
+## Setup, the login service and the on-demand start
+
+`langspan setup` ([ADR 0035](../adr/0035-one-command-setup.md)) runs the
+user-level install with the skill, writes a per-user login service (a
+LaunchAgent on macOS, a `systemd --user` unit on Linux) and runs the service
+manager. A hook or `langspan mcp` that finds no coordinator starts one as a
+child process. These are new boundaries: a file the service manager executes
+at every login, external commands (`launchctl`, `systemctl`), and a
+long-running process started from a host's hook.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: a service file that is not LangSpan's is taken for one, so it is replaced, removed or trusted as covering a state directory | LangSpan's file carries a marker line and is recognized only with it. A file at the path without it stops setup with nothing written, and `uninstall` leaves it in place. | A hand-written file with the marker is treated as LangSpan's, as with hook entries. |
+| **Tampering**: the service runs something other than the installed binary | The file names the absolute binary `install` resolves (the Homebrew `opt` link under Homebrew) and the absolute state directory; the unit refuses paths that systemd would split or expand (whitespace, quotes, `\`, `%`, `$`); the plist escapes XML markup. The file is written owner-only (`0600`) with an atomic rename, and shown in full before it is written. | Anyone who can write the user's `~/.config/systemd/user` or `~/Library/LaunchAgents`, or the binary, can already run code as the user. |
+| **Tampering**: two hooks start two coordinators for one state directory | The daemon's own `daemon.lock` stops a second one before it touches the socket. A caller starts a process only under `autostart.lock`, after checking again, and not within 30 seconds of a recorded start. Tested with two concurrent real hooks (`tests/setup.rs`). | None known. |
+| **Repudiation**: a coordinator runs and nobody knows who started it | The caller logs `coordinator_started` with the process ID to its stderr, and a line naming itself to `daemon.log`; the service manager's own logs record a service start. | `daemon.log` is plain text in the owner-only state directory, not tamper-evident. |
+| **Information disclosure**: the coordinator inherits a host's secrets | The on-demand start clears the environment and keeps an allow-list (`HOME`, `PATH`, locale, `XDG_*`, `SSH_AUTH_SOCK`, `GIT_SSH*`, desktop session variables, `LANGSPAN_STATE_DIR`); API keys and tokens in the host's environment are dropped. Setup reads no host credential or sign-in file: it reads only the files `install` reads, with the same key-level rules. `daemon.log` is created `0600` inside the `0700` state directory. | `SSH_AUTH_SOCK` lets the coordinator use the user's SSH agent, which remote publication already needs. |
+| **Denial of service**: starting the coordinator holds a hook past its budget, or a failing coordinator is restarted from every hook | A hook spends at most half of its remaining budget, including the lock wait, then answers as before; `langspan mcp` waits at most 2 seconds. A start within the last 30 seconds is not repeated. The started process has standard input and output on `/dev/null`, so the host never waits on it. Every `launchctl` and `systemctl` call is bounded to 10 seconds. | A coordinator that crashes at start is tried again every 30 seconds by hooks, or every 5 seconds (systemd) or 10 (launchd) by the service, each adding to `daemon.log`. The on-demand start moves a log over 8 MiB aside; the service's log is not rotated. |
+| **Elevation of privilege** | The service is per user (`gui/UID`, `systemd --user`), never system-wide, and no `sudo` is run. `--home` installs no service, so a spare home cannot change the login user's manager. `LANGSPAN_AUTOSTART=off` turns the on-demand start off. | A user-level hook already runs code on every session; the on-demand start makes that code also leave a process running. |
+
 ## Host detection
 
 `langspan hosts`, `doctor` and the daemon's hourly host check (roadmap A7,

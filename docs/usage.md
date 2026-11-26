@@ -8,6 +8,44 @@ Examples below use the binary built from the LangSpan repository root.
 If you installed a release binary on your PATH, replace
 `./target/release/langspan` with `langspan`.
 
+## Set up in one command
+
+With `langspan` on your PATH (a [release](#install-a-release) or a [source
+build](#build-from-source)), run:
+
+```sh
+langspan setup
+```
+
+Setup prints one plan and asks once, `Set this up? [Y/n]`:
+
+- the state directory;
+- the files `langspan install --skill` changes for each host whose
+  configuration directory exists: user-level hooks, the MCP entry and the
+  [LangSpan skill](#the-langspan-skill);
+- the coordinator's login service, shown in full: on macOS a LaunchAgent,
+  `~/Library/LaunchAgents/dev.langspan.coordinator.plist`; on Linux a
+  `systemd --user` unit, `~/.config/systemd/user/langspan.service` (under
+  `XDG_CONFIG_HOME` when set).
+
+It then applies the install, starts the service so the coordinator runs at
+every login and restarts after a failure, and runs `langspan doctor`. The
+service runs `langspan daemon --state-dir DIR` and appends its output to
+`daemon.log` in the state directory. On Linux without a user manager, setup
+installs no service, says so, and starts the coordinator in the background
+instead.
+
+`--yes` applies the plan without asking, for scripts. Without a terminal and
+without `--yes`, setup prints the plan and changes nothing. A second run
+changes nothing and prints `Already set up; nothing to change.` Close Claude
+Code first, as for [`install --apply`](#all-repositories-for-this-user).
+`--hosts`, `--home` and `--state-dir` work as they do for `install`; with
+`--home`, setup installs no login service. `langspan uninstall --apply` stops
+and removes the service with everything else.
+
+An install script and a Homebrew formula that run `langspan setup` for you
+are not published yet ([ADR 0035](adr/0035-one-command-setup.md)).
+
 ## Install a release
 
 [v0.1.0](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0) provides
@@ -43,7 +81,19 @@ and macOS arm64. Process probing is Linux-only; Windows transport is not impleme
 
 ## Start the coordinator
 
-In one terminal, from the LangSpan repository root:
+`langspan setup` installs the coordinator as a login service. Without it, a
+hook or `langspan mcp` that finds no coordinator for its state directory
+starts `langspan daemon` in the background, so even a source build needs no
+terminal kept open. It does so only when no login service of LangSpan's names
+that state directory, never starts a second coordinator for it, spends at
+most half of the hook's remaining budget, and logs the start to the hook's
+stderr and to `daemon.log` in the state directory. Set
+`LANGSPAN_AUTOSTART=off` to turn this off. The coordinator started this way
+keeps only the environment it needs (`HOME`, `PATH`, the locale, `XDG_*`, the
+SSH agent socket and the desktop session variables), not a host's API keys.
+[ADR 0035](adr/0035-one-command-setup.md) records the details.
+
+To run it in the foreground instead, from the LangSpan repository root:
 
 ```sh
 ./target/release/langspan daemon
@@ -60,8 +110,8 @@ change workspace files.
 
 ### All repositories for this user
 
-Keep the coordinator running as described above. `install` writes host
-configuration; it does not start the daemon. Preview the user-level hooks and
+`langspan setup` does all of this and starts the coordinator. `install`
+writes host configuration only; it does not start the daemon. Preview the user-level hooks and
 MCP registration with:
 
 ```sh
@@ -106,7 +156,8 @@ precedence. `langspan doctor --root /path/to/checkout` reports both setups;
 `hosts` compare state directories by their canonical form, so one reached
 through a symbolic link (`/tmp` and `/private/tmp` on macOS) is the same
 coordinator, and only a genuinely different directory is reported.
-`langspan uninstall --apply` removes the user-level entries it recognizes and
+`langspan uninstall --apply` removes the user-level entries it recognizes,
+stops and removes the coordinator's login service if `setup` installed one, and
 leaves the coordination state directory in place. A hooks or MCP file left
 holding nothing else (`{}`, or empty text) is removed rather than left behind.
 Running it again after an upgrade also removes such a file an earlier
