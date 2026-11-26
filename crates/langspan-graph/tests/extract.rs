@@ -368,6 +368,31 @@ fn a_java_rewrap_or_annotation_is_not_a_signature_change_and_a_type_change_is() 
     assert_eq!(changed(body, body_after), []);
 }
 
+/// `langspan doctor` lists `Language::ALL`: each entry is chosen by its
+/// own extension and named once. The match makes a new variant name its
+/// extension here.
+#[test]
+fn every_listed_language_is_chosen_by_its_extension_and_named_once() {
+    let extension = |language: Language| match language {
+        Language::Rust => "rs",
+        Language::Python => "py",
+        Language::TypeScript => "ts",
+        Language::Tsx => "tsx",
+        Language::Go => "go",
+        Language::Java => "java",
+    };
+    for language in Language::ALL {
+        assert_eq!(
+            Language::for_path(&format!("src/a.{}", extension(language))),
+            Some(language)
+        );
+    }
+    let mut names: Vec<&str> = Language::ALL.iter().map(|l| l.name()).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), Language::ALL.len());
+}
+
 #[test]
 fn a_java_file_that_does_not_parse_is_indexed_as_far_as_it_parsed() {
     let graph = extract(
@@ -502,14 +527,7 @@ fn broken_oversized_and_hostile_input_is_bounded_and_never_panics() {
     let many: String = (0..30_000).map(|n| format!("a{n};")).collect();
     let graph = extract(Language::TypeScript, many.as_bytes()).unwrap();
     assert!(graph.partial && graph.references.len() <= langspan_graph::MAX_REFERENCES + 16);
-    for language in [
-        Language::Rust,
-        Language::Python,
-        Language::TypeScript,
-        Language::Tsx,
-        Language::Go,
-        Language::Java,
-    ] {
+    for language in Language::ALL {
         extract(language, &[0xff, 0xfe, 0x00, b'{', 0x80]).unwrap();
         extract(language, b"").unwrap();
     }
