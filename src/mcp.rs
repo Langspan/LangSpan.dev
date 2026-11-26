@@ -341,6 +341,17 @@ struct GraphSymbolArgs {
     /// by name), `notes` on its file and `last_check`.
     #[serde(default)]
     detail: bool,
+    /// Rank the definitions as a prompt's code briefing does: a file
+    /// `session_id` edited or read, then one a live peer is editing, then
+    /// exported, then path order. Each definition gets `rank_reasons` and
+    /// `dependents`, up to 5 other files that mention its name, ranked the
+    /// same way and then by mention count.
+    #[serde(default)]
+    rank: bool,
+    /// The asking session's ID, for `rank`. Without it nothing ranks as
+    /// the session's own.
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1495,6 +1506,8 @@ impl McpAdapter {
                 limit: args.limit,
                 detail: args.detail,
                 blind_in_scope: true,
+                rank: args.rank,
+                session_id: args.session_id,
             },
         )
         .await

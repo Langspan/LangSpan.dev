@@ -75,7 +75,7 @@ every answer:
 
 | CLI | MCP | Returns |
 | --- | --- | --- |
-| `graph symbol WORKSPACE NAME [--detail]` | `langspan_symbol` (`detail`) | Definitions of that name; with detail, what is around each (below) |
+| `graph symbol WORKSPACE NAME [--detail] [--rank [--session ID]]` | `langspan_symbol` (`detail`, `rank`, `session_id`) | Definitions of that name; with detail, what is around each (below); ranked, the code briefing's order with each one's dependents (below) |
 | `graph references WORKSPACE NAME` | `langspan_references` | Mentions of that name |
 | `graph impact WORKSPACE PATH [--depth N]` | `langspan_impact` (`depth`) | What the file exports, and other files mentioning those names; with a depth of 2 or 3, those files level by level (below) |
 | `graph blind-spots WORKSPACE` | `langspan_blind_spots` | The files the index cannot answer for, by reason (below) |
@@ -374,6 +374,48 @@ at every prompt that names a defined symbol, whether or not peer news
 changed, and is not remembered as delivered. Nothing is added when the index
 has no complete scan or nothing matched, and any failure adds nothing.
 `--code-briefing off` on the hook, or on `hooks install`, turns it off.
+
+**A ranked code briefing (added later, roadmap C2).** The hook sends
+`graph_context` with `rank: true`, its own session ID and up to 12
+qualifiers from the same 16 KiB of the prompt: relative paths
+(`src/store/upload.rs`), source file names (`upload.rs`) and the leading
+parts of qualified names (`store` in `store::upload` or `store.upload`). The
+qualifiers are used for that query only and, like the names, never recorded.
+The core ranks each name's definitions by fixed rules, each outranking the
+next, with no learned weight:
+
+1. A file the asking session edited or read (its touched paths, held leases
+   and recorded source versions, ADR 0005).
+2. A file a live peer is editing: a peer counted as in a briefing (this
+   generation, the same workspace or a linked worktree of its repository,
+   not exited, not ended, not the asker's parent), holding the file or
+   having edited it within the 30-minute briefing horizon. The most recent
+   such peer is named.
+3. An exported definition.
+4. A file whose path the prompt names: a qualifier equal to a directory on
+   the path, the file name or its stem, or a whole-component run of the path.
+5. Path order, then line.
+
+Each definition in the answer carries `rank_reasons` (`own_file` with
+`edited`, `peer_editing` with `session_id`, `exported`,
+`qualified_in_prompt`) and `dependents`: up to 5 files other than its own
+that mention its name, each with its count of `mentions`, ranked by rules 1,
+2 and 4, then by most mentions, then by path. `dependent_count` and the
+name's `definition_count` count what was left out. The daemon ranks among
+the first 256 definitions in path order and every definition in a file the
+session or a peer works on, and the 256 most-mentioning files and every file
+they work on; past that a definition or file is counted, never ranked. The
+section puts the top definition first with a short reason, such as `(you
+edited this file)`, and `used by` with its ranked dependents and their
+counts; later definitions follow as `also`. A line is built from whole parts
+within 500 bytes: a dependent or definition that does not fit is counted (`and
+3 more file(s)`, `2 more definition(s) not shown`), never cut, and a name
+that does not fit is counted on the closing line as before. Paths and
+signatures are capped at 160 bytes each. Without `rank`, `graph_context`
+answers exactly as before. `graph symbol --rank [--session ID]` and
+`langspan_symbol` with `rank` and `session_id` give the same order outside a
+prompt, with up to 200 definitions in one frame. Nothing is resolved: a
+dependent mentions the name and may mean another symbol of it.
 
 **Another worktree's in-flight signatures (added later, roadmap C7).** The
 observer keeps, for each file that differs from the worktree's `HEAD`, the

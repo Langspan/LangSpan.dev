@@ -567,11 +567,42 @@ mod unix {
         let graph = graph.ok_or("the index is not available yet; try again shortly")?;
         let failed = |error: Box<dyn std::error::Error + Send + Sync>| error.to_string();
         let detail = matches!(command, Command::GraphSymbol { detail: true, .. });
+        let mut ranked_total = None;
+        let inputs = match command {
+            Command::GraphSymbol {
+                rank: true,
+                session_id,
+                ..
+            } => {
+                langspan_core::validate_rank(session_id.as_deref(), &[])
+                    .map_err(|error| error.message)?;
+                Some(langspan_core::rank_inputs(
+                    state,
+                    workspace_id,
+                    session_id.as_deref(),
+                    &[],
+                    now_ms(),
+                ))
+            }
+            Command::GraphSymbol {
+                session_id: Some(_),
+                ..
+            } => return Err("session_id ranks a query: send it with rank set".into()),
+            _ => None,
+        };
         let started = Instant::now();
         let ((mut symbols, mut references, levels), coverage) = graph
             .with_coverage(&of, |graph| match command {
                 Command::GraphSymbol { name, .. } => {
-                    let mut symbols = graph.symbol(workspace_id, name, limit)?;
+                    let mut symbols = match &inputs {
+                        Some(inputs) => {
+                            let (symbols, total) =
+                                ranked_definitions(graph, inputs, workspace_id, name, limit)?;
+                            ranked_total = Some(total);
+                            symbols
+                        }
+                        None => graph.symbol(workspace_id, name, limit)?,
+                    };
                     if detail {
                         for symbol in symbols.iter_mut().take(limit as usize) {
                             graph.add_detail(workspace_id, symbol)?;
@@ -596,11 +627,15 @@ mod unix {
                 _ => unreachable!("matched above"),
             })
             .map_err(failed)?;
-        let mut truncated = symbols.len() > limit as usize || references.len() > limit as usize;
+        let mut truncated = symbols.len() > limit as usize
+            || references.len() > limit as usize
+            || ranked_total.is_some_and(|total| total > limit);
         symbols.truncate(limit as usize);
         references.truncate(limit as usize);
         if detail {
             add_notes_and_checks(state, workspace_id, &mut symbols);
+        }
+        if detail || inputs.is_some() {
             truncated |= fit_frame(&mut symbols, &coverage);
         }
         let levels = levels.map(|mut levels| {
@@ -806,12 +841,39 @@ mod unix {
     fn graph_context(
         graph: Option<&crate::graph::Index>,
         state: &State,
-        workspace_id: &str,
-        names: &[String],
-        limit: u32,
+        command: &Command,
     ) -> Result<Outcome, (&'static str, String)> {
+        let Command::GraphContext {
+            workspace_id,
+            names,
+            limit,
+            rank,
+            session_id,
+            qualifiers,
+        } = command
+        else {
+            return Err(("invalid_graph_context", "not a code-context query".into()));
+        };
+        let limit = *limit;
         langspan_core::validate_graph_context(names, limit)
             .map_err(|error| ("invalid_graph_context", error.message))?;
+        langspan_core::validate_rank(session_id.as_deref(), qualifiers)
+            .map_err(|error| ("invalid_graph_context", error.message))?;
+        if !rank && (session_id.is_some() || !qualifiers.is_empty()) {
+            return Err((
+                "invalid_graph_context",
+                "session_id and qualifiers rank a query: send them with rank set".into(),
+            ));
+        }
+        let inputs = rank.then(|| {
+            langspan_core::rank_inputs(
+                state,
+                workspace_id,
+                session_id.as_deref(),
+                qualifiers,
+                now_ms(),
+            )
+        });
         let unavailable = |message: String| ("index_unavailable", message);
         let of = Registration::of(state, workspace_id)
             .ok_or_else(|| unavailable("workspace is not registered".into()))?;
@@ -824,6 +886,25 @@ mod unix {
             .with_coverage(&of, |graph| {
                 let mut matches = Vec::new();
                 for name in names {
+                    if let Some(inputs) = &inputs {
+                        let (definitions, total) =
+                            ranked_definitions(graph, inputs, workspace_id, name, limit)?;
+                        if definitions.is_empty() {
+                            continue;
+                        }
+                        let files = langspan_core::CONTEXT_FILES;
+                        let mut mentioned_in = graph.mentioned_in(workspace_id, name, files)?;
+                        let truncated = total > limit || mentioned_in.len() > files as usize;
+                        mentioned_in.truncate(files as usize);
+                        matches.push(langspan_core::NameContext {
+                            name: name.clone(),
+                            definitions,
+                            mentioned_in,
+                            truncated,
+                            definition_count: Some(total),
+                        });
+                        continue;
+                    }
                     let mut definitions = graph.symbol(workspace_id, name, limit)?;
                     if definitions.is_empty() {
                         continue;
@@ -839,12 +920,55 @@ mod unix {
                         definitions,
                         mentioned_in,
                         truncated,
+                        definition_count: None,
                     });
                 }
                 Ok(matches)
             })
             .map_err(failed)?;
         Ok(Outcome::GraphContext { matches, coverage })
+    }
+
+    /// The first `limit` definitions of `name` in rank order (roadmap C2),
+    /// each with its reasons and its ranked dependents, and how many
+    /// definitions the name has. Ranked among the first `RANK_CANDIDATES`
+    /// in path order and every one in a file the session or a peer works
+    /// on; the rest are counted.
+    fn ranked_definitions(
+        graph: &crate::graph::Index,
+        inputs: &langspan_core::RankInputs,
+        workspace_id: &str,
+        name: &str,
+        limit: u32,
+    ) -> Result<(Vec<langspan_core::SymbolRef>, u32), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let paths = inputs.paths();
+        let (mut definitions, total) = graph.rank_candidates(workspace_id, name, &paths)?;
+        if definitions.is_empty() {
+            return Ok((definitions, total));
+        }
+        langspan_core::rank_definitions(inputs, &mut definitions);
+        definitions.truncate(limit as usize);
+        // The shown definitions' own files are read too, so each one's
+        // count of other files is exact.
+        let mut asked = paths;
+        asked.extend(definitions.iter().map(|symbol| symbol.path.clone()));
+        asked.sort_unstable();
+        asked.dedup();
+        let (files, mentioning) = graph.mention_counts(workspace_id, name, &asked)?;
+        for symbol in &mut definitions {
+            let own = files.iter().any(|(path, _)| *path == symbol.path);
+            let others: Vec<(String, u32)> = files
+                .iter()
+                .filter(|(path, _)| *path != symbol.path)
+                .cloned()
+                .collect();
+            let mut dependents = langspan_core::rank_dependents(inputs, &others);
+            dependents.truncate(langspan_core::CONTEXT_FILES as usize);
+            symbol.dependents = Some(dependents);
+            symbol.dependent_count = Some(mentioning.saturating_sub(u32::from(own)));
+        }
+        Ok((definitions, total))
     }
 
     /// In-flight symbols `graph inflight` reads from one worktree's index,
@@ -2790,11 +2914,7 @@ mod unix {
                     limit,
                 } => graph_blind_spots(graph, store.state(), workspace_id, *limit)
                     .map_err(|message| ("index_unavailable", message)),
-                Command::GraphContext {
-                    workspace_id,
-                    names,
-                    limit,
-                } => graph_context(graph, store.state(), workspace_id, names, *limit),
+                Command::GraphContext { .. } => graph_context(graph, store.state(), &command),
                 _ => graph_query(graph, store.state(), &command)
                     .map_err(|message| ("index_unavailable", message)),
             };

@@ -3097,6 +3097,8 @@ fn doctor(
                         limit: 1,
                         detail: false,
                         blind_in_scope: true,
+                        rank: false,
+                        session_id: None,
                     },
                 ) {
                     let behind = coverage.indexable_files - coverage.current_files;
@@ -4081,6 +4083,8 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                         limit,
                         detail: options.remove("--detail").is_some(),
                         blind_in_scope: true,
+                        rank: options.remove("--rank").is_some(),
+                        session_id: options.remove("--session"),
                     },
                     "references" => Command::GraphReferences {
                         workspace_id,
@@ -4385,8 +4389,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
             // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
-            // `graph symbol`: `--detail`; `brief`: `--recent`; `setup`: `--yes`;
-            // `guidance install`: `--create`).
+            // `graph symbol`: `--detail`, `--rank`; `brief`: `--recent`;
+            // `setup`: `--yes`; `guidance install`: `--create`).
             "--open"
             | "--allow-network"
             | "--demo"
@@ -4394,6 +4398,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--publish-as-branch"
             | "--mine"
             | "--detail"
+            | "--rank"
             | "--recent"
             | "--all"
             | "--skill"
@@ -4462,6 +4467,42 @@ fn no_unused_options(options: &BTreeMap<String, String>) -> Result<(), langspan:
 }
 /// The lines `graph symbol --detail` adds under a definition. Note text is
 /// another session's: quoted, so it reads as data.
+/// A ranked definition's reasons and dependents (roadmap C2), under it.
+fn print_symbol_rank(symbol: &langspan_core::SymbolRef) {
+    use langspan_core::RankReason;
+    let reason = |reason: &RankReason| match reason {
+        RankReason::OwnFile { edited: true } => "the session edited this file".to_owned(),
+        RankReason::OwnFile { edited: false } => "the session read this file".to_owned(),
+        RankReason::PeerEditing { session_id } => format!("session {session_id} is editing it"),
+        RankReason::Exported => "exported".to_owned(),
+        RankReason::QualifiedInPrompt => "the prompt names its path".to_owned(),
+    };
+    if let Some(reasons) = symbol.rank_reasons.as_ref().filter(|r| !r.is_empty()) {
+        let reasons: Vec<String> = reasons.iter().map(reason).collect();
+        println!("  ranked by: {}", reasons.join("; "));
+    }
+    let Some(dependents) = &symbol.dependents else {
+        return;
+    };
+    let listed: Vec<String> = dependents
+        .iter()
+        .map(|dependent| {
+            let mut parts = vec![format!("{} mention(s)", dependent.mentions)];
+            parts.extend(dependent.rank_reasons.iter().map(reason));
+            format!("{} ({})", dependent.path, parts.join(", "))
+        })
+        .collect();
+    let more = symbol
+        .dependent_count
+        .unwrap_or(0)
+        .saturating_sub(dependents.len() as u32);
+    match (listed.is_empty(), more) {
+        (true, _) => println!("  used by: no other indexed file"),
+        (false, 0) => println!("  used by: {}", listed.join(", ")),
+        (false, more) => println!("  used by: {} and {more} more file(s)", listed.join(", ")),
+    }
+}
+
 fn print_symbol_detail(symbol: &langspan_core::SymbolRef) {
     if let Some(digest) = &symbol.body_digest {
         println!("  body digest {digest}");
@@ -5135,6 +5176,7 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                     if symbol.exported { " (exported)" } else { "" },
                     symbol.signature
                 );
+                print_symbol_rank(symbol);
                 print_symbol_detail(symbol);
             }
             match levels {
