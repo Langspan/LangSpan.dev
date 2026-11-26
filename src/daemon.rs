@@ -1967,7 +1967,9 @@ mod unix {
             && workspace_id.starts_with("lsh1-root-")
             && let Ok(canonical) = fs::canonicalize(root)
             && let Some(existing) = store.state().workspaces.values().find(|existing| {
-                existing.workspace_id != *workspace_id && Path::new(&existing.root) == canonical
+                existing.workspace_id != *workspace_id
+                    && (Path::new(&existing.root) == canonical
+                        || crate::observer::same_root(Path::new(&existing.root), &canonical))
             })
         {
             return Response {
@@ -2136,6 +2138,8 @@ mod unix {
 
     /// The other workspaces whose roots overlap `canonical` as distinct
     /// linked worktrees of one repository. Any other overlap is refused.
+    /// A registered root is kept as given, so it is compared both as given
+    /// and resolved: a root that is now a link to `canonical` overlaps it.
     fn verified_overlaps(
         state: &State,
         workspace_id: &str,
@@ -2144,10 +2148,14 @@ mod unix {
     ) -> Result<Vec<String>, String> {
         let mut verified = Vec::new();
         for old in state.workspaces.values() {
-            let other = Path::new(&old.root);
+            let given = Path::new(&old.root);
+            let resolved = fs::canonicalize(given).ok();
+            let overlaps =
+                |other: &Path| canonical.starts_with(other) || other.starts_with(canonical);
             if old.workspace_id != workspace_id
-                && (canonical.starts_with(other) || other.starts_with(canonical))
+                && (overlaps(given) || resolved.as_deref().is_some_and(overlaps))
             {
+                let other = resolved.as_deref().unwrap_or(given);
                 let linked = crate::git::identity(canonical, deadline)
                     .and_then(|a| crate::git::identity(other, deadline).map(|b| (a, b)))
                     .is_ok_and(|(a, b)| {
@@ -2235,12 +2243,29 @@ mod unix {
                 )));
             }
         };
+        // The old root still resolves to NEW_ROOT, as when a link was left
+        // where the checkout used to be: the same checkout, moved.
+        // With or without --switch, there is nothing else to tell apart.
+        let same = old_exists && crate::observer::same_root(old, &canonical);
         match (switch, old_exists) {
+            _ if same => {}
             (false, true) => {
+                // A link at the old root, or on the way to it, names the
+                // directory it now leads to.
+                let link = match fs::canonicalize(old) {
+                    Ok(target) if target != old => format!(
+                        ": it is reached through a symbolic link and resolves to {}, not to NEW_ROOT",
+                        target.display()
+                    ),
+                    Err(_) if old.is_symlink() => {
+                        ": it is a symbolic link whose target cannot be resolved".into()
+                    }
+                    _ => String::new(),
+                };
                 return Err((
                     "old_root_exists",
                     format!(
-                        "The old root {} still exists. To coordinate the checkout at NEW_ROOT under {workspace_id} instead, add --switch; to coordinate both, register NEW_ROOT with `langspan workspace add`. Nothing changed",
+                        "The old root {} still exists{link}. To coordinate the checkout at NEW_ROOT under {workspace_id} instead, add --switch; to coordinate both, register NEW_ROOT with `langspan workspace add`. Nothing changed",
                         old.display()
                     ),
                 ));
@@ -2307,12 +2332,8 @@ mod unix {
                 old.display()
             ))
         })?;
-        let object = format!("{head}^{{commit}}");
-        let arguments = [&SAFE[..], &["cat-file", "-e", &object]].concat();
-        let found = crate::git::run_with_env(new, &arguments, &[], deadline, 256)
-            .map_err(|error| refused(format!("cannot read NEW_ROOT's objects: {error}")))?
-            .0
-            .success();
+        let found = crate::observer::holds_commit(new, &head, deadline)
+            .map_err(|error| refused(format!("cannot read NEW_ROOT's objects: {error}")))?;
         if found {
             Ok(())
         } else {
@@ -2333,6 +2354,18 @@ mod unix {
                     .map_err(|e| format!("cannot resolve workspace root: {e}"))?;
                 if !canonical.is_dir() {
                     return Err("workspace root must be a directory".into());
+                }
+                // The registered root reached another way, such as through a
+                // link left where the checkout used to be: the same
+                // registration, kept as given.
+                if let Some(existing) = state.workspaces.get(workspace_id)
+                    && crate::observer::same_root(Path::new(&existing.root), &canonical)
+                {
+                    return Ok(Command::WorkspaceRegisterVerified {
+                        workspace_id: workspace_id.clone(),
+                        root: existing.root.clone(),
+                        verified_overlaps: existing.verified_overlaps.clone(),
+                    });
                 }
                 let deadline = Instant::now() + Duration::from_millis(250);
                 let verified_overlaps =
@@ -2533,18 +2566,46 @@ mod unix {
             return Err("session workspace is missing".into());
         };
         let root = Path::new(&workspace.root);
+        // A root reached through a link is the checkout the link leads to,
+        // unless the scan found that to be another repository.
         let current_root = fs::canonicalize(root)?;
-        if current_root != root {
+        if current_root != root
+            && state
+                .scan_failures
+                .get(&session.workspace_id)
+                .is_some_and(|failure| failure.detail == crate::store::IDENTITY_CHANGED)
+        {
             return Err("workspace root identity changed; use a new workspace registration".into());
+        }
+        // Other registered roots, resolved like this one, so a root behind
+        // a link still bounds its own files. A root that no longer resolves
+        // keeps its stored form.
+        let others: Vec<std::path::PathBuf> = state
+            .workspaces
+            .iter()
+            .filter(|(id, _)| **id != session.workspace_id)
+            .map(|(_, workspace)| {
+                let stored = Path::new(&workspace.root);
+                fs::canonicalize(stored).unwrap_or_else(|_| stored.to_path_buf())
+            })
+            .collect();
+        // Another workspace ID that now resolves to this very root, as when
+        // a registered clone's root was replaced by a link to another
+        // registered clone: both would admit the same physical files while
+        // the core keeps their leases apart, so neither admits any.
+        if others.contains(&current_root) {
+            return Err("workspace root now resolves to another registered workspace's root; move or remove one of them".into());
         }
         let mut keys = paths
             .iter()
             .map(|path| -> Result<String, crate::Error> {
-                let key = file_key(root, path)?;
-                let full = root.join(&key);
-                if state.workspaces.values().any(|workspace| {
-                    let descendant = Path::new(&workspace.root);
-                    descendant != root && descendant.starts_with(root) && full.starts_with(descendant)
+                // Resolved paths are compared with the resolved root.
+                let key = file_key(&current_root, path)?;
+                let full = current_root.join(&key);
+                if others.iter().any(|descendant| {
+                    *descendant != current_root
+                        && descendant.starts_with(&current_root)
+                        && full.starts_with(descendant)
                 }) {
                     return Err("file belongs to a registered descendant workspace; attach that physical root separately".into());
                 }
