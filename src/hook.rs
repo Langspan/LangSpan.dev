@@ -1235,20 +1235,38 @@ fn lifecycle(
             max_peers: BRIEF_PEERS,
             deliver,
             mid_turn: false,
+            // What changed recently goes only into a starting context.
+            recent: starting,
+            recent_window_ms: None,
             mcp: false,
         },
     ) {
-        // A new or resumed context has lost any earlier briefing; a prompt
-        // in a continuing context gets one only when the situation changed.
         Ok(Response {
             outcome: Outcome::Briefing { briefing },
             ..
-        }) => Ok((has_content(&briefing) && (starting || briefing.changed)).then_some(briefing)),
+        }) => Ok(briefing),
         Ok(other) => Err(Reply::none(
             "unknown",
             format!("unexpected outcome {other:?}"),
         )),
         Err(failure) => Err(failure_reply(failure)),
+    };
+    // The work ended sessions left uncommitted is confirmed against the line
+    // journal within a quarter of the budget; past it, the recent section
+    // is left out and the rest of the briefing is sent. A new or resumed
+    // context has lost any earlier briefing; a prompt in a continuing
+    // context gets one only when the situation changed.
+    let confirmed = |mut briefing: langspan_core::Briefing, note: &mut String| {
+        if let Some(recent) = briefing.recent.as_mut() {
+            let share = (Instant::now() + config.budget / 4).min(deadline);
+            if let Err(reason) =
+                crate::recent::confirm_left(&config.state_dir, &ids.session_id, recent, share)
+            {
+                briefing.recent = None;
+                note.push_str(&format!("; recent changes left out: {reason}"));
+            }
+        }
+        (has_content(&briefing) && (starting || briefing.changed)).then_some(briefing)
     };
     // Delivering a briefing acknowledges its messages and check results, so
     // with less than the whole limit left (a reply joining several
@@ -1259,7 +1277,8 @@ fn lifecycle(
         None
     } else {
         match brief("brief-preview", false) {
-            Ok(preview) => Some(preview),
+            // The preview only sizes the reply; a note about it is not kept.
+            Ok(preview) => Some(confirmed(preview, &mut String::new())),
             Err(reply) => return reply,
         }
     };
@@ -1273,7 +1292,7 @@ fn lifecycle(
             None
         }
         _ => match brief("brief", true) {
-            Ok(briefing) => briefing,
+            Ok(briefing) => confirmed(briefing, &mut targets_note),
             Err(reply) => return reply,
         },
     };
@@ -2041,6 +2060,25 @@ fn definitions_text(change: &langspan_core::InterfaceChange) -> String {
     }
 }
 
+/// One interface change in words, its names and signatures quoted.
+pub(crate) fn interface_change_text(change: &langspan_core::InterfaceChange) -> String {
+    match (&change.before, &change.after) {
+        _ if change.before_count.is_some() => definitions_text(change),
+        (Some(before), Some(after)) => format!(
+            "{} {} changed from {} to {}",
+            clean(&change.kind, 16),
+            quoted(&change.name),
+            quoted(before),
+            quoted(after)
+        ),
+        _ => format!(
+            "{} {} was removed or renamed",
+            clean(&change.kind, 16),
+            quoted(&change.name)
+        ),
+    }
+}
+
 /// An automatic check's results first: each is delivered once, so they are
 /// always shown, and the peer lines take the room that is left.
 fn render_briefing_within(briefing: &langspan_core::Briefing, limit: usize) -> String {
@@ -2171,6 +2209,23 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
             text.push_str(&reader);
         }
     }
+    // What changed recently (roadmap C3), at a session's start only: its
+    // room is set aside here, after the messages, and it is placed after
+    // the peer lines. What does not fit is counted. 160 bytes stay free for
+    // the count lines that may follow it.
+    let (recent, recent_unshown) = match &briefing.recent {
+        Some(recent) => crate::recent::render(
+            recent,
+            crate::recent::LIMIT.min(limit.saturating_sub(text.len() + footer.len() + 160)),
+        ),
+        None => (String::new(), 0),
+    };
+    skipped += recent_unshown;
+    let limit = limit.saturating_sub(if recent.is_empty() {
+        0
+    } else {
+        recent.len() + 1
+    });
     if !briefing.stale_reads.is_empty() {
         let stale: Vec<String> = briefing
             .stale_reads
@@ -2245,25 +2300,7 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
         }
     }
     for impact in &briefing.interface_changes {
-        let changes: Vec<String> = impact
-            .changes
-            .iter()
-            .map(|change| match (&change.before, &change.after) {
-                _ if change.before_count.is_some() => definitions_text(change),
-                (Some(before), Some(after)) => format!(
-                    "{} {} changed from {} to {}",
-                    clean(&change.kind, 16),
-                    quoted(&change.name),
-                    quoted(before),
-                    quoted(after)
-                ),
-                _ => format!(
-                    "{} {} was removed or renamed",
-                    clean(&change.kind, 16),
-                    quoted(&change.name)
-                ),
-            })
-            .collect();
+        let changes: Vec<String> = impact.changes.iter().map(interface_change_text).collect();
         let by = impact
             .by_session
             .as_deref()
@@ -2459,6 +2496,10 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
         }
     }
     text.push_str(&remote);
+    if !recent.is_empty() {
+        text.push_str(&recent);
+        text.push('\n');
+    }
     if unshown > 0 {
         text.push_str(&format!("({unshown} more message(s) not shown.)\n"));
     }
@@ -3283,6 +3324,10 @@ fn has_peer_content(briefing: &langspan_core::Briefing) -> bool {
         || !briefing.messages.is_empty()
         || !briefing.retracted.is_empty()
         || !briefing.checkout_changes.is_empty()
+        || briefing
+            .recent
+            .as_ref()
+            .is_some_and(|recent| !recent.is_empty())
         || !briefing.uncoordinated.is_empty()
 }
 
@@ -3301,6 +3346,8 @@ impl Session<'_> {
                     max_peers: BRIEF_PEERS,
                     deliver: true,
                     mid_turn: true,
+                    recent: false,
+                    recent_window_ms: None,
                     mcp: false,
                 },
             )
@@ -4622,6 +4669,7 @@ mod briefing_text {
             checkout_changes: Vec::new(),
             uncoordinated: Vec::new(),
             checks: Vec::new(),
+            recent: None,
         }
     }
 
@@ -4644,6 +4692,53 @@ mod briefing_text {
                 .collect(),
             ..peer(id, work)
         }
+    }
+
+    /// Both sides of a merge: an uncoordinated change and the recent section
+    /// are each peer content alone, and a briefing with a peer's presence and
+    /// the recent section shows the presence on the peer line and the recent
+    /// section after the peer lines.
+    #[test]
+    fn presence_uncoordinated_changes_and_the_recent_section_all_count_and_show() {
+        use langspan_core::{ChangedPath, RecentChanges, UncoordinatedNotice};
+        let recent = RecentChanges {
+            window_ms: 4 * 60 * 60_000,
+            root: "/repos/app".into(),
+            changed_paths: vec![ChangedPath {
+                path: "src/store.rs".into(),
+                sessions: 2,
+                age_ms: 60_000,
+                elsewhere: false,
+            }],
+            interface_changes: Vec::new(),
+            contested_paths: Vec::new(),
+            left_uncommitted: Vec::new(),
+            omitted: 0,
+        };
+        let mut only_recent = briefing(Vec::new());
+        only_recent.recent = Some(recent.clone());
+        assert!(has_peer_content(&only_recent));
+        let mut only_uncoordinated = briefing(Vec::new());
+        only_uncoordinated.uncoordinated = vec![UncoordinatedNotice {
+            sessions: vec!["codex.c".into()],
+            paths: vec!["src/a.rs".into()],
+            age_ms: 1_000,
+        }];
+        assert!(has_peer_content(&only_uncoordinated));
+        assert!(!has_peer_content(&briefing(Vec::new())));
+
+        let mut both = briefing(vec![looking("alice", "src/token.rs", &["src/auth.rs"])]);
+        both.recent = Some(recent);
+        let text = render_briefing(&both);
+        let peer_line = text
+            .find(r#"looking at "src/auth.rs";"#)
+            .unwrap_or_else(|| panic!("{text}"));
+        let section = text
+            .find(crate::recent::HEADING)
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(peer_line < section, "{text}");
+        assert!(text.contains("src/store.rs"), "{text}");
+        assert!(text.len() <= BRIEFING_LIMIT, "{}", text.len());
     }
 
     #[test]
@@ -5569,6 +5664,7 @@ mod code_briefing_text {
             checkout_changes: Vec::new(),
             uncoordinated: Vec::new(),
             checks: Vec::new(),
+            recent: None,
         }
     }
 

@@ -38,6 +38,7 @@ impl Fixture {
     fn start(&mut self) {
         self.child = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -251,6 +252,7 @@ fn second_daemon_cannot_replace_live_socket() {
     let mut f = Fixture::new();
     f.start();
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["daemon", "--state-dir"])
         .arg(f.state_dir())
         .output()
@@ -338,6 +340,7 @@ fn cli_uses_the_same_daemon_and_exposes_conflict_exit_codes() {
     f.setup();
     let cli = |args: &[&str]| {
         Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(f.state_dir())
             .arg("--json")

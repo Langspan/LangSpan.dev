@@ -83,6 +83,7 @@ impl Fixture {
             ],
         );
         let child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["daemon", "--state-dir"])
             .arg(base.join("state"))
             .stdout(Stdio::null())
@@ -104,6 +105,7 @@ impl Fixture {
     }
     fn run(&self, vendor: &str, event: &Value) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", vendor, "--state-dir"])
             .arg(self.base.join("state"))
             .args(["--workspace", "work", "--root"])
@@ -313,6 +315,7 @@ fn the_claude_code_adapter_ignores_a_cursor_event_cursor_sends_it() {
 
 fn hooks(state: &Path, root: &Path, action: &str, apply: bool) -> String {
     let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
+    command.env("LANGSPAN_AUTOSTART", "off");
     command
         .arg("--state-dir")
         .arg(state)
@@ -479,6 +482,7 @@ fn doctor_reports_the_project_cursor_install() {
     let state = f.base.join("state");
     hooks(&state, &f.root(), "install", true);
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .arg("--state-dir")
         .arg(&state)
         .args(["doctor", "--root"])

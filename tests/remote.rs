@@ -54,6 +54,7 @@ impl Developer {
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         self.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(&self.state)
                 .stdout(Stdio::null())
@@ -139,6 +140,7 @@ impl Developer {
     }
     fn hook(&self, vendor: &str, event: Value) -> (String, Option<String>) {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", vendor, "--state-dir"])
             .arg(&self.state)
             .args(["--workspace", "app", "--root"])

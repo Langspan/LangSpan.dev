@@ -51,6 +51,7 @@ impl World {
         let mut world = Self { base, daemon: None };
         world.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(world.state())
                 .stdin(Stdio::null())
@@ -92,6 +93,7 @@ impl World {
     /// The CLI's `--json` answer.
     fn cli(&self, args: &[&str]) -> Value {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.state())
             .args(args)
@@ -134,6 +136,7 @@ impl World {
 
     async fn mcp(&self) -> RunningService<RoleClient, ()> {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+        command.env("LANGSPAN_AUTOSTART", "off");
         command.arg("mcp").arg("--state-dir").arg(self.state());
         tokio::time::timeout(DEADLINE, ().serve(TokioChildProcess::new(command).unwrap()))
             .await
