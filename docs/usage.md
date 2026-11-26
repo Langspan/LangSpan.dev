@@ -113,6 +113,23 @@ coordinating local edits. Each machine runs its own daemon; remote sharing is a
 separate setup below. The daemon requires owner-only permissions and does not
 change workspace files.
 
+The daemon checks its state directory every second and exits if the directory
+was removed, was replaced by another folder at the same path, or is no longer
+owner-only. It logs a `daemon_stopping` line naming the reason
+(`state_directory_removed`, `state_directory_replaced` or
+`state_directory_not_private`). The next hook or `langspan mcp` call starts a
+coordinator for the folder now at that path, as it would after any stop; a
+folder that others can open is refused at start.
+
+A daemon that stops while an automatic check runs cancels the check and kills
+its command's process group first, waiting up to two seconds for it; a check
+still running then is logged as `auto_check_not_stopped`.
+
+A debug build of the daemon also exits after five minutes with no client and
+no automatic check running (reason `idle`), so a coordinator left by a test
+that was killed ends by itself. The test-only variable `LANGSPAN_TEST_IDLE_EXIT_MS` changes that limit
+(`0` turns it off). A release build has no idle exit and ignores the variable.
+
 ## Connect a native agent
 
 ### All repositories for this user
@@ -2514,6 +2531,32 @@ The current wire protocol is version 4 and the SQLite schema marker version 4
 fields version 4 added, and a client asks a daemon of an earlier build in
 version 3. Upgrade the daemon and clients together. Earlier persisted
 records remain readable; a build older than the marker refuses the file.
+
+### Mixed versions after an upgrade
+
+LangSpan never downloads or replaces its own binary and makes no update
+check. Upgrade with a new release archive, checked as in
+[Verify the binary](install.md#verify-a-download), or by rebuilding from
+source; roll back by keeping the previous archive. `brew upgrade langspan`
+applies once the Homebrew tap is published. The store stays readable by the
+earlier build while the schema marker is unchanged.
+
+After an upgrade, a coordinator started before it keeps running the old
+binary while hooks start the new one. `langspan doctor` asks the coordinator
+for its version and reads the version recorded in each executable that an
+installed hook or MCP entry names, without running it:
+
+```text
+$ langspan doctor --root /work/app
+ok Coordinator version 0.4.0, process 4242.
+FIX Hooks (claude-code) in /work/app, MCP server (claude-code) in /work/app/.mcp.json: /opt/homebrew/opt/langspan/bin/langspan, version 0.5.0; the coordinator, version 0.4.0, is older than this binary; restart it: `launchctl kickstart -k gui/501/dev.langspan.coordinator` (do it between agents' turns: a restart ends the leases they hold, and each session is coordinated again when it next acts).
+```
+
+A version difference, or an executable that records no version (a build from
+before this check, or not LangSpan), needs attention and makes `doctor` exit 1.
+Without a login service the fix names `kill PID` and `langspan daemon`;
+`doctor` restarts nothing itself. A coordinator that does not answer the
+`version` request runs a build older than the one asking.
 
 Receipts are kept until [retention](#retention) removes them, at the
 earliest 7 days after they were recorded; a retry after that is a new

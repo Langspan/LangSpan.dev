@@ -24,7 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[allow(dead_code)] // Only `alive` is used here.
+#[allow(dead_code)] // Only `running` is used here.
 mod support;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -81,6 +81,11 @@ impl Fixture {
     }
     /// As `new`, with the daemon's whole `config.json`.
     fn with_config(config_json: Value) -> Self {
+        Self::with_idle_exit(config_json, None)
+    }
+    /// As `with_config`, with a debug build's idle limit in milliseconds
+    /// (`LANGSPAN_TEST_IDLE_EXIT_MS`) and the daemon's log in `daemon.log`.
+    fn with_idle_exit(config_json: Value, idle_ms: Option<u64>) -> Self {
         let base = fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
@@ -102,14 +107,20 @@ impl Fixture {
         let config = state.join("config.json");
         fs::write(&config, config_json.to_string()).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
-        let daemon = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        let mut daemon = Process::new(env!("CARGO_BIN_EXE_langspan"));
+        daemon
             .env("LANGSPAN_AUTOSTART", "off")
+            .env_remove("LANGSPAN_TEST_IDLE_EXIT_MS")
             .args(["daemon", "--state-dir"])
             .arg(&state)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        if let Some(ms) = idle_ms {
+            daemon
+                .env("LANGSPAN_TEST_IDLE_EXIT_MS", ms.to_string())
+                .stderr(fs::File::create(base.join("daemon.log")).unwrap());
+        }
+        let daemon = daemon.spawn().unwrap();
         let fixture = Self {
             base,
             daemon: Some(daemon),
@@ -527,12 +538,7 @@ fn status() -> Request {
 fn stops(pid: i32) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let state = Process::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .unwrap();
-        let state = String::from_utf8_lossy(&state.stdout).trim().to_owned();
-        if !support::alive(pid) || state.is_empty() || state.starts_with('Z') {
+        if !support::running(pid) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -672,13 +678,73 @@ fn the_hook_never_waits_for_the_check_and_turning_it_off_stops_one_running() {
     assert!(batch.took < Duration::from_secs(10), "{:?}", batch.took);
     let during = f.prompt("p1");
     assert!(during.took < Duration::from_secs(10), "{:?}", during.took);
-    assert!(support::alive(pid), "the check is still running");
+    assert!(support::running(pid), "the check is still running");
     assert!(f.checks().is_empty());
     assert_eq!(f.cli(&["check", "auto", "work", "--off"]).0, 0);
     assert!(stops(pid), "turning the check off stops it");
     // Long enough for the worker to hear that the run ended.
     std::thread::sleep(Duration::from_millis(1500));
     assert!(f.checks().is_empty(), "a cancelled run records nothing");
+}
+
+/// Waits up to 10 s for the fixture's daemon to exit by itself, and returns
+/// its log.
+#[cfg(debug_assertions)]
+fn daemon_exits(f: &mut Fixture) -> String {
+    let daemon = f.daemon.as_mut().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while daemon.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon was still running 10 s later: {}",
+            fs::read_to_string(f.base.join("daemon.log")).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    fs::read_to_string(f.base.join("daemon.log")).unwrap()
+}
+
+/// The idle limit of a debug build (issue #239) counts an automatic check
+/// that is still running as activity: the daemon stays to record its result,
+/// however long it outlasts the limit, and stops once idle after it.
+#[cfg(debug_assertions)]
+#[test]
+fn a_debug_daemon_does_not_stop_for_idleness_while_an_automatic_check_runs() {
+    let mut f = Fixture::with_idle_exit(json!({ "auto_check_debounce_ms": 100 }), Some(1000));
+    f.enable(
+        60,
+        r#"echo start >> "$0"; sleep 4; echo end >> "$0"; exit 0"#,
+    );
+    f.write_batch("call-1", "one\n");
+    // No client call while the check runs: only the check keeps it busy.
+    f.wait_for_log(2);
+    assert!(
+        f.daemon.as_mut().unwrap().try_wait().unwrap().is_none(),
+        "the daemon stopped while its check ran: {}",
+        fs::read_to_string(f.base.join("daemon.log")).unwrap_or_default()
+    );
+    let checks = f.wait_for_checks(1);
+    assert_eq!(checks[0].result, CheckResult::Passed {});
+    let log = daemon_exits(&mut f);
+    assert!(log.contains(r#""reason":"idle""#), "{log}");
+}
+
+/// A daemon that stops while an automatic check runs (here, because its
+/// state directory went away) stops the check's process group first, so
+/// the command does not outlive the daemon that would enforce its limit.
+#[test]
+fn a_daemon_that_stops_stops_its_running_automatic_check() {
+    let f = Fixture::new(100);
+    let pidfile = f.base.join("check.pid");
+    f.enable(
+        600,
+        &format!(r#"echo $$ > {}; exec sleep 30"#, pidfile.display()),
+    );
+    f.write_batch("call-1", "one\n");
+    let pid = f.pid("check.pid");
+    assert!(support::running(pid), "the check is running");
+    fs::remove_dir_all(f.state_dir()).unwrap();
+    assert!(stops(pid), "the check outlived its daemon");
 }
 
 /// A clone of the fixture's checkout, for `workspace move --switch`.

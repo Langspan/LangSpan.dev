@@ -558,16 +558,21 @@ class Coordinator:
         self.process = subprocess.Popen([str(langspan), "daemon", "--state-dir", str(state_dir)],
                                         stdin=subprocess.DEVNULL, stdout=self.log, stderr=self.log,
                                         start_new_session=True)
-        deadline = time.monotonic() + DAEMON_START_SECONDS
-        while True:
-            probe = subprocess.run([str(langspan), "status", "--state-dir", str(state_dir)],
-                                   capture_output=True, timeout=10)
-            if probe.returncode == 0:
-                return
-            if self.process.poll() is not None or time.monotonic() > deadline:
-                self.stop()
-                raise RuntimeError("the LangSpan coordinator did not start; see " + str(log_path))
-            time.sleep(.1)
+        # Until this returns, no caller holds the coordinator to stop it, so
+        # any exception here, even an interrupt, stops it first (issue #239).
+        try:
+            deadline = time.monotonic() + DAEMON_START_SECONDS
+            while True:
+                probe = subprocess.run([str(langspan), "status", "--state-dir", str(state_dir)],
+                                       capture_output=True, timeout=10)
+                if probe.returncode == 0:
+                    return
+                if self.process.poll() is not None or time.monotonic() > deadline:
+                    raise RuntimeError("the LangSpan coordinator did not start; see " + str(log_path))
+                time.sleep(.1)
+        except BaseException:
+            self.stop()
+            raise
 
     def events(self):
         """Every persisted event, in order, page by page."""

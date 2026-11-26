@@ -12,7 +12,11 @@ The daemon stores canonical workspace locations, logical session IDs, user-suppl
 intent summaries, file keys, typed operation digests, grant/denial receipts,
 process-incarnation observations, disk/branch observations and event history.
 SQLite and its sidecars live in an owner-only state directory. A different state
-directory remains an independent coordination domain.
+directory remains an independent coordination domain. A running daemon stops,
+logging why, once its state directory is opened to others, removed or replaced
+by another folder at the same path, so it never keeps answering for a folder
+that is no longer the private one it opened. The check runs once a second: a
+change is served for at most that long.
 
 M3 expands the read boundary. The Git observer reads bounded repository metadata
 and file contents to compute digests, including symlink target text without
@@ -887,6 +891,23 @@ below has been observed in a real run.
 | **Repudiation** | The provenance names the workflow, commit and run; the run log is kept by GitHub. | Log retention is GitHub's. |
 | **Information disclosure**: build paths or tokens in the binary or logs | Paths remapped with `--remap-path-prefix`; checkouts do not persist credentials; no secret is used. | None known. |
 | **Elevation of privilege**: a pull request or a dependency gains write access | `permissions: {}` at the top of each workflow; each job names its own. Release jobs never run on `pull_request`. Signing permissions are only in jobs that compile nothing. | A maintainer merging the release pull request publishes whatever `main` holds. |
+
+## Mixed versions and `doctor`'s version check
+
+Roadmap I5 ([ADR 0025](../adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md#i5-mixed-versions-as-built))
+adds no download and no binary replacement: LangSpan never fetches,
+verifies or installs a release itself. It widens two existing boundaries.
+`doctor` reads the executable named in a host's hook or MCP configuration,
+which a repository can supply. The socket also answers one more read-only
+request, `version`.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Elevation of privilege**: a repository's settings name a program that `doctor` would run | `doctor` reads the file for its version marker and never executes it, nor any program a configuration names. | None from `doctor`; the host still runs whatever its hooks name, as before. |
+| **Spoofing**: a planted file carries a false version marker | The marker only changes a `doctor` line. Exactly one well-formed marker is accepted; two different ones read as no version. | A crafted file can make `doctor` report a matching version. It cannot change what runs. |
+| **Denial of service**: a huge or endless file named as the executable | At most 1 GiB is read, in 1 MiB pieces, with a bounded marker length; a file that cannot be read is reported, not retried. | Reading a large file takes as long as the disk needs; `doctor` is run by the person, not on a hot path. |
+| **Information disclosure**: the `version` answer | It holds the build version and the daemon's process ID, on the owner-only socket. | None beyond what `ps` shows the same user. |
+| **Tampering / repudiation** | `version` is never recorded and changes no state. | None. |
 
 ## Failure cases guarded by tests
 
