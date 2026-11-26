@@ -18,6 +18,7 @@ mod status;
 mod status_line;
 mod today;
 mod workspaces;
+mod write_check;
 pub use classes::{
     FailureClass, KeptTests, MAX_FIXED_NAMED, MAX_WRITE_RUNS, MAX_WRITERS_NAMED, WriteRun,
 };
@@ -65,6 +66,11 @@ pub use today::{
 };
 pub use workspaces::{
     MAX_ENDING_SESSIONS, MAX_WORKSPACE_PAGE, WorkspaceEnding, WorkspaceKept, WorkspaceSummary,
+};
+pub use write_check::{
+    DefinitionFacts, PathFacts, UnreadLines, WRITE_CHECK_DEFINITIONS, WRITE_CHECK_LABEL,
+    WRITE_CHECK_PATHS, WRITE_CHECK_SYMBOLS, WRITE_CHECK_WRITERS, WriteCheck, WriteCheckPath,
+    WriteCheckRequest, WriteCheckSymbol, write_check, write_check_request,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3534,6 +3540,17 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "is_false")]
         apply: bool,
     },
+    /// Answered by the daemon from its records, the line journal and its
+    /// source index (roadmap B26): whether `paths` are held, which of their
+    /// lines peers wrote recently and whether they are stale for the
+    /// session, and what a peer just changed in `symbols` (or, without
+    /// any, in the definitions of `paths`). A read: never recorded.
+    CheckWrite {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        symbols: Vec<String>,
+    },
     /// Answered by the daemon with its source index: the calls among
     /// `calls` whose argument count does not fit a signature another live
     /// session changed, from notices not yet alerted to this session. The
@@ -4197,6 +4214,12 @@ enum CommandWire {
         #[serde(default)]
         apply: bool,
     },
+    CheckWrite {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default)]
+        symbols: Vec<String>,
+    },
     /// Answered by the daemon with its source index: the calls among
     /// `calls` whose argument count does not fit a signature another live
     /// session changed, from notices not yet alerted to this session. The
@@ -4757,6 +4780,10 @@ pub enum Outcome {
         breaks: Vec<CallBreak>,
         coverage: GraphCoverage,
         ready: bool,
+    },
+    /// The answer to `CheckWrite` (roadmap B26). Nothing was recorded.
+    WriteCheck {
+        check: WriteCheck,
     },
     /// Where the index cannot answer for the workspace's source (roadmap
     /// D8). Each list is in path order and holds at most the request's
@@ -7003,6 +7030,7 @@ fn decide_checked(
         | Command::GraphInflight { .. }
         | Command::GraphExport { .. }
         | Command::GraphImport { .. }
+        | Command::CheckWrite { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
             "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores",

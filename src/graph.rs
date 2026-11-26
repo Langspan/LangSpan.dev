@@ -1519,6 +1519,16 @@ impl Index {
         self.symbols_where("s.name = ?2", workspace_id, name, limit + 1)
     }
 
+    /// Definitions in the file `path`, in line order, at most `limit`.
+    pub fn symbols_in(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        limit: u32,
+    ) -> Result<Vec<SymbolRef>, Failure> {
+        self.symbols_where("s.path = ?2", workspace_id, path, limit)
+    }
+
     /// Mentions of `name`. `except` leaves one file out.
     pub fn references(
         &self,

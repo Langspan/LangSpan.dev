@@ -131,6 +131,14 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Dry run: how many exported files have the same
                                  content here. --apply loads those the index does
                                  not hold yet; the rest are indexed from disk
+  check-write SESSION PATH... [--symbol NAME]...
+                                 Before a write, for a host without hooks: per PATH
+                                 (1 to 8) who holds it, lines other sessions wrote in
+                                 the last 30 minutes and whether it changed since
+                                 SESSION read it; per NAME (up to 16, or without any,
+                                 the definitions in PATH) a peer's recent signature
+                                 change, removal or body lines, matched by name.
+                                 Records nothing
   graph history WORKSPACE NAME [--path PATH] [--limit N] [--before SEQ]
                                  The recorded interface changes of definitions named
                                  NAME, newest first (--limit 1 to 50, default 10):
@@ -3640,9 +3648,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         args,
         command,
         mut options,
+        symbols,
         json,
         apply,
     } = parse_options(input)?;
+    if !symbols.is_empty() && args.first().map(String::as_str) != Some("check-write") {
+        return Err("option --symbol is not valid for this command".into());
+    }
     if let [action] = args.as_slice()
         && (action == "install" || action == "uninstall")
     {
@@ -3960,6 +3972,11 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                     .map(|seq| seq.parse().map_err(|_| "--before must be an integer"))
                     .transpose()?,
             },
+            ["check-write", session, paths @ ..] if !paths.is_empty() => Command::CheckWrite {
+                session_id: (*session).into(),
+                paths: paths.iter().map(|path| (*path).into()).collect(),
+                symbols: symbols.clone(),
+            },
             ["graph", "blind-spots", workspace] => Command::GraphBlindSpots {
                 workspace_id: (*workspace).into(),
                 limit: u32::try_from(number(&mut options, "--limit", 50)?)
@@ -4070,6 +4087,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphInflight { .. }
                 | Command::GraphExport { .. }
                 | Command::GraphImport { .. }
+                | Command::CheckWrite { .. }
                 | Command::Recap { .. }
                 | Command::ShowMessage { .. }
                 | Command::MessageStatus { .. }
@@ -4188,6 +4206,8 @@ struct ParsedOptions {
     /// Everything after a literal `--`: a check's command line.
     command: Vec<String>,
     options: BTreeMap<String, String>,
+    /// Each `--symbol NAME`, in order: the one option that may repeat.
+    symbols: Vec<String>,
     json: bool,
     apply: bool,
 }
@@ -4196,6 +4216,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
     let mut positionals = Vec::new();
     let mut command = Vec::new();
     let mut options = BTreeMap::new();
+    let mut symbols = Vec::new();
     let mut json = false;
     let mut apply = false;
     let mut raw = false;
@@ -4209,6 +4230,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
         match arg.as_str() {
             "--" => raw = true,
             "--json" => json = true,
+            "--symbol" => symbols.push(input.next().ok_or("--symbol needs a value")?),
             "--apply" => apply = true,
             // Flags, kept with the options so that only the commands that take
             // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
@@ -4263,6 +4285,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
         args: positionals,
         command,
         options,
+        symbols,
         json,
         apply,
     })
@@ -4382,6 +4405,115 @@ fn print_project_hook_reruns(
             install::quote(&state.to_string_lossy()),
         );
     }
+}
+
+/// Line ranges as `1-2, 6`.
+fn line_ranges(ranges: &[langspan_core::LineRange]) -> String {
+    ranges
+        .iter()
+        .map(|range| {
+            if range.start_line == range.end_line {
+                range.start_line.to_string()
+            } else {
+                format!("{}-{}", range.start_line, range.end_line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A write check (roadmap B26). Paths, names and signatures are quoted:
+/// repository text, shown as data.
+fn print_write_check(check: &langspan_core::WriteCheck) -> Result<(), langspan::Error> {
+    println!("{}", langspan_core::WRITE_CHECK_LABEL);
+    let seconds = |age_ms: u64| format!("{}s ago", age_ms / 1000);
+    for path in &check.paths {
+        let mut parts = vec![match &path.held_by {
+            Some(holder) => format!("held by {holder}"),
+            None => "not held".to_owned(),
+        }];
+        parts.push(
+            match path.stale {
+                Some(true) => "changed since this session last read it",
+                Some(false) => "as this session last read it",
+                None => "no read by this session recorded",
+            }
+            .to_owned(),
+        );
+        for unread in &path.unread_lines {
+            parts.push(if unread.lines.is_empty() {
+                format!(
+                    "{} wrote lines not known {}",
+                    unread.session_id,
+                    seconds(unread.age_ms)
+                )
+            } else {
+                format!(
+                    "{} wrote lines {} {}",
+                    unread.session_id,
+                    line_ranges(&unread.lines),
+                    seconds(unread.age_ms)
+                )
+            });
+        }
+        if path.omitted_writers > 0 {
+            parts.push(format!("{} more writer(s) left out", path.omitted_writers));
+        }
+        println!(
+            "{}: {}.",
+            serde_json::to_string(&path.path)?,
+            parts.join("; ")
+        );
+    }
+    if !check.index_ready {
+        println!(
+            "Symbols not checked: the source index has no complete scan of this workspace yet."
+        );
+        return Ok(());
+    }
+    for symbol in &check.symbols {
+        let by = symbol.by_session.as_deref().unwrap_or("an unknown session");
+        let age = symbol.age_ms.map(seconds).unwrap_or_default();
+        let what = match symbol.change.as_str() {
+            "signature" => format!(
+                "signature changed by {by} {age}, from {} to {}",
+                serde_json::to_string(symbol.before.as_deref().unwrap_or_default())?,
+                serde_json::to_string(symbol.after.as_deref().unwrap_or_default())?
+            ),
+            "removed" => match &symbol.renamed_to {
+                Some(new) => format!("renamed to {} by {by} {age}", serde_json::to_string(new)?),
+                None => format!("removed by {by} {age}"),
+            },
+            _ => format!(
+                "body lines {} written by {by} {age}",
+                line_ranges(&symbol.lines)
+            ),
+        };
+        let intents = if symbol.intents.is_empty() {
+            String::new()
+        } else {
+            format!("; intent of {} names it", symbol.intents.join(", "))
+        };
+        println!(
+            "{} ({} in {}): {what}{intents}.",
+            serde_json::to_string(&symbol.name)?,
+            symbol.kind,
+            serde_json::to_string(&symbol.path)?
+        );
+    }
+    if check.symbols.is_empty() {
+        println!("No recent change by another session to these symbols is recorded.");
+    }
+    if check.omitted_symbols > 0 {
+        println!("{} more symbol change(s) left out.", check.omitted_symbols);
+    }
+    if check.unchecked_bodies > 0 {
+        println!(
+            "{} definition(s) not compared with recent writes: their file is not indexed at its current content.",
+            check.unchecked_bodies
+        );
+    }
+    Ok(())
 }
 
 fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), langspan::Error> {
@@ -4807,6 +4939,7 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             notice.changes.len(),
             notice.dependents.len()
         ),
+        Outcome::WriteCheck { check } => print_write_check(check)?,
         Outcome::CallBreaks { ready: false, .. } => {
             println!("Not checked: the source index has no complete scan of this workspace yet.")
         }
