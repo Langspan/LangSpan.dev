@@ -567,6 +567,29 @@ mod unix {
         let graph = graph.ok_or("the index is not available yet; try again shortly")?;
         let failed = |error: Box<dyn std::error::Error + Send + Sync>| error.to_string();
         let detail = matches!(command, Command::GraphSymbol { detail: true, .. });
+        let mut ranked_total = None;
+        let inputs = match command {
+            Command::GraphSymbol {
+                rank: true,
+                session_id,
+                ..
+            } => {
+                langspan_core::validate_rank(session_id.as_deref(), &[])
+                    .map_err(|error| error.message)?;
+                Some(langspan_core::rank_inputs(
+                    state,
+                    workspace_id,
+                    session_id.as_deref(),
+                    &[],
+                    now_ms(),
+                ))
+            }
+            Command::GraphSymbol {
+                session_id: Some(_),
+                ..
+            } => return Err("session_id ranks a query: send it with rank set".into()),
+            _ => None,
+        };
         // Roadmap D7: an old name asked for with `--renamed` is looked up
         // under the newest name its recorded renames lead to.
         let mut renamed = match command {
@@ -589,7 +612,15 @@ mod unix {
                         .as_ref()
                         .and_then(|hops| hops.last())
                         .map_or(name, |hop| &hop.after_name);
-                    let mut symbols = graph.symbol(workspace_id, name, limit)?;
+                    let mut symbols = match &inputs {
+                        Some(inputs) => {
+                            let (symbols, total) =
+                                ranked_definitions(graph, inputs, workspace_id, name, limit)?;
+                            ranked_total = Some(total);
+                            symbols
+                        }
+                        None => graph.symbol(workspace_id, name, limit)?,
+                    };
                     if detail {
                         for symbol in symbols.iter_mut().take(limit as usize) {
                             graph.add_detail(workspace_id, symbol)?;
@@ -614,11 +645,15 @@ mod unix {
                 _ => unreachable!("matched above"),
             })
             .map_err(failed)?;
-        let mut truncated = symbols.len() > limit as usize || references.len() > limit as usize;
+        let mut truncated = symbols.len() > limit as usize
+            || references.len() > limit as usize
+            || ranked_total.is_some_and(|total| total > limit);
         symbols.truncate(limit as usize);
         references.truncate(limit as usize);
         if detail {
             add_notes_and_checks(state, workspace_id, &mut symbols);
+        }
+        if detail || inputs.is_some() {
             truncated |= fit_frame(&mut symbols, &coverage);
         }
         let levels = levels.map(|mut levels| {
@@ -847,12 +882,39 @@ mod unix {
     fn graph_context(
         graph: Option<&crate::graph::Index>,
         state: &State,
-        workspace_id: &str,
-        names: &[String],
-        limit: u32,
+        command: &Command,
     ) -> Result<Outcome, (&'static str, String)> {
+        let Command::GraphContext {
+            workspace_id,
+            names,
+            limit,
+            rank,
+            session_id,
+            qualifiers,
+        } = command
+        else {
+            return Err(("invalid_graph_context", "not a code-context query".into()));
+        };
+        let limit = *limit;
         langspan_core::validate_graph_context(names, limit)
             .map_err(|error| ("invalid_graph_context", error.message))?;
+        langspan_core::validate_rank(session_id.as_deref(), qualifiers)
+            .map_err(|error| ("invalid_graph_context", error.message))?;
+        if !rank && (session_id.is_some() || !qualifiers.is_empty()) {
+            return Err((
+                "invalid_graph_context",
+                "session_id and qualifiers rank a query: send them with rank set".into(),
+            ));
+        }
+        let inputs = rank.then(|| {
+            langspan_core::rank_inputs(
+                state,
+                workspace_id,
+                session_id.as_deref(),
+                qualifiers,
+                now_ms(),
+            )
+        });
         let unavailable = |message: String| ("index_unavailable", message);
         let of = Registration::of(state, workspace_id)
             .ok_or_else(|| unavailable("workspace is not registered".into()))?;
@@ -861,10 +923,29 @@ mod unix {
         })?;
         let failed =
             |error: Box<dyn std::error::Error + Send + Sync>| unavailable(error.to_string());
-        let (matches, coverage) = graph
+        let (mut matches, coverage) = graph
             .with_coverage(&of, |graph| {
                 let mut matches = Vec::new();
                 for name in names {
+                    if let Some(inputs) = &inputs {
+                        let (definitions, total) =
+                            ranked_definitions(graph, inputs, workspace_id, name, limit)?;
+                        if definitions.is_empty() {
+                            continue;
+                        }
+                        let files = langspan_core::CONTEXT_FILES;
+                        let mut mentioned_in = graph.mentioned_in(workspace_id, name, files)?;
+                        let truncated = total > limit || mentioned_in.len() > files as usize;
+                        mentioned_in.truncate(files as usize);
+                        matches.push(langspan_core::NameContext {
+                            name: name.clone(),
+                            definitions,
+                            mentioned_in,
+                            truncated,
+                            definition_count: Some(total),
+                        });
+                        continue;
+                    }
                     let mut definitions = graph.symbol(workspace_id, name, limit)?;
                     if definitions.is_empty() {
                         continue;
@@ -880,12 +961,127 @@ mod unix {
                         definitions,
                         mentioned_in,
                         truncated,
+                        definition_count: None,
                     });
                 }
                 Ok(matches)
             })
             .map_err(failed)?;
+        fit_context(&mut matches, &coverage);
         Ok(Outcome::GraphContext { matches, coverage })
+    }
+
+    /// Cut a code-context answer until it fits one response frame (review
+    /// comment 4709803050): first the dependents under every definition,
+    /// one fewer at a time; then the mentioning files of every name; then
+    /// every name's lowest-ranked definitions down to one each; then the
+    /// last names. Counts stay as they were, so what is left out is still
+    /// counted, and a name that loses a definition or a file is marked
+    /// `truncated`. Returns whether anything was cut.
+    fn fit_context(
+        matches: &mut Vec<langspan_core::NameContext>,
+        coverage: &langspan_core::GraphCoverage,
+    ) -> bool {
+        // The envelope, the request ID and the outcome's other fields.
+        const ROOM: usize = 1024;
+        let fits = |matches: &Vec<langspan_core::NameContext>| {
+            serde_json::to_vec(&(matches, coverage))
+                .is_ok_and(|bytes| bytes.len() + ROOM < MAX_FRAME_BYTES)
+        };
+        if fits(matches) {
+            return false;
+        }
+        fn most(
+            matches: &[langspan_core::NameContext],
+            count: fn(&langspan_core::NameContext) -> usize,
+        ) -> usize {
+            matches.iter().map(count).max().unwrap_or(0)
+        }
+        let dependents = most(matches, |matched| {
+            let lengths = matched.definitions.iter();
+            lengths
+                .map(|symbol| symbol.dependents.as_ref().map_or(0, Vec::len))
+                .max()
+                .unwrap_or(0)
+        });
+        for keep in (0..dependents).rev() {
+            for symbol in matches.iter_mut().flat_map(|m| &mut m.definitions) {
+                if let Some(dependents) = &mut symbol.dependents {
+                    dependents.truncate(keep);
+                }
+            }
+            if fits(matches) {
+                return true;
+            }
+        }
+        for keep in (0..most(matches, |matched| matched.mentioned_in.len())).rev() {
+            for matched in matches.iter_mut() {
+                if matched.mentioned_in.len() > keep {
+                    matched.mentioned_in.truncate(keep);
+                    matched.truncated = true;
+                }
+            }
+            if fits(matches) {
+                return true;
+            }
+        }
+        for keep in (1..most(matches, |matched| matched.definitions.len())).rev() {
+            for matched in matches.iter_mut() {
+                if matched.definitions.len() > keep {
+                    matched.definitions.truncate(keep);
+                    matched.truncated = true;
+                }
+            }
+            if fits(matches) {
+                return true;
+            }
+        }
+        while !matches.is_empty() && !fits(matches) {
+            matches.pop();
+        }
+        true
+    }
+
+    /// The first `limit` definitions of `name` in rank order (roadmap C2),
+    /// each with its reasons and its ranked dependents, and how many
+    /// definitions the name has. Ranked among the first `RANK_CANDIDATES`
+    /// in path order and the first `RANK_CANDIDATES` in rank order in the
+    /// files the session or a peer works on; the rest are counted.
+    fn ranked_definitions(
+        graph: &crate::graph::Index,
+        inputs: &langspan_core::RankInputs,
+        workspace_id: &str,
+        name: &str,
+        limit: u32,
+    ) -> Result<(Vec<langspan_core::SymbolRef>, u32), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let paths = inputs.paths();
+        let (mut definitions, total) = graph.rank_candidates(workspace_id, name, inputs)?;
+        if definitions.is_empty() {
+            return Ok((definitions, total));
+        }
+        langspan_core::rank_definitions(inputs, &mut definitions);
+        definitions.truncate(limit as usize);
+        // The shown definitions' own files are read too, so each one's
+        // count of other files is exact.
+        let mut asked = paths;
+        asked.extend(definitions.iter().map(|symbol| symbol.path.clone()));
+        asked.sort_unstable();
+        asked.dedup();
+        let (files, mentioning) = graph.mention_counts(workspace_id, name, &asked)?;
+        for symbol in &mut definitions {
+            let own = files.iter().any(|(path, _)| *path == symbol.path);
+            let others: Vec<(String, u32)> = files
+                .iter()
+                .filter(|(path, _)| *path != symbol.path)
+                .cloned()
+                .collect();
+            let mut dependents = langspan_core::rank_dependents(inputs, &others);
+            dependents.truncate(langspan_core::CONTEXT_FILES as usize);
+            symbol.dependents = Some(dependents);
+            symbol.dependent_count = Some(mentioning.saturating_sub(u32::from(own)));
+        }
+        Ok((definitions, total))
     }
 
     /// In-flight symbols `graph inflight` reads from one worktree's index,
@@ -1366,6 +1562,52 @@ mod unix {
         cut
     }
 
+    /// How long one write check may spend asking Git where other worktrees'
+    /// changes stand (issue #217). A notice Git has not answered for by then
+    /// keeps the uncommitted rules.
+    const STANDING_BUDGET: Duration = Duration::from_millis(250);
+
+    /// Git's answer, for each of the write's `standing_questions`, to where
+    /// that worktree's change stands against the session's checkout. A
+    /// failure or the budget running out leaves a notice out, and is logged.
+    fn standings(
+        state: &State,
+        session_id: &str,
+        calls: &[langspan_core::CallSite],
+        now: u64,
+    ) -> Result<langspan_core::Standings, langspan_core::CoreError> {
+        let questions = langspan_core::standing_questions(state, session_id, calls, now)?;
+        let mut standings = langspan_core::Standings::new();
+        let base = state
+            .sessions
+            .get(session_id)
+            .and_then(|session| state.workspaces.get(&session.workspace_id));
+        let (Some(base), false) = (base, questions.is_empty()) else {
+            return Ok(standings);
+        };
+        let deadline = Instant::now() + STANDING_BUDGET;
+        for question in questions {
+            let Some(changed) = state.workspaces.get(&question.workspace_id) else {
+                continue;
+            };
+            match crate::git::standing(
+                Path::new(&changed.root),
+                &question.path,
+                Path::new(&base.root),
+                deadline,
+            ) {
+                Ok(standing) => {
+                    standings.insert((question.workspace_id, question.notice_id), standing);
+                }
+                Err(detail) => eprintln!(
+                    "{}",
+                    serde_json::json!({"level":"info","event":"change_standing_unknown","workspace_id":question.workspace_id,"detail":detail})
+                ),
+            }
+        }
+        Ok(standings)
+    }
+
     /// The write-time break check (ADR 0029). The calls are used for this
     /// answer only: never logged or recorded. What is recorded, when a
     /// break is found, is which notices the session was alerted to.
@@ -1386,11 +1628,16 @@ mod unix {
             lease_valid: None,
             outcome,
         };
-        let candidates = match langspan_core::call_candidates(store.state(), session_id, calls, now)
-        {
-            Ok(candidates) => candidates,
+        let standings = match standings(store.state(), session_id, calls, now) {
+            Ok(standings) => standings,
             Err(e) => return error(request_id, generation, &e.code, e.message),
         };
+        let candidates =
+            match langspan_core::call_candidates(store.state(), session_id, calls, &standings, now)
+            {
+                Ok(candidates) => candidates,
+                Err(e) => return error(request_id, generation, &e.code, e.message),
+            };
         let workspace_id = store.state().sessions[session_id].workspace_id.clone();
         let not_ready = |coverage: Option<langspan_core::GraphCoverage>| {
             answer(Outcome::CallBreaks {
@@ -1487,11 +1734,17 @@ mod unix {
                 }
             },
         };
-        let breaks =
-            match langspan_core::call_breaks(store.state(), session_id, calls, &current, now) {
-                Ok(breaks) => breaks,
-                Err(e) => return error(request_id, generation, &e.code, e.message),
-            };
+        let breaks = match langspan_core::call_breaks(
+            store.state(),
+            session_id,
+            calls,
+            &standings,
+            &current,
+            now,
+        ) {
+            Ok(breaks) => breaks,
+            Err(e) => return error(request_id, generation, &e.code, e.message),
+        };
         // Only the notices the hook's alert will show are recorded: one
         // left out for room stays to be told at a later write. The hook
         // lays the alert out with the same function.
@@ -3053,11 +3306,7 @@ mod unix {
                     limit,
                 } => graph_blind_spots(graph, store.state(), workspace_id, *limit)
                     .map_err(|message| ("index_unavailable", message)),
-                Command::GraphContext {
-                    workspace_id,
-                    names,
-                    limit,
-                } => graph_context(graph, store.state(), workspace_id, names, *limit),
+                Command::GraphContext { .. } => graph_context(graph, store.state(), &command),
                 _ => graph_query(graph, store.state(), &command)
                     .map_err(|message| ("index_unavailable", message)),
             };
@@ -3877,6 +4126,136 @@ mod unix {
                 },
             };
             protocol::encode(&response).expect("fits one frame");
+        }
+
+        /// Twelve names of `definitions` definitions, each with `dependents`
+        /// dependents and five mentioning files, every path `long` bytes.
+        fn context(
+            definitions: usize,
+            dependents: usize,
+            long: usize,
+        ) -> Vec<langspan_core::NameContext> {
+            let path = |what: &str, n: usize| format!("{what}/{n:03}/{}.rs", "x".repeat(long));
+            (0..12)
+                .map(|n| langspan_core::NameContext {
+                    name: format!("name_{n}"),
+                    definitions: (0..definitions)
+                        .map(|d| SymbolRef {
+                            path: path("defs", n * 10 + d),
+                            name: format!("name_{n}"),
+                            dependents: Some(
+                                (0..dependents)
+                                    .map(|c| langspan_core::Dependent {
+                                        path: path("callers", c),
+                                        mentions: 1,
+                                        rank_reasons: Vec::new(),
+                                    })
+                                    .collect(),
+                            ),
+                            dependent_count: Some(dependents as u32 + 4),
+                            ..SymbolRef::default()
+                        })
+                        .collect(),
+                    mentioned_in: (0..5).map(|c| path("callers", c)).collect(),
+                    truncated: false,
+                    definition_count: Some(definitions as u32 + 1),
+                })
+                .collect()
+        }
+
+        fn encodes(matches: Vec<langspan_core::NameContext>) {
+            let response = Response {
+                version: PROTOCOL_VERSION,
+                request_id: "r".repeat(128),
+                replayed: false,
+                generation: u64::MAX,
+                lease_valid: None,
+                outcome: Outcome::GraphContext {
+                    matches,
+                    coverage: GraphCoverage::default(),
+                },
+            };
+            protocol::encode(&response).expect("fits one frame");
+        }
+
+        #[test]
+        fn a_code_context_that_fits_one_frame_is_left_whole() {
+            let coverage = GraphCoverage::default();
+            let whole = context(3, 5, 20);
+            let mut fitted = whole.clone();
+            assert!(!fit_context(&mut fitted, &coverage));
+            assert_eq!(fitted, whole);
+        }
+
+        #[test]
+        fn a_code_context_cuts_dependents_first_and_keeps_their_counts() {
+            // Review comment 4709803050: twelve names, three definitions,
+            // five dependents of about 300 bytes each.
+            let coverage = GraphCoverage::default();
+            let mut fitted = context(3, 5, 300);
+            assert!(fit_context(&mut fitted, &coverage), "cut, and said so");
+            assert_eq!(fitted.len(), 12, "every name kept");
+            for matched in &fitted {
+                assert_eq!(matched.definitions.len(), 3, "every definition kept");
+                assert_eq!(matched.mentioned_in.len(), 5);
+                assert!(!matched.truncated, "only dependents were cut");
+                assert_eq!(matched.definition_count, Some(4));
+                for symbol in &matched.definitions {
+                    let kept = symbol.dependents.as_ref().unwrap().len();
+                    assert!(kept < 5, "{kept}");
+                    assert_eq!(symbol.dependent_count, Some(9), "still counted");
+                }
+            }
+            encodes(fitted.clone());
+            let mut again = context(3, 5, 300);
+            fit_context(&mut again, &coverage);
+            assert_eq!(again, fitted, "the same on every call");
+        }
+
+        #[test]
+        fn a_code_context_cuts_mentioning_files_then_definitions_then_names() {
+            let coverage = GraphCoverage::default();
+            // Without dependents (an answer that is not ranked), long
+            // mentioning files are cut next and the name is marked.
+            let mut unranked = context(3, 0, 800);
+            for matched in &mut unranked {
+                matched.definition_count = None;
+                for symbol in &mut matched.definitions {
+                    symbol.dependents = None;
+                    symbol.dependent_count = None;
+                }
+            }
+            assert!(fit_context(&mut unranked, &coverage));
+            assert_eq!(unranked.len(), 12);
+            assert!(
+                unranked
+                    .iter()
+                    .all(|m| m.truncated && m.mentioned_in.len() < 5)
+            );
+            assert!(unranked.iter().all(|m| m.definitions.len() == 3));
+            encodes(unranked);
+
+            // Longer still, definitions go down to one each, lowest-ranked
+            // first.
+            let whole = context(3, 5, 1900);
+            let mut fewer = whole.clone();
+            assert!(fit_context(&mut fewer, &coverage));
+            assert_eq!(fewer.len(), 12);
+            for (matched, whole) in fewer.iter().zip(&whole) {
+                assert!(matched.truncated && matched.mentioned_in.is_empty());
+                assert!(matched.definitions.len() < 3);
+                assert_eq!(matched.definitions[0].path, whole.definitions[0].path);
+                assert_eq!(matched.definition_count, Some(4), "still counted");
+            }
+            encodes(fewer);
+
+            // A single definition per name that cannot all fit loses the
+            // last names.
+            let mut names = context(1, 0, 8000);
+            assert!(fit_context(&mut names, &coverage));
+            assert!(!names.is_empty() && names.len() < 12, "{}", names.len());
+            assert_eq!(names[0].name, "name_0");
+            encodes(names);
         }
 
         #[test]

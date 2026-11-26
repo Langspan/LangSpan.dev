@@ -12,6 +12,7 @@ mod dashboard;
 mod flaky;
 mod history;
 mod lines;
+mod rank;
 mod recall;
 mod recent;
 mod report;
@@ -42,6 +43,10 @@ pub use history::{
     HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_MOVES, HISTORY_NAME_BYTES,
     HISTORY_RELATED, HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote,
     HistoryQuery, history as definition_history,
+};
+pub use rank::{
+    Dependent, QUALIFIER_BYTES, RANK_CANDIDATES, RankInputs, RankReason, is_qualifier,
+    rank_definitions, rank_dependents, rank_inputs, validate_rank,
 };
 pub use recall::{
     RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
@@ -1317,6 +1322,18 @@ pub struct SymbolRef {
     /// indexed content. Absent when none was found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_check: Option<LastCheck>,
+    /// In a ranked answer, why this definition ranks where it does, in
+    /// rank order; empty for path order alone (roadmap C2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank_reasons: Option<Vec<RankReason>>,
+    /// In a ranked answer, the files other than its own that mention this
+    /// definition's name, ranked, at most `CONTEXT_FILES`. Found by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependents: Option<Vec<Dependent>>,
+    /// In a ranked answer, how many files other than its own mention the
+    /// name: `dependents` and those left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependent_count: Option<u32>,
 }
 
 /// Distinct callees listed for one definition.
@@ -2410,6 +2427,10 @@ pub struct NameContext {
     pub mentioned_in: Vec<String>,
     /// True when more definitions or mentioning files exist than are listed.
     pub truncated: bool,
+    /// In a ranked answer, how many definitions the name has: those listed
+    /// and those left out (roadmap C2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_count: Option<u32>,
 }
 
 pub const MAX_CHECKS: usize = 64;
@@ -3755,6 +3776,13 @@ pub enum Command {
         /// the coverage shape that build knows.
         #[serde(default, skip_serializing_if = "is_false")]
         blind_in_scope: bool,
+        /// Rank the definitions as a code briefing does and give each the
+        /// files that mention its name (roadmap C2).
+        #[serde(default, skip_serializing_if = "is_false")]
+        rank: bool,
+        /// The asking session, whose own files rank first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         /// Follow recorded renames of `name` to its newest name and look
         /// that up instead (roadmap D7); the answer's `renamed` says which.
         #[serde(default, skip_serializing_if = "is_false")]
@@ -3794,6 +3822,18 @@ pub enum Command {
         workspace_id: String,
         names: Vec<String>,
         limit: u32,
+        /// Rank each name's definitions and give each the files that
+        /// mention its name (roadmap C2). Without it the answer is the one
+        /// earlier builds give, in path order.
+        #[serde(default, skip_serializing_if = "is_false")]
+        rank: bool,
+        /// The asking session, whose own files rank first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// Paths and qualifiers the prompt names (`store` in `store::upload`).
+        /// Used for this query only: never logged, recorded or kept.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        qualifiers: Vec<String>,
     },
     /// Read-only: what other worktrees of the workspace's repository have
     /// in flight that any of its indexed files mention (roadmap C7). Never
@@ -4478,6 +4518,13 @@ enum CommandWire {
         /// the coverage shape that build knows.
         #[serde(default, skip_serializing_if = "is_false")]
         blind_in_scope: bool,
+        /// Rank the definitions as a code briefing does and give each the
+        /// files that mention its name (roadmap C2).
+        #[serde(default, skip_serializing_if = "is_false")]
+        rank: bool,
+        /// The asking session, whose own files rank first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         /// Follow recorded renames of `name` to its newest name and look
         /// that up instead (roadmap D7); the answer's `renamed` says which.
         #[serde(default, skip_serializing_if = "is_false")]
@@ -4517,6 +4564,18 @@ enum CommandWire {
         workspace_id: String,
         names: Vec<String>,
         limit: u32,
+        /// Rank each name's definitions and give each the files that
+        /// mention its name (roadmap C2). Without it the answer is the one
+        /// earlier builds give, in path order.
+        #[serde(default, skip_serializing_if = "is_false")]
+        rank: bool,
+        /// The asking session, whose own files rank first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// Paths and qualifiers the prompt names (`store` in `store::upload`).
+        /// Used for this query only: never logged, recorded or kept.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        qualifiers: Vec<String>,
     },
     /// Read-only: what other worktrees of the workspace's repository have
     /// in flight that any of its indexed files mention (roadmap C7). Never
@@ -11948,16 +12007,92 @@ pub fn validate_calls(calls: &[CallSite]) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Changes to functions that another live session made in this session's
+/// Where a notice of another worktree stands against the asking session's
+/// checkout, as Git answers it (issue #217).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// The notice's file differs from its worktree's `HEAD`: not committed.
+    Uncommitted,
+    /// Committed on its worktree's branch, in a commit the asking
+    /// checkout's `HEAD` does not contain.
+    Unmerged,
+    /// The asking checkout's `HEAD` contains the commit.
+    Merged,
+}
+
+/// Standings by `(workspace ID, notice ID)`. A notice missing from it, such
+/// as one Git could not answer for in time, keeps the uncommitted rules.
+pub type Standings = BTreeMap<(String, String), Standing>;
+
+/// Notices of other worktrees whose standing one write check asks Git for,
+/// at most.
+pub const MAX_STANDING_QUESTIONS: usize = 8;
+
+/// A notice of another worktree whose standing a write check asks Git for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandingQuestion {
+    pub workspace_id: String,
+    pub notice_id: String,
+    /// The notice's file, relative to that worktree's root.
+    pub path: String,
+}
+
+/// The notices of other worktrees that `calls` could be alerted to if they
+/// were committed and not merged: those the uncommitted rules would also
+/// keep, and those they leave out only because the change is older than the
+/// briefing horizon or its session has ended. At most
+/// `MAX_STANDING_QUESTIONS`, each workspace's newest first. Usually none, and
+/// then Git is not asked.
+pub fn standing_questions(
+    state: &State,
+    session_id: &str,
+    calls: &[CallSite],
+    now_ms: u64,
+) -> Result<Vec<StandingQuestion>, CoreError> {
+    validate_calls(calls)?;
+    let own = &current_session(state, session_id)?.workspace_id;
+    let mut questions: Vec<StandingQuestion> = Vec::new();
+    for (notice, change, _) in alertable(state, session_id, now_ms, None)? {
+        let asked = questions.iter().any(|question| {
+            question.workspace_id == notice.workspace_id && question.notice_id == notice.notice_id
+        });
+        if notice.workspace_id == *own
+            || asked
+            || !calls.iter().any(|call| call.name == change.name)
+        {
+            continue;
+        }
+        if questions.len() == MAX_STANDING_QUESTIONS {
+            break;
+        }
+        questions.push(StandingQuestion {
+            workspace_id: notice.workspace_id.clone(),
+            notice_id: notice.notice_id.clone(),
+            path: notice.path.clone(),
+        });
+    }
+    Ok(questions)
+}
+
+/// Changes to functions that another session made in this session's
 /// workspace or in another worktree of its repository (issue #194), in this
-/// generation and within the briefing horizon, that this session has not
-/// been alerted to: `(notice, change, the peer)`. A signature change counts
-/// only with the new parameter count; a rename and a removal always count.
-/// The session's own workspace first, each workspace's newest notice first.
+/// generation, that this session has not been alerted to: `(notice, change,
+/// the peer)`. A signature change counts only with the new parameter count;
+/// a rename and a removal always count. The session's own workspace first,
+/// each workspace's newest notice first.
+///
+/// An uncommitted change counts within the briefing horizon while its
+/// session is live. Another worktree's change that `standings` says is
+/// committed and not merged into this session's checkout counts whatever
+/// its age and whether or not its session has ended, and one it says is
+/// merged never counts (issue #217). With `standings` `None` (asking which
+/// notices Git should answer for), every other worktree's change counts
+/// as if committed and not merged.
 fn alertable<'a>(
     state: &'a State,
     session_id: &str,
     now_ms: u64,
+    standings: Option<&Standings>,
 ) -> Result<Vec<(&'a InterfaceNotice, &'a InterfaceChange, &'a str)>, CoreError> {
     let me = current_session(state, session_id)?;
     let alerted = state
@@ -11994,11 +12129,26 @@ fn alertable<'a>(
         let Some(peer) = notice.by_session.as_deref() else {
             continue;
         };
+        let standing = if notice.workspace_id == me.workspace_id {
+            Some(Standing::Uncommitted)
+        } else {
+            match standings {
+                None => Some(Standing::Unmerged),
+                Some(standings) => standings
+                    .get(&(notice.workspace_id.clone(), notice.notice_id.clone()))
+                    .copied(),
+            }
+        };
+        let committed = match standing {
+            Some(Standing::Merged) => continue,
+            Some(Standing::Unmerged) => true,
+            Some(Standing::Uncommitted) | None => false,
+        };
         if notice.generation != state.generation
-            || now_ms.saturating_sub(notice.at_ms) > BRIEF_HORIZON_MS
             || peer == session_id
             || alerted.contains(&notice.notice_id)
-            || !live(peer)
+            || (!committed
+                && (now_ms.saturating_sub(notice.at_ms) > BRIEF_HORIZON_MS || !live(peer)))
         {
             continue;
         }
@@ -12019,17 +12169,19 @@ fn alertable<'a>(
 
 /// The names among `calls` that a write check must look up in the index,
 /// by the workspace whose index holds the change: those of a change it
-/// could alert to, and a renamed function's new name. Usually none, and
-/// then nothing is looked up.
+/// could alert to, and a renamed function's new name. `standings` holds
+/// Git's answers for `standing_questions`. Usually none, and then nothing
+/// is looked up.
 pub fn call_candidates(
     state: &State,
     session_id: &str,
     calls: &[CallSite],
+    standings: &Standings,
     now_ms: u64,
 ) -> Result<BTreeMap<String, BTreeSet<String>>, CoreError> {
     validate_calls(calls)?;
     let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (notice, change, _) in alertable(state, session_id, now_ms)? {
+    for (notice, change, _) in alertable(state, session_id, now_ms, Some(standings))? {
         if calls.iter().any(|call| call.name == change.name) {
             candidates
                 .entry(notice.workspace_id.clone())
@@ -12080,18 +12232,20 @@ pub struct IndexedNames {
 ///
 /// A same-count change is not alerted: calls are matched by name, and
 /// without the argument types at a call site nothing tells a right call
-/// from a wrong one (ADR 0029). Pure; the caller records the alert.
+/// from a wrong one (ADR 0029). `standings` is as for `call_candidates`.
+/// Pure; the caller records the alert.
 pub fn call_breaks(
     state: &State,
     session_id: &str,
     calls: &[CallSite],
+    standings: &Standings,
     current: &BTreeMap<String, IndexedNames>,
     now_ms: u64,
 ) -> Result<Vec<CallBreak>, CoreError> {
     validate_calls(calls)?;
     let own_workspace = &current_session(state, session_id)?.workspace_id;
     let mut breaks = Vec::new();
-    for (notice, change, peer) in alertable(state, session_id, now_ms)? {
+    for (notice, change, peer) in alertable(state, session_id, now_ms, Some(standings))? {
         let Some(indexed) = current.get(&notice.workspace_id) else {
             continue;
         };
