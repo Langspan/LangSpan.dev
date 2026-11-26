@@ -90,6 +90,7 @@ remembered in it (such as how someone decided a field is named), and
 `langspan_message_status` says where it was delivered. A message ending
 `(cut; langspan messages show -- WORKSPACE ID)` was shortened:
 `langspan_show_message` returns it in full.
+Without LangSpan hooks, call `langspan_check_write` before each write.
 
 ## What never to do
 

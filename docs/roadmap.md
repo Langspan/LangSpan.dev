@@ -86,7 +86,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [B20: Typed refactor operations and recipes](https://github.com/Langspan/LangSpan.dev/issues/36): a hand-made rename across many files misses call sites and collides with peers.
 - [B21: Expected-version checks over MCP](https://github.com/Langspan/LangSpan.dev/issues/37): `langspan_admit` on a host without hooks does not check the file is the version the agent read.
 - [B25: Opt-in fast-forward of an idle checkout](https://github.com/Langspan/LangSpan.dev/issues/38): a shared checkout falls behind its target branch and every session works on an old base.
-- [B26: Ask before a write what changed in its symbols](https://github.com/Langspan/LangSpan.dev/issues/39): an agent without hooks cannot ask whether the functions it will change were just changed.
 - [B27: Show this session's uncommitted lines](https://github.com/Langspan/LangSpan.dev/issues/40): in a shared checkout a session cannot tell which uncommitted lines are its own.
 
 ## C. Briefings and context
