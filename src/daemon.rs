@@ -2708,6 +2708,7 @@ mod unix {
                 max_peers,
                 deliver,
                 mid_turn,
+                left,
                 recent: true,
                 mcp,
                 ..
@@ -2716,6 +2717,7 @@ mod unix {
                 max_peers: *max_peers,
                 deliver: *deliver,
                 mid_turn: *mid_turn,
+                left: left.clone(),
                 recent: true,
                 recent_window_ms: RECENT_WINDOW_MS.get().copied(),
                 mcp: *mcp,

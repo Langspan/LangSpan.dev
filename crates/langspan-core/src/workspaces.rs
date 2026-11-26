@@ -378,6 +378,9 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
         !notices.is_empty()
     });
     state.intents.retain(|_, intent| intent.workspace_id != id);
+    state
+        .adoptions
+        .retain(|_, adoption| adoption.workspace_id != id);
     state.leases.retain(|_, lease| lease.workspace_id != id);
     state.turns.retain(|_, turn| turn.workspace_id != id);
     state
