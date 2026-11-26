@@ -33,10 +33,47 @@ struct Fixture {
 struct Run {
     coverage: String,
     reason: Option<String>,
+    detail: String,
+}
+
+fn git(root: &std::path::Path, arguments: &[&str]) {
+    let output = Process::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(arguments)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {arguments:?}: {output:?}");
 }
 
 impl Fixture {
+    /// The checkout as a Git repository with `a.txt` committed, so a shell
+    /// command's snapshot is complete.
     fn new() -> Self {
+        let fixture = Self::without_git();
+        let root = fixture.base.join("work");
+        git(&root, &["init", "--quiet", "-b", "main"]);
+        git(&root, &["add", "a.txt"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ],
+        );
+        fixture
+    }
+    /// The checkout as a plain directory: Git reports no working tree, so a
+    /// shell command's snapshot is incomplete.
+    fn without_git() -> Self {
         let base = fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(
@@ -104,12 +141,123 @@ impl Fixture {
         let reply: Option<Value> = serde_json::from_slice(&output.stdout).ok();
         Run {
             coverage: diagnostic["coverage"].as_str().unwrap().into(),
+            detail: diagnostic["detail"].as_str().unwrap_or_default().into(),
+            // Each host's own denial field: Claude Code and Codex, Cursor.
             reason: reply.and_then(|reply| {
-                reply["hookSpecificOutput"]["permissionDecisionReason"]
-                    .as_str()
-                    .map(str::to_owned)
+                [
+                    &reply["hookSpecificOutput"]["permissionDecisionReason"],
+                    &reply["agent_message"],
+                ]
+                .into_iter()
+                .find_map(|value| value.as_str().map(str::to_owned))
             }),
         }
+    }
+    /// A complete shell call on `vendor`'s shell tool: the pre-tool
+    /// decision, and unless it is denied, `command` really run in the
+    /// checkout and the post-tool report.
+    fn shell(&self, vendor: &str, session: &str, command: &str) -> Run {
+        let work = self.base.join("work");
+        let call = self.call();
+        let mut event = match vendor {
+            "cursor" => json!({
+                "conversation_id": session, "session_id": session,
+                "generation_id": "00000000-0000-4000-8000-0000000000e1",
+                "hook_event_name": "preToolUse", "cursor_version": "1.7.2",
+                "workspace_roots": [work], "tool_name": "Shell", "tool_use_id": call,
+                "tool_input": {"command": command, "cwd": work}, "cwd": work,
+            }),
+            "codex" => json!({
+                "session_id": session, "turn_id": "turn", "cwd": work,
+                "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "tool_use_id": format!("exec-{call}"), "tool_input": {"command": command},
+            }),
+            _ => json!({
+                "session_id": session, "cwd": work, "hook_event_name": "PreToolUse",
+                "tool_name": "Bash", "tool_use_id": call,
+                "tool_input": {"command": command, "description": "test command"},
+            }),
+        };
+        let pre = self.run(vendor, &event);
+        if pre.coverage.starts_with("denied") {
+            return pre;
+        }
+        let status = Process::new("/bin/sh")
+            .args(["-c", command])
+            .current_dir(&work)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{command}");
+        match vendor {
+            "cursor" => event["hook_event_name"] = json!("postToolUse"),
+            "codex" => {
+                event["hook_event_name"] = json!("PostToolUse");
+                event["tool_response"] = json!("");
+            }
+            _ => {
+                event["hook_event_name"] = json!("PostToolUse");
+                event["tool_response"] = json!({"stdout": "", "stderr": "", "interrupted": false});
+            }
+        }
+        let post = self.run(vendor, &event);
+        // `contested`: the command rewrote another session's uncommitted
+        // lines, so its changes are attributed to no session.
+        assert!(
+            post.coverage.starts_with("shell_") || post.coverage == "contested",
+            "{post:?}"
+        );
+        pre
+    }
+    /// A complete Cursor `Write` of the whole file, in its constructed event
+    /// shape (`fixtures/cursor-constructed/pre-write.json`).
+    fn cursor_write(&self, session: &str, content: &str) -> Run {
+        let work = self.base.join("work");
+        let mut event = json!({
+            "conversation_id": session, "session_id": session,
+            "generation_id": "00000000-0000-4000-8000-0000000000e1",
+            "hook_event_name": "preToolUse", "cursor_version": "1.7.2",
+            "workspace_roots": [work], "tool_name": "Write", "tool_use_id": self.call(),
+            "tool_input": {"file_path": self.path(), "content": content}, "cwd": work,
+        });
+        let pre = self.run("cursor", &event);
+        if pre.coverage != "admitted" {
+            return pre;
+        }
+        fs::write(self.path(), content).unwrap();
+        event["hook_event_name"] = json!("postToolUse");
+        assert_eq!(self.run("cursor", &event).coverage, "observed");
+        pre
+    }
+    /// Every line journal entry under the state directory made `ms` older,
+    /// in the time it records.
+    fn age_journal(&self, ms: u64) {
+        fn walk(dir: &std::path::Path, ms: u64) -> usize {
+            let mut aged = 0;
+            for item in fs::read_dir(dir).unwrap() {
+                let path = item.unwrap().path();
+                if path.is_dir() {
+                    aged += walk(&path, ms);
+                    continue;
+                }
+                let Ok(mut entry) = serde_json::from_slice::<Value>(&fs::read(&path).unwrap())
+                else {
+                    continue;
+                };
+                if let Some(at) = entry.get("at_ms").and_then(Value::as_u64)
+                    && entry.get("session_id").is_some()
+                {
+                    entry["at_ms"] = json!(at - ms);
+                    fs::write(&path, serde_json::to_vec(&entry).unwrap()).unwrap();
+                    aged += 1;
+                }
+            }
+            aged
+        }
+        assert!(
+            walk(&self.base.join("state/journal"), ms) > 0,
+            "no entry aged"
+        );
     }
     /// A complete Claude Code tool call: its pre-tool decision, and when it
     /// is admitted, the host's write and the post-tool report.
@@ -377,4 +525,121 @@ fn a_redelivered_pre_tool_event_after_a_refusal_for_unread_lines_is_refused_agai
     let again = f.run("claude-code", &stale);
     assert_eq!(again.coverage, "denied_stale", "{again:?}");
     assert_eq!(again.reason, first.reason);
+}
+
+/// Issue #23: a shell `> path` from a session with no recorded version of
+/// the file, over a line another live session wrote seconds ago, is refused
+/// once, naming that session; the same command run again is admitted.
+#[test]
+fn a_shell_overwrite_of_a_peers_fresh_line_is_refused_once_naming_the_writer() {
+    let f = Fixture::new();
+    assert_eq!(f.edit(ALICE, "line 3", "alice 3").coverage, "admitted");
+    let command = "printf 'bob\\n' > a.txt";
+    let refused = f.shell("codex", BOB, command);
+    assert_eq!(refused.coverage, "denied_unread", "{refused:?}");
+    let reason = refused.reason.unwrap();
+    assert!(reason.contains(&claude_session(ALICE)), "{reason}");
+    assert!(reason.contains("\"a.txt\": line 3,"), "{reason}");
+    assert!(!reason.contains("alice 3"), "no line text: {reason}");
+    assert!(f.content().contains("alice 3"), "Alice's line is kept");
+
+    let retried = f.shell("codex", BOB, command);
+    assert_eq!(retried.coverage, "admitted", "{retried:?}");
+    assert_eq!(f.content(), "bob\n");
+}
+
+/// The other shell forms on the other hosts: `tee` (Cursor `Shell`) and
+/// `sed -i` (Codex `Bash`) may change any line, so every recent line of the
+/// peer is named; a Claude Code `Bash` session is refused for `>` too.
+#[test]
+fn tee_and_sed_on_every_host_shell_are_refused_once_over_a_peers_fresh_lines() {
+    let f = Fixture::new();
+    assert_eq!(f.edit(ALICE, "line 3", "alice 3").coverage, "admitted");
+    assert_eq!(f.edit(ALICE, "line 5", "alice 5").coverage, "admitted");
+    for (vendor, session, command) in [
+        ("cursor", CAROL, "printf 'x\\n' | tee a.txt"),
+        ("codex", BOB, "sed -i.bak 's/line 1/one/' a.txt"),
+        ("claude-code", ERIN, "printf 'x\\n' > a.txt"),
+    ] {
+        let refused = f.shell(vendor, session, command);
+        assert_eq!(refused.coverage, "denied_unread", "{vendor}: {refused:?}");
+        let reason = refused.reason.unwrap();
+        assert!(reason.contains("LangSpan unread lines."), "{reason}");
+        assert!(reason.contains(&claude_session(ALICE)), "{reason}");
+        assert!(
+            reason.contains("\"a.txt\": lines 3, 5,"),
+            "every recent line of hers is named: {reason}"
+        );
+        assert!(f.content().contains("alice 3"), "{vendor}");
+    }
+}
+
+/// A heredoc is outside the parsed write set until B5: the command gets no
+/// decision, so it is never refused for lines, and its changes are compared
+/// after it runs.
+#[test]
+fn a_heredoc_write_gets_no_decision_and_is_never_refused_for_lines() {
+    let f = Fixture::new();
+    assert_eq!(f.edit(ALICE, "line 3", "alice 3").coverage, "admitted");
+    let run = f.shell("codex", BOB, "cat > a.txt <<'EOF'\nbob's file\nEOF");
+    assert_eq!(run.coverage, "shell_observing", "{run:?}");
+    assert!(run.reason.is_none(), "{run:?}");
+    assert!(run.detail.contains("write set unknown"), "{run:?}");
+}
+
+/// Cursor `Write` states the whole new content: one that keeps another
+/// session's lines and only appends changes none of them.
+#[test]
+fn a_cursor_write_that_keeps_a_peers_lines_and_appends_is_admitted() {
+    let f = Fixture::new();
+    assert_eq!(f.edit(ALICE, "line 3", "alice 3").coverage, "admitted");
+    let appended = format!("{}cursor 7\n", f.content());
+    let run = f.cursor_write(CAROL, &appended);
+    assert_eq!(run.coverage, "admitted", "{run:?}");
+    assert_eq!(f.content(), appended);
+    // One that replaces her line, from another Cursor session, is refused.
+    let refused = f.cursor_write(DAVE, "dave's file\n");
+    assert_eq!(refused.coverage, "denied_unread", "{refused:?}");
+    assert!(refused.reason.unwrap().contains(&claude_session(ALICE)));
+}
+
+#[test]
+fn lines_older_than_thirty_minutes_refuse_nothing() {
+    let f = Fixture::new();
+    assert_eq!(f.edit(ALICE, "line 3", "alice 3").coverage, "admitted");
+    f.age_journal(30 * 60 * 1000 + 1_000);
+    let run = f.shell("codex", BOB, "printf 'bob\\n' > a.txt");
+    assert_eq!(run.coverage, "admitted", "{run:?}");
+}
+
+#[test]
+fn lines_of_an_ended_session_refuse_nothing() {
+    let f = Fixture::new();
+    assert_eq!(f.edit(ALICE, "line 3", "alice 3").coverage, "admitted");
+    let ended = f.run(
+        "claude-code",
+        &json!({
+            "session_id": ALICE, "transcript_path": "/dev/null", "cwd": f.base.join("work"),
+            "hook_event_name": "SessionEnd", "reason": "other",
+        }),
+    );
+    assert!(!ended.coverage.starts_with("denied"), "{ended:?}");
+    let run = f.shell("codex", BOB, "printf 'bob\\n' > a.txt");
+    assert_eq!(run.coverage, "admitted", "{run:?}");
+}
+
+/// A shell write whose snapshot is incomplete gives no decision, never a
+/// denial, and says why.
+#[test]
+fn a_shell_write_with_an_incomplete_snapshot_gives_no_decision_and_says_why() {
+    let f = Fixture::without_git();
+    assert_eq!(f.edit(ALICE, "line 3", "alice 3").coverage, "admitted");
+    let run = f.shell("codex", BOB, "printf 'bob\\n' > a.txt");
+    assert_eq!(run.coverage, "shell_unobserved", "{run:?}");
+    assert!(run.reason.is_none(), "{run:?}");
+    assert!(
+        run.detail
+            .contains("no decision; workspace snapshot incomplete ("),
+        "{run:?}"
+    );
 }
