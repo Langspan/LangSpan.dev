@@ -3856,6 +3856,11 @@ pub enum Command {
     ObserveUncoordinated {
         workspace_id: String,
         files: Vec<ObservedFile>,
+        /// When the scan began reading the checkout, on the clock the core is
+        /// told. A session that reported a file since then is newer than the
+        /// version the scan saw. Absent: not known, and no file is excused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scanned_from_ms: Option<u64>,
     },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
@@ -4660,6 +4665,11 @@ enum CommandWire {
     ObserveUncoordinated {
         workspace_id: String,
         files: Vec<ObservedFile>,
+        /// When the scan began reading the checkout, on the clock the core is
+        /// told. A session that reported a file since then is newer than the
+        /// version the scan saw. Absent: not known, and no file is excused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scanned_from_ms: Option<u64>,
     },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
@@ -7707,6 +7717,7 @@ fn decide_checked(
         Command::ObserveUncoordinated {
             workspace_id,
             files,
+            scanned_from_ms,
         } => {
             validate_known_workspace(state, workspace_id)?;
             if files.is_empty() || files.len() > MAX_UNCOORDINATED_OBSERVED {
@@ -7719,12 +7730,17 @@ fn decide_checked(
             }
             let files = normalized_files(files)?;
             // A file under an admitted edit is that edit's, whose report has
-            // not arrived yet; a version a session reported is explained.
+            // not arrived yet; a version a session reported is explained; and
+            // a file a session reported after the scan began reading is newer
+            // than what the scan saw: the version before that session's edit.
             let unexplained: Vec<ObservedFile> = files
                 .into_iter()
                 .filter(|file| {
                     !leased(state, workspace_id, &file.path, now_ms)
                         && !explained(state, workspace_id, file)
+                        && !scanned_from_ms.is_some_and(|from| {
+                            reported_since(state, workspace_id, &file.path, from)
+                        })
                 })
                 .take(MAX_UNCOORDINATED_FILES)
                 .collect();
@@ -10273,6 +10289,22 @@ fn explained(state: &State, workspace_id: &str, file: &ObservedFile) -> bool {
                 .known
                 .iter()
                 .any(|known| known.path == file.path && known.state == file.state)
+        })
+}
+
+/// Whether a session of this workspace reported reading or writing the file
+/// at or after `from_ms`, at any version.
+fn reported_since(state: &State, workspace_id: &str, path: &str, from_ms: u64) -> bool {
+    state
+        .sessions
+        .values()
+        .filter(|session| session.workspace_id == workspace_id)
+        .filter_map(|session| state.activity.get(&session.session_id))
+        .any(|activity| {
+            activity
+                .known
+                .iter()
+                .any(|known| known.path == path && known.at_ms >= from_ms)
         })
 }
 

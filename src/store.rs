@@ -794,6 +794,7 @@ impl Store {
             commands.push(Command::ObserveUncoordinated {
                 workspace_id: workspace_id.into(),
                 files: content_changes,
+                scanned_from_ms: snapshot.scanned_from_ms,
             });
         }
         // Worktrees of one repository share a Git common directory. Only its

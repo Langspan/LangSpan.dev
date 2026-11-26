@@ -83,9 +83,55 @@ fn observe(state: &mut State, id: &str, files: Vec<ObservedFile>, now: u64) -> O
         Command::ObserveUncoordinated {
             workspace_id: "work".into(),
             files,
+            scanned_from_ms: None,
         },
         now,
     )
+}
+
+/// A scan reads the checkout off the state owner's thread, so a session can
+/// report a newer version of a file between the scan's read and its result.
+/// The version the scan saw is then the one before the session's own edit:
+/// not a change no session reported (the macOS failure on pull request #242).
+#[test]
+fn a_file_a_session_reported_after_the_scan_read_it_is_not_recorded() {
+    let mut state = ready(true);
+    let write = |state: &mut State, id: &str, digit: &str, at: u64| {
+        ok(run(
+            state,
+            id,
+            Command::ObserveSource {
+                session_id: CLAUDE.into(),
+                files: vec![file("src/a.rs", digit)],
+                origin: SourceOrigin::Write,
+            },
+            at,
+        ));
+    };
+    write(&mut state, "w1", "1", 100);
+    // The scan starts at 500 and reads version 1; Claude writes version 2 at
+    // 600; the scan's result reaches the core at 1_000.
+    write(&mut state, "w2", "2", 600);
+    let stale = |from: Option<u64>| Command::ObserveUncoordinated {
+        workspace_id: "work".into(),
+        files: vec![file("src/a.rs", "1")],
+        scanned_from_ms: from,
+    };
+    let outcome = run(&mut state, "scan-1", stale(Some(500)), 1_000);
+    assert_eq!(recorded(outcome), (vec![], vec![]));
+    assert!(
+        brief(&mut state, CLAUDE, "b1", 2_000)
+            .uncoordinated
+            .is_empty()
+    );
+
+    // A report from before the scan started explains only its own version:
+    // a different one on disk is still a change no session reported.
+    let outcome = run(&mut state, "scan-2", stale(Some(700)), 1_000);
+    assert_eq!(
+        recorded(outcome),
+        (vec![CODEX.into()], vec!["src/a.rs".into()])
+    );
 }
 
 fn recorded(outcome: Outcome) -> (Vec<String>, Vec<String>) {
@@ -287,6 +333,7 @@ fn invalid_observations_are_rejected_without_events_and_events_replay() {
         let command = Command::ObserveUncoordinated {
             workspace_id: "work".into(),
             files,
+            scanned_from_ms: None,
         };
         let decision = decide(&state, &command, "bad", 10);
         assert!(matches!(decision.outcome, Outcome::Error { .. }));
@@ -295,6 +342,7 @@ fn invalid_observations_are_rejected_without_events_and_events_replay() {
     let missing = Command::ObserveUncoordinated {
         workspace_id: "missing".into(),
         files: vec![file("src/a.rs", "a")],
+        scanned_from_ms: None,
     };
     assert!(matches!(
         decide(&state, &missing, "bad", 10).outcome,
@@ -304,6 +352,7 @@ fn invalid_observations_are_rejected_without_events_and_events_replay() {
     let command = Command::ObserveUncoordinated {
         workspace_id: "work".into(),
         files: vec![file("src/a.rs", "a")],
+        scanned_from_ms: None,
     };
     let decision = decide(&state, &command, "scan-1", 10);
     let wire = serde_json::to_string(&decision.events[0]).unwrap();

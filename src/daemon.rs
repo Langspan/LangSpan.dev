@@ -2064,8 +2064,15 @@ mod unix {
             .name("langspan-git-reader".into())
             .spawn(move || {
                 while let Ok(of) = scan_receiver.recv() {
+                    // Hook reports keep arriving while this thread reads the
+                    // checkout: the core compares them with this time.
+                    let from = now_ms();
                     let snapshot =
-                        crate::observer::scan(&of.root, Instant::now() + Duration::from_secs(2));
+                        crate::observer::scan(&of.root, Instant::now() + Duration::from_secs(2))
+                            .map(|mut snapshot| {
+                                snapshot.scanned_from_ms = Some(from);
+                                snapshot
+                            });
                     if scan_result_sender
                         .send(ScanResult { of, snapshot })
                         .is_err()

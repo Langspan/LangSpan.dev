@@ -31,6 +31,11 @@ pub struct Snapshot {
     /// the index's in-flight comparison (roadmap C7). Not persisted.
     #[serde(skip)]
     pub head_objects: BTreeMap<String, String>,
+    /// When the scan began reading, on the clock the core is told: a session
+    /// that reported a file since then is newer than this scan's read of it.
+    /// Set by the daemon's reader; not persisted.
+    #[serde(skip)]
+    pub scanned_from_ms: Option<u64>,
 }
 
 /// Why a scan listed a working-tree file but did not read it.
@@ -377,6 +382,7 @@ pub fn scan_with_limits(
             unobserved,
             unread,
             head_objects,
+            scanned_from_ms: None,
         })
     }
 }
