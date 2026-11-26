@@ -4,7 +4,7 @@
 //! as a sequence of records in pages, each resumed after an opaque cursor.
 
 use crate::{
-    Adoption, AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CoreError, Intent,
+    Adoption, AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CheckoutRun, CoreError, Intent,
     InterfaceNotice, Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, PresenceSetting,
     RemoteLink, RemotePeer, RetractedMessage, ScanCoverage, ScanFailure, Session, SessionActivity,
     SessionLiveness, State, TestLearning, Turn, TurnWaiter, UninstalledHost, Workspace,
@@ -518,6 +518,11 @@ pub enum StatusRecord {
         key: String,
         adoption: Adoption,
     },
+    /// A command run in workspace `key` that may explain a checkout change.
+    CheckoutRun {
+        key: String,
+        run: CheckoutRun,
+    },
     /// Part of one record too large for a page: `text` is its JSON from
     /// byte `offset`. The parts of a record come in order, the last with
     /// `last`, and joined they are that record's JSON. A part at offset 0
@@ -530,7 +535,7 @@ pub enum StatusRecord {
 }
 
 /// Record kinds in page order. The cursor names one of these.
-const KINDS: [&str; 27] = [
+const KINDS: [&str; 28] = [
     "workspace",
     "session",
     "intent",
@@ -558,6 +563,7 @@ const KINDS: [&str; 27] = [
     "retracted_notice",
     "presence",
     "adoption",
+    "checkout_run",
 ];
 
 impl StatusRecord {
@@ -611,6 +617,7 @@ impl StatusRecord {
             }
             Self::Presence { key, setting } => drop(state.presence.insert(key, setting)),
             Self::Adoption { key, adoption } => drop(state.adoptions.insert(key, adoption)),
+            Self::CheckoutRun { key, run } => state.checkout_runs.entry(key).or_default().push(run),
         }
         Ok(())
     }
@@ -797,7 +804,7 @@ pub fn status_records<'a>(
         .as_ref()
         .and_then(|after| Some((after.position.clone(), after.within?)));
     let after = after.as_ref();
-    let pages: [Page<'a>; 27] = [
+    let pages: [Page<'a>; 28] = [
         entries(0, &state.workspaces, after, |key, workspace| {
             StatusRecord::Workspace { key, workspace }
         }),
@@ -882,6 +889,9 @@ pub fn status_records<'a>(
         }),
         entries(26, &state.adoptions, after, |key, adoption| {
             StatusRecord::Adoption { key, adoption }
+        }),
+        lists(27, &state.checkout_runs, after, |key, run| {
+            StatusRecord::CheckoutRun { key, run }
         }),
     ];
     Ok((resume, pages.into_iter().flatten()))

@@ -532,6 +532,25 @@ fn a_sessions_own_merge_is_not_briefed_to_it_and_is_named_to_the_others() {
     }
 }
 
+/// The paged status records carry checkout runs, so a reader that pages
+/// through `status --all` keeps the attribution that suppresses a session's
+/// own merge, as the single-frame status does.
+#[test]
+fn paged_status_records_carry_the_checkout_runs() {
+    let w = World::new(upstream_to_merge);
+    w.read(ALICE, "read-a", "a.txt");
+    w.wait_for_scan_of_head();
+    w.shell(ALICE, "alice-merge", "git merge origin/main", || {
+        ok(&w.work(), &["merge", "--quiet", "origin/main"]);
+    });
+    let runs = w.state().checkout_runs;
+    assert_eq!(runs.get("work").map(Vec::len), Some(1), "{runs:?}");
+    let paged =
+        client::read_all(|command| Ok(client::call(&w.state_dir(), &request(command))?.outcome))
+            .unwrap();
+    assert_eq!(paged.checkout_runs, runs);
+}
+
 /// Issue #139: Alice commits through her shell tool, which moves HEAD and
 /// changes no file, so the scan records no checkout change for it. The owner
 /// then restores two dirty files in a terminal, within the grace period, at
