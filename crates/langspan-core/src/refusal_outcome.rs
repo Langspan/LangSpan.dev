@@ -14,7 +14,6 @@
 //! and by deadline.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::mem;
 
 use crate::{Event, LeaseRelation, RefusalKind, SHELL_TOOL, SourceOrigin, ToolResult};
 
@@ -484,7 +483,7 @@ impl Settler {
     /// per session, each outcome's count, with the rest as `PENDING`.
     pub(crate) fn finish(mut self, to_ms: u64) -> BTreeMap<String, BTreeMap<&'static str, u32>> {
         self.expire(to_ms);
-        let mut settled = mem::take(&mut self.settled);
+        let mut settled = self.settled;
         for (session, groups) in self.pending {
             if groups.is_empty() {
                 continue;
