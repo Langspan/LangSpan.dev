@@ -6,20 +6,24 @@
 
 # Your agents. On the same page.
 
-LangSpan gives your team's coding agents a shared view of work in progress.
-The aim is to help people build related parts of a project together with less
-avoidable rework and less manual relay between their agent sessions.
-It connects Claude Code and Codex through hooks, with CLI and MCP access for
-other agent workflows. Cursor, Gemini CLI and Antigravity adapters are built
-from documentation and not yet verified on a real Cursor, a live Gemini CLI
-session or a real Antigravity.
+**Run agents in parallel. Build as a team.**
 
-[See the team story](https://langspan.dev/#team-story) ·
-[Get started](#get-started) ·
-[Usage guide](docs/usage.md) ·
-[Implementation status](docs/IMPLEMENTATION_STATUS.md)
+LangSpan is the open-source coordination layer for parallel agentic development.
+Keep your existing coding agents. Share relevant work across sessions,
+worktrees and machines, coordinate supported local edits, and verify combined
+changes before landing.
 
-<a href="https://langspan.dev/#demo">
+Keep your existing Claude Code and Codex sessions. LangSpan runs locally,
+with optional Git-based teammate awareness and CLI/MCP access. Cursor,
+Gemini CLI and Antigravity adapters exist but have not been verified in live
+sessions.
+
+**v0.1.0 is available for macOS and Linux.** [Download a release binary](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0) or [build from source](#build-from-source).
+
+[Get started](#get-started) · [Parallel work](https://langspan.dev/#scale) · [Explore capabilities](https://langspan.dev/#demo) · [Research](https://langspan.dev/#research) ·
+[Usage guide](docs/usage.md) · [Implementation status](docs/IMPLEMENTATION_STATUS.md)
+
+<a href="https://langspan.dev/#edit-coordination">
   <picture>
     <source media="(max-width: 600px)" srcset="https://langspan.dev/assets/product/langspan-overview-compact.svg">
     <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="https://langspan.dev/assets/product/langspan-card-dark-still.svg">
@@ -30,29 +34,38 @@ session or a real Antigravity.
 </a>
 
 *An authored 12-second illustration of local coordination, not a session recording.
-[Explore each step](https://langspan.dev/#demo) with Play, Pause and Replay, or open
+[Explore each step](https://langspan.dev/#edit-coordination) with Play, Pause and Replay, or open
 the motionless [light](https://langspan.dev/assets/product/langspan-card-light-still.svg) or
 [dark](https://langspan.dev/assets/product/langspan-card-dark-still.svg) version.*
 
+[Watch the 33-second local-coordination film](https://langspan.dev/#film) or [inspect the recorded evidence](https://langspan.dev/#evidence). The film combines the authored workflow with actual v0.1.0 dashboard excerpts from scripted hook events; no live model was invoked.
+
 ## Why we're building LangSpan
 
-Our mission is to help teams keep building together as their agents write more
-code. When a swarm moves faster than the team can keep one another informed,
-people can end up choosing unrelated work to avoid getting in its way. Even
-separate worktrees can bring incompatible changes back together at integration.
+Parallel execution is easy. Coordinated development is hard.
 
-Consider two developers working on one feature. Alice's agent changes session
-refresh while Bob's agent updates the login flow. A useful briefing tells Bob's
-agent what Alice changed before it chooses the affected edit. The intended
-result is a working combined feature with less repair and fewer copied updates.
+Worktrees isolate files, not intent. One agent can rename a function while
+another adds a caller on a different branch that uses the old name. Git can
+merge both branches without a textual conflict, and the combined tests can
+still fail. Shared notes can help, but agents must keep them current and read
+them before their next decision.
 
-We will judge LangSpan by that team outcome: relevant information arriving in
-time, an observable response, less avoidable rework and useful parallel progress,
-with the same checks and review standard. Those benefits still need comparative
-evidence. [The mission](docs/mission.md) defines the hypothesis and success measures.
+LangSpan connects the work in the tools you already use. Relevant briefings
+surface related activity; supported local edit checks and session-attributed
+commits help keep changes separate. Exact-tree checks help you verify the
+combined result. None of these mechanisms guarantees semantic compatibility.
+Agents choose their next action, and people direct and review the work.
 
-One developer running several agents can use the same coordination tools. Each
-agent stays in its own session, using its own tools and permission prompts.
+The goal is less avoidable repair and manual relay while useful parallel work
+continues. Comparative team outcomes remain to be measured.
+[Reproduce the clean-merge failure](https://langspan.dev/#why), explore
+[the research](https://langspan.dev/#research), and read
+[the mission](docs/mission.md) and [positioning](docs/positioning.md).
+The [coordination benchmark](https://github.com/Langspan/LangSpan.dev/issues/172)
+describes how we plan to measure the outcome.
+
+One developer running several sessions can start with one checkout. The
+same tools also support linked worktrees and opt-in awareness across machines.
 
 ## What reaches your agents
 
@@ -65,8 +78,21 @@ updates while keeping their own checkouts.
 
 Briefings can also include activity published from other machines through the
 repository's Git remote. Sharing is off until enabled for that workspace;
-remote activity informs the agent and never blocks a local edit. Task text
-stays out of remote updates unless you choose to share it.
+remote activity informs the agent and never blocks a local edit. LangSpan's
+remote publications exclude source contents. Task text stays out unless you
+choose to share it. The agent provider's data handling is separate.
+
+### See how changes relate
+
+The local source index identifies potential relationships between files,
+including changed exported signatures and related name mentions. A supported
+Claude Code or Codex write that uses an outdated argument count can receive
+an advisory notice with the tool result. The notice does not refuse the
+write or repair the caller. Matching is by name within one checkout, not
+resolved dependencies. See the [source index](docs/adr/0008-derived-source-index.md),
+[alert limits](docs/adr/0029-break-alerts-at-write-time.md) and
+[semantic awareness illustration](https://langspan.dev/#semantic-awareness).
+Rename-aware alerts and cross-worktree symbol awareness are roadmap work.
 
 ### Catch overlapping edits
 
@@ -75,7 +101,10 @@ another session's file or region hold. It can admit edits to separate regions
 of one file when it can locate them; otherwise it holds the whole file.
 Where LangSpan has a recorded version, it also checks whether the file changed
 before the edit. [Region admission and its limits](docs/adr/0012-region-admission.md)
-describe which edits can proceed together.
+describe which edits can proceed together. A refusal is scoped to the supported
+operation and current hold or recorded source. The agent can reread, retry or
+choose another task. Waiting and revalidating an active edit hold is proposed
+in [B28](https://github.com/Langspan/LangSpan.dev/issues/171), not a shipped edit queue.
 
 ### See what happened
 
@@ -93,7 +122,7 @@ workspace health. The view includes up to 50 agents and 20 entries in each
 other list, with counts for entries left out.
 
 ```sh
-./target/release/langspan dashboard --open
+langspan dashboard --open
 ```
 
 It defaults to `127.0.0.1:7311` and prints a URL with a token for this run;
@@ -106,53 +135,72 @@ binding to a VPN address and the limits of that setup.
 Within one workspace, agents can ask for a recap, save short notes, message
 another session or leave a handoff for the next one. Notes survive coordinator
 restarts. Messages and handoffs arrive through supported briefing events;
-they do not wake idle sessions. These records stay local to the coordinator.
+they do not wake idle sessions. A message that no longer holds can be
+withdrawn, and sessions that already read it are told to disregard it. These
+records stay local to the coordinator.
 
 ## Get started
 
 ### Install
 
-Build from source. You need Rust through rustup (the repository pins the
-version in `rust-toolchain.toml`) and a C compiler for the bundled SQLite and
-Tree-sitter grammars. From a clone of this repository:
+Get the archive for your operating system and processor from the
+[v0.1.0 release](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0).
+The archive contains the executable, notices and licences. Rust is not needed
+to run the published binary.
+
+| Platform | Archive |
+| --- | --- |
+| macOS Apple silicon | [Download](https://github.com/Langspan/LangSpan.dev/releases/download/v0.1.0/langspan-v0.1.0-aarch64-apple-darwin.tar.gz) |
+| macOS Intel | [Download](https://github.com/Langspan/LangSpan.dev/releases/download/v0.1.0/langspan-v0.1.0-x86_64-apple-darwin.tar.gz) |
+| Linux x86-64 | [Download](https://github.com/Langspan/LangSpan.dev/releases/download/v0.1.0/langspan-v0.1.0-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux ARM64 | [Download](https://github.com/Langspan/LangSpan.dev/releases/download/v0.1.0/langspan-v0.1.0-aarch64-unknown-linux-gnu.tar.gz) |
+
+Linux requires glibc 2.35 or newer. Run `uname -m` to check your processor.
+After downloading the matching archive and verifying it (see below), extract it,
+then run these commands from the extracted directory:
 
 ```sh
-cargo build --workspace --release --locked
-./target/release/langspan --help
+mkdir -p "$HOME/.local/bin"
+install -m 0755 langspan "$HOME/.local/bin/langspan"
+export PATH="$HOME/.local/bin:$PATH"
+langspan --version
 ```
 
-Release binaries and Homebrew are prepared but not published yet. No release
-has been made, and the Homebrew tap does not exist. Once they are published:
+Add that PATH entry to your shell's startup file if needed. macOS archives are
+not signed with an Apple Developer ID; a browser download may be quarantined.
+Review the checksum and provenance before allowing execution in System Settings.
+The Homebrew tap is not available as of this release.
 
-| Method | Command | Status |
-| --- | --- | --- |
-| Release archive | Download `langspan-vX.Y.Z-TARGET.tar.gz` for your platform from the [Releases page](https://github.com/Langspan/LangSpan.dev/releases) and put `langspan` on your `PATH` | Not published yet |
-| Homebrew | `brew install langspan/tap/langspan` | Not published yet |
+### Build from source
 
-Archives are planned for macOS (Apple silicon and Intel) and Linux (x86_64
-and arm64, glibc 2.35 or later). They are not signed with an Apple Developer
-ID: a macOS archive downloaded in a browser is quarantined, and Gatekeeper
-stops `langspan` from running until you allow it in System Settings or remove the
-attribute with `xattr -d com.apple.quarantine langspan`. Downloads with `curl`
-or Homebrew are not quarantined.
+Alternatively, clone this repository and build with Rust through rustup and
+a C compiler for bundled SQLite and Tree-sitter:
 
-Under Homebrew, the hooks and MCP entries name the stable
-`$(brew --prefix)/opt/langspan/bin/langspan`, so they keep working after
-`brew upgrade`. After any upgrade, restart a running coordinator.
+```sh
+git clone https://github.com/Langspan/LangSpan.dev.git
+cd LangSpan.dev
+cargo build --workspace --release --locked
+export PATH="$PWD/target/release:$PATH"
+langspan --version
+```
+
+Use the same absolute binary location for the daemon and installed hooks.
+Restart a running coordinator after upgrading.
 
 ### Verify a download
 
-Each release is planned to carry `SHA256SUMS`, a CycloneDX SBOM per archive
-and a build provenance attestation made by the release workflow. To check an
-archive with the [GitHub CLI](https://cli.github.com/):
+The v0.1.0 release includes [SHA256SUMS](https://github.com/Langspan/LangSpan.dev/releases/download/v0.1.0/SHA256SUMS), a CycloneDX SBOM per target
+and a provenance bundle. Download SHA256SUMS beside your archive. For example,
+on macOS Apple silicon, with the [GitHub CLI](https://cli.github.com/):
 
 ```sh
-shasum -a 256 -c SHA256SUMS --ignore-missing   # on Linux: sha256sum -c SHA256SUMS --ignore-missing
-gh attestation verify langspan-vX.Y.Z-aarch64-apple-darwin.tar.gz \
+grep ' langspan-v0.1.0-aarch64-apple-darwin.tar.gz$' SHA256SUMS | shasum -a 256 -c
+gh attestation verify langspan-v0.1.0-aarch64-apple-darwin.tar.gz \
   -R Langspan/LangSpan.dev \
   --signer-workflow Langspan/LangSpan.dev/.github/workflows/release.yml
 ```
 
+Substitute your actual archive name (on Linux, use `sha256sum -c`).
 The second command checks that the archive was built by this repository's
 release workflow. Add `--predicate-type https://cyclonedx.org/bom` to check
 its SBOM attestation instead. Builds are not bit-for-bit reproducible; the
@@ -161,10 +209,10 @@ C code and the macOS linker vary between builds.
 
 ### Run
 
-Start the local coordinator and leave it running:
+Start the local coordinator and leave it running in one terminal:
 
 ```sh
-./target/release/langspan daemon
+langspan daemon
 ```
 
 The default state directory is `$XDG_STATE_HOME/langspan` or
@@ -175,6 +223,12 @@ change workspace files.
 
 ## Connect a native agent
 
+For a first project, use the [single-checkout setup](#one-project) below.
+Preview the proposed hook settings before applying them. Start your usual
+agent session afterwards, and run `langspan doctor --root /absolute/path/to/project`
+and `langspan status` in a second terminal to inspect the setup.
+You can also open the read-only dashboard with `langspan dashboard --open`.
+
 ### Across your Git repositories
 
 `langspan install` prepares user-level hooks and registers `langspan mcp` as
@@ -182,7 +236,7 @@ the MCP server `langspan`. Supported hosts can then discover LangSpan in Git
 repositories without a per-project install:
 
 ```sh
-./target/release/langspan install
+langspan install
 ```
 
 This is a dry run that previews the proposed settings; for `~/.claude.json`,
@@ -224,7 +278,7 @@ To cover a single checkout instead, inspect the proposed project settings.
 Replace `/path/to/checkout` with the project your agent is editing:
 
 ```sh
-./target/release/langspan hooks install claude-code \
+langspan hooks install claude-code \
   --workspace my-project --root /absolute/path/to/project
 ```
 
@@ -264,7 +318,8 @@ hold expires. See [source-version coverage](docs/usage.md#source-versions) and
 
 ## Current availability
 
-LangSpan is available as a source preview. One
+LangSpan v0.1.0 is published for macOS and Linux. A release is not proof of
+every adapter's behavior. One
 [recorded Claude Code/Codex run](docs/evidence/mixed-hosts/README.md) used
 sequential turns in a shared checkout on macOS. Codex completed an edit,
 Claude preserved that change in its own edit, and Codex later declined to edit
@@ -297,8 +352,8 @@ without rereading the changed file.
 The retained mixed-host run does not cover simultaneous overlapping edits or
 live Claude Code agents in linked worktrees, and the two-machine run did not show an agent
 changing its approach. Comparative evidence of less
-rework and manual relay remains open. Windows transport and signed releases
-are not available. Source context matches names without resolving types, scopes
+rework and manual relay remains open. Windows transport and Apple Developer ID signing are
+not available. Source context matches names without resolving types, scopes
 or dependency chains. The [roadmap](docs/roadmap.md) and
 [implementation status](docs/IMPLEMENTATION_STATUS.md)
 record the versions tested and the remaining checks.
@@ -307,6 +362,7 @@ record the versions tested and the remaining checks.
 
 | Guide | What you'll find |
 | --- | --- |
+| [Positioning](docs/positioning.md) | Shared public messaging and claim boundaries |
 | [Mission](docs/mission.md) | The problem, intended team outcome and how we'll measure success |
 | [Usage](docs/usage.md) | Setup, native hooks, CLI walkthrough, MCP, retries and configuration |
 | [Implementation status](docs/IMPLEMENTATION_STATUS.md) | Current behavior, retained evidence and open acceptance |

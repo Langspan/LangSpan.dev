@@ -329,6 +329,64 @@ fn v3_prompt_targets_request_and_target_briefing_match_the_committed_golden_vect
 }
 
 #[test]
+fn v3_presence_requests_and_briefing_match_the_committed_golden_vectors() {
+    use langspan_core::PresenceKind;
+    let wire = include_bytes!("../fixtures/presence-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::ObservePresence {
+            session_id: "claude-code.alice".into(),
+            kind: PresenceKind::Search,
+            paths: vec!["src/auth".into()],
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    // Paths only: a search pattern or a command has no field to travel in.
+    for field in ["pattern", "command", "glob"] {
+        let worded = String::from_utf8_lossy(wire).replace(
+            r#""paths":["src/auth"]"#,
+            &format!(r#""paths":["src/auth"],"{field}":"x""#),
+        );
+        assert!(serde_json::from_str::<Request>(&worded).is_err(), "{field}");
+    }
+
+    let wire = include_bytes!("../fixtures/set-presence-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::SetPresence {
+            session_id: "claude-code.alice".into(),
+            shown: false,
+            window_ms: 600_000,
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+
+    let wire = include_bytes!("../fixtures/presence-briefing-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    let looking = &briefing.peers[0].looking;
+    assert_eq!(looking[0].path, "src/auth.rs");
+    assert_eq!(looking[0].kind, PresenceKind::Read);
+    assert_eq!(looking[1].age_s, 200);
+    assert_eq!(encode(&response).unwrap(), wire);
+    // A briefing from before presence has no such field and still reads.
+    let older = String::from_utf8_lossy(wire).replace(
+        r#","looking":[{"path":"src/auth.rs","kind":"read","age_s":180},{"path":"src/session","kind":"search","age_s":200}]"#,
+        "",
+    );
+    let response: Response = serde_json::from_str(&older).unwrap();
+    let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert!(briefing.peers[0].looking.is_empty());
+    assert_eq!(encode(&response).unwrap(), older.as_bytes());
+}
+
+#[test]
 fn v3_symbol_detail_request_and_response_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/graph-symbol-detail-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
@@ -438,6 +496,80 @@ fn v3_briefing_with_messages_matches_the_committed_golden_vector() {
         r#""kind":"next_session""#,
         r#""kind":"next_session","all":true"#,
     );
+    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+}
+
+#[test]
+fn v3_show_message_request_and_response_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/show-message-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::ShowMessage { workspace_id, message_id }
+            if workspace_id == "app" && message_id == "msg-1"
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+    let unknown = String::from_utf8_lossy(wire).replace(
+        r#""message_id":"msg-1""#,
+        r#""message_id":"msg-1","session_id":"x""#,
+    );
+    assert!(serde_json::from_str::<Request>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/show-message-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::MessageShown { message } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(message.paths, ["src/api.rs"]);
+    assert!(!message.retracted);
+    assert_eq!(encode(&response).unwrap(), wire);
+}
+
+#[test]
+fn v3_message_retraction_matches_the_committed_golden_vectors() {
+    let last = include_bytes!("../fixtures/retract-message-request-v3.json");
+    let by_id = include_bytes!("../fixtures/retract-message-by-id-request-v3.json");
+    for wire in [&last[..], &by_id[..]] {
+        let request: Request = serde_json::from_slice(wire).unwrap();
+        assert_eq!(request.version, PROTOCOL_VERSION);
+        assert_eq!(encode(&request).unwrap(), wire);
+    }
+    let request: Request = serde_json::from_slice(last).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::RetractMessage { from: Some(from), message_id: None, .. } if from == "codex.bob"
+    ));
+    let request: Request = serde_json::from_slice(by_id).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::RetractMessage { from: None, message_id: Some(id), .. } if id == "m-9"
+    ));
+    let unknown = String::from_utf8_lossy(last)
+        .replace(r#""message_id":null"#, r#""message_id":null,"all":true"#);
+    assert!(serde_json::from_str::<Request>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/retract-message-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &response.outcome,
+        langspan_core::Outcome::MessageRetracted { withdrawn_unread, told_to_disregard, .. }
+            if withdrawn_unread == &["codex.carol"] && told_to_disregard == &["claude-code.alice"]
+    ));
+    assert_eq!(encode(&response).unwrap(), wire);
+
+    let wire = include_bytes!("../fixtures/retracted-briefing-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(briefing.retracted.len(), 1);
+    assert!(briefing.retracted[0].cut);
+    assert_eq!(encode(&response).unwrap(), wire);
+    // The briefing before withdrawals existed still reads the same.
+    let old = include_bytes!("../fixtures/message-briefing-response-v3.json");
+    let response: Response = serde_json::from_slice(old).unwrap();
+    assert_eq!(encode(&response).unwrap(), old);
+    let unknown = String::from_utf8_lossy(wire).replace(r#""cut":true"#, r#""cut":true,"all":1"#);
     assert!(serde_json::from_str::<Response>(&unknown).is_err());
 }
 

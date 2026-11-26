@@ -523,6 +523,8 @@ mod tests {
                 budget: Duration::from_millis(1500),
                 share_prompt: true,
                 code_briefing: true,
+                presence: true,
+                presence_window_ms: langspan_core::PRESENCE_WINDOW_MS,
                 vendor: crate::install::Vendor::Antigravity,
                 user_level: false,
             }

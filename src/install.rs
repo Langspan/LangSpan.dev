@@ -17,8 +17,9 @@ pub const EVENTS: [&str; 3] = ["PreToolUse", "PostToolUse", "PostToolUseFailure"
 /// literal and compared before and after ([ADR 0011](../docs/adr/0011-shell-writes.md)).
 pub const MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash";
 /// After the tool ran, a completed Read is also reported, so the version a
-/// session saw can be compared when it later edits the file.
-pub const POST_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash|Read";
+/// session saw can be compared when it later edits the file, and a Read or
+/// Grep shows peers where the session is looking (roadmap A13).
+pub const POST_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash|Read|Grep";
 pub const CODEX_EVENTS: [&str; 2] = ["PreToolUse", "PostToolUse"];
 pub const CODEX_MATCHER: &str = "^(apply_patch|Bash)$";
 pub const GEMINI_EVENTS: [&str; 2] = ["BeforeTool", "AfterTool"];
@@ -44,7 +45,7 @@ pub const ANTIGRAVITY_HOOK_NAME: &str = "langspan";
 /// documentation they carry no tool-call ID to join a call's two halves.
 pub const CURSOR_EVENTS: [&str; 3] = ["preToolUse", "postToolUse", "postToolUseFailure"];
 pub const CURSOR_MATCHER: &str = "^(Write|Delete|Shell)$";
-pub const CURSOR_POST_MATCHER: &str = "^(Write|Delete|Shell|Read)$";
+pub const CURSOR_POST_MATCHER: &str = "^(Write|Delete|Shell|Read|Grep)$";
 const CURSOR_PROJECT_MARK: &str = "LANGSPAN_MANAGED=cursor:v1 ";
 const CURSOR_USER_MARK: &str = "LANGSPAN_MANAGED=cursor:user:v1 ";
 /// The `hooks.json` schema version Cursor documents ("use `1`").
@@ -323,6 +324,78 @@ pub struct Registration {
     pub share_prompt: bool,
     /// False adds `--code-briefing off` to the installed command.
     pub code_briefing: bool,
+    /// Where this session looks is shown to peers; false adds `--presence
+    /// off`, and a window other than the default adds `--presence-minutes`.
+    pub presence: Presence,
+}
+
+/// The presence options of an installed hook command (roadmap A13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Presence {
+    /// False: the session's reads, searches and shell paths are never shown.
+    pub shown: bool,
+    /// How old a peer's presence the session is shown; `None` is the
+    /// default, `PRESENCE_MINUTES`.
+    pub minutes: Option<u64>,
+}
+
+/// The presence window, in minutes, when none is given.
+pub const PRESENCE_MINUTES: u64 = langspan_core::PRESENCE_WINDOW_MS / 60_000;
+
+impl Default for Presence {
+    fn default() -> Self {
+        Self {
+            shown: true,
+            minutes: None,
+        }
+    }
+}
+
+impl Presence {
+    /// How old a peer's presence the session is shown, in milliseconds.
+    pub fn window_ms(self) -> u64 {
+        self.minutes.unwrap_or(PRESENCE_MINUTES) * 60_000
+    }
+
+    /// `--presence-minutes`: 1 to 30, the briefing horizon. The default
+    /// is written as no option at all.
+    pub fn minutes(value: &str) -> Result<Option<u64>, String> {
+        match value.parse::<u64>() {
+            Ok(PRESENCE_MINUTES) => Ok(None),
+            Ok(minutes @ 1..=30) => Ok(Some(minutes)),
+            _ => Err("--presence-minutes must be a whole number of minutes from 1 to 30".into()),
+        }
+    }
+
+    fn words(self) -> Vec<String> {
+        let mut words = Vec::new();
+        if !self.shown {
+            words.extend(["--presence".into(), "off".into()]);
+        }
+        if let Some(minutes) = self.minutes {
+            words.extend(["--presence-minutes".into(), minutes.to_string()]);
+        }
+        words
+    }
+
+    /// Take one presence option of an installed command, in the order
+    /// `words` writes them; false for anything else.
+    fn parse(&mut self, option: &str, value: &str) -> bool {
+        match (option, value) {
+            ("--presence", "off") if self.shown && self.minutes.is_none() => {
+                self.shown = false;
+                true
+            }
+            ("--presence-minutes", value) if self.minutes.is_none() => match Self::minutes(value) {
+                Ok(Some(minutes)) => {
+                    self.minutes = Some(minutes);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
 }
 
 /// Whether two paths name the same directory: compared in canonical form,
@@ -424,6 +497,7 @@ impl Registration {
         if !self.code_briefing {
             words.extend(["--code-briefing".into(), "off".into()]);
         }
+        words.extend(self.presence.words());
         words.join(" ")
     }
 }
@@ -466,6 +540,7 @@ pub struct UserRegistration {
     pub executable: PathBuf,
     pub state_dir: PathBuf,
     pub share_prompt: bool,
+    pub presence: Presence,
 }
 
 impl UserRegistration {
@@ -486,6 +561,7 @@ impl UserRegistration {
         if !self.share_prompt {
             words.extend(["--prompt-summary".into(), "off".into()]);
         }
+        words.extend(self.presence.words());
         words.join(" ")
     }
 }
@@ -499,18 +575,33 @@ pub fn parse_user_hook(vendor: Vendor, hook: &Value) -> Option<UserRegistration>
     let command = hook.get("command").and_then(Value::as_str)?;
     let body = vendor.unmark(command, true)?;
     let (words, event) = split_event(vendor, words(body)?)?;
-    let share_prompt = match &words[..] {
-        [_, _, _, _, _] => true,
-        [_, _, _, _, _, option, value] if option == "--prompt-summary" && value == "off" => false,
-        _ => return None,
-    };
-    if words[1] != "hook" || words[2] != vendor.name() || words[3] != "--state-dir" {
+    if words.len() < 5 {
+        return None;
+    }
+    // Only the options this module writes, each at most once, in its order;
+    // the rebuilt command below must match.
+    let (mut share_prompt, mut presence) = (true, Presence::default());
+    let mut options = &words[5..];
+    while let [option, value, rest @ ..] = options {
+        match (option.as_str(), value.as_str()) {
+            ("--prompt-summary", "off") if share_prompt => share_prompt = false,
+            (option, value) if presence.parse(option, value) => {}
+            _ => return None,
+        }
+        options = rest;
+    }
+    if !options.is_empty()
+        || words[1] != "hook"
+        || words[2] != vendor.name()
+        || words[3] != "--state-dir"
+    {
         return None;
     }
     let parsed = UserRegistration {
         executable: words[0].clone().into(),
         state_dir: words[4].clone().into(),
         share_prompt,
+        presence,
     };
     (parsed.command_body(vendor, event.as_deref()) == body).then_some(parsed)
 }
@@ -641,11 +732,13 @@ pub fn parse_project_hook(vendor: Vendor, hook: &Value) -> Option<Registration> 
     // Only the opt-outs this module writes, each at most once. Rebuilding
     // the command below also requires the order it writes them in.
     let (mut share_prompt, mut code_briefing) = (true, true);
+    let mut presence = Presence::default();
     let mut options = &words[9..];
     while let [option, value, rest @ ..] = options {
         match (option.as_str(), value.as_str()) {
             ("--prompt-summary", "off") if share_prompt => share_prompt = false,
             ("--code-briefing", "off") if code_briefing => code_briefing = false,
+            (option, value) if presence.parse(option, value) => {}
             _ => return None,
         }
         options = rest;
@@ -666,6 +759,7 @@ pub fn parse_project_hook(vendor: Vendor, hook: &Value) -> Option<Registration> 
         root: words[8].clone().into(),
         share_prompt,
         code_briefing,
+        presence,
     };
     let ours = parsed.command_body(vendor, event.as_deref()) == body
         && (marked
@@ -1164,6 +1258,7 @@ mod tests {
             root: root.into(),
             share_prompt: true,
             code_briefing: true,
+            presence: Presence::default(),
         }
     }
 
@@ -1414,6 +1509,7 @@ mod tests {
             executable: executable.into(),
             state_dir: "/home/u/.local/state/langspan".into(),
             share_prompt: true,
+            presence: Presence::default(),
         }
     }
 
@@ -1495,12 +1591,33 @@ mod tests {
             share_prompt: false,
             ..user("/opt/it's/langspan")
         };
-        for registration in [user("/opt/bin/langspan"), private] {
+        let unseen = UserRegistration {
+            share_prompt: false,
+            presence: Presence {
+                shown: false,
+                minutes: Some(3),
+            },
+            ..user("/opt/bin/langspan")
+        };
+        let window = UserRegistration {
+            presence: Presence {
+                shown: true,
+                minutes: Some(30),
+            },
+            ..user("/opt/bin/langspan")
+        };
+        assert!(
+            unseen
+                .command_for(Vendor::ClaudeCode)
+                .contains("--prompt-summary off --presence off --presence-minutes 3 #")
+        );
+        for registration in [user("/opt/bin/langspan"), private, unseen, window] {
             for vendor in [Vendor::ClaudeCode, Vendor::Codex] {
                 let hook = json!({"type": "command", "command": registration.command_for(vendor)});
                 let parsed = parse_user_hook(vendor, &hook).unwrap();
                 assert_eq!(parsed.executable, registration.executable);
                 assert_eq!(parsed.share_prompt, registration.share_prompt);
+                assert_eq!(parsed.presence, registration.presence);
                 let other = if vendor == Vendor::Codex {
                     Vendor::ClaudeCode
                 } else {
@@ -1514,6 +1631,12 @@ mod tests {
             body.to_owned(),
             format!("{body} # langspan-managed:claude-code:v1"),
             format!("{body} --ttl-ms 1 # langspan-managed:claude-code:user:v1"),
+            // Presence options only in the order and form install writes.
+            format!("{body} --presence-minutes 3 --presence off # langspan-managed:claude-code:user:v1"),
+            format!("{body} --presence-minutes 10 # langspan-managed:claude-code:user:v1"),
+            format!("{body} --presence-minutes 31 # langspan-managed:claude-code:user:v1"),
+            format!("{body} --presence on # langspan-managed:claude-code:user:v1"),
+            format!("{body} --presence off --presence off # langspan-managed:claude-code:user:v1"),
             format!("{body} && rm -rf / # langspan-managed:claude-code:user:v1"),
             "'/opt/bin/langspan' hook codex --state-dir '/s' # langspan-managed:claude-code:user:v1".into(),
         ] {

@@ -54,7 +54,31 @@ pub struct Entry {
     pub tool: String,
     pub input_digest: String,
     pub parent: Option<String>,
+    /// The presence setting of the hook run that kept it, so that the run
+    /// that sends it again, whatever its own options, attaches the session
+    /// as that run would have. An entry kept before this was recorded has
+    /// none and is sent with presence off: what it read is still recorded as
+    /// a version, but never shown as where its session looked.
+    #[serde(default = "Presence::unrecorded")]
+    pub presence: Presence,
     pub report: Report,
+}
+
+/// A session's `--presence` and `--presence-minutes`, as its hook had them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Presence {
+    pub shown: bool,
+    pub window_ms: u64,
+}
+
+impl Presence {
+    fn unrecorded() -> Self {
+        Self {
+            shown: false,
+            window_ms: langspan_core::PRESENCE_WINDOW_MS,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,12 +463,25 @@ mod tests {
             tool: "Write".into(),
             input_digest: "0".repeat(64),
             parent: None,
+            presence: Presence {
+                shown: true,
+                window_ms: langspan_core::PRESENCE_WINDOW_MS,
+            },
             report: Report::Post {
                 result: ToolResult::Succeeded,
                 paths: vec![path.into()],
                 files: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn an_entry_kept_before_presence_was_recorded_is_sent_with_presence_off() {
+        let mut value = serde_json::to_value(entry("old", "s", "a.txt")).unwrap();
+        value.as_object_mut().unwrap().remove("presence").unwrap();
+        let old: Entry = serde_json::from_value(value).unwrap();
+        assert_eq!(old.presence, Presence::unrecorded());
+        assert!(!old.presence.shown);
     }
 
     #[test]
