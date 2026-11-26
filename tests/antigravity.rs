@@ -18,6 +18,13 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const BOB: &str = "00000000-0000-4000-8000-00000000000b";
 const FIXTURE_ROOT: &str = "/work/demo";
+/// The root of the events captured from Antigravity 1.5.14.
+const CAPTURED_ROOT: &str = "/work/repo";
+/// `PreToolUse`'s answer when LangSpan has no objection: Antigravity 1.5.14
+/// reads `{}` there as a refusal.
+const ALLOW: &str = r#"{"decision":"allow"}"#;
+const CALC: &str = "def add(a, b):\n    return a + b\n\n\ndef multiply(a, b):\n    return a * b\n";
+const MAIN: &str = "from calc import add, multiply\n\n\ndef main():\n    print(add(2, 3))\n    print(multiply(2, 3))\n\n\nif __name__ == \"__main__\":\n    main()\n";
 
 struct Fixture {
     base: PathBuf,
@@ -41,6 +48,24 @@ fn git(root: &Path, arguments: &[&str]) {
         .output()
         .unwrap();
     assert!(output.status.success(), "git {arguments:?}: {output:?}");
+}
+
+/// An event captured from Antigravity 1.5.14, with its root replaced by
+/// `root`.
+fn captured_event(name: &str, root: &Path) -> Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/antigravity-1.5.14")
+        .join(name);
+    let text = fs::read_to_string(&path).unwrap();
+    serde_json::from_str(&text.replace(CAPTURED_ROOT, root.to_str().unwrap())).unwrap()
+}
+
+/// The `PreToolUse` of a captured call that was seen only at `PostToolUse`:
+/// the same event without `error` (see the fixtures' README).
+fn before(mut post: Value) -> Value {
+    post.as_object_mut().unwrap().remove("error");
+    post["hookEventName"] = json!("PreToolUse");
+    post
 }
 
 /// A constructed fixture with its placeholder root replaced by `root`.
@@ -184,15 +209,21 @@ impl Fixture {
         let stdout = String::from_utf8(output.stdout).unwrap();
         if vendor == "antigravity" {
             // Never a permission it was not asked for, and never another
-            // host's shape: every answer is a JSON object.
+            // host's shape: every answer is a JSON object. The one allow is
+            // the explicit "no objection" `PreToolUse` needs, and only there.
             for word in [
-                "allow",
                 "auto_approve",
                 "\"ask\"",
                 "force_ask",
                 "hookSpecificOutput",
+                "overwrite",
+                "permissionOverrides",
             ] {
                 assert!(!stdout.contains(word), "{word}: {stdout}");
+            }
+            if stdout.contains("allow") {
+                assert_eq!(stdout, ALLOW, "{event_name:?}");
+                assert_eq!(event_name, Some("PreToolUse"), "{stdout}");
             }
         }
         Run {
@@ -212,16 +243,44 @@ impl Fixture {
 
     /// Bob, a Claude Code session, starts writing `a.txt` and keeps it.
     fn bob_holds_a(&self) {
+        self.bob_holds("a.txt");
+    }
+
+    fn bob_holds(&self, file: &str) {
         let pre = self.run(
             "claude-code",
             None,
             &json!({
                 "session_id": BOB, "cwd": self.root(), "hook_event_name": "PreToolUse",
-                "tool_name": "Write", "tool_use_id": "bob-1",
-                "tool_input": {"file_path": self.root().join("a.txt"), "content": "bob\n"},
+                "tool_name": "Write", "tool_use_id": format!("bob-{file}"),
+                "tool_input": {"file_path": self.root().join(file), "content": "bob\n"},
             }),
         );
         assert_eq!(pre.coverage, "admitted", "{pre:?}");
+    }
+
+    /// The repository of the captured run: `calc.py` and `main.py`.
+    fn captured_repository(&self) {
+        fs::write(self.root().join("calc.py"), CALC).unwrap();
+        fs::write(self.root().join("main.py"), MAIN).unwrap();
+        git(&self.root(), &["add", "calc.py", "main.py"]);
+        git(
+            &self.root(),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "calc",
+            ],
+        );
+    }
+
+    fn captured(&self, event_name: &str, body: &Value) -> Run {
+        self.run("antigravity", Some(event_name), body)
     }
 }
 
@@ -265,11 +324,11 @@ fn a_write_held_by_another_session_is_denied_with_antigravitys_decision() {
 }
 
 #[test]
-fn an_unheld_edit_gets_no_decision_and_its_completion_is_observed() {
+fn an_unheld_edit_is_allowed_and_its_completion_is_observed() {
     let f = Fixture::new();
     let pre = f.agy("PreToolUse", "pre-replace.json");
     assert_eq!(pre.coverage, "admitted", "{pre:?}");
-    assert_eq!(pre.stdout, "{}", "no decision");
+    assert_eq!(pre.stdout, ALLOW, "no objection");
     fs::write(f.root().join("a.txt"), "goodbye\n").unwrap();
     let post = f.agy("PostToolUse", "post-replace.json");
     assert_eq!(post.coverage, "observed", "{post:?}");
@@ -558,7 +617,7 @@ fn project_install_round_trips_hooks_mcp_and_rule_keeping_the_owners_bytes() {
         .write_all(b"{\"conversationId\":\"c\"}")
         .unwrap();
     let output = child.wait_with_output().unwrap();
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "{}");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), ALLOW);
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
@@ -707,7 +766,8 @@ fn the_user_level_hook_steps_aside_for_the_workspaces_project_install() {
             coverage.starts_with("deferred_to_project:"),
             "{name}: {coverage}"
         );
-        assert_eq!(stdout, "{}");
+        let expected = if name == "PreToolUse" { ALLOW } else { "{}" };
+        assert_eq!(stdout, expected, "{name}");
     }
 }
 
@@ -789,7 +849,7 @@ fn a_user_level_conversation_is_coordinated_in_each_of_its_workspace_folders() {
             coverage.starts_with("admitted:"),
             "{name} {root:?}: {coverage}"
         );
-        assert_eq!(stdout, "{}");
+        assert_eq!(stdout, ALLOW);
     }
 
     // Another conversation, open only on the second folder, is refused the
@@ -825,7 +885,7 @@ fn a_linked_worktree_inside_the_repository_is_its_own_workspace_folder() {
     for (step, name) in [(30, "pre-replace.json"), (31, "pre-run-command.json")] {
         let (coverage, stdout) = user_hook(&state, "PreToolUse", &in_worktree(name, step));
         assert!(coverage.starts_with("admitted:"), "{name}: {coverage}");
-        assert_eq!(stdout, "{}");
+        assert_eq!(stdout, ALLOW);
     }
 
     // Admitted under the worktree's workspace: another conversation open
@@ -1002,5 +1062,349 @@ fn user_install_round_trips_the_global_files_and_doctor_reports_them() {
         OWN_MCP
     );
     assert!(!config.join("rules/langspan.md").exists());
+    fs::remove_dir_all(&base).unwrap();
+}
+
+// Antigravity 1.5.14, replayed from the events captured in a real run
+// (`fixtures/antigravity-1.5.14`, issue #187).
+
+#[test]
+fn a_captured_edit_file_is_allowed_admitted_and_completed() {
+    let f = Fixture::new();
+    f.captured_repository();
+    let post = captured_event("post-edit-file.json", &f.root());
+    let pre = f.captured("PreToolUse", &before(post.clone()));
+    assert_eq!(pre.coverage, "admitted", "{pre:?}");
+    assert_eq!(pre.stdout, ALLOW);
+    fs::write(
+        f.root().join("main.py"),
+        MAIN.replace("add(2, 3)", "add(2, 4)"),
+    )
+    .unwrap();
+    let done = f.captured("PostToolUse", &post);
+    assert_eq!(done.coverage, "observed", "{done:?}");
+    assert_eq!(done.stdout, "{}", "PostToolUse takes no decision");
+}
+
+#[test]
+fn a_captured_edit_file_of_a_held_file_is_refused_with_the_conflict() {
+    let f = Fixture::new();
+    f.captured_repository();
+    f.bob_holds("main.py");
+    let pre = f.captured(
+        "PreToolUse",
+        &before(captured_event("post-edit-file.json", &f.root())),
+    );
+    assert_eq!(pre.coverage, "denied", "{pre:?}");
+    assert_eq!(pre.reply["decision"], "deny");
+    let reason = pre.reply["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("LangSpan coordination conflict"),
+        "{reason}"
+    );
+    assert!(reason.contains(r#"["main.py"]"#), "{reason}");
+    assert!(reason.contains(&format!("claude-code.{BOB}")), "{reason}");
+
+    // The shell write of the same run, to the same held file.
+    let shell = f.captured(
+        "PreToolUse",
+        &captured_event("pre-run-command-append.json", &f.root()),
+    );
+    assert_eq!(shell.coverage, "denied", "{shell:?}");
+    assert_eq!(shell.reply["decision"], "deny");
+}
+
+#[test]
+fn a_captured_read_file_then_an_outside_change_makes_the_edit_stale() {
+    let f = Fixture::new();
+    f.captured_repository();
+    let read = f.captured(
+        "PostToolUse",
+        &captured_event("post-read-file.json", &f.root()),
+    );
+    assert_eq!(read.coverage, "read_recorded", "{read:?}");
+    assert_eq!(read.stdout, "{}");
+    // The run's outside change to `multiply`.
+    fs::write(
+        f.root().join("calc.py"),
+        CALC.replace("return a * b", "result = a * b\n    return result"),
+    )
+    .unwrap();
+    // The same conversation's edit, from the version it read.
+    let edit = before(captured_event("post-edit-file-failed.json", &f.root()));
+    let stale = f.captured("PreToolUse", &edit);
+    assert_eq!(stale.coverage, "denied_stale", "{stale:?}");
+    assert_eq!(stale.reply["decision"], "deny");
+    let reason = stale.reply["reason"].as_str().unwrap();
+    assert!(reason.contains("LangSpan stale source"), "{reason}");
+    assert!(reason.contains("calc.py"), "{reason}");
+}
+
+#[test]
+fn a_captured_harmless_run_command_is_allowed() {
+    let f = Fixture::new();
+    f.captured_repository();
+    let pre = f.captured(
+        "PreToolUse",
+        &captured_event("pre-run-command.json", &f.root()),
+    );
+    assert_eq!(pre.stdout, ALLOW, "{pre:?}");
+    assert!(
+        !pre.coverage.starts_with("denied") && pre.coverage != "unsupported",
+        "{pre:?}"
+    );
+}
+
+#[test]
+fn a_resumed_conversation_registers_at_its_first_pre_invocation_and_is_named_plainly() {
+    let f = Fixture::new();
+    f.captured_repository();
+    // No SessionStart: a resumed conversation's first event.
+    let first = f.captured(
+        "PreInvocation",
+        &captured_event("pre-invocation-resumed.json", &f.root()),
+    );
+    assert!(
+        !matches!(first.coverage.as_str(), "unsupported" | "unknown"),
+        "{first:?}"
+    );
+    let peer = f.run(
+        "claude-code",
+        None,
+        &json!({"session_id": BOB, "cwd": f.root(), "hook_event_name": "SessionStart",
+                "source": "startup"}),
+    );
+    let context = peer.reply["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        context.contains("- antigravity session 00000000"),
+        "{context}"
+    );
+    // Its workspace suffix is not a subagent.
+    assert!(!context.contains("subagent"), "{context}");
+    assert!(
+        context.contains(r#"task: "Now add a one-line docstring to multiply"#),
+        "{context}"
+    );
+}
+
+#[test]
+fn the_installed_command_resolves_the_workspace_from_the_event_not_its_directory() {
+    let f = Fixture::new();
+    f.captured_repository();
+    let state = f.base.join("state");
+    hooks(&state, &f.root(), "install", &["--apply"]);
+    let installed: Value =
+        serde_json::from_str(&fs::read_to_string(f.root().join(".agents/hooks.json")).unwrap())
+            .unwrap();
+    let command = installed["langspan"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    // Antigravity 1.5.14 runs a hook through a shell, in `<workspace>/.agents`.
+    let mut child = Process::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(f.root().join(".agents"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let body = before(captured_event("post-edit-file.json", &f.root()));
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), ALLOW, "{stderr}");
+    assert!(stderr.contains(r#""coverage":"admitted""#), "{stderr}");
+}
+
+#[test]
+fn the_installed_matchers_name_the_tools_antigravity_1_5_14_sends() {
+    let base = scratch("matchers");
+    let root = base.join("repo");
+    fs::create_dir_all(&root).unwrap();
+    hooks(&base.join("state"), &root, "install", &["--apply"]);
+    let installed: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".agents/hooks.json")).unwrap())
+            .unwrap();
+    let names = |event: &str| -> Vec<String> {
+        installed["langspan"][event][0]["matcher"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("^(")
+            .and_then(|rest| rest.strip_suffix(")$"))
+            .unwrap()
+            .split('|')
+            .map(str::to_owned)
+            .collect()
+    };
+    let pre = names("PreToolUse");
+    let post = names("PostToolUse");
+    for tool in [
+        "edit_file",
+        "run_command",
+        "write_to_file",
+        "replace_file_content",
+    ] {
+        assert!(pre.iter().any(|name| name == tool), "{tool}: {pre:?}");
+        assert!(post.iter().any(|name| name == tool), "{tool}: {post:?}");
+    }
+    for tool in ["read_file", "view_file"] {
+        assert!(!pre.iter().any(|name| name == tool), "{tool}: {pre:?}");
+        assert!(post.iter().any(|name| name == tool), "{tool}: {post:?}");
+    }
+    fs::remove_dir_all(&base).unwrap();
+}
+
+fn doctor(state: &Path, root: Option<&Path>, home: &Path) -> String {
+    let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
+    command.arg("--state-dir").arg(state).arg("doctor");
+    if let Some(root) = root {
+        command.arg("--root").arg(root);
+    }
+    let output = command
+        .arg("--home")
+        .arg(home)
+        .env_remove("GEMINI_CLI_HOME")
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn an_empty_mcp_config_is_an_empty_configuration_at_both_levels() {
+    let f = Fixture::new();
+    let state = f.base.join("state");
+    let root = f.root();
+    // Antigravity leaves both files empty itself.
+    fs::create_dir_all(root.join(".agents")).unwrap();
+    fs::write(root.join(".agents/mcp_config.json"), "").unwrap();
+    let home = f.base.join("home");
+    let config = home.join(".gemini/config");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(config.join("mcp_config.json"), "").unwrap();
+
+    // Before anything is installed, an empty file is not a problem.
+    let text = doctor(&state, Some(&root), &home);
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.starts_with("FIX ") && line.contains("mcp_config.json")),
+        "{text}"
+    );
+
+    let dry = hooks(&state, &root, "install", &[]);
+    assert!(dry.contains("Dry run"), "{dry}");
+    hooks(&state, &root, "install", &["--apply"]);
+    let home_arg = home.to_str().unwrap();
+    langspan(
+        &state,
+        &[
+            "install",
+            "--home",
+            home_arg,
+            "--hosts",
+            "antigravity",
+            "--apply",
+        ],
+    );
+    for file in [
+        root.join(".agents/mcp_config.json"),
+        config.join("mcp_config.json"),
+    ] {
+        let mcp: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(mcp["mcpServers"]["langspan"]["args"][0], "mcp", "{file:?}");
+    }
+    let text = doctor(&state, Some(&root), &home);
+    for expected in [
+        "antigravity hooks installed",
+        "antigravity: MCP server `langspan` registered in",
+        "antigravity: user-level hooks installed in",
+    ] {
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("ok ") && line.contains(expected)),
+            "{expected}: {text}"
+        );
+    }
+
+    // An empty file is nothing to remove, not an error.
+    fs::write(root.join(".agents/mcp_config.json"), "\n").unwrap();
+    let removed = hooks(&state, &root, "remove", &["--apply"]);
+    assert!(!removed.contains("not valid JSON"), "{removed}");
+}
+
+#[test]
+fn doctor_reports_fix_for_matchers_that_name_none_of_the_edit_tools() {
+    let f = Fixture::new();
+    let state = f.base.join("state");
+    let root = f.root();
+    let home = f.base.join("home");
+    hooks(&state, &root, "install", &["--apply"]);
+    let path = root.join(".agents/hooks.json");
+    let mut installed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    // The matchers the first install wrote, which name no tool 1.5.14 edits
+    // or reads with.
+    installed["langspan"]["PreToolUse"][0]["matcher"] =
+        json!("^(write_to_file|replace_file_content|multi_replace_file_content|run_command)$");
+    installed["langspan"]["PostToolUse"][0]["matcher"] = json!(
+        "^(write_to_file|replace_file_content|multi_replace_file_content|run_command|view_file)$"
+    );
+    fs::write(&path, serde_json::to_string_pretty(&installed).unwrap()).unwrap();
+    let text = doctor(&state, Some(&root), &home);
+    let line = text
+        .lines()
+        .find(|line| line.contains("antigravity hooks installed"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(line.starts_with("FIX "), "{line}");
+    assert!(line.contains("PreToolUse, PostToolUse"), "{line}");
+    assert!(line.contains("hooks install antigravity"), "{line}");
+
+    // Installing again writes this version's matchers.
+    hooks(&state, &root, "install", &["--apply"]);
+    let text = doctor(&state, Some(&root), &home);
+    let line = text
+        .lines()
+        .find(|line| line.contains("antigravity hooks installed"))
+        .unwrap();
+    assert!(line.starts_with("ok "), "{line}");
+}
+
+#[test]
+fn doctor_reports_fix_for_user_level_matchers_that_name_none_of_the_edit_tools() {
+    let base = scratch("user-matchers");
+    let home = base.join("home");
+    let config = home.join(".gemini/config");
+    fs::create_dir_all(&config).unwrap();
+    let state = base.join("state");
+    let home_arg = home.to_str().unwrap();
+    langspan(
+        &state,
+        &[
+            "install",
+            "--home",
+            home_arg,
+            "--hosts",
+            "antigravity",
+            "--apply",
+        ],
+    );
+    let path = config.join("hooks.json");
+    let mut installed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    installed["langspan"]["PreToolUse"][0]["matcher"] = json!("^(run_command)$");
+    fs::write(&path, serde_json::to_string_pretty(&installed).unwrap()).unwrap();
+    let text = doctor(&state, None, &home);
+    let line = text
+        .lines()
+        .find(|line| line.contains("antigravity: user-level hooks installed in"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(line.starts_with("FIX "), "{line}");
+    assert!(line.contains("PreToolUse"), "{line}");
     fs::remove_dir_all(&base).unwrap();
 }

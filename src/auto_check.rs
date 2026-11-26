@@ -23,7 +23,10 @@
 //! state owner as a request, like any client's.
 
 use crate::{daemon::Registration, integrate, test_output};
-use langspan_core::{AutoCheck, CheckReport, CheckResult, Command, Outcome, TestResults};
+use langspan_core::{
+    AutoCheck, CheckReport, CheckResult, Command, InterfaceCause, InterfaceChange,
+    MAX_CAUSE_DEPENDENTS, MAX_REPORT_DEPENDENT_PATHS, NOTICE_DEPENDENTS, Outcome, TestResults,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
@@ -69,11 +72,19 @@ pub enum Message {
     /// `session_id` wrote files and reached a batch or stop.
     /// `of` is the workspace's registration when the session wrote: the
     /// run is in its root, and its result is recorded only while the
-    /// workspace still has it.
+    /// workspace still has it. `index_scanned`: the index had a complete
+    /// scan of it then, so an interface change could be found.
     Wrote {
         check: AutoCheck,
         of: Registration,
         session_id: String,
+        index_scanned: bool,
+    },
+    /// The index reported that a session's writes changed an export other
+    /// files mention, in a workspace whose check has a wider command.
+    Interface {
+        workspace_id: String,
+        change: Pending,
     },
     /// The owner turned the check off or changed it, or moved, switched or
     /// removed the workspace: stop what runs, forget what waits.
@@ -96,6 +107,82 @@ pub fn refuse_secrets(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// An interface notice that has not yet been graded by a wider check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pending {
+    pub notice_id: String,
+    pub path: String,
+    pub changes: Vec<InterfaceChange>,
+    /// Never empty: a change no other file mentions starts nothing.
+    pub dependents: Vec<String>,
+    /// The session that last reported editing `path`.
+    pub by_session: String,
+    /// Supported-language files the index could not read in full then.
+    pub blind_files: u32,
+}
+
+/// Interface changes waiting for a wider check, per workspace.
+const MAX_PENDING: usize = 16;
+
+impl Pending {
+    /// What a wider check ran for: the newest notice's first change (its
+    /// signatures are the current ones), with the files that mention any of
+    /// them, bounded.
+    fn cause(pending: &[Pending]) -> Option<InterfaceCause> {
+        let first = pending.last()?;
+        let change = first.changes.first()?.clone();
+        let changes: usize = pending.iter().map(|pending| pending.changes.len()).sum();
+        let dependents: BTreeSet<&String> = pending
+            .iter()
+            .flat_map(|pending| &pending.dependents)
+            .collect();
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Some(InterfaceCause {
+            path: first.path.clone(),
+            change,
+            more_changes: count(changes.saturating_sub(1)),
+            more_dependents: count(dependents.len().saturating_sub(MAX_CAUSE_DEPENDENTS)),
+            dependents: dependents
+                .into_iter()
+                .take(MAX_CAUSE_DEPENDENTS)
+                .cloned()
+                .collect(),
+            blind_files: pending
+                .iter()
+                .map(|pending| pending.blind_files)
+                .max()
+                .unwrap_or(0),
+        })
+    }
+    /// Every file that mentions one of the changes, for the core to choose
+    /// whom to tell: the cause shows only the first few.
+    fn dependent_paths(pending: &[Pending]) -> Vec<String> {
+        let paths: BTreeSet<&String> = pending
+            .iter()
+            .flat_map(|pending| &pending.dependents)
+            .collect();
+        paths
+            .into_iter()
+            .take(MAX_REPORT_DEPENDENT_PATHS)
+            .cloned()
+            .collect()
+    }
+}
+
+// Every waiting change's mentioning files fit one report.
+const _: () = assert!(MAX_PENDING * NOTICE_DEPENDENTS <= MAX_REPORT_DEPENDENT_PATHS);
+
+/// Which of the check's two commands a run is.
+#[derive(Clone)]
+enum Kind {
+    /// The regular command, after a session's writes.
+    Regular,
+    /// The wider command, for these interface changes, on `tree`: the tree
+    /// the regular command last passed or failed on. Any other tree is
+    /// checked by the regular command first.
+    Wider { tree: String, causes: Vec<Pending> },
+}
+
 /// How a run ended.
 pub enum Ended {
     /// The command finished or was stopped at its limit on a tree that held
@@ -108,6 +195,9 @@ pub enum Ended {
     Cancelled,
     /// The tree could not be taken or the command could not start.
     Failed(String),
+    /// A wider run found a tree other than the one it was for: nothing
+    /// ran, and the regular command checks the tree first.
+    Moved,
 }
 
 pub struct Finished {
@@ -134,6 +224,7 @@ struct Running {
     check: AutoCheck,
     /// The registration it runs for, in that registration's root.
     of: Registration,
+    kind: Kind,
 }
 
 /// Requests to compare the tree again, one per burst of writes that
@@ -191,6 +282,13 @@ struct Workspace {
     first: Option<Instant>,
     due: Option<Instant>,
     running: Option<Running>,
+    /// Interface changes no wider check has graded yet.
+    pending: Vec<Pending>,
+    /// The tree the regular command last passed or failed on, and the
+    /// sessions it was for.
+    last_regular: Option<(String, BTreeSet<String>)>,
+    /// Whether the index had a complete scan at the last boundary.
+    index_scanned: bool,
 }
 
 /// The worker loop. `record` sends a command to the state owner and returns
@@ -221,6 +319,7 @@ pub fn worker(
                 check,
                 of,
                 session_id,
+                index_scanned,
             }) => {
                 let workspace = workspaces.entry(check.workspace_id.clone()).or_default();
                 if workspace
@@ -231,13 +330,36 @@ pub fn worker(
                     workspace.cancel();
                 }
                 workspace.check = Some((check, of));
+                workspace.index_scanned = index_scanned;
                 if let Some(running) = &mut workspace.running {
                     running.not_covered_yet(&session_id);
                 }
                 workspace.waiting.insert(session_id);
-                let now = Instant::now();
-                let first = *workspace.first.get_or_insert(now);
-                workspace.due = Some((now + debounce).min(first + MAX_WAIT));
+                workspace.debounce(debounce);
+            }
+            Ok(Message::Interface {
+                workspace_id,
+                change,
+            }) => {
+                // Only for a check this worker runs: one it has not heard of
+                // yet is told by the session's own boundary.
+                let workspace = workspaces.entry(workspace_id).or_default();
+                if workspace
+                    .pending
+                    .iter()
+                    .all(|pending| pending.notice_id != change.notice_id)
+                {
+                    if workspace.pending.len() >= MAX_PENDING {
+                        workspace.pending.remove(0);
+                    }
+                    workspace.pending.push(change);
+                }
+                // A change found after its regular check ended starts the
+                // wider check on that tree; one found while a check runs, or
+                // before its writes' boundary, waits for that check.
+                if workspace.running.is_none() {
+                    workspace.debounce(debounce);
+                }
             }
             Ok(Message::Off { workspace_id }) => {
                 if let Some(workspace) = workspaces.get_mut(&workspace_id) {
@@ -263,25 +385,68 @@ pub fn worker(
                 } else {
                     ended
                 };
+                if !matches!(ended, Ended::Done(_) | Ended::Cancelled) {
+                    // The tree moved on, or could not be taken: the wider
+                    // check waits for a regular result on the tree as it is.
+                    workspace.last_regular = None;
+                }
                 match ended {
                     Ended::Done(finished) => {
                         // Writes that came after the run last compared the
                         // tree are not in its result: they get a run of
                         // their own.
                         let (running, late) = running.split();
-                        if !late.is_empty() {
+                        let newer = !late.is_empty();
+                        if newer {
                             workspace.waiting.extend(late);
                             workspace.due.get_or_insert_with(Instant::now);
                         }
+                        let index_incomplete = match &running.kind {
+                            Kind::Regular => {
+                                // A regular result on a tree the wider check
+                                // can follow on.
+                                workspace.last_regular =
+                                    (!matches!(finished.result, CheckResult::Inconclusive {}))
+                                        .then(|| {
+                                            (
+                                                finished.tree.clone(),
+                                                running.sessions.keys().cloned().collect(),
+                                            )
+                                        });
+                                running.check.on_interface_change.is_some()
+                                    && !workspace.index_scanned
+                                    && workspace.pending.is_empty()
+                            }
+                            Kind::Wider { causes, .. } => {
+                                workspace
+                                    .pending
+                                    .retain(|pending| !causes.contains(pending));
+                                false
+                            }
+                        };
                         if !running.sessions.is_empty() {
-                            report(&record, &workspace_id, running, *finished);
+                            report(&record, &workspace_id, running, *finished, index_incomplete);
+                        }
+                        // The wider check follows on the same tree, unless
+                        // newer writes are checked first.
+                        if !newer
+                            && !workspace.pending.is_empty()
+                            && workspace.last_regular.is_some()
+                        {
+                            workspace.due.get_or_insert_with(Instant::now);
                         }
                     }
                     // A session's new writes are checked on the new tree;
-                    // the run's sessions are told that result instead.
+                    // the run's sessions are told that result instead. A
+                    // wider run whose tree had already moved on is the same:
+                    // the regular check of the new tree comes first.
                     Ended::Changed(_)
                         if running.wrote_meanwhile() || !workspace.waiting.is_empty() =>
                     {
+                        workspace.waiting.extend(running.sessions.into_keys());
+                        workspace.due.get_or_insert_with(Instant::now);
+                    }
+                    Ended::Moved => {
                         workspace.waiting.extend(running.sessions.into_keys());
                         workspace.due.get_or_insert_with(Instant::now);
                     }
@@ -289,7 +454,14 @@ pub fn worker(
                     // outside any session, changed the tree. Its result is
                     // about no tree, and the sessions are told so.
                     Ended::Changed(Some(finished)) => {
-                        report(&record, &workspace_id, running, *finished)
+                        // A wider run that changed the tree itself is not run
+                        // again for the same changes: it reports inconclusive.
+                        if let Kind::Wider { causes, .. } = &running.kind {
+                            workspace
+                                .pending
+                                .retain(|pending| !causes.contains(pending));
+                        }
+                        report(&record, &workspace_id, running, *finished, false)
                     }
                     Ended::Changed(None) | Ended::Cancelled => {}
                     Ended::Failed(detail) => log("auto_check_failed", &workspace_id, &detail),
@@ -331,18 +503,37 @@ pub fn worker(
                 // runs.
                 workspace.check = None;
                 workspace.waiting.clear();
-            } else {
+            } else if let (kind, sessions) = workspace.next_run(&check)
+                && !sessions.is_empty()
+            {
+                // What runs: the regular command, or the wider one, whole
+                // and with its own name and limit, never a rerun.
+                let (command, rerun_max) = match (&kind, &check.on_interface_change) {
+                    (Kind::Wider { .. }, Some(wider)) => (
+                        AutoCheck {
+                            name: wider.name.clone(),
+                            argv: wider.argv.clone(),
+                            timeout_s: wider.timeout_s,
+                            on_interface_change: None,
+                            ..check.clone()
+                        },
+                        Duration::ZERO,
+                    ),
+                    _ => (check.clone(), timing.rerun_max),
+                };
+                let expect = match &kind {
+                    Kind::Wider { tree, .. } => Some(tree.clone()),
+                    Kind::Regular => None,
+                };
                 next_run += 1;
                 let running = Running {
                     run: next_run,
                     cancel: Arc::default(),
                     recheck: Arc::default(),
-                    sessions: std::mem::take(&mut workspace.waiting)
-                        .into_iter()
-                        .map(|session| (session, 0))
-                        .collect(),
+                    sessions: sessions.into_iter().map(|session| (session, 0)).collect(),
                     check: check.clone(),
                     of: of.clone(),
+                    kind,
                 };
                 let (cancel, recheck, sender, writes) = (
                     running.cancel.clone(),
@@ -356,10 +547,11 @@ pub fn worker(
                     .spawn(move || {
                         let ended = run_once(
                             &of.root,
-                            &check,
+                            &command,
+                            expect.as_deref(),
                             &cancel,
                             &recheck,
-                            timing.rerun_max,
+                            rerun_max,
                             &writes,
                         );
                         let _ = sender.send(Message::Finished {
@@ -420,6 +612,44 @@ impl Workspace {
         self.waiting.clear();
         self.due = None;
         self.first = None;
+        self.pending.clear();
+        self.last_regular = None;
+    }
+    /// Due after the debounce, and at most `MAX_WAIT` after the first
+    /// trigger of a burst.
+    fn debounce(&mut self, debounce: Duration) {
+        let now = Instant::now();
+        let first = *self.first.get_or_insert(now);
+        self.due = Some((now + debounce).min(first + MAX_WAIT));
+    }
+    /// What the next run is, and for which sessions. Writes waiting for a
+    /// check come first: the regular command runs on their tree, and the
+    /// wider one follows it. With none, an interface change not yet graded
+    /// runs the wider command on the tree the regular one last checked, for
+    /// its sessions and those whose writes changed the interface; with no
+    /// such tree yet, the regular command runs first.
+    fn next_run(&mut self, check: &AutoCheck) -> (Kind, BTreeSet<String>) {
+        if check.on_interface_change.is_none() {
+            self.pending.clear();
+        }
+        if !self.waiting.is_empty() || self.pending.is_empty() {
+            return (Kind::Regular, std::mem::take(&mut self.waiting));
+        }
+        let changed_by: BTreeSet<String> = self
+            .pending
+            .iter()
+            .map(|pending| pending.by_session.clone())
+            .collect();
+        match &self.last_regular {
+            Some((tree, sessions)) => (
+                Kind::Wider {
+                    tree: tree.clone(),
+                    causes: self.pending.clone(),
+                },
+                sessions.iter().cloned().chain(changed_by).collect(),
+            ),
+            None => (Kind::Regular, changed_by),
+        }
     }
 }
 
@@ -436,6 +666,7 @@ fn report(
     workspace_id: &str,
     running: Running,
     finished: Finished,
+    index_incomplete: bool,
 ) {
     // Moved, switched, removed or turned off after the run ended, before the
     // worker heard: the result is about a checkout the workspace no longer
@@ -444,7 +675,30 @@ fn report(
     if !still_enabled(record, &running.check, &running.of) {
         return;
     }
-    let check = running.check;
+    // A wider run is recorded under the wider command's own name, with the
+    // interface change it ran for.
+    let (check, interface, dependent_paths) =
+        match (&running.kind, &running.check.on_interface_change) {
+            (Kind::Wider { causes, .. }, Some(wider)) => {
+                let interface = Pending::cause(causes).map(Box::new);
+                // Without a cause the core would refuse the paths.
+                let paths = if interface.is_some() {
+                    Pending::dependent_paths(causes)
+                } else {
+                    Vec::new()
+                };
+                (
+                    AutoCheck {
+                        name: wider.name.clone(),
+                        argv: wider.argv.clone(),
+                        ..running.check.clone()
+                    },
+                    interface,
+                    paths,
+                )
+            }
+            _ => (running.check.clone(), None, Vec::new()),
+        };
     let request_id = crate::hook::wire_id(
         "auto-check",
         &[
@@ -466,11 +720,14 @@ fn report(
         inputs: Vec::new(),
         result: finished.result,
         duration_ms: finished.duration_ms,
-        report: Some(CheckReport {
+        report: Some(Box::new(CheckReport {
             session_ids: sessions,
             tail: finished.tail,
             timed_out_s: finished.timed_out_s,
-        }),
+            interface,
+            index_incomplete,
+            dependent_paths,
+        })),
         writes_before: finished.tests.as_ref().map(|_| finished.writes_before),
         // An automatic check's command holds no secret (`refuse_secrets`).
         command_id: finished
@@ -511,9 +768,11 @@ fn report(
 
 /// One run: the tree before, the command, the tree after; then, for a quick
 /// failure that named its failing tests, the command again on that tree.
+/// With `expect`, a tree other than that one runs nothing ([`Ended::Moved`]).
 fn run_once(
     root: &Path,
     check: &AutoCheck,
+    expect: Option<&str>,
     cancel: &AtomicBool,
     recheck: &Recheck,
     rerun_max: Duration,
@@ -534,6 +793,9 @@ fn run_once(
     };
     if cancel.load(Ordering::SeqCst) {
         return Ended::Cancelled;
+    }
+    if expect.is_some_and(|tree| tree != before) {
+        return Ended::Moved;
     }
     let limit = Duration::from_secs(u64::from(check.timeout_s));
     let tree_changed = |deadline: Instant| {
@@ -878,8 +1140,10 @@ mod tests {
                 name: "tests".into(),
                 argv: vec!["true".into()],
                 timeout_s: 1,
+                on_interface_change: None,
             },
             of: registration(),
+            kind: Kind::Regular,
         };
         running.recheck.requested.store(2, Ordering::SeqCst);
         // The run found the tree unchanged after the first request only.
@@ -904,8 +1168,10 @@ mod tests {
                 name: "tests".into(),
                 argv: vec!["true".into()],
                 timeout_s: 1,
+                on_interface_change: None,
             },
             of: registration(),
+            kind: Kind::Regular,
         };
         running.wrote_again("first".into(), 1);
         running.wrote_again("first".into(), 2);
@@ -931,8 +1197,10 @@ mod tests {
                 name: "tests".into(),
                 argv: vec!["true".into()],
                 timeout_s: 1,
+                on_interface_change: None,
             },
             of: registration(),
+            kind: Kind::Regular,
         };
         // The run's final snapshot found the tree unchanged, then "first"
         // wrote again and the run finished before that write's debounce.
@@ -941,6 +1209,37 @@ mod tests {
         let (covered, late) = running.split();
         assert_eq!(covered.sessions.into_keys().collect::<Vec<_>>(), ["second"]);
         assert_eq!(late.into_iter().collect::<Vec<_>>(), ["first"]);
+    }
+
+    #[test]
+    fn a_wider_report_shows_eight_mentioning_files_and_sends_all_of_them_for_its_recipients() {
+        let pending = |id: &str, files: std::ops::Range<u32>| Pending {
+            notice_id: id.into(),
+            path: "core/src/lib.rs".into(),
+            changes: vec![InterfaceChange {
+                name: "parse".into(),
+                kind: "function".into(),
+                change: "signature_changed".into(),
+                before: Some("pub fn parse(a: u32)".into()),
+                after: Some("pub fn parse()".into()),
+                before_arity: None,
+                after_arity: None,
+                before_count: None,
+                after_count: None,
+                after_name: None,
+            }],
+            dependents: files.map(|n| format!("src/f{n}.rs")).collect(),
+            by_session: "alice".into(),
+            blind_files: 0,
+        };
+        // Nine distinct files across two notices, one shared.
+        let causes = [pending("n1", 0..5), pending("n2", 4..9)];
+        let cause = Pending::cause(&causes).unwrap();
+        assert_eq!(cause.dependents.len(), MAX_CAUSE_DEPENDENTS);
+        assert_eq!(cause.more_dependents, 1);
+        let all = Pending::dependent_paths(&causes);
+        assert_eq!(all.len(), 9);
+        assert!(all.contains(&"src/f8.rs".to_owned()), "{all:?}");
     }
 
     #[test]

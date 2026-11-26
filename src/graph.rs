@@ -202,22 +202,48 @@ impl Index {
                     && arity.max.is_none_or(|max| max <= langspan_core::MAX_ARITY)
             })
         };
-        // The signature a removed function had, which a write calling it is
-        // shown (roadmap B10); `None` when several definitions shared the name.
-        let removed = |name: &str, kind: SymbolKind| {
-            let mut had = before
+        // The exported signatures a version gives one name and kind, as a
+        // notice shows several: each as written, joined by " | ", as many as
+        // fit a notice's 256 bytes (one signature is at most 240), so that
+        // they never make the core refuse the notice and the changes in it.
+        let written = |graph: &FileGraph, name: &str, kind| {
+            let mut signatures: Vec<&str> = graph
                 .symbols
                 .iter()
-                .filter(|symbol| symbol.exported && symbol.name == name && symbol.kind == kind);
-            let only = had.next()?;
-            had.next().is_none().then(|| only.signature.clone())
+                .filter(|symbol| symbol.exported && symbol.name == name && symbol.kind == kind)
+                .map(|symbol| symbol.signature.as_str())
+                .filter(|signature| !signature.chars().any(char::is_control))
+                .collect();
+            signatures.sort_unstable();
+            signatures.dedup();
+            let mut shown = String::new();
+            for signature in signatures {
+                let joined = if shown.is_empty() {
+                    signature.to_owned()
+                } else {
+                    format!("{shown} | {signature}")
+                };
+                if joined.len() > 256 {
+                    break;
+                }
+                shown = joined;
+            }
+            (!shown.is_empty()).then_some(shown)
         };
         let changes: Vec<InterfaceChange> = langspan_graph::diff(&before, after)
             .into_iter()
-            .filter_map(|change| {
+            .map(|change| {
                 let mut after_name = None;
                 let (label, before, after, number) = match change.change {
-                    Change::Removed => ("removed", removed(&change.name, change.kind), None, None),
+                    // The signature that went, for a definition's history
+                    // (roadmap D4) to see it come back and for a write
+                    // calling it to be shown (roadmap B10).
+                    Change::Removed => (
+                        "removed",
+                        written(&before, &change.name, change.kind),
+                        None,
+                        None,
+                    ),
                     Change::SignatureChanged { before, after } => {
                         ("signature_changed", Some(before), Some(after), None)
                     }
@@ -248,16 +274,25 @@ impl Index {
                         None,
                         Some((before, after)),
                     ),
-                    Change::Added => return None,
+                    // A new name: history only, never told to anyone
+                    // (roadmap D4), so no parameter counts.
+                    Change::Added => (
+                        "added",
+                        None,
+                        written(after, &change.name, change.kind),
+                        None,
+                    ),
                 };
+                // Counts for the changes the write-time break check reads
+                // (ADR 0029): never for a new name or a count change.
                 let arity = |signature| {
-                    if number.is_some() {
+                    if label == "added" || number.is_some() {
                         None
                     } else {
                         counts(signature)
                     }
                 };
-                Some(InterfaceChange {
+                InterfaceChange {
                     name: change.name,
                     kind: change.kind.name().into(),
                     change: label.into(),
@@ -268,7 +303,7 @@ impl Index {
                     before,
                     after,
                     after_name,
-                })
+                }
             })
             .take(langspan_core::NOTICE_CHANGES)
             .collect();
@@ -1177,8 +1212,8 @@ pub const MAX_UNREAD: usize = 4096;
 /// files (documentation, data, images) are not counted.
 const OTHER_SOURCE: &[&str] = &[
     "c", "cc", "clj", "cljs", "cpp", "cs", "cxx", "dart", "elm", "erl", "ex", "exs", "fs", "fsx",
-    "groovy", "h", "hh", "hpp", "hrl", "hs", "java", "jl", "kt", "kts", "lua", "m", "ml", "mli",
-    "mm", "nim", "php", "pl", "pm", "r", "rb", "scala", "svelte", "swift", "vue", "zig",
+    "groovy", "h", "hh", "hpp", "hrl", "hs", "jl", "kt", "kts", "lua", "m", "ml", "mli", "mm",
+    "nim", "php", "pl", "pm", "r", "rb", "scala", "svelte", "swift", "vue", "zig",
 ];
 
 /// What the last complete scan listed but the index cannot read. It is kept
@@ -1593,7 +1628,7 @@ mod review_regressions {
         }
         fs::create_dir_all(root.join("z")).unwrap();
         for n in 0..10 {
-            fs::write(root.join(format!("z/C{n}.java")), "class C {}\n").unwrap();
+            fs::write(root.join(format!("z/C{n}.kt")), "class C {}\n").unwrap();
         }
         fs::write(root.join("z/README.md"), "notes\n").unwrap();
         let limits = crate::observer::Limits {
@@ -1624,12 +1659,29 @@ mod review_regressions {
         assert_eq!(
             spots.unsupported_languages,
             [langspan_core::LanguageCount {
-                extension: ".java".into(),
+                extension: ".kt".into(),
                 files: 10
             }]
         );
         assert_eq!((spots.totals.too_large, spots.totals.unscanned), (1, 1));
         assert_eq!(coverage.blind_in_scope, 2);
+    }
+
+    /// A language gains a grammar: its files are indexed and counted in
+    /// coverage, so they are no longer reported as another language.
+    #[test]
+    fn no_indexed_extension_is_reported_as_another_language() {
+        for extension in OTHER_SOURCE {
+            assert_eq!(
+                Language::for_path(&format!("src/a.{extension}")),
+                None,
+                ".{extension} is indexed"
+            );
+        }
+        assert_eq!(
+            Language::for_path("src/main/java/shop/Orders.java"),
+            Some(Language::Java)
+        );
     }
 
     const NOW: u64 = 1_700_000_000_000;
@@ -1883,7 +1935,8 @@ mod review_regressions {
             .iter()
             .map(|change| change.change.as_str())
             .collect();
-        assert_eq!(labels, ["removed"], "{notices:?}");
+        // The new name is also recorded, for its history (roadmap D4).
+        assert_eq!(labels, ["removed", "added"], "{notices:?}");
         // From then on the baseline has them.
         let again = (
             "src/api.rs",

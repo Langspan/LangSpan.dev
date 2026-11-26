@@ -56,6 +56,13 @@ fn a_rename_with_an_unchanged_body_is_one_rename_in_each_language() {
             ("FetchUser", "func FetchUser(id int) int"),
             ("LoadUser", "func LoadUser(id int) int"),
         ),
+        (
+            Language::Java,
+            "public class App {\n    public int fetchUser(int id) {\n        return id + 1;\n    }\n}\n",
+            "public class App {\n    public int loadUser(int id) {\n        return id + 1;\n    }\n}\n",
+            ("fetchUser", "public int fetchUser(int id)"),
+            ("loadUser", "public int loadUser(int id)"),
+        ),
     ];
     for (language, before, after, (old, old_signature), (new, new_signature)) in cases {
         let found = changes(language, before, after);
