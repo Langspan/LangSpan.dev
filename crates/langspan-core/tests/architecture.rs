@@ -54,6 +54,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
     let submodules = [
         include_str!("../src/dashboard.rs"),
         include_str!("../src/flaky.rs"),
+        include_str!("../src/history.rs"),
         include_str!("../src/lines.rs"),
         include_str!("../src/recall.rs"),
         include_str!("../src/report.rs"),
@@ -98,6 +99,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
         [
             "mod dashboard;",
             "mod flaky;",
+            "mod history;",
             "mod lines;",
             "mod recall;",
             "mod report;",

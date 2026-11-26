@@ -32,7 +32,7 @@ whole.
 | Codex `Add File`, `Delete File`, `Move to`, a file in two sections | Whole file. |
 
 **What a region is.** For a language the source parser handles (Rust, Python,
-TypeScript/JavaScript, Go), each touched line is assigned to the innermost
+TypeScript/JavaScript, Go, Java), each touched line is assigned to the innermost
 definition containing it. A definition's lines include the attributes,
 decorators and comments directly above it. The region is that definition,
 named by its **key**: its own name below the names of the definitions that
