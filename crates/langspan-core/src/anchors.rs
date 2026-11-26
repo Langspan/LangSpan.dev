@@ -8,7 +8,7 @@
 
 use crate::{CoreError, Note, SymbolRef, error};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Tags one note carries at most.
 pub const MAX_TAGS: usize = 4;
@@ -132,11 +132,7 @@ pub struct AnchorLookup {
 /// is looked up so the command is still refused for naming too many.
 const LOOKUP_PATHS: usize = 64 + 1;
 
-fn add_lookup(
-    lookups: &mut std::collections::BTreeMap<String, AnchorLookup>,
-    name: &str,
-    scope: &[&str],
-) {
+fn add_lookup(lookups: &mut BTreeMap<String, AnchorLookup>, name: &str, scope: &[&str]) {
     let lookup = lookups.entry(name.to_owned()).or_default();
     if scope.is_empty() {
         lookup.workspace = true;
@@ -152,10 +148,7 @@ fn add_lookup(
 /// What the daemon looks up for `remember TEXT [PATHS] --symbol NAME`:
 /// each named file in full, and the workspace as well, so a name not
 /// found there can be listed where it is defined.
-pub fn remember_lookups(
-    name: &str,
-    paths: &[&str],
-) -> std::collections::BTreeMap<String, AnchorLookup> {
+pub fn remember_lookups(name: &str, paths: &[&str]) -> BTreeMap<String, AnchorLookup> {
     let mut lookups = Default::default();
     add_lookup(&mut lookups, name, paths);
     add_lookup(&mut lookups, name, &[]);
@@ -334,10 +327,7 @@ pub(crate) fn note_reaches(
 /// resolved anchor in its own file, an unresolved one in the files its
 /// note names, or across the workspace when it names none. Each looked-up
 /// file's freshness and presence decide a state.
-pub fn anchored(
-    state: &crate::State,
-    workspace_id: &str,
-) -> std::collections::BTreeMap<String, AnchorLookup> {
+pub fn anchored(state: &crate::State, workspace_id: &str) -> BTreeMap<String, AnchorLookup> {
     let mut lookups = Default::default();
     for note in state.notes.get(workspace_id).into_iter().flatten() {
         if let Some(anchor) = &note.anchor {

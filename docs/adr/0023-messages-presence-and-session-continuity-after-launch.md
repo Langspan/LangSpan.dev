@@ -207,12 +207,13 @@ Decisions the issue left open, each the smallest that meets it:
   definition's file.
 - A note recorded before E1 has no anchor and reads as unanchored; its
   `remembered` event is read as before.
-- Wire protocol version 7 adds the note fields, `symbol`, `tags` and `tag`.
-  A client of version 6 or earlier is told an anchored note only while it is
+- Wire protocol version 8 adds the note fields, `symbol`, `tags` and `tag`.
+  A client of version 7 or earlier is told an anchored note only while it is
   `current`, without the new fields, and a note with a symbol or tags, or a
   recap by tag, is not sent to an earlier daemon.
 - `graph symbol --detail` lists an anchored note only with its own
-  definition and only while `current`, since that list has no state.
+  definition and only while `current`, since that list has no state; it is
+  found by its anchor, so a note made without paths is listed too.
 - The note's line keeps the recorded line number; a definition that moves
   within its file stays `current`.
 

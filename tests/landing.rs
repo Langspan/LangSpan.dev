@@ -2677,8 +2677,8 @@ fn a_rebase_landing_bounds_the_rewritten_commits_of_all_its_branches_together() 
 
 impl World {
     /// A state folder whose socket answers as a daemon of protocol version
-    /// 5 would, the build before rebase landings: it refuses version 6
-    /// requests in version 5, refuses a request to record a landing with
+    /// 5 would, the build before rebase landings: it refuses requests of
+    /// later versions in version 5, refuses a request to record a landing with
     /// `rebased` or `adapted` as unreadable, and passes every other request
     /// to the real daemon. The flag says whether such a request arrived.
     fn version_5_daemon(&self) -> (PathBuf, std::sync::Arc<std::sync::atomic::AtomicBool>) {

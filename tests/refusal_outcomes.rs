@@ -417,18 +417,24 @@ fn every_counts(reply: &Value) -> Vec<&Value> {
 fn clients_of_protocol_4_and_3_get_reports_without_refusal_outcomes() {
     let f = Fixture::new();
     stale_refusal(&f);
-    let current = f.report_in(langspan::protocol::PROTOCOL_VERSION);
-    assert_eq!(
-        current["version"],
+    // Version 5 added it, and versions 6 (roadmap F5) and 7 (issue #222)
+    // keep it.
+    for version in [
         langspan::protocol::PROTOCOL_VERSION,
-        "{current:#}"
-    );
+        langspan::protocol::PROTOCOL_VERSION_6,
+        langspan::protocol::PROTOCOL_VERSION_5,
+    ] {
+        let reply = f.report_in(version);
+        assert_eq!(reply["version"], version, "{reply:#}");
+        assert!(
+            every_counts(&reply)
+                .iter()
+                .any(|counts| counts["refusal_outcomes"] == json!({"pending": 1})),
+            "{reply:#}"
+        );
+    }
+    let current = f.report_in(langspan::protocol::PROTOCOL_VERSION);
     let with = every_counts(&current);
-    assert!(
-        with.iter()
-            .any(|counts| counts["refusal_outcomes"] == json!({"pending": 1})),
-        "{current:#}"
-    );
     for version in [4, 3] {
         let reply = f.report_in(version);
         assert_eq!(reply["version"], version, "{reply:#}");

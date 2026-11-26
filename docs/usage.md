@@ -641,9 +641,12 @@ A session with no recorded version of a file (a Codex session's first edit of
 it, for example) has nothing for the comparison above to use. For such a
 session the core also checks the lines other sessions wrote recently
 ([ADR 0028](adr/0028-line-ownership.md)). At admission the hook works out which
-lines the edit changes: an `Edit` or `MultiEdit` applied in memory, a `Write`'s
-new content compared with the file, or each `apply_patch` hunk where it
-matches. It then looks those lines up in the line journal of the commit guard
+lines the edit changes: an `Edit` or `MultiEdit` applied in memory, the new
+content of a Claude Code `Write` or a Cursor `Write` compared with the file,
+or each `apply_patch` hunk where it matches. A shell write the parser names
+(`> path`, `tee path`, `sed -i`), on the Claude Code, Codex or Cursor shell
+tool, may change any line of its target. It then looks those
+lines up in the line journal of the commit guard
 ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)), which records the lines
 each session's writes added, by content.
 
@@ -667,6 +670,14 @@ holds another session's recent write of the file with unknown lines, any
 unread edit that changes lines of it is refused once, and the denial says the
 lines could not be placed. An ended or exited session's lines no longer count.
 The journal is kept on disk, so a daemon restart does not lose them.
+
+The check refuses only on what it has read. With the daemon down, the journal
+unreadable or less than half the hook budget left, the lines are not checked
+and nothing is refused for them. A shell command whose write set is unknown (a
+heredoc, a loop or a variable, until B5) or whose snapshot is incomplete gets
+no decision, and its coverage says why (`shell_observing` or
+`shell_unobserved`). An append (`>> path`, `tee -a`) is a shell write like any
+other, so it is refused over another session's recent lines too.
 
 ## Coordination policies
 
@@ -746,10 +757,45 @@ the stop rate, retries and elapsed time per arm with sample sizes.
 
 Session-start and prompt hooks register the session and deliver relevant peer
 work through the host's `additionalContext`. The briefing includes current
-admissions, declared intent, recent successful edits and a task line. A prompt
-receives another briefing only when its content has changed; session start can
-restore context in a new or resumed session. Briefings also name files the
-session read before a peer reported editing them in the same checkout.
+admissions, declared intent, recent successful edits and a task line. Session
+start gives the full view, which also restores context in a new, resumed or
+compacted session. After that, a prompt or a completed tool call gets a
+briefing only when something changed, and it carries only what changed since
+the session was last told: a peer's new file, its new task line, a new notice.
+Briefings also name files the session read before a peer reported editing them
+in the same checkout.
+
+A briefing of changes only opens with "What changed since your last
+briefing" and ends with one line that counts what it left out:
+
+```text
+(4 unchanged item(s) from earlier briefings not repeated; the langspan_brief tool or `langspan brief claude-code.SESSION --request-id NEW_ID` shows the full view.)
+```
+
+Three items are told again after they were told, once each time the session
+reads or edits one of their files: another session's hold on a file in this
+checkout that the session works on, an interface change to a name its files
+use, and a file it read that a peer has since edited. Refusals are never left
+out: admission refuses each attempt and says why. An item the hook's text had
+no room for (counted as "more session(s) not shown" or "more notice(s) not
+shown", a path past a line's cut, or where a peer looks) is not told, and the
+next briefing names it. [ADR 0004](adr/0004-automatic-peer-briefing.md) lists
+what each item is and what repeats.
+
+`langspan status` shows, for each session, the context LangSpan's hooks added
+to it in this daemon run: briefings, the code section, mid-turn briefings, and
+the alerts and notices a hook adds at a tool call. It counts bytes over its
+turns, bytes and estimated tokens per turn, and the largest turn. Tokens are
+estimated at four bytes each:
+
+```text
+  Added context: 2054 bytes over 13 turn(s), 158 bytes (about 40 tokens) per turn; the largest turn 722 bytes (about 181 tokens). Tokens are estimated at 4 bytes each.
+```
+
+`status --json` has the same counts in each session's `activity.context`
+(`turns`, `bytes`, `largest_turn_bytes`, and `turn_bytes` for the current
+turn). The budget is 256 bytes, about 64 tokens, per turn for a typical
+session; a test holds a stand-in session to it.
 
 By default, one line of the latest user prompt becomes a bounded task line
 shared with relevant local sessions:
@@ -875,8 +921,10 @@ Inspect a registered session's briefing from the terminal:
 ./target/release/langspan brief bob --max-peers 8 --request-id bob-brief-1
 ```
 
-This terminal view does not mark the briefing as delivered to Bob or suppress
-his next hook briefing. It still requires a request ID in the current CLI;
+This terminal view is always the full view. It does not mark the briefing as
+delivered to Bob or suppress his next hook briefing. The MCP tool
+`langspan_brief` also gives the full view, and does mark it delivered. The
+terminal view still requires a request ID in the current CLI;
 use a fresh ID for a new observation, or retry the identical ID and arguments
 if the outcome is unknown.
 
@@ -1207,7 +1255,7 @@ lower-case letters, digits and `-`, and anything else is refused with
 notes carrying it. MCP `langspan_remember` takes `symbol` and `tags`, and
 `langspan_recap` takes `tag`. Notes stay on this machine: remote sharing does
 not publish them. Notes written before anchors are plain notes, read as
-unanchored. A client of protocol version 6 or earlier is told an anchored
+unanchored. A client of protocol version 7 or earlier is told an anchored
 note only while it is `current`, as a plain note.
 
 `recall` searches all the notes a workspace holds, including notes about other
@@ -2858,21 +2906,22 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol is version 7 and the SQLite schema marker version 4
-(retention). The daemon also answers version 6 clients, without the
-note fields `symbol`, `tags`, `anchor_state` and `tag` that version 7
-added (see [Notes about a definition](#notes-about-a-definition) for how an anchored note reaches them); version 5
-clients, also without the `rebased` and `adapted` that version 6 added to a
-landing; version 4
+The current wire protocol is version 8 and the SQLite schema marker version 4
+(retention). The daemon also answers version 7 clients, without the note
+fields `symbol`, `tags`, `anchor_state` and `tag` that version 8 added (see
+[Notes about a definition](#notes-about-a-definition) for how an anchored note
+reaches them); version 6 clients, also without the briefing memory and
+context counts version 7 added; version 5 clients, also without the `rebased`
+and `adapted` that version 6 added to a landing; version 4
 clients, also without the `refusal_outcomes` that version 5 added to a
 report's counts and the `interface_notice_ids` it added to a briefing; and
-version 3 clients, also without the rename fields
-version 4 added. A client asks a daemon of an earlier build again in the
-version that daemon names. A `--rebase` or `--adapt-renames` landing that
-an earlier daemon could not record stops before it pushes, with nothing
-pushed: restart the daemon after upgrading. Upgrade the daemon and clients
-together. Earlier persisted
-records remain readable; a build older than the marker refuses the file.
+version 3 clients, also without the rename fields version 4 added. A client
+asks a daemon of an earlier build again in the version that daemon names. A
+`--rebase` or `--adapt-renames` landing that a daemon of version 5 or
+earlier could not record stops before it pushes, with nothing pushed:
+restart the daemon after upgrading. Upgrade the daemon and clients
+together. Earlier persisted records remain readable; a build older than the
+marker refuses the file.
 
 ### Mixed versions after an upgrade
 

@@ -355,7 +355,10 @@ reports the effect instead:
   their new versions to the core (`ObserveUncoordinated`, internal to the scan
   like `ObserveDisk`). The core drops files under an active admission (an edit
   whose report has not arrived) and versions any session of the workspace
-  read or wrote. If any remain and a Codex session is registered there in this
+  read or wrote. It also drops a file a session reported reading or writing
+  after the scan began: the scan reads the checkout off the state owner's
+  thread, so the version it saw is then the one before that session's edit
+  (`scanned_from_ms`, on the clock the core is told). If any remain and a Codex session is registered there in this
   generation, it records `UncoordinatedChanged` naming up to two Codex
   sessions, most recently active first, and up to eight files. A Codex
   session already named in a notice still within the briefing horizon is not

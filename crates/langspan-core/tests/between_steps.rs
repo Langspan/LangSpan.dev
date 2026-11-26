@@ -156,6 +156,7 @@ fn brief(state: &mut State, id: &str, now: u64) -> Briefing {
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         now,
     );
@@ -349,6 +350,7 @@ fn a_briefing_asked_for_through_mcp_records_the_notices_it_told() {
             recent: false,
             recent_window_ms: None,
             mcp: true,
+            changes_only: false,
         },
         "b1",
         3_000,

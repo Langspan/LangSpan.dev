@@ -556,6 +556,21 @@ pub struct SessionActivity {
     /// Signature of the last briefing delivered to this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub briefed: Option<String>,
+    /// Keys of the briefing items this session was last told, in briefing
+    /// order, at most `MAX_TOLD` (issue #222). A briefing asked for with
+    /// `changes_only` leaves out an item whose key is here. An item past
+    /// the bound is not remembered, so it is told again: never dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub told: Vec<u64>,
+    /// When a briefing last placed items in this session's context: a
+    /// safety item is told again when the session read or edited one of
+    /// its files after this.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub told_at_ms: u64,
+    /// The context LangSpan's hooks added to this session in this
+    /// generation, as they measured it (issue #222).
+    #[serde(default, skip_serializing_if = "ContextUse::is_empty")]
+    pub context: ContextUse,
     /// Interface notices this session was alerted to at a write, newest
     /// first, at most `MAX_ALERTED`. Each is alerted once (ADR 0029).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -653,6 +668,57 @@ pub const PRESENCE_PATHS: usize = 4;
 pub const PRESENCE_WINDOW_MS: u64 = 10 * 60 * 1000;
 /// The shortest presence window a session can choose.
 pub const MIN_PRESENCE_WINDOW_MS: u64 = 60 * 1000;
+
+/// Briefing item keys remembered per session, at most.
+pub const MAX_TOLD: usize = 256;
+
+/// The context a session's hooks added to it: every briefing, code section
+/// and mid-turn note, in bytes of text placed in its context.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextUse {
+    /// Turns: a session start or resume, and each prompt.
+    pub turns: u64,
+    /// Bytes added over those turns, mid-turn notes included.
+    pub bytes: u64,
+    /// The most one turn added, its own context and the notes after it.
+    #[serde(default)]
+    pub largest_turn_bytes: u64,
+    /// Bytes added since the current turn began.
+    #[serde(default)]
+    pub turn_bytes: u64,
+}
+
+/// Bytes of text per token, for an estimate only: English prose and code
+/// average about four bytes per token in current models' tokenizers.
+pub const BYTES_PER_TOKEN: u64 = 4;
+
+/// The most one context record may name: far above any hook's cap.
+pub const MAX_CONTEXT_RECORD_BYTES: u64 = 1024 * 1024;
+
+impl ContextUse {
+    pub fn is_empty(&self) -> bool {
+        self.turns == 0 && self.bytes == 0
+    }
+    /// Count `bytes` added, at the start of a new turn when `turn`.
+    fn add(&mut self, bytes: u64, turn: bool) {
+        if turn {
+            self.turns = self.turns.saturating_add(1);
+            self.turn_bytes = 0;
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.turn_bytes = self.turn_bytes.saturating_add(bytes);
+        self.largest_turn_bytes = self.largest_turn_bytes.max(self.turn_bytes);
+    }
+    /// Bytes per turn on average, rounded down; zero before the first turn.
+    pub fn bytes_per_turn(&self) -> u64 {
+        self.bytes.checked_div(self.turns).unwrap_or(0)
+    }
+    /// An estimate of `bytes` in tokens (`BYTES_PER_TOKEN`), rounded up.
+    pub fn estimated_tokens(bytes: u64) -> u64 {
+        bytes.div_ceil(BYTES_PER_TOKEN)
+    }
+}
 
 impl SessionActivity {
     /// When the session was last known to be working: its newest edit,
@@ -2754,6 +2820,11 @@ pub struct Briefing {
     pub changed: bool,
     pub peers: Vec<PeerWork>,
     pub omitted_peers: u32,
+    /// Items left out because this session was already told them and they
+    /// are unchanged: only in a briefing asked for with `changes_only`
+    /// (issue #222). Zero means the briefing is the full view.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unchanged: u32,
     /// Files this session read that a peer in the same checkout has since
     /// reported editing. Detection after the fact, from reported edits only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3375,6 +3446,30 @@ pub enum Event {
     BriefingDelivered {
         session_id: String,
         signature: String,
+        /// The keys of the items the session has now been told, at most
+        /// `MAX_TOLD` (issue #222). Absent from a delivery recorded before
+        /// them: the next briefing is then the full view.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        told: Vec<u64>,
+        /// When this delivery placed items in the session's context; absent
+        /// when it only forgot items that no longer apply.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        told_at_ms: Option<u64>,
+    },
+    /// A hook placed `bytes` of text in the session's context; `turn` when
+    /// it did so at the start of a turn (a session start or a prompt), with
+    /// zero bytes when it had nothing to add (issue #222).
+    ContextAdded {
+        session_id: String,
+        bytes: u64,
+        turn: bool,
+        generation: u64,
+    },
+    /// These told items were not placed in the session's context: they are
+    /// told again (review comment 4711375989). At most `MAX_TOLD` keys.
+    ToldForgotten {
+        session_id: String,
+        keys: Vec<u64>,
     },
     /// These in-flight signatures were placed in the session's context with
     /// a briefing (roadmap C7). Each is told once.
@@ -3754,6 +3849,23 @@ pub enum Command {
     SessionSeen {
         session_id: String,
     },
+    /// The hook placed `bytes` of text in the session's context, at a
+    /// turn's start (`turn`, zero bytes allowed) or after a tool call
+    /// (issue #222). A measurement only.
+    RecordContext {
+        session_id: String,
+        bytes: u64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        turn: bool,
+    },
+    /// The hook could not place these briefing items in the session's
+    /// context (its text budget was full): they are no longer told, so the
+    /// next briefing of changes only tells them (review comment 4711375989).
+    /// At most `MAX_TOLD` keys, from `briefing_keys`.
+    ForgetTold {
+        session_id: String,
+        keys: Vec<u64>,
+    },
     IntentSet {
         session_id: String,
         paths: Vec<String>,
@@ -4102,6 +4214,11 @@ pub enum Command {
     ObserveUncoordinated {
         workspace_id: String,
         files: Vec<ObservedFile>,
+        /// When the scan began reading the checkout, on the clock the core is
+        /// told. A session that reported a file since then is newer than the
+        /// version the scan saw. Absent: not known, and no file is excused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scanned_from_ms: Option<u64>,
     },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
@@ -4508,6 +4625,12 @@ pub enum Command {
         /// start. The ended ones nobody adopted are named in the briefing.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         left: Vec<String>,
+        /// Leave out what the session was already told and is unchanged,
+        /// and count it in `Briefing::unchanged` (issue #222). Set by
+        /// prompt and mid-turn hooks; a session start and an explicit
+        /// request get the full view.
+        #[serde(default, skip_serializing_if = "is_false")]
+        changes_only: bool,
     },
     /// Take over an ended session's journaled, uncommitted lines in the
     /// same workspace (issue #161). Refused for a live session and for one
@@ -4531,6 +4654,7 @@ pub enum Command {
         recent_window_ms: Option<u64>,
         mcp: bool,
         left: Vec<String>,
+        changes_only: bool,
         inflight: Vec<InflightSymbol>,
         /// Names of anchored notes that the session's files mention, as
         /// the index found them (roadmap E1).
@@ -4644,6 +4768,23 @@ enum CommandWire {
     /// last record is `SESSION_SEEN_INTERVAL_MS` old (roadmap J12).
     SessionSeen {
         session_id: String,
+    },
+    /// The hook placed `bytes` of text in the session's context, at a
+    /// turn's start (`turn`, zero bytes allowed) or after a tool call
+    /// (issue #222). A measurement only.
+    RecordContext {
+        session_id: String,
+        bytes: u64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        turn: bool,
+    },
+    /// The hook could not place these briefing items in the session's
+    /// context (its text budget was full): they are no longer told, so the
+    /// next briefing of changes only tells them (review comment 4711375989).
+    /// At most `MAX_TOLD` keys, from `briefing_keys`.
+    ForgetTold {
+        session_id: String,
+        keys: Vec<u64>,
     },
     IntentSet {
         session_id: String,
@@ -4991,6 +5132,11 @@ enum CommandWire {
     ObserveUncoordinated {
         workspace_id: String,
         files: Vec<ObservedFile>,
+        /// When the scan began reading the checkout, on the clock the core is
+        /// told. A session that reported a file since then is newer than the
+        /// version the scan saw. Absent: not known, and no file is excused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scanned_from_ms: Option<u64>,
     },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
@@ -5371,6 +5517,8 @@ enum CommandWire {
         mcp: bool,
         #[serde(default)]
         left: Vec<String>,
+        #[serde(default)]
+        changes_only: bool,
     },
     Adopt {
         session_id: String,
@@ -5444,6 +5592,17 @@ pub enum Outcome {
     SessionSeen {
         session_id: String,
         last_hook_ms: u64,
+    },
+    /// What the session's hooks have added to its context so far.
+    ContextRecorded {
+        session_id: String,
+        context: ContextUse,
+    },
+    /// How many of the named items the session had been told and now has
+    /// not; zero when none was, and nothing is recorded.
+    ToldForgotten {
+        session_id: String,
+        forgotten: u32,
     },
     Intent {
         intent: Intent,
@@ -6079,6 +6238,78 @@ fn decide_checked(
                 outcome: Outcome::SessionSeen {
                     session_id: session_id.clone(),
                     last_hook_ms: if due { now_ms } else { last },
+                },
+            })
+        }
+        Command::RecordContext {
+            session_id,
+            bytes,
+            turn,
+        } => {
+            current_session(state, session_id)?;
+            if *bytes > MAX_CONTEXT_RECORD_BYTES || (*bytes == 0 && !*turn) {
+                return Err(error(
+                    "invalid_request",
+                    "A context record names at most 1 MiB, and zero bytes only at a turn's start",
+                ));
+            }
+            let event = Event::ContextAdded {
+                session_id: session_id.clone(),
+                bytes: *bytes,
+                turn: *turn,
+                generation: state.generation,
+            };
+            let mut after = state
+                .activity
+                .get(session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map(|activity| activity.context)
+                .unwrap_or_default();
+            after.add(*bytes, *turn);
+            Ok(Decision {
+                events: vec![event],
+                outcome: Outcome::ContextRecorded {
+                    session_id: session_id.clone(),
+                    context: after,
+                },
+            })
+        }
+        Command::ForgetTold { session_id, keys } => {
+            current_session(state, session_id)?;
+            if keys.len() > MAX_TOLD {
+                return Err(error(
+                    "invalid_request",
+                    "Forget at most 256 briefing item keys at once",
+                ));
+            }
+            let named: BTreeSet<u64> = keys.iter().copied().collect();
+            let told: Vec<u64> = state
+                .activity
+                .get(session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map(|activity| {
+                    activity
+                        .told
+                        .iter()
+                        .copied()
+                        .filter(|key| named.contains(key))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let forgotten = u32::try_from(told.len()).unwrap_or(u32::MAX);
+            Ok(Decision {
+                // A retry, or keys never told, record nothing.
+                events: if told.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Event::ToldForgotten {
+                        session_id: session_id.clone(),
+                        keys: told,
+                    }]
+                },
+                outcome: Outcome::ToldForgotten {
+                    session_id: session_id.clone(),
+                    forgotten,
                 },
             })
         }
@@ -7630,6 +7861,7 @@ fn decide_checked(
             recent,
             recent_window_ms,
             mcp,
+            changes_only,
         }
         | Command::BriefPrepared {
             session_id,
@@ -7640,6 +7872,7 @@ fn decide_checked(
             recent,
             recent_window_ms,
             mcp,
+            changes_only,
             ..
         } => {
             if !(1..=MAX_BRIEF_PEERS).contains(max_peers) {
@@ -7700,19 +7933,75 @@ fn decide_checked(
             // it merely aged out, it is not (see `brief`).
             let differs = without_presence(&signature) != without_presence(previous)
                 || (!*mid_turn && new_presence(&signature, previous));
-            briefing.changed = differs
-                || !briefing.messages.is_empty()
+            let once = !briefing.messages.is_empty()
                 || !briefing.uncoordinated.is_empty()
                 || !briefing.retracted.is_empty()
                 || !briefing.checks.is_empty()
                 || !briefing.left_work.is_empty()
                 || briefing.trail.is_some();
+            // What the session was told, and when: from this generation
+            // only, since times from an earlier one do not compare.
+            let activity = state
+                .activity
+                .get(session_id)
+                .filter(|activity| activity.generation == state.generation);
+            let told: BTreeSet<u64> = activity
+                .map(|activity| activity.told.iter().copied().collect())
+                .unwrap_or_default();
+            let keys = briefing_keys(&briefing);
+            let (told_next, shown) = if *changes_only {
+                let since = activity.map_or(0, |activity| activity.told_at_ms);
+                // The session read or edited `path` after it was last told:
+                // a safety item about the file is news again. A read in the
+                // same millisecond as that briefing counts as told with it:
+                // the clock cannot order the two, and usually the read is
+                // the hook run that carried the briefing.
+                let acted = |path: &str| {
+                    activity.is_some_and(|activity| {
+                        activity
+                            .touched
+                            .iter()
+                            .any(|touch| touch.path == path && touch.at_ms > since)
+                            || activity
+                                .known
+                                .iter()
+                                .any(|known| known.path == path && known.at_ms > since)
+                    })
+                };
+                let shown_keys = keep_changes(&mut briefing, &told, &acted, *mid_turn, once);
+                briefing.changed = once || shown_anything(&briefing);
+                let next: Vec<u64> = keys
+                    .iter()
+                    .copied()
+                    .filter(|key| told.contains(key) || shown_keys.contains(key))
+                    .take(MAX_TOLD)
+                    .collect();
+                (next, briefing.changed)
+            } else {
+                // The whole view: once delivered, every item in it is told.
+                briefing.changed = differs || once;
+                (keys.into_iter().take(MAX_TOLD).collect(), true)
+            };
+            let told_before: Vec<u64> = activity
+                .map(|activity| activity.told.clone())
+                .unwrap_or_default();
             let mut events = Vec::new();
             if *deliver {
-                if signature != previous && briefing.changed {
+                let records = if *changes_only {
+                    shown || told_next != told_before
+                } else {
+                    // Mid-turn, a full view not delivered as news (where a
+                    // peer looks, alone) is not recorded: it stays news for
+                    // the next prompt.
+                    (signature != previous && briefing.changed)
+                        || (told_next != told_before && (briefing.changed || !*mid_turn))
+                };
+                if records {
                     events.push(Event::BriefingDelivered {
                         session_id: session_id.clone(),
                         signature,
+                        told: told_next,
+                        told_at_ms: shown.then_some(now_ms),
                     });
                 }
                 events.extend(
@@ -8211,6 +8500,7 @@ fn decide_checked(
         Command::ObserveUncoordinated {
             workspace_id,
             files,
+            scanned_from_ms,
         } => {
             validate_known_workspace(state, workspace_id)?;
             if files.is_empty() || files.len() > MAX_UNCOORDINATED_OBSERVED {
@@ -8223,12 +8513,17 @@ fn decide_checked(
             }
             let files = normalized_files(files)?;
             // A file under an admitted edit is that edit's, whose report has
-            // not arrived yet; a version a session reported is explained.
+            // not arrived yet; a version a session reported is explained; and
+            // a file a session reported after the scan began reading is newer
+            // than what the scan saw: the version before that session's edit.
             let unexplained: Vec<ObservedFile> = files
                 .into_iter()
                 .filter(|file| {
                     !leased(state, workspace_id, &file.path, now_ms)
                         && !explained(state, workspace_id, file)
+                        && !scanned_from_ms.is_some_and(|from| {
+                            reported_since(state, workspace_id, &file.path, from)
+                        })
                 })
                 .take(MAX_UNCOORDINATED_FILES)
                 .collect();
@@ -10450,6 +10745,8 @@ fn brief(
             session_id: session_id.into(),
             changed: false,
             omitted_peers: u32::try_from(total - peers.len()).unwrap_or(u32::MAX),
+            // Counted by `keep_changes` for a briefing of changes only.
+            unchanged: 0,
             peers,
             stale_reads,
             remote,
@@ -10481,6 +10778,285 @@ fn brief(
         signature,
         inflight_keys,
     ))
+}
+
+/// The key of one briefing item: what it says, without ages, so that the
+/// same item told again has the same key (issue #222).
+fn item_key(parts: &[&str]) -> u64 {
+    let mut text = String::new();
+    for part in parts {
+        text.push_str(part);
+        text.push('\u{1f}');
+    }
+    fingerprint_u64(&text)
+}
+
+/// A peer's own line without its files: who it is, where, its task and
+/// whether it is still running. A peer in this checkout is on this
+/// session's own branch, which the Git observer may learn only after a
+/// briefing (as in `brief`'s signature): not part of its key.
+fn peer_key(peer: &PeerWork) -> u64 {
+    let branch = (!peer.same_workspace)
+        .then_some(peer.branch_ref.as_deref())
+        .flatten();
+    let relation = peer.relation.map(|relation| format!("{relation:?}"));
+    item_key(&[
+        "peer",
+        &peer.session_id,
+        &peer.workspace_root,
+        branch.unwrap_or(""),
+        peer.summary.as_deref().unwrap_or(""),
+        peer.intent.as_deref().unwrap_or(""),
+        if peer.ended { "ended" } else { "" },
+        if peer.liveness == Some(LivenessStatus::Unknown) {
+            "unknown"
+        } else {
+            ""
+        },
+        relation.as_deref().unwrap_or(""),
+    ])
+}
+
+fn peer_path_key(peer: &PeerWork, kind: &str, path: &str) -> u64 {
+    item_key(&["peer", &peer.session_id, kind, path])
+}
+
+fn stale_key(stale: &StaleRead) -> u64 {
+    item_key(&["stale", &stale.path, &stale.session_id])
+}
+
+fn remote_work_key(remote: &RemotePeerWork) -> u64 {
+    let work = &remote.work;
+    item_key(&[
+        "remote",
+        &remote.name,
+        &work.session,
+        work.branch_ref.as_deref().unwrap_or(""),
+        work.summary.as_deref().unwrap_or(""),
+        &work.editing.join(","),
+        &work.recent.join(","),
+        &remote.overlap.join(","),
+    ])
+}
+
+fn interface_key(impact: &InterfaceImpact) -> u64 {
+    let changes: Vec<String> = impact
+        .changes
+        .iter()
+        .map(|change| {
+            format!(
+                "{}:{}:{}",
+                change.name,
+                change.change,
+                change.after.as_deref().unwrap_or("")
+            )
+        })
+        .collect();
+    item_key(&[
+        "interface",
+        &impact.path,
+        &changes.join("|"),
+        &impact.affected.join(","),
+    ])
+}
+
+/// A note and its anchor's state: an anchored note whose state changes is
+/// news again (roadmap E1).
+fn note_key(note: &Note) -> u64 {
+    item_key(&[
+        "note",
+        &note.note_id,
+        note.anchor_state.map_or("", AnchorState::as_str),
+    ])
+}
+
+fn checkout_key(change: &CheckoutNotice) -> u64 {
+    item_key(&[
+        "checkout",
+        change.from_branch.as_deref().unwrap_or(""),
+        change.to_branch.as_deref().unwrap_or(""),
+        change.from_head.as_deref().unwrap_or(""),
+        change.to_head.as_deref().unwrap_or(""),
+        change.by_session.as_deref().unwrap_or(""),
+        &change.files.to_string(),
+    ])
+}
+
+/// The kinds of a peer's listed paths, each with its own key.
+const PEER_LISTS: [&str; 5] = ["overlap", "target", "editing", "recent", "looking"];
+
+fn peer_paths<'a>(peer: &'a PeerWork, kind: &str) -> Vec<&'a str> {
+    match kind {
+        "overlap" => peer.overlap.iter().map(String::as_str).collect(),
+        "target" => peer.target_overlap.iter().map(String::as_str).collect(),
+        "editing" => peer.editing.iter().map(String::as_str).collect(),
+        "recent" => peer
+            .recent
+            .iter()
+            .map(|recent| recent.path.as_str())
+            .collect(),
+        _ => peer
+            .looking
+            .iter()
+            .map(|looked| looked.path.as_str())
+            .collect(),
+    }
+}
+
+/// Every item key of `briefing`, in the order a reader meets them. Messages,
+/// withdrawals, check results, in-flight signatures, uncoordinated changes
+/// and left work are not keyed: each is delivered once already. A hook
+/// names the keys of the items it could not place to `Command::ForgetTold`.
+pub fn briefing_keys(briefing: &Briefing) -> Vec<u64> {
+    let mut keys = Vec::new();
+    keys.extend(briefing.stale_reads.iter().map(stale_key));
+    keys.extend(briefing.checkout_changes.iter().map(checkout_key));
+    keys.extend(briefing.notes.iter().map(note_key));
+    keys.extend(briefing.interface_changes.iter().map(interface_key));
+    for peer in &briefing.peers {
+        keys.push(peer_key(peer));
+        for kind in PEER_LISTS {
+            keys.extend(
+                peer_paths(peer, kind)
+                    .into_iter()
+                    .map(|path| peer_path_key(peer, kind, path)),
+            );
+        }
+    }
+    keys.extend(briefing.remote.iter().map(remote_work_key));
+    keys
+}
+
+/// Leave in `briefing` only what `told` does not hold, count the rest in
+/// `unchanged`, and return the keys left in. A safety item stays in when
+/// `acted` says the session read or edited one of its files since it was
+/// last told: a peer's hold on a file this session works on, an interface
+/// change to names its files use, a file it read that a peer has since
+/// edited. Mid-turn, where a peer is looking is not news by itself
+/// (`once`: something delivered once is in the briefing); it waits, untold,
+/// for a briefing that has other news.
+fn keep_changes(
+    briefing: &mut Briefing,
+    told: &BTreeSet<u64>,
+    acted: &dyn Fn(&str) -> bool,
+    mid_turn: bool,
+    once: bool,
+) -> BTreeSet<u64> {
+    let mut shown = BTreeSet::new();
+    let mut unchanged = 0_usize;
+    let mut keep = |key: u64, safety: bool| {
+        let fresh = !told.contains(&key) || safety;
+        if fresh {
+            shown.insert(key);
+        } else {
+            unchanged += 1;
+        }
+        fresh
+    };
+    briefing
+        .stale_reads
+        .retain(|stale| keep(stale_key(stale), acted(&stale.path)));
+    briefing
+        .checkout_changes
+        .retain(|change| keep(checkout_key(change), false));
+    briefing.notes.retain(|note| keep(note_key(note), false));
+    briefing.interface_changes.retain(|impact| {
+        keep(
+            interface_key(impact),
+            impact.affected.iter().any(|path| acted(path)),
+        )
+    });
+    // Presence counted apart: alone, mid-turn, it is held back.
+    let mut presence = Vec::new();
+    let mut work_news = false;
+    briefing.peers.retain_mut(|peer| {
+        let only_presence = presence_only(peer);
+        // A file this peer holds in this checkout that this session works
+        // on: refused to this session while held.
+        let held: BTreeSet<String> = peer
+            .overlap
+            .iter()
+            .filter(|path| peer.same_workspace && peer.editing.contains(path))
+            .cloned()
+            .collect();
+        let header = peer_key(peer);
+        let header_fresh = keep(header, false);
+        if header_fresh {
+            if only_presence {
+                presence.push(header);
+            } else {
+                work_news = true;
+            }
+        }
+        let mut any = false;
+        let id = peer.session_id.clone();
+        let mut list = |kind: &str, path: &str| {
+            let key = item_key(&["peer", &id, kind, path]);
+            let safety =
+                matches!(kind, "overlap" | "editing") && held.contains(path) && acted(path);
+            let fresh = keep(key, safety);
+            if fresh {
+                any = true;
+                if kind == "looking" {
+                    presence.push(key);
+                } else {
+                    work_news = true;
+                }
+            }
+            fresh
+        };
+        peer.overlap.retain(|path| list("overlap", path));
+        peer.target_overlap.retain(|path| list("target", path));
+        peer.editing.retain(|path| list("editing", path));
+        peer.recent.retain(|recent| list("recent", &recent.path));
+        peer.looking.retain(|looked| list("looking", &looked.path));
+        if !header_fresh {
+            // Its task was told: the line names the peer and what is new.
+            peer.summary = None;
+            peer.intent = None;
+        }
+        header_fresh || any
+    });
+    briefing
+        .remote
+        .retain(|remote| keep(remote_work_key(remote), false));
+    let other_news = work_news
+        || once
+        || !briefing.stale_reads.is_empty()
+        || !briefing.checkout_changes.is_empty()
+        || !briefing.notes.is_empty()
+        || !briefing.interface_changes.is_empty()
+        || !briefing.remote.is_empty()
+        || !briefing.inflight.is_empty();
+    if mid_turn && !other_news && !presence.is_empty() {
+        for key in &presence {
+            shown.remove(key);
+        }
+        // A peer is left in only for its own line, told here for the first
+        // time (and not only for where it looked), or for a file still in.
+        // A told line had its task cleared, so its key no longer matches.
+        briefing.peers.retain_mut(|peer| {
+            peer.looking.clear();
+            shown.contains(&peer_key(peer))
+                || !(peer.overlap.is_empty()
+                    && peer.target_overlap.is_empty()
+                    && peer.editing.is_empty()
+                    && peer.recent.is_empty())
+        });
+    }
+    briefing.unchanged = u32::try_from(unchanged).unwrap_or(u32::MAX);
+    shown
+}
+
+/// Whether a `changes_only` briefing still has an item to place in context.
+fn shown_anything(briefing: &Briefing) -> bool {
+    !briefing.peers.is_empty()
+        || !briefing.stale_reads.is_empty()
+        || !briefing.remote.is_empty()
+        || !briefing.interface_changes.is_empty()
+        || !briefing.inflight.is_empty()
+        || !briefing.notes.is_empty()
+        || !briefing.checkout_changes.is_empty()
 }
 
 /// Bytes in the presence part of a briefing signature: with the work
@@ -10577,6 +11153,22 @@ fn explained(state: &State, workspace_id: &str, file: &ObservedFile) -> bool {
                 .known
                 .iter()
                 .any(|known| known.path == file.path && known.state == file.state)
+        })
+}
+
+/// Whether a session of this workspace reported reading or writing the file
+/// at or after `from_ms`, at any version.
+fn reported_since(state: &State, workspace_id: &str, path: &str, from_ms: u64) -> bool {
+    state
+        .sessions
+        .values()
+        .filter(|session| session.workspace_id == workspace_id)
+        .filter_map(|session| state.activity.get(&session.session_id))
+        .any(|activity| {
+            activity
+                .known
+                .iter()
+                .any(|known| known.path == path && known.at_ms >= from_ms)
         })
 }
 
@@ -13070,15 +13662,49 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::BriefingDelivered {
             session_id,
             signature,
+            told,
+            told_at_ms,
         } => {
             current_session(state, session_id)?;
-            if signature.len() > 64 {
+            if signature.len() > 64 || told.len() > MAX_TOLD {
                 return Err(error(
                     "invalid_event",
-                    "A briefing signature is at most 64 bytes",
+                    "A briefing signature is at most 64 bytes, and a delivery names at most 256 item keys",
                 ));
             }
-            activity_mut(state, session_id).briefed = Some(signature.clone());
+            let activity = activity_mut(state, session_id);
+            activity.briefed = Some(signature.clone());
+            activity.told = told.clone();
+            if let Some(at_ms) = told_at_ms {
+                activity.told_at_ms = *at_ms;
+            }
+        }
+        Event::ContextAdded {
+            session_id,
+            bytes,
+            turn,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            if *generation != state.generation || *bytes > MAX_CONTEXT_RECORD_BYTES {
+                return Err(error(
+                    "invalid_event",
+                    "A context record belongs to the current daemon generation and names at most 1 MiB",
+                ));
+            }
+            activity_mut(state, session_id).context.add(*bytes, *turn);
+        }
+        Event::ToldForgotten { session_id, keys } => {
+            current_session(state, session_id)?;
+            if keys.len() > MAX_TOLD {
+                return Err(error(
+                    "invalid_event",
+                    "A forget names at most 256 briefing item keys",
+                ));
+            }
+            activity_mut(state, session_id)
+                .told
+                .retain(|key| !keys.contains(key));
         }
         Event::InflightDelivered { session_id, keys } => {
             current_session(state, session_id)?;

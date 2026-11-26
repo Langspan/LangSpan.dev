@@ -100,6 +100,7 @@ fn brief(state: &mut State, session: &str, id: &str, now: u64) -> Briefing {
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         now,
     )) {
@@ -379,6 +380,7 @@ fn invalid_briefing_inputs_are_rejected_without_events() {
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         Command::Brief {
             session_id: "nobody".into(),
@@ -389,6 +391,7 @@ fn invalid_briefing_inputs_are_rejected_without_events() {
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         Command::SessionPrompt {
             session_id: "alice".into(),
@@ -472,6 +475,7 @@ fn the_largest_briefing_is_still_an_event_the_core_accepts_and_fits_one_frame() 
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         300,
     ));
@@ -638,6 +642,7 @@ fn an_owed_trail_of_escaped_paths_beside_full_peers_still_fits_one_frame() {
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         300,
     ));
@@ -743,6 +748,7 @@ fn a_look_from_outside_is_not_a_delivery_and_not_activity() {
         recent: false,
         recent_window_ms: None,
         mcp: false,
+        changes_only: false,
     };
     let decision = decide(&state, &look, "look", 200);
     assert!(decision.events.is_empty());
@@ -1062,6 +1068,7 @@ fn brief_mid_turn(state: &mut State, session: &str, id: &str, now: u64) -> Brief
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         now,
     )) {
@@ -1477,6 +1484,7 @@ fn presence_never_takes_the_place_of_a_peer_with_work() {
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         "b",
         6_000,
@@ -1639,6 +1647,7 @@ fn a_change_of_presence_alone_waits_for_the_next_prompt_not_the_next_tool_call()
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         now,
     )) {
@@ -1849,6 +1858,7 @@ fn brief_with(
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
             left: Vec::new(),
             inflight,
             mentioned: Default::default(),
@@ -1936,6 +1946,7 @@ fn an_in_flight_signature_is_told_once_per_signature_and_only_from_another_workt
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
             left: Vec::new(),
             inflight: found(v3),
             mentioned: Default::default(),
@@ -1992,6 +2003,7 @@ fn in_flight_lines_are_at_most_three_within_their_share_and_the_rest_counted() {
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
             left: Vec::new(),
             inflight: too_many,
             mentioned: Default::default(),
@@ -2128,6 +2140,7 @@ fn presence_and_an_in_flight_signature_are_each_news_once() {
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
             left: Vec::new(),
             inflight: found(v1),
             mentioned: Default::default(),
@@ -2200,6 +2213,7 @@ fn start_brief(state: &mut State, session: &str, window: Option<u64>, now: u64) 
             recent: true,
             recent_window_ms: window,
             mcp: false,
+            changes_only: false,
         },
         now,
     )) {
@@ -2425,6 +2439,7 @@ fn nothing_older_than_the_window_or_from_before_the_current_boot_appears() {
                 recent: true,
                 recent_window_ms: Some(window),
                 mcp: false,
+                changes_only: false,
             },
             now,
         );
@@ -2491,6 +2506,7 @@ fn only_a_starting_briefing_carries_the_section_and_it_is_never_news_by_itself()
             recent: true,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         2 * HOUR + 20,
     );

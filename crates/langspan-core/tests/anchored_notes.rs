@@ -353,6 +353,18 @@ fn without_a_complete_scan_the_anchor_is_unknown_until_the_next_one() {
 }
 
 fn briefed(state: &mut State, id: &str, mentioned: &[&str], now: u64) -> Vec<Note> {
+    brief(state, id, mentioned, now, false)
+}
+
+/// The notes of one briefing, `changes_only` as a prompt after the first
+/// asks for it.
+fn brief(
+    state: &mut State,
+    id: &str,
+    mentioned: &[&str],
+    now: u64,
+    changes_only: bool,
+) -> Vec<Note> {
     let (outcome, _) = run(
         state,
         id,
@@ -361,6 +373,7 @@ fn briefed(state: &mut State, id: &str, mentioned: &[&str], now: u64) -> Vec<Not
             max_peers: 4,
             deliver: true,
             mid_turn: false,
+            changes_only,
             recent: false,
             recent_window_ms: None,
             mcp: false,
@@ -397,6 +410,49 @@ fn a_session_whose_files_mention_the_name_is_told_the_note_with_its_state() {
     let told = briefed(&mut state, "b-3", &["parse_upload"], 22);
     assert_eq!(told.len(), 1);
     assert_eq!(told[0].anchor_state, Some(AnchorState::Changed));
+}
+
+/// A briefing of changes only (issue #222) leaves out a note the session
+/// was told, but an anchored note whose state changed since is news again.
+#[test]
+fn a_changes_only_briefing_tells_a_note_again_when_its_state_changes() {
+    let mut state = ready();
+    remember(
+        &mut state,
+        "note-7",
+        &["src/api.rs"],
+        "parse_upload",
+        &[],
+        Some(api_index("a", "b")),
+    );
+    assert_eq!(
+        brief(&mut state, "b-1", &["parse_upload"], 20, false).len(),
+        1
+    );
+    assert!(brief(&mut state, "b-2", &["parse_upload"], 21, true).is_empty());
+    for (scan, found, held) in [
+        ("scan-1", api_index("e", "b"), AnchorState::Changed),
+        ("scan-2", index(vec![]), AnchorState::Gone),
+    ] {
+        observe(&mut state, scan, found);
+        let told = brief(
+            &mut state,
+            &format!("b-{scan}"),
+            &["parse_upload"],
+            22,
+            true,
+        );
+        assert_eq!(told.len(), 1, "{held:?}");
+        assert_eq!(told[0].anchor_state, Some(held));
+        let again = brief(
+            &mut state,
+            &format!("b2-{scan}"),
+            &["parse_upload"],
+            23,
+            true,
+        );
+        assert!(again.is_empty(), "{held:?} told once");
+    }
 }
 
 #[test]

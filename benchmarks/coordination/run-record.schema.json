@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "LangSpan coordination benchmark run record v6",
-  "description": "One record per driver run: one arm, task family, session count and seed, including a run the preflight check refused. A value the run did not measure is null, never zero. The runner's raw journal (runner/runs.jsonl) holds the per-command detail. v2: isolated clones, tasks_accepted in place of tasks_completed, no contradictions_reported (notes are evidence, not a verdict), split permission denials, session cost, duration and turns, coordinator scans, the requested model, ignored options and the refused status. v3: worktrees of one repository and one coordinator in the langspan arm (isolation), the tool guard's verdict (tool_check), figures summed over every result line of a session (results, turns), peer_checkout denials, interface notices per session, and the hedge stand-in mode. v4: the discovered_change family (roles changer and dependent), the stagger (stagger_s), auto memory (auto_memory) and, per task, whether an interface notice came before the session's first write (notice_before_write). v5: whether the changer made the interface change (interface_change), with dependents not judged when it did not, and the workaround stand-in mode. v6: the repair round of a trial whose combined result failed (repair), and the cost to a correct result (cost): the run's, the repair's and the total figures, and the cost per accepted task.",
+  "title": "LangSpan coordination benchmark run record v7",
+  "description": "One record per driver run: one arm, task family, session count and seed, including a run the preflight check refused. A value the run did not measure is null, never zero. The runner's raw journal (runner/runs.jsonl) holds the per-command detail. v2: isolated clones, tasks_accepted in place of tasks_completed, no contradictions_reported (notes are evidence, not a verdict), split permission denials, session cost, duration and turns, coordinator scans, the requested model, ignored options and the refused status. v3: worktrees of one repository and one coordinator in the langspan arm (isolation), the tool guard's verdict (tool_check), figures summed over every result line of a session (results, turns), peer_checkout denials, interface notices per session, and the hedge stand-in mode. v4: the discovered_change family (roles changer and dependent), the stagger (stagger_s), auto memory (auto_memory) and, per task, whether an interface notice came before the session's first write (notice_before_write). v5: whether the changer made the interface change (interface_change), with dependents not judged when it did not, and the workaround stand-in mode. v6: the repair round of a trial whose combined result failed (repair), and the cost to a correct result (cost): the run's, the repair's and the total figures, and the cost per accepted task. v7: the context LangSpan's hooks added to the sessions (context_added), per task and per trial, in bytes and estimated tokens per turn.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -10,11 +10,11 @@
     "ignored_options", "isolation", "stagger_s", "auto_memory", "tool_check", "versions", "tasks", "tasks_total",
     "tasks_accepted",
     "integrated_tests", "interface_change", "merge_conflicts", "semantic_conflicts", "duplicate_work", "stops", "questions",
-    "permission_denials", "cost_usd", "turns", "refusals", "coordinator_scans", "tokens", "repair", "cost",
+    "permission_denials", "cost_usd", "turns", "refusals", "coordinator_scans", "context_added", "tokens", "repair", "cost",
     "evidence"
   ],
   "properties": {
-    "schema_version": {"const": 6},
+    "schema_version": {"const": 7},
     "record_type": {"const": "coordination_run"},
     "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
     "arm": {"enum": ["worktrees", "awareness_only", "langspan"]},
@@ -71,8 +71,8 @@
         "required": [
           "session", "task_id", "role", "branch", "process_status", "merged", "completed",
           "accepted", "detail", "stopped", "asked_question", "results", "tool_check", "permission_denials",
-          "tokens", "cost_usd", "duration_ms", "turns", "refusals", "interface_notices", "transcript", "hook_log",
-          "standin_informed", "notice_before_write"
+          "tokens", "cost_usd", "duration_ms", "turns", "refusals", "interface_notices", "context_added", "transcript",
+          "hook_log", "standin_informed", "notice_before_write"
         ],
         "properties": {
           "session": {"type": "integer", "minimum": 1},
@@ -103,6 +103,7 @@
           "turns": {"type": ["integer", "null"], "minimum": 0},
           "refusals": {"type": ["integer", "null"], "minimum": 0},
           "interface_notices": {"type": ["integer", "null"], "minimum": 0},
+          "context_added": {"$ref": "#/$defs/context"},
           "transcript": {"type": ["string", "null"]},
           "hook_log": {"type": ["string", "null"]},
           "standin_informed": {"type": ["boolean", "null"]},
@@ -191,6 +192,20 @@
             }
           }
         }
+      }
+    },
+    "context_added": {
+      "description": "The context LangSpan's hooks added over every task. reported: every task was measured, and the figures are their sum; partial when some were and unknown when none were, both with every figure null; not_applicable in another arm. bytes_per_turn rounds down; estimated_tokens_per_turn is bytes_per_turn over four, rounded up, an estimate; largest_turn_bytes is the largest of any task's.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "turns", "bytes", "bytes_per_turn", "estimated_tokens_per_turn", "largest_turn_bytes"],
+      "properties": {
+        "status": {"enum": ["reported", "partial", "unknown", "not_applicable"]},
+        "turns": {"type": ["integer", "null"], "minimum": 0},
+        "bytes": {"type": ["integer", "null"], "minimum": 0},
+        "bytes_per_turn": {"type": ["integer", "null"], "minimum": 0},
+        "estimated_tokens_per_turn": {"type": ["integer", "null"], "minimum": 0},
+        "largest_turn_bytes": {"type": ["integer", "null"], "minimum": 0}
       }
     },
     "tokens": {
@@ -290,6 +305,19 @@
     }
   },
   "$defs": {
+    "context": {
+      "description": "LangSpan arm: the context LangSpan's hooks added to a task's sessions, summed over every session registered from its checkout. turns: a session start or resume, and each prompt; bytes: text added over those turns, mid-turn notes included; bytes_per_turn: bytes over turns, rounded down, 0 with no turn; estimated_tokens_per_turn: bytes_per_turn over four, rounded up, an estimate and not a tokenizer's count; largest_turn_bytes: the most one turn added. null when not measured: another arm, the coordinator's state not read, no session registered from the checkout, or a malformed figure.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["turns", "bytes", "bytes_per_turn", "estimated_tokens_per_turn", "largest_turn_bytes"],
+      "properties": {
+        "turns": {"type": "integer", "minimum": 0},
+        "bytes": {"type": "integer", "minimum": 0},
+        "bytes_per_turn": {"type": "integer", "minimum": 0},
+        "estimated_tokens_per_turn": {"type": "integer", "minimum": 0},
+        "largest_turn_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
     "figures": {
       "type": "object",
       "additionalProperties": false,
