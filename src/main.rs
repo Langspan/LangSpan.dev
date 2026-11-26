@@ -4329,6 +4329,85 @@ fn switch(options: &mut BTreeMap<String, String>, name: &str) -> Result<bool, la
     }
 }
 
+/// What happened since a point of the event log (roadmap C10), in full.
+/// Names are data from other sessions, printed quoted.
+fn print_since(since: &langspan_core::Since) {
+    println!(
+        "Since event {} (through {}){}{}:",
+        since.from_seq,
+        since.to_seq,
+        since
+            .away_ms
+            .map(|ms| format!(
+                ", after {} without an interactive session{}",
+                ago(ms).trim_end_matches(" ago"),
+                if since.ongoing { ", still" } else { "" }
+            ))
+            .unwrap_or_default(),
+        if since.truncated {
+            "; older events were not read, so this is part of it"
+        } else {
+            ""
+        }
+    );
+    for landing in &since.landings {
+        println!(
+            "  Landed {} onto {:?}{}.",
+            landing.commit_oid.as_deref().unwrap_or("a commit"),
+            landing.onto,
+            landing
+                .session_id
+                .as_ref()
+                .map(|session| format!(" by session {session}"))
+                .unwrap_or_default()
+        );
+    }
+    let checks = &since.checks;
+    println!(
+        "  Check runs: {} failed, {} passed.{}",
+        checks.failed,
+        checks.passed,
+        checks
+            .latest_failure
+            .as_ref()
+            .map(|failure| format!(
+                " Latest failure {:?} (exit {}){}.",
+                failure.name,
+                failure.exit_code,
+                if failure.passed_since {
+                    ", passed since"
+                } else {
+                    ""
+                }
+            ))
+            .unwrap_or_default()
+    );
+    for change in &since.interface_changes {
+        println!(
+            "  Interface change in {:?}: {:?}.",
+            change.path, change.names
+        );
+    }
+    for session in &since.sessions_ended {
+        println!("  Session {session} ended.");
+    }
+    for message in &since.messages_unacknowledged {
+        println!(
+            "  Message {} not yet acknowledged by every recipient; `langspan message show` has its text.",
+            message.message_id
+        );
+    }
+    for name in &since.teammates_heard {
+        println!("  Heard from teammate {name:?}.");
+    }
+    if since.omitted > 0 {
+        println!(
+            "  ({} more item(s) left out; `langspan events --after {}` lists every event.)",
+            since.omitted, since.from_seq
+        );
+    }
+}
+
 /// How long ago, for a person: seconds, minutes, hours or days.
 fn ago(ms: u64) -> String {
     match ms / 1000 {
@@ -4756,6 +4835,16 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             },
             ["recap", workspace] => Command::Recap {
                 workspace_id: (*workspace).into(),
+                since: langspan::since::asked(
+                    options
+                        .remove("--since-seq")
+                        .map(|seq| {
+                            seq.parse()
+                                .map_err(|_| "--since-seq must be an event sequence number")
+                        })
+                        .transpose()?,
+                    options.remove("--since-away").is_some(),
+                )?,
             },
             ["trail", workspace] => Command::Trails {
                 workspace_id: (*workspace).into(),
@@ -5059,7 +5148,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             // `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
             // `graph symbol`: `--detail`, `--rank`, `--renamed`; `brief`: `--recent`;
-            // `setup`: `--yes`; `guidance install`: `--create`).
+            // `setup`: `--yes`; `guidance install`: `--create`; `recap`:
+            // `--since-away`).
             "--open"
             | "--allow-network"
             | "--demo"
@@ -5078,6 +5168,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--create"
             | "--yes"
             | "--switch"
+            | "--since-away"
             | "--off" => {
                 if options.insert(arg.clone(), String::new()).is_some() {
                     return Err(format!("duplicate option {arg}").into());
@@ -5091,7 +5182,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
             | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" | "--keep-days"
             | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools"
-            | "--wait-ms" | "--max-hops" | "--mode" => {
+            | "--wait-ms" | "--max-hops" | "--mode" | "--since-seq" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -6398,6 +6489,9 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                         format!(" about {:?}", note.paths)
                     }
                 );
+            }
+            if let Some(since) = &recap.since {
+                print_since(since);
             }
         }
         Outcome::Recall { recall } => {

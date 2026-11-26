@@ -1056,6 +1056,13 @@ impl Store {
                     // A recap or a recall must fit one frame with room for
                     // the envelope.
                     Outcome::Recap { mut recap } => {
+                        if let Command::Recap {
+                            workspace_id,
+                            since: Some(from),
+                        } = original
+                        {
+                            recap.since = self.since(workspace_id, *from)?;
+                        }
                         recap.shrink_until(|recap| {
                             serde_json::to_vec(recap).is_ok_and(|bytes| bytes.len() <= 48 * 1024)
                         });
@@ -1430,7 +1437,7 @@ impl Store {
         if let Some(refused) = self.refused_window(workspace_id, from_ms, wall_ms) {
             return Ok(refused);
         }
-        let (events, anchor, earlier) = self.newest_events()?;
+        let (events, anchor, earlier) = self.newest_events(TODAY_EVENTS)?;
         let retained_from_ms = retention::since_ms(&self.connection)?;
         let mut today = langspan_core::today(
             &self.state,
@@ -1475,14 +1482,38 @@ impl Store {
         })
     }
 
-    /// The newest `TODAY_EVENTS` events, oldest first, with the anchor of
-    /// the generation the first belongs to (when it was anchored) and
-    /// whether older events exist. `today` and `report` read the same.
-    fn newest_events(&self) -> StoreResult<(Vec<RecordedEvent>, Option<ClockAnchor>, bool)> {
+    /// What happened in a workspace since a point of the log (roadmap C10),
+    /// from the newest `SINCE_EVENTS` events.
+    fn since(
+        &self,
+        workspace_id: &str,
+        from: langspan_core::SinceFrom,
+    ) -> StoreResult<Option<langspan_core::Since>> {
+        let (events, anchor, earlier) = self.newest_events(langspan_core::SINCE_EVENTS)?;
+        Ok(langspan_core::since(
+            &self.state,
+            &langspan_core::SinceQuery {
+                workspace_id,
+                from,
+                events: &events,
+                anchor,
+                earlier,
+                wall_now_ms: wall_now_ms(),
+            },
+        ))
+    }
+
+    /// The newest `limit` events, oldest first, with the anchor of the
+    /// generation the first belongs to (when it was anchored) and whether
+    /// older events exist. `today` and `report` read `TODAY_EVENTS`.
+    fn newest_events(
+        &self,
+        limit: usize,
+    ) -> StoreResult<(Vec<RecordedEvent>, Option<ClockAnchor>, bool)> {
         let mut statement = self
             .connection
             .prepare("SELECT seq, event_json FROM events ORDER BY seq DESC LIMIT ?1")?;
-        let mut rows = statement.query([i64::try_from(TODAY_EVENTS)?])?;
+        let mut rows = statement.query([i64::try_from(limit)?])?;
         let mut events = Vec::new();
         while let Some(row) = rows.next()? {
             let seq: i64 = row.get(0)?;
@@ -1585,7 +1616,7 @@ impl Store {
         if let Some(refused) = self.refused_window(Some(workspace_id), from_ms, wall_ms) {
             return Ok(refused);
         }
-        let (events, anchor, earlier) = self.newest_events()?;
+        let (events, anchor, earlier) = self.newest_events(TODAY_EVENTS)?;
         let retained_from_ms = retention::since_ms(&self.connection)?;
         let (open_intents, session_workspaces, known) =
             self.report_history_before(events.first().map_or(0, |first| first.seq))?;

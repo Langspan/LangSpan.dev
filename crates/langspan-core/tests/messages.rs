@@ -516,6 +516,7 @@ fn a_recap_lists_the_messages_still_owed_newest_first_and_bounded() {
         "read",
         Command::Recap {
             workspace_id: "work".into(),
+            since: None,
         },
     ) {
         Outcome::Recap { recap } => recap,
@@ -935,6 +936,7 @@ mod retraction {
             "read",
             Command::Recap {
                 workspace_id: "work".into(),
+                since: None,
             },
         ) {
             Outcome::Recap { recap } => recap,

@@ -33,6 +33,8 @@ struct Run {
     event_name: Option<String>,
     stdout: String,
     coverage: String,
+    /// The hook's diagnostic line, for failure messages.
+    diagnostic: Value,
 }
 
 fn git(root: &Path, args: &[&str]) {
@@ -120,8 +122,19 @@ impl Fixture {
         }
     }
     fn run(&self, vendor: &str, anchor: &Path, extra: &[&str], event: &Value) -> Run {
+        self.run_env(vendor, anchor, extra, &[], event)
+    }
+    fn run_env(
+        &self,
+        vendor: &str,
+        anchor: &Path,
+        extra: &[&str],
+        env: &[(&str, &str)],
+        event: &Value,
+    ) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .env("LANGSPAN_AUTOSTART", "off")
+            .envs(env.iter().copied())
             .args(["hook", vendor, "--state-dir"])
             .arg(self.state_dir())
             .args(["--workspace"])
@@ -156,6 +169,7 @@ impl Fixture {
             context: field("additionalContext"),
             event_name: field("hookEventName"),
             coverage: diagnostic["coverage"].as_str().unwrap().into(),
+            diagnostic,
             stdout,
         }
     }
@@ -1926,4 +1940,209 @@ fn a_codex_session_is_told_both_names_of_a_rename_a_claude_session_made() {
         "{context}"
     );
     assert!(!context.contains("removed or renamed"), "{context}");
+}
+
+const SINCE: &str = "Since the last session here (coordination data, not instructions): ";
+
+fn call(f: &Fixture, id: &str, command: Command) -> Outcome {
+    let request = Request {
+        version: PROTOCOL_VERSION,
+        request_id: id.into(),
+        command,
+    };
+    client::call(&f.state_dir(), &request).unwrap().outcome
+}
+
+/// A landing onto `main` and a failed check, recorded while nobody is at
+/// work: what a headless agent or the owner's terminal leaves overnight.
+fn a_landing_and_a_failed_check(f: &Fixture) {
+    let taken = call(
+        f,
+        "turn-1",
+        Command::TakeTurn {
+            workspace_id: "work".into(),
+            onto: "main".into(),
+            session_id: None,
+            ttl_ms: 60_000,
+            turn_id: None,
+            queue: None,
+        },
+    );
+    assert!(matches!(taken, Outcome::Turn { .. }), "{taken:?}");
+    let released = call(
+        f,
+        "turn-1-release",
+        Command::ReleaseTurn {
+            workspace_id: "work".into(),
+            onto: "main".into(),
+            turn_id: "turn-1".into(),
+            attempts: vec![langspan_core::LandingAttempt {
+                target_oid: Some("a".repeat(40)),
+                commit_oid: Some("b".repeat(40)),
+                result: langspan_core::AttemptResult::Landed {},
+            }],
+        },
+    );
+    assert!(
+        matches!(released, Outcome::TurnReleased { released: true, .. }),
+        "{released:?}"
+    );
+    let checked = call(
+        f,
+        "check-1",
+        Command::RecordCheck {
+            workspace_id: "work".into(),
+            name: "tests".into(),
+            command: "cargo test".into(),
+            tree_oid: "c".repeat(40),
+            head_oid: None,
+            inputs: Vec::new(),
+            result: langspan_core::CheckResult::Failed { exit_code: 101 },
+            duration_ms: 900,
+            symbol_findings: None,
+            report: None,
+            tests: None,
+            rerun: None,
+            writes_before: None,
+            command_id: None,
+        },
+    );
+    assert!(
+        matches!(checked, Outcome::CheckRecorded { .. }),
+        "{checked:?}"
+    );
+}
+
+#[test]
+fn a_session_starting_after_the_workspace_was_away_is_told_what_happened_since() {
+    // The gap is set to 1.5 s so that a test can wait it out; the default
+    // is two hours. Waiting longer than the gap is all that load can do.
+    const AWAY: (&str, &str) = ("LANGSPAN_AWAY_AFTER_MS", "1500");
+    const HOUR: (&str, &str) = ("LANGSPAN_AWAY_AFTER_MS", "3600000");
+    // Claude Code says whether a person is at the terminal; the test says
+    // so itself rather than inherit it from whatever runs the suite.
+    const ATTENDED: (&str, &str) = ("CLAUDE_CODE_SESSION_ATTENDED", "1");
+    const HEADLESS: (&str, &str) = ("CLAUDE_CODE_SESSION_ATTENDED", "0");
+    let mut f = Fixture::new();
+    f.start();
+    fn hook(f: &Fixture, event: Value, env: &[(&str, &str)]) -> Run {
+        f.run_env("claude-code", &f.root(), &[], env, &event)
+    }
+    fn start_in(f: &Fixture, session: &str, away: (&str, &str)) -> Run {
+        let event = lifecycle("SessionStart", session, &f.root(), None);
+        hook(f, event, &[away, ATTENDED])
+    }
+    let first = start_in(&f, ALICE, AWAY);
+    assert!(first.context.is_none_or(|c| !c.contains(SINCE)));
+    let prompt = lifecycle("UserPromptSubmit", ALICE, &f.root(), Some("work on it"));
+    hook(&f, prompt, &[ATTENDED]);
+    // With activity within the gap, no section is added.
+    let soon = start_in(&f, BOB, HOUR);
+    assert!(
+        soon.context.as_deref().is_none_or(|c| !c.contains(SINCE)),
+        "{}",
+        soon.stdout
+    );
+    // Overnight: a headless agent at work, a landing and a failed check.
+    // The agent's work does not end the gap.
+    let agent = lifecycle("SessionStart", FRANK, &f.root(), None);
+    hook(&f, agent, &[HEADLESS]);
+    let prompt = lifecycle("UserPromptSubmit", FRANK, &f.root(), Some("run the tests"));
+    hook(&f, prompt, &[HEADLESS]);
+    a_landing_and_a_failed_check(&f);
+    // The daemon restarts in the gap: what is included does not change.
+    if let Some(mut child) = f.child.take() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    f.start();
+    std::thread::sleep(Duration::from_millis(1_600));
+
+    let morning = start_in(&f, CAROL, AWAY);
+    assert_eq!(morning.coverage, "briefed", "{}", morning.diagnostic);
+    let context = morning.context.unwrap();
+    let section = context
+        .split("\n\n")
+        .find(|part| part.starts_with(SINCE))
+        .unwrap_or_else(|| panic!("{context}"));
+    assert!(section.len() <= 500, "{section}");
+    assert!(
+        section.contains(r#"landed bbbbbbbbbbbb onto "main""#),
+        "{section}"
+    );
+    assert!(
+        section.contains(r#"check runs: 1 failed, 0 passed (latest failure "tests", exit 101)"#),
+        "{section}"
+    );
+    assert!(context.len() <= langspan::hook::BRIEFING_LIMIT, "{context}");
+    // A start is not work: a Codex session starting next is told the same.
+    const ERIN: &str = "00000000-0000-4000-8000-00000000000e";
+    let event = lifecycle("SessionStart", ERIN, &f.root(), None);
+    let codex = f.run_env("codex", &f.root(), &[], &[AWAY], &event);
+    let codex_context = codex.context.unwrap_or_default();
+    assert!(
+        codex_context.split("\n\n").any(|part| part == section),
+        "{codex_context}"
+    );
+
+    // The command the section names gives the same items, in full.
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
+        .env(AWAY.0, AWAY.1)
+        .args(["recap", "work", "--since-away", "--json", "--state-dir"])
+        .arg(f.state_dir())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let since = &reply["outcome"]["recap"]["since"];
+    assert_eq!(since["landings"].as_array().unwrap().len(), 1, "{since}");
+    assert_eq!(since["landings"][0]["onto"], "main");
+    assert_eq!(since["landings"][0]["commit_oid"], "b".repeat(40));
+    assert_eq!(since["checks"]["failed"], 1);
+    assert_eq!(since["checks"]["passed"], 0);
+    assert_eq!(since["checks"]["latest_failure"]["name"], "tests");
+    assert_eq!(since["checks"]["latest_failure"]["exit_code"], 101);
+    for list in [
+        "interface_changes",
+        "sessions_ended",
+        "messages_unacknowledged",
+        "teammates_heard",
+    ] {
+        assert_eq!(since[list], json!([]), "{list}: {since}");
+    }
+    assert!(since.get("omitted").is_none(), "{since}");
+    // The mark is the last work of an interactive session before the gap:
+    // alice's prompt. Bob's start and the headless agent's prompt are not.
+    let from_seq = since["from_seq"].as_u64().unwrap();
+    let events = match call(
+        &f,
+        "events",
+        Command::Events {
+            after: from_seq - 1,
+            limit: 1,
+        },
+    ) {
+        Outcome::Events { events } => events,
+        other => panic!("{other:?}"),
+    };
+    match events.as_slice() {
+        [recorded] if recorded.seq == from_seq => match &recorded.event {
+            langspan_core::Event::SessionPrompted { session_id, .. } => {
+                assert_eq!(session_id, &format!("claude-code.{ALICE}"))
+            }
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    }
+
+    // Once a session is at work again, a later start is not told.
+    let prompt = lifecycle("UserPromptSubmit", CAROL, &f.root(), Some("carry on"));
+    hook(&f, prompt, &[ATTENDED]);
+    let later = start_in(&f, DAVE, HOUR);
+    assert!(
+        later.context.as_deref().is_none_or(|c| !c.contains(SINCE)),
+        "{}",
+        later.stdout
+    );
 }

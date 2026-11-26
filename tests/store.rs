@@ -730,6 +730,7 @@ fn a_recap_of_the_largest_valid_notes_still_fits_one_frame() {
     }
     let command = Command::Recap {
         workspace_id: "workspace".into(),
+        since: None,
     };
     let outcome = store
         .execute("read", &command, &command, 20)

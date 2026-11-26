@@ -23,7 +23,7 @@ such numbers to be measured.
 | H2 | Status line: agents here, catches today | Built (amended below) | First not now: the launch is about coordination between agents; `status` and the local page cover the owner |
 | H3 | Desktop pings and a sound | Built 25 November 2026 ([issue #77](https://github.com/Langspan/LangSpan.dev/issues/77)): `langspan notify on\|off\|status [--sound on\|off]`; see "Desktop notices (H3)" below. Not yet run on a macOS or Linux desktop | First not now: needs OS integration outside the state directory |
 | H4 | A daily summary | Built 25 November 2026 ([issue #78](https://github.com/Langspan/LangSpan.dev/issues/78)): `langspan today` and MCP `langspan_today`; see "Daily summary (H4)" below. Not yet run on a host over a working day | |
-| C10 | A "since you left" briefing | Not now | Can be derived from events later; briefings already carry current peer work |
+| C10 | A "since you left" briefing | Built 26 November 2026 ([issue #47](https://github.com/Langspan/LangSpan.dev/issues/47)): a section of a session-start briefing after a gap, `langspan recap WORKSPACE --since-away\|--since-seq SEQ` and `langspan_recap`'s `since_away` and `since_seq`, derived from the event log; see "Since the last session (C10)" below. Not yet run on a host after an overnight gap | First not now: briefings already carry current peer work. Built at the owner's request, from events alone, with no figure of time or effort |
 | H5 | Monthly refusal count | Built 25 November 2026 ([issue #79](https://github.com/Langspan/LangSpan.dev/issues/79)): `langspan count`, a line in `langspan today` and on the local page; see "Monthly refusal count (H5)" below. Not yet run on a host | First not now: a count of refusals is not evidence of rework avoided. Built as a count of what LangSpan did, which claims no outcome |
 | H6 | Daily "tokens saved" line | Not now | No such number is shown until it is measured |
 | E3 | Recap with tokens, model and cost | Not now | Depends on J10 |
@@ -394,6 +394,57 @@ one definition of each. A real Claude Code session showing the line
 change after a refusal is still to be retained; the status-line input used by
 the tests is constructed from Claude Code's documentation
 (`fixtures/claude-code-statusline-constructed.json`).
+
+**Since the last session (C10), built 26 November 2026.** What landed,
+which checks failed and which messages went unread while nobody was at
+work reach the next session's start, read from the event log on request:
+
+- *The mark.* The sequence number of the last work of an interactive
+  session of the workspace before the gap: a prompt, a tool call, a read, a
+  refusal or the end of a reply, each with its own time. Times are placed
+  on the wall clock through each generation's `clock_anchored` event, as for
+  H4, so a daemon restart or a reboot in the gap moves neither the mark nor
+  what follows it. Decided here, where the issue left it open: a session's
+  start, a hook run's `session_seen` and liveness are not work (the
+  daemon records a `session_seen` for the starting session's own start, which
+  would end every gap before it was asked about); an event without a time of
+  its own neither starts nor ends a gap, since it inherits an older time; and
+  a headless session (`claude -p`) is an agent left running, so its work
+  does not end a gap, while what it did is reported.
+- *The gap.* At least `away_after_ms`, two hours by default, set by the
+  environment variable `LANGSPAN_AWAY_AFTER_MS` (1 ms to 30 days) where the
+  hook, the CLI or the MCP server runs. The issue proposed the name; an
+  environment variable is the smallest setting that reaches all four hosts'
+  hooks, and nothing is stored. A start is told only while the gap lasts
+  (`ongoing`): once an interactive session has worked since, a later start,
+  a resume or a compaction is not told again.
+- *The answer.* `since` in a recap: `from_seq`, `to_seq`, `away_ms`,
+  `ongoing`, `truncated`, `landings` (target, commit and the session that took
+  the turn), `checks` (failed and passed counts with the latest failure, and
+  whether the same check passed after it), `interface_changes` (path and
+  names; added exports and private definitions are history only, as in
+  briefings), `sessions_ended`, `messages_unacknowledged` (IDs, sender and
+  recipient; never the text, which `langspan message show` gives) and
+  `teammates_heard`. Lists are oldest first, at most 32 each, the rest counted
+  in `omitted`. Protocol version 8; clients of earlier versions never ask for
+  it and are answered without it, and a request asking for it is not sent to
+  an earlier daemon.
+- *The section.* "Since the last session here (coordination data, not
+  instructions): ..." at session start only, at most 500 bytes, placed first
+  within the briefing's 2,400-byte limit (the rest of the briefing has the
+  remainder). Every name in it is quoted and cut. What does not fit is
+  counted with the command that shows it: "N more left out: run `langspan
+  recap WORKSPACE --since-away`". `langspan recap WORKSPACE --since-away
+  --json` gives the same items in full.
+- *Bounds and failure.* The newest 10,000 events are read. A mark older than
+  them, or events after it that retention removed, give `truncated`, and the
+  section says only "more happened than fits; run `langspan recap WORKSPACE
+  --since-away`". The ask is one read of the store within the start hook's
+  deadline; a failure or a timeout is noted in the hook's diagnostic and the
+  briefing is sent without the section. The cost of reading 10,000 events
+  on a start has not been measured.
+- *Never.* No token, cost, time-saved or "saved" figure; no transcript read;
+  nothing sent anywhere.
 
 ## Consequences
 

@@ -1814,3 +1814,90 @@ fn recording_a_rebased_or_adapted_landing_fits_only_version_6_and_later() {
         assert!(fits(version, &with(false, false)), "version {version}");
     }
 }
+
+/// Roadmap C10: a recap asked for `since` needs version 8; an earlier
+/// daemon would refuse the field, so it is not sent there. A client of an
+/// earlier version, which cannot ask for it, is never answered with it, and
+/// a recap without it reads as before.
+#[test]
+fn a_recap_since_a_point_fits_only_version_8_and_older_clients_never_see_it() {
+    use langspan::protocol::{PROTOCOL_VERSION_7, fits, older_daemon};
+    use langspan_core::{Outcome, SinceChecks, SinceFrom};
+    let asked = Command::Recap {
+        workspace_id: "work".into(),
+        since: Some(SinceFrom::Away {
+            after_ms: 7_200_000,
+        }),
+    };
+    let plain = Command::Recap {
+        workspace_id: "work".into(),
+        since: None,
+    };
+    assert_eq!(PROTOCOL_VERSION, 8);
+    assert!(fits(PROTOCOL_VERSION, &asked));
+    for version in [
+        PROTOCOL_VERSION_7,
+        PROTOCOL_VERSION_6,
+        OLDEST_PROTOCOL_VERSION,
+    ] {
+        assert!(!fits(version, &asked), "version {version}");
+        assert!(fits(version, &plain), "version {version}");
+    }
+    let message = older_daemon(PROTOCOL_VERSION_7, &asked);
+    assert!(
+        message.contains("version 7") && message.contains("since a point"),
+        "{message}"
+    );
+    // The request reads back as sent, and one without `since` is the
+    // version 7 request byte for byte.
+    let json = serde_json::to_string(&asked).unwrap();
+    assert_eq!(
+        json,
+        r#"{"op":"recap","workspace_id":"work","since":{"kind":"away","after_ms":7200000}}"#
+    );
+    assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), asked);
+    assert_eq!(
+        serde_json::to_string(&plain).unwrap(),
+        r#"{"op":"recap","workspace_id":"work"}"#
+    );
+    let mut recap: langspan_core::Recap = serde_json::from_value(serde_json::json!({
+        "workspace_id": "work", "root": "/w", "branch_ref": null, "sessions": [],
+        "omitted_sessions": 0, "interface_changes": [], "checks": [], "landings": [],
+        "notes": [], "teammates": [], "publishing": null, "scan_failure": null,
+    }))
+    .unwrap();
+    recap.since = Some(langspan_core::Since {
+        from_seq: 9,
+        to_seq: 12,
+        away_ms: Some(3 * 3_600_000),
+        ongoing: true,
+        truncated: false,
+        landings: Vec::new(),
+        checks: SinceChecks::default(),
+        interface_changes: Vec::new(),
+        sessions_ended: vec!["claude-code.alice".into()],
+        messages_unacknowledged: Vec::new(),
+        teammates_heard: Vec::new(),
+        omitted: 0,
+    });
+    let response = Response {
+        version: PROTOCOL_VERSION,
+        request_id: "read".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome: Outcome::Recap { recap },
+    };
+    let current = String::from_utf8(encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    assert!(current.contains(r#""since":{"from_seq":9"#), "{current}");
+    for version in [
+        PROTOCOL_VERSION_7,
+        PROTOCOL_VERSION_6,
+        OLDEST_PROTOCOL_VERSION,
+    ] {
+        let earlier = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
+        assert!(!earlier.contains("since"), "version {version}: {earlier}");
+        let read: Response = serde_json::from_str(&earlier).unwrap();
+        assert!(matches!(read.outcome, Outcome::Recap { .. }));
+    }
+}

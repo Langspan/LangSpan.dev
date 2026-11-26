@@ -1335,7 +1335,7 @@ fn attempt(
         if !crate::protocol::fits(version, &record_landing) {
             return Err(format!(
                 "{}; nothing was pushed",
-                crate::protocol::older_daemon(version)
+                crate::protocol::older_daemon(version, &record_landing)
             )
             .into());
         }

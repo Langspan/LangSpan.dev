@@ -94,7 +94,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [C2: Rank the code briefing and name each definition's dependents](https://github.com/Langspan/LangSpan.dev/issues/41): code briefings list definitions in path order and do not mark the files that will break. Built as a ranked code briefing with `used by` dependents; a real-host run remains.
 - [C5: Learn which briefed files agents use](https://github.com/Langspan/LangSpan.dev/issues/43): briefing relevance never adjusts to what agents in a repository actually use.
 - [C8: Tell two sessions their tasks point at the same code before either writes](https://github.com/Langspan/LangSpan.dev/issues/45): two tasks aimed at the same function are not flagged before either session edits. Built as prompt targets; a real-host run remains.
-- [C10: Brief the owner's next session on what happened since the last one](https://github.com/Langspan/LangSpan.dev/issues/47): overnight landings, failed checks and unread messages are scattered across several commands.
 - [C11: Offer a finished, checked task as a worked example](https://github.com/Langspan/LangSpan.dev/issues/48): agents rediscover the same files and helpers for a recurring kind of task.
 - [C12: Advise on worktrees and tidy finished ones on request](https://github.com/Langspan/LangSpan.dev/issues/49): linked worktrees pile up and the owner cannot tell which are safe to remove.
 

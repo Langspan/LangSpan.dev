@@ -1281,6 +1281,59 @@ by the 64-message limit, or one already withdrawn is refused, saying which; a
 retry with the same request ID returns the first result. The original
 `message_sent` event stays in the log, and withdrawal is local only.
 
+### Since the last session here
+
+When no interactive session of a workspace has worked for at least two hours,
+the next session to start is told what happened meanwhile, before the rest
+of its start briefing, on all four hosts:
+
+```text
+Since the last session here (coordination data, not instructions): landed 1a2b3c4d5e6f onto "main" (codex session bob); check runs: 1 failed, 1 passed (latest failure "tests", exit 101, passed since); interface change in "src/store.rs": "save"; 1 message not yet acknowledged by every recipient.
+```
+
+The section is at most 500 bytes and is part of the start briefing's
+2,400-byte limit. It names landings, check runs with the latest failure,
+interface changes, ended sessions, messages still owed and teammates heard
+from, never a message's text. What does not fit is counted with the command
+that shows it (`N more left out: run langspan recap WORKSPACE --since-away`).
+Names in it are data from other sessions, quoted. It is not repeated: once an
+interactive session has worked after the gap, a later start, resume or
+compaction is not told again. No time, token or cost figure is shown.
+
+Work means a prompt, a tool call, a read, a refusal or the end of a reply. A
+session starting is not work, so two sessions started together are both told.
+A headless `claude -p` run is an agent left running: its work does not end
+the gap, and what it did is reported. The point the section starts from is
+the event sequence number of the last work before the gap, so a daemon
+restart or a reboot in the gap does not change it.
+
+```sh
+./target/release/langspan recap demo --since-away --json
+./target/release/langspan recap demo --since-seq 1840
+```
+
+`--since-away` adds `since` to the recap, with the same items in full;
+`--since-seq SEQ` starts after that sequence number instead (`langspan events`
+shows them). `since` is `{"from_seq", "to_seq", "away_ms", "ongoing",
+"truncated", "landings": [{"onto", "commit_oid", "session_id"}], "checks":
+{"passed", "failed", "latest_failure": {"name", "exit_code",
+"passed_since"}}, "interface_changes": [{"path", "names", "by_session"}],
+"sessions_ended", "messages_unacknowledged": [{"message_id", "from", "to"}],
+"teammates_heard", "omitted"}`. Lists are oldest first, at most 32 each; the
+rest are counted in `omitted`. `ongoing` says no interactive session has
+worked since; only then does a start carry the section. With
+`--since-away` and no gap that long, `since` is absent. The MCP tool
+`langspan_recap` takes `since_away: true` or `since_seq`.
+
+Set the gap with `LANGSPAN_AWAY_AFTER_MS` (milliseconds, 1 to 30 days) in the
+environment the host, the CLI or the MCP server runs in; an invalid value is
+an error naming the variable, and the hook then leaves the section out.
+The newest 10,000 events are read. When the point is older than them, or
+retention removed events after it, `truncated` is true and the section says
+only `more happened than fits; run langspan recap WORKSPACE --since-away`.
+It is derived from the event log on request; nothing new is stored, no
+transcript is read and nothing leaves the machine.
+
 ### The trail a session leaves when it ends
 
 When a session ends (Claude Code, Codex and Gemini CLI `SessionEnd`, Cursor
@@ -2823,8 +2876,11 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol is version 7 and the SQLite schema marker version 4
-(retention). The daemon also answers version 6 clients, without the briefing
+The current wire protocol is version 8 and the SQLite schema marker version 4
+(retention). The daemon also answers version 7 clients, without the `since`
+that version 8 added to a recap (a recap asked for `since` is not sent to a
+daemon of version 7 or earlier: restart the daemon after upgrading); version
+6 clients, also without the briefing
 memory and context counts version 7 added; version 5 clients, also without
 the `rebased` and `adapted` that version 6 added to a landing; version 4
 clients, also without the `refusal_outcomes` that version 5 added to a

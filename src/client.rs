@@ -36,17 +36,19 @@ mod unix {
         crate::hook::redact_command(&mut request.command);
         let mut response = exchange(state_dir, &request, deadline)?;
         // A daemon of an earlier build refuses this version before it reads
-        // the command, and answers in its own (version 6, 5, 4 or 3), so the
-        // same request in the version it names cannot take effect twice.
-        // Requests are the same in every version it answers, except the one
-        // version 6 changed (`protocol::fits`), which is not sent at all to
-        // a daemon of version 5 or earlier.
+        // the command, and answers in its own (version 7, 6, 5, 4 or 3), so
+        // the same request in the version it names cannot take effect twice.
+        // Requests are the same in every version it answers, except those
+        // versions 6 and 8 changed (`protocol::fits`), which are not sent at
+        // all to a daemon of an earlier version.
         if request.version == PROTOCOL_VERSION
             && (OLDEST_PROTOCOL_VERSION..PROTOCOL_VERSION).contains(&response.version)
             && matches!(&response.outcome, Outcome::Error { code, .. } if code == "unsupported_version")
         {
             if !crate::protocol::fits(response.version, &request.command) {
-                return Err(crate::protocol::older_daemon(response.version).into());
+                return Err(
+                    crate::protocol::older_daemon(response.version, &request.command).into(),
+                );
             }
             request.version = response.version;
             response = exchange(state_dir, &request, deadline)?;
@@ -320,6 +322,7 @@ mod unix {
                 crate::protocol::PROTOCOL_VERSION_4,
                 crate::protocol::PROTOCOL_VERSION_5,
                 crate::protocol::PROTOCOL_VERSION_6,
+                crate::protocol::PROTOCOL_VERSION_7,
             ] {
                 ask_an_earlier_daemon(version);
             }
