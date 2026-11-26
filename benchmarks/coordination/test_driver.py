@@ -911,6 +911,20 @@ class StandinHooks(Temporary):
         self.addCleanup(log.close)
         return standin_agent.Session(settings, log, str(self.root)), log
 
+    def test_a_following_wait_lasts_until_just_before_the_session_limit(self):
+        # A fixed wait ran out on a loaded machine before LangSpan's notice
+        # arrived, and the session ended uninformed. Every wait now shares
+        # the session's own time limit.
+        started = time.monotonic() - 5
+        self.assertEqual(standin_agent.wait_deadline({"time_limit_s": 600}, started),
+                         started + 600 - standin_agent.WAIT_MARGIN_SECONDS)
+        # A plan without a limit, or one too short for the margin, keeps the fixed wait.
+        for plan in ({}, {"time_limit_s": standin_agent.WAIT_MARGIN_SECONDS}):
+            before = time.monotonic()
+            deadline = standin_agent.wait_deadline(plan, started)
+            self.assertGreaterEqual(deadline, before + standin_agent.WAIT_SECONDS, plan)
+            self.assertLessEqual(deadline, time.monotonic() + standin_agent.WAIT_SECONDS, plan)
+
     def test_a_hook_slower_than_its_host_timeout_still_decides_the_call(self):
         # On a loaded machine a hook can start late. Its decision is what the
         # dry run measures, so the edit waits for it, and the log says it was late.
@@ -1127,8 +1141,12 @@ class DryRun(Temporary):
 
     def run_driver(self, arm, family, n, mode, seed=11, stagger=None):
         output = self.root / ("%s-%s-%d-%s" % (arm, family, n, mode))
+        # A following stand-in waits for its peers and LangSpan's notices
+        # until shortly before this limit, so a loaded machine slows the run
+        # instead of changing what the sessions learn. An unloaded run ends
+        # its waits in seconds.
         argv = [sys.executable, "-B", str(HERE / "driver.py"), "--arm", arm, "--family", family,
-                "--sessions", str(n), "--seed", str(seed), "--standin-mode", mode, "--time-limit", "180",
+                "--sessions", str(n), "--seed", str(seed), "--standin-mode", mode, "--time-limit", "600",
                 "--run", "--output", str(output)]
         if stagger is not None:
             argv += ["--stagger", str(stagger)]

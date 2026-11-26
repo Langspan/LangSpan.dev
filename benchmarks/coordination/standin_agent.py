@@ -54,9 +54,14 @@ import uuid
 # A hook still running at the bound is killed with every process it started.
 HOOK_SECONDS = 30
 BRIEF_SECONDS = 10
-# How long a following session waits to hear from its peers, per phase.
-# Sharing through the remote takes a pass of each daemon (5 s) or two.
+# How long a following session waits to hear from its peers, per phase, when
+# its plan gives no session time limit. With one, every wait may run until
+# WAIT_MARGIN_SECONDS before the driver would stop the session: on a loaded
+# machine, a peer's edit and LangSpan's index of it can take longer than any
+# fixed wait, and a wait that ran out would make the session act uninformed
+# instead of failing for the reason it did.
 WAIT_SECONDS = 75
+WAIT_MARGIN_SECONDS = 30
 POLL_SECONDS = 1
 MAX_PEERS = 16
 
@@ -191,13 +196,21 @@ def briefed_peers(session):
     return peers
 
 
-def wait_for(session, peers_expected, ready, also=lambda: True):
+def wait_deadline(plan, started):
+    """When a wait ends: WAIT_MARGIN_SECONDS before the session's time limit
+    from STARTED, or WAIT_SECONDS from now for a plan without one."""
+    limit = plan.get("time_limit_s")
+    if isinstance(limit, (int, float)) and limit > WAIT_MARGIN_SECONDS:
+        return started + limit - WAIT_MARGIN_SECONDS
+    return time.monotonic() + WAIT_SECONDS
+
+
+def wait_for(session, peers_expected, ready, deadline, also=lambda: True):
     """Poll LangSpan until READY holds for every expected peer and ALSO
-    holds, within the bound. Each poll is a read of a file the task uses, as
-    an agent's would be, so hook briefings arrive as well. Returns what was
-    heard."""
+    holds, or until DEADLINE (monotonic). Each poll is a read of a file the
+    task uses, as an agent's would be, so hook briefings arrive as well.
+    Returns what was heard."""
     heard = {}
-    deadline = time.monotonic() + WAIT_SECONDS
     while True:
         for name, peer in briefed_peers(session).items():
             # A peer's task line goes once it ends; keep the one heard before.
@@ -241,7 +254,9 @@ def main(argv):
         return 2
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, stop_on_signal)
+    started = time.monotonic()
     plan = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
+    deadline = wait_deadline(plan, started)
     index, mode = int(argv[1]), argv[2]
     task = plan["tasks"][index - 1]
     prompt = plan["prompts"][index - 1]
@@ -271,7 +286,7 @@ def main(argv):
 
         # Only a task that depends on its peers' work waits to hear of it.
         if mode == "follow" and sharing and "trigger" in task:
-            heard = wait_for(session, plan["sessions"] - 1, lambda peer: bool(peer["task"]))
+            heard = wait_for(session, plan["sessions"] - 1, lambda peer: bool(peer["task"]), deadline)
         for name in task.get("reads", []):
             session.read(Path(name))
         informed = mode == "follow" and told()
@@ -281,12 +296,12 @@ def main(argv):
             if task.get("leads"):
                 # Peers learn of this session's change while it is in
                 # flight, so it stays until every peer has ended.
-                wait_for(session, plan["sessions"] - 1, lambda peer: peer["ended"])
+                wait_for(session, plan["sessions"] - 1, lambda peer: peer["ended"], deadline)
             else:
                 # A peer that shows edits has finished waiting for this one.
                 # A notice the task expects arrives with a later briefing.
                 notice = task.get("notice")
-                wait_for(session, plan["sessions"] - 1, lambda peer: peer["edited"],
+                wait_for(session, plan["sessions"] - 1, lambda peer: peer["edited"], deadline,
                          lambda: not notice or any(re.search(notice, text) for text in session.context))
             if not informed and told():
                 # Told only after its edit, as by an alert at the write:

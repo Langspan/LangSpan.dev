@@ -228,13 +228,16 @@ The stand-in agent makes one of the fixed edits its task defines:
   details ask for; otherwise the uninformed edit. A dependent in
   `discovered_change` first reads `shelf/dates.py` and the package's caller,
   `shelf/orders.py`, as an agent reads how a helper is called. In the
-  LangSpan arm, a session whose task depends on a peer's waits, at most 75
-  seconds, until LangSpan has told it every peer's task. Before it ends, it
-  waits until every peer shows edits and, for a new caller or a dependent,
-  until LangSpan's notice of the change has arrived; the session whose task
-  changes the interface waits until every peer has ended. When LangSpan's
-  notice or alert tells a session of the change only after its edit, it makes
-  the informed edit then, as an agent told of a broken call fixes it.
+  LangSpan arm, a session whose task depends on a peer's waits until
+  LangSpan has told it every peer's task. Before it ends, it waits until
+  every peer shows edits and, for a new caller or a dependent, until
+  LangSpan's notice of the change has arrived; the session whose task changes
+  the interface waits until every peer has ended. Each wait lasts at most
+  until 30 seconds before the session's `--time-limit`, so a loaded machine
+  slows a dry run instead of changing what its sessions learn. When
+  LangSpan's notice or alert tells a session of the change only after its
+  edit, it makes the informed edit then, as an agent told of a broken call
+  fixes it.
 - `--standin-mode ignore` always makes the uninformed edit.
 - `--standin-mode hedge` makes the edit that holds up whatever peers do,
   without knowing: a contradiction task keeps the default and sets its value
