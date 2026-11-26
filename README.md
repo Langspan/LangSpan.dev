@@ -135,7 +135,7 @@ choose to share it. The agent provider's data handling is separate.
 
 The local source index identifies potential relationships between files,
 including changed exported signatures and related name mentions. It reads
-Rust, Python, TypeScript/JavaScript, Go and Java. A supported
+Rust, Python, TypeScript/JavaScript, Go, Java and C#. A supported
 Claude Code or Codex write that uses an outdated argument count can receive
 an advisory notice with the tool result. The notice does not refuse the
 write or repair the caller. Matching is by name, not resolved types or imports. See the [source index](docs/adr/0008-derived-source-index.md),

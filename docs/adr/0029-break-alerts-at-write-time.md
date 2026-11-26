@@ -99,7 +99,11 @@ whether the first parameter is an explicit receiver (Rust `self`, Python
 `self` or `cls`). Python `*` and `/` markers are not parameters; a Go
 `a, b int` is two; a TypeScript `this:` parameter and a Java receiver
 parameter (`Orders this`) are never passed; a Java `T... items` is variadic.
-A Java constructor's count is checked against `new T(...)`. Two
+A Java constructor's count is checked against `new T(...)`. A C# parameter
+with a default is optional and `params T[] items` is variadic; a C# extension
+method (`this Cart cart`) has no count, since `cart.F()` and `Carts.F(cart)`
+are both member calls with different counts. A C# constructor's count is
+checked against `new T(...)`; a target-typed `new(...)` names no type. Two
 definitions of one name in one file, a signature cut at its 240-byte bound, or
 any parameter shape not listed has no count, and its notice cannot alert.
 
@@ -352,7 +356,7 @@ alerted at another session's `Write` with both counts, signatures, file, line
 and peer; a call with the new count gets nothing; the same notice is not
 repeated to that session while a third session is still told; the changing
 session is not told; only `interface_alerted` is recorded, never the code;
-Python and Java through a Claude Code `Edit`, TypeScript and Go through Codex patches
+Python, Java and C# through a Claude Code `Edit`, TypeScript and Go through Codex patches
 (`Update File` and `Add File`); a Gemini CLI `replace` gets the alert with
 its `AfterTool` result once, not when it fails, not for the new count and not
 again at the same session's next write, and leaves nothing kept

@@ -77,6 +77,21 @@ fn a_rename_with_an_unchanged_body_is_one_rename_in_each_language() {
             ("fetchUser", "public int fetchUser(int id)"),
             ("loadUser", "public int loadUser(int id)"),
         ),
+        (
+            Language::CSharp,
+            "public class App\n{\n    public int FetchUser(int id)\n    {\n        return id + 1;\n    }\n}\n",
+            "public class App\n{\n    public int LoadUser(int id)\n    {\n        return id + 1;\n    }\n}\n",
+            ("FetchUser", "public int FetchUser(int id)"),
+            ("LoadUser", "public int LoadUser(int id)"),
+        ),
+        // An expression-bodied method's `=> expression` is its body.
+        (
+            Language::CSharp,
+            "public class App\n{\n    public int FetchUser(int id) => id + 1;\n}\n",
+            "public class App\n{\n    public int LoadUser(int id) => id + 1;\n}\n",
+            ("FetchUser", "public int FetchUser(int id)"),
+            ("LoadUser", "public int LoadUser(int id)"),
+        ),
     ];
     for (language, before, after, (old, old_signature), (new, new_signature)) in cases {
         let found = changes(language, before, after);
@@ -149,6 +164,23 @@ fn a_rename_with_a_changed_body_at_the_same_lines_is_a_same_signature_rename() {
                 "load_user",
                 "def fetch_user(id)",
                 "def load_user(id)",
+                RenameEvidence::SameSignature
+            )
+        )]
+    );
+    // A C# property has no block, so only its lines link a rename.
+    assert_eq!(
+        sorted(changes(
+            Language::CSharp,
+            "public class App\n{\n    public int Count { get; set; }\n}\n",
+            "public class App\n{\n    public int Total { get; set; }\n}\n",
+        )),
+        [(
+            "Count".to_owned(),
+            renamed_by(
+                "Total",
+                "public int Count { get; set; }",
+                "public int Total { get; set; }",
                 RenameEvidence::SameSignature
             )
         )]

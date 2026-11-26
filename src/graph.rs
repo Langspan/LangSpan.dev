@@ -2292,7 +2292,7 @@ fn head_graph(
 /// A signature of `path`'s language as `added_or_changed` compares it: its
 /// tokens, as a reformat is (`crate::reformat::tokens`), so spacing between
 /// two tokens never counts and never joins them. Every indexed language
-/// is split into words: Go and Java by the TypeScript and JavaScript rules
+/// is split into words: Go, Java and C# by the TypeScript and JavaScript rules
 /// (words, quoted and backtick literals, `//` and `/* */` comments), as
 /// the rules for other files drop all whitespace, and `chan int` would
 /// then equal `chanint` (review comment 4704678366).
@@ -2301,9 +2301,9 @@ fn signature_tokens(path: &str, signature: &str) -> Vec<Vec<u8>> {
     let language = match Language::for_path(path) {
         Some(Language::Rust) => Tokens::Rust,
         Some(Language::Python) => Tokens::Python,
-        Some(Language::TypeScript | Language::Tsx | Language::Go | Language::Java) => {
-            Tokens::Script
-        }
+        Some(
+            Language::TypeScript | Language::Tsx | Language::Go | Language::Java | Language::CSharp,
+        ) => Tokens::Script,
         None => crate::reformat::language(path),
     };
     crate::reformat::tokens(signature.as_bytes(), language)
@@ -3186,6 +3186,7 @@ mod review_regressions {
             langspan_graph::Language::Tsx => "src/a.tsx",
             langspan_graph::Language::Go => "src/a.go",
             langspan_graph::Language::Java => "src/A.java",
+            langspan_graph::Language::CSharp => "src/A.cs",
         }
     }
 
@@ -3351,6 +3352,21 @@ mod review_regressions {
                 r#"@Named("a b") public void f()"#,
                 r#"@Named("ab") public void f()"#,
             ),
+            (
+                CSharp,
+                "public static int F(ref Foo x)",
+                "public static int F(refFoo x)",
+            ),
+            (
+                CSharp,
+                "public async Task<T> F<T>(T x) where T : class",
+                "public asyncTask<T> F<T>(T x) where T : class",
+            ),
+            (
+                CSharp,
+                r#"public string F(string x = @"a b")"#,
+                r#"public string F(string x = @"ab")"#,
+            ),
         ];
         for (language, before, after) in changed {
             let path = language_path(*language);
@@ -3385,6 +3401,11 @@ mod review_regressions {
             (Go, "func F(x <-chan int)", "func F(x <- chan int)"),
             (Go, "func F(x chan<- int)", "func F(x chan <-int)"),
             (Java, "public  int  f( int[]  x )", "public int f(int[] x)"),
+            (
+                CSharp,
+                "public  int  F( int[]  x ,  ref  T  y )",
+                "public int F(int[] x, ref T y)",
+            ),
         ];
         for (language, before, after) in respaced {
             let path = language_path(*language);

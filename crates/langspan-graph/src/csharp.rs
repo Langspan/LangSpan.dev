@@ -63,6 +63,14 @@ pub(crate) fn visit(node: Node, source: &[u8], graph: &mut FileGraph) -> Option<
         signature: signature(node, source),
         exported: exported(node, source),
         bytes: start.start_byte()..whole.end_byte(),
+        // A method's or constructor's block or `=> expression`. A property
+        // has none, so two properties are linked as a rename only by their
+        // lines.
+        block: matches!(kind, "method_declaration" | "constructor_declaration")
+            .then(|| node.child_by_field_name("body"))
+            .flatten()
+            .map(|body| body.byte_range()),
+        block_digest: None,
     });
     Some(Some(name.id()))
 }

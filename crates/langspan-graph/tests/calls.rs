@@ -164,6 +164,18 @@ fn csharp_method_calls_and_constructor_calls_count_their_arguments() {
     )
     .unwrap();
     assert_eq!((wrapped[0].line, wrapped[0].lines), (5, (5, 7)));
+    // In a null-conditional chain, the call is named by its last member.
+    assert_eq!(
+        found(
+            Language::CSharp,
+            "class A\n{\n    void M()\n    {\n        a?.B?.G(1, 2);\n        a?.B.H(1, 2, 3);\n        a.B?.K();\n    }\n}\n"
+        ),
+        [
+            call("G", 5, Some(2), true),
+            call("H", 6, Some(3), true),
+            call("K", 7, Some(0), true),
+        ]
+    );
 }
 
 fn counts(language: Language, signature: &str) -> Option<(u32, Option<u32>, bool)> {

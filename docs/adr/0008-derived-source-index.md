@@ -17,7 +17,7 @@ needs to know what each file defines and what each file mentions.
 Tree-sitter and returns the symbols it defines (name, kind, line range,
 signature text up to the body, whether exported by the language's own rule),
 the names it mentions and what it imports. Rust, Python, TypeScript/JavaScript
-(including TSX/JSX), Go and Java, chosen by file extension. It does no I/O. Inputs
+(including TSX/JSX), Go, Java and C#, chosen by file extension. It does no I/O. Inputs
 over 1 MiB are refused; a file with a syntax error is indexed as far as it
 parsed and marked partial.
 
@@ -47,6 +47,44 @@ are not. Tests: the Java tests in `crates/langspan-graph/tests/extract.rs`
 and `calls.rs`, and
 `a_java_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_session`
 in `tests/graph.rs`.
+
+**C#** (`.cs`, added 26 November 2026 for roadmap D6,
+[issue #55](https://github.com/Langspan/LangSpan.dev/issues/55)). Classes,
+structs, records, enums and delegates are types; interfaces are interfaces;
+methods, constructors and properties are methods, since C# has no free
+functions; enum members and `const` or `static readonly` fields are
+constants, one per declarator. Namespaces, block or file-scoped, are not
+symbols, and a namespace's name is not a mention. The export rule is what
+another assembly can reach: `public`, `protected` and `protected internal`.
+`internal`, `private protected`, `private`, `file` and no modifier are not
+exported, since a type defaults to `internal` and a member to `private`. An
+interface's members are exported unless `private` or `internal`, and every
+enum member is. An explicit interface implementation (`void IPlacer.Cancel()`)
+is not exported: callers reach it through the interface's own member. Each
+declaration is judged alone, as in Java. A definition starts after the
+attributes and comments that lead it, and its signature leaves those
+attributes out, so adding `[Obsolete]` changes no caller. A constructor's
+signature ends before its `: base(...)` or `: this(...)` initializer. A
+constant's signature is its modifiers, type and name, without the value. A
+property's signature is its declaration and its accessors without their bodies
+or an initial value (`public int Count { get; private set; }`), and `{ get; }`
+for an expression-bodied property, so removing a setter is an interface
+change. A method's or constructor's block or `=> expression` is its body for
+a rename (D7); a property has none, so a renamed property is linked only by
+its lines. An import is recorded as written after `using`, `using static` or
+an alias's `=`. References are identifiers. Calls are method calls, member
+calls (`a.F(x)`, `a?.F(x)`, `F<T>(x)`) and constructor calls (`new T(x)`,
+named by the type's last identifier); a target-typed `new(x)`, an object
+initializer without parentheses and a `: base(x)` initializer are not.
+Tests: the C# tests in `crates/langspan-graph/tests/extract.rs`, `calls.rs`
+and `renames.rs`; in `tests/graph.rs`,
+`a_csharp_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_session`
+and
+`a_committed_csharp_rename_in_another_worktree_is_told_until_it_is_merged`;
+`a_csharp_method_call_that_no_longer_fits_is_told_at_the_write` in
+`tests/break_alerts.rs`; and
+`stdio_check_write_reports_a_peers_csharp_signature_and_body_changes` in
+`tests/mcp.rs`.
 
 **Everything is a name match.** Nothing resolves scopes, types, modules or
 imports. A mention of `open` matches every symbol called `open`. Every
@@ -306,9 +344,9 @@ trailing comma, a rewrapped `where` clause or spacing inside braces is not a
 changed signature, while whitespace between two words, and any change to a
 name, type or default, still is. The same rule holds for every indexed
 language, since in each a trailing comma in those lists is optional or, in
-Java's parameter lists, not allowed, and spacing around punctuation means
-nothing. A google-java-format rewrap of a parameter list is therefore not a
-changed signature, and a changed parameter type is. One trailing comma is kept: the only comma of a
+Java's and C#'s parameter lists, not allowed, and spacing around punctuation
+means nothing. A google-java-format or `dotnet format` rewrap of a parameter
+list is therefore not a changed signature, and a changed parameter type is. One trailing comma is kept: the only comma of a
 parenthesised group that is not a parameter or argument list (a parenthesis
 not right after a name or a closing `>`), because it makes a one-element
 tuple: Python's `(1,)` and `(1)`, or Rust's `(u32,)` and `(u32)`, differ.
@@ -443,7 +481,7 @@ the `HEAD` version lacks, or exports with a different signature, are the
 file's in-flight set. Signatures are compared by their tokens as a reformat
 is ([ADR 0011](0011-shell-writes.md)): spacing between tokens aside, but a
 string literal's whitespace counts. Every indexed language is split into
-words, Go and Java by the TypeScript rules, so removing spacing never joins
+words, Go, Java and C# by the TypeScript rules, so removing spacing never joins
 two tokens (`chan int` is not `chanint`). Every outcome of reading a file
 for the index or for this comparison is terminal for that version or tried
 again with a bound. A `HEAD` blob over the parse bound, or one that does not

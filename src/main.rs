@@ -114,7 +114,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Who holds BRANCH's push turn and who waits for it
   land-cancel WORKSPACE --onto BRANCH --request-id ID
                                  Stop the waiting landing ID; it pushes nothing
-  graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go, Java)
+  graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go, Java, C#)
                                  [--detail]: with its body digest, calls, callers
                                  by name, notes on its file and last check;
                                  [--renamed]: under the newest name a recorded

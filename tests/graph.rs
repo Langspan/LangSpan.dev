@@ -3604,12 +3604,26 @@ const CALLS_PARSE_CONFIG: &str =
 /// work in the checkout; Alice, in the worktree, renames `parse_config` to
 /// `load_config` and saves. Returns once the coordinator holds the rename.
 fn parse_config_renamed_in_another_worktree() -> (World, PathBuf) {
-    let w = World::with_files(Vec::new(), PARSE_CONFIG);
+    renamed_in_another_worktree(
+        PARSE_CONFIG,
+        ("src/config.rs", LOAD_CONFIG),
+        ("parse_config", "load_config"),
+    )
+}
+
+/// The same with `files`, where Alice writes `renamed` to `path` and so
+/// renames `old` to `new`.
+fn renamed_in_another_worktree(
+    files: &[(&str, &str)],
+    (path, renamed): (&str, &str),
+    (old, new): (&str, &str),
+) -> (World, PathBuf) {
+    let w = World::with_files(Vec::new(), files);
     let tree = w.linked_tree();
     for workspace in ["app", "tree"] {
         let deadline = Instant::now() + WAIT;
         loop {
-            let (_, text) = w.cli(&["graph", "symbol", workspace, "parse_config", "--json"]);
+            let (_, text) = w.cli(&["graph", "symbol", workspace, old, "--json"]);
             let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
             if outcome["coverage"]["current_files"] == 3 {
                 break;
@@ -3621,13 +3635,10 @@ fn parse_config_renamed_in_another_worktree() -> (World, PathBuf) {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
-    assert!(
-        w.prompt("bob")
-            .is_none_or(|context| !context.contains("parse_config"))
-    );
-    w.edits_in("tree", &tree, "alice", "a1", "src/config.rs", LOAD_CONFIG);
+    assert!(w.prompt("bob").is_none_or(|context| !context.contains(old)));
+    w.edits_in("tree", &tree, "alice", "a1", path, renamed);
     let deadline = Instant::now() + WAIT;
-    while !rename_notice(&w).is_some_and(|notice| notice.to_string().contains("load_config")) {
+    while !notice_for(&w, path).is_some_and(|notice| notice.to_string().contains(new)) {
         assert!(Instant::now() < deadline, "no rename notice");
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -3636,12 +3647,17 @@ fn parse_config_renamed_in_another_worktree() -> (World, PathBuf) {
 
 /// The worktree's interface notice for `src/config.rs`.
 fn rename_notice(w: &World) -> Option<Value> {
+    notice_for(w, "src/config.rs")
+}
+
+/// The worktree's interface notice for `path`.
+fn notice_for(w: &World, path: &str) -> Option<Value> {
     let (_, status) = w.cli(&["status", "--json"]);
     let status: Value = serde_json::from_str(&status).unwrap();
     status["outcome"]["state"]["interface_notices"]["tree"]
         .as_array()?
         .iter()
-        .find(|notice| notice["path"] == "src/config.rs")
+        .find(|notice| notice["path"] == path)
         .cloned()
 }
 
@@ -3914,6 +3930,105 @@ fn a_caller_written_after_a_committed_rename_is_listed_on_its_notice() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// Roadmap D6 with D7, B10 and issue #217, in C#: Alice renames a public
+/// method in her worktree, commits on her branch and ends her session. The
+/// notice names the rename with its evidence, Bob's later write of a caller
+/// of the old name in the checkout is told of it, and once the branch is
+/// merged into the checkout's, Carol's write is not.
+#[test]
+fn a_committed_csharp_rename_in_another_worktree_is_told_until_it_is_merged() {
+    const CONFIG: &str = "namespace App;\n\npublic static class Config\n{\n    public static int ParseConfig(string text)\n    {\n        return text.Length;\n    }\n}\n";
+    const CALLER: &str = "namespace App;\n\npublic static class Report\n{\n    public static int Run() => Config.ParseConfig(\"b\");\n}\n";
+    let files = [
+        ("src/Config.cs", CONFIG),
+        (
+            "src/Program.cs",
+            "namespace App;\n\nstatic class Program\n{\n    static void Main() => Config.ParseConfig(\"a\");\n}\n",
+        ),
+        (
+            "src/Report.cs",
+            "namespace App;\n\npublic static class Report\n{\n    public static int Run() => 0;\n}\n",
+        ),
+    ];
+    let (w, tree) = renamed_in_another_worktree(
+        &files,
+        (
+            "src/Config.cs",
+            &CONFIG.replace("ParseConfig", "LoadConfig"),
+        ),
+        ("ParseConfig", "LoadConfig"),
+    );
+    let notice = notice_for(&w, "src/Config.cs").unwrap();
+    let change = &notice["changes"][0];
+    assert_eq!(
+        (
+            &change["change"],
+            &change["before_name"],
+            &change["after_name"],
+            &change["evidence"]
+        ),
+        (
+            &json!("renamed"),
+            &json!("ParseConfig"),
+            &json!("LoadConfig"),
+            &json!("same_body")
+        ),
+        "{notice:#}"
+    );
+    assert_eq!(
+        notice["dependents"],
+        json!(["src/Program.cs"]),
+        "{notice:#}"
+    );
+    alice_commits_the_rename_and_ends(&w, &tree);
+    let root = w.work();
+    let writes = |session: &str, call: &str, file: &str| {
+        let (coverage, context, detail) = w.hook_in(
+            "app",
+            &root,
+            json!({
+                "session_id": session, "cwd": root, "hook_event_name": "PreToolUse",
+                "tool_name": "Write", "tool_use_id": call,
+                "tool_input": {"file_path": root.join(file), "content": CALLER},
+            }),
+            &[],
+        );
+        assert_eq!(coverage, "admitted", "{detail}");
+        context
+    };
+    let context = writes("bob", "b1", "src/Report.cs").expect("no alert at the write");
+    let expected = format!(
+        r#""src/Report.cs":5 calls "ParseConfig", which was renamed to "LoadConfig" in "src/Config.cs" in worktree "{}" by claude-code.alice"#,
+        tree.display()
+    );
+    assert!(context.contains(&expected), "{context}");
+    assert!(
+        context.contains(r#""public static int LoadConfig(string text)""#),
+        "{context}"
+    );
+    git(&root, &["merge", "--quiet", "--no-edit", "feature"]);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, text) = w.cli(&["graph", "symbol", "app", "LoadConfig", "--json"]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome["coverage"]["current_files"] == 3
+            && outcome["symbols"][0]["name"] == "LoadConfig"
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "merge never indexed: {outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        writes("carol", "c1", "src/Summary.cs")
+            .is_none_or(|context| !context.contains("ParseConfig")),
+        "told after the merge"
+    );
 }
 
 /// Issue #217, fourth acceptance criterion: an uncommitted change keeps its
