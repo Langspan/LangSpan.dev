@@ -1,9 +1,11 @@
 # Product marketing context
 
-Document version: 1.0 — 25 November 2026
+Document version: 2.0 — 25 November 2026
 
 ## Product and offer
-LangSpan is an Apache-2.0 coordination layer for existing coding-agent sessions.
+Use [the canonical product positioning](../docs/positioning.md) for every
+public-facing surface. LangSpan is an Apache-2.0 coordination layer for
+parallel agentic development, built for existing coding-agent sessions.
 The primary action is to download v0.1.0, connect one checkout and observe work
 from two sessions. Source builds remain an option; Homebrew and Windows are not
 available. The user keeps the agent, its permissions and code-review process.
@@ -20,7 +22,8 @@ Manual chat/status relay, issue assignment, Git branches/worktrees and agent
 orchestrators are relevant alternatives or complements. LangSpan operates in
 existing sessions via hooks, CLI and MCP, with optional Git-based awareness.
 Worktree isolation remains useful; it does not share local holds across
-checkouts. Do not claim unique market position without competitive validation.
+checkouts or resolve semantic incompatibilities. Shared notes require agents
+to maintain and read them. Do not claim unique market position without competitive validation.
 
 ## Objections and evidence
 - Does it replace my agent? No; native hooks integrate supported sessions.
@@ -50,4 +53,6 @@ now starts with an archive; preserve the source route. No conversion analytics
 or customer research was available to validate lift.
 
 ## Changelog
+- 2.0: align the coordination category, problem, headline and claim rules
+  with the public website and canonical positioning.
 - 1.0: initial source-based context, release and claim review.

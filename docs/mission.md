@@ -74,9 +74,11 @@ purpose even when the transport is fast.
 
 ## Elevator pitch
 
-LangSpan keeps a team's coding agents informed about each other's work. It
-brings relevant updates into their existing sessions so developers can work on
-connected parts of a feature without relaying every change by hand.
+LangSpan is the open-source coordination layer for parallel agentic development.
+It brings relevant peer work into existing coding-agent sessions, coordinates
+supported local edits, and helps teams verify combined changes. The goal is
+compatible parallel work with less avoidable repair and manual relay.
+[Product positioning](positioning.md) owns the public message and claim boundaries.
 
 ## Internal planning form
 
