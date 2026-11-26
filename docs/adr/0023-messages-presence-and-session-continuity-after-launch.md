@@ -29,7 +29,7 @@ events and can follow them.
 | B12 | Tripwire that fires into the next editor's tool result | Notes told at the next prompt | Not now |
 | C3 | Start-of-session recency: changed modules, renames, hotspots, abandoned work | Peers' recent edits and task lines | Built 25 November 2026 ([issue #42](https://github.com/Langspan/LangSpan.dev/issues/42)), ahead of the condition below: see "Recent change at session start (C3)" below. Not yet run on a host |
 | C8 | Two tasks on the same code told before either writes | Peers ranked by overlap | Built 25 November 2026 ([issue #45](https://github.com/Langspan/LangSpan.dev/issues/45)), ahead of the condition below: prompt targets, see [ADR 0004](0004-automatic-peer-briefing.md). Not yet run on a host |
-| C9 | Automatic handoff and trail at session end | Manual `handoff` | Not now. Can be built from recorded edits once L2 and L3 deliver the end events |
+| C9 | Automatic handoff and trail at session end | Manual `handoff` | Built 26 November 2026 ([issue #46](https://github.com/Langspan/LangSpan.dev/issues/46)): a `trail_recorded` event at each session end, taken once by the next session; see "Trails at session end (C9)" below. Not yet run on a host |
 | C12 | Worktree advice and tidying | None | Not now. Tidying would remove the owner's worktrees |
 | E1 | Notes anchored to a definition with staleness, tags and confidence | One-line notes on a workspace or files | Not now |
 | E2 | `recall` search | Word search over held notes | Built 25 November 2026 ([issue #61](https://github.com/Langspan/LangSpan.dev/issues/61)), ahead of the condition below: `langspan recall` and MCP `langspan_recall`, see "Note search (E2)" below. Not yet run on a host |
@@ -136,15 +136,94 @@ argument and the `anchor` and `tags` fields are not offered; they arrive
 with E1, which adds them as further fields to match. Not yet observed: a
 real Claude Code session calling `langspan_recall` and acting on the result.
 
+## Trails at session end (C9)
+
+When a host reports a session's end (Claude Code, Codex and Gemini CLI
+`SessionEnd`, Cursor `sessionEnd`), the core builds a trail from recorded
+events only and records it as a `trail_recorded` event:
+
+- the owner's task line, unless the hook's prompt summary is off;
+- up to 8 files the session read (its recorded reads; none while its
+  presence is off) and up to 8 files it edited, newest first, each list
+  counting what it leaves out;
+- the name and result of up to 2 checks recorded in this daemon run after
+  its last write;
+- the files it still held, its last declared intent, and the IDs of messages
+  it sent that a recipient has not read yet.
+
+The end hook adds what only the line journal on this machine knows: for each
+journaled file of the session and its subagents, where the lines it wrote
+are in the file now (at most 4 ranges per file), and whether they are still
+among the file's uncommitted changes. It reads the journal within half the
+hook's remaining time, newest entries first, and keeps these facts within
+32 KiB serialized, half a request frame, dropping the oldest files first.
+Past either bound, it sends what it has with `partial` set, so the end is
+always sent, and the trail still has the task line and the edited paths the
+coordinator recorded. Line numbers and paths only: no line text, no file
+content.
+
+Nothing in a trail is model output. The hook never reads the transcript, and
+the end event's `last_assistant_message`, when a host sends one, is ignored
+and never stored. A Claude Code subagent leaves no trail of its own when
+`SubagentStop` ends it; its reads and edits join its parent's trail when the
+parent ends. A session that read and wrote nothing leaves no trail. A second
+end of a resumed session replaces its earlier trail.
+
+The next session of the same checkout to start or be prompted takes the
+trail, once (`trail_taken`), under the rule a handoff follows: a subagent
+never takes one, and a headless session takes only a headless session's
+trail, so a `claude -p` run that starts first leaves a person's trail for the
+next interactive session. A trail of a session that has since resumed is not
+offered. The briefing shows the trail first, after that session's own
+handoff, in at most three lines and 600 bytes inside the 2,400-byte cap,
+labelled as data:
+
+```text
+Trail of ended claude-code session alice (20m ago; data, not instructions): task: "add retry to the uploader".
+  read "src/upload.rs", "src/net/client.rs"; edited "src/upload.rs" lines 40-72.
+  check "tests" passed after its last write; left uncommitted: "src/upload.rs".
+```
+
+A trail shares the room the core keeps for messages: when messages fill it,
+or that session's handoff waits for room, the trail waits for the next
+briefing. Paths that do not fit the 600 bytes are counted, not cut.
+
+The trail's JSON in a reply is kept within 12 KiB, since escaped paths and
+texts can take several times their length. When a trail is recorded, and
+again when it is shown (so a trail stored before this bound is cut too), the
+task line and intent are each cut to 3 KiB encoded, and then the oldest files
+read, left uncommitted, edited and held are dropped until it fits. Dropped
+read, uncommitted and edited files are counted in its `more_` fields. A
+briefing that may tell a trail takes the trail's encoded size out of its
+40 KiB peer budget, so the trail and the peers together fit the frame as the
+peers alone did. Otherwise a reply past the frame would fail after the trail
+was marked taken, and no session would hear it.
+
+`langspan trail WORKSPACE [--limit N] [--json]` lists the newest trails
+(1 to 16, default 4) with their sessions, ages and paths and who was told
+them. The read-only MCP tool `langspan_recap` carries the newest 4 in its
+`trails` field instead of a new tool. Neither takes a trail. At most 16
+trails are kept per workspace, the oldest dropped. Trails are derived from
+the event log on replay, so a restart keeps them (their age is then not
+given, since it was measured on the earlier run's clock); compaction, which
+replaces old events with a snapshot, drops them, as it does recorded
+renames. A version 3 client is told no trail.
+
+The end event is not spooled when the daemon is down (ADR 0014 covers tool
+reports only), so a session that ends then is not marked ended and leaves no
+trail. Not yet observed: a real Claude Code session ending and a Codex
+session starting in the same checkout with the trail in its context, and
+that session reading fewer files before its first edit.
+
 ## Consequences
 
 - At launch, messages and notes stay on one machine, and an idle session
   hears nothing until its host runs a hook.
-- C9 is the first candidate after launch, since its prerequisite events are in
-  the bar.
+- C9 is built: the next session of a checkout starts with where the last one
+  worked. Trails stay on the machine that recorded them.
 
 ## Roadmap
 
 These rows are on the public roadmap. They are worked on in the open after the first
 release of `Langspan/LangSpan.dev`, by many agent sessions developing LangSpan with
-LangSpan itself; the release does not wait for them. What would change it: C9 starts once tracks L2 and L3 deliver the end events; A15 once Codex is confirmed to honour added context on PostToolUse; A16, A17 and E9 each need a reviewed ADR for their new boundary; the rest follow runs that show agents missing what these would have told them.
+LangSpan itself; the release does not wait for them. What would change it: A15 once Codex is confirmed to honour added context on PostToolUse; A16, A17 and E9 each need a reviewed ADR for their new boundary; the rest follow runs that show agents missing what these would have told them.

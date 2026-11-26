@@ -1353,6 +1353,7 @@ fn the_report_takes_intents_and_memberships_from_before_a_compaction() {
         "e-bob",
         Command::SessionEnd {
             session_id: bob.into(),
+            trail: None,
         },
         2_000,
     ));

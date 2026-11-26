@@ -182,6 +182,7 @@ fn counts_current_sessions_of_the_repository_including_its_worktrees() {
         "end",
         Command::SessionEnd {
             session_id: "ended".into(),
+            trail: None,
         },
         now - 500,
     );
