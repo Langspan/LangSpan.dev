@@ -2471,9 +2471,10 @@ records remain readable; a build older than the marker refuses the file.
 ### Mixed versions after an upgrade
 
 LangSpan never downloads or replaces its own binary and makes no update
-check. Upgrade with `brew upgrade langspan`, or with a new release archive
-checked with `gh attestation verify` (see the release notes); roll back the
-same way, or by keeping the previous archive. The store stays readable by the
+check. Upgrade with a new release archive, checked as in
+[Verify the binary](install.md#verify-a-download), or by rebuilding from
+source; roll back by keeping the previous archive. `brew upgrade langspan`
+applies once the Homebrew tap is published. The store stays readable by the
 earlier build while the schema marker is unchanged.
 
 After an upgrade, a coordinator started before it keeps running the old
