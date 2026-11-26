@@ -108,10 +108,15 @@ async function coordinator() {
   git(other, 'commit', '--quiet', '-m', 'fixture');
   hook(stateDir, other, 'claude-code', { session_id: '33333333-0000-4000-8000-00000000000d', transcript_path: '/dev/null', cwd: other,
     hook_event_name: 'UserPromptSubmit', prompt: 'other work' }, 'other');
-  for (const command of [['message', 'work', HOSTILE, HOSTILE_FILE], ['remember', 'work', HOSTILE, HOSTILE_FILE],
-    ['remember', 'work', 'NOTE-HERE', 'a.txt'], ['remember', 'other', 'NOTE-OTHER-REPO', 'a.txt']]) {
-    const run = spawnSync(binary, ['--state-dir', stateDir, ...command, '--request-id', 'browser-' + command[0] + '-' + command[1] + '-' + command[3]]);
-    if (run.status !== 0) fail(command.slice(0, 2).join(' ') + ' failed: ' + run.stderr);
+  // Request IDs are index-based: a request ID admits only ASCII letters,
+  // digits, dots, underscores and hyphens, and the hostile file name has others.
+  for (const [i, command] of [['message', 'work', HOSTILE, HOSTILE_FILE], ['remember', 'work', HOSTILE, HOSTILE_FILE],
+    ['remember', 'work', 'NOTE-HERE', 'a.txt'], ['remember', 'other', 'NOTE-OTHER-REPO', 'a.txt']].entries()) {
+    const run = spawnSync(binary, ['--state-dir', stateDir, ...command, '--request-id', 'browser-fixture-' + i]);
+    if (run.status !== 0) {
+      fail(command.slice(0, 2).join(' ') + ' failed (status ' + run.status + ', signal ' + run.signal + (run.error ? ', ' + run.error.message : '')
+        + '): ' + run.stderr + run.stdout);
+    }
   }
   return { stateDir, daemon };
 }

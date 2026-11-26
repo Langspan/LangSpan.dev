@@ -649,7 +649,7 @@ function records(d, refusals) {
     push({ kind: 'notice', object: n, icon: 'notice', tone: 't-warn', age: num(n.age_ms), paths: [str(n.path)],
       key: recordKey('notice', [n.workspace_id, n.path]),
       title: 'Interface changed in ' + str(n.path),
-      detail: changes.map((c) => str(c.kind) + ' ' + str(c.name) + ': ' + str(c.change).replace(/_/g, ' ')).join('; ')
+      detail: changes.map((c) => str(c.kind) + ' ' + str(c.name) + ': ' + str(c.change).replace(/_/g, ' ') + (c.after_name ? ' to ' + str(c.after_name) : '')).join('; ')
         + (count(n.more_changes) ? '; ' + count(n.more_changes) + ' more' : '') + ' · ' + plural(dependents, 'possible dependent') });
   }
   for (const c of list(d.checks)) {
@@ -962,7 +962,7 @@ function inspectPath(col, d) {
   }
   for (const n of col.notices) {
     out.push(block('notice', 'Interface notice', add(el('div', 'items'), ...list(n.changes).map((c) =>
-      el('div', 'item mono', str(c.kind) + ' ' + str(c.name) + ': ' + str(c.change).replace(/_/g, ' ')))),
+      el('div', 'item mono', str(c.kind) + ' ' + str(c.name) + ': ' + str(c.change).replace(/_/g, ' ') + (c.after_name ? ' to ' + str(c.after_name) : '')))),
       count(n.more_changes) ? el('p', 'caveat', count(n.more_changes) + ' more changes') : null,
       strings(n.dependents).length ? add(el('div'), el('p', 'caveat', 'Files that name it:'), chips(strings(n.dependents))) : null,
       count(n.more_dependents) ? el('p', 'caveat', count(n.more_dependents) + ' more files') : null,
