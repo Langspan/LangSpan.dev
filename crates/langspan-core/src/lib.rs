@@ -1000,6 +1000,129 @@ pub struct CheckRecord {
     /// Set only for working-tree checks; never cleared.
     #[serde(default, skip_serializing_if = "is_false")]
     pub changed_since: bool,
+    /// For a combined check asked for them: definitions the combined
+    /// branches changed in ways that disagree. Advisory; they never change
+    /// `result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_findings: Option<Box<SymbolFindings>>,
+}
+
+/// The most definition findings one combined check keeps.
+pub const MAX_SYMBOL_FINDINGS: usize = 32;
+/// The most bytes of a finding's name, branch, path or signature.
+pub const MAX_SYMBOL_FINDING_TEXT: usize = 256;
+/// The longest note on why findings are missing or incomplete.
+pub const MAX_SYMBOL_FINDINGS_NOTE: usize = 512;
+
+/// What comparing the combined branches' definitions found (ADR 0020, D9):
+/// name matches across the files each branch changed, never a resolved
+/// reference. Repository text, data only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolFindings {
+    /// At most `MAX_SYMBOL_FINDINGS`, in branch, path and line order.
+    pub findings: Vec<SymbolFinding>,
+    /// Findings found beyond those kept.
+    pub more: u32,
+    /// Changed files in a supported language that were indexed.
+    pub files_indexed: u32,
+    /// Changed files in a supported language that were not: larger than
+    /// the parser's bound, or not text.
+    pub files_skipped: u32,
+    /// Why findings were skipped, when they were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolFindingKind {
+    /// Two branches changed one definition's signature differently.
+    BothChanged,
+    /// One branch changed a signature; another added a call whose argument
+    /// count fits the old signature and not the new one.
+    ChangedAndCalled,
+    /// One branch removed or renamed an exported definition; another added
+    /// a line that mentions its name.
+    RemovedAndUsed,
+}
+
+/// One disagreement between two combined branches. `branch`, `path` and
+/// `line` are where the first branch has the definition (where it was, for
+/// a removal); `other_*` where the second branch changed it, calls it or
+/// mentions it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolFinding {
+    pub finding: SymbolFindingKind,
+    pub name: String,
+    pub branch: String,
+    pub path: String,
+    pub line: u32,
+    /// The signature where the branches started.
+    pub before: String,
+    /// The first branch's signature; unset for a removal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// For a rename, the new name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_to: Option<String>,
+    pub other_branch: String,
+    pub other_path: String,
+    pub other_line: u32,
+    /// For `both_changed`, the second branch's signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_after: Option<String>,
+    /// For `changed_and_called`, the call's argument count, and how many
+    /// the first branch's signature takes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takes: Option<Arity>,
+}
+
+fn validate_symbol_findings(check: &CheckRecord) -> Result<(), CoreError> {
+    let Some(found) = &check.symbol_findings else {
+        return Ok(());
+    };
+    let text = |value: &str| {
+        !value.is_empty()
+            && value.len() <= MAX_SYMBOL_FINDING_TEXT
+            && !value.chars().any(char::is_control)
+    };
+    let valid = !check.inputs.is_empty()
+        && found.findings.len() <= MAX_SYMBOL_FINDINGS
+        && found.note.as_ref().is_none_or(|note| {
+            note.len() <= MAX_SYMBOL_FINDINGS_NOTE && !note.chars().any(char::is_control)
+        })
+        && found.findings.iter().all(|finding| {
+            [
+                &finding.name,
+                &finding.branch,
+                &finding.path,
+                &finding.before,
+                &finding.other_branch,
+                &finding.other_path,
+            ]
+            .into_iter()
+            .chain(&finding.after)
+            .chain(&finding.renamed_to)
+            .chain(&finding.other_after)
+            .all(|value| text(value))
+                && finding.line > 0
+                && finding.other_line > 0
+                && finding.args.is_none_or(|args| args <= MAX_ARITY)
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(error(
+            "invalid_check",
+            &format!(
+                "Definition findings belong to a combined check: at most {MAX_SYMBOL_FINDINGS}, each with one-line texts of 1 to {MAX_SYMBOL_FINDING_TEXT} bytes and lines from 1"
+            ),
+        ))
+    }
 }
 
 /// Whether a record says anything about the tree being asked about.
@@ -3572,6 +3695,10 @@ pub enum Command {
         /// compared only when this is equal.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command_id: Option<String>,
+        /// For a combined check asked for them: what comparing the
+        /// branches' definitions found, kept with the record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        symbol_findings: Option<Box<SymbolFindings>>,
     },
     /// Read-only: the tests known to flip on unchanged code, of check `name`
     /// or of every check.
@@ -4364,6 +4491,10 @@ enum CommandWire {
         /// compared only when this is equal.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command_id: Option<String>,
+        /// For a combined check asked for them: what comparing the
+        /// branches' definitions found, kept with the record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        symbol_findings: Option<Box<SymbolFindings>>,
     },
     /// Read-only: the tests known to flip on unchanged code, of check `name`
     /// or of every check.
@@ -6445,6 +6576,7 @@ fn decide_checked(
             rerun,
             writes_before,
             command_id,
+            symbol_findings,
         } => {
             let check = CheckRecord {
                 check_id: request_id.into(),
@@ -6459,6 +6591,7 @@ fn decide_checked(
                 recorded_ms: now_ms,
                 generation: state.generation,
                 changed_since: false,
+                symbol_findings: symbol_findings.clone(),
             };
             validate_check(state, &check)?;
             // Kept with the record so that a later run can be compared with
@@ -8491,6 +8624,7 @@ fn validate_check(state: &State, check: &CheckRecord) -> Result<(), CoreError> {
         validate_oid(head)?;
     }
     validate_inputs(&check.inputs)?;
+    validate_symbol_findings(check)?;
     if check.generation != state.generation {
         return Err(error(
             "invalid_event",

@@ -156,6 +156,7 @@ fn record_with(
         inputs: Vec::new(),
         result,
         duration_ms: 4000,
+        symbol_findings: None,
         report: Some(Box::new(CheckReport {
             session_ids: vec!["alice".into()],
             tail: "error[E0061]".into(),

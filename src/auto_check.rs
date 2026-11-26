@@ -720,6 +720,7 @@ fn report(
         inputs: Vec::new(),
         result: finished.result,
         duration_ms: finished.duration_ms,
+        symbol_findings: None,
         report: Some(Box::new(CheckReport {
             session_ids: sessions,
             tail: finished.tail,

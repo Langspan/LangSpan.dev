@@ -276,6 +276,7 @@ fn evidence_and_risks_are_carried_with_their_applicability() {
             inputs: vec![],
             result: CheckResult::Failed { exit_code: 101 },
             duration_ms: 50,
+            symbol_findings: None,
             report: None,
             tests: None,
             rerun: None,

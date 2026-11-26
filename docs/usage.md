@@ -1949,6 +1949,39 @@ file a build tool creates, is the usual cause: commit the file on the branch or
 add it to `.gitignore`, then run the check again under a new request ID. The
 paths are the repository's text, redacted and without control characters.
 
+`integrate check --symbols` (`symbols: true` on `langspan_integrate_check`)
+also compares the branches' definitions before the command runs. For each
+branch, the files it changed in an indexed language (up to 1000, each up to
+1 MiB) are read from Git's object database at the branch and where it started
+from the target, and indexed in memory; `graph.sqlite3`, the checkout and the
+refs are not written. The record's `symbol_findings` holds at most 32 findings,
+each a name match between two branches:
+
+- `both_changed`: both branches changed one definition's signature, in the
+  same file, to different signatures.
+- `changed_and_called`: one branch changed a signature, and another added a
+  call whose argument count fits the old signature but not the new one (the
+  rule of the write-time break alert, ADR 0029). `args` is the call's count
+  and `takes` the new signature's.
+- `removed_and_used`: one branch removed or renamed (`renamed_to`) an
+  exported definition, and another added a line that mentions its name.
+
+A branch that itself changes or adds a definition of that name is not told
+about it. Each finding gives the branch, path and line on both sides; `more`
+counts the findings past 32, and `files_indexed` and `files_skipped` say what
+was read. Findings are advisory: they never change the check's result, its exit
+code or what `land` requires. If indexing takes more than 10 seconds or Git
+fails, `note` says the findings were skipped, and the check runs as without
+`--symbols`. A retry of the same request returns the recorded findings.
+
+```text
+$ langspan integrate check app --onto main --name unit --symbols feat/sync feat/import -- cargo test
+...
+unit passed on the combined tree 7ac1...
+Definition findings (found by name; advisory):
+- changed_and_called: "save" now takes 2 arguments (feat/sync, "src/store.rs":40); feat/import calls it with 1 at "src/import.rs":18
+```
+
 Combining always follows renames, whatever `merge.renames` is set to: when the
 target renamed a file after a branch started, the branch's edits to the old name
 are combined into the new file, and the result's `renames` (and the printed
@@ -2350,7 +2383,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
 | `langspan_history` | A definition's recorded interface changes, newest first, with the last reported editor, its task line, nearby notes and messages, and changes back to an earlier signature; at most 50 |
 | `langspan_check_write` | Before a write on a host without hooks: per path, its holder, other sessions' recent lines and whether it is stale; per symbol, a peer's recent signature change, removal or body lines, matched by name; records nothing |
-| `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
+| `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result. With `symbols`, also name definitions the branches changed in ways that disagree (advisory) |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |
 | `langspan_flaky_tests` | Read which tests are known to flip on unchanged code, with runs, flips and the age of the last flip |

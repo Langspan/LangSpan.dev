@@ -64,6 +64,9 @@ pub struct Target {
 pub struct Check {
     pub argv: Vec<String>,
     pub timeout_s: u64,
+    /// Compare the combined branches' definitions before the command runs
+    /// and keep what that finds with the record (`integrate check` only).
+    pub symbols: bool,
 }
 
 // One result per operation, returned once: its size does not matter.
@@ -528,6 +531,22 @@ fn run_check(
     check_id: String,
 ) -> Result<(CheckRecord, bool, Option<Inconclusive>), crate::Error> {
     let limit = Duration::from_secs(check.timeout_s);
+    // Before the command, from the object database: advisory, and never
+    // part of the result.
+    let symbol_findings = check.symbols.then(|| {
+        let branches: Vec<(String, String)> = target
+            .branches
+            .iter()
+            .cloned()
+            .zip(merged.inputs.iter().skip(1).cloned())
+            .collect();
+        Box::new(crate::definitions::findings(
+            root,
+            &merged.inputs[0],
+            &branches,
+            crate::definitions::budget(),
+        ))
+    });
     // The checkout must hold exactly the combined tree before the command
     // runs and still hold it after; otherwise the result is about some other
     // code. What differed is read while the checkout still exists.
@@ -589,6 +608,7 @@ fn run_check(
             rerun: None,
             writes_before: None,
             command_id: None,
+            symbol_findings,
         },
     )?
     .outcome
