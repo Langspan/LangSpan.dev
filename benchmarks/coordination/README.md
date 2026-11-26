@@ -177,9 +177,11 @@ The stand-in agent makes one of the fixed edits its task defines:
   briefings and `langspan brief` in the LangSpan arm. When that information
   shows the peer work its task depends on, it makes the edit the task's
   details ask for; otherwise the uninformed edit. In the LangSpan arm it
-  waits, at most 75 seconds, until LangSpan has told it every peer's task,
-  and before it ends until every peer shows edits and, for a new caller, until
-  LangSpan's notice of the rename has arrived.
+  waits until LangSpan has told it every peer's task, and before it ends until
+  every peer shows edits and, for a new caller, until LangSpan's notice of the
+  rename has arrived. Each wait lasts at most until 30 seconds before the
+  session's `--time-limit`, so a loaded machine slows a dry run instead of
+  changing what its sessions learn.
 - `--standin-mode ignore` always makes the uninformed edit.
 - `--standin-mode hedge` makes the edit that holds up whatever peers do,
   without knowing: a contradiction task keeps the default and sets its value
