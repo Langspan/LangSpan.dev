@@ -555,6 +555,15 @@ fn hooks(
             "Cursor: built from documentation, not yet verified on a real Cursor (ADR 0032). Cursor runs project hooks only in a trusted workspace. These files hold paths on this machine; Cursor's project files are often committed, so keep LangSpan's entries out of a commit."
         );
     }
+    if vendor == install::Vendor::Codex && install {
+        // Codex trusts project hooks by the exact path of their file: a
+        // session resumed under another path for the same directory runs
+        // none of them (issue #129).
+        println!(
+            "Codex: start and resume Codex in '{}', the resolved root with no symbolic links. Codex trusts a project's hooks only at the exact path they were trusted at, so a session started or resumed under another path for the same directory (a symbolic link, or /tmp for /private/tmp on macOS) runs none of LangSpan's hooks, without a warning.",
+            root.display()
+        );
+    }
     if vendor == install::Vendor::Gemini && install {
         println!(
             "Gemini CLI: built from documentation, not yet verified on a real Gemini CLI (ADR 0033). Gemini CLI loads project settings only in a folder it trusts."
@@ -3968,6 +3977,11 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 change.to_head.as_deref(),
                 change.files
             )
+        ),
+        Outcome::UncoordinatedObserved { sessions, paths } => println!(
+            "Uncoordinated change recorded: sessions {}; files {}.",
+            sessions.join(", "),
+            paths.join(", ")
         ),
         Outcome::Today { today } => {
             println!(
