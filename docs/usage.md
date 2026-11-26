@@ -2,6 +2,8 @@
 
 Build, connect native sessions, inspect coordination, and integrate through MCP.
 For the product overview and support summary, see [the README](../README.md).
+For a visual introduction, open the [interactive workflow](https://langspan.dev/#demo),
+[launch film](https://langspan.dev/#film) or [recorded dashboard evidence](https://langspan.dev/#evidence).
 Examples below use the binary built from the LangSpan repository root.
 If you installed a release binary on your PATH, replace
 `./target/release/langspan` with `langspan`.
@@ -669,7 +671,8 @@ proof a process is alive; Linux process observation is available through
 ## Recap, notes and messages
 
 `recap` gives a bounded account of one workspace's recorded state, including
-sessions, edits, checks, remembered notes and unacknowledged messages. Using the
+sessions, edits, checks, remembered notes, unacknowledged messages and recently
+withdrawn ones (`"retracted": true`). Using the
 workspace and sessions from the CLI example:
 
 ```sh
@@ -726,6 +729,25 @@ one explicitly, use `langspan ack bob MESSAGE_ID --request-id ack-1`. Notes and
 messages stay local; remote Git-ref sharing does not publish them. Treat their
 text as data and leave secrets out. [ADR 0009](adr/0009-agent-messages-and-handoff.md)
 describes delivery, retention and the local identity boundary.
+
+A message or handoff that no longer holds can be withdrawn:
+
+```sh
+./target/release/langspan messages retract demo last --from alice --request-id retract-1 --json
+```
+
+`last` is the sender's newest message; otherwise name the message ID its send
+returned. Copies not yet delivered are removed, and a handoff not yet taken is
+not taken. Each session that already received it is told once, at its next
+briefing (start, prompt, or for Claude Code after a completed tool call):
+`- Session alice withdrew its message "..." (first 120 bytes): disregard it.`
+The result lists both groups:
+`{"message_id":"message-1","withdrawn_unread":["bob"],"told_to_disregard":[]}`.
+A session may withdraw only its own messages (`not_sender` otherwise); without
+`--from` it is the owner, who may withdraw any. An unknown message, one dropped
+by the 64-message limit, or one already withdrawn is refused, saying which; a
+retry with the same request ID returns the first result. The original
+`message_sent` event stays in the log, and withdrawal is local only.
 
 ## The day so far
 
@@ -1246,7 +1268,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_intent_end` | End advisory work independently of admission |
 | `langspan_admit` | Request an entire file set or inspect conflicts |
 | `langspan_complete` | Complete a currently valid held admission |
-| `langspan_status` | Inspect open admissions, live or recent sessions and liveness observations; `all` and `after` page through every record |
+| `langspan_status` | Inspect open admissions, live or recent sessions, liveness observations and each session's last hook run (`summary.last_hook_age_ms`); `all` and `after` page through every record |
 | `langspan_events` | Read an ordered page of persisted events |
 | `langspan_changes` | Read file and local-branch observations with scan freshness |
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
@@ -1266,6 +1288,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_recall` | Search a workspace's remembered notes: every query word in a note's text or paths, without case; best first, at most 50 |
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |
 | `langspan_handoff` | Leave a message for the next other session to take up |
+| `langspan_retract_message` | Withdraw a message this session sent, by ID or `"last"`; its readers are told to disregard it |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |
 | `langspan_my_changes` | List this session's own uncommitted files and hunks in a shared checkout, as `langspan_commit_mine` would split them; changes nothing |
 
@@ -1309,6 +1332,18 @@ A daemon restart advances the generation and invalidates outstanding grants.
 Sessions and intents remain visible as stale. Reattach with a new registration
 request ID, then explicitly refresh intent. Process liveness observations never
 renew an admission or replace this recovery step.
+
+A session counts as current for peers' briefings, the status line and the
+dashboard while it is in this generation, not ended, not known to have exited,
+and its newest edit, prompt or hook run is at most 30 minutes old. Any hook run
+that reaches the daemon counts, reads, failed tool calls, tool batches, stops
+and shell commands included; the daemon records one `session_seen` event per
+session at most every 30 seconds. `langspan status` prints each session's last
+hook run and process observation, and its `--json` form and `langspan_status`
+give them as `summary.last_hook_age_ms` and `state.session_liveness`. Process
+observations are made on Linux and macOS for Claude Code and Codex hosts; a
+probe that fails, or of another user's process, records `unknown`, which does
+not drop a session.
 
 CLI exit codes: `0` successful result, `1` error/unavailable coordination or a
 failed check, `2` conflict or refused push, `3` an inactive historical admission,

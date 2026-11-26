@@ -1,0 +1,1 @@
+{"version":3,"request_id":"brief-4","replayed":false,"generation":2,"lease_valid":null,"outcome":{"type":"briefing","briefing":{"session_id":"claude-code.alice","changed":true,"peers":[],"omitted_peers":0,"retracted":[{"message_id":"m-9","workspace_id":"demo","from":"codex.bob","text":"do not touch src/db.rs, I am migrating it","cut":true}]}}}
