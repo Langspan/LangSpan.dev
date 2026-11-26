@@ -17,10 +17,10 @@ Gemini CLI adapters exist but have not been verified in live sessions.
 
 **v0.1.0 is available for macOS and Linux.** [Download a release binary](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0) or [build from source](#build-from-source).
 
-[Get started](#get-started) · [See it work](https://langspan.dev/#demo) · [Launch film](https://langspan.dev/#film) ·
+[Get started](#get-started) · [Explore six capabilities](https://langspan.dev/#demo) · [Launch film](https://langspan.dev/#film) ·
 [Usage guide](docs/usage.md) · [Implementation status](docs/IMPLEMENTATION_STATUS.md)
 
-<a href="https://langspan.dev/#demo">
+<a href="https://langspan.dev/#edit-coordination">
   <picture>
     <source media="(max-width: 600px)" srcset="https://langspan.dev/assets/product/langspan-overview-compact.svg">
     <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="https://langspan.dev/assets/product/langspan-card-dark-still.svg">
@@ -31,7 +31,7 @@ Gemini CLI adapters exist but have not been verified in live sessions.
 </a>
 
 *An authored 12-second illustration of local coordination, not a session recording.
-[Explore each step](https://langspan.dev/#demo) with Play, Pause and Replay, or open
+[Explore each step](https://langspan.dev/#edit-coordination) with Play, Pause and Replay, or open
 the motionless [light](https://langspan.dev/assets/product/langspan-card-light-still.svg) or
 [dark](https://langspan.dev/assets/product/langspan-card-dark-still.svg) version.*
 

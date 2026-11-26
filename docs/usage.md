@@ -221,6 +221,45 @@ session-end handling. Claude Code and Codex get end-of-reply handling
 host's own folder and hook trust requirements still apply. For Codex, review the
 project hooks through its native hook-trust flow.
 
+#### Codex: start and resume at the resolved path
+
+Codex keys its hook trust to the exact path of the project's hooks file. A
+session whose hooks were trusted with Codex started at `/tmp/work` and that is
+later reopened with `codex exec resume` at `/private/tmp/work` (the same
+directory on macOS, by another path) counts them as untrusted there: Codex runs
+none of LangSpan's hooks, prints no warning, and the session edits
+uncoordinated. A symbolic link anywhere in the path does the same. To avoid it:
+
+- Start Codex, trust LangSpan's hooks, and resume Codex in the checkout's
+  resolved path, with no symbolic links. `langspan hooks install codex` prints
+  it:
+
+  ```text
+  Codex: start and resume Codex in '/private/tmp/work', the resolved root with no symbolic links. ...
+  ```
+
+- If a session must be resumed under another path, trust the hooks again there
+  with `/hooks` before it edits.
+
+LangSpan cannot see a hook that never runs, but it notices the result. When
+the coordinator's scan sees a file's content change in a checkout and no
+session of the checkout reported it, while a Codex session is registered there, it records an
+`uncoordinated_changed` event naming up to two of the checkout's Codex
+sessions, most recently active first, as the likely cause (not a proven
+author: a hand edit looks the same). Files held by an admitted edit, versions a
+session read or wrote, and files a checkout change (a branch switch, reset or
+stash) accounts for are left out. The next briefing to each session of that
+checkout carries one line, once per session:
+
+```text
+LangSpan: edits not coordinated. Files in this checkout changed 12s ago and no session reported the edit. codex session 0198c0de may be running without LangSpan's hooks: ... Read these files again before changing them: "src/a.rs"
+```
+
+A Codex session named is not named again while that notice is held (the
+briefing horizon), and a file a session reports at that version afterwards
+drops out of the line. Without a registered Codex session nothing is recorded.
+`langspan status --json` shows the held notices under `uncoordinated`.
+
 Cursor: built from documentation, not yet verified on a real Cursor. Its
 installer writes `.cursor/hooks.json` (`preToolUse`, `postToolUse` and
 `postToolUseFailure` for `Write`, `Delete` and `Shell`, `postToolUse` also for
@@ -1241,10 +1280,17 @@ so `cargo fmt --all` during another session's test run leaves each session's
 `commit --mine` able to take its own hunks, and a new file one session wrote
 stays that session's after another session's formatter rewrites it. Tokens
 are compared by language: Rust, TypeScript and JavaScript as words and
-punctuation, with a comma just before a closing `)`, `]` or `}` ignored (a
-formatter adds and drops those when it wraps a list); Markdown as words and
-punctuation; any other file as its text with all whitespace removed.
-Whitespace inside a string literal is not told apart from formatting.
+punctuation, each string or character literal one token whitespace and all,
+with a comma just before a closing `)`, `]` or `}` ignored (a formatter adds
+and drops those when it wraps a list); Markdown as words and punctuation;
+Python as words, punctuation and strings, with the indentation of each line
+that starts a statement as content, so re-wrapping a call inside its
+parentheses is formatting but re-indenting a block is not; YAML, Makefiles
+and other indentation-sensitive files (`.haml`, `.pug`, `.sass`, `.styl`,
+`.nim`, `.fs` and the others ADR 0011 lists) as words and punctuation with
+every line's indentation as content; any other file as its text with all
+whitespace removed. Trailing whitespace and blank lines are always
+formatting.
 
 A change that alters tokens (a rename, an added line) is credited as before:
 to the command's session when nothing else could have made it and it
@@ -1340,6 +1386,71 @@ checkout, inside the `langspan mcp` process rather than the daemon; its output
 goes to that process's standard error. `langspan_land` with `apply` pushes as
 you, and `langspan_commit_mine` commits as you, running your Git hooks. Deny
 any of them in your host's permission settings if agents should not do this.
+
+## Move, switch and remove a workspace
+
+These are owner commands of the CLI only; no MCP tool moves or removes a
+workspace ([ADR 0025](adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md)).
+
+```sh
+langspan workspace list
+mv /path/to/src/app /path/to/work/app
+langspan workspace move app /path/to/work/app --request-id ws-move-1
+```
+
+```text
+Workspace app now at /path/to/work/app. Kept: 6 notes, 2 pending messages, 14 check records, 3 landings.
+Project hooks name the old root; rerun:
+  langspan hooks install claude-code --workspace 'app' --root '/path/to/work/app' --state-dir '…' --apply
+```
+
+`workspace list [--after ID] [--json]` shows every workspace with its root and
+whether it exists, its current sessions, notes, pending messages, check
+records, and whether its automatic check and remote sharing are on. It answers
+a page at a time, in workspace ID order: at most 100 workspaces, and fewer when
+long roots would not fit one frame. When more remain, the page ends with
+`More: langspan workspace list --after ID` (`next` in the JSON); run that for
+the next page. A cursor whose workspace was removed since still continues after
+it.
+
+`workspace move ID NEW_ROOT` is for a checkout you moved: the old root must be
+gone and NEW_ROOT must be the top of a Git checkout. With `--switch`, the old
+root still exists and NEW_ROOT is another checkout of the same repository
+(its object database holds the old root's `HEAD` commit), for example a fresh
+clone that replaces a broken one; the old root then stops being coordinated
+under the ID. `--switch` is refused (`root_derived_id`) when the ID is the one
+user-level hooks derived from the old root, since new sessions there would
+claim it again; move or delete the old checkout and run the move without
+`--switch`, or register NEW_ROOT with `workspace add`. The ID, notes, pending
+messages, check records, landings, the automatic check and the remote setting
+are kept; an automatic check waiting or running in the old root is cancelled,
+and the next writes in NEW_ROOT are checked there. File versions sessions read
+under the old root are dropped, so a session's next edit of an existing file
+has an unknown base until it reads it again; the next scan and the source
+index start again from NEW_ROOT. A refused move changes nothing and says
+which check failed: `not_checkout_top`, `old_root_exists`,
+`old_root_missing`, `root_derived_id`, `different_repository` or
+`workspace_conflict` (NEW_ROOT
+is registered already or overlaps another workspace).
+
+User-level hooks need nothing: an event from NEW_ROOT joins the moved ID.
+Project-level hooks name their root in the host's configuration, which the
+command does not edit; it prints the `hooks install` commands to rerun for the
+hosts whose project hooks name this workspace.
+
+`workspace remove ID` is a dry run that lists what would end: sessions,
+intents, notes, pending messages and the automatic check. `workspace remove ID
+--apply --request-id ID` takes the workspace out of `status`, `recap`,
+`workspace list`, briefings and the dashboard; `langspan events` keeps its
+history. A hook event from that root later registers it again, empty.
+
+Moving and removing are refused while a session holds an admission there or a
+landing holds or waits for its push turn (`workspace_busy`), and while remote
+sharing is on (`remote_sharing_on`): run `langspan remote disable ID` first,
+so the published ref is removed, and wait until that ref is gone (`langspan
+doctor` shows its progress): the daemon removes it through the old checkout's
+remote.
+A refusal is recorded under its request ID; retry with a new one.
 
 ## Retries and recovery
 

@@ -89,6 +89,31 @@ fn part_end(text: &str, start: usize, room: usize) -> usize {
     end
 }
 
+/// A `workspace list` page within `PAGE_BUDGET_BYTES`: the core bounds it
+/// by count, and a root can be 4 KiB, so it may end sooner here, with the
+/// cursor moved back to its last workspace. It always keeps one, which a
+/// root's bound lets fit.
+fn workspace_page(
+    mut workspaces: Vec<langspan_core::WorkspaceSummary>,
+    mut next: Option<String>,
+) -> Outcome {
+    let mut bytes = 0usize;
+    let keep = workspaces
+        .iter()
+        .take_while(|workspace| {
+            let size = serde_json::to_vec(workspace).map_or(usize::MAX, |json| json.len() + 1);
+            let first = bytes == 0;
+            bytes = bytes.saturating_add(size);
+            first || bytes <= PAGE_BUDGET_BYTES
+        })
+        .count();
+    if keep < workspaces.len() {
+        workspaces.truncate(keep);
+        next = workspaces.last().map(|last| last.workspace_id.clone());
+    }
+    Outcome::Workspaces { workspaces, next }
+}
+
 /// Identifies one record's JSON across pages, so that a page resumes inside
 /// a record only if the record has not changed. Not a security control: a
 /// mismatch (or a different build) starts the record again from its start.
@@ -349,6 +374,9 @@ impl Store {
                 })?;
         let scan_id = format!("scan-{}-{sequence}", self.state.generation);
         let mut commands = Vec::new();
+        // Files whose content changed since a complete earlier scan, at their
+        // new versions: the core keeps those no session reported (issue #129).
+        let mut content_changes = Vec::new();
         // Several changed files back at their committed version at once,
         // with HEAD where it was: a reset, stash or checkout of files.
         let restored = changes
@@ -390,11 +418,20 @@ impl Store {
             } else {
                 None
             };
+            let after = observed_file_state(change.after.as_ref())?;
+            if before.as_ref().is_some_and(|before| *before != after)
+                && content_changes.len() < langspan_core::MAX_UNCOORDINATED_OBSERVED
+            {
+                content_changes.push(langspan_core::ObservedFile {
+                    path: change.path.clone(),
+                    state: after.clone(),
+                });
+            }
             commands.push(Command::ObserveDisk {
                 workspace_id: workspace_id.into(),
                 path: change.path,
                 before,
-                after: observed_file_state(change.after.as_ref())?,
+                after,
                 related_operation_ids: Vec::new(),
             });
         }
@@ -419,6 +456,7 @@ impl Store {
             }
         }
         let facts = commands.len();
+        let mut checkout_changed = false;
         // The checkout changed under the sessions in it: another branch, a
         // HEAD that moved with files no session put there, or a bulk
         // restore. A commit moves HEAD without changing any file, or with
@@ -439,7 +477,16 @@ impl Store {
                     to_head: snapshot.head.clone(),
                     files: file_changes,
                 });
+                checkout_changed = true;
             }
+        }
+        // Changed files no checkout change accounts for. Which of them no
+        // session reported, and whom to name, is the core's decision.
+        if !checkout_changed && !content_changes.is_empty() {
+            commands.push(Command::ObserveUncoordinated {
+                workspace_id: workspace_id.into(),
+                files: content_changes,
+            });
         }
         // Worktrees of one repository share a Git common directory. Only its
         // digest is recorded; it groups workspaces without merging them.
@@ -518,6 +565,8 @@ impl Store {
                 | Command::Today { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
+                | Command::WorkspaceList { .. }
+                | Command::WorkspaceRemove { apply: false, .. }
         ) {
             return Ok(None);
         }
@@ -619,9 +668,12 @@ impl Store {
             | Command::LandingReadiness { .. }
             | Command::TurnQueue { .. }
             | Command::StatusLine { .. }
+            | Command::WorkspaceList { .. }
+            | Command::WorkspaceRemove { apply: false, .. }
             | Command::Recap { .. }
             | Command::Recall { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
+                    Outcome::Workspaces { workspaces, next } => workspace_page(workspaces, next),
                     // A recap or a recall must fit one frame with room for
                     // the envelope.
                     Outcome::Recap { mut recap } => {
@@ -805,10 +857,11 @@ impl Store {
 
     /// One page of state records from `after`, within `budget` bytes
     /// (`PAGE_BUDGET_BYTES` unless the reader asked for less, never under
-    /// `MIN_PAGE_BYTES`). A record that fits a page is never split; one that
-    /// does not (an entry at its limits can be larger than a frame) is given
-    /// as parts of its JSON, so that every valid state can be read. A page
-    /// holds at least one record or part when any remain.
+    /// `MIN_PAGE_BYTES`; `workspace_page` bounds a `workspace list` page by
+    /// `PAGE_BUDGET_BYTES`). A record that fits a page is never split; one
+    /// that does not (an entry at its limits can be larger than a frame) is
+    /// given as parts of its JSON, so that every valid state can be read. A
+    /// page holds at least one record or part when any remain.
     fn status_records(&self, after: Option<&str>, budget: usize) -> Outcome {
         let (mut resume, records) = match status_records(&self.state, after) {
             Ok(read) => read,
@@ -1134,6 +1187,20 @@ impl Store {
                 "INSERT INTO events(event_json) VALUES (?1)",
                 [serde_json::to_string(event)?],
             )?;
+            // The last scan was of the old checkout: the next scan of the
+            // new root starts a fresh baseline, so files that differ between
+            // the two checkouts are not reported as changes.
+            if let Event::WorkspaceMoved {
+                workspace: langspan_core::Workspace { workspace_id, .. },
+                ..
+            }
+            | Event::WorkspaceRemoved { workspace_id } = event
+            {
+                transaction.execute(
+                    "DELETE FROM git_snapshots WHERE workspace_id = ?1",
+                    [workspace_id],
+                )?;
+            }
         }
         if let Some((request_id, command, outcome)) = receipt {
             transaction.execute(

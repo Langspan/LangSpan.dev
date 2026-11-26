@@ -338,6 +338,51 @@ fn a_prompt_summary_stays_private_when_switched_off_and_session_end_withdraws_wo
     );
 }
 
+/// Issue #129: a Codex session resumed under another path for the same
+/// directory runs none of LangSpan's hooks. The daemon's own scan sees the
+/// change no hook reported, and the next briefing to the checkout's other
+/// session says so once, naming the Codex session and the likely cause.
+#[test]
+fn a_change_no_hook_reported_is_told_once_naming_the_registered_codex_session() {
+    let mut f = Fixture::new();
+    f.start();
+    f.lifecycle("codex", "SessionStart", BOB, &f.root());
+    f.lifecycle("claude-code", "SessionStart", ALICE, &f.root());
+    // A baseline scan first, so that the edit below is a change.
+    f.wait_for_repositories(1);
+    fs::write(f.root().join("a.txt"), "edited with no hook\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while f
+        .state()
+        .uncoordinated
+        .get("work")
+        .is_none_or(Vec::is_empty)
+    {
+        assert!(Instant::now() < deadline, "the change was not observed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let told = f.prompt("claude-code", ALICE, "carry on", &[]);
+    let context = told.context.unwrap();
+    let line = context
+        .lines()
+        .find(|line| line.starts_with(langspan::hook::UNCOORDINATED))
+        .unwrap_or_else(|| panic!("{context}"));
+    assert!(line.contains("codex session 00000000"), "{line}");
+    assert!(line.contains("without LangSpan's hooks"), "{line}");
+    assert!(line.contains(r#""a.txt""#), "{line}");
+    assert!(context.len() <= langspan::hook::BRIEFING_LIMIT);
+
+    let again = f.prompt("claude-code", ALICE, "carry on", &[]);
+    assert!(
+        !again
+            .context
+            .unwrap_or_default()
+            .contains(langspan::hook::UNCOORDINATED),
+        "told once"
+    );
+}
+
 /// The prompt every agent in a swarm starts from, with its own task line.
 fn from_template(task: &str) -> String {
     format!(

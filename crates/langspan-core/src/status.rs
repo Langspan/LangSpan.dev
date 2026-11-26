@@ -81,6 +81,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         scan_failures,
         scan_coverage,
         checkouts,
+        uncoordinated,
         auto_checks,
         check_notices,
         test_learning,
@@ -93,6 +94,8 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
+        // Derived for the source index; never part of the status reply.
+        workspace_revisions: _,
         // The write generation check runs carry: one count per workspace,
         // never trimmed.
         writes,
@@ -157,6 +160,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         scan_failures: scan_failures.clone(),
         scan_coverage: scan_coverage.clone(),
         checkouts: checkouts.clone(),
+        uncoordinated: uncoordinated.clone(),
         auto_checks: auto_checks.clone(),
         check_notices: keep(check_notices, of_shown),
         test_learning: test_learning.clone(),
@@ -167,6 +171,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),
+        workspace_revisions: BTreeMap::new(),
         writes: writes.clone(),
     };
     (view, summary)
@@ -228,7 +233,7 @@ macro_rules! activity {
 /// Parts of the view left out, in this order, while it does not fit: the
 /// bulkiest histories first, current coordination last. Each name is the one
 /// `StatusSummary::omitted` gives.
-const TRIMS: [Trim; 16] = [
+const TRIMS: [Trim; 17] = [
     activity!("activity.known", known),
     // `check flaky` reads it through its own command.
     field!("test_learning", test_learning),
@@ -236,6 +241,7 @@ const TRIMS: [Trim; 16] = [
     field!("landings", landings),
     field!("interface_notices", interface_notices),
     field!("checkouts", checkouts),
+    field!("uncoordinated", uncoordinated),
     field!("notes", notes),
     field!("remote_peers", remote_peers),
     activity!("activity.touched", touched),

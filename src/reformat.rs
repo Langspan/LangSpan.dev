@@ -11,19 +11,30 @@
 //!
 //! Pure: the caller passes both versions and who wrote each line before.
 //!
-//! What a token is depends on the file's language (`language`):
+//! What a token is depends on the file's language (`language`). A word is
+//! a run of word bytes (ASCII letters and digits, `_`, any byte of a
+//! non-ASCII character); any other byte that is not ASCII whitespace is a
+//! token of its own.
 //!
-//! - Code (Rust, TypeScript, JavaScript): runs of word bytes (ASCII letters
-//!   and digits, `_`, any byte of a non-ASCII character), and each other
-//!   byte that is not ASCII whitespace. A comma just before a closing `)`,
-//!   `]` or `}` is not a token, as formatters add and remove such trailing
-//!   commas when they wrap a list.
-//! - Prose (Markdown): the same tokens, every comma kept.
+//! - Rust, TypeScript and JavaScript: words and other bytes, and each
+//!   string or character literal is one token, whitespace and all (#158).
+//!   Comments are words and other bytes. A comma just before a closing
+//!   `)`, `]` or `}` is not a token, as formatters add and remove such
+//!   trailing commas when they wrap a list.
+//! - Prose (Markdown): words and other bytes, every comma kept.
+//! - Python: words, other bytes and string literals, as in Rust, and each
+//!   line that starts a logical line (outside brackets and strings) begins
+//!   with its indentation as a token (#158). A call re-wrapped inside its
+//!   parentheses is a reformat; a re-indented block is not.
+//! - Other indentation-sensitive files (YAML, Makefiles and the others in
+//!   `language`): words and other bytes, and every line that has a token
+//!   begins with its indentation as one.
 //! - Any other file: every byte that is not ASCII whitespace, so the text
 //!   is compared with all whitespace removed.
 //!
-//! A change of whitespace inside a string literal therefore counts as a
-//! reformat, in every language.
+//! An indentation token is the line's leading spaces, tabs and form feeds,
+//! empty for none, so two lines joined into one also differ. Trailing
+//! whitespace and blank lines never count.
 
 use crate::journal::{Lines, MAX_KEYS, line_key};
 use std::collections::BTreeMap;
@@ -36,24 +47,38 @@ pub const MAX_WORK: usize = 4_000_000;
 /// How a file's text is split into tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Language {
-    /// Rust, TypeScript and JavaScript.
-    Code,
+    /// Rust.
+    Rust,
+    /// TypeScript and JavaScript.
+    Script,
     /// Markdown.
     Prose,
+    /// Python: indentation of a logical line's first line is a token.
+    Python,
+    /// Another indentation-sensitive format: every line's indentation is a
+    /// token.
+    Indented,
     /// Anything else: compared with all whitespace removed.
     Other,
 }
 
-/// The language of a workspace path, by its file name's extension.
+/// The language of a workspace path, by its file name or extension.
 pub fn language(path: &str) -> Language {
     let name = path.rsplit('/').next().unwrap_or(path);
+    if matches!(name, "Makefile" | "makefile" | "GNUmakefile") {
+        return Language::Indented;
+    }
     let extension = match name.rsplit_once('.') {
         Some((stem, extension)) if !stem.is_empty() => extension.to_ascii_lowercase(),
         _ => return Language::Other,
     };
     match extension.as_str() {
-        "rs" | "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => Language::Code,
+        "rs" => Language::Rust,
+        "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => Language::Script,
         "md" | "markdown" | "mdx" => Language::Prose,
+        "py" | "pyi" | "pyw" => Language::Python,
+        "yaml" | "yml" | "mk" | "mak" | "haml" | "pug" | "jade" | "slim" | "sass" | "styl"
+        | "coffee" | "nim" | "nims" | "nimble" | "fs" | "fsi" | "fsx" => Language::Indented,
         _ => Language::Other,
     }
 }
@@ -94,72 +119,311 @@ fn word(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
 }
 
-/// A line's tokens, in order, before any comma is dropped.
-fn tokens(line: &[u8], language: Language) -> Vec<&[u8]> {
-    let mut out = Vec::new();
-    let mut at = 0;
-    while at < line.len() {
-        let byte = line[at];
-        if byte.is_ascii_whitespace() {
-            at += 1;
-        } else if word(byte) && language != Language::Other {
-            let start = at;
-            while at < line.len() && word(line[at]) {
-                at += 1;
-            }
-            out.push(&line[start..at]);
-        } else {
-            out.push(&line[at..=at]);
-            at += 1;
+fn indentation(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\x0c')
+}
+
+/// Where a quoted literal opened at `at` ends: after its closing quote, or
+/// unterminated at the end of the line (`multiline` false) or the text. A
+/// backslash escapes the byte after it, a line break included.
+fn quoted_end(text: &[u8], at: usize, multiline: bool) -> usize {
+    let quote = text[at];
+    let mut i = at + 1;
+    while i < text.len() {
+        match text[i] {
+            b'\\' => i += 2,
+            b'\n' if !multiline => return i,
+            byte if byte == quote => return i + 1,
+            _ => i += 1,
         }
     }
-    out
+    text.len()
+}
+
+/// Where a Python string opened at `at` ends; a triple quote closes only at
+/// the same triple quote, and may span lines.
+fn python_string_end(text: &[u8], at: usize) -> usize {
+    let quote = text[at];
+    let triple = [quote; 3];
+    if !text[at..].starts_with(&triple) {
+        return quoted_end(text, at, false);
+    }
+    let mut i = at + 3;
+    while i < text.len() {
+        if text[i] == b'\\' {
+            i += 2;
+        } else if text[i..].starts_with(&triple) {
+            return i + 3;
+        } else {
+            i += 1;
+        }
+    }
+    text.len()
+}
+
+/// Where a JavaScript template literal opened at `at` ends, `${...}`
+/// substitutions (and the literals inside them) included. Iterative, so
+/// nesting is bounded by the text, not the stack.
+fn template_end(text: &[u8], at: usize) -> usize {
+    enum Frame {
+        Template,
+        /// Inside `${`, with this many braces open.
+        Code(usize),
+    }
+    let mut stack = vec![Frame::Template];
+    let mut i = at + 1;
+    while i < text.len() {
+        let Some(frame) = stack.last_mut() else {
+            return i;
+        };
+        match (frame, text[i]) {
+            (Frame::Template, b'\\') => i += 2,
+            (Frame::Template, b'`') => {
+                stack.pop();
+                i += 1;
+            }
+            (Frame::Template, b'$') if text.get(i + 1) == Some(&b'{') => {
+                stack.push(Frame::Code(1));
+                i += 2;
+            }
+            (Frame::Code(open), b'{') => {
+                *open += 1;
+                i += 1;
+            }
+            (Frame::Code(open), b'}') => {
+                *open -= 1;
+                if *open == 0 {
+                    stack.pop();
+                }
+                i += 1;
+            }
+            (Frame::Code(_), b'`') => {
+                stack.push(Frame::Template);
+                i += 1;
+            }
+            (Frame::Code(_), b'\'' | b'"') => i = quoted_end(text, i, false),
+            _ => i += 1,
+        }
+        if stack.is_empty() {
+            return i;
+        }
+    }
+    text.len()
+}
+
+/// A Rust literal starting at `at`, which is not inside a word: a string,
+/// byte or C string, raw or not, or a character or byte literal. `None`
+/// for anything else, a lifetime's `'` included.
+fn rust_literal_end(text: &[u8], at: usize) -> Option<usize> {
+    let mut i = at;
+    if matches!(text[i], b'b' | b'c') {
+        i += 1;
+    }
+    let raw = text.get(i) == Some(&b'r');
+    if raw {
+        i += 1;
+        let hashes = text[i..].iter().take_while(|byte| **byte == b'#').count();
+        i += hashes;
+        if text.get(i) != Some(&b'"') {
+            return None;
+        }
+        let mut close = vec![b'"'];
+        close.extend(std::iter::repeat_n(b'#', hashes));
+        let end = text[i + 1..]
+            .windows(close.len())
+            .position(|window| window == close.as_slice())
+            .map_or(text.len(), |found| i + 1 + found + close.len());
+        return Some(end);
+    }
+    match text.get(i) {
+        Some(b'"') => Some(quoted_end(text, i, true)),
+        Some(b'\'') if i == at || text[at] == b'b' => {
+            // `'x'`, `'\n'`, `'\u{1F600}'`; a lone `'` is a lifetime's.
+            let rest = &text[i + 1..];
+            let length = if rest.first() == Some(&b'\\') {
+                rest.iter()
+                    .take(12)
+                    .skip(2)
+                    .position(|byte| *byte == b'\'')?
+                    + 2
+            } else {
+                let character = std::str::from_utf8(&rest[..rest.len().min(4)])
+                    .or_else(|error| std::str::from_utf8(&rest[..error.valid_up_to()]))
+                    .ok()?
+                    .chars()
+                    .next()?;
+                if matches!(character, '\'' | '\n') {
+                    return None;
+                }
+                character.len_utf8()
+            };
+            (rest.get(length) == Some(&b'\'')).then_some(i + 1 + length + 1)
+        }
+        _ => None,
+    }
+}
+
+/// Where a literal starting at `at` (outside any comment) ends, by the
+/// language's rules; `None` when none starts there.
+fn literal_end(text: &[u8], at: usize, language: Language) -> Option<usize> {
+    match (language, text[at]) {
+        (Language::Rust, b'"' | b'\'' | b'b' | b'c' | b'r') => rust_literal_end(text, at),
+        (Language::Script, b'\'' | b'"') => Some(quoted_end(text, at, false)),
+        (Language::Script, b'`') => Some(template_end(text, at)),
+        (Language::Python, b'\'' | b'"') => Some(python_string_end(text, at)),
+        _ => None,
+    }
+}
+
+/// A comment the lexer is inside.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Comment {
+    None,
+    /// To the end of the line.
+    Line,
+    /// A block comment, nested this deep (Rust nests them).
+    Block(usize),
+}
+
+/// Each line of `text` (as `split_inclusive` on `\n` gives them) as its
+/// tokens, in order, before any trailing comma is dropped. A literal that
+/// spans lines gives each line the part of it on that line, its line break
+/// included.
+fn lex(text: &[u8], language: Language) -> Vec<Vec<&[u8]>> {
+    let count = text.split_inclusive(|byte| *byte == b'\n').count();
+    let mut lines: Vec<Vec<&[u8]>> = vec![Vec::new(); count];
+    let mut line = 0;
+    // The token `text[start..end]`, split where it spans lines; an empty
+    // one (no indentation) is kept.
+    let mut push = |line: &mut usize, start: usize, end: usize| {
+        if start == end {
+            lines[*line].push(&text[start..end]);
+        }
+        let mut from = start;
+        while from < end {
+            let to = text[from..end]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(end, |found| from + found + 1);
+            lines[*line].push(&text[from..to]);
+            if text[to - 1] == b'\n' {
+                *line += 1;
+            }
+            from = to;
+        }
+    };
+    let indented = matches!(language, Language::Python | Language::Indented);
+    let block_comments = matches!(language, Language::Rust | Language::Script);
+    let mut comment = Comment::None;
+    // Python's open brackets: inside them a line's indentation is layout.
+    let mut brackets = 0usize;
+    let mut at = 0;
+    while at < text.len() {
+        let line_start = at == 0 || text[at - 1] == b'\n';
+        if line_start && indented && brackets == 0 {
+            let end = at
+                + text[at..]
+                    .iter()
+                    .take_while(|byte| indentation(**byte))
+                    .count();
+            if text
+                .get(end)
+                .is_some_and(|byte| !byte.is_ascii_whitespace())
+            {
+                push(&mut line, at, end);
+            }
+        }
+        let byte = text[at];
+        if byte == b'\n' {
+            line += 1;
+            if comment == Comment::Line {
+                comment = Comment::None;
+            }
+            at += 1;
+            continue;
+        }
+        if byte.is_ascii_whitespace() {
+            at += 1;
+            continue;
+        }
+        let pair = &text[at..text.len().min(at + 2)];
+        match comment {
+            Comment::None => {
+                if let Some(end) = literal_end(text, at, language) {
+                    push(&mut line, at, end);
+                    at = end;
+                    continue;
+                }
+                if (block_comments && pair == b"//")
+                    || (language == Language::Python && byte == b'#')
+                {
+                    comment = Comment::Line;
+                } else if block_comments && pair == b"/*" {
+                    comment = Comment::Block(1);
+                    push(&mut line, at, at + 2);
+                    at += 2;
+                    continue;
+                } else if language == Language::Python {
+                    match byte {
+                        b'(' | b'[' | b'{' => brackets += 1,
+                        b')' | b']' | b'}' => brackets = brackets.saturating_sub(1),
+                        _ => {}
+                    }
+                }
+            }
+            Comment::Block(depth)
+                if pair == b"*/" || (language == Language::Rust && pair == b"/*") =>
+            {
+                comment = match (pair, depth) {
+                    (b"*/", 1) => Comment::None,
+                    (b"*/", _) => Comment::Block(depth - 1),
+                    _ => Comment::Block(depth + 1),
+                };
+                push(&mut line, at, at + 2);
+                at += 2;
+                continue;
+            }
+            _ => {}
+        }
+        let start = at;
+        if word(byte) && language != Language::Other {
+            while at < text.len() && word(text[at]) {
+                at += 1;
+            }
+        } else {
+            at += 1;
+        }
+        push(&mut line, start, at);
+    }
+    lines
 }
 
 fn closing(token: &[u8]) -> bool {
     matches!(token, b")" | b"]" | b"}")
 }
 
-/// The tokens of `lines[index]` in a version, with a code file's trailing
-/// commas dropped: `next` is the first token of the following line that
-/// has one.
-fn line_tokens<'a>(
-    lines: &[&'a [u8]],
-    index: usize,
-    language: Language,
-    next: &[Option<&'a [u8]>],
-) -> Vec<&'a [u8]> {
-    let mut found = tokens(lines[index], language);
-    if language == Language::Code {
-        let following = next.get(index).copied().flatten();
-        let mut kept = Vec::with_capacity(found.len());
-        for (at, token) in found.iter().enumerate() {
-            let after = found.get(at + 1).copied().or(following);
-            if *token == b"," && after.is_some_and(closing) {
-                continue;
+/// Each line of a version as its tokens, with a Rust, TypeScript or
+/// JavaScript file's trailing commas dropped: a comma followed, on its line
+/// or the next with a token, by a closing bracket.
+fn version_tokens(text: &[u8], language: Language) -> Vec<Vec<&[u8]>> {
+    let mut lines = lex(text, language);
+    if matches!(language, Language::Rust | Language::Script) {
+        let mut following: Option<&[u8]> = None;
+        for line in lines.iter_mut().rev() {
+            let first = line.first().copied();
+            let mut kept = Vec::with_capacity(line.len());
+            for (at, token) in line.iter().enumerate() {
+                let after = line.get(at + 1).copied().or(following);
+                if *token == b"," && after.is_some_and(closing) {
+                    continue;
+                }
+                kept.push(*token);
             }
-            kept.push(*token);
-        }
-        found = kept;
-    }
-    found
-}
-
-/// For each line, the first token of the next line that has one: what a
-/// trailing comma at its end is followed by. Only code files need it.
-fn next_tokens<'a>(lines: &[&'a [u8]], language: Language) -> Vec<Option<&'a [u8]>> {
-    if language != Language::Code {
-        return Vec::new();
-    }
-    let mut next = vec![None; lines.len()];
-    let mut following = None;
-    for index in (0..lines.len()).rev() {
-        next[index] = following;
-        if let Some(first) = tokens(lines[index], language).first() {
-            following = Some(*first);
+            *line = kept;
+            following = first.or(following);
         }
     }
-    next
+    lines
 }
 
 /// One change's lines, by index into the change's removed and added lines:
@@ -316,9 +580,9 @@ fn authors_within(
         .after
         .split_inclusive(|byte| *byte == b'\n')
         .collect();
-    let (old_next, new_next) = (
-        next_tokens(&old, change.language),
-        next_tokens(&new, change.language),
+    let (old_tokens, new_tokens) = (
+        version_tokens(change.before, change.language),
+        version_tokens(change.after, change.language),
     );
     let command = || Some(change.command.to_owned());
     let resolve = |line: &[u8]| -> Owner {
@@ -365,18 +629,14 @@ fn authors_within(
     for (rows, cols) in blocks {
         let removed_lines = old.get(rows.clone())?;
         let added_lines = new.get(cols.clone())?;
-        let removed: Vec<Vec<&[u8]>> = rows
-            .map(|index| line_tokens(&old, index, change.language, &old_next))
-            .collect();
-        let added: Vec<Vec<&[u8]>> = cols
-            .map(|index| line_tokens(&new, index, change.language, &new_next))
-            .collect();
+        let removed = old_tokens.get(rows)?;
+        let added = new_tokens.get(cols)?;
         spend(
             &mut left,
-            removed.iter().chain(&added).map(Vec::len).sum::<usize>(),
+            removed.iter().chain(added).map(Vec::len).sum::<usize>(),
         )
         .ok()?;
-        let parts = split(&removed, &added, &mut left).ok()?;
+        let parts = split(removed, added, &mut left).ok()?;
         for (rows, cols) in &parts.groups {
             let with_tokens: Vec<usize> =
                 rows.clone().filter(|r| !removed[*r].is_empty()).collect();
@@ -494,9 +754,20 @@ mod tests {
         Author::Session(name.into())
     }
 
+    /// The tokens of a one-line text.
+    fn tokens(line: &[u8], language: Language) -> Vec<&[u8]> {
+        lex(line, language).concat()
+    }
+
+    /// Whether `before` and `after` have the same tokens, in order.
+    fn same(before: &str, after: &str, language: Language) -> bool {
+        version_tokens(before.as_bytes(), language).concat()
+            == version_tokens(after.as_bytes(), language).concat()
+    }
+
     #[test]
     fn tokens_ignore_whitespace_but_not_where_words_meet() {
-        let code = Language::Code;
+        let code = Language::Rust;
         assert_eq!(
             tokens(b"fn a(x,y) {}\n", code),
             tokens(b"  fn a( x, y ) { }", code)
@@ -513,22 +784,203 @@ mod tests {
     }
 
     #[test]
-    fn a_files_language_is_its_extension() {
-        for path in ["src/a.rs", "web/App.TSX", "x/y.mjs", "lib.cts", "a.js"] {
-            assert_eq!(language(path), Language::Code, "{path}");
+    fn a_files_language_is_its_name_or_extension() {
+        for path in ["src/a.rs", "lib/b.RS"] {
+            assert_eq!(language(path), Language::Rust, "{path}");
+        }
+        for path in ["web/App.TSX", "x/y.mjs", "lib.cts", "a.js", "a.ts"] {
+            assert_eq!(language(path), Language::Script, "{path}");
         }
         for path in ["README.md", "docs/a.markdown", "page.mdx"] {
             assert_eq!(language(path), Language::Prose, "{path}");
         }
+        for path in ["a.py", "pkg/types.pyi", "tool.PY"] {
+            assert_eq!(language(path), Language::Python, "{path}");
+        }
+        for path in [
+            "config.yaml",
+            ".github/workflows/check.yml",
+            "Makefile",
+            "sub/makefile",
+            "GNUmakefile",
+            "rules.mk",
+            "view.haml",
+            "page.pug",
+            "style.sass",
+            "style.styl",
+            "app.nim",
+            "Program.fs",
+        ] {
+            assert_eq!(language(path), Language::Indented, "{path}");
+        }
         for path in [
             "Cargo.toml",
-            "a.py",
-            "Makefile",
             ".rs",
             "dir.rs/notes",
             "a.txt",
+            ".yml",
+            "Dockerfile",
         ] {
             assert_eq!(language(path), Language::Other, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_rust_or_script_string_is_one_token_whitespace_and_all() {
+        for language in [Language::Rust, Language::Script] {
+            assert!(!same("let s = \"a b\";\n", "let s = \"a  b\";\n", language));
+            assert!(!same("f(\"x\")\n", "f(\" x\")\n", language));
+            // Spacing outside the string is still layout.
+            assert!(same("let s=\"a b\";\n", "let s = \"a b\" ;\n", language));
+            // An escaped quote does not end it.
+            assert!(!same("\"a\\\" b\"\n", "\"a\\\"  b\"\n", language));
+        }
+        let rust = Language::Rust;
+        // Raw, byte and character literals, and lifetimes that are not.
+        assert!(!same("r#\"a \"b\"#\n", "r#\"a  \"b\"#\n", rust));
+        assert!(!same("b\"a b\"\n", "b\"a  b\"\n", rust));
+        assert!(!same("x(' ')\n", "x('  ')\n", rust));
+        assert!(!same("x(b' ')\n", "x(b'\\t')\n", rust));
+        assert!(same(
+            "fn f<'a>(x: &'a str) -> &'a str {x}\n",
+            "fn f<'a>(x: &'a str) -> &'a str {\n    x\n}\n",
+            rust
+        ));
+        // A string that spans lines: re-indenting its second line changes it.
+        assert!(!same(
+            "let s = \"one\n  two\";\n",
+            "let s = \"one\n    two\";\n",
+            rust
+        ));
+        assert!(same(
+            "let s = \"one\n  two\";\n",
+            "let s =\n    \"one\n  two\";\n",
+            rust
+        ));
+        // A quote in a comment opens no string.
+        assert!(same(
+            "// say \"hi\na(x,y);\n",
+            "// say \"hi\na(x, y);\n",
+            rust
+        ));
+        assert!(same(
+            "/* it's /* nested */ \" */ a(x,y);\n",
+            "/* it's /* nested */ \" */\na(x, y);\n",
+            rust
+        ));
+        let script = Language::Script;
+        // A template literal, with its substitutions, is one token.
+        assert!(!same("`a ${f(`b c`)} d`\n", "`a ${f(`b  c`)} d`\n", script));
+        assert!(!same("`one\n  two`\n", "`one\n    two`\n", script));
+        // An unterminated quote ends at its line.
+        assert!(same("x = 'a\ny(a,b)\n", "x = 'a\ny(a, b)\n", script));
+    }
+
+    #[test]
+    fn python_indentation_is_content_but_not_inside_brackets() {
+        let python = Language::Python;
+        // A statement moved into an `if`.
+        assert!(!same(
+            "if x:\n    a()\nb()\n",
+            "if x:\n    a()\n    b()\n",
+            python
+        ));
+        // Two statements joined, and a block re-indented as a whole.
+        assert!(!same("a()\nb()\n", "a() b()\n", python));
+        assert!(!same("if x:\n  a()\n", "if x:\n    a()\n", python));
+        // Spacing within a line, trailing whitespace and blank lines are
+        // layout.
+        assert!(same(
+            "if x :\n    a( 1,2 )  \n\n\nb()\n",
+            "if x:\n    a(1, 2)\nb()\n",
+            python
+        ));
+        // A call re-wrapped inside its brackets keeps its tokens.
+        assert!(same(
+            "def run():\n    result = compute(first, second)\n    return result\n",
+            "def run():\n    result = compute(\n        first, second\n    )\n    return result\n",
+            python
+        ));
+        assert!(same(
+            "x = [1,\n       2]\n",
+            "x = [\n    1,\n    2]\n",
+            python
+        ));
+        // A bracket in a string or a comment opens nothing.
+        assert!(!same(
+            "s = '('\nif x:\n    a()\n",
+            "s = '('\nif x:\n        a()\n",
+            python
+        ));
+        assert!(!same(
+            "a()  # (\nif x:\n    b()\n",
+            "a()  # (\nif x:\nb()\n",
+            python
+        ));
+        // A string is one token, triple-quoted ones across lines.
+        assert!(!same("s = 'a b'\n", "s = 'a  b'\n", python));
+        assert!(!same(
+            "s = \"\"\"one\n  two\"\"\"\n",
+            "s = \"\"\"one\n    two\"\"\"\n",
+            python
+        ));
+    }
+
+    #[test]
+    fn yaml_and_makefile_indentation_is_content() {
+        let indented = Language::Indented;
+        // A list moved under another key.
+        assert!(!same(
+            "defaults:\n  retries: 3\nports:\n  - 80\n",
+            "defaults:\n  retries: 3\n  ports:\n    - 80\n",
+            indented
+        ));
+        // A recipe line's tab.
+        assert!(!same("all:\n\tcc a.c\n", "all:\ncc a.c\n", indented));
+        assert!(!same("a: 1\nb: 2\n", "a: 1 b: 2\n", indented));
+        // Spacing within a line, trailing whitespace and blank lines.
+        assert!(same(
+            "key:   value  \n\n- a\n",
+            "key: value\n- a\n",
+            indented
+        ));
+        // Words that come to touch differ, as they do not in other files.
+        assert!(!same("key: a b\n", "key: ab\n", indented));
+    }
+
+    #[test]
+    fn rust_char_literal_and_raw_string_edges_do_not_panic() {
+        for text in [
+            "'",
+            "'\\",
+            "'\\u{",
+            "b'",
+            "r#",
+            "r#\"",
+            "br##\"x\"#",
+            "c\"",
+            "'é",
+            "'\u{1F600}'",
+            "\"\\",
+            "`${",
+            "`${'",
+            "`${`",
+            "/*",
+            "/* /*",
+            "\"\"\"",
+            "'''a",
+        ] {
+            for language in [
+                Language::Rust,
+                Language::Script,
+                Language::Python,
+                Language::Indented,
+                Language::Prose,
+                Language::Other,
+            ] {
+                let lines = lex(text.as_bytes(), language);
+                assert_eq!(lines.len(), 1, "{text:?} {language:?}");
+            }
         }
     }
 
@@ -540,7 +992,7 @@ mod tests {
             let credited = credit(
                 before,
                 after,
-                Language::Code,
+                Language::Rust,
                 overlapped,
                 &[
                     ("fn a(x,y) {}\n", session("alice")),
@@ -560,7 +1012,7 @@ mod tests {
         let mine = credit(
             before,
             after,
-            Language::Code,
+            Language::Rust,
             true,
             &[
                 ("fn a(x,y) {}\n", session(ME)),
@@ -579,7 +1031,7 @@ mod tests {
         };
         let before = "call(a,\nb);\nlong(x, y, z);\n";
         let after = "call(a, b);\nlong(\n    x,\n    y,\n    z,\n);\n";
-        let code = credit(before, after, Language::Code, true, &alice(before));
+        let code = credit(before, after, Language::Rust, true, &alice(before));
         assert!(
             code.sessions["alice"].added.len() == 6 && code.sessions.len() == 1,
             "{code:?}"
@@ -588,7 +1040,7 @@ mod tests {
         let wrapped = credit(
             "f(\n    a,\n    b\n)\n",
             "f(\n    a,\n    b,\n)\n",
-            Language::Code,
+            Language::Rust,
             true,
             &alice("f(\n    a,\n    b\n)\n"),
         );
@@ -607,7 +1059,7 @@ mod tests {
         let changed = credit(
             "f(a, b)\n",
             "f(a b)\n",
-            Language::Code,
+            Language::Rust,
             true,
             &alice("f(a, b)\n"),
         );
@@ -643,10 +1095,10 @@ mod tests {
         let before = "keep\nlet total = 1;\n";
         let after = "keep\nlet sum = 1;\nsum;\n";
         let own = [("let total = 1;\n", session(ME))];
-        let alone = credit(before, after, Language::Code, false, &own);
+        let alone = credit(before, after, Language::Rust, false, &own);
         assert!(alone.whole, "{alone:?}");
         // While another session's command ran: no session's.
-        let overlapped = credit(before, after, Language::Code, true, &own);
+        let overlapped = credit(before, after, Language::Rust, true, &own);
         assert!(
             overlapped.sessions.is_empty() && !overlapped.whole,
             "{overlapped:?}"
@@ -655,13 +1107,13 @@ mod tests {
         let theirs = credit(
             before,
             after,
-            Language::Code,
+            Language::Rust,
             false,
             &[("let total = 1;\n", session("bob"))],
         );
         assert!(theirs.sessions.is_empty() && !theirs.whole, "{theirs:?}");
         // A pure addition while nothing ran is the command's.
-        let added = credit("a\n", "a\nb\n", Language::Code, false, &[]);
+        let added = credit("a\n", "a\nb\n", Language::Rust, false, &[]);
         assert!(added.whole && added.sessions[ME].added == keys(&["b\n"]));
     }
 
@@ -669,8 +1121,8 @@ mod tests {
     fn committed_lines_count_as_the_commands_only_when_nothing_overlapped() {
         let before = "fn a(x,y) {}\n";
         let after = "fn a(x, y) {}\n";
-        assert!(credit(before, after, Language::Code, false, &[]).whole);
-        let overlapped = credit(before, after, Language::Code, true, &[]);
+        assert!(credit(before, after, Language::Rust, false, &[]).whole);
+        let overlapped = credit(before, after, Language::Rust, true, &[]);
         assert!(overlapped.sessions.is_empty() && !overlapped.whole);
     }
 
@@ -680,7 +1132,7 @@ mod tests {
         let joined = credit(
             "call(a,\nb);\n",
             "call(a, b);\n",
-            Language::Code,
+            Language::Rust,
             false,
             &[("call(a,\n", session("alice")), ("b);\n", session("bob"))],
         );
@@ -688,7 +1140,7 @@ mod tests {
         let unknown = credit(
             "f(a,b);\n",
             "f(a, b);\n",
-            Language::Code,
+            Language::Rust,
             false,
             &[("f(a,b);\n", Author::Unknown)],
         );
@@ -702,7 +1154,7 @@ mod tests {
         let credited = credit(
             "x( );\ny\n",
             "x();\nz\nx();\n",
-            Language::Code,
+            Language::Rust,
             true,
             &[("x( );\n", session("bob")), ("y\n", session("bob"))],
         );
@@ -724,7 +1176,7 @@ mod tests {
         let credited = credit(
             "fn a() {\n\nx\n}\n",
             "fn a() {\n    x\n\n}\n",
-            Language::Code,
+            Language::Rust,
             true,
             &who,
         );
@@ -741,7 +1193,7 @@ mod tests {
         let change = Change {
             before: b"\xff\n",
             after: b"x\n",
-            language: Language::Code,
+            language: Language::Rust,
             command: ME,
             overlapped: true,
         };
@@ -755,7 +1207,7 @@ mod tests {
         let change = Change {
             before: before.as_bytes(),
             after: after.as_bytes(),
-            language: Language::Code,
+            language: Language::Rust,
             command: ME,
             overlapped: true,
         };
@@ -782,7 +1234,7 @@ mod tests {
         let change = Change {
             before: before.as_bytes(),
             after: after.as_bytes(),
-            language: Language::Code,
+            language: Language::Rust,
             command: ME,
             overlapped: true,
         };
