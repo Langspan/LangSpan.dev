@@ -54,6 +54,7 @@ impl Fixture {
         let mut fixture = Self { base, daemon: None };
         fixture.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(fixture.state_dir())
                 .stdout(Stdio::null())
@@ -80,6 +81,7 @@ impl Fixture {
     /// Runs the hook; returns its diagnostic and its stdout.
     fn hook(&self, adapter: &str, event: &Value) -> (Value, String) {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", adapter, "--workspace", "demo", "--root"])
             .arg(self.root())
             .arg("--state-dir")

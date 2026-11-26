@@ -10,6 +10,14 @@ const HELP: &str = r#"LangSpan — local cooperative coordination for AI coding 
 
 Usage: langspan [--state-dir DIR] COMMAND [--json]
 
+  setup [--home DIR] [--hosts ...] [--yes]
+                                 From nothing to coordinated sessions: shows one plan
+                                 (the hosts found, the files `install --skill` changes,
+                                 the coordinator's login service and the state
+                                 directory), asks once, applies it, starts the
+                                 coordinator and runs `doctor`. --yes applies without
+                                 asking; without a terminal and without --yes it only
+                                 prints the plan. A second run changes nothing
   daemon                         Run the local coordinator in the foreground
   mcp                            Serve MCP over stdin/stdout using the coordinator
   dashboard [--listen 127.0.0.1:7311] [--open] [--allow-network]
@@ -282,8 +290,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  statusLine to `langspan statusline` where none is
                                  set (never replacing one); off removes LangSpan's
   uninstall [--home DIR] [--hosts ...] [--apply]
-                                 Remove only what install wrote, the skill included;
-                                 the state directory stays
+                                 Remove only what install and setup wrote, the skill
+                                 and the coordinator's login service included; the
+                                 state directory stays
+
+A hook or `mcp` that finds no coordinator, where no login service is installed for
+its state directory, starts `langspan daemon` in the background and logs it to
+daemon.log in the state directory. LANGSPAN_AUTOSTART=off turns that off.
 
 Every mutation requires --request-id ID. Retry the identical ID and command after
 an unknown outcome; a new operation needs a new ID. Old grants never become fresh
@@ -425,6 +438,12 @@ fn hook(input: Vec<String>) -> ExitCode {
         }
         let deadline = std::time::Instant::now() + config.budget;
         let input = langspan::hook::read_stdin_until(deadline);
+        // At most half of what is left, so the event itself keeps the rest.
+        let now = std::time::Instant::now();
+        start_coordinator(
+            &config.state_dir,
+            now + deadline.saturating_duration_since(now) / 2,
+        );
         // Opt-in, for capturing what a real host sends so it can become a
         // fixture. Off unless the variable names an existing directory; a
         // failure to write is ignored and never changes the hook's answer.
@@ -748,15 +767,27 @@ type FilePlan<'a> = (
     Option<Box<langspan::install::LeftEmpty<'a>>>,
 );
 
+/// How `user_install` runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Show the plan and how to apply it.
+    DryRun,
+    /// Show the plan only: `setup` says how to apply it.
+    Plan,
+    Apply,
+}
+
 /// `install` / `uninstall`: LangSpan's user-level hooks and MCP server entry
-/// for each chosen host. Every file is planned, and every refusal raised,
-/// before anything is written.
+/// for each chosen host, and on uninstall the coordinator's login service.
+/// Every file is planned, and every refusal raised, before anything is
+/// written. Returns how many files would change or changed.
 fn user_install(
     install: bool,
     options: &mut BTreeMap<String, String>,
-    apply: bool,
-) -> Result<u8, langspan::Error> {
+    mode: Mode,
+) -> Result<usize, langspan::Error> {
     use langspan::{install as hooks, install::Vendor, user_install};
+    let apply = mode == Mode::Apply;
     let home = UserHome::new(options.remove("--home").map(PathBuf::from))?;
     let state_dir = std::path::absolute(home.state_dir(options.remove("--state-dir")))?;
     let share_prompt = switch(options, "--prompt-summary")?;
@@ -796,12 +827,18 @@ fn user_install(
             .filter(|vendor| home.files(*vendor).config_dir.is_dir())
             .collect(),
     };
-    if vendors.is_empty() {
+    if vendors.is_empty() && install {
         return Err(format!(
             "no host configuration found under {} (.claude, .codex or .cursor); choose --hosts claude-code,codex,cursor,gemini-cli,antigravity",
             home.home.display()
         )
         .into());
+    }
+    if vendors.is_empty() {
+        println!(
+            "No host configuration found under {} (.claude, .codex or .cursor), so no host's files change.",
+            home.home.display()
+        );
     }
     let executable = hooks::installed_executable(&std::env::current_exe()?)?;
     // Claude Code's `statusLine` (roadmap H2): only where none is set, and
@@ -1126,7 +1163,10 @@ fn user_install(
             );
         }
     }
-    if changed > 0 && !apply {
+    if !install {
+        changed += remove_service(&home, apply)?;
+    }
+    if changed > 0 && mode == Mode::DryRun {
         println!("Dry run; nothing was written. Run the same command with --apply to write it.");
     }
     if !install && apply {
@@ -1135,7 +1175,345 @@ fn user_install(
     for note in notes {
         println!("{note}");
     }
+    Ok(changed)
+}
+
+/// Starts a coordinator for `state_dir` if none runs and no login service is
+/// installed for it, waiting at most until `until`. Never fails: what
+/// happened goes to stderr as one structured line.
+fn start_coordinator(state_dir: &std::path::Path, until: std::time::Instant) {
+    if langspan::autostart::disabled() {
+        return;
+    }
+    let Ok(state_dir) = std::path::absolute(state_dir) else {
+        return;
+    };
+    // The usual case, before anything else is looked up.
+    if langspan::client::accepts(
+        &state_dir,
+        until.min(std::time::Instant::now() + std::time::Duration::from_millis(100)),
+    ) {
+        return;
+    }
+    let executable = std::env::current_exe()
+        .map_err(langspan::Error::from)
+        .and_then(|exe| Ok(langspan::install::installed_executable(&exe)?));
+    let outcome = match executable {
+        Ok(executable) => {
+            let service = UserHome::new(None)
+                .is_ok_and(|home| langspan::service::installed_for(&home, &state_dir));
+            langspan::autostart::ensure(&state_dir, &executable, None, service, until)
+        }
+        Err(error) => {
+            langspan::autostart::Outcome::Failed(format!("cannot find this executable: {error}"))
+        }
+    };
+    if let Some(line) = outcome.log_line(&state_dir) {
+        eprintln!("{line}");
+    }
+}
+
+/// The login service `setup` would install, as planned.
+enum ServicePlan {
+    /// No service: why, and so the coordinator is started on demand.
+    None(String),
+    /// The file and the manager already match.
+    Unchanged(PathBuf),
+    /// The file to write, its text, and what is there now.
+    Install {
+        manager: langspan::service::Manager,
+        path: PathBuf,
+        text: String,
+        existing: Option<String>,
+    },
+}
+
+fn plan_service(
+    home: &UserHome,
+    executable: &std::path::Path,
+    state_dir: &std::path::Path,
+) -> Result<ServicePlan, langspan::Error> {
+    use langspan::service::{self, Manager};
+    let Some(manager) = Manager::current() else {
+        return Ok(ServicePlan::None(
+            "this platform has no supported login service".into(),
+        ));
+    };
+    if home.explicit() {
+        return Ok(ServicePlan::None(
+            "--home names a home other than the login user's, whose service manager setup does not change".into(),
+        ));
+    }
+    let path = manager.file(home);
+    let existing = service::read(&path)?;
+    if let Some(existing) = &existing
+        && manager.state_dir_of(existing).is_none()
+    {
+        return Err(format!(
+            "{} exists and LangSpan did not write it; move it aside, then run setup again",
+            path.display()
+        )
+        .into());
+    }
+    if let Err(reason) = service::manager_available(manager) {
+        return Ok(ServicePlan::None(reason));
+    }
+    let text = manager.render(executable, state_dir, &|name| std::env::var(name).ok())?;
+    if existing.as_deref() == Some(text.as_str()) && service::running(manager) {
+        return Ok(ServicePlan::Unchanged(path));
+    }
+    Ok(ServicePlan::Install {
+        manager,
+        path,
+        text,
+        existing,
+    })
+}
+
+/// `setup`: one plan for the user-level install with the skill, the
+/// coordinator's login service and the state directory; one question; then
+/// the install, the service, a running coordinator and `doctor`.
+fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langspan::Error> {
+    use std::io::{BufRead, IsTerminal, Read, Write};
+    if json {
+        return Err(
+            "--json is not valid for `setup`; run `langspan doctor --json` after it".into(),
+        );
+    }
+    let yes = options.remove("--yes").is_some();
+    if options.contains_key("--skill") {
+        return Err("`setup` always installs the skill; leave out --skill".into());
+    }
+    options.insert("--skill".into(), String::new());
+    let home = UserHome::new(options.get("--home").map(PathBuf::from))?;
+    let state_dir = std::path::absolute(home.state_dir(options.get("--state-dir").cloned()))?;
+    langspan::autostart::check_state_dir(&state_dir)?;
+    let executable = langspan::install::installed_executable(&std::env::current_exe()?)?;
+    println!("LangSpan setup for {}", home.home.display());
+    println!("State directory: {}", state_dir.display());
+    println!("Hook and MCP files:");
+    let mut plan_options = options.clone();
+    let files = user_install(true, &mut plan_options, Mode::Plan)?;
+    let service = plan_service(&home, &executable, &state_dir)?;
+    println!("Coordinator:");
+    match &service {
+        ServicePlan::None(reason) => println!(
+            "  No login service: {reason}. Hooks and `langspan mcp` start the coordinator when they find none, and setup starts one now."
+        ),
+        ServicePlan::Unchanged(path) => {
+            println!(
+                "  Login service {} is installed and running; nothing to change.",
+                path.display()
+            )
+        }
+        ServicePlan::Install {
+            path,
+            text,
+            existing,
+            ..
+        } => {
+            if existing.as_deref() == Some(text.as_str()) {
+                println!(
+                    "  Start login service {}, which is installed but not running.",
+                    path.display()
+                );
+            } else {
+                println!(
+                    "  {} {} and start it, so the coordinator runs at every login:",
+                    if existing.is_some() {
+                        "Replace"
+                    } else {
+                        "Write"
+                    },
+                    path.display()
+                );
+                for line in text.lines() {
+                    println!("    {line}");
+                }
+            }
+        }
+    }
+    let service_changes = matches!(service, ServicePlan::Install { .. });
+    let running = langspan::client::accepts(
+        &state_dir,
+        std::time::Instant::now() + std::time::Duration::from_millis(500),
+    );
+    if files == 0 && !service_changes && running {
+        println!("Already set up; nothing to change.");
+        return Ok(0);
+    }
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            println!(
+                "Not run from a terminal and no --yes, so nothing was changed. Run `langspan setup --yes` to apply this plan."
+            );
+            return Ok(0);
+        }
+        eprint!("Set this up? [Y/n] ");
+        let _ = std::io::stderr().flush();
+        let mut answer = String::new();
+        std::io::stdin().lock().take(256).read_line(&mut answer)?;
+        if !matches!(
+            answer.trim().to_ascii_lowercase().as_str(),
+            "" | "y" | "yes"
+        ) {
+            println!("Nothing was changed.");
+            return Ok(0);
+        }
+    }
+    if files > 0 {
+        user_install(true, options, Mode::Apply)?;
+    }
+    langspan::autostart::prepare_state_dir(&state_dir)?;
+    match service {
+        ServicePlan::Install {
+            manager,
+            path,
+            text,
+            existing,
+        } => {
+            install_service(manager, &path, existing.as_deref(), &text, &state_dir)?;
+        }
+        ServicePlan::Unchanged(_) => {}
+        ServicePlan::None(_) => {
+            let outcome = langspan::autostart::ensure(
+                &state_dir,
+                &executable,
+                home.explicit().then_some(home.home.as_path()),
+                false,
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            );
+            match outcome {
+                langspan::autostart::Outcome::Running => {
+                    println!("A coordinator is already running.")
+                }
+                langspan::autostart::Outcome::Started { pid, ready: true } => println!(
+                    "Started a coordinator in the background (process {pid}); it logs to {}.",
+                    langspan::autostart::log_path(&state_dir).display()
+                ),
+                langspan::autostart::Outcome::Started { pid, ready: false } => println!(
+                    "Started a coordinator (process {pid}), but it did not accept connections within 5 seconds; read {} for why.",
+                    langspan::autostart::log_path(&state_dir).display()
+                ),
+                langspan::autostart::Outcome::Skipped(reason) => {
+                    println!("No coordinator was started ({reason}).")
+                }
+                langspan::autostart::Outcome::Failed(error) => {
+                    println!("No coordinator was started: {error}.")
+                }
+            }
+        }
+    }
+    println!("langspan doctor:");
+    // Setup itself succeeded; what doctor finds is reported, not its exit.
+    doctor(&state_dir, None, &home, false)?;
     Ok(0)
+}
+
+/// Writes the login service file, unless it changed from `planned` since
+/// the plan was shown, and starts it, then waits up to five seconds for the
+/// coordinator to accept connections.
+fn install_service(
+    manager: langspan::service::Manager,
+    path: &std::path::Path,
+    planned: Option<&str>,
+    text: &str,
+    state_dir: &std::path::Path,
+) -> Result<(), langspan::Error> {
+    use langspan::service;
+    // The manager creates the log as it starts the service: owner-only first.
+    drop(langspan::autostart::open_log(&std::fs::canonicalize(
+        state_dir,
+    )?)?);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    langspan::service::write(path, planned, text)?;
+    println!("Wrote {}.", path.display());
+    let commands = service::start_commands(manager, path);
+    let last = commands.len() - 1;
+    for (index, (program, args)) in commands.iter().enumerate() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let ran = service::run(program, &args)?;
+        // launchd's first step unloads an earlier load, and fails when there
+        // was none.
+        let optional = manager == service::Manager::Launchd && index < last;
+        if !ran.success && !optional {
+            return Err(format!(
+                "`{program} {}` failed: {}. {} is written; run that command again, or `langspan daemon` to start the coordinator by hand",
+                args.join(" "),
+                ran.said,
+                path.display()
+            )
+            .into());
+        }
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut ready = false;
+    while std::time::Instant::now() < deadline {
+        if langspan::client::accepts(state_dir, deadline) {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if ready {
+        println!("Started the login service; the coordinator accepts connections.");
+    } else {
+        println!(
+            "Started the login service, but the coordinator did not accept connections within 5 seconds; see {}.",
+            langspan::autostart::log_path(state_dir).display()
+        );
+    }
+    Ok(())
+}
+
+/// On uninstall, stops and removes the login service LangSpan wrote, if
+/// any. Returns 1 when there is one to remove, else 0.
+fn remove_service(home: &UserHome, apply: bool) -> Result<usize, langspan::Error> {
+    use langspan::service::{self, Manager};
+    let Some(manager) = Manager::current() else {
+        return Ok(0);
+    };
+    let path = manager.file(home);
+    match service::read(&path)? {
+        None => return Ok(0),
+        Some(text) if manager.state_dir_of(&text).is_none() => {
+            println!(
+                "{} was not written by LangSpan; it was left in place.",
+                path.display()
+            );
+            return Ok(0);
+        }
+        Some(_) => {}
+    }
+    if !apply {
+        println!(
+            "The coordinator's login service {} would be stopped and removed.",
+            path.display()
+        );
+        return Ok(1);
+    }
+    // Another home's manager is not this login's: only the file goes.
+    if !home.explicit() {
+        for (program, args) in service::stop_commands(manager) {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            match service::run(&program, &args) {
+                Ok(ran) if ran.success => {}
+                Ok(ran) => println!("`{program} {}` said: {}", args.join(" "), ran.said),
+                Err(error) => println!("{error}"),
+            }
+        }
+    }
+    std::fs::remove_file(&path)?;
+    if !home.explicit() && manager == Manager::Systemd {
+        let _ = service::run("systemctl", &["--user", "daemon-reload"]);
+    }
+    println!(
+        "Stopped and removed the coordinator's login service {}.",
+        path.display()
+    );
+    Ok(1)
 }
 
 /// What a dry run shows of Gemini CLI's settings file: LangSpan's entries
@@ -2388,7 +2766,7 @@ fn doctor(
         Err(error) => note(
             false,
             format!(
-                "Coordinator not reachable at {}: {error}. Start it with `langspan daemon`. Until then every hook gives no decision and no briefing.",
+                "Coordinator not reachable at {}: {error}. Run `langspan setup` to install it as a login service, or start it with `langspan daemon`. Until then a hook starts one when it finds none, unless LANGSPAN_AUTOSTART=off or a login service is installed for it.",
                 state_dir.display()
             ),
         ),
@@ -3190,7 +3568,20 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     if let [action] = args.as_slice()
         && (action == "install" || action == "uninstall")
     {
-        return user_install(action == "install", &mut options, apply);
+        user_install(
+            action == "install",
+            &mut options,
+            if apply { Mode::Apply } else { Mode::DryRun },
+        )?;
+        return Ok(0);
+    }
+    if args == ["setup"] {
+        if apply {
+            return Err(
+                "`setup` asks before it changes anything; use --yes to skip the question".into(),
+            );
+        }
+        return setup(&mut options, json);
     }
     let home_option = options.remove("--home").map(PathBuf::from);
     let state_option = options.get("--state-dir").cloned();
@@ -3304,6 +3695,14 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         if words[0] == "daemon" {
             langspan::daemon::run(state_dir).await?;
         } else {
+            let dir = state_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                start_coordinator(
+                    &dir,
+                    std::time::Instant::now() + std::time::Duration::from_secs(2),
+                )
+            })
+            .await?;
             langspan::mcp::serve(state_dir).await?;
         }
         return Ok(0);
@@ -3671,6 +4070,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--detail"
             | "--all"
             | "--skill"
+            | "--yes"
             | "--switch"
             | "--off" => {
                 if options.insert(arg.clone(), String::new()).is_some() {
