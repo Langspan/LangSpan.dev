@@ -4177,6 +4177,10 @@ pub enum Command {
     /// Read-only: a bounded view of every session on every machine heard
     /// from, with what is held, what overlaps, evidence and health.
     Dashboard,
+    /// Read-only: the version the running coordinator was built as and its
+    /// process ID, for `doctor` (roadmap I5). Answered by the daemon, never
+    /// recorded. A daemon from before it answers with an error.
+    Version,
     Events {
         after: u64,
         limit: u32,
@@ -4919,6 +4923,7 @@ enum CommandWire {
         page_bytes: Option<u32>,
     },
     Dashboard {},
+    Version {},
     Events {
         after: u64,
         limit: u32,
@@ -5313,6 +5318,11 @@ pub enum Outcome {
     },
     Dashboard {
         dashboard: Dashboard,
+    },
+    /// The answer to `Command::Version`.
+    Version {
+        version: String,
+        pid: u32,
     },
     /// Every list is a name match bounded by the request's limit. `coverage`
     /// says how much of the workspace was indexed when it was answered.
@@ -7814,6 +7824,7 @@ fn decide_checked(
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
         | Command::Compact { .. }
+        | Command::Version
         | Command::ShowMessage { .. }
         | Command::MessageStatus { .. }
         | Command::GraphSymbol { .. }

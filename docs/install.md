@@ -49,7 +49,7 @@ export PATH="$PWD/target/release:$PATH"
 langspan setup
 ```
 
-Requires Rust and a C compiler. Restart a running coordinator after upgrading. See the [engineering guide](engineering.md).
+Requires Rust and a C compiler. Restart a running coordinator after upgrading; `langspan doctor` reports one that runs an older build ([mixed versions](usage.md#mixed-versions-after-an-upgrade)). See the [engineering guide](engineering.md).
 
 ### Connect a native agent
 

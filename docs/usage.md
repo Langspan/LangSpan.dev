@@ -2515,6 +2515,32 @@ fields version 4 added, and a client asks a daemon of an earlier build in
 version 3. Upgrade the daemon and clients together. Earlier persisted
 records remain readable; a build older than the marker refuses the file.
 
+### Mixed versions after an upgrade
+
+LangSpan never downloads or replaces its own binary and makes no update
+check. Upgrade with a new release archive, checked as in
+[Verify the binary](install.md#verify-a-download), or by rebuilding from
+source; roll back by keeping the previous archive. `brew upgrade langspan`
+applies once the Homebrew tap is published. The store stays readable by the
+earlier build while the schema marker is unchanged.
+
+After an upgrade, a coordinator started before it keeps running the old
+binary while hooks start the new one. `langspan doctor` asks the coordinator
+for its version and reads the version recorded in each executable that an
+installed hook or MCP entry names, without running it:
+
+```text
+$ langspan doctor --root /work/app
+ok Coordinator version 0.4.0, process 4242.
+FIX Hooks (claude-code) in /work/app, MCP server (claude-code) in /work/app/.mcp.json: /opt/homebrew/opt/langspan/bin/langspan, version 0.5.0; the coordinator, version 0.4.0, is older than this binary; restart it: `launchctl kickstart -k gui/501/dev.langspan.coordinator` (do it between agents' turns: a restart ends the leases they hold, and each session is coordinated again when it next acts).
+```
+
+A version difference, or an executable that records no version (a build from
+before this check, or not LangSpan), needs attention and makes `doctor` exit 1.
+Without a login service the fix names `kill PID` and `langspan daemon`;
+`doctor` restarts nothing itself. A coordinator that does not answer the
+`version` request runs a build older than the one asking.
+
 Receipts are kept until [retention](#retention) removes them, at the
 earliest 7 days after they were recorded; a retry after that is a new
 request.

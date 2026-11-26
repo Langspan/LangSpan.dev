@@ -881,6 +881,7 @@ impl Store {
                 | Command::History { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
+                | Command::Version
                 | Command::Compact { .. }
                 | Command::WorkspaceList { .. }
                 | Command::WorkspaceRemove { apply: false, .. }
