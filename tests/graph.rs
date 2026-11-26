@@ -3802,6 +3802,94 @@ fn a_caller_written_after_a_committed_rename_is_listed_on_its_notice() {
     }
 }
 
+/// Roadmap C2 with D7 and issue #217: Alice renames `parse_config` in the
+/// worktree, commits on her unmerged branch and ends her session. Bob's
+/// ranked code briefing in the checkout names the checkout's own definition,
+/// with his edited caller first among its dependents, and gives Alice's
+/// file no peer reason. A ranked lookup of the old name in the worktree
+/// follows the recorded rename and ranks the new name's definition.
+#[test]
+fn a_ranked_briefing_names_a_rename_committed_on_another_worktrees_branch() {
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    alice_commits_the_rename_and_ends(&w, &tree);
+    w.edits("bob", "b1", "src/report.rs", CALLS_PARSE_CONFIG);
+    let root = w.work();
+    let ask = |at: &str| {
+        w.hook_in(
+            "app",
+            &root,
+            json!({"session_id": "bob", "cwd": root, "hook_event_name": "UserPromptSubmit",
+                   "prompt": format!("{at}: why does parse_config count bytes, and is load_config merged yet?")}),
+            &[],
+        )
+        .1
+    };
+    let deadline = Instant::now() + WAIT;
+    let line = loop {
+        let context = ask(&format!("{:?}", Instant::now())).unwrap_or_default();
+        let line = context
+            .lines()
+            .find(|line| line.starts_with(r#"- "parse_config": "#))
+            .map(str::to_owned);
+        if let Some(line) = line.filter(|line| line.contains(r#""src/report.rs""#)) {
+            // The checkout's index has no `load_config`: the branch is not
+            // merged, so the new name has no line of its own.
+            assert!(!context.contains(r#"- "load_config": "#), "{context}");
+            break line;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Bob's caller never ranked: {context}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        line.starts_with(
+            r#"- "parse_config": function at "src/config.rs":1, exported: "pub fn parse_config(text: &str) -> usize"; used by "src/report.rs" (1, you edited it), "src/main.rs" (1)"#
+        ),
+        "{line}"
+    );
+    // Alice's session ended: her committed change is no live peer's work.
+    assert!(!line.contains("is editing it"), "{line}");
+
+    // In the worktree, the old name leads to the new one, ranked.
+    let (code, text) = w.cli(&[
+        "graph",
+        "symbol",
+        "tree",
+        "parse_config",
+        "--renamed",
+        "--rank",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let outcome = &serde_json::from_str::<Value>(&text).unwrap()["outcome"];
+    assert_eq!(
+        (
+            &outcome["renamed"][0]["name"],
+            &outcome["renamed"][0]["after_name"]
+        ),
+        (&json!("parse_config"), &json!("load_config")),
+        "{outcome:#}"
+    );
+    let symbol = &outcome["symbols"][0];
+    assert_eq!(
+        (&symbol["name"], &symbol["path"], &symbol["rank_reasons"]),
+        (
+            &json!("load_config"),
+            &json!("src/config.rs"),
+            &json!([{"reason": "exported"}])
+        ),
+        "{outcome:#}"
+    );
+    // Dependents are of the new name, which no other worktree file uses yet.
+    assert_eq!(
+        (&symbol["dependents"], &symbol["dependent_count"]),
+        (&json!([]), &json!(0)),
+        "{outcome:#}"
+    );
+}
+
 /// Issue #217, fourth acceptance criterion: an uncommitted change keeps its
 /// earlier rule, so once its session ends a write is not told of it.
 #[test]
