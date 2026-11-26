@@ -40,7 +40,6 @@ BRIEF_SECONDS = 10
 WAIT_SECONDS = 75
 POLL_SECONDS = 1
 MAX_PEERS = 16
-AWARENESS_MARKER = "Other sessions are working"
 
 
 def hook_commands(settings, event, tool):
@@ -161,9 +160,12 @@ def main(argv):
         if mode == "follow":
             if sharing:
                 heard = wait_for(session, plan["sessions"] - 1, lambda peer: bool(peer["task"]))
+            # The whole prompt but the session's own task counts, as it would
+            # for a real agent, so peer information leaking into the shared
+            # text shows in a dry run.
+            shared = prompt.replace(task["task"], "").replace(task["details"], "")
             information = "\n".join(
-                ([prompt.split(AWARENESS_MARKER, 1)[1]] if AWARENESS_MARKER in prompt else [])
-                + session.context + [peer["task"] for peer in heard.values() if peer["task"]])
+                [shared] + session.context + [peer["task"] for peer in heard.values() if peer["task"]])
             informed = "trigger" in task and re.search(task["trigger"], information) is not None
         for op in task["standin"]["follow" if informed else "ignore"]:
             for name in op.get("paths", [op.get("path")]):

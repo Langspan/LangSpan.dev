@@ -70,10 +70,12 @@ The commands below assume the repository root.
 Each task is a one-line statement, the prompt's `Task:` line, and details
 beneath it. Every prompt also states how the result is judged: every branch is
 merged into one tree, and the family's success definition below must hold in
-that tree. A prompt tells the session to build against a peer's changed form
-when it knows of one, even if its own branch's tests then fail. The oracle
-checks exactly the success definition, on the merged tree, never on a branch
-alone.
+that tree. The prompt states that definition in terms of the tasks, never of
+what a peer task changes, so it gives no arm the renamed interface; the last
+column below spells out what it means for the fixture. A prompt tells the
+session to build against a peer's changed form when it knows of one, even if
+its own branch's tests then fail. The oracle checks exactly the success
+definition, on the merged tree, never on a branch alone.
 
 | Family | Sessions | What can go wrong | A successful combined result |
 | --- | --- | --- | --- |

@@ -181,13 +181,17 @@ CONTROL = {
 }
 CONTROL["standin"]["follow"] = CONTROL["standin"]["ignore"]
 
-# What a successful combined result is, per family. The README and every
-# prompt state it; the oracle checks exactly this.
+# What a successful combined result is, per family. Every prompt, in every
+# arm, states it, and the oracle checks exactly this. It is written in terms
+# of the tasks, never of what a peer task changes: naming the renamed
+# function here would give the baseline arm the peer information that only
+# the arm's own channel may carry. The README spells out what it means for
+# each family's fixture.
 SUCCESS = {
     "rename_vs_new_caller": (
-        "the combined tree has `load_config` and no `parse_config`, every caller in the package "
-        "uses `load_config`, every new feature module calls `load_config` and works, and the "
-        "package's tests pass"
+        "every function a task renames exists only under the name that task gives it, with no "
+        "alias or wrapper under its old name; every caller in the package, every new feature "
+        "module included, calls it by that name and works; and the package's tests pass"
     ),
     "contradictory_defaults": (
         "each function returns the value its task asked for, every shared default in "

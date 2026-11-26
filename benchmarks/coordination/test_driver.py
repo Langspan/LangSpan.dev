@@ -115,6 +115,22 @@ class DriverUnitTests(Temporary):
                 self.assertEqual(all(given), arm == "awareness_only", arm)
                 self.assertEqual(any(peer["task"] in prompt for peer in peers), arm == "awareness_only", arm)
 
+    def test_prompts_outside_the_awareness_arm_carry_no_peer_outcome(self):
+        # The shared text (preamble, success definition) is the same for every
+        # arm, so it must not reveal what a peer changes: a session learns that
+        # only through its arm's peer-information channel.
+        for family in tasks.FAMILIES:
+            for sessions in tasks.SESSION_COUNTS:
+                assigned = tasks.assign(family, sessions, 3)
+                for arm in ("worktrees", "langspan"):
+                    for index, task in enumerate(assigned, 1):
+                        prompt = driver.prompt_for(arm, family, assigned, index)
+                        shared = prompt.replace(task["task"], "").replace(task["details"], "")
+                        if "trigger" in task:
+                            self.assertIsNone(re.search(task["trigger"], shared), (family, arm, task["id"]))
+                        if family == "rename_vs_new_caller" and task["id"] != "rename":
+                            self.assertNotIn(tasks.NEW_NAME, prompt, (arm, task["id"]))
+
     def test_plan_only_executes_nothing_and_names_ignored_options(self):
         output = self.root / "never"
         result = subprocess.run([sys.executable, "-B", str(HERE / "driver.py"), "--arm", "worktrees",
