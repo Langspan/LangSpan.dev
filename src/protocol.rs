@@ -40,8 +40,12 @@ pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::E
 /// objects of the protocol with both `edits_admitted` and
 /// `retried_unchanged`).
 const COUNTS_FIELD_SINCE_5: &str = "refusal_outcomes";
+/// The field version 5 added to a briefing (`Briefing`, the only object
+/// with `changed` and `omitted_peers`): the source index was partial
+/// (issue #262).
+const BRIEFING_FIELD_SINCE_5: &str = "inflight_partial";
 
-/// `value` without the field version 5 added.
+/// `value` without the fields version 5 added.
 fn protocol_4_shape(value: &mut serde_json::Value) {
     use serde_json::Value;
     match value {
@@ -49,6 +53,9 @@ fn protocol_4_shape(value: &mut serde_json::Value) {
         Value::Object(fields) => {
             if fields.contains_key("edits_admitted") && fields.contains_key("retried_unchanged") {
                 fields.shift_remove(COUNTS_FIELD_SINCE_5);
+            }
+            if fields.contains_key("changed") && fields.contains_key("omitted_peers") {
+                fields.shift_remove(BRIEFING_FIELD_SINCE_5);
             }
             fields.values_mut().for_each(protocol_4_shape);
         }

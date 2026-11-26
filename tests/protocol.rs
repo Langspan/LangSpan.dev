@@ -1186,6 +1186,41 @@ fn a_version_3_reply_leaves_out_trails() {
     );
 }
 
+/// Issue #262: a version 4 or version 3 client reads briefings with
+/// `deny_unknown_fields`, so its answer does not say the index was partial.
+#[test]
+fn a_version_4_reply_leaves_out_a_partial_index() {
+    use langspan_core::{Briefing, Outcome};
+    let mut briefing: Briefing = serde_json::from_value(serde_json::json!({
+        "session_id": "codex.bob", "changed": true, "peers": [], "omitted_peers": 0,
+    }))
+    .unwrap();
+    briefing.inflight_partial = true;
+    let response = Response {
+        version: PROTOCOL_VERSION,
+        request_id: "r".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome: Outcome::Briefing { briefing },
+    };
+    for version in [4, OLDEST_PROTOCOL_VERSION] {
+        let earlier: serde_json::Value =
+            serde_json::from_slice(&encode_for(version, &response).unwrap()).unwrap();
+        assert!(
+            earlier["outcome"]["briefing"]
+                .get("inflight_partial")
+                .is_none(),
+            "{version}: {earlier:#}"
+        );
+    }
+    let current: Response =
+        serde_json::from_slice(&encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    assert!(
+        matches!(&current.outcome, Outcome::Briefing { briefing: read } if read.inflight_partial)
+    );
+}
+
 /// Roadmap D7 (review comment 4707749784): to a version 3 client an
 /// interface notice has no rename fields and no change of a definition that
 /// is not exported, while a version 4 client gets both.

@@ -1817,9 +1817,16 @@ such lines in 600 bytes, within its 2,400-byte cap. A briefing that carries a
 message, a withdrawal, an uncoordinated change or a check result holds none.
 The lines that do not fit are counted with the other notices left out, and
 they come with a later briefing. Only the signature line, at most 240 bytes as
-indexed, is relayed: no other file content. Nothing is held or refused. A
-worktree without a complete scan says nothing, and with the daemon down the
-hook prints nothing.
+indexed, is relayed: no other file content. Nothing is held or refused.
+While the index has not finished a first scan of the session's worktree or of
+another worktree of the repository, a briefing given for another reason says
+so in one line instead of listing nothing:
+
+```text
+The source index has not finished scanning every worktree of this repository yet, so work in flight in another worktree may be missing here.
+```
+
+With the daemon down the hook prints nothing.
 
 List what other worktrees have in flight that any file of a workspace
 mentions:
@@ -2569,7 +2576,8 @@ when the response is produced and cannot fence a later write.
 
 The current wire protocol is version 5 and the SQLite schema marker version 4
 (retention). The daemon also answers version 4 clients, without the
-`refusal_outcomes` that version 5 added to a report's counts, and version 3
+`refusal_outcomes` that version 5 added to a report's counts and the
+`inflight_partial` it added to a briefing, and version 3
 clients, without that field and without the rename fields version 4 added. A
 client asks a daemon of an earlier build again in the version that daemon
 names. Upgrade the daemon and clients together. Earlier persisted
