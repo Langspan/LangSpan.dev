@@ -191,6 +191,19 @@ pub fn parse_rfc3339(text: &str) -> Result<u64, String> {
     Ok(u64::try_from(seconds * 1000 + millis).unwrap_or(0))
 }
 
+/// Unix milliseconds as an ISO 8601 UTC time, for people.
+pub fn utc(ms: u64) -> String {
+    let seconds = ms / 1000;
+    let (days, rest) = (seconds / 86_400, seconds % 86_400);
+    let (year, month, day) = civil_from_days(i64::try_from(days).unwrap_or(i64::MAX));
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
 /// `HH:MM` at the offset.
 fn clock(ms: u64, offset_minutes: i32) -> String {
     let local = i64::try_from(ms / 60_000).unwrap_or(i64::MAX) + i64::from(offset_minutes);
@@ -208,7 +221,7 @@ fn date_time(ms: u64, offset_minutes: i32) -> String {
     )
 }
 
-fn cut_line(mut line: String) -> String {
+pub(crate) fn cut_line(mut line: String) -> String {
     if line.len() > LINE_BYTES {
         let mut end = LINE_BYTES - 3;
         while !line.is_char_boundary(end) {
@@ -433,6 +446,13 @@ mod tests {
             assert!(parse_rfc3339(bad).is_err(), "{bad}");
         }
         assert!(parse_rfc3339("2024-02-29T00:00:00Z").is_ok(), "a leap day");
+    }
+
+    #[test]
+    fn unix_milliseconds_are_shown_as_utc() {
+        assert_eq!(utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc(951_782_400_000), "2000-02-29T00:00:00Z");
+        assert_eq!(utc(1_795_521_906_123), "2026-11-24T12:05:06Z");
     }
 
     #[test]
