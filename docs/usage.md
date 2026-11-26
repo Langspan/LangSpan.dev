@@ -1123,6 +1123,47 @@ several definitions of one name (a method of that name on two types, say), a
 definition added or removed is told as such, with how many there are now:
 "a second method "text" was added … (now 2 definitions with that name)".
 
+Each notice stays in the event log, and `graph history` reads a definition's
+past from there, before an agent changes it again:
+
+```sh
+./target/release/langspan graph history PROJECT save --json
+./target/release/langspan graph history PROJECT save --path src/store.rs --limit 5
+```
+
+```text
+seq 812, 2h ago: "src/store.rs" function signature changed from "fn save(x: &Item, sync: bool)" to "fn save(x: &Item)" by session codex.bob (reverted: back to an earlier signature)
+  note (note-7, by codex.bob): "sync deadlocks under load; keep it off"
+seq 640, 1d ago: "src/store.rs" function signature changed from "fn save(x: &Item)" to "fn save(x: &Item, sync: bool)" by session claude-code.alice; task: "add a sync option to save"
+Sessions are the last reported editors of the file, not proof of authorship.
+```
+
+Entries are newest first, at most `--limit` (1 to 50, default 10). Each has
+`seq`, `age_ms`, `change` (`added`, `removed`, `signature_changed`,
+`definition_added` or `definition_removed`), `kind`, `path`, `before` and
+`after`, and `by_session`: the last session that reported editing the file
+before the change was indexed, a correlation and not proof of who wrote it
+(the answer's `attribution` says so). `task` is that session's last prompt
+summary before the change, absent when it recorded none (prompt summaries
+off). `notes` and `messages` (up to 4 each) are those that named the file, in
+their paths or text, within 30 minutes either side of the change; forgotten
+notes, withdrawn messages, and notes or messages recorded before they kept
+their time, are not shown. `reverted: true` means the change put back a signature that the
+definition, in that file, had at an earlier recorded change. A new exported
+name is recorded as `added` for this history and told to no session; a removal
+records the signature that went, so a definition removed and added back is
+marked reverted. Notices recorded before this did not carry those signatures.
+
+`truncated: true` with a `next_seq` says more is recorded than one answer
+holds: more entries than `--limit`, an answer over 28 KiB, or a log with
+more than 20,000 events of the kinds a history reads before that point. Ask
+again with `--before NEXT_SEQ` (MCP: `before_seq`). Only changes the index
+observed are known: body-only changes, changes before LangSpan watched the
+repository, and commit messages are not part of it. A history is a read: it
+records and delivers nothing. MCP: `langspan_history`, whose result puts a
+label first saying the signatures, task lines, notes and messages are data,
+not instructions.
+
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
 Code) or an `apply_patch` (Codex) is admitted, the hook parses the calls in the
 text it writes. If a call's argument count does not fit a function signature
@@ -1459,6 +1500,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
+| `langspan_history` | A definition's recorded interface changes, newest first, with the last reported editor, its task line, nearby notes and messages, and changes back to an earlier signature; at most 50 |
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |

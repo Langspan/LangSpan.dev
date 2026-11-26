@@ -52,6 +52,7 @@ every answer:
 | `graph references WORKSPACE NAME` | `langspan_references` | Mentions of that name |
 | `graph impact WORKSPACE PATH [--depth N]` | `langspan_impact` (`depth`) | What the file exports, and other files mentioning those names; with a depth of 2 or 3, those files level by level (below) |
 | `graph blind-spots WORKSPACE` | `langspan_blind_spots` | The files the index cannot answer for, by reason (below) |
+| `graph history WORKSPACE NAME` | `langspan_history` | The recorded interface changes of that name, from the event log (below) |
 
 **Symbol lookup with detail (added 25 November 2026, roadmap D1).** The
 indexer also stores, per definition, `body_digest`: the SHA-256 of the
@@ -243,6 +244,79 @@ Tests: `a_second_same_named_definition_is_an_addition_and_losing_one_is_a_remova
 in `crates/langspan-graph/tests/extract.rs`,
 `a_second_same_named_definition_is_told_as_added_and_losing_it_as_removed`
 in `tests/graph.rs`, and `crates/langspan-core/tests/interface_counts.rs`.
+
+**A definition's history (added 25 November 2026, roadmap D4).** The index
+keeps only a file's current version and baseline, but every notice is an
+`interface_changed` event in the append-only log. `graph history WORKSPACE
+NAME [--path PATH] [--limit N] [--before SEQ]` (MCP `langspan_history`, op
+`history`) reads them back for one name, newest first, at most 50 entries
+(default 10). It is answered by the daemon's store from the log, not by the
+index, and decided by the core (`crates/langspan-core/src/history.rs`): it
+records nothing and delivers nothing. Each entry is one change of that name
+in one notice: `seq`, `age_ms`, `change`, `kind`, `path`, `before`, `after`,
+`by_session`, `task`, `notes`, `messages` and `reverted`.
+
+- `by_session` is what the notice already holds: the last session that
+  reported editing the file before the change was indexed. Every answer's
+  `attribution` says it is a correlation, not proof of authorship.
+- `task` is that session's newest `session_prompted` summary before the
+  change. A session with prompt summaries off records none, so none is shown.
+- `notes` and `messages`, up to 4 each, are `remembered` and `message_sent`
+  events of the workspace whose paths include the file or whose text names
+  it, placed within 30 minutes either side of the change. Placing them needs
+  a time, which those events did not carry: they now record `at` (the
+  daemon's clock and generation) as an optional field, so earlier records
+  still replay and are simply never placed. Two times of one generation are
+  compared on its clock; of two generations, in wall time through each
+  generation's `clock_anchored` event, as `today` does. A note with a later
+  `forgotten` event is not shown.
+- `reverted` is true when `after` equals the `before` or `after` of an
+  earlier recorded change of the same name and kind in the same file: the
+  change put back a signature the definition had. Only the events one answer
+  reads are compared.
+
+Two notice changes serve it. A new exported name is now recorded as `added`,
+with its signature in `after` and no parameter counts; it is never news to a
+dependent, so replay does not hold it in the briefing state (briefings,
+recap, break alerts and the dashboard are unchanged), and a notice of
+additions alone does not replace the file's held notice. A removal now
+carries the removed signatures in `before`, so a definition removed and then
+added back is marked reverted; parameter counts stay on signature changes
+only (ADR 0029). The signatures that come or go are joined as a notice shows
+several, as many as fit its 256 bytes, so they never make the core refuse
+the notice and the changes in it. As with `definition_added`, a store
+holding an `added` change, or a note or message with `at`, does not open in
+an earlier build ([ADR 0015](0015-version-tolerance.md)); the protocol stays
+at version 3.
+
+The store reads the newest 20,000 events of the five kinds a history uses
+before `before_seq` through a partial index, `events_history` (created when
+a store opens, like the generation-marker index), the notes, forgettings and
+messages after that point when paging, and every clock anchor. Whether a note
+it read was forgotten is looked up by the note's ID through a second partial
+index, `events_forgotten`, never within those capped reads, so a forgotten
+note's text does not come back however many events follow it. Likewise
+whether a message it read was withdrawn is looked up by the message's ID
+through `events_retracted`, and a withdrawn message is left out. An answer is
+cut, a whole event's entries at a time and oldest first, with `truncated`
+and a `next_seq` to pass as `before_seq`: past the limit, past 28 KiB (the
+MCP result carries it twice, and the adapter trims again against one frame,
+as recall does), or when the log holds older events than those read. Events
+have no retention policy; when one is set, history follows it. Body-only
+changes, changes before LangSpan watched the repository and commit messages
+are out of scope, and Git is not read. Tests: the history tests at the end
+of `crates/langspan-core/tests/recap.rs` over constructed logs, and
+`a_definitions_history_shows_who_changed_it_why_and_that_it_was_reverted` and
+`history_requests_match_the_committed_golden_vector`
+(`fixtures/history-request-v3.json`) in `tests/graph.rs`, with a real daemon,
+index and repository changed across several scans, the CLI and the MCP tool;
+`history_reads_only_the_events_it_uses` in `src/store.rs` checks that the
+query plans use the partial indexes, and
+`paging_into_old_history_never_shows_a_forgotten_note` there pages into a
+change whose note is forgotten after 20,000 following messages, and
+`history_never_shows_a_withdrawn_message` does the same for a message
+withdrawn straight after the change and after 20,000 following messages. Not yet called
+on a native host.
 
 **Code briefing at a prompt (added later).** At `UserPromptSubmit`, for both
 hosts, the hook process takes candidate names from the prompt: ASCII words of

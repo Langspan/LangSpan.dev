@@ -187,11 +187,46 @@ impl Index {
                     && arity.max.is_none_or(|max| max <= langspan_core::MAX_ARITY)
             })
         };
+        // The exported signatures a version gives one name and kind, as a
+        // notice shows several: each as written, joined by " | ", as many as
+        // fit a notice's 256 bytes (one signature is at most 240), so that
+        // they never make the core refuse the notice and the changes in it.
+        let written = |graph: &FileGraph, name: &str, kind| {
+            let mut signatures: Vec<&str> = graph
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.exported && symbol.name == name && symbol.kind == kind)
+                .map(|symbol| symbol.signature.as_str())
+                .filter(|signature| !signature.chars().any(char::is_control))
+                .collect();
+            signatures.sort_unstable();
+            signatures.dedup();
+            let mut shown = String::new();
+            for signature in signatures {
+                let joined = if shown.is_empty() {
+                    signature.to_owned()
+                } else {
+                    format!("{shown} | {signature}")
+                };
+                if joined.len() > 256 {
+                    break;
+                }
+                shown = joined;
+            }
+            (!shown.is_empty()).then_some(shown)
+        };
         let changes: Vec<InterfaceChange> = langspan_graph::diff(&before, after)
             .into_iter()
-            .filter_map(|change| {
+            .map(|change| {
                 let (label, before, after, number) = match change.change {
-                    Change::Removed => ("removed", None, None, None),
+                    // The signature that went, for a definition's history
+                    // (roadmap D4) to see it come back.
+                    Change::Removed => (
+                        "removed",
+                        written(&before, &change.name, change.kind),
+                        None,
+                        None,
+                    ),
                     Change::SignatureChanged { before, after } => {
                         ("signature_changed", Some(before), Some(after), None)
                     }
@@ -217,16 +252,25 @@ impl Index {
                         None,
                         Some((before, after)),
                     ),
-                    Change::Added => return None,
+                    // A new name: history only, never told to anyone
+                    // (roadmap D4), so no parameter counts.
+                    Change::Added => (
+                        "added",
+                        None,
+                        written(after, &change.name, change.kind),
+                        None,
+                    ),
                 };
+                // Counts only for a signature change, the one change the
+                // write-time break check reads (ADR 0029).
                 let arity = |signature| {
-                    if number.is_some() {
-                        None
-                    } else {
+                    if label == "signature_changed" {
                         counts(signature)
+                    } else {
+                        None
                     }
                 };
-                Some(InterfaceChange {
+                InterfaceChange {
                     name: change.name,
                     kind: change.kind.name().into(),
                     change: label.into(),
@@ -236,7 +280,7 @@ impl Index {
                     after_count: number.map(|(_, after)| after),
                     before,
                     after,
-                })
+                }
             })
             .take(langspan_core::NOTICE_CHANGES)
             .collect();
