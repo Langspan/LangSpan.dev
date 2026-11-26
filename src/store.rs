@@ -60,6 +60,53 @@ const ANCHOR_LOOKUP: &str = concat!(
     " ORDER BY seq DESC LIMIT 1"
 );
 
+/// A `write_refused` row, and the index the monthly count reads them by.
+macro_rules! refusal_row {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         = 'write_refused'"
+    };
+}
+
+/// A `lease_granted` row and its session: the index a count's retry lookup
+/// reads, so finding a session's next admission does not scan the log.
+macro_rules! grant_row {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         = 'lease_granted'"
+    };
+}
+macro_rules! grant_session {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.lease.session_id') END"
+    };
+}
+
+/// Partial indexes of refusals and of admissions by session (roadmap H5).
+const COUNT_INDEXES: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_write_refused ON events(seq) WHERE ",
+    refusal_row!(),
+    ";\nCREATE INDEX IF NOT EXISTS events_grant_session ON events(",
+    grant_session!(),
+    ", seq) WHERE ",
+    grant_row!(),
+    ";"
+);
+
+/// The newest `write_refused` rows, newest first.
+const REFUSAL_ROWS: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE ",
+    refusal_row!(),
+    " ORDER BY seq DESC LIMIT ?1"
+);
+
+/// Whether a `write_refused` row precedes a sequence number.
+const REFUSAL_EARLIER: &str = concat!(
+    "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1 AND ",
+    refusal_row!(),
+    ")"
+);
+
 /// The kinds of event a definition's history reads (roadmap D4). One owner
 /// for the partial index over them and the lookups that must match it.
 macro_rules! history_kinds {
@@ -142,6 +189,18 @@ const ANCHORS: &str = concat!(
     " ORDER BY seq"
 );
 
+/// A session's admissions after a sequence number, oldest first.
+const GRANTS_AFTER: &str = concat!(
+    "SELECT event_json FROM events WHERE ",
+    grant_session!(),
+    " = ?1 AND seq > ?2 AND ",
+    grant_row!(),
+    " ORDER BY seq LIMIT ?3"
+);
+
+/// A session's admissions a retry is looked for in, after a refusal: it
+/// may run other edits of the same reply first.
+pub const RETRY_LOOKAHEAD: u32 = 16;
 /// A history's answer stops before this many bytes: the MCP result carries
 /// it twice, once escaped again as text, inside one 64 KiB frame.
 pub const HISTORY_BUDGET_BYTES: usize = 28 * 1024;
@@ -362,6 +421,8 @@ impl Store {
         // when opened (one pass over the log), and a build without it
         // reads and writes the same rows.
         connection.execute_batch(GENERATION_MARKER_INDEX)?;
+        // The same for the monthly count (H5): two partial indexes.
+        connection.execute_batch(COUNT_INDEXES)?;
         connection.execute_batch(HISTORY_INDEX)?;
         connection.execute_batch(FORGOTTEN_INDEX)?;
         connection.execute_batch(RETRACTED_INDEX)?;
@@ -742,6 +803,7 @@ impl Store {
                 | Command::Recap { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
+                | Command::Count { .. }
                 | Command::History { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
@@ -888,6 +950,7 @@ impl Store {
                 workspace_id,
                 from_ms,
             } => self.today(workspace_id.as_deref(), *from_ms, wall_now_ms(), now_ms)?,
+            Command::Count { days } => self.count(days)?,
             Command::History {
                 workspace_id,
                 name,
@@ -1254,6 +1317,83 @@ impl Store {
             serde_json::to_vec(today).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
         });
         Ok(Outcome::Today { today })
+    }
+
+    /// The refusal count (H5): the newest `COUNT_REFUSALS` refusals at
+    /// most, placed by their generation's anchor and counted by the core.
+    /// Reads only; it writes nothing.
+    pub fn count(&self, days: &[u64]) -> StoreResult<Outcome> {
+        if let Err(message) = langspan_core::validate_count_days(days) {
+            return Ok(Outcome::Error {
+                code: "invalid_window".into(),
+                message,
+            });
+        }
+        let mut statement = self.connection.prepare(REFUSAL_ROWS)?;
+        let mut rows = statement.query([i64::try_from(langspan_core::COUNT_REFUSALS)?])?;
+        let mut refusals = Vec::new();
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            refusals.push(RecordedEvent {
+                seq: u64::try_from(seq)?,
+                event: serde_json::from_str(&json)?,
+            });
+        }
+        refusals.reverse();
+        let earlier: bool = match refusals.first() {
+            Some(first) => {
+                self.connection
+                    .query_row(REFUSAL_EARLIER, [i64::try_from(first.seq)?], |row| {
+                        row.get(0)
+                    })?
+            }
+            None => false,
+        };
+        let mut anchors = Vec::new();
+        let mut statement = self.connection.prepare_cached(ANCHORS)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            if let Event::ClockAnchored { anchor } = serde_json::from_str(&json)? {
+                anchors.push(anchor);
+            }
+        }
+        let mut grants = self.connection.prepare(GRANTS_AFTER)?;
+        let count = langspan_core::count_refusals(
+            &langspan_core::CountQuery {
+                days,
+                refusals: &refusals,
+                anchors: &anchors,
+                earlier,
+                retained_since_ms: retention::since_ms(&self.connection)?,
+            },
+            |session, workspace, after, paths| -> StoreResult<bool> {
+                let mut rows =
+                    grants.query(params![session, i64::try_from(after)?, RETRY_LOOKAHEAD])?;
+                while let Some(row) = rows.next()? {
+                    let json: String = row.get(0)?;
+                    if let Event::LeaseGranted { lease } = serde_json::from_str(&json)? {
+                        let mut granted: Vec<&String> = lease.paths.iter().collect();
+                        granted.sort();
+                        granted.dedup();
+                        // A refusal keeps the first `REFUSAL_PATHS` paths,
+                        // sorted: the grant's, cut the same way, must match.
+                        if lease.workspace_id == workspace
+                            && granted
+                                .iter()
+                                .take(langspan_core::REFUSAL_PATHS)
+                                .copied()
+                                .eq(paths.iter())
+                        {
+                            return Ok(true);
+                        }
+                    }
+                }
+                Ok(false)
+            },
+        )?;
+        Ok(Outcome::Count { count })
     }
 
     /// A definition's history (roadmap D4): the newest `HISTORY_EVENTS`
@@ -1898,6 +2038,42 @@ fn observed_branches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `count` runs in the daemon's request handler too: reading refusals
+    /// and a session's later admissions must use their partial indexes, not
+    /// read the whole log.
+    #[test]
+    fn the_count_lookups_read_their_indexes() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-count-plan-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let plan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> Vec<String> {
+            store
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(params, |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let refusals = plan(REFUSAL_ROWS, &[&10i64]);
+        let earlier = plan(REFUSAL_EARLIER, &[&10i64]);
+        let grants = plan(GRANTS_AFTER, &[&"session", &1i64, &16i64]);
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        for (steps, index) in [
+            (&refusals, "events_write_refused"),
+            (&earlier, "events_write_refused"),
+            (&grants, "events_grant_session"),
+        ] {
+            assert!(steps.iter().any(|step| step.contains(index)), "{steps:?}");
+        }
+    }
 
     /// `today` runs in the daemon's request handler: finding the anchor must
     /// read the generation markers only, not every older event of a long

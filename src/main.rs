@@ -134,6 +134,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  What each session did since local midnight (or the
                                  time given), refusals by kind, checks, landings, and
                                  what is still open. Reads only; acknowledges nothing
+  count [--month YYYY-MM]        Refusals in one local month (default: this one), by
+                                 kind and workspace, once per session, kind and files
+                                 a day, and how many were retried and let through.
+                                 Says what LangSpan did, not what it saved. Reads only
   remember WORKSPACE TEXT [PATH...] [--session ID]
                                  Keep a one-line note for the repository or for files;
                                  sessions working there are told. Survives restarts
@@ -1795,6 +1799,29 @@ fn status_line(
         println!("{}", answer.json());
     } else {
         println!("{}", answer.text());
+    }
+    Ok(0)
+}
+
+/// `count`: refusals in one local month, read from the event log (H5).
+/// The coordinator being down is an error (exit 1); no earlier figure is
+/// shown instead.
+fn refusal_count(
+    state_dir: &std::path::Path,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    use langspan::count;
+    let month = count::month(
+        options.remove("--month").as_deref(),
+        langspan::store::wall_now_ms(),
+    )?;
+    no_unused_options(options)?;
+    let answer = count::ask(state_dir, month, count::day_starts(month)?)?;
+    if json {
+        println!("{}", serde_json::to_string(&answer)?);
+    } else {
+        println!("{}", answer.text(&month.label()));
     }
     Ok(0)
 }
@@ -3629,6 +3656,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             );
         }
         ["statusline"] => return status_line(&state_dir, &mut options, json),
+        ["count"] => return refusal_count(&state_dir, &mut options, json),
         ["notify", action] if command.is_empty() => {
             return notify(&state_dir, action, &mut options, json);
         }
@@ -4035,6 +4063,17 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     }
     if json {
         println!("{}", serde_json::to_string(&response)?);
+    } else if let Outcome::Today { today } = &response.outcome {
+        // The month's refusal count, one line, for the person only (H5).
+        let month = langspan::count::today_line(
+            &state_dir,
+            today.workspace_id.as_deref(),
+            langspan::store::wall_now_ms(),
+        );
+        println!(
+            "{}",
+            langspan::today::text(today, &langspan::today::shown(&today.window), Some(&month))
+        );
     } else {
         print_human(&response, &state_dir)?;
         if let Outcome::WorkspaceMoved {
@@ -4109,7 +4148,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--max-peers" | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s"
             | "--wait-s" | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen"
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
-            | "--sound" | "--depth" | "--path" | "--before" | "--keep-days" => {
+            | "--sound" | "--depth" | "--path" | "--before" | "--keep-days" | "--month" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -4891,9 +4930,15 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::Today { today } => {
             println!(
                 "{}",
-                langspan::today::text(today, &langspan::today::shown(&today.window))
+                langspan::today::text(today, &langspan::today::shown(&today.window), None)
             );
         }
+        Outcome::Count { count } => println!(
+            "{} refusals from {} to {} (UTC).",
+            count.refusals,
+            utc(count.from_ms),
+            utc(count.to_ms)
+        ),
         Outcome::StatusLine { line } => println!("{}", line.text()),
         Outcome::RefusalRecorded { session_id } => {
             println!("Refusal recorded for session {session_id}.")
