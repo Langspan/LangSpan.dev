@@ -538,6 +538,7 @@ fn after_a_restart_a_peer_edit_is_still_after_an_earlier_read() {
             max_peers: 4,
             deliver: true,
             mid_turn: false,
+            mcp: false,
         },
         6_000,
     );
@@ -571,6 +572,7 @@ fn a_briefing_reports_files_read_before_a_peer_edited_them() {
             max_peers: 4,
             deliver: true,
             mid_turn: false,
+            mcp: false,
         },
         now,
     ) {

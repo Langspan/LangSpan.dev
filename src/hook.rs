@@ -1261,6 +1261,7 @@ fn lifecycle(
             max_peers: BRIEF_PEERS,
             deliver,
             mid_turn: false,
+            mcp: false,
         },
     ) {
         // A new or resumed context has lost any earlier briefing; a prompt
@@ -1640,7 +1641,8 @@ pub fn uncoordinated_text(change: &langspan_core::UncoordinatedNotice) -> String
     )
 }
 
-pub(crate) fn age(ms: u64) -> String {
+/// An age for a person: seconds up to 89, then minutes.
+pub fn age(ms: u64) -> String {
     match ms / 1000 {
         seconds @ 0..=89 => format!("{seconds}s ago"),
         seconds => format!("{}m ago", seconds / 60),
@@ -3136,6 +3138,7 @@ impl Session<'_> {
                     max_peers: BRIEF_PEERS,
                     deliver: true,
                     mid_turn: true,
+                    mcp: false,
                 },
             )
             .ok()?;
