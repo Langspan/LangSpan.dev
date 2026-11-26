@@ -1426,7 +1426,7 @@ before-and-after trees or an unfinished command produce an inconclusive result.
 
 `integrate check` combines branches in the order given and runs the command in
 a temporary checkout. `land` recombines them and requires a passing check of the
-chosen name for the resulting tree. It pushes only with `--apply`, using a normal
+chosen name for the resulting tree; without one it exits 6. It pushes only with `--apply`, using a normal
 non-forced push and the repository's pre-push hooks. With `--apply` it first
 takes the push turn for the workspace and target. If another landing has it,
 it waits in line for it, first come first served, for up to `--wait-s`
