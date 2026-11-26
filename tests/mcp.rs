@@ -172,14 +172,19 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
     if let Err(problem) = langspan::mcp::compare_tool_names(names.iter().copied()) {
         panic!("{problem}");
     }
-    // Every tool the LangSpan skill names is one this server lists.
-    let named = langspan::skill::tools();
-    assert!(!named.is_empty());
-    for tool in named {
-        assert!(
-            names.contains(tool),
-            "the skill names {tool}, which is not listed"
-        );
+    // Every tool the LangSpan skill and the guidance block name is one this
+    // server lists.
+    for (what, named) in [
+        ("skill", langspan::skill::tools()),
+        ("guidance block", langspan::guidance::tools()),
+    ] {
+        assert!(!named.is_empty(), "{what}");
+        for tool in named {
+            assert!(
+                names.contains(tool),
+                "the {what} names {tool}, which is not listed"
+            );
+        }
     }
     for tool in &tools {
         assert_eq!(

@@ -13,6 +13,7 @@ pub mod count;
 pub mod daemon;
 pub mod dashboard;
 pub mod formatter;
+pub mod guidance;
 pub mod install;
 mod lines;
 mod local;
