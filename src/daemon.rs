@@ -249,11 +249,8 @@ mod unix {
         else {
             return;
         };
-        let refused = if version != PROTOCOL_VERSION {
-            Some(refuse(
-                "unsupported_version",
-                "expected protocol version 3; restart the daemon after upgrading LangSpan".into(),
-            ))
+        let refused = if !protocol::answers(version) {
+            Some(refuse("unsupported_version", unsupported_version()))
         } else if let Err(e) = validate_request_id(&request_id) {
             Some(refuse(&e.code, e.message))
         } else if !Path::new(path).is_absolute() || path.len() > 4096 || path.contains('\0') {
@@ -2416,6 +2413,14 @@ mod unix {
         ))
     }
 
+    /// Why a request of another protocol version is refused.
+    fn unsupported_version() -> String {
+        format!(
+            "expected protocol version {} to {PROTOCOL_VERSION}; restart the daemon after upgrading LangSpan",
+            protocol::OLDEST_PROTOCOL_VERSION
+        )
+    }
+
     fn error(id: String, generation: u64, code: &str, message: impl Into<String>) -> Response {
         Response {
             version: PROTOCOL_VERSION,
@@ -2782,12 +2787,12 @@ mod unix {
             request_id,
             command,
         } = request;
-        if version != PROTOCOL_VERSION {
+        if !protocol::answers(version) {
             return error(
                 request_id,
                 store.state().generation,
                 "unsupported_version",
-                "expected protocol version 3; restart the daemon after upgrading LangSpan",
+                unsupported_version(),
             );
         }
         if let Err(e) = validate_request_id(&request_id) {
@@ -2974,9 +2979,14 @@ mod unix {
             }
             Ok(bytes)
         };
-        let reply = match timeout(Duration::from_millis(config.io_timeout_ms), read).await {
+        // Answered in the version the client asked in, and in that
+        // version's shape; a request that does not parse, in the version it
+        // names when the daemon answers that one.
+        let mut asked = PROTOCOL_VERSION;
+        let mut reply = match timeout(Duration::from_millis(config.io_timeout_ms), read).await {
             Ok(Ok(bytes)) => match serde_json::from_slice::<Request>(&bytes) {
                 Ok(mut request) => {
+                    asked = request.version;
                     // Clients redact before sending; a client that did not
                     // still cannot have a secret recorded.
                     crate::hook::redact_command(&mut request.command);
@@ -3012,12 +3022,21 @@ mod unix {
                         ),
                     }
                 }
-                Err(_) => error(
-                    String::new(),
-                    0,
-                    "invalid_request",
-                    "expected a typed version 1 request; unknown fields are rejected",
-                ),
+                Err(_) => {
+                    if let Some(version) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .ok()
+                        .and_then(|request| request.get("version")?.as_u64())
+                        .and_then(|version| u16::try_from(version).ok())
+                    {
+                        asked = version;
+                    }
+                    error(
+                        String::new(),
+                        0,
+                        "invalid_request",
+                        "expected a typed version 1 request; unknown fields are rejected",
+                    )
+                }
             },
             Ok(Err(e)) => error(String::new(), 0, "invalid_frame", e.to_string()),
             Err(_) => error(
@@ -3027,7 +3046,20 @@ mod unix {
                 "JSON request was not received before the I/O deadline",
             ),
         };
-        let bytes=protocol::encode(&reply).or_else(|_|protocol::encode(&error(reply.request_id,reply.generation,"response_too_large","response exceeds 64 KiB; reduce the event page size, or page the state with `status --all`")));
+        if !protocol::answers(asked) {
+            asked = PROTOCOL_VERSION;
+        }
+        reply.version = asked;
+        let bytes = protocol::encode_for(asked, &reply).or_else(|_| {
+            let mut too_large = error(
+                reply.request_id,
+                reply.generation,
+                "response_too_large",
+                "response exceeds 64 KiB; reduce the event page size, or page the state with `status --all`",
+            );
+            too_large.version = asked;
+            protocol::encode(&too_large)
+        });
         if let Ok(bytes) = bytes {
             let _ = timeout(
                 Duration::from_millis(config.io_timeout_ms),

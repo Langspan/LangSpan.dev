@@ -1453,7 +1453,7 @@ fn a_definitions_history_shows_who_changed_it_why_and_that_it_was_reverted() {
 fn history_requests_match_the_committed_golden_vector() {
     let wire: &[u8] = include_bytes!("../fixtures/history-request-v3.json");
     let request: langspan::protocol::Request = serde_json::from_slice(wire).unwrap();
-    assert_eq!(request.version, langspan::protocol::PROTOCOL_VERSION);
+    assert_eq!(request.version, langspan::protocol::OLDEST_PROTOCOL_VERSION);
     assert_eq!(langspan::protocol::encode(&request).unwrap(), wire);
     assert!(matches!(
         &request.command,
@@ -2917,6 +2917,152 @@ fn a_rename_with_an_unchanged_body_names_both_names_and_its_evidence_to_a_depend
         (&entry["change"], &entry["after_name"], &entry["evidence"]),
         (&json!("renamed"), &json!("send"), &json!("same_body")),
         "{found:#}"
+    );
+}
+
+/// Every object in `value` shaped like an interface change or a history
+/// entry (it has `kind`, `change` and `before`).
+fn interface_changes(value: &Value, found: &mut Vec<Value>) {
+    match value {
+        Value::Object(fields) => {
+            if ["kind", "change", "before"]
+                .iter()
+                .all(|key| fields.contains_key(*key))
+            {
+                found.push(value.clone());
+            }
+            fields
+                .values()
+                .for_each(|field| interface_changes(field, found));
+        }
+        Value::Array(items) => items.iter().for_each(|item| interface_changes(item, found)),
+        _ => {}
+    }
+}
+
+/// Roadmap D7 (review comment 4707749784): an earlier client, a CLI or a
+/// long-running MCP adapter speaking protocol version 3, reads interface
+/// changes strictly. After a rename and a file move, every answer it can
+/// get keeps the shape it knows; a version 4 client gets the rename's old
+/// name, evidence and earlier path.
+#[test]
+fn a_protocol_3_client_reads_answers_after_a_rename_and_a_file_move() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let main = fs::read_to_string(w.work().join("src/main.rs")).unwrap();
+    w.edits("alice", "a1", "src/main.rs", &format!("{main}// touched\n"));
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &original.replace("pub fn upload(", "pub fn send("),
+    );
+    history(&w, "upload", 1);
+    git(&w.work(), &["mv", "src/upload.rs", "src/transfer.rs"]);
+    // The rename, then the move.
+    let moved = history(&w, "send", 2);
+    assert_eq!(
+        moved["entries"][0]["before_path"], "src/upload.rs",
+        "{moved:#}"
+    );
+
+    /// `InterfaceChange` as builds before roadmap D7 read it.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct EarlierChange {
+        name: String,
+        kind: String,
+        change: String,
+        before: Option<String>,
+        after: Option<String>,
+        #[serde(default)]
+        after_name: Option<String>,
+        #[serde(default)]
+        before_arity: Option<Value>,
+        #[serde(default)]
+        after_arity: Option<Value>,
+        #[serde(default)]
+        before_count: Option<u32>,
+        #[serde(default)]
+        after_count: Option<u32>,
+    }
+    /// `HistoryEntry` as builds before roadmap D7 read it.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct EarlierEntry {
+        seq: u64,
+        notice_id: String,
+        age_ms: Option<u64>,
+        change: String,
+        kind: String,
+        path: String,
+        before: Option<String>,
+        after: Option<String>,
+        by_session: Option<String>,
+        task: Option<String>,
+        notes: Vec<Value>,
+        messages: Vec<Value>,
+        reverted: bool,
+    }
+    let commands = [
+        json!({"op": "status"}),
+        json!({"op": "brief", "session_id": "claude-code.alice", "max_peers": 8, "deliver": false}),
+        json!({"op": "history", "workspace_id": "app", "name": "upload", "limit": 10}),
+        json!({"op": "history", "workspace_id": "app", "name": "send", "limit": 10}),
+        json!({"op": "recap", "workspace_id": "app"}),
+        json!({"op": "dashboard"}),
+    ];
+    let mut read = 0;
+    for command in &commands {
+        let response = w.raw(&json!({"version": 3, "request_id": "earlier", "command": command}));
+        assert_eq!(response["version"], 3, "{response:#}");
+        assert!(
+            response["outcome"]["type"] != "error",
+            "{command}: {response:#}"
+        );
+        let mut changes = Vec::new();
+        interface_changes(&response["outcome"], &mut changes);
+        for change in changes {
+            let parsed = if change.get("seq").is_some() {
+                serde_json::from_value::<EarlierEntry>(change.clone()).map(drop)
+            } else {
+                serde_json::from_value::<EarlierChange>(change.clone()).map(drop)
+            };
+            parsed.unwrap_or_else(|error| panic!("{command}: {error}: {change}"));
+            read += 1;
+        }
+    }
+    // At least the status notices and both histories.
+    assert!(read >= 4, "too few interface changes were read: {read}");
+
+    // This build's clients ask in version 4 and get every field.
+    let current = w.raw(&json!({"version": 4, "request_id": "current", "command": commands[2]}));
+    assert_eq!(current["version"], 4, "{current:#}");
+    let entry = &current["outcome"]["history"]["entries"][0];
+    assert_eq!(
+        (&entry["after_name"], &entry["evidence"]),
+        (&json!("send"), &json!("same_body")),
+        "{current:#}"
+    );
+    let current = w.raw(&json!({"version": 4, "request_id": "current", "command": commands[0]}));
+    let mut changes = Vec::new();
+    interface_changes(&current["outcome"], &mut changes);
+    assert!(
+        changes
+            .iter()
+            .any(|change| change["before_name"] == "upload" && change["evidence"] == "same_body"),
+        "{current:#}"
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|change| change["before_path"] == "src/upload.rs"),
+        "{current:#}"
     );
 }
 

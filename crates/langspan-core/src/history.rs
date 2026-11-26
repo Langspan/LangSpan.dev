@@ -81,7 +81,8 @@ pub struct HistoryEntry {
     pub after: Option<String>,
     /// For a rename: the new name, what links the two names, and for a file
     /// moved whole, where it was (roadmap D7). Absent otherwise, and from
-    /// renames recorded before each was kept.
+    /// renames recorded before each was kept. Left out of replies to
+    /// protocol version 3 clients (`protocol::encode_for` in the daemon).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

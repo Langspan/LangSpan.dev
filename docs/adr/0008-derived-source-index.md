@@ -272,6 +272,28 @@ content change that repeats an earlier one (`a → b → a → b`) is recorded
 again, and a redelivery of one notice is still a replay.
 `graph symbol OLD --renamed` follows recorded renames to the newest name. A
 rename across files other than such a move is never inferred.
+Earlier builds read interface changes and history entries with
+`deny_unknown_fields`, and status, briefings, recaps, history and the
+dashboard all carry them, so a per-command flag like `blind_in_scope` would
+not cover every answer. The wire protocol is version 4 instead: version 3
+with `before_name`, `evidence`, `before_path` and `private` in interface
+changes and `after_name`, `evidence` and `before_path` in history entries.
+Requests are the same in both. The daemon answers a version 3 request in
+version 3, without those fields and without private changes. The shape is
+chosen in one place, the protocol adapter, as the reply is encoded, so the
+pure core keeps one serialized form. A client of this build sends
+version 4, and when a daemon of an earlier build refuses it with
+`unsupported_version`, which that build does before reading the command, it
+sends the same request once in version 3. Tests:
+`a_protocol_3_client_reads_answers_after_a_rename_and_a_file_move`
+(`tests/graph.rs`) reads status, a briefing, two histories, a recap and the
+dashboard over the daemon's socket with strict copies of the earlier
+structures (it failed before the change);
+`v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors`
+and `a_version_3_reply_leaves_out_rename_fields_and_private_changes`
+(`tests/protocol.rs`); and
+`a_daemon_of_an_earlier_build_is_asked_again_in_its_version`
+(`src/client.rs`).
 
 Signatures are compared in a normalised form and shown as written (added 24
 November 2026, backlog item 15). The comparison removes whitespace next to

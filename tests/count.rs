@@ -408,7 +408,7 @@ fn refusals_are_counted_once_a_day_in_their_own_local_month() {
 fn count_requests_match_the_committed_golden_vector() {
     let wire: &[u8] = include_bytes!("../fixtures/count-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
-    assert_eq!(request.version, PROTOCOL_VERSION);
+    assert_eq!(request.version, langspan::protocol::OLDEST_PROTOCOL_VERSION);
     assert_eq!(langspan::protocol::encode(&request).unwrap(), wire);
     let Command::Count { days } = &request.command else {
         panic!("{request:?}");

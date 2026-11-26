@@ -1,4 +1,6 @@
-use langspan::protocol::{PROTOCOL_VERSION, Request, Response, encode, read_frame};
+use langspan::protocol::{
+    OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, Response, encode, encode_for, read_frame,
+};
 use langspan_core::Command;
 
 // V1 fixtures are archived parsing/replay vectors. Their continued readability
@@ -166,7 +168,7 @@ fn v3_adoption_request_outcome_and_left_work_briefing_request_match_the_golden_v
 fn v3_briefing_request_and_response_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/brief-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
-    assert_eq!(request.version, PROTOCOL_VERSION);
+    assert_eq!(request.version, OLDEST_PROTOCOL_VERSION);
     assert!(matches!(
         &request.command,
         Command::Brief { max_peers: 6, .. }
@@ -175,7 +177,7 @@ fn v3_briefing_request_and_response_match_the_committed_golden_vectors() {
 
     let wire = include_bytes!("../fixtures/briefing-response-v3.json");
     let response: Response = serde_json::from_slice(wire).unwrap();
-    assert_eq!(response.version, PROTOCOL_VERSION);
+    assert_eq!(response.version, OLDEST_PROTOCOL_VERSION);
     let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
         panic!("{response:?}");
     };
@@ -290,7 +292,7 @@ fn v3_overwritten_lines_and_unread_lines_match_the_committed_golden_vectors() {
 fn v3_code_context_request_and_response_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/graph-context-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
-    assert_eq!(request.version, PROTOCOL_VERSION);
+    assert_eq!(request.version, OLDEST_PROTOCOL_VERSION);
     assert!(matches!(
         &request.command,
         Command::GraphContext { names, limit: 3, .. } if names == &["upload", "gate"]
@@ -589,7 +591,7 @@ fn v3_message_handoff_and_ack_requests_match_the_committed_golden_vectors() {
     ];
     for wire in vectors {
         let request: Request = serde_json::from_slice(wire).unwrap();
-        assert_eq!(request.version, PROTOCOL_VERSION);
+        assert_eq!(request.version, OLDEST_PROTOCOL_VERSION);
         assert_eq!(encode(&request).unwrap(), *wire);
     }
     let request: Request = serde_json::from_slice(vectors[0]).unwrap();
@@ -769,7 +771,7 @@ fn v3_message_retraction_matches_the_committed_golden_vectors() {
     let by_id = include_bytes!("../fixtures/retract-message-by-id-request-v3.json");
     for wire in [&last[..], &by_id[..]] {
         let request: Request = serde_json::from_slice(wire).unwrap();
-        assert_eq!(request.version, PROTOCOL_VERSION);
+        assert_eq!(request.version, OLDEST_PROTOCOL_VERSION);
         assert_eq!(encode(&request).unwrap(), wire);
     }
     let request: Request = serde_json::from_slice(last).unwrap();
@@ -960,4 +962,106 @@ fn v3_index_export_and_import_match_the_committed_golden_vectors() {
         }
     ));
     assert_eq!(encode(&response).unwrap(), wire);
+}
+
+/// Version 4 (roadmap D7): a history answer with a rename and a file move
+/// carries `after_name`, `evidence` and `before_path`. To a version 3
+/// client the same answer is encoded without them, and the earlier build
+/// reads that form.
+#[test]
+fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() {
+    let wire = include_bytes!("../fixtures/rename-history-response-v4.json");
+    let mut response: Response = serde_json::from_slice(wire).unwrap();
+    assert_eq!(response.version, PROTOCOL_VERSION);
+    let langspan_core::Outcome::History { history } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(history.entries[0].evidence.as_deref(), Some("same_body"));
+    assert_eq!(
+        history.entries[1].before_path.as_deref(),
+        Some("app/old_users.py")
+    );
+    assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
+
+    response.version = OLDEST_PROTOCOL_VERSION;
+    let earlier = include_bytes!("../fixtures/rename-history-response-v3.json");
+    assert_eq!(
+        encode_for(OLDEST_PROTOCOL_VERSION, &response).unwrap(),
+        earlier
+    );
+    // The earlier form is only for that reply: the response is unchanged.
+    assert!(
+        String::from_utf8(encode(&response).unwrap())
+            .unwrap()
+            .contains("before_path")
+    );
+}
+
+/// Roadmap D7 (review comment 4707749784): to a version 3 client an
+/// interface notice has no rename fields and no change of a definition that
+/// is not exported, while a version 4 client gets both.
+#[test]
+fn a_version_3_reply_leaves_out_rename_fields_and_private_changes() {
+    use langspan_core::{InterfaceChange, InterfaceNotice, Outcome};
+    let renamed = InterfaceChange {
+        name: "fetch_user".into(),
+        kind: "function".into(),
+        change: "renamed".into(),
+        before: Some("def fetch_user(id)".into()),
+        after: Some("def load_user(id)".into()),
+        after_name: Some("load_user".into()),
+        before_name: Some("fetch_user".into()),
+        evidence: Some("same_body".into()),
+        before_path: None,
+        private: false,
+        before_arity: None,
+        after_arity: None,
+        before_count: None,
+        after_count: None,
+    };
+    let private = InterfaceChange {
+        name: "helper".into(),
+        before: Some("def helper(x)".into()),
+        after: Some("def helper(x)".into()),
+        after_name: Some("helper".into()),
+        before_name: Some("helper".into()),
+        evidence: Some("file_moved".into()),
+        before_path: Some("app/old.py".into()),
+        private: true,
+        ..renamed.clone()
+    };
+    let notice = InterfaceNotice {
+        notice_id: "n1".into(),
+        workspace_id: "work".into(),
+        path: "app/users.py".into(),
+        changes: vec![renamed, private],
+        dependents: Vec::new(),
+        elsewhere: Vec::new(),
+        by_session: None,
+        at_ms: 1,
+        generation: 1,
+    };
+    let response = Response {
+        version: OLDEST_PROTOCOL_VERSION,
+        request_id: "r".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome: Outcome::InterfaceObserved {
+            notice: notice.clone(),
+        },
+    };
+    let earlier: serde_json::Value =
+        serde_json::from_slice(&encode_for(OLDEST_PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    assert_eq!(
+        earlier["outcome"]["notice"]["changes"],
+        serde_json::json!([{"name": "fetch_user", "kind": "function", "change": "renamed",
+            "before": "def fetch_user(id)", "after": "def load_user(id)", "after_name": "load_user"}]),
+        "{earlier:#}"
+    );
+    let current: Response =
+        serde_json::from_slice(&encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    assert!(
+        matches!(&current.outcome, Outcome::InterfaceObserved { notice: read } if read == &notice)
+    );
 }

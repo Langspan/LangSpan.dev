@@ -2,7 +2,10 @@
 
 #[cfg(unix)]
 mod unix {
-    use crate::protocol::{PROTOCOL_VERSION, Request, Response, encode, read_frame};
+    use crate::protocol::{
+        OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, Response, encode, read_frame,
+    };
+    use langspan_core::Outcome;
     use rustix::{
         event::{PollFd, PollFlags, Timespec, poll},
         io::Errno,
@@ -31,7 +34,32 @@ mod unix {
         // Owner and agent text is redacted here, before it leaves the client.
         let mut request = request.clone();
         crate::hook::redact_command(&mut request.command);
-        let bytes = encode(&request)?;
+        let mut response = exchange(state_dir, &request, deadline)?;
+        // A daemon of an earlier build refuses this version before it reads
+        // the command, so the same request in the version it names cannot
+        // take effect twice. Requests are the same in both versions.
+        if request.version == PROTOCOL_VERSION
+            && response.version == OLDEST_PROTOCOL_VERSION
+            && matches!(&response.outcome, Outcome::Error { code, .. } if code == "unsupported_version")
+        {
+            request.version = OLDEST_PROTOCOL_VERSION;
+            response = exchange(state_dir, &request, deadline)?;
+        }
+        if response.version != request.version {
+            return Err(
+                "daemon response does not match the request identity or protocol version".into(),
+            );
+        }
+        Ok(response)
+    }
+
+    /// One request and its answer, in the request's version.
+    fn exchange(
+        state_dir: &Path,
+        request: &Request,
+        deadline: Instant,
+    ) -> Result<Response, crate::Error> {
+        let bytes = encode(request)?;
         crate::local::check_endpoint(state_dir).map_err(|error| {
             format!("coordination unavailable: {error}; start `langspan daemon --state-dir <dir>`")
         })?;
@@ -58,7 +86,7 @@ mod unix {
                 )
             })?;
         let response: Response = serde_json::from_slice(&frame)?;
-        if response.version != PROTOCOL_VERSION || response.request_id != request.request_id {
+        if response.request_id != request.request_id {
             return Err(
                 "daemon response does not match the request identity or protocol version".into(),
             );
@@ -270,6 +298,68 @@ mod unix {
             std::fs::remove_dir_all(&dir).unwrap();
             assert!(error.starts_with("coordination unavailable at "), "{error}");
             assert!(error.contains("retry with the same request_id"), "{error}");
+        }
+
+        /// Roadmap D7 (review comment 4707749784): a daemon of an earlier
+        /// build answers only protocol version 3. It refuses this build's
+        /// version, as that build does, and the client asks again once in
+        /// version 3, with the same request, and reads that answer.
+        #[test]
+        fn a_daemon_of_an_earlier_build_is_asked_again_in_its_version() {
+            use std::io::{BufRead, BufReader};
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("ls-earlier-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(dir.join("daemon.sock")).unwrap();
+            std::fs::set_permissions(
+                dir.join("daemon.sock"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut asked = Vec::new();
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().unwrap();
+                    let mut line = String::new();
+                    BufReader::new(&stream).read_line(&mut line).unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let outcome = if request["version"] == 3 {
+                        serde_json::json!({"type": "error", "code": "answered", "message": "in version 3"})
+                    } else {
+                        serde_json::json!({"type": "error", "code": "unsupported_version",
+                            "message": "expected protocol version 3; restart the daemon after upgrading LangSpan"})
+                    };
+                    let reply = serde_json::json!({"version": 3, "request_id": request["request_id"],
+                        "replayed": false, "generation": 1, "lease_valid": null, "outcome": outcome});
+                    writeln!(&stream, "{reply}").unwrap();
+                    asked.push(request);
+                }
+                asked
+            });
+            let request = crate::protocol::Request {
+                version: crate::protocol::PROTOCOL_VERSION,
+                request_id: "read".into(),
+                command: langspan_core::Command::Dashboard,
+            };
+            let response = call(&dir, &request).unwrap();
+            let asked = peer.join().unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert_eq!(
+                asked
+                    .iter()
+                    .map(|r| r["version"].clone())
+                    .collect::<Vec<_>>(),
+                [serde_json::json!(4), serde_json::json!(3)]
+            );
+            assert_eq!(asked[0]["command"], asked[1]["command"]);
+            assert_eq!(asked[1]["request_id"], "read");
+            assert_eq!(response.version, 3);
+            assert!(
+                matches!(&response.outcome, Outcome::Error { code, .. } if code == "answered"),
+                "{response:?}"
+            );
         }
     }
 }

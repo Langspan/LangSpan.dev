@@ -1493,7 +1493,10 @@ pub struct InterfaceChange {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_name: Option<String>,
     /// The old name, for `renamed` only: always `name` (roadmap D7). Absent
-    /// from notices recorded before it was kept.
+    /// from notices recorded before it was kept. This field, `evidence`,
+    /// `before_path` and `private` are left out of replies to protocol
+    /// version 3 clients, and so is a change with `private` set
+    /// (`protocol::encode_for` in the daemon).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_name: Option<String>,
     /// What links the two, for `renamed` only (roadmap D7): `same_body`
