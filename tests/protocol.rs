@@ -1,5 +1,6 @@
 use langspan::protocol::{
-    OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, Response, encode, encode_for, read_frame,
+    OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, PROTOCOL_VERSION_4, PROTOCOL_VERSION_5,
+    PROTOCOL_VERSION_6, Request, Response, encode, encode_for, encode_record_for, read_frame,
 };
 use langspan_core::Command;
 
@@ -1069,7 +1070,7 @@ fn v3_index_export_and_import_match_the_committed_golden_vectors() {
 fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() {
     let wire = include_bytes!("../fixtures/rename-history-response-v4.json");
     let mut response: Response = serde_json::from_slice(wire).unwrap();
-    assert_eq!(response.version, 4);
+    assert_eq!(response.version, PROTOCOL_VERSION_4);
     let langspan_core::Outcome::History { history } = &response.outcome else {
         panic!("{response:?}");
     };
@@ -1078,8 +1079,10 @@ fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() 
         history.entries[1].before_path.as_deref(),
         Some("app/old_users.py")
     );
-    // Version 5 added nothing to a history answer: versions 4 and 5 agree.
-    assert_eq!(encode_for(4, &response).unwrap(), wire);
+    // Versions 5, 6 and 7 added nothing to a history answer: 4 to 7 agree.
+    assert_eq!(encode_for(PROTOCOL_VERSION_4, &response).unwrap(), wire);
+    assert_eq!(encode_for(PROTOCOL_VERSION_5, &response).unwrap(), wire);
+    assert_eq!(encode_for(PROTOCOL_VERSION_6, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
 
     response.version = OLDEST_PROTOCOL_VERSION;
@@ -1135,23 +1138,29 @@ fn earlier_counts(wire: &[u8]) -> Result<usize, serde_json::Error> {
 fn v5_report_response_and_its_version_4_and_3_forms_match_the_golden_vectors() {
     let wire = include_bytes!("../fixtures/report-response-v5.json");
     let mut response: Response = serde_json::from_slice(wire).unwrap();
-    assert_eq!(response.version, 5);
+    assert_eq!(response.version, PROTOCOL_VERSION_5);
     let langspan_core::Outcome::Report { report } = &response.outcome else {
         panic!("{response:?}");
     };
     assert_eq!(report.sessions[0].counts.refusal_outcomes["adapted"], 1);
     assert_eq!(report.hosts[0].counts.refusal_outcomes["adapted"], 1);
-    assert_eq!(encode_for(5, &response).unwrap(), wire);
-    // Version 6 changed landings only: its report is the version 5 form.
-    response.version = PROTOCOL_VERSION;
-    assert_eq!(
-        String::from_utf8(encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap(),
-        String::from_utf8_lossy(wire).replacen(
-            "\"version\":5",
-            &format!("\"version\":{PROTOCOL_VERSION}"),
-            1
-        )
-    );
+    // A version 5 client still reads `refusal_outcomes`.
+    assert_eq!(encode_for(PROTOCOL_VERSION_5, &response).unwrap(), wire);
+    // Version 6 changed landings and version 7 (issue #222) activity,
+    // briefings and events: their report is the version 5 form.
+    for later in [PROTOCOL_VERSION_6, PROTOCOL_VERSION] {
+        let mut current = response.clone();
+        current.version = later;
+        assert_eq!(
+            String::from_utf8(encode_for(later, &current).unwrap()).unwrap(),
+            String::from_utf8_lossy(wire).replacen(
+                r#""version":5"#,
+                &format!(r#""version":{later}"#),
+                1
+            ),
+            "version {later}"
+        );
+    }
     assert!(
         earlier_counts(wire).is_err(),
         "an earlier build cannot read version 5 counts"
@@ -1480,6 +1489,192 @@ fn a_version_3_reply_leaves_out_an_inflight_renames_old_name() {
     );
 }
 
+/// What issue #222 added in version 7, as field and event names.
+const ADDED_IN_7: [&str; 6] = [
+    "told",
+    "told_at_ms",
+    "context",
+    "unchanged",
+    "context_added",
+    "told_forgotten",
+];
+/// Every version the daemon answers before the current one.
+const EARLIER_VERSIONS: [u16; 4] = [
+    PROTOCOL_VERSION_6,
+    PROTOCOL_VERSION_5,
+    PROTOCOL_VERSION_4,
+    OLDEST_PROTOCOL_VERSION,
+];
+
+/// Review comment 4712860167: a state record too large for a page is given
+/// as parts of its JSON, which `encode_for` cannot reshape. The store pages
+/// the text `encode_record_for` gives, which for an earlier version is
+/// already in that version's shape: activity without what version 7 added,
+/// and an interface notice without version 4's `renamed_from` for version
+/// 3. A version 7 record is its own JSON.
+#[test]
+fn a_state_record_is_encoded_in_each_versions_shape_for_its_parts() {
+    use langspan_core::{ContextUse, SessionActivity, StatusRecord};
+    let activity = StatusRecord::Activity {
+        key: "codex.bob".into(),
+        activity: SessionActivity {
+            told: vec![7],
+            told_at_ms: 1_000,
+            context: ContextUse {
+                turns: 1,
+                bytes: 10,
+                largest_turn_bytes: 10,
+                turn_bytes: 10,
+            },
+            ..SessionActivity::default()
+        },
+    };
+    assert_eq!(
+        encode_record_for(PROTOCOL_VERSION, &activity).unwrap(),
+        serde_json::to_string(&activity).unwrap()
+    );
+    for version in EARLIER_VERSIONS {
+        let text = encode_record_for(version, &activity).unwrap();
+        for field in ADDED_IN_7 {
+            assert!(!text.contains(&format!("\"{field}\"")), "{version}: {text}");
+        }
+        // Still the same record otherwise.
+        let read: StatusRecord = serde_json::from_str(&text).unwrap();
+        assert!(matches!(read, StatusRecord::Activity { key, .. } if key == "codex.bob"));
+    }
+    // A version 3 reader also loses version 4's fields in a record's parts.
+    let notice: StatusRecord = serde_json::from_value(serde_json::json!({
+        "kind": "interface_notice", "key": "app",
+        "notice": {
+            "notice_id": "n1", "workspace_id": "app", "path": "a.py",
+            "changes": [{
+                "name": "renamed", "kind": "function", "change": "renamed",
+                "before": "def original()", "after": "def renamed()",
+                "before_name": "original", "evidence": "same_body",
+            }],
+            "dependents": [], "by_session": null, "at_ms": 1, "generation": 1,
+        },
+    }))
+    .unwrap_or_else(|error| panic!("an interface notice: {error}"));
+    let current = encode_record_for(PROTOCOL_VERSION, &notice).unwrap();
+    assert!(current.contains("before_name"), "{current}");
+    let oldest = encode_record_for(OLDEST_PROTOCOL_VERSION, &notice).unwrap();
+    assert!(!oldest.contains("before_name"), "{oldest}");
+    assert!(!oldest.contains("evidence"), "{oldest}");
+}
+
+/// Issue #222 (review comments 4711375982 and 4712860167): version 7 added
+/// what a session was told (`told`, `told_at_ms`), the context its hooks
+/// added (`context`), a briefing's `unchanged` count, the told keys of a
+/// briefing delivery and the `context_added` and `told_forgotten` events.
+/// A client of version 6 (roadmap F5's build), 5 (roadmap H9's), 4 or 3
+/// reads activity, briefings and events with `deny_unknown_fields`: its
+/// reply leaves every one of them out, in every outcome that carries them,
+/// while a version 7 client reads them all.
+#[test]
+fn an_earlier_reply_leaves_out_what_version_7_added_to_activity_briefings_and_events() {
+    use langspan_core::{
+        ContextUse, Event, Outcome, RecordedEvent, SessionActivity, State, StatusRecord,
+    };
+    let activity = SessionActivity {
+        told: vec![7, 9],
+        told_at_ms: 1_000,
+        context: ContextUse {
+            turns: 2,
+            bytes: 300,
+            largest_turn_bytes: 200,
+            turn_bytes: 100,
+        },
+        ..SessionActivity::default()
+    };
+    let mut state = State::default();
+    state.activity.insert("codex.bob".into(), activity.clone());
+    let wire = include_bytes!("../fixtures/briefing-response-v3.json");
+    let Outcome::Briefing { mut briefing } =
+        serde_json::from_slice::<Response>(wire).unwrap().outcome
+    else {
+        panic!("a briefing fixture");
+    };
+    briefing.unchanged = 3;
+    let events = vec![
+        RecordedEvent {
+            seq: 1,
+            event: Event::BriefingDelivered {
+                session_id: "codex.bob".into(),
+                signature: "sig".into(),
+                told: vec![7, 9],
+                told_at_ms: Some(1_000),
+            },
+        },
+        RecordedEvent {
+            seq: 2,
+            event: Event::ContextAdded {
+                session_id: "codex.bob".into(),
+                bytes: 120,
+                turn: true,
+                generation: 1,
+            },
+        },
+        RecordedEvent {
+            seq: 3,
+            event: Event::ToldForgotten {
+                session_id: "codex.bob".into(),
+                keys: vec![9],
+            },
+        },
+    ];
+    let outcomes = [
+        Outcome::Status {
+            state,
+            summary: None,
+        },
+        Outcome::StatusRecords {
+            records: vec![StatusRecord::Activity {
+                key: "codex.bob".into(),
+                activity,
+            }],
+            next: None,
+        },
+        Outcome::Briefing { briefing },
+        Outcome::Events {
+            events: events.clone(),
+        },
+        Outcome::Changes { events, scan: None },
+    ];
+    for outcome in outcomes {
+        let response = Response {
+            version: PROTOCOL_VERSION,
+            request_id: "r".into(),
+            replayed: false,
+            generation: 1,
+            lease_valid: None,
+            outcome,
+        };
+        let current = String::from_utf8(encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+        assert!(
+            ADDED_IN_7
+                .iter()
+                .any(|field| current.contains(&format!("\"{field}\""))),
+            "a version 7 client reads them: {current}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Response>(&current).unwrap(),
+            response
+        );
+        for version in EARLIER_VERSIONS {
+            let earlier = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
+            for field in ADDED_IN_7 {
+                assert!(
+                    !earlier.contains(&format!("\"{field}\"")),
+                    "version {version} has {field}: {earlier}"
+                );
+            }
+            // What is left still reads as a response.
+            serde_json::from_str::<Response>(&earlier).unwrap();
+        }
+    }
+}
+
 /// A landing as a build before roadmap F5 reads it: no `rebased` and no
 /// `adapted`, and every other field.
 #[derive(serde::Deserialize)]
@@ -1516,19 +1711,30 @@ fn rebased_landing() -> langspan_core::Landing {
 /// `rebased` and `adapted`. To a client of version 5, 4 or 3 the same
 /// answer is encoded without them, so an earlier build, which reads a
 /// landing with `deny_unknown_fields`, still reads the whole answer.
+/// Version 7 (issue #222) added nothing to a landing: 6 and 7 agree.
 #[test]
 fn v6_landed_response_and_its_earlier_forms_match_the_golden_vectors() {
     use langspan_core::Outcome;
     let wire = include_bytes!("../fixtures/landed-response-v6.json");
     let mut response: Response = serde_json::from_slice(wire).unwrap();
-    assert_eq!(response.version, PROTOCOL_VERSION);
+    assert_eq!(response.version, PROTOCOL_VERSION_6);
     assert_eq!(
         response.outcome,
         Outcome::Landed {
             landing: rebased_landing()
         }
     );
-    assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
+    assert_eq!(encode_for(PROTOCOL_VERSION_6, &response).unwrap(), wire);
+    let mut current = response.clone();
+    current.version = PROTOCOL_VERSION;
+    assert_eq!(
+        String::from_utf8(encode_for(PROTOCOL_VERSION, &current).unwrap()).unwrap(),
+        String::from_utf8_lossy(wire).replacen(
+            r#""version":6"#,
+            &format!(r#""version":{PROTOCOL_VERSION}"#),
+            1
+        )
+    );
     let earlier_reads = |wire: &[u8]| {
         let value: serde_json::Value = serde_json::from_slice(wire).unwrap();
         serde_json::from_value::<EarlierLanding>(value["outcome"]["landing"].clone()).is_ok()
@@ -1536,7 +1742,11 @@ fn v6_landed_response_and_its_earlier_forms_match_the_golden_vectors() {
     assert!(!earlier_reads(wire), "an earlier build cannot read it");
 
     let earlier = include_bytes!("../fixtures/landed-response-v5.json");
-    for version in [5, 4, OLDEST_PROTOCOL_VERSION] {
+    for version in [
+        PROTOCOL_VERSION_5,
+        PROTOCOL_VERSION_4,
+        OLDEST_PROTOCOL_VERSION,
+    ] {
         response.version = version;
         let reply = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
         let expected = String::from_utf8_lossy(earlier).replacen(
@@ -1555,15 +1765,16 @@ fn v6_landed_response_and_its_earlier_forms_match_the_golden_vectors() {
     );
 }
 
-/// A request to record a rebased or adapted landing needs version 6: an
-/// earlier daemon refuses its fields as unreadable, and that is too late
-/// once the push is done. A landing that rewrote nothing fits every version.
+/// A request to record a rebased or adapted landing needs version 6 or
+/// later: an earlier daemon refuses its fields as unreadable, and that is
+/// too late once the push is done. A landing that rewrote nothing fits
+/// every version.
 #[test]
-fn recording_a_rebased_or_adapted_landing_fits_only_version_6() {
+fn recording_a_rebased_or_adapted_landing_fits_only_version_6_and_later() {
     use langspan::protocol::fits;
     let wire = include_bytes!("../fixtures/record-landing-request-v6.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
-    assert_eq!(request.version, PROTOCOL_VERSION);
+    assert_eq!(request.version, PROTOCOL_VERSION_6);
     assert_eq!(encode(&request).unwrap(), wire);
     let with = |rebased: bool, adapted: bool| {
         let mut command = request.command.clone();
@@ -1587,14 +1798,19 @@ fn recording_a_rebased_or_adapted_landing_fits_only_version_6() {
     for (rebased, adapted) in [(true, true), (true, false), (false, true)] {
         let command = with(rebased, adapted);
         assert!(fits(PROTOCOL_VERSION, &command));
-        for version in [5, 4, OLDEST_PROTOCOL_VERSION] {
+        assert!(fits(PROTOCOL_VERSION_6, &command));
+        for version in [
+            PROTOCOL_VERSION_5,
+            PROTOCOL_VERSION_4,
+            OLDEST_PROTOCOL_VERSION,
+        ] {
             assert!(
                 !fits(version, &command),
                 "version {version}, rebased {rebased}, adapted {adapted}"
             );
         }
     }
-    for version in [PROTOCOL_VERSION, 5, 4, OLDEST_PROTOCOL_VERSION] {
+    for version in std::iter::once(PROTOCOL_VERSION).chain(EARLIER_VERSIONS) {
         assert!(fits(version, &with(false, false)), "version {version}");
     }
 }

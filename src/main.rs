@@ -4636,6 +4636,8 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 recent: options.remove("--recent").is_some(),
                 recent_window_ms: None,
                 mcp: false,
+                // Asked for: the full view (issue #222).
+                changes_only: false,
             },
             ["remote", "enable", workspace] => Command::RemoteEnable {
                 workspace_id: (*workspace).into(),
@@ -5386,6 +5388,22 @@ fn print_write_check(check: &langspan_core::WriteCheck) -> Result<(), langspan::
     Ok(())
 }
 
+/// The context a session's hooks added, in bytes and estimated tokens
+/// (issue #222).
+fn context_line(context: &langspan_core::ContextUse) -> String {
+    let per_turn = context.bytes_per_turn();
+    let tokens = langspan_core::ContextUse::estimated_tokens;
+    format!(
+        "Added context: {} bytes over {} turn(s), {per_turn} bytes (about {} tokens) per turn; the largest turn {} bytes (about {} tokens). Tokens are estimated at {} bytes each.",
+        context.bytes,
+        context.turns,
+        tokens(per_turn),
+        context.largest_turn_bytes,
+        tokens(context.largest_turn_bytes),
+        langspan_core::BYTES_PER_TOKEN
+    )
+}
+
 fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), langspan::Error> {
     if response.replayed {
         println!(
@@ -5493,6 +5511,14 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             session_id,
             last_hook_ms,
         } => println!("Session {session_id}: last hook run recorded at {last_hook_ms} ms."),
+        Outcome::ContextRecorded {
+            session_id,
+            context,
+        } => println!("Session {session_id}: {}", context_line(context)),
+        Outcome::ToldForgotten {
+            session_id,
+            forgotten,
+        } => println!("Session {session_id}: {forgotten} briefing item(s) will be told again."),
         Outcome::Intent { intent } => println!(
             "Intent for {}: {} on {:?}.",
             intent.session_id,
@@ -6561,6 +6587,14 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 {
                     Some(age) => println!("  Last hook run: {} s ago.", age / 1000),
                     None => println!("  Last hook run: none recorded in this generation."),
+                }
+                if let Some(activity) = state
+                    .activity
+                    .get(&session.session_id)
+                    .filter(|activity| activity.generation == state.generation)
+                    .filter(|activity| !activity.context.is_empty())
+                {
+                    println!("  {}", context_line(&activity.context));
                 }
             }
             for adoption in state.adoptions.values() {

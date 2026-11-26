@@ -1420,6 +1420,7 @@ mod unix {
             recent,
             recent_window_ms,
             mcp,
+            changes_only,
         } = command
         else {
             return command.clone();
@@ -1454,6 +1455,7 @@ mod unix {
             recent_window_ms,
             mcp: *mcp,
             left: left.clone(),
+            changes_only: *changes_only,
             inflight,
         }
     }
@@ -2256,8 +2258,15 @@ mod unix {
             .name("langspan-git-reader".into())
             .spawn(move || {
                 while let Ok(of) = scan_receiver.recv() {
+                    // Hook reports keep arriving while this thread reads the
+                    // checkout: the core compares them with this time.
+                    let from = now_ms();
                     let snapshot =
-                        crate::observer::scan(&of.root, Instant::now() + Duration::from_secs(2));
+                        crate::observer::scan(&of.root, Instant::now() + Duration::from_secs(2))
+                            .map(|mut snapshot| {
+                                snapshot.scanned_from_ms = Some(from);
+                                snapshot
+                            });
                     if scan_result_sender
                         .send(ScanResult { of, snapshot })
                         .is_err()
@@ -3639,6 +3648,19 @@ mod unix {
         };
         match store.execute(&request_id, &command, &prepared, now_ms()) {
             Ok(mut execution) => {
+                // A record given in parts is cut from its JSON in the
+                // client's version, which the reply's own reshaping cannot
+                // reach (review comment 4712860167).
+                if version < PROTOCOL_VERSION
+                    && let Command::StatusRecords { after, page_bytes } = &command
+                    && matches!(execution.outcome, Outcome::StatusRecords { .. })
+                {
+                    execution.outcome =
+                        store.status_page(after.as_deref(), *page_bytes, |record| {
+                            protocol::encode_record_for(version, record)
+                                .map_err(|error| error.to_string())
+                        });
+                }
                 if let Outcome::Dashboard { dashboard } = &mut execution.outcome {
                     complete_dashboard(dashboard, store.state(), graph);
                 }

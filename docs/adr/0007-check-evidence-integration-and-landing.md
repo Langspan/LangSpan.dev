@@ -298,8 +298,10 @@ landing, in a landed answer, the status view and the journal, without
 `a_merge_landing_still_lands_through_a_daemon_of_the_build_before`
 (`tests/landing.rs`, through a socket that answers as a version 5 daemon),
 `v6_landed_response_and_its_earlier_forms_match_the_golden_vectors`,
-`recording_a_rebased_or_adapted_landing_fits_only_version_6`
-(`tests/protocol.rs`).
+`recording_a_rebased_or_adapted_landing_fits_only_version_6_and_later`
+(`tests/protocol.rs`). Version 7 (issue #222, ADR 0004) added nothing to a
+landing or to this request: a version 7 daemon records it, and a version 6
+client gets landings in the version 6 shape.
 
 **One implementation, two interfaces.** `integrate check` and `land` are
 application operations in `src/landing.rs`. The CLI and the MCP tools

@@ -1572,6 +1572,8 @@ impl McpAdapter {
                 recent: false,
                 recent_window_ms: None,
                 mcp: true,
+                // Asked for: the full view (issue #222).
+                changes_only: false,
             },
         )
         .await
