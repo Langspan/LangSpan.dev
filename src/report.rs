@@ -5,6 +5,8 @@
 //! Every share is shown as a count beside the count it is out of
 //! (`9 of 41`), never as a bare rate.
 
+use std::collections::BTreeMap;
+
 use langspan_core::{REPORT_HISTORY_EVENTS, Report, ReportCounts, TODAY_EVENTS};
 
 use crate::today::{cut_line, utc};
@@ -116,22 +118,28 @@ pub fn lines(report: &Report) -> Vec<String> {
             rows.push(row);
         }
         lines.extend(table(rows));
-        let kinds: Vec<String> = report
-            .hosts
-            .iter()
-            .filter(|host| !host.counts.refusals.is_empty())
-            .map(|host| {
-                let counts: Vec<String> = host
-                    .counts
-                    .refusals
-                    .iter()
-                    .map(|(kind, count)| format!("{count} {kind}"))
-                    .collect();
-                format!("{} {}", host.host, counts.join(", "))
-            })
-            .collect();
-        if !kinds.is_empty() {
-            lines.push(cut_line(format!("Refusals by kind: {}", kinds.join("; "))));
+        for (title, field) in [
+            (
+                "Refusals by kind",
+                (|counts| &counts.refusals) as fn(&ReportCounts) -> &BTreeMap<String, u32>,
+            ),
+            ("Refusal outcomes", |counts| &counts.refusal_outcomes),
+        ] {
+            let named: Vec<String> = report
+                .hosts
+                .iter()
+                .filter(|host| !field(&host.counts).is_empty())
+                .map(|host| {
+                    let counts: Vec<String> = field(&host.counts)
+                        .iter()
+                        .map(|(name, count)| format!("{count} {name}"))
+                        .collect();
+                    format!("{} {}", host.host, counts.join(", "))
+                })
+                .collect();
+            if !named.is_empty() {
+                lines.push(cut_line(format!("{title}: {}", named.join("; "))));
+            }
         }
         let unreported: Vec<String> = report
             .hosts
@@ -237,6 +245,10 @@ mod tests {
             ]),
             retried_unchanged: seed,
             briefings_delivered: 7 * seed,
+            refusal_outcomes: BTreeMap::from([
+                ("adapted".to_owned(), 3 * seed),
+                ("pending".to_owned(), seed),
+            ]),
         }
     }
 
@@ -287,6 +299,10 @@ mod tests {
         assert!(!text.contains('%'), "{text}");
         assert!(
             text.contains("Refusals by kind: claude-code 5000 conflict, 2000 stale_base"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Refusal outcomes: claude-code 3000 adapted, 1000 pending"),
             "{text}"
         );
         // Codex's reads are marked as not reported, not shown as zero.

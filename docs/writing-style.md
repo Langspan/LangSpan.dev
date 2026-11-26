@@ -115,6 +115,24 @@ failed, why, and what to do next. In practice:
 - An issue states the observed behavior, the expected behavior and how to
   reproduce it, in that order.
 
+### Images and motion in the README
+
+README cards, stills, loops and films follow the website's
+[motion and visual content playbook](https://github.com/Langspan/langspan.github.io/blob/main/docs/motion-playbook.md).
+The rules that matter most for README media:
+
+- Write briefs in numbers, not adjectives: an easing curve, a duration in
+  milliseconds, a minimum size in pixels.
+- Judge every visual at phone width (390 pixels) as well as desktop.
+- Measure motion, not only stills: check for unplanned freezes and watch
+  the playback before you merge.
+- Render a loop from frame 0 to frame N-1, never frame N, so the seam
+  doesn't stutter.
+- Label a simulation as simulated, and keep authored illustrations distinct
+  from observed behavior.
+- Never show an outcome that wasn't measured. Link the evidence, as for any
+  number.
+
 ### Release notes
 
 Each entry starts with what the reader can now do or what changed for them,

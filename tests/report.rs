@@ -62,6 +62,10 @@ impl World {
         self.base.join("state")
     }
     fn start(&mut self) {
+        self.start_within(Duration::from_secs(10));
+    }
+    /// Start the daemon and wait up to `ready` for it to answer.
+    fn start_within(&mut self, ready: Duration) {
         self.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
                 .args(["daemon", "--state-dir"])
@@ -71,7 +75,7 @@ impl World {
                 .spawn()
                 .unwrap(),
         );
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + ready;
         while self.cli(&["status"]).0 != 0 {
             assert!(Instant::now() < deadline, "daemon did not become ready");
             std::thread::sleep(Duration::from_millis(10));
@@ -703,7 +707,13 @@ fn an_admission_completes_promptly_while_reports_read_a_long_history() {
             )
             .unwrap();
     }
-    w.start();
+    // With no snapshot the daemon replays all 800,000 events before it
+    // answers: 2.7 s here (Apple silicon, debug build), while the usual 10 s
+    // wait ran out on a CI macOS runner. That replay is not what this test
+    // bounds; the admission behind a report is, below.
+    let booted = Instant::now();
+    w.start_within(Duration::from_secs(60));
+    eprintln!("restart over the long history {:?}", booted.elapsed());
     // A restart begins a generation: Alice registers again, as a hook would.
     call(
         &state,
