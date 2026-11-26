@@ -76,10 +76,18 @@ const FILES: &[(&str, &str)] = &[
         "cmd/main.go",
         "package main\n\nfunc main() {\n\tEncode(1)\n}\n",
     ),
+    (
+        "shop/Orders.java",
+        "package shop;\n\npublic class Orders {\n    public Orders() {}\n\n    public Order place(Cart cart) {\n        return null;\n    }\n}\n",
+    ),
+    (
+        "shop/Checkout.java",
+        "package shop;\n\nclass Checkout {\n    Order submit(Orders orders, Cart cart) {\n        return orders.place(cart);\n    }\n}\n",
+    ),
 ];
 
 impl World {
-    /// A repository with the four languages' files, or with `git: false`
+    /// A repository with each indexed language's files, or with `git: false`
     /// a plain directory, which is never scanned or indexed.
     fn new(git_repo: bool) -> Self {
         let base = fs::canonicalize(std::env::temp_dir())
@@ -106,6 +114,7 @@ impl World {
         let mut world = Self { base, daemon: None };
         world.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(&state)
                 .stdout(Stdio::null())
@@ -135,6 +144,7 @@ impl World {
     }
     fn cli(&self, args: &[&str]) -> (i32, String) {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.base.join("state"))
             .args(args)
@@ -180,6 +190,7 @@ impl World {
     fn hook(&self, vendor: &str, event: &Value) -> Run {
         let started = Instant::now();
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", vendor, "--state-dir"])
             .arg(self.base.join("state"))
             .args(["--workspace", "app", "--root"])
@@ -214,9 +225,11 @@ impl World {
         Run {
             coverage: diagnostic["coverage"].as_str().unwrap().into(),
             detail: diagnostic["detail"].as_str().unwrap_or("").into(),
+            // Cursor's context is a top-level `additional_context`.
             context: reply.and_then(|reply| {
                 reply["hookSpecificOutput"]["additionalContext"]
                     .as_str()
+                    .or(reply["additional_context"].as_str())
                     .map(str::to_owned)
             }),
             elapsed,
@@ -393,26 +406,6 @@ fn python_typescript_and_go_calls_are_checked_through_both_hosts() {
     w.wait_for_notice("render", "theme");
     w.wait_for_notice("Encode", "base int");
 
-    // Gemini CLI reads no context on BeforeTool, so its write is not
-    // checked: an alert there would use up the notice unread.
-    let replace = json!({"file_path": w.work().join("app/main.py"),
-                         "old_string": "    return scale(2)\n",
-                         "new_string": "    total = scale(2)\n    return total\n"});
-    let gemini = |phase: &str, response: Value| {
-        w.hook(
-            "gemini-cli",
-            &json!({"session_id": "gina", "cwd": w.work(), "hook_event_name": phase,
-                    "tool_name": "replace", "tool_input": replace, "tool_response": response}),
-        )
-    };
-    let before = gemini("BeforeTool", Value::Null);
-    quiet(&before);
-    assert!(!before.detail.contains("break"), "{}", before.detail);
-    gemini(
-        "AfterTool",
-        json!({"error": {"message": "not run", "type": "edit_no_occurrence_found"}}),
-    );
-
     // Python, through a Claude Code Edit: only the edited lines are checked.
     let edit = w.claude(
         "bob",
@@ -466,6 +459,67 @@ fn python_typescript_and_go_calls_are_checked_through_both_hosts() {
         context.contains(r#""func Encode(value, base int) int""#),
         "{context}"
     );
+}
+
+/// Roadmap D6, Java: the issue's example. A peer adds a parameter to a
+/// public method; a write that keeps the one-argument call is told.
+#[test]
+fn a_java_method_call_that_no_longer_fits_is_told_at_the_write() {
+    let w = World::new(true);
+    w.wait_for_index();
+    w.rewrites(
+        "alice",
+        "a1",
+        "shop/Orders.java",
+        "package shop;\n\npublic class Orders {\n    public Orders(Store store) {}\n\n    public Order place(Cart cart, Coupon coupon) {\n        return null;\n    }\n}\n",
+    );
+    w.wait_for_notice("place", "Coupon coupon");
+    w.wait_for_notice("Orders", "Store store");
+    let edit = w.claude(
+        "bob",
+        "b1",
+        "Edit",
+        json!({"file_path": w.work().join("shop/Checkout.java"),
+               "old_string": "        return orders.place(cart);\n",
+               "new_string": "        Order order = orders.place(cart);\n        return order;\n"}),
+        "PreToolUse",
+    );
+    let context = alert(&edit);
+    assert!(
+        context.contains(r#""shop/Checkout.java":5 calls "place" with 1 argument"#),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#""public Order place(Cart cart, Coupon coupon)""#),
+        "{context}"
+    );
+    // A constructor call is a call of the type's name. Carol, since one
+    // notice is told to a session once.
+    let created = w.writes(
+        "carol",
+        "c1",
+        "shop/Shop.java",
+        "package shop;\n\nclass Shop {\n    Orders open() {\n        return new Orders();\n    }\n}\n",
+    );
+    let context = alert(&created);
+    assert!(
+        context.contains(r#""shop/Shop.java":5 calls "Orders" with 0 arguments"#),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#""public Orders(Store store)""#),
+        "{context}"
+    );
+    // A call with the new count is not told.
+    quiet(&w.claude(
+        "bob",
+        "b3",
+        "Edit",
+        json!({"file_path": w.work().join("shop/Checkout.java"),
+               "old_string": "        return orders.place(cart);\n",
+               "new_string": "        return orders.place(cart, null);\n"}),
+        "PreToolUse",
+    ));
 }
 
 #[test]
@@ -630,4 +684,529 @@ fn a_notice_left_out_of_a_full_alert_is_told_at_a_later_write() {
         rest.iter().all(|name| !shown.contains(name)),
         "{first}\n{second}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// B10: renames, removals and same-count changes (issue #29).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_call_to_a_peers_renamed_function_is_told_the_new_name_once() {
+    let w = World::new(true);
+    w.wait_for_index();
+    quiet(&w.writes("bob", "b0", "app/extra.py", "x = 1\n"));
+    // Alice renames `scale` to `zoom`; the body and parameters stay.
+    w.rewrites(
+        "alice",
+        "a1",
+        "app/api.py",
+        "def zoom(factor):\n    return factor\n",
+    );
+    w.wait_for_notice("scale", "\"renamed\"");
+    let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
+    assert!(events.contains(r#""after_name":"zoom""#), "{events}");
+    assert!(!events.contains(r#""change":"removed""#), "{events}");
+
+    // A call of the new name gets nothing.
+    quiet(&w.writes(
+        "bob",
+        "b1",
+        "app/extra.py",
+        "from api import zoom\n\nprint(zoom(1))\n",
+    ));
+    let run = w.writes(
+        "bob",
+        "b2",
+        "app/extra.py",
+        "from api import scale\n\nprint(scale(1))\n",
+    );
+    let context = alert(&run);
+    assert!(
+        context.contains(
+            r#""app/extra.py":3 calls "scale", which was renamed to "zoom" in "app/api.py" by claude-code.alice"#
+        ),
+        "{context}"
+    );
+    assert!(context.contains(r#""def zoom(factor)""#), "{context}");
+    assert_eq!(
+        context.lines().count(),
+        2,
+        "one line for one call: {context}"
+    );
+    assert!(context.len() <= 1200, "{}", context.len());
+
+    // Once per notice per session; another session is still told.
+    quiet(&w.writes(
+        "bob",
+        "b3",
+        "app/extra.py",
+        "from api import scale\n\nprint(scale(2))\n",
+    ));
+    alert(&w.writes(
+        "carol",
+        "c1",
+        "app/extra.py",
+        "from api import scale\n\nprint(scale(2))\n",
+    ));
+}
+
+#[test]
+fn a_rename_with_a_changed_body_is_a_removal_and_a_call_to_it_is_told_once() {
+    let w = World::new(true);
+    w.wait_for_index();
+    quiet(&w.writes("bob", "b0", "src/extra.rs", "pub fn extra() {}\n"));
+    // A new name and a new body: no rename is claimed.
+    w.rewrites(
+        "alice",
+        "a1",
+        "src/api.rs",
+        "pub fn grow(width: u32) -> u32 {\n    width + 1\n}\n",
+    );
+    w.wait_for_notice("resize", "\"removed\"");
+    let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
+    assert!(!events.contains("\"renamed\""), "{events}");
+
+    let run = w.writes(
+        "bob",
+        "b1",
+        "src/main.rs",
+        "mod api;\nfn main() {\n    api::resize(1);\n}\n",
+    );
+    let context = alert(&run);
+    assert!(
+        context.contains(
+            r#""src/main.rs":3 calls "resize", which was removed from "src/api.rs" by claude-code.alice"#
+        ),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#""pub fn resize(width: u32) -> u32""#),
+        "{context}"
+    );
+    // Once.
+    quiet(&w.writes(
+        "bob",
+        "b2",
+        "src/main.rs",
+        "mod api;\nfn main() {\n    api::resize(2);\n}\n",
+    ));
+}
+
+#[test]
+fn a_removed_name_still_defined_elsewhere_is_not_told() {
+    let w = World::new(true);
+    w.wait_for_index();
+    quiet(&w.writes("bob", "b0", "cmd/extra.go", "package main\n"));
+    // Alice moves `Encode` to another file: a call of it may still be right.
+    w.rewrites(
+        "alice",
+        "a1",
+        "cmd/codec.go",
+        "package main\n\nfunc Encode(value int) int {\n\treturn value * 2\n}\n",
+    );
+    w.rewrites(
+        "alice",
+        "a2",
+        "cmd/api.go",
+        "package main\n\nfunc other() int {\n\treturn 0\n}\n",
+    );
+    w.wait_for_notice("Encode", "\"removed\"");
+    let deadline = Instant::now() + WAIT;
+    while !w
+        .cli(&["graph", "symbol", "app", "Encode"])
+        .1
+        .contains("cmd/codec.go")
+    {
+        assert!(Instant::now() < deadline, "codec.go never indexed");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    quiet(&w.writes(
+        "bob",
+        "b1",
+        "cmd/extra.go",
+        "package main\n\nfunc extra() int {\n\treturn Encode(5)\n}\n",
+    ));
+}
+
+#[test]
+fn a_signature_change_that_keeps_the_count_is_not_told_at_the_write() {
+    let w = World::new(true);
+    w.wait_for_index();
+    quiet(&w.writes("bob", "b0", "web/extra.ts", "export const x = 1;\n"));
+    // A type changes; the count stays. Call sites do not resolve to their
+    // definition and argument types are not known, so nothing is checked.
+    w.rewrites(
+        "alice",
+        "a1",
+        "web/api.ts",
+        "export function render(view: number): string {\n  return String(view);\n}\n",
+    );
+    w.wait_for_notice("render", "view: number");
+    quiet(&w.writes(
+        "bob",
+        "b1",
+        "web/extra.ts",
+        "import { render } from \"./api\";\n\nexport const page = render(\"home\");\n",
+    ));
+    let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
+    assert!(!events.contains("interface_alerted"), "{events}");
+}
+
+// ---------------------------------------------------------------------------
+// B9 on the other hosts: Gemini CLI, Cursor and shell heredocs (issue #28).
+// ---------------------------------------------------------------------------
+
+/// Alice changes `scale` in `app/api.py` to two parameters.
+fn scale_takes_two(w: &World) {
+    w.rewrites(
+        "alice",
+        "a1",
+        "app/api.py",
+        "def scale(factor, offset):\n    return factor + offset\n",
+    );
+    w.wait_for_notice("scale", "offset");
+}
+
+/// A Gemini CLI `replace` in `app/main.py`: its BeforeTool, then, when it
+/// succeeds, the file changed as Gemini would change it, then its AfterTool.
+fn gemini_replace(w: &World, session: &str, old: &str, new: &str, succeeds: bool) -> (Run, Run) {
+    let path = w.work().join("app/main.py");
+    let input = json!({"file_path": path, "old_string": old, "new_string": new});
+    let event = |phase: &str, response: Value| {
+        json!({"session_id": session, "cwd": w.work(), "hook_event_name": phase,
+               "tool_name": "replace", "tool_input": input, "tool_response": response})
+    };
+    let before = w.hook("gemini-cli", &event("BeforeTool", Value::Null));
+    let response = if succeeds {
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(old), "{text}");
+        fs::write(&path, text.replacen(old, new, 1)).unwrap();
+        json!({"llmContent": "Successfully modified file."})
+    } else {
+        json!({"error": {"message": "not run", "type": "edit_no_occurrence_found"}})
+    };
+    let after = w.hook("gemini-cli", &event("AfterTool", response));
+    (before, after)
+}
+
+fn told_after(run: &Run) -> &str {
+    assert_eq!(run.coverage, "observed", "{}", run.detail);
+    let context = run
+        .context
+        .as_deref()
+        .unwrap_or_else(|| panic!("no alert: {}", run.detail));
+    assert!(context.starts_with(HEADER), "{context}");
+    assert!(context.contains("not instructions"), "{context}");
+    context
+}
+
+fn untold_after(run: &Run) {
+    assert!(
+        run.context
+            .as_deref()
+            .is_none_or(|text| !text.contains(HEADER)),
+        "{:?}",
+        run.context
+    );
+}
+
+#[test]
+fn a_gemini_replace_is_told_of_a_broken_call_with_its_result_once() {
+    let w = World::new(true);
+    w.wait_for_index();
+    // Gina is at work before Alice changes anything.
+    let (before, _) = gemini_replace(
+        &w,
+        "gina",
+        "    return scale(2)\n",
+        "    return scale(2)\n\n",
+        true,
+    );
+    assert_eq!(before.coverage, "admitted", "{}", before.detail);
+    scale_takes_two(&w);
+
+    // A call with the new count gets nothing, before or after.
+    let (before, after) = gemini_replace(
+        &w,
+        "gina",
+        "    return scale(2)\n",
+        "    return scale(2, 0)\n",
+        true,
+    );
+    quiet(&before);
+    untold_after(&after);
+
+    // Gemini reads no context on BeforeTool: the calls are kept there and
+    // checked at AfterTool. A write that fails is not told and does not
+    // use up the notice.
+    let broken = "    total = scale(2)\n    return total\n";
+    let (before, after) = gemini_replace(&w, "gina", "    return scale(2, 0)\n", broken, false);
+    quiet(&before);
+    assert!(
+        before.detail.contains("kept for the tool's result"),
+        "{}",
+        before.detail
+    );
+    untold_after(&after);
+
+    let (before, after) = gemini_replace(&w, "gina", "    return scale(2, 0)\n", broken, true);
+    quiet(&before);
+    let context = told_after(&after);
+    assert!(
+        context.contains(r#""app/main.py":5 calls "scale" with 1 argument; it now takes 2"#),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#""def scale(factor, offset)""#),
+        "{context}"
+    );
+    assert!(context.contains("claude-code.alice"), "{context}");
+    assert!(context.len() <= 1200, "{}", context.len());
+
+    // The same session's next write with the same broken call is not told
+    // again.
+    let (_, after) = gemini_replace(
+        &w,
+        "gina",
+        "    total = scale(2)\n",
+        "    total = scale(3)\n",
+        true,
+    );
+    assert_eq!(after.coverage, "observed", "{}", after.detail);
+    untold_after(&after);
+
+    // A `write_file` of another Gemini session is checked whole, and that
+    // session is still told.
+    let path = w.work().join("app/extra.py");
+    let content = "from api import scale\n\nprint(scale(1))\n";
+    let input = json!({"file_path": path, "content": content});
+    let event = |phase: &str, response: Value| {
+        json!({"session_id": "gwen", "cwd": w.work(), "hook_event_name": phase,
+               "tool_name": "write_file", "tool_input": input, "tool_response": response})
+    };
+    quiet(&w.hook("gemini-cli", &event("BeforeTool", Value::Null)));
+    fs::write(&path, content).unwrap();
+    let after = w.hook(
+        "gemini-cli",
+        &event("AfterTool", json!({"llmContent": "Wrote the file."})),
+    );
+    let context = told_after(&after);
+    assert!(
+        context.contains(r#""app/extra.py":3 calls "scale" with 1 argument"#),
+        "{context}"
+    );
+
+    // Nothing kept is left behind, and only the alert is recorded.
+    let kept = w.base.join("state").join("break-calls");
+    assert!(
+        fs::read_dir(&kept).map_or(true, |mut entries| entries.next().is_none()),
+        "{kept:?}"
+    );
+    let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
+    assert!(events.contains("interface_alerted"), "{events}");
+    assert!(!events.contains("total = scale"), "{events}");
+}
+
+#[test]
+fn a_cursor_write_is_checked_only_once_a_captured_write_fixture_is_present() {
+    let w = World::new(true);
+    w.wait_for_index();
+    let cursor = |call: &str, phase: &str, content: &str| {
+        w.hook(
+            "cursor",
+            &json!({"conversation_id": "cora", "session_id": "cora", "generation_id": "g1",
+                    "hook_event_name": phase, "workspace_roots": [w.work()], "cwd": w.work(),
+                    "tool_name": "Write", "tool_use_id": call,
+                    "tool_input": {"file_path": w.work().join("app/extra.py"), "content": content}}),
+        )
+    };
+    let writes = |call: &str, content: &str| {
+        let pre = cursor(call, "preToolUse", content);
+        cursor(call, "postToolUseFailure", content);
+        pre
+    };
+    quiet(&writes("c0", "x = 1\n"));
+    scale_takes_two(&w);
+
+    quiet(&writes(
+        "c1",
+        "from api import scale\n\nprint(scale(1, 2))\n",
+    ));
+    let run = writes("c2", "from api import scale\n\nprint(scale(1))\n");
+    match langspan::cursor::CAPTURED_WRITE {
+        // Built from documentation only: no check, so no notice is spent.
+        None => {
+            quiet(&run);
+            assert!(!run.detail.contains("break"), "{}", run.detail);
+        }
+        Some(_) => {
+            let context = alert(&run);
+            assert!(
+                context.contains(r#""app/extra.py":3 calls "scale" with 1 argument"#),
+                "{context}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_quoted_heredoc_writing_a_broken_call_is_told_before_it_runs() {
+    let w = World::new(true);
+    w.wait_for_index();
+    let bash = |session: &str, call: &str, command: &str| {
+        let input = json!({"command": command});
+        let pre = w.claude(session, call, "Bash", input.clone(), "PreToolUse");
+        w.claude(session, call, "Bash", input, "PostToolUse");
+        pre
+    };
+    let heredoc = |delimiter: &str, call: &str| {
+        format!("cat > app/extra.py <<{delimiter}\nfrom api import scale\n\nprint({call})\nEOF")
+    };
+    bash("bob", "b0", "echo start > notes.txt");
+    scale_takes_two(&w);
+
+    // A call with the new count gets nothing.
+    let right = bash("bob", "b1", &heredoc("'EOF'", "scale(1, 2)"));
+    assert!(right.context.is_none(), "{:?}", right.context);
+    assert!(right.detail.contains("no call breaks"), "{}", right.detail);
+    // An unquoted delimiter may expand its body: not checked.
+    let unquoted = bash("bob", "b2", &heredoc("EOF", "scale(1)"));
+    assert!(unquoted.context.is_none(), "{:?}", unquoted.context);
+    assert!(!unquoted.detail.contains("break"), "{}", unquoted.detail);
+
+    let run = bash("bob", "b3", &heredoc("'EOF'", "scale(1)"));
+    let context = run
+        .context
+        .as_deref()
+        .unwrap_or_else(|| panic!("no alert: {}", run.detail));
+    assert!(context.starts_with(HEADER), "{context}");
+    assert!(
+        context.contains(r#""app/extra.py":3 calls "scale" with 1 argument; it now takes 2"#),
+        "{context}"
+    );
+    // The other order of the redirection and the heredoc, after the notice
+    // was told: not told again.
+    let again = bash(
+        "bob",
+        "b4",
+        "cat <<\"EOF\" > app/extra.py\nfrom api import scale\nscale(4)\nEOF",
+    );
+    assert!(again.context.is_none(), "{:?}", again.context);
+    assert!(again.detail.contains("break check"), "{}", again.detail);
+}
+
+/// Review 4703451339: a Gemini edit the user changes in its confirmation
+/// dialog keeps its call ID, but what lands is the changed input. The calls
+/// kept from the original input are not checked against it, and the notice
+/// is left for a later write that really has the broken call.
+#[test]
+fn a_gemini_edit_changed_at_confirmation_is_not_told_of_the_calls_it_no_longer_has() {
+    let w = World::new(true);
+    w.wait_for_index();
+    let (before, _) = gemini_replace(
+        &w,
+        "gina",
+        "    return scale(2)\n",
+        "    return scale(2)\n\n",
+        true,
+    );
+    assert_eq!(before.coverage, "admitted", "{}", before.detail);
+    scale_takes_two(&w);
+
+    let path = w.work().join("app/main.py");
+    let proposed = json!({"file_path": path, "old_string": "    return scale(2)\n",
+                          "new_string": "    total = scale(2)\n    return total\n"});
+    let corrected = json!({"file_path": path, "old_string": "    return scale(2)\n",
+                           "new_string": "    total = scale(2, 0)\n    return total\n"});
+    let event = |phase: &str, input: &Value, response: Value| {
+        json!({"session_id": "gina", "cwd": w.work(), "hook_event_name": phase,
+               "tool_name": "replace", "tool_input": input, "tool_response": response})
+    };
+    let before = w.hook("gemini-cli", &event("BeforeTool", &proposed, Value::Null));
+    quiet(&before);
+    assert!(
+        before.detail.contains("kept for the tool's result"),
+        "{}",
+        before.detail
+    );
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        text.replacen(
+            "    return scale(2)\n",
+            "    total = scale(2, 0)\n    return total\n",
+            1,
+        ),
+    )
+    .unwrap();
+    let after = w.hook(
+        "gemini-cli",
+        &event(
+            "AfterTool",
+            &corrected,
+            json!({"llmContent": "Successfully modified file."}),
+        ),
+    );
+    assert_eq!(after.coverage, "observed_mismatch", "{}", after.detail);
+    untold_after(&after);
+    let kept = w.base.join("state").join("break-calls");
+    assert!(
+        fs::read_dir(&kept).map_or(true, |mut entries| entries.next().is_none()),
+        "{kept:?}"
+    );
+
+    // The notice was not used up: a write that really has the broken call
+    // is still told.
+    let (_, after) = gemini_replace(
+        &w,
+        "gina",
+        "    total = scale(2, 0)\n",
+        "    total = scale(2)\n",
+        true,
+    );
+    let context = told_after(&after);
+    assert!(
+        context.contains(r#""app/main.py":5 calls "scale" with 1 argument; it now takes 2"#),
+        "{context}"
+    );
+}
+
+/// Review 4703578513: a name missing from the index is no proof it is gone
+/// while the index cannot read every file. Alice moves `Encode` into a file
+/// too large to index, then removes it from `cmd/api.go`; a call of it is
+/// not told it was removed, and the notice is not used up.
+#[test]
+fn a_removed_name_is_not_told_while_the_index_cannot_read_every_file() {
+    let w = World::new(true);
+    w.wait_for_index();
+    quiet(&w.writes("bob", "b0", "cmd/extra.go", "package main\n"));
+    let mut big =
+        String::from("package main\n\nfunc Encode(value int) int {\n\treturn value * 2\n}\n");
+    while big.len() <= 1 << 20 {
+        big.push_str("// padding to put the file over the index's size bound\n");
+    }
+    fs::write(w.work().join("cmd/codec.go"), &big).unwrap();
+    w.rewrites(
+        "alice",
+        "a1",
+        "cmd/api.go",
+        "package main\n\nfunc other() int {\n\treturn 0\n}\n",
+    );
+    w.wait_for_notice("Encode", "\"removed\"");
+    let deadline = Instant::now() + WAIT;
+    while !w
+        .cli(&["graph", "blind-spots", "app"])
+        .1
+        .contains("cmd/codec.go")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "codec.go never seen as too large"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let call = "package main\n\nfunc extra() int {\n\treturn Encode(5)\n}\n";
+    quiet(&w.writes("bob", "b1", "cmd/extra.go", call));
+    let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
+    assert!(!events.contains("interface_alerted"), "{events}");
 }

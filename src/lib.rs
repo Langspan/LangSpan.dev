@@ -1,11 +1,14 @@
 //! LangSpan adapters. The domain crate has no dependency on these modules.
 
 pub mod auto_check;
+pub mod autostart;
+mod break_calls;
 pub mod breaks;
 pub mod claude_code;
 pub mod client;
 pub mod clock;
 pub mod commit;
+pub mod count;
 pub mod daemon;
 pub mod dashboard;
 pub mod formatter;
@@ -16,8 +19,10 @@ pub mod local_day;
 pub mod mcp;
 pub mod notify;
 pub mod protocol;
+pub mod recent;
 mod reformat;
 pub mod regions;
+pub mod service;
 mod sha1;
 mod sha256;
 pub mod skill;
@@ -26,6 +31,7 @@ pub mod store;
 pub mod test_output;
 pub mod today;
 pub mod user_install;
+mod zone;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -40,6 +46,8 @@ pub mod codex;
 pub mod cursor;
 
 pub mod gemini;
+
+pub mod antigravity;
 
 pub mod process;
 

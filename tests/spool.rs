@@ -88,6 +88,7 @@ impl Fixture {
         assert!(self.child.is_none());
         self.child = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state())
                 .stdout(Stdio::null())
@@ -122,6 +123,7 @@ impl Fixture {
 
     fn cli(&self, args: &[&str]) -> (i32, String) {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.state())
             .args(args)
@@ -176,6 +178,7 @@ impl Fixture {
     /// A hook run with the install's own options, such as `--presence off`.
     fn run_with(&self, extra: &[&str], event: Value, budget_ms: u64) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.state())
             .args(["--workspace", "work", "--root"])

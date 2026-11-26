@@ -128,6 +128,7 @@ impl Fixture {
 
     async fn start_daemon(&mut self) {
         let child = Command::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["daemon", "--state-dir"])
             .arg(self.state_dir())
             .stdin(Stdio::null())
@@ -165,6 +166,7 @@ impl Fixture {
 
     fn run_hook(&self, vendor: &str, event: &str) {
         let mut child = Command::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", vendor, "--state-dir"])
             .arg(self.state_dir())
             .args(["--workspace", "work", "--root"])
@@ -211,6 +213,7 @@ impl Fixture {
     async fn connect_in(&self, cwd: &Path, args: &[&str], quiet_ms: Option<u64>) -> Client {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
         command
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("mcp")
             .arg("--state-dir")
             .arg(self.state_dir())

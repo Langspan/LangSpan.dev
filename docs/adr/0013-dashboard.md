@@ -31,7 +31,9 @@ other interface does.
 **A small server in the same binary.** `langspan dashboard` uses the standard
 library's `TcpListener`: no new dependency. It serves `GET /` (one page with its
 script and style inline and nothing loaded from anywhere) and
-`GET /api/state` (the view as JSON). It reads only a request head of at most
+`GET /api/state` (the view as JSON, with this local month's refusal count as
+`refusals_this_month`, the fields `langspan count --json` prints; see
+[ADR 0019](0019-person-facing-surfaces-and-usage-accounting.md), H5). It reads only a request head of at most
 8 KiB and 64 headers, within 2 s per read and 5 s in total; refuses every other
 method, any request with a body, and unknown paths; and serves at most 16
 connections at once, closing the rest unanswered.

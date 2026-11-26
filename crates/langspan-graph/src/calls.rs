@@ -75,7 +75,52 @@ fn parse(language: Language, source: &[u8]) -> Result<tree_sitter::Tree, String>
         .ok_or_else(|| "the parser returned no tree".into())
 }
 
+/// A Java method call (`a.f(x)`, `f(x)`) or constructor call (`new T(x)`,
+/// named by the type's last identifier). `this(x)` and `super(x)` name no
+/// constructor by their text and are left out.
+fn java_call_site(node: Node, source: &[u8]) -> Option<Call> {
+    let (name, member) = match node.kind() {
+        "method_invocation" => (
+            node.child_by_field_name("name")?,
+            node.child_by_field_name("object").is_some(),
+        ),
+        "object_creation_expression" => {
+            let mut named = node.child_by_field_name("type")?;
+            // `ArrayList<String>`, then `java.util.ArrayList`: the type's
+            // own name.
+            loop {
+                named = match named.kind() {
+                    "generic_type" => named.named_child(0)?,
+                    "scoped_type_identifier" => {
+                        let mut cursor = named.walk();
+                        named.named_children(&mut cursor).last()?
+                    }
+                    "type_identifier" => break,
+                    _ => return None,
+                };
+            }
+            (named, false)
+        }
+        _ => return None,
+    };
+    let name_text = text(name, source);
+    if name_text.is_empty() || name_text.len() > NAME_BYTES {
+        return None;
+    }
+    let arguments = node.child_by_field_name("arguments")?;
+    Some(Call {
+        name: name_text.to_owned(),
+        line: line(name),
+        lines: (line(node), end_line(arguments)),
+        args: count_arguments(arguments),
+        member,
+    })
+}
+
 fn call_site(language: Language, node: Node, source: &[u8]) -> Option<Call> {
+    if language == Language::Java {
+        return java_call_site(node, source);
+    }
     let call_kind = match language {
         Language::Python => "call",
         _ => "call_expression",
@@ -151,6 +196,8 @@ pub fn arity(language: Language, signature: &str) -> Option<Arity> {
             format!("{signature} => {{}}"),
             format!("class L {{ {signature} {{}} }}"),
         ],
+        // A method or constructor is only ever a member of a type.
+        Language::Java => vec![format!("class L {{ {signature} {{}} }}")],
     };
     candidates
         .iter()
@@ -193,6 +240,7 @@ fn is_function(language: Language, kind: &str) -> bool {
                 | "method_definition"
         ),
         Language::Go => matches!(kind, "function_declaration" | "method_declaration"),
+        Language::Java => matches!(kind, "method_declaration" | "constructor_declaration"),
     }
 }
 
@@ -276,6 +324,10 @@ fn parameters(language: Language, function: Node, source: &[u8]) -> Option<Arity
                 }
             }
             (Language::Go, "variadic_parameter_declaration") => arity.max = None,
+            (Language::Java, "formal_parameter") => add(true, &mut arity),
+            (Language::Java, "spread_parameter") => arity.max = None,
+            // `Orders this` names the type of the receiver; it is never passed.
+            (Language::Java, "receiver_parameter") => {}
             // Anything else: the count would be a guess.
             _ => return None,
         }
