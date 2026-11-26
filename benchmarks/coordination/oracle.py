@@ -47,17 +47,20 @@ def expected(function, value):
 
 
 def references(text, name):
-    """Each place TEXT names NAME (as `name` or `module.name`), in source
-    order: the call's argument count, or None for a reference that is not a
-    plain call (a call with `*args` or `**kwargs`, or the name passed or
-    kept as a value). None when TEXT does not parse."""
+    """Each place TEXT names NAME (as `name`, `module.name`, or an alias
+    that `from ... import name as alias` binds), in source order: the call's
+    argument count, or None for a reference that is not a plain call (a call
+    with `*args` or `**kwargs`, or the name passed or kept as a value). None
+    when TEXT does not parse."""
     try:
         tree = ast.parse(text)
     except SyntaxError:
         return None
+    local = {name} | {alias.asname for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                      for alias in node.names if alias.name == name and alias.asname}
 
     def names(node):
-        return (isinstance(node, ast.Name) and node.id == name) or (isinstance(node, ast.Attribute) and node.attr == name)
+        return (isinstance(node, ast.Name) and node.id in local) or (isinstance(node, ast.Attribute) and node.attr == name)
 
     counts = {}
     for node in ast.walk(tree):

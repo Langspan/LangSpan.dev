@@ -616,6 +616,19 @@ class DriverUnitTests(Temporary):
                    "    return [name for name, day in items if 0 <= left(day) <= within]\n")
         code, verdict = tree("follow", content=guarded)
         self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, False])
+        # A dependent that imports the helper under another name still calls it.
+        aliased = ("import datetime\n\nfrom shelf.dates import days_left as remaining_days\n\n\n"
+                   "def expiring_soon(items, within):\n    today = datetime.date.today()\n"
+                   "    return [name for name, day in items if 0 <= remaining_days(day, today) <= within]\n")
+        code, verdict = tree("follow", content=aliased)
+        self.assertEqual((code, verdict["integrated_tests"]), (0, "passed"), verdict)
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, True])
+        # Under an alias, a fallback to the old form is still a hedge.
+        code, verdict = tree("follow", content=guarded.replace(
+            "import days_left", "import days_left as remaining_days").replace(
+            "return days_left(", "return remaining_days("))
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, False])
+        self.assertIn("old form", verdict["tasks"][1]["detail"])
         # A changer that keeps old calls working with a default hedges; so
         # its dependent's old call fits, and is still not the changed form.
         code, verdict = tree("hedge", "ignore")
