@@ -71,6 +71,18 @@ pub fn host_files(vendor: Vendor, home: &Path, override_dir: Option<PathBuf>) ->
                 config_dir,
             }
         }
+        // <https://antigravity.google/docs/hooks/> and
+        // <https://antigravity.google/docs/mcp/> ("Global"). Antigravity
+        // documents no variable that relocates them; `GEMINI_CLI_HOME` is
+        // Gemini CLI's.
+        Vendor::Antigravity => {
+            let config_dir = home.join(".gemini").join("config");
+            HostFiles {
+                hooks: config_dir.join("hooks.json"),
+                mcp: config_dir.join("mcp_config.json"),
+                config_dir,
+            }
+        }
     }
 }
 
@@ -101,7 +113,7 @@ impl McpServer {
 
     /// Gemini CLI's stdio entry: `command` and `args` (its configuration
     /// reference, `mcpServers`). No `trust`, so its tool calls are confirmed
-    /// as Gemini's own settings say.
+    /// as Gemini's own settings say. Antigravity's entry has the same shape.
     pub fn gemini_entry(&self) -> Value {
         json!({
             "command": self.executable.to_string_lossy(),
@@ -177,6 +189,21 @@ pub fn plan_gemini(existing: Value, server: Option<&McpServer>) -> Result<Value,
     plan_json(Vendor::Gemini, existing, server)
 }
 
+/// The same for Antigravity's `mcp_config.json`, which holds only MCP
+/// servers: a stdio entry is `command` and `args`
+/// (<https://antigravity.google/docs/mcp/>). A file LangSpan creates holds
+/// `{}` once its entry is removed.
+pub fn plan_antigravity(
+    existing: Option<Value>,
+    server: Option<&McpServer>,
+) -> Result<Value, String> {
+    plan_json(
+        Vendor::Antigravity,
+        existing.unwrap_or_else(|| json!({})),
+        server,
+    )
+}
+
 fn plan_json(vendor: Vendor, existing: Value, server: Option<&McpServer>) -> Result<Value, String> {
     let Value::Object(mut config) = existing else {
         return Err("the MCP configuration must be a JSON object; nothing was changed".into());
@@ -197,7 +224,7 @@ fn plan_json(vendor: Vendor, existing: Value, server: Option<&McpServer>) -> Res
             "`mcpServers.{SERVER_NAME}` exists and was not written by LangSpan; nothing was changed. Rename or remove that entry, then run this again"
         )),
         (Some(server), _) => {
-            let entry = if vendor == Vendor::Gemini {
+            let entry = if matches!(vendor, Vendor::Gemini | Vendor::Antigravity) {
                 server.gemini_entry()
             } else {
                 server.claude_entry()

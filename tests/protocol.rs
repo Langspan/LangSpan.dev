@@ -526,6 +526,91 @@ fn v3_show_message_request_and_response_match_the_committed_golden_vectors() {
 }
 
 #[test]
+fn v3_message_status_request_and_response_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/message-status-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::MessageStatus { workspace_id, from: Some(from), message_id: Some(id) }
+            if workspace_id == "demo" && from == "codex.bob" && id == "m-9"
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+    // `last` leaves the ID out, and the owner leaves out the sender.
+    let last: Request = serde_json::from_str(
+        r#"{"version":3,"request_id":"read","command":{"op":"message_status","workspace_id":"demo"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        last.command,
+        Command::MessageStatus {
+            from: None,
+            message_id: None,
+            ..
+        }
+    ));
+    let unknown = String::from_utf8_lossy(wire).replace(
+        r#""message_id":"m-9""#,
+        r#""message_id":"m-9","session_id":"x""#,
+    );
+    assert!(serde_json::from_str::<Request>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/message-status-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::MessageStatus { status } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(status.state, langspan_core::MessageState::Pending);
+    assert_eq!(
+        status.recipients[0].via,
+        Some(langspan_core::Delivery::Briefing)
+    );
+    assert_eq!(
+        status.recipients[2].status,
+        langspan_core::RecipientState::Ended
+    );
+    assert_eq!(encode(&response).unwrap(), wire);
+}
+
+#[test]
+fn message_events_recorded_before_delivery_receipts_still_read() {
+    use langspan_core::Event;
+    let sent: Event = serde_json::from_str(
+        r#"{"type":"message_sent","message":{"message_id":"m1","workspace_id":"app","from":null,"to":{"kind":"everyone"},"text":"hi","paths":[]}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        sent,
+        Event::MessageSent {
+            at_ms: None,
+            generation: None,
+            ..
+        }
+    ));
+    let acknowledged: Event = serde_json::from_str(
+        r#"{"type":"message_acknowledged","workspace_id":"app","message_id":"m1","session_id":"codex.bob"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        acknowledged,
+        Event::MessageAcknowledged {
+            via: None,
+            at_ms: None,
+            generation: None,
+            ..
+        }
+    ));
+    // A new record carries how and when, and is written the same way back.
+    let json = r#"{"type":"message_acknowledged","workspace_id":"app","message_id":"m1","session_id":"codex.bob","via":"mcp_brief","at_ms":5,"generation":2}"#;
+    let event: Event = serde_json::from_str(json).unwrap();
+    assert_eq!(serde_json::to_string(&event).unwrap(), json);
+    // The brief command says when the MCP tool asked, and only then.
+    let brief = r#"{"version":3,"request_id":"b","command":{"op":"brief","session_id":"s","max_peers":4,"deliver":true,"mcp":true}}"#;
+    let request: Request = serde_json::from_str(brief).unwrap();
+    assert!(matches!(request.command, Command::Brief { mcp: true, .. }));
+    assert_eq!(encode(&request).unwrap(), format!("{brief}\n").into_bytes());
+}
+
+#[test]
 fn v3_message_retraction_matches_the_committed_golden_vectors() {
     let last = include_bytes!("../fixtures/retract-message-request-v3.json");
     let by_id = include_bytes!("../fixtures/retract-message-by-id-request-v3.json");

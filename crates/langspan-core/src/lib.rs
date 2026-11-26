@@ -1549,6 +1549,294 @@ impl From<Message> for ShownMessage {
     }
 }
 
+/// How a message reached a session's context (roadmap E12).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    /// A briefing a hook placed at session start or at a prompt.
+    Briefing,
+    /// A briefing a hook placed after a completed tool call, mid-turn.
+    MidTurn,
+    /// The session's own call to the MCP tool `langspan_brief`.
+    McpBrief,
+    /// `langspan ack` or its operation: marked seen without a briefing.
+    Ack,
+}
+
+/// Where a sent message stands as a whole.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageState {
+    /// Still held: some recipient may yet be given it.
+    Pending,
+    /// Every session it was owed to was given it; nothing more is sent.
+    Done,
+    /// Withdrawn by its sender or the owner.
+    Retracted,
+    /// Pushed out, unread, by newer messages past the `MAX_MESSAGES` held.
+    Dropped,
+}
+
+/// Where a message stands for one recipient.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecipientState {
+    /// Placed in the session's context. Not a sign the model acted on it.
+    Delivered,
+    /// Not yet placed in the session's context.
+    Pending,
+    /// The session ended before it was given the message.
+    Ended,
+}
+
+/// One recipient of a message and whether it was given it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RecipientStatus {
+    pub session_id: String,
+    pub status: RecipientState,
+    /// Since delivery, on this daemon's clock; `None` before delivery or
+    /// when it was recorded before the daemon last started or before
+    /// roadmap E12.
+    pub age_ms: Option<u64>,
+    /// `None` before delivery or in a record from before roadmap E12.
+    pub via: Option<Delivery>,
+}
+
+/// Recipients a status lists at most; the rest are counted.
+pub const STATUS_RECIPIENTS: usize = 64;
+
+/// What `delivered` means, carried in every status reply.
+pub const DELIVERED_MEANS: &str =
+    "Delivered means placed in the session's context, not that it acted on it.";
+
+/// Who was given a sent message: what `messages status` answers its sender
+/// (roadmap E12). Read-only: asking records nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MessageStatus {
+    pub message_id: String,
+    /// The sending session; `None` for the owner.
+    pub from: Option<String>,
+    pub to: Recipient,
+    /// Since it was sent, on this daemon's clock; `None` when that is not
+    /// known (sent before the daemon last started, or the record is gone).
+    pub sent_age_ms: Option<u64>,
+    pub state: MessageState,
+    /// Delivered sessions first, in delivery order, then the rest by ID; at
+    /// most `STATUS_RECIPIENTS`. A pending handoff has none: no session has
+    /// taken it.
+    pub recipients: Vec<RecipientStatus>,
+    /// Recipients past `STATUS_RECIPIENTS`, counted and not listed.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub more_recipients: u64,
+    /// Part of the message's record is no longer in the event log
+    /// (retention removed it): the answer is what remains.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub partial: bool,
+    /// `DELIVERED_MEANS`.
+    pub delivered_means: String,
+}
+
+/// A message's sent record as the event log holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentRecord {
+    pub message: Message,
+    pub at_ms: Option<u64>,
+    pub generation: Option<u64>,
+}
+
+/// One `message_acknowledged` record from the event log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AckRecord {
+    pub session_id: String,
+    pub via: Option<Delivery>,
+    pub at_ms: Option<u64>,
+    pub generation: Option<u64>,
+}
+
+/// The message `message_id` of the workspace, or with no ID the newest one
+/// `from` sent (the owner's when `from` is `None`), for a status query. The
+/// workspace and IDs are validated here; the message's own records are
+/// read from the event log by the caller.
+pub fn status_message_id(
+    state: &State,
+    workspace_id: &str,
+    from: Option<&str>,
+    message_id: Option<&str>,
+) -> Result<String, CoreError> {
+    validate_known_workspace(state, workspace_id)?;
+    if let Some(from) = from {
+        validate_id(from, "session ID")?;
+    }
+    match message_id {
+        Some(id) => {
+            validate_request_id(id)?;
+            Ok(id.to_owned())
+        }
+        None => sent_message(state, workspace_id, from, None)
+            .map(|message| message.message_id.clone())
+            .ok_or_else(|| {
+                error(
+                    "unknown_message",
+                    "This sender has none of the latest 64 messages sent in this workspace; ask about an older one by its ID",
+                )
+            }),
+    }
+}
+
+/// Who was given message `message_id`: from the state's held messages and
+/// history, and from its records in the event log, `sent` (absent when not
+/// kept) and `acks` (in log order, after `sent`). `retracted` says a later
+/// `message_retracted` record exists. `None` when neither the state nor
+/// the log knows the message.
+pub fn message_status(
+    state: &State,
+    workspace_id: &str,
+    message_id: &str,
+    sent: Option<&SentRecord>,
+    acks: &[AckRecord],
+    retracted: bool,
+    now_ms: u64,
+) -> Option<MessageStatus> {
+    fn find<'a>(
+        lists: &'a BTreeMap<String, Vec<Message>>,
+        workspace_id: &str,
+        message_id: &str,
+    ) -> Option<&'a Message> {
+        lists
+            .get(workspace_id)
+            .and_then(|list| list.iter().find(|message| message.message_id == message_id))
+    }
+    let held = find(&state.messages, workspace_id, message_id);
+    let record = find(&state.message_history, workspace_id, message_id);
+    let message = sent.map(|sent| &sent.message).or(record).or(held)?.clone();
+    let age = |at_ms: Option<u64>, generation: Option<u64>| match (at_ms, generation) {
+        (Some(at_ms), Some(generation)) if generation == state.generation => {
+            Some(now_ms.saturating_sub(at_ms))
+        }
+        _ => None,
+    };
+    // Every reader the log and the state know, first delivery first.
+    let mut delivered: Vec<RecipientStatus> = Vec::new();
+    for ack in acks {
+        if !delivered
+            .iter()
+            .any(|seen| seen.session_id == ack.session_id)
+        {
+            delivered.push(RecipientStatus {
+                session_id: ack.session_id.clone(),
+                status: RecipientState::Delivered,
+                age_ms: age(ack.at_ms, ack.generation),
+                via: ack.via,
+            });
+        }
+    }
+    for reader in record
+        .into_iter()
+        .chain(held)
+        .flat_map(|message| &message.acknowledged)
+    {
+        if !delivered.iter().any(|seen| &seen.session_id == reader) {
+            delivered.push(RecipientStatus {
+                session_id: reader.clone(),
+                status: RecipientState::Delivered,
+                age_ms: None,
+                via: None,
+            });
+        }
+    }
+    let dropped = state
+        .dropped_messages
+        .get(workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut partial = sent.is_none();
+    let message_state = if retracted || record.is_some_and(|record| record.retracted) {
+        MessageState::Retracted
+    } else if held.is_some() {
+        MessageState::Pending
+    } else if record.is_some() {
+        // The history outlasts every drop: a message the cap pushed out of
+        // the held list was already out of the history.
+        MessageState::Done
+    } else if dropped.iter().any(|id| id == message_id) {
+        MessageState::Dropped
+    } else {
+        match message.to {
+            // These leave the held list only when taken, withdrawn or dropped.
+            Recipient::Session { .. } | Recipient::NextSession {} => {
+                if delivered.is_empty() {
+                    MessageState::Dropped
+                } else {
+                    MessageState::Done
+                }
+            }
+            Recipient::Everyone {} => {
+                // The drop list keeps the latest `MAX_MESSAGES` drops; once
+                // full, an older drop cannot be told from a completion.
+                if dropped.len() >= MAX_MESSAGES {
+                    partial = true;
+                }
+                MessageState::Done
+            }
+        }
+    };
+    let ended = |session_id: &str| {
+        state
+            .activity
+            .get(session_id)
+            .is_some_and(|activity| activity.ended)
+    };
+    let mut waiting: Vec<RecipientStatus> = Vec::new();
+    let mut not_given = |session_id: &str| {
+        if !delivered.iter().any(|seen| seen.session_id == session_id) {
+            waiting.push(RecipientStatus {
+                session_id: session_id.to_owned(),
+                status: if ended(session_id) {
+                    RecipientState::Ended
+                } else {
+                    RecipientState::Pending
+                },
+                age_ms: None,
+                via: None,
+            });
+        }
+    };
+    match &message.to {
+        Recipient::Session { session_id } => not_given(session_id),
+        // Each current session it is still owed to. Once done, a session
+        // that joined later was never owed it.
+        Recipient::Everyone {} if message_state != MessageState::Done => {
+            for session in state.sessions.values() {
+                if session.workspace_id == workspace_id
+                    && session.generation == state.generation
+                    && message.from.as_deref() != Some(session.session_id.as_str())
+                {
+                    not_given(&session.session_id);
+                }
+            }
+        }
+        Recipient::Everyone {} | Recipient::NextSession {} => {}
+    }
+    waiting.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    let mut recipients = delivered;
+    recipients.append(&mut waiting);
+    let more_recipients = recipients.len().saturating_sub(STATUS_RECIPIENTS) as u64;
+    recipients.truncate(STATUS_RECIPIENTS);
+    Some(MessageStatus {
+        message_id: message.message_id,
+        from: message.from,
+        to: message.to,
+        sent_age_ms: sent.and_then(|sent| age(sent.at_ms, sent.generation)),
+        state: message_state,
+        recipients,
+        more_recipients,
+        partial,
+        delivered_means: DELIVERED_MEANS.into(),
+    })
+}
+
 /// The observer could not complete a scan of a workspace. Until one
 /// completes, disk facts, check staleness marks and the index are as of the
 /// last complete scan.
@@ -1770,6 +2058,11 @@ pub struct State {
     /// whether it was withdrawn: what a withdrawal and the recap read.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub message_history: BTreeMap<String, Vec<Message>>,
+    /// IDs of the messages per workspace that newer ones pushed out of
+    /// `messages` unread, newest first, at most `MAX_MESSAGES`: what a
+    /// status query reads to tell a drop from a completion.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dropped_messages: BTreeMap<String, Vec<String>>,
     /// Withdrawn messages each session received and has not yet been told
     /// to disregard, per session, newest first, at most `MAX_MESSAGES`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2216,13 +2509,28 @@ pub enum Event {
         workspace_id: String,
         note_id: String,
     },
+    /// `at_ms` and `generation` say when it was sent, on the daemon's
+    /// clock; absent in records written before roadmap E12.
     MessageSent {
         message: Message,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
     },
+    /// The session was given the message. `via` is the path that placed it
+    /// in the session's context, and `at_ms` and `generation` when; all
+    /// three are absent in records written before roadmap E12.
     MessageAcknowledged {
         workspace_id: String,
         message_id: String,
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<Delivery>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
     },
     /// The message was withdrawn by `by` (its sender; `None` for the
     /// owner). The `MessageSent` event stays in the log.
@@ -2636,6 +2944,16 @@ pub enum Command {
         workspace_id: String,
         message_id: String,
     },
+    /// Read-only: who was given a sent message (roadmap E12).
+    /// `message_id` absent means the newest message `from` sent, or the
+    /// owner's newest when `from` is absent too.
+    MessageStatus {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
     /// Leave one line for the next other session that starts or is
     /// prompted in this session's workspace. Leases, intents and activity
     /// are unchanged.
@@ -2884,6 +3202,11 @@ pub enum Command {
         /// tool call. A handoff waits for a session's start or next prompt.
         #[serde(default, skip_serializing_if = "is_false")]
         mid_turn: bool,
+        /// True when the session asked through the MCP tool
+        /// `langspan_brief`, so a message it carries is recorded as
+        /// delivered that way (roadmap E12).
+        #[serde(default, skip_serializing_if = "is_false")]
+        mcp: bool,
     },
     /// Read-only: the bounded view of what matters now. Closed admissions
     /// are counted, not listed; the answer always fits one frame.
@@ -3198,6 +3521,16 @@ enum CommandWire {
         workspace_id: String,
         message_id: String,
     },
+    /// Read-only: who was given a sent message (roadmap E12).
+    /// `message_id` absent means the newest message `from` sent, or the
+    /// owner's newest when `from` is absent too.
+    MessageStatus {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
     /// Leave one line for the next other session that starts or is
     /// prompted in this session's workspace. Leases, intents and activity
     /// are unchanged.
@@ -3446,6 +3779,11 @@ enum CommandWire {
         /// tool call. A handoff waits for a session's start or next prompt.
         #[serde(default, skip_serializing_if = "is_false")]
         mid_turn: bool,
+        /// True when the session asked through the MCP tool
+        /// `langspan_brief`, so a message it carries is recorded as
+        /// delivered that way (roadmap E12).
+        #[serde(default, skip_serializing_if = "is_false")]
+        mcp: bool,
     },
     Status {},
     StatusRecords {
@@ -3734,6 +4072,9 @@ pub enum Outcome {
     },
     MessageShown {
         message: ShownMessage,
+    },
+    MessageStatus {
+        status: MessageStatus,
     },
     /// Sessions that were still owed it and now are not, and sessions that
     /// had received it and will be told to disregard it.
@@ -5407,6 +5748,7 @@ fn decide_checked(
             max_peers,
             deliver,
             mid_turn,
+            mcp,
         } => {
             if !(1..=MAX_BRIEF_PEERS).contains(max_peers) {
                 return Err(error(
@@ -5450,6 +5792,15 @@ fn decide_checked(
                             workspace_id: message.workspace_id.clone(),
                             message_id: message.message_id.clone(),
                             session_id: session_id.clone(),
+                            via: Some(if *mid_turn {
+                                Delivery::MidTurn
+                            } else if *mcp {
+                                Delivery::McpBrief
+                            } else {
+                                Delivery::Briefing
+                            }),
+                            at_ms: Some(now_ms),
+                            generation: Some(state.generation),
                         }),
                 );
                 events.extend(briefing.retracted.iter().map(|retracted| {
@@ -5518,7 +5869,16 @@ fn decide_checked(
                 }
                 None => Recipient::Everyone {},
             };
-            sent(request_id, workspace_id, from.clone(), to, text, paths)
+            sent(
+                request_id,
+                now_ms,
+                state.generation,
+                workspace_id,
+                from.clone(),
+                to,
+                text,
+                paths,
+            )
         }
         Command::Handoff {
             session_id,
@@ -5528,6 +5888,8 @@ fn decide_checked(
             let session = known_session(state, session_id)?;
             sent(
                 request_id,
+                now_ms,
+                state.generation,
                 &session.workspace_id,
                 Some(session_id.clone()),
                 Recipient::NextSession {},
@@ -5556,6 +5918,9 @@ fn decide_checked(
                         workspace_id: session.workspace_id.clone(),
                         message_id: message_id.clone(),
                         session_id: session_id.clone(),
+                        via: Some(Delivery::Ack),
+                        at_ms: Some(now_ms),
+                        generation: Some(state.generation),
                     }]
                 } else {
                     Vec::new()
@@ -5929,6 +6294,7 @@ fn decide_checked(
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
         | Command::ShowMessage { .. }
+        | Command::MessageStatus { .. }
         | Command::GraphSymbol { .. }
         | Command::GraphReferences { .. }
         | Command::GraphImpact { .. }
@@ -5956,8 +6322,11 @@ fn validate_note(note: &Note) -> Result<(), CoreError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sent(
     request_id: &str,
+    now_ms: u64,
+    generation: u64,
     workspace_id: &str,
     from: Option<String>,
     to: Recipient,
@@ -5982,6 +6351,8 @@ fn sent(
     Ok(Decision {
         events: vec![Event::MessageSent {
             message: message.clone(),
+            at_ms: Some(now_ms),
+            generation: Some(generation),
         }],
         outcome: Outcome::MessageSent { message },
     })
@@ -8892,7 +9263,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 notes.retain(|note| &note.note_id != note_id);
             }
         }
-        Event::MessageSent { message } => {
+        Event::MessageSent { message, .. } => {
             validate_message(message)?;
             validate_known_workspace(state, &message.workspace_id)?;
             if !message.acknowledged.is_empty() || message.retracted {
@@ -8901,17 +9272,44 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                     "A message is sent unacknowledged and not withdrawn",
                 ));
             }
-            for list in [&mut state.messages, &mut state.message_history] {
-                let messages = list.entry(message.workspace_id.clone()).or_default();
-                messages.retain(|held| held.message_id != message.message_id);
-                messages.insert(0, message.clone());
-                messages.truncate(MAX_MESSAGES);
+            let history = state
+                .message_history
+                .entry(message.workspace_id.clone())
+                .or_default();
+            history.retain(|held| held.message_id != message.message_id);
+            history.insert(0, message.clone());
+            history.truncate(MAX_MESSAGES);
+            let held = state
+                .messages
+                .entry(message.workspace_id.clone())
+                .or_default();
+            held.retain(|held| held.message_id != message.message_id);
+            held.insert(0, message.clone());
+            // The oldest held past the cap are dropped unread.
+            let pushed_out: Vec<String> = held
+                .split_off(held.len().min(MAX_MESSAGES))
+                .into_iter()
+                .map(|dropped| dropped.message_id)
+                .collect();
+            let dropped = state
+                .dropped_messages
+                .entry(message.workspace_id.clone())
+                .or_default();
+            dropped.retain(|id| *id != message.message_id);
+            for id in pushed_out.into_iter().rev() {
+                dropped.retain(|held| *held != id);
+                dropped.insert(0, id);
+            }
+            dropped.truncate(MAX_MESSAGES);
+            if dropped.is_empty() {
+                state.dropped_messages.remove(&message.workspace_id);
             }
         }
         Event::MessageAcknowledged {
             workspace_id,
             message_id,
             session_id,
+            ..
         } => {
             known_session(state, session_id)?;
             // Sessions of this generation that a message for everyone is

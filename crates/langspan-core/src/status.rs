@@ -90,6 +90,8 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         // bounded view shows what is held, and `status --all` has these.
         message_history: _,
         retracted_notices: _,
+        // Read by a message status query only.
+        dropped_messages: _,
         presence,
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
@@ -172,6 +174,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         uninstalled_hosts: uninstalled_hosts.clone(),
         retracted_notices: BTreeMap::new(),
         message_history: BTreeMap::new(),
+        dropped_messages: BTreeMap::new(),
         presence: keep(presence, of_shown),
         sessions: shown_sessions.clone(),
         clock_anchor: None,
