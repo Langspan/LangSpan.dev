@@ -1276,6 +1276,41 @@ async fn stdio_retract_message_withdraws_the_callers_newest_message() {
     disconnect(client).await;
 }
 
+/// Roadmap C9: the recap tool answers with the trail an ended session left,
+/// read-only, and asking for it neither delivers nor takes it.
+#[tokio::test]
+async fn stdio_recap_lists_an_ended_sessions_trail_without_taking_it() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let root = directory.workspace();
+    let _daemon = Daemon::start(&state_dir).await;
+    for phase in ["PreToolUse", "PostToolUse"] {
+        claude_write_hook(&state_dir, &root, "alice", "src/shared.rs", "x\n", phase);
+    }
+    call_ipc(
+        &state_dir,
+        "end-alice",
+        Operation::SessionEnd {
+            session_id: "claude-code.alice".into(),
+            trail: None,
+        },
+    )
+    .await;
+    let client = connect(&state_dir).await;
+    let recap =
+        response(call_tool(&client, "langspan_recap", json!({"workspace_id": "app"})).await);
+    let Outcome::Recap { recap } = &recap.outcome else {
+        panic!("{recap:?}");
+    };
+    let trail = &recap.trails[0].trail;
+    assert_eq!(trail.session_id, "claude-code.alice");
+    assert_eq!(trail.edited[0].path, "src/shared.rs");
+    // Without the end hook's journal facts, the trail says so.
+    assert!(trail.partial);
+    assert_eq!(trail.taken_by, None);
+    disconnect(client).await;
+}
+
 /// One Claude Code `Write` hook event, through the real hook executable,
 /// for a session in workspace `app` at `root`.
 fn claude_write_hook(

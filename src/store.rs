@@ -883,6 +883,7 @@ impl Store {
                 | Command::LandingReadiness { .. }
                 | Command::TurnQueue { .. }
                 | Command::Recap { .. }
+                | Command::Trails { .. }
                 | Command::Recall { .. }
                 | Command::Policy { .. }
                 | Command::Holders { .. }
@@ -1028,11 +1029,31 @@ impl Store {
             | Command::WorkspaceList { .. }
             | Command::WorkspaceRemove { apply: false, .. }
             | Command::Recap { .. }
+            | Command::Trails { .. }
             | Command::Policy { .. }
             | Command::Holders { .. }
             | Command::Recall { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
                     Outcome::Workspaces { workspaces, next } => workspace_page(workspaces, next),
+                    // Oldest trails first out of an answer past one frame,
+                    // counted in `omitted`.
+                    Outcome::Trails {
+                        workspace_id,
+                        mut trails,
+                        mut omitted,
+                    } => {
+                        while trails.len() > 1
+                            && serde_json::to_vec(&trails).is_ok_and(|b| b.len() > 48 * 1024)
+                        {
+                            trails.pop();
+                            omitted += 1;
+                        }
+                        Outcome::Trails {
+                            workspace_id,
+                            trails,
+                            omitted,
+                        }
+                    }
                     // A recap or a recall must fit one frame with room for
                     // the envelope.
                     Outcome::Recap { mut recap } => {
@@ -2585,6 +2606,7 @@ mod tests {
             "e",
             Command::SessionEnd {
                 session_id: "claude-code.alice".into(),
+                trail: None,
             },
         );
         let outcome = store.report("work", from_ms, wall_now_ms() + 1).unwrap();

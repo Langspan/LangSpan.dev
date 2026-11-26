@@ -1069,6 +1069,96 @@ fn v5_report_response_and_its_version_4_and_3_forms_match_the_golden_vectors() {
     );
 }
 
+/// Roadmap C9: a session end carrying the journal's facts for its trail, a
+/// trail listing request, and its answer. An end without `trail`, as an
+/// earlier client sends it, still reads.
+#[test]
+fn v4_trail_requests_and_listing_match_the_committed_golden_vectors() {
+    use langspan_core::{CheckResult, Outcome};
+    let wire = include_bytes!("../fixtures/session-end-trail-request-v4.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    let Command::SessionEnd {
+        session_id,
+        trail: Some(trail),
+    } = &request.command
+    else {
+        panic!("{request:?}");
+    };
+    assert_eq!(session_id, "claude-code.alice");
+    assert_eq!(trail.edited[0].lines[0].end_line, 72);
+    assert_eq!(trail.uncommitted, ["src/upload.rs", "tests/upload.rs"]);
+    assert_eq!(encode(&request).unwrap(), wire);
+    let earlier: Request = serde_json::from_str(
+        r#"{"version":3,"request_id":"e","command":{"op":"session_end","session_id":"claude-code.alice"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        earlier.command,
+        Command::SessionEnd { trail: None, .. }
+    ));
+
+    let wire = include_bytes!("../fixtures/trail-request-v4.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::Trails {
+            workspace_id: "demo".into(),
+            limit: Some(4),
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+
+    let wire = include_bytes!("../fixtures/trails-response-v4.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let Outcome::Trails { trails, .. } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(trails[0].age_ms, Some(1_200_000));
+    assert_eq!(trails[0].trail.checks[0].result, CheckResult::Passed {});
+    assert_eq!(trails[0].trail.taken_by.as_deref(), Some("codex.bob"));
+    assert_eq!(encode(&response).unwrap(), wire);
+}
+
+/// Roadmap C9: a version 3 client reads briefings and recaps with
+/// `deny_unknown_fields`, so its answer carries no trail.
+#[test]
+fn a_version_3_reply_leaves_out_trails() {
+    use langspan_core::{Briefing, Outcome, TrailView};
+    let listing: Response =
+        serde_json::from_slice(include_bytes!("../fixtures/trails-response-v4.json")).unwrap();
+    let Outcome::Trails { trails, .. } = listing.outcome else {
+        unreachable!()
+    };
+    let trail: TrailView = trails[0].clone();
+    let mut briefing: Briefing = serde_json::from_value(serde_json::json!({
+        "session_id": "codex.bob", "changed": true, "peers": [], "omitted_peers": 0,
+    }))
+    .unwrap();
+    briefing.trail = Some(trail.clone());
+    let response = Response {
+        version: OLDEST_PROTOCOL_VERSION,
+        request_id: "r".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome: Outcome::Briefing {
+            briefing: briefing.clone(),
+        },
+    };
+    let earlier: serde_json::Value =
+        serde_json::from_slice(&encode_for(OLDEST_PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    assert!(
+        earlier["outcome"]["briefing"].get("trail").is_none(),
+        "{earlier:#}"
+    );
+    assert_eq!(earlier["outcome"]["briefing"]["session_id"], "codex.bob");
+    let current: Response =
+        serde_json::from_slice(&encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    assert!(
+        matches!(&current.outcome, Outcome::Briefing { briefing: read } if read.trail == Some(trail))
+    );
+}
+
 /// Roadmap D7 (review comment 4707749784): to a version 3 client an
 /// interface notice has no rename fields and no change of a definition that
 /// is not exported, while a version 4 client gets both.
