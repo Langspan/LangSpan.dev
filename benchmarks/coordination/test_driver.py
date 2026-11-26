@@ -496,6 +496,26 @@ class StandinHooks(Temporary):
             standin_agent.HOOK_SECONDS = original
             self.kill_groups(group)
 
+    def test_a_hook_that_exits_leaves_no_background_child_running(self):
+        # A hook can start a child with its streams redirected and exit 0.
+        # The child is in the hook's process group, outside the runner's, so
+        # once the hook returns nothing else would stop it.
+        heartbeat, group = self.root / "heartbeat", self.root / "group"
+        command = "echo $$ > %s; (while :; do printf x >> %s; sleep 0.05; done) </dev/null >/dev/null 2>&1 & " \
+                  "sleep 0.3; exit 0" % (shlex.quote(str(group)), shlex.quote(str(heartbeat)))
+        session, log = self.session(command, 5)
+        try:
+            denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
+            log.flush()
+            entry = json.loads((self.root / "standin.jsonl").read_text().splitlines()[0])
+            self.assertFalse(denied, entry)
+            self.assertEqual(entry["exit_code"], 0, entry)
+            self.assertEqual(standin_agent.RUNNING, [])
+            self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
+            self.assert_stopped(heartbeat)
+        finally:
+            self.kill_groups(group)
+
     def kill_groups(self, group_file, *groups):
         """Kill GROUPS and the hook's group named in GROUP_FILE, so a failed
         test leaves nothing running."""

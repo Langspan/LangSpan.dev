@@ -17,7 +17,8 @@ it runs them as Claude Code would around each read and edit, so the
 LangSpan arm's dry run passes through LangSpan's real hooks, coordinators,
 event logs and Git-remote sharing. Unlike a host, it waits for each hook's
 decision past the hook's configured timeout (see HOOK_SECONDS), so the dry
-run's result does not depend on how loaded the machine is. A signal that
+run's result does not depend on how loaded the machine is. When a hook
+returns, any process it left in its group is killed, and a signal that
 stops the stand-in first kills the hook it is running. A ``follow``
 session there first waits,
 within a bound, until LangSpan has told it every peer's task, and before it
@@ -75,7 +76,9 @@ def kill_group(process):
 
 def run_hook(command, payload, cwd):
     """Run one hook in a process group of its own, for up to HOOK_SECONDS.
-    Returns its stdout and exit code, or ("", None) when it was killed."""
+    Returns its stdout and exit code, or ("", None) when it was killed.
+    Every process left in the hook's group when it returns is killed too,
+    so a background child the hook started cannot act after the call."""
     process = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, cwd=cwd, text=True, start_new_session=True)
     RUNNING.append(process)
@@ -87,6 +90,9 @@ def run_hook(command, payload, cwd):
         process.communicate()
         return "", None
     finally:
+        # The leader is reaped, but its group ID is not reused while any
+        # member of the group is alive, so this reaches only the hook's own.
+        kill_group(process)
         RUNNING.remove(process)
 
 
