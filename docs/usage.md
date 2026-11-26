@@ -1521,13 +1521,38 @@ The result is an ordinary check record of that tree (`check status` shows it,
 briefing point (a completed tool call, the next batch, or the next prompt):
 passed, failed with the exit code, stopped at its time limit, or inconclusive,
 with the tree ID and, unless it passed, up to 20 of the last output lines,
-redacted and labelled as the command's own text. Failures are not classified
-as new or already failing, but when the output is that of `cargo test`,
-`go test -v` or `pytest`, the failing tests it named are listed. The command runs as you, with
+redacted and labelled as the command's own text. When the output is that of
+`cargo test`, `go test -v` or `pytest`, the failing tests it named are listed,
+and compared with the session's baseline when it has one (below). The command runs as you, with
 the daemon's environment, outside the agent host's sandbox and permission
 prompts: code an agent writes runs without the host asking. A command that
 looks like it holds a secret is refused; pass secrets through the environment.
 See [ADR 0030](adr/0030-automatic-checks-after-write-batches.md).
+
+#### Which tests a write broke
+
+A session's baseline is the newest result of the same check (name and
+whole argument list) with named tests whose tree was taken before the session's
+first write: a `check run` you made before the agents started, or an
+automatic run after another session's writes. A run during which any write
+was recorded is no baseline. The session's results are then
+compared with it, test by test:
+
+```text
+LangSpan: the automatic check tests failed (exit 101) after your writes, on working tree 4b1c9e2… (took 41.0 s; recorded as check 7f3a…).
+2 new failures: parser::rejects_empty, parser::keeps_order.
+1 already failing before your writes: net::times_out.
+1 fixed since before your writes: old::was_broken.
+This tree also holds writes by codex session bob since the check before your writes.
+```
+
+A test the baseline did not name, or skipped, is listed as failing and not
+named by the check before. The writers are the other sessions whose writes
+were recorded between the two trees. With no baseline (run `langspan check
+run WORKSPACE --name NAME -- COMMAND...` with the automatic check's command
+before the agents start, so every session has one), or output no parser
+recognises, the result is reported as before. The comparison never changes
+the record: `check status` and `land` see the same failure.
 
 #### The wider check after an interface change
 
@@ -1682,6 +1707,63 @@ private index, no commit, and Git reads run with `--no-optional-locks`. The
 MCP tool `langspan_my_changes` does the same. Other worktrees and machines
 are not included.
 
+### Take over an ended session's uncommitted work
+
+A session that ends before it commits (its process crashed or was killed, the
+disk filled) leaves its edits in the checkout, credited to it. A session that
+carries on the same task takes them over:
+
+```sh
+langspan adopt SESSION [--session ID] [--root DIR] [--request-id ID] [--json]
+```
+
+```text
+Session claude-code.… adopted the uncommitted work of ended session claude-code.…. Reason: both sessions have the same task line. Its lines in 2 file(s) are now this session's: a.txt, b.txt. …
+```
+
+The coordinator checks that `SESSION` has ended (the host reported its end,
+or its process is known to have exited) and worked in the same workspace,
+and records the transfer as a `session_adopted` event naming both sessions.
+Then the journal entries of `SESSION` and its ended subagents are credited
+to the adopting session, keeping their age, so `status --mine` and
+`commit --mine` treat those lines as its own. Ending a session does not end
+its subagents: a subagent that has not ended keeps its lines, and the report
+names it (`live` in `--json`). Lines another session also wrote stay shared,
+exactly as before, and other sessions' lines stay theirs.
+
+The adoption is refused, and nothing changes, for a session that has not
+ended (`session_live`: a killed session whose process LangSpan never observed
+counts as live), for one of another workspace (`other_workspace`), and for one
+another session already adopted (`already_adopted`). Running it again is safe:
+the coordinator answers `already_adopted` with nothing new recorded, and any
+lines still credited to the ended session are credited then. A retry with the
+same `--request-id` is checked again too: if the ended session has resumed
+since, the retry is refused with `session_live` and credits none of its lines.
+An adopter that ends after its adoption is recorded, but before its lines are
+credited, leaves them under the session it adopted. Adopting that adopter
+credits them as well: the coordinator names every session whose adoptions
+lead to it (`earlier` in the coordinator's answer), and their lines move with
+its own, except those of subagents that have not ended and of sessions that
+have resumed since they were adopted. A subagent that another session adopted
+keeps its lines for that session, even before that session's adoption credits
+them (`kept` in the coordinator's answer). The reason shown
+is a message the ended session sent the adopter (addressed to it, or a
+handoff it took) or a `Task:` line both share; neither is required, so the
+person or agent decides. The adopting session is found as for
+`commit --mine`. The MCP tool `langspan_adopt` does the same. `recap` names
+the transfer under both sessions, as do `status` and the dashboard.
+
+When a session starts in a checkout where an ended session's journaled lines
+are still uncommitted and nobody adopted them, its briefing says so once,
+with that session's task line, and suggests the command:
+
+```text
+Session claude-code.… ended and left uncommitted work in this checkout (its task: "Fix the upload handler"). If you are continuing that task, run `langspan adopt -- claude-code.…` to take its lines over as yours; otherwise leave them.
+```
+
+At most four such sessions are named, and at most 32 files are compared with
+`HEAD` to find them, within half the start hook's time.
+
 A formatter or other workspace-wide command (`cargo fmt --all`) does not
 change who wrote a line it only reformats. Where the command kept a line's
 tokens in order and changed only whitespace and line breaks (re-indented,
@@ -1791,6 +1873,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_retract_message` | Withdraw a message this session sent, by ID or `"last"`; its readers are told to disregard it |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |
 | `langspan_my_changes` | List this session's own uncommitted files and hunks in a shared checkout, as `langspan_commit_mine` would split them; changes nothing |
+| `langspan_adopt` | Take over an ended session's uncommitted lines in the same workspace; refused for a live session or another workspace's |
 
 Every mutation tool requires a caller-owned `request_id` (for
 `langspan_land_cancel`, it names the waiting landing). Conflicts are normal

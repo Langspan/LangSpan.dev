@@ -1012,7 +1012,9 @@ function inspectSession(row) {
     [row.local ? 'Last activity' : 'Last heard', row.local ? (num(row.active_age_ms) === null ? 'none this run' : ago(row.active_age_ms))
       : (num(row.heard_age_ms) === null ? 'before this coordinator started' : ago(row.heard_age_ms))],
     ['Task', row.task ? quoted(str(row.task)) : (row.local ? 'not recorded' : 'not shared')],
-    ['Intent', row.intent ? quoted(str(row.intent)) : null]]));
+    ['Intent', row.intent ? quoted(str(row.intent)) : null],
+    ['Uncommitted work adopted by', row.adopted_by ? el('span', 'mono', str(row.adopted_by)) : null],
+    ['Adopted the uncommitted work of', strings(row.adopted).length ? el('span', 'mono', strings(row.adopted).join(', ')) : null]]));
   if (row.editing.length) out.push(block(row.local ? 'lock' : 'edit', row.local ? 'Held now' : 'Editing, as published', chips(row.editing)));
   if (row.recent.length) {
     out.push(block('file', 'Recent files', add(el('div', 'items'), ...row.recent.map((file) =>
