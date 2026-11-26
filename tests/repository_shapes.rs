@@ -96,9 +96,17 @@ impl World {
                 .spawn()
                 .unwrap(),
         );
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while client::call(&world.state_dir(), &request(Command::Status)).is_err() {
-            assert!(Instant::now() < deadline, "daemon did not become ready");
+        // Bounded by WAIT, far above a loaded machine's start-up time; a
+        // daemon that exits fails at once.
+        let started = Instant::now();
+        while let Err(error) = client::call(&world.state_dir(), &request(Command::Status)) {
+            if let Some(status) = world.daemon.as_mut().unwrap().try_wait().unwrap() {
+                panic!("the daemon exited before it answered ({status}): {error:?}");
+            }
+            assert!(
+                started.elapsed() < WAIT,
+                "the daemon did not answer within {WAIT:?}: {error:?}"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         world
@@ -265,7 +273,8 @@ fn disk_paths(events: &[Event]) -> Vec<String> {
 }
 
 /// Item 1: more files than the scan's 4,096-file bound and one over 4 MiB,
-/// with the daemon's own bounds and its two-second scan deadline.
+/// with the daemon's own bounds and its two-second scan deadline, whichever
+/// of them stops the scan.
 #[test]
 fn a_repository_over_the_scan_bounds_is_scanned_partially_and_says_so() {
     let w = World::new(|work| {
@@ -300,15 +309,37 @@ fn a_repository_over_the_scan_bounds_is_scanned_partially_and_says_so() {
         "{:?}",
         state.scan_failures
     );
-    let coverage = w.wait("the coverage in state", || {
+    w.wait("the coverage in state", || {
         w.state().scan_coverage.get("work").cloned()
     });
-    assert!(coverage.is_partial());
-    assert_eq!(coverage.too_large_paths, ["big.bin"]);
-    // 4,202 listed: 4,096 versioned, 1 too large, the rest left out.
-    assert_eq!(coverage.omitted, 4202 - 4096 - 1);
-    let (_, scan) = w.changes();
-    assert_eq!(scan.unwrap().file_count, 4096);
+    // The counts of one scan. The daemon's scan stops at the file-count
+    // bound, or, on a slow or loaded machine, at its time bound: clean
+    // files are versioned only in the first half of the two-second
+    // deadline. Either way it is partial, says so and accounts for every
+    // file. The exact count at the file bound is held by
+    // `the_default_file_bound_versions_exactly_4096_files` in
+    // tests/git_observer.rs, with a deadline that cannot stop it first.
+    let scan = w.changes().1.unwrap();
+    let coverage = scan.coverage.clone().unwrap_or_default();
+    let bound = if scan.file_count == 4096 {
+        "the file-count bound"
+    } else {
+        "the time bound"
+    };
+    let seen = format!(
+        "{bound} stopped the scan: {} files versioned, coverage {coverage:?}",
+        scan.file_count
+    );
+    eprintln!("{seen}");
+    assert!(coverage.is_partial(), "{seen}");
+    assert_eq!(coverage.too_large_paths, ["big.bin"], "{seen}");
+    // 4,202 listed: each one versioned, too large or left out.
+    assert_eq!(
+        scan.file_count + coverage.too_large + coverage.omitted,
+        4202,
+        "{seen}"
+    );
+    assert!(scan.file_count <= 4096, "{seen}");
 
     let (_, recap) = w.cli(&["recap", "work"]);
     assert!(recap.contains("The last scan was partial"), "{recap}");
