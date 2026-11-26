@@ -74,7 +74,7 @@ li:first-child { border-top: 0; }
       <div><h3>Files being edited now</h3><ul id="editing"></ul><div id="editing-more"></div></div>
       <div><h3>Files several agents touched recently</h3><ul id="overlaps"></ul><div id="overlaps-more"></div></div>
       <div><h3>Interface changes</h3><ul id="notices"></ul><div id="notices-more"></div></div>
-      <div><h3>Recent denials</h3><ul id="denials"></ul><div id="denials-more"></div></div>
+      <div><h3>Recent denials</h3><ul id="denials"></ul><div id="denials-more"></div><p class="more" id="month-refusals"></p></div>
     </div>
   </section>
   <section>
@@ -210,6 +210,17 @@ function denials(d) {
   if (rows.length === 0) list.replaceChildren(el('li', 'empty', 'No conflicts or stale-source refusals recorded recently.'));
   add(extra, el('p', 'more', (d.more_conflicts || d.more_stale_refusals ? 'More denials exist than are shown. ' : '') +
     'Searched the newest ' + d.window + ' recorded events and receipts. Conflicts are recorded without a time.'));
+}
+
+// This local month's refusals, as `langspan count` counts them (H5).
+function monthRefusals(m) {
+  const node = byId('month-refusals');
+  if (!m || m.error) {
+    node.textContent = 'This month’s refusal count could not be read' + (m && m.error ? ': ' + m.error : '.');
+    return;
+  }
+  // The daemon's own line: the count, its kinds and any truncation.
+  node.textContent = m.line + ', once per session, kind and files a day. ' + m.note;
 }
 
 function checkResult(result) {
@@ -349,6 +360,7 @@ async function refresh() {
       return;
     }
     render(body.dashboard, body.install_advice || {});
+    monthRefusals(body.refusals_this_month);
     lastSuccess = Date.now();
     banner(null);
   } catch (error) {

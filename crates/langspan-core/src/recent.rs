@@ -131,8 +131,10 @@ pub struct LeftUncommitted {
 }
 
 /// A refused write with its paths, kept for this section. Derived on
-/// replay from `WriteRefused` events; never stored or sent on its own.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// replay from `WriteRefused` events; never sent on its own, and stored
+/// only in a retention snapshot, which a start from it must still have.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PathRefusal {
     pub workspace_id: String,
     pub paths: Vec<String>,
