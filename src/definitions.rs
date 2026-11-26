@@ -332,7 +332,21 @@ fn index(
             .map_or(1, |symbol| symbol.line)
     };
     // A partial parse is not trusted to say a definition changed or went.
+    // What it did extract still names the branch's own definitions: any the
+    // old parse does not show with the same signature, so that the branch's
+    // calls to them are not compared with another branch's definition.
     let changes = if old.partial || new.partial {
+        for symbol in new.symbols.iter().filter(|symbol| symbol.exported) {
+            let kept = old.symbols.iter().any(|was| {
+                was.exported
+                    && was.name == symbol.name
+                    && was.kind == symbol.kind
+                    && langspan_graph::same_signature(&was.signature, &symbol.signature)
+            });
+            if !kept {
+                branch.added.insert(symbol.name.clone());
+            }
+        }
         Vec::new()
     } else {
         langspan_graph::diff(&old, &new)
@@ -745,5 +759,99 @@ mod tests {
         let edit = branch("edit", &[("src/s.rs", "pub fn save(x: u32) {}\n", ")\n")]);
         let caller = branch("caller", &[("src/i.rs", "", "fn c() { save(1); }\n")]);
         assert_eq!(compare(&[edit, caller]).0, Vec::new());
+    }
+
+    // Review follow-up on #279: a partial parse still names the branch's own
+    // definitions.
+
+    /// `first`, then more exported functions than one parse extracts.
+    fn past_the_symbol_bound(first: &str) -> String {
+        let mut source = format!("{first}\n");
+        for i in 0..langspan_graph::MAX_SYMBOLS {
+            source.push_str(&format!("pub fn filler{i}() {{}}\n"));
+        }
+        source
+    }
+
+    fn sync() -> Branch {
+        branch(
+            "sync",
+            &[(
+                "src/s.rs",
+                "pub fn save(x: u32) {}\n",
+                "pub fn save(x: u32, y: u32) {}\n",
+            )],
+        )
+    }
+
+    #[test]
+    fn a_definition_the_branch_adds_in_a_file_past_the_symbol_bound_is_its_own() {
+        let big = past_the_symbol_bound("pub fn save(x: u32) {}");
+        let own = branch(
+            "own",
+            &[
+                ("src/big.rs", "", &big),
+                ("src/i.rs", "", "fn c() { save(1); }\n"),
+            ],
+        );
+        assert_eq!(compare(&[sync(), own]).0, Vec::new());
+    }
+
+    #[test]
+    fn a_definition_the_branch_changes_in_a_file_past_the_symbol_bound_is_its_own() {
+        let before = past_the_symbol_bound("pub fn save(x: u32) {}");
+        let after = past_the_symbol_bound("pub fn save(x: u32, z: u8) {}");
+        let own = branch(
+            "own",
+            &[
+                ("src/big.rs", &before, &after),
+                ("src/i.rs", "", "fn c() { save(1); }\n"),
+            ],
+        );
+        assert_eq!(compare(&[sync(), own]).0, Vec::new());
+    }
+
+    #[test]
+    fn a_name_the_branch_renames_to_in_a_file_past_the_symbol_bound_is_its_own() {
+        let before = past_the_symbol_bound("pub fn store(x: u32) {}");
+        let after = past_the_symbol_bound("pub fn save(x: u32) {}");
+        let own = branch(
+            "own",
+            &[
+                ("src/big.rs", &before, &after),
+                ("src/i.rs", "", "fn c() { save(1); }\n"),
+            ],
+        );
+        assert_eq!(compare(&[sync(), own]).0, Vec::new());
+    }
+
+    #[test]
+    fn a_definition_added_where_only_the_old_parse_was_partial_is_its_own() {
+        let after = "pub fn save(x: u32) {}\n";
+        let own = branch(
+            "own",
+            &[
+                ("src/m.rs", ")\n", after),
+                ("src/i.rs", "", "fn c() { save(1); }\n"),
+            ],
+        );
+        assert_eq!(compare(&[sync(), own]).0, Vec::new());
+    }
+
+    #[test]
+    fn a_definition_a_partial_file_keeps_unchanged_is_not_the_branch_own() {
+        // `save` is in the file before and after, as it was: a call to it
+        // still breaks against the other branch's change.
+        let big = past_the_symbol_bound("pub fn save(x: u32) {}");
+        let caller = branch(
+            "caller",
+            &[
+                ("src/big.rs", &big, &format!("{big})\n")),
+                ("src/i.rs", "", "fn c() { save(1); }\n"),
+            ],
+        );
+        let (findings, _) = compare(&[sync(), caller]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].finding, SymbolFindingKind::ChangedAndCalled);
     }
 }
