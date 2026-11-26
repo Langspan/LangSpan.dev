@@ -1258,10 +1258,23 @@ fn lifecycle(
     };
     let (ask, prompt_recorded) = match kind {
         LifecycleKind::End => {
+            // The trail's line ranges and uncommitted files (roadmap C9),
+            // read within half the time left; past it, what was read goes
+            // with the end, marked partial.
+            let now = Instant::now();
+            let until = now + deadline.saturating_duration_since(now) / 2;
+            let trail = crate::trail::facts(
+                &config.state_dir,
+                &config.root,
+                &ids.session_id,
+                config.share_prompt,
+                until,
+            );
             return match step(
                 "session-end",
                 Command::SessionEnd {
                     session_id: ids.session_id.clone(),
+                    trail: Some(trail),
                 },
             ) {
                 Ok(_) => Reply::none("session_ended", format!("session marked ended{closed}")),
@@ -1597,8 +1610,11 @@ impl Session<'_> {
         }
         match self.call(
             wire_id("session-end", &[self.source, &ids.operation_id]),
+            // A subagent leaves no trail of its own: its parent's has its
+            // work (roadmap C9).
             Command::SessionEnd {
                 session_id: ids.session_id.clone(),
+                trail: None,
             },
         ) {
             Ok(_) => Reply::none(
@@ -2296,6 +2312,7 @@ fn render_briefing_within(briefing: &langspan_core::Briefing, limit: usize) -> S
     if briefing.messages.is_empty()
         && briefing.retracted.is_empty()
         && briefing.uncoordinated.is_empty()
+        && briefing.trail.is_none()
         && room < PEERS_MINIMUM
     {
         return format!("{checks}\n{PEERS_NOT_SHOWN}");
@@ -2335,6 +2352,29 @@ fn cut_message_line(line: String, message: &langspan_core::Message) -> String {
     cut
 }
 
+/// One message as a briefing line: who sent it, to whom, its quoted text
+/// and files, within `MESSAGE_LINE_LIMIT`.
+fn message_line(message: &langspan_core::Message) -> String {
+    let mut line = match &message.from {
+        Some(session) => format!("- From session {}", clean(session, 128)),
+        None => "- From the owner".into(),
+    };
+    match message.to {
+        langspan_core::Recipient::Everyone {} => line.push_str(" to every session"),
+        langspan_core::Recipient::NextSession {} => line.push_str(" (handoff)"),
+        langspan_core::Recipient::Session { .. } => {}
+    }
+    line.push_str(&format!(
+        ": {:?}",
+        clean(&message.text, langspan_core::MESSAGE_BYTES)
+    ));
+    if !message.paths.is_empty() {
+        let paths: Vec<String> = message.paths.iter().map(|p| quoted(p)).collect();
+        line.push_str(&format!(" (about {})", paths.join(", ")));
+    }
+    cut_message_line(line, message)
+}
+
 fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> String {
     let list = |paths: &[String]| {
         paths
@@ -2348,6 +2388,23 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
     );
     let mut skipped = 0_usize;
     let footer = "A file another session is editing in this checkout is held until that edit finishes. Work in another worktree or on another machine is never held; shared files there can conflict when the branches integrate. Re-read a listed file before changing it.";
+    // An ended session's trail at the head (roadmap C9), after that
+    // session's own handoff, which then is not repeated below. Both are
+    // used up when delivered, and the core keeps room for them.
+    let handed_off = |message: &langspan_core::Message| {
+        briefing.trail.as_ref().is_some_and(|view| {
+            message.from.as_deref() == Some(view.trail.session_id.as_str())
+                && matches!(message.to, langspan_core::Recipient::NextSession {})
+        })
+    };
+    if let Some(view) = &briefing.trail {
+        for message in briefing.messages.iter().filter(|m| handed_off(m)) {
+            text.push_str(&message_line(message));
+            text.push('\n');
+        }
+        text.push_str(&crate::trail::text(view));
+        text.push('\n');
+    }
     // An uncoordinated change first: it is delivered once, the core sends
     // at most one, and its line is bounded, so it always fits.
     for change in &briefing.uncoordinated {
@@ -2366,25 +2423,13 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
             clean(&briefing.session_id, 128)
         );
         let mut lines: Vec<String> = briefing.retracted.iter().map(retracted_line).collect();
-        for message in &briefing.messages {
-            let mut line = match &message.from {
-                Some(session) => format!("- From session {}", clean(session, 128)),
-                None => "- From the owner".into(),
-            };
-            match message.to {
-                langspan_core::Recipient::Everyone {} => line.push_str(" to every session"),
-                langspan_core::Recipient::NextSession {} => line.push_str(" (handoff)"),
-                langspan_core::Recipient::Session { .. } => {}
-            }
-            line.push_str(&format!(
-                ": {:?}",
-                clean(&message.text, langspan_core::MESSAGE_BYTES)
-            ));
-            if !message.paths.is_empty() {
-                line.push_str(&format!(" (about {})", list(&message.paths)));
-            }
-            lines.push(cut_message_line(line, message));
-        }
+        lines.extend(
+            briefing
+                .messages
+                .iter()
+                .filter(|message| !handed_off(message))
+                .map(message_line),
+        );
         let mut shown = String::new();
         for mut line in lines {
             line.push('\n');
@@ -3967,6 +4012,7 @@ fn has_peer_content(briefing: &langspan_core::Briefing) -> bool {
             .is_some_and(|recent| !recent.is_empty())
         || !briefing.uncoordinated.is_empty()
         || !briefing.left_work.is_empty()
+        || briefing.trail.is_some()
 }
 
 impl Session<'_> {
@@ -5517,6 +5563,7 @@ mod briefing_text {
             uncoordinated: Vec::new(),
             checks: Vec::new(),
             left_work: Vec::new(),
+            trail: None,
             recent: None,
         }
     }
@@ -6795,6 +6842,7 @@ mod code_briefing_text {
             uncoordinated: Vec::new(),
             checks: Vec::new(),
             left_work: Vec::new(),
+            trail: None,
             recent: None,
         }
     }

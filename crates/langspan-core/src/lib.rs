@@ -20,6 +20,7 @@ mod report;
 mod status;
 mod status_line;
 mod today;
+mod trail;
 mod workspaces;
 mod write_check;
 pub use classes::{
@@ -79,6 +80,10 @@ pub use today::{
     OpenAdmission, OpenCheck, OpenIntent, OpenMessage, TODAY_EVENTS, TODAY_FILES, TODAY_OPEN,
     TODAY_SESSIONS, Today, TodayChecks, TodayLandings, TodayOpen, TodayQuery, TodaySession,
     TodayWindow, today,
+};
+pub use trail::{
+    MAX_TRAIL_FACTS, MAX_TRAILS, TRAIL_BYTES, TRAIL_CHECKS, TRAIL_FILES, TRAIL_JSON_BYTES,
+    TRAIL_RANGES, TRAIL_WAITING, Trail, TrailCheck, TrailFacts, TrailFile, TrailView,
 };
 pub use workspaces::{
     MAX_ENDING_SESSIONS, MAX_WORKSPACE_PAGE, WorkspaceEnding, WorkspaceKept, WorkspaceSummary,
@@ -2454,6 +2459,10 @@ pub struct Recap {
     /// recently withdrawn ones (`retracted`), newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<Message>,
+    /// The newest trails ended sessions left here, at most `RECAP_TRAILS`
+    /// (roadmap C9), whether or not a session was told them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trails: Vec<TrailView>,
     pub teammates: Vec<RemotePeer>,
     pub publishing: Option<RemoteLink>,
     /// Present when the last scan attempt failed.
@@ -2467,6 +2476,8 @@ pub const MAX_NOTES: usize = 64;
 pub const NOTE_BYTES: usize = 400;
 pub const RECAP_SESSIONS: usize = 16;
 const RECAP_ITEMS: usize = 8;
+/// Trails in a recap; `langspan trail` lists up to `MAX_TRAILS`.
+pub const RECAP_TRAILS: usize = 4;
 
 /// Unacknowledged messages held per workspace; the oldest go first.
 pub const MAX_MESSAGES: usize = 64;
@@ -2596,6 +2607,11 @@ pub struct Briefing {
     /// `BRIEF_LEFT_WORK`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left_work: Vec<LeftWork>,
+    /// The trail an ended session of this checkout left, at a start or a
+    /// prompt, taken once (roadmap C9). Shown first, after that session's
+    /// own handoff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail: Option<TrailView>,
     /// What changed recently in the repository, only in a briefing asked
     /// for at session start (roadmap C3). Never part of the signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2704,6 +2720,11 @@ pub struct State {
     /// again is dropped. Derived on replay; not part of the status reply.
     #[serde(skip)]
     pub renames: BTreeMap<String, Vec<Rename>>,
+    /// Trails of ended sessions per workspace, newest first, at most
+    /// `MAX_TRAILS` (roadmap C9). Derived on replay; not part of the status
+    /// reply.
+    #[serde(skip)]
+    pub trails: BTreeMap<String, Vec<Trail>>,
     /// The current generation's clock anchor, once recorded. Derived from
     /// the events on replay; not part of the status reply.
     #[serde(skip)]
@@ -3109,6 +3130,17 @@ pub enum Event {
     /// #161).
     SessionAdopted {
         adoption: Adoption,
+    },
+    /// What a session left as it ended (roadmap C9). Replaces an earlier
+    /// trail of the same session.
+    TrailRecorded {
+        trail: Trail,
+    },
+    /// `session_id` was told the trail `from` left.
+    TrailTaken {
+        workspace_id: String,
+        from: String,
+        session_id: String,
     },
     /// The host said the session finished its reply (Stop, StopFailure or
     /// SubagentStop). `released` are the tool admissions still open then,
@@ -3833,6 +3865,13 @@ pub enum Command {
     Recap {
         workspace_id: String,
     },
+    /// Read-only: the newest trails ended sessions left in one workspace
+    /// (roadmap C9), at most `limit` (1 to `MAX_TRAILS`, default 4).
+    Trails {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
     /// Read-only: the held notes of one workspace that hold every word of
     /// `query`, about `path` or the whole workspace when a path is given
     /// (roadmap E2). Never recorded, never counted as delivered.
@@ -4140,6 +4179,11 @@ pub enum Command {
     },
     SessionEnd {
         session_id: String,
+        /// What the end hook read from the line journal for the trail
+        /// (roadmap C9). Absent from an older client: the trail has no line
+        /// ranges and no uncommitted files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trail: Option<TrailFacts>,
     },
     /// The session finished a reply: complete what its tool calls still
     /// hold. `failure` is the host's error type (lower-case letters and
@@ -4631,6 +4675,13 @@ enum CommandWire {
     Recap {
         workspace_id: String,
     },
+    /// Read-only: the newest trails ended sessions left in one workspace
+    /// (roadmap C9), at most `limit` (1 to `MAX_TRAILS`, default 4).
+    Trails {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
     /// Read-only: the held notes of one workspace that hold every word of
     /// `query`, about `path` or the whole workspace when a path is given
     /// (roadmap E2). Never recorded, never counted as delivered.
@@ -4920,6 +4971,11 @@ enum CommandWire {
     },
     SessionEnd {
         session_id: String,
+        /// What the end hook read from the line journal for the trail
+        /// (roadmap C9). Absent from an older client: the trail has no line
+        /// ranges and no uncommitted files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trail: Option<TrailFacts>,
     },
     /// The session finished a reply: complete what its tool calls still
     /// hold. `failure` is the host's error type (lower-case letters and
@@ -5324,6 +5380,13 @@ pub enum Outcome {
     },
     Recap {
         recap: Recap,
+    },
+    Trails {
+        workspace_id: String,
+        trails: Vec<TrailView>,
+        /// Trails left out so that the answer fits one frame.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted: u32,
     },
     Recall {
         recall: Recall,
@@ -6142,20 +6205,26 @@ fn decide_checked(
                 },
             })
         }
-        Command::SessionEnd { session_id } => {
-            known_session(state, session_id)?;
-            let events = if state
+        Command::SessionEnd { session_id, trail } => {
+            let session = known_session(state, session_id)?;
+            if let Some(facts) = trail {
+                trail::validate_facts(facts)?;
+            }
+            let ending = state
                 .activity
                 .get(session_id)
-                .is_none_or(|activity| !activity.ended)
-                || state.intents.contains_key(session_id)
-            {
+                .is_none_or(|activity| !activity.ended);
+            let mut events = if ending || state.intents.contains_key(session_id) {
                 vec![Event::SessionEnded {
                     session_id: session_id.clone(),
                 }]
             } else {
                 Vec::new()
             };
+            // A trail is built once per end, from the state before it.
+            if ending && let Some(trail) = trail::build(state, session, trail.as_ref(), now_ms) {
+                events.push(Event::TrailRecorded { trail });
+            }
             Ok(Decision {
                 events,
                 outcome: Outcome::SessionEnded {
@@ -7152,7 +7221,8 @@ fn decide_checked(
                 || !briefing.uncoordinated.is_empty()
                 || !briefing.retracted.is_empty()
                 || !briefing.checks.is_empty()
-                || !briefing.left_work.is_empty();
+                || !briefing.left_work.is_empty()
+                || briefing.trail.is_some();
             let mut events = Vec::new();
             if *deliver {
                 if signature != previous && briefing.changed {
@@ -7185,6 +7255,11 @@ fn decide_checked(
                         session_id: session_id.clone(),
                         message_id: retracted.message_id.clone(),
                     }
+                }));
+                events.extend(briefing.trail.iter().map(|view| Event::TrailTaken {
+                    workspace_id: view.trail.workspace_id.clone(),
+                    from: view.trail.session_id.clone(),
+                    session_id: session_id.clone(),
                 }));
                 events.extend(briefing.checks.iter().map(|notice| Event::CheckDelivered {
                     session_id: session_id.clone(),
@@ -7629,6 +7704,27 @@ fn decide_checked(
                 events: Vec::new(),
                 outcome: Outcome::Recap {
                     recap: recap(state, workspace_id, now_ms),
+                },
+            })
+        }
+        Command::Trails {
+            workspace_id,
+            limit,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            let limit = limit.unwrap_or(4);
+            if !(1..=MAX_TRAILS as u32).contains(&limit) {
+                return Err(error(
+                    "invalid_limit",
+                    "A trail listing names between 1 and 16 trails",
+                ));
+            }
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Trails {
+                    workspace_id: workspace_id.clone(),
+                    trails: trail::listed(state, workspace_id, limit as usize, now_ms),
+                    omitted: 0,
                 },
             })
         }
@@ -8256,6 +8352,7 @@ fn recap(state: &State, workspace_id: &str, now_ms: u64) -> Recap {
             )
             .cloned()
             .collect(),
+        trails: trail::listed(state, workspace_id, RECAP_TRAILS, now_ms),
         teammates: state
             .remote_peers
             .values()
@@ -9351,7 +9448,13 @@ fn brief(
     let total = peers.len();
     // Peers are chosen by their work within the byte budget first; where
     // they look is added after, in the space left, first peers first, so
-    // presence never takes the place of another peer's work.
+    // presence never takes the place of another peer's work. A trail this
+    // briefing may tell takes its encoding out of that budget, so the
+    // reply holds both within its frame.
+    let peer_bytes = BRIEF_BYTES
+        - trail::owed(state, me, handoffs).map_or(0, |trail| {
+            trail::json_cost(trail).min(trail::TRAIL_JSON_BYTES)
+        });
     let mut bytes = 0;
     let mut peers: Vec<PeerWork> = peers
         .into_iter()
@@ -9376,7 +9479,7 @@ fn brief(
                     .map(|path| recent::json_len(path) + 32)
                     .sum::<usize>();
             bytes += cost;
-            if bytes > BRIEF_BYTES {
+            if bytes > peer_bytes {
                 bytes -= cost;
                 return false;
             }
@@ -9391,7 +9494,7 @@ fn brief(
             .iter()
             .map(|looked| recent::json_len(&looked.path) + 32)
             .sum();
-        if bytes + presence <= BRIEF_BYTES {
+        if bytes + presence <= peer_bytes {
             bytes += presence;
             return true;
         }
@@ -9555,6 +9658,32 @@ fn brief(
             ..message.clone()
         })
         .collect();
+    // An ended session's trail (roadmap C9) shares the messages' room and
+    // follows that session's own handoff: while the handoff is owed here
+    // and waits for room, so does the trail.
+    let used = retracted.iter().map(retracted_cost).sum::<usize>()
+        + messages.iter().map(message_cost).sum::<usize>();
+    let trail = trail::owed(state, me, handoffs)
+        .filter(|_| used + TRAIL_BYTES < message_bytes)
+        .filter(|trail| {
+            state
+                .messages
+                .get(&me.workspace_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .filter(|message| {
+                    message.from.as_deref() == Some(trail.session_id.as_str())
+                        && matches!(message.to, Recipient::NextSession {})
+                        && owed_to(message, session_id, takes_handoff(state, me, message))
+                })
+                .all(|handoff| {
+                    messages
+                        .iter()
+                        .any(|shown| shown.message_id == handoff.message_id)
+                })
+        })
+        .map(|trail| trail::view(state, trail, now_ms));
     // A checkout change matters to a session that read or edited files
     // here before it: what it knows may no longer be on disk.
     // A change a session's own shell command explains is not news to it;
@@ -9614,6 +9743,7 @@ fn brief(
     // only for a briefing with nothing else used up on delivery, whose
     // text is sure to hold it; otherwise every one is counted and waits.
     let quiet = messages.is_empty()
+        && trail.is_none()
         && retracted.is_empty()
         && uncoordinated.is_empty()
         && !state.check_notices.contains_key(session_id);
@@ -9743,6 +9873,7 @@ fn brief(
             uncoordinated,
             // Filled in by the request that names the sessions (`Brief::left`).
             left_work: Vec::new(),
+            trail,
             // One result per briefing, the newest: it always fits the
             // rendered text, and each delivered one is removed, so the rest
             // follow at the next briefings.
@@ -11371,6 +11502,29 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             state
                 .adoptions
                 .insert(adoption.from.clone(), adoption.clone());
+        }
+        Event::TrailRecorded { trail } => {
+            trail::validate_trail(state, trail)?;
+            let trails = state.trails.entry(trail.workspace_id.clone()).or_default();
+            trails.retain(|kept| kept.session_id != trail.session_id);
+            trails.insert(0, trail.clone());
+            trails.truncate(MAX_TRAILS);
+        }
+        Event::TrailTaken {
+            workspace_id,
+            from,
+            session_id,
+        } => {
+            known_session(state, session_id)?;
+            // A trail the cap already dropped has nothing left to mark.
+            if let Some(trail) = state
+                .trails
+                .get_mut(workspace_id)
+                .and_then(|trails| trails.iter_mut().find(|trail| &trail.session_id == from))
+                && trail.taken_by.is_none()
+            {
+                trail.taken_by = Some(session_id.clone());
+            }
         }
         // Boundaries in the log. The admissions a stop released ended in
         // their own `LeaseCompleted` events.
@@ -13431,6 +13585,7 @@ impl Recap {
     pub fn shrink_until(&mut self, mut fits: impl FnMut(&Recap) -> bool) {
         while !fits(self) {
             let dropped = self.notes.pop().is_some()
+                || self.trails.pop().is_some()
                 || self.teammates.pop().is_some()
                 || self.checks.pop().is_some()
                 || self.landings.pop().is_some()

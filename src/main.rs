@@ -164,6 +164,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   recap WORKSPACE                A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
                                  messages not yet acknowledged, then withdrawn ones
+  trail WORKSPACE [--limit N]    Trails ended sessions left, newest first (--limit 1
+                                 to 16, default 4): task line, files read and edited
+                                 with line ranges, checks after the last write, files
+                                 left uncommitted, and who was told. Reads only
   today [WORKSPACE] [--since RFC3339]
                                  What each session did since local midnight (or the
                                  time given), refusals by kind, checks, landings, and
@@ -4300,6 +4304,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             ["recap", workspace] => Command::Recap {
                 workspace_id: (*workspace).into(),
             },
+            ["trail", workspace] => Command::Trails {
+                workspace_id: (*workspace).into(),
+                limit: Some(
+                    u32::try_from(number(&mut options, "--limit", 4)?)
+                        .map_err(|_| "--limit is too large")?,
+                ),
+            },
             // The words may come quoted as one argument or as several.
             ["recall", workspace, query @ ..] if !query.is_empty() => Command::Recall {
                 workspace_id: (*workspace).into(),
@@ -4442,6 +4453,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphImport { .. }
                 | Command::CheckWrite { .. }
                 | Command::Recap { .. }
+                | Command::Trails { .. }
                 | Command::ShowMessage { .. }
                 | Command::MessageStatus { .. }
                 | Command::Recall { .. }
@@ -5701,6 +5713,25 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::StatusLine { line } => println!("{}", line.text()),
         Outcome::RefusalRecorded { session_id } => {
             println!("Refusal recorded for session {session_id}.")
+        }
+        Outcome::Trails {
+            workspace_id,
+            trails,
+            omitted,
+        } => {
+            if trails.is_empty() {
+                println!("No trails recorded in workspace {workspace_id}.");
+            }
+            if *omitted > 0 {
+                println!("({omitted} older trail(s) left out: they did not fit in one reply.)");
+            }
+            for view in trails {
+                println!("{}", langspan::trail::text(view));
+                match &view.trail.taken_by {
+                    Some(session) => println!("  Told to session {session}."),
+                    None => println!("  Not told to any session yet."),
+                }
+            }
         }
         Outcome::Policy { workspace_id, rows } => {
             println!("Coordination policies for workspace {workspace_id}:");

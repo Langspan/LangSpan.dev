@@ -1,0 +1,1 @@
+{"version":4,"request_id":"session-end-1","command":{"op":"session_end","session_id":"claude-code.alice","trail":{"edited":[{"path":"src/upload.rs","lines":[{"start_line":40,"end_line":72}]},{"path":"tests/upload.rs","lines":[{"start_line":10,"end_line":31}]}],"uncommitted":["src/upload.rs","tests/upload.rs"]}}}
