@@ -17,7 +17,8 @@ it runs them as Claude Code would around each read and edit, so the
 LangSpan arm's dry run passes through LangSpan's real hooks, coordinators,
 event logs and Git-remote sharing. Unlike a host, it waits for each hook's
 decision past the hook's configured timeout (see HOOK_SECONDS), so the dry
-run's result does not depend on how loaded the machine is. A ``follow``
+run's result does not depend on how loaded the machine is. A signal that
+stops the stand-in first kills the hook it is running. A ``follow``
 session there first waits,
 within a bound, until LangSpan has told it every peer's task, and before it
 ends waits until every peer shows edits, so that no peer acts before it
@@ -60,21 +61,46 @@ def hook_commands(settings, event, tool):
                     yield hook["command"], hook.get("timeout", HOOK_SECONDS)
 
 
+# The hook running now, if any. Its process group is outside the runner's,
+# so the stand-in ends it before it exits on a signal (see stop_on_signal).
+RUNNING = []
+
+
+def kill_group(process):
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 def run_hook(command, payload, cwd):
     """Run one hook in a process group of its own, for up to HOOK_SECONDS.
     Returns its stdout and exit code, or ("", None) when it was killed."""
     process = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, cwd=cwd, text=True, start_new_session=True)
+    RUNNING.append(process)
     try:
         stdout, _ = process.communicate(payload, timeout=HOOK_SECONDS)
         return stdout, process.returncode
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        kill_group(process)
         process.communicate()
         return "", None
+    finally:
+        RUNNING.remove(process)
+
+
+def stop_on_signal(signum, _frame):
+    """End the running hook's process group, then die of SIGNUM. The runner
+    stops an attempt by signaling the stand-in's group, which does not
+    reach the hook's. SIGKILL cannot be caught; the runner sends SIGTERM
+    first."""
+    for process in list(RUNNING):
+        # A reaped leader's PID can be reused; its group is no longer ours.
+        if process.returncode is None:
+            kill_group(process)
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
 
 
 class Session:
@@ -172,6 +198,8 @@ def main(argv):
     if len(argv) != 3 or argv[2] not in ("ignore", "follow"):
         print("usage: standin_agent.py PLAN SESSION ignore|follow", file=sys.stderr)
         return 2
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, stop_on_signal)
     plan = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
     index, mode = int(argv[1]), argv[2]
     task = plan["tasks"][index - 1]

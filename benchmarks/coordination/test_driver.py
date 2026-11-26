@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -477,25 +478,77 @@ class StandinHooks(Temporary):
     def test_a_hook_past_the_standin_bound_leaves_no_process_running(self):
         # A hook the stand-in gives up on must not go on acting, for example
         # by reading a file after the edit it was asked about was applied.
-        pid_file = self.root / "grandchild.pid"
-        command = "sleep 30 & echo $! > %s; wait" % shlex.quote(str(pid_file))
+        # The child's heartbeat shows whether it still acts. Its PID alone
+        # does not: where PID 1 does not reap orphans, a killed child stays
+        # a zombie and `kill(pid, 0)` still succeeds.
+        heartbeat, group = self.root / "heartbeat", self.root / "group"
+        command = "echo $$ > %s; while :; do printf x >> %s; sleep 0.05; done & wait" % (
+            shlex.quote(str(group)), shlex.quote(str(heartbeat)))
         session, _ = self.session(command, 1)
         original = standin_agent.HOOK_SECONDS
         standin_agent.HOOK_SECONDS = 2
         try:
             denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
+            self.assertFalse(denied)
+            self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
+            self.assert_stopped(heartbeat)
         finally:
             standin_agent.HOOK_SECONDS = original
-        self.assertFalse(denied)
-        pid = int(pid_file.read_text())
-        deadline = time.monotonic() + 10
-        while True:
+            self.kill_groups(group)
+
+    def kill_groups(self, group_file, *groups):
+        """Kill GROUPS and the hook's group named in GROUP_FILE, so a failed
+        test leaves nothing running."""
+        if group_file.exists() and group_file.read_text().strip():
+            groups += (int(group_file.read_text()),)
+        for group in groups:
             try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
-            self.assertLess(time.monotonic(), deadline, "the hook's child %d is still running" % pid)
-            time.sleep(0.05)
+                os.killpg(group, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    def assert_stopped(self, heartbeat):
+        """HEARTBEAT stops growing within a bound, and stays the same for a
+        second after that, many times the child's 0.05 s beat."""
+        deadline = time.monotonic() + 10
+        size = heartbeat.stat().st_size if heartbeat.exists() else 0
+        while True:
+            time.sleep(1)
+            now = heartbeat.stat().st_size if heartbeat.exists() else 0
+            if now == size:
+                return
+            self.assertLess(time.monotonic(), deadline, "the hook's child is still writing %s" % heartbeat)
+            size = now
+
+    def test_terminating_the_standin_stops_the_hook_it_is_running(self):
+        # The runner ends an attempt by signaling the stand-in's process
+        # group. Each hook runs in a group of its own, so the stand-in must
+        # end the running hook's group before it exits.
+        heartbeat = self.root / "heartbeat"
+        started = self.root / "started"
+        command = "echo $$ > %s; while :; do printf x >> %s; sleep 0.05; done" % (
+            shlex.quote(str(started)), shlex.quote(str(heartbeat)))
+        settings = {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": command}]}]}}
+        (self.root / ".claude").mkdir()
+        (self.root / ".claude" / "settings.local.json").write_text(json.dumps(settings))
+        plan = {"sessions": 1, "prompts": ["p"],
+                "tasks": [{"task": "t", "details": "d", "standin": {"ignore": [], "follow": []}}]}
+        (self.root / "plan.json").write_text(json.dumps(plan))
+        env = dict(os.environ, LANGSPAN_BENCH_RUN_DIR=str(self.root))
+        standin = subprocess.Popen([sys.executable, str(HERE / "standin_agent.py"), "plan.json", "1", "ignore"],
+                                   cwd=self.root, env=env, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not (started.exists() and started.read_text().strip() and heartbeat.exists()):
+                self.assertLess(time.monotonic(), deadline, "the hook never started")
+                time.sleep(0.05)
+            os.killpg(standin.pid, signal.SIGTERM)
+            standin.wait(timeout=10)
+            self.assert_stopped(heartbeat)
+        finally:
+            self.kill_groups(started, standin.pid)
+            standin.wait()
 
 
 class RefusalCollection(Temporary):
