@@ -25,7 +25,7 @@
 use crate::{daemon::Registration, integrate, test_output};
 use langspan_core::{
     AutoCheck, CheckReport, CheckResult, Command, InterfaceCause, InterfaceChange,
-    MAX_CAUSE_DEPENDENTS, Outcome, TestResults,
+    MAX_CAUSE_DEPENDENTS, MAX_REPORT_DEPENDENT_PATHS, NOTICE_DEPENDENTS, Outcome, TestResults,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -154,7 +154,23 @@ impl Pending {
                 .unwrap_or(0),
         })
     }
+    /// Every file that mentions one of the changes, for the core to choose
+    /// whom to tell: the cause shows only the first few.
+    fn dependent_paths(pending: &[Pending]) -> Vec<String> {
+        let paths: BTreeSet<&String> = pending
+            .iter()
+            .flat_map(|pending| &pending.dependents)
+            .collect();
+        paths
+            .into_iter()
+            .take(MAX_REPORT_DEPENDENT_PATHS)
+            .cloned()
+            .collect()
+    }
 }
+
+// Every waiting change's mentioning files fit one report.
+const _: () = assert!(MAX_PENDING * NOTICE_DEPENDENTS <= MAX_REPORT_DEPENDENT_PATHS);
 
 /// Which of the check's two commands a run is.
 #[derive(Clone)]
@@ -661,17 +677,28 @@ fn report(
     }
     // A wider run is recorded under the wider command's own name, with the
     // interface change it ran for.
-    let (check, interface) = match (&running.kind, &running.check.on_interface_change) {
-        (Kind::Wider { causes, .. }, Some(wider)) => (
-            AutoCheck {
-                name: wider.name.clone(),
-                argv: wider.argv.clone(),
-                ..running.check.clone()
-            },
-            Pending::cause(causes).map(Box::new),
-        ),
-        _ => (running.check.clone(), None),
-    };
+    let (check, interface, dependent_paths) =
+        match (&running.kind, &running.check.on_interface_change) {
+            (Kind::Wider { causes, .. }, Some(wider)) => {
+                let interface = Pending::cause(causes).map(Box::new);
+                // Without a cause the core would refuse the paths.
+                let paths = if interface.is_some() {
+                    Pending::dependent_paths(causes)
+                } else {
+                    Vec::new()
+                };
+                (
+                    AutoCheck {
+                        name: wider.name.clone(),
+                        argv: wider.argv.clone(),
+                        ..running.check.clone()
+                    },
+                    interface,
+                    paths,
+                )
+            }
+            _ => (running.check.clone(), None, Vec::new()),
+        };
     let request_id = crate::hook::wire_id(
         "auto-check",
         &[
@@ -699,6 +726,7 @@ fn report(
             timed_out_s: finished.timed_out_s,
             interface,
             index_incomplete,
+            dependent_paths,
         })),
         writes_before: finished.tests.as_ref().map(|_| finished.writes_before),
         // An automatic check's command holds no secret (`refuse_secrets`).
@@ -1181,6 +1209,36 @@ mod tests {
         let (covered, late) = running.split();
         assert_eq!(covered.sessions.into_keys().collect::<Vec<_>>(), ["second"]);
         assert_eq!(late.into_iter().collect::<Vec<_>>(), ["first"]);
+    }
+
+    #[test]
+    fn a_wider_report_shows_eight_mentioning_files_and_sends_all_of_them_for_its_recipients() {
+        let pending = |id: &str, files: std::ops::Range<u32>| Pending {
+            notice_id: id.into(),
+            path: "core/src/lib.rs".into(),
+            changes: vec![InterfaceChange {
+                name: "parse".into(),
+                kind: "function".into(),
+                change: "signature_changed".into(),
+                before: Some("pub fn parse(a: u32)".into()),
+                after: Some("pub fn parse()".into()),
+                before_arity: None,
+                after_arity: None,
+                before_count: None,
+                after_count: None,
+            }],
+            dependents: files.map(|n| format!("src/f{n}.rs")).collect(),
+            by_session: "alice".into(),
+            blind_files: 0,
+        };
+        // Nine distinct files across two notices, one shared.
+        let causes = [pending("n1", 0..5), pending("n2", 4..9)];
+        let cause = Pending::cause(&causes).unwrap();
+        assert_eq!(cause.dependents.len(), MAX_CAUSE_DEPENDENTS);
+        assert_eq!(cause.more_dependents, 1);
+        let all = Pending::dependent_paths(&causes);
+        assert_eq!(all.len(), 9);
+        assert!(all.contains(&"src/f8.rs".to_owned()), "{all:?}");
     }
 
     #[test]

@@ -1276,8 +1276,9 @@ at their next briefing:
 LangSpan: the automatic check ran its wider command. Interface change to parse_upload in core/src/lib.rs: "pub fn parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) -> u32": the wider check all failed (exit 101); files that mention it: cli/src/main.rs (a name lookup, not resolved uses). On working tree ...
 ```
 
-The mentioning files come from the index's name lookup, at most 8, and the
-line says how many source files the index could not read in full. If the
+The mentioning files come from the index's name lookup. The line shows at
+most 8 of them and counts the rest; a session working on any of them, shown
+or not, is told. The line also says how many source files the index could not read in full. If the
 index has no complete scan of the workspace, no interface change can be found:
 the regular result says so and the wider command does not run.
 

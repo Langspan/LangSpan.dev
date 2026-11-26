@@ -285,7 +285,11 @@ was inconclusive. The core refuses a grade that disagrees with the result on
 replay. The sessions the run was for are told, and the core adds the running
 sessions of the workspace that work on or have read a mentioning file, by the
 same rule the briefing uses for interface notices, up to the 16 sessions a
-report names. The briefing says, inside the check section's 1,200 bytes:
+report names. Recipients are chosen from every mentioning file of the
+changes the run covered, not only the 8 the notice shows: the daemon sends
+all of them, at most 512 (16 waiting changes of at most 32 files each), in
+the report's `dependent_paths`, which the core uses for that choice and does
+not keep. The briefing says, inside the check section's 1,200 bytes:
 `Interface change to parse_upload in core/src/lib.rs: "pub fn
 parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) -> u32":
 the wider check all failed (exit 101); files that mention it: cli/src/main.rs

@@ -130,6 +130,18 @@ fn record(
     result: CheckResult,
     interface: Option<InterfaceCause>,
 ) -> Result<Outcome, String> {
+    record_with(state, id, result, interface, Vec::new())
+}
+
+/// As [`record`], with every mentioning file the run was for in
+/// `dependent_paths`.
+fn record_with(
+    state: &mut State,
+    id: &str,
+    result: CheckResult,
+    interface: Option<InterfaceCause>,
+    dependent_paths: Vec<String>,
+) -> Result<Outcome, String> {
     let command = Command::RecordCheck {
         workspace_id: "work".into(),
         name: "all".into(),
@@ -145,6 +157,7 @@ fn record(
             timed_out_s: None,
             interface: interface.map(Box::new),
             index_incomplete: false,
+            dependent_paths,
         })),
         tests: None,
         rerun: None,
@@ -247,6 +260,61 @@ fn a_failing_wider_check_grades_the_change_broke_and_tells_the_sessions_on_menti
     }
     assert!(waiting(&state, "dave").is_empty());
     assert!(waiting(&state, "carol").is_empty());
+}
+
+#[test]
+fn a_session_on_a_mentioning_file_past_the_shown_eight_is_still_told() {
+    let mut state = ready();
+    enable(&mut state, wider("all"));
+    // Nine files mention the change; the cause shows the first eight, and
+    // bob works only on the ninth.
+    let all: Vec<String> = (0..9).map(|n| format!("src/f{n}.rs")).collect();
+    write(&mut state, "bob", "b1", &all[8]);
+    let shown: Vec<&str> = all[..8].iter().map(String::as_str).collect();
+    let mut cause = cause(&shown);
+    cause.more_dependents = 1;
+    record_with(
+        &mut state,
+        "all-1",
+        CheckResult::Failed { exit_code: 101 },
+        Some(cause),
+        all.clone(),
+    )
+    .unwrap();
+    let notices = waiting(&state, "bob");
+    assert_eq!(notices.len(), 1, "bob works on the ninth mentioning file");
+    assert_eq!(notices[0].interface_grade, Some(InterfaceGrade::Broke));
+    // The notice still shows eight files and counts the rest.
+    let shown = notices[0].interface.as_ref().unwrap();
+    assert_eq!(shown.dependents.len(), 8);
+    assert_eq!(shown.more_dependents, 1);
+}
+
+#[test]
+fn dependent_paths_are_bounded_valid_and_only_with_an_interface_change() {
+    let mut state = ready();
+    enable(&mut state, wider("all"));
+    let too_many: Vec<String> = (0..=langspan_core::MAX_REPORT_DEPENDENT_PATHS)
+        .map(|n| format!("src/f{n}.rs"))
+        .collect();
+    for (interface, paths) in [
+        (Some(cause(&["cli/src/main.rs"])), too_many),
+        (
+            Some(cause(&["cli/src/main.rs"])),
+            vec!["../outside.rs".into()],
+        ),
+        (None, vec!["cli/src/main.rs".into()]),
+    ] {
+        let refused = record_with(
+            &mut state,
+            "bad",
+            CheckResult::Failed { exit_code: 1 },
+            interface,
+            paths.clone(),
+        );
+        assert!(refused.is_err(), "{paths:?}");
+    }
+    assert!(state.checks.get("work").is_none_or(Vec::is_empty));
 }
 
 #[test]

@@ -462,6 +462,7 @@ fn a_failed_automatic_check_and_a_waiting_handoff_each_get_a_notice() {
                         timed_out_s: None,
                         interface: None,
                         index_incomplete: false,
+                        dependent_paths: Vec::new(),
                     })),
                     tests: None,
                     rerun: None,

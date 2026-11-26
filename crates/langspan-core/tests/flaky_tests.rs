@@ -163,6 +163,7 @@ fn record_as(
                 timed_out_s: None,
                 interface: None,
                 index_incomplete: false,
+                dependent_paths: Vec::new(),
             })),
             tests: Some(tests),
             rerun,

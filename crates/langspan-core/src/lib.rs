@@ -1030,7 +1030,18 @@ pub struct CheckReport {
     /// no interface change could be found and the wider check did not run.
     #[serde(default, skip_serializing_if = "is_false")]
     pub index_incomplete: bool,
+    /// For a wider check: every file that mentions a changed name, at most
+    /// [`MAX_REPORT_DEPENDENT_PATHS`]. The sessions working on any of them
+    /// are told, even past the [`MAX_CAUSE_DEPENDENTS`] the notice shows.
+    /// Used to choose recipients and not kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependent_paths: Vec<String>,
 }
+
+/// Mentioning files a wider check's report may name to choose its
+/// recipients: the daemon's 16 waiting interface notices, each with at
+/// most [`NOTICE_DEPENDENTS`] files.
+pub const MAX_REPORT_DEPENDENT_PATHS: usize = 16 * NOTICE_DEPENDENTS;
 
 /// An automatic check's result waiting to be placed in one session's
 /// context, once.
@@ -5341,13 +5352,15 @@ fn decide_checked(
             if let Some(report) = report {
                 let mut session_ids = report.session_ids.clone();
                 let interface_grade = interface_grade(report.interface.as_deref(), &check.result);
+                validate_dependent_paths(report)?;
                 if let Some(cause) = &report.interface {
                     validate_interface_cause(cause)?;
-                    // The sessions working on a mentioning file are told
-                    // too, decided here so that replay gives the same set.
-                    for peer in
-                        concerned_sessions(state, &check.workspace_id, &cause.dependents, now_ms)
-                    {
+                    // The sessions working on any mentioning file are told
+                    // too, not only those on the files the notice shows,
+                    // decided here so that replay gives the same set.
+                    let mut paths = cause.dependents.clone();
+                    paths.extend(report.dependent_paths.iter().cloned());
+                    for peer in concerned_sessions(state, &check.workspace_id, &paths, now_ms) {
                         if session_ids.len() >= MAX_CHECK_REPORT_SESSIONS {
                             break;
                         }
@@ -8268,6 +8281,26 @@ fn validate_check_command(name: &str, argv: &[String], timeout_s: u32) -> Result
             "invalid_limit",
             &format!("An automatic check's time limit is 1 to {MAX_AUTO_CHECK_TIMEOUT_S} seconds"),
         ));
+    }
+    Ok(())
+}
+
+/// A report's mentioning files come only with an interface change, are
+/// valid paths and number at most [`MAX_REPORT_DEPENDENT_PATHS`].
+fn validate_dependent_paths(report: &CheckReport) -> Result<(), CoreError> {
+    if report.dependent_paths.is_empty() {
+        return Ok(());
+    }
+    if report.interface.is_none() || report.dependent_paths.len() > MAX_REPORT_DEPENDENT_PATHS {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A check report names mentioning files only for an interface change, at most {MAX_REPORT_DEPENDENT_PATHS}"
+            ),
+        ));
+    }
+    for path in &report.dependent_paths {
+        validate_relative_path(path)?;
     }
     Ok(())
 }
