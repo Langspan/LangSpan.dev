@@ -1261,7 +1261,9 @@ fn a_registered_root_relinked_to_another_registered_clone_admits_nothing() {
             "{session}: {refused}"
         );
         assert!(
-            refused.to_string().contains("another registered workspace's root"),
+            refused
+                .to_string()
+                .contains("another registered workspace's root"),
             "{session}: {refused}"
         );
     }
@@ -1304,7 +1306,9 @@ fn a_commit_made_while_the_checkout_moved_behind_a_link_is_observed() {
     assert!(home.status()["scan_failures"].get("app").is_none());
     let changes = home.json(&["changes", "app", "--after", "0", "--limit", "1000"]);
     assert!(
-        changes["outcome"]["events"].to_string().contains("src/a.rs"),
+        changes["outcome"]["events"]
+            .to_string()
+            .contains("src/a.rs"),
         "{changes}"
     );
 }
