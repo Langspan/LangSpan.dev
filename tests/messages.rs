@@ -379,6 +379,59 @@ fn the_command_a_cut_line_names_runs_for_an_id_beginning_with_a_hyphen() {
     );
 }
 
+/// `messages show` reads the message from its `message_sent` event; once it
+/// is withdrawn the answer says so, also across a restart, while a message
+/// never withdrawn still answers `retracted: false`.
+#[test]
+fn a_shown_message_says_when_it_was_withdrawn() {
+    let mut f = Fixture::new();
+    f.start_session("claude-code", ALICE);
+    let alice = format!("claude-code.{ALICE}");
+    for id in ["m-kept", "m-gone"] {
+        f.send(&[
+            "message",
+            "work",
+            "hello",
+            "--to",
+            &alice,
+            "--request-id",
+            id,
+        ]);
+    }
+    f.send(&[
+        "messages",
+        "retract",
+        "work",
+        "m-gone",
+        "--request-id",
+        "r-1",
+    ]);
+    let show = |id: &str| {
+        let (code, shown) = f.cli(&["messages", "show", "work", id, "--json"]);
+        assert_eq!(code, 0, "{shown}");
+        serde_json::from_str::<Value>(&shown).unwrap()["outcome"]["message"]["retracted"].clone()
+    };
+    assert_eq!(show("m-gone"), json!(true));
+    assert_eq!(show("m-kept"), json!(false));
+    let (code, human) = f.cli(&["messages", "show", "work", "m-gone"]);
+    assert_eq!(code, 0, "{human}");
+    assert!(human.contains("withdrawn"), "{human}");
+    let (code, human) = f.cli(&["messages", "show", "work", "m-kept"]);
+    assert_eq!(code, 0, "{human}");
+    assert!(!human.contains("withdrawn"), "{human}");
+
+    // The answer outlives a restart: it is read from the event log.
+    if let Some(mut child) = f.child.take() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    f.start();
+    let (code, shown) = f.cli(&["messages", "show", "work", "m-gone", "--json"]);
+    assert_eq!(code, 0, "{shown}");
+    let shown: Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(shown["outcome"]["message"]["retracted"], json!(true));
+}
+
 /// Retention (roadmap J7) deletes the oldest events. Once a message's
 /// `message_sent` event is among them, `messages show` says the full text is
 /// no longer kept instead of claiming the message was never sent. The test
@@ -603,4 +656,180 @@ fn a_headless_session_takes_a_handoff_written_by_a_headless_session() {
         true,
     );
     assert!(mentions(&next, "Step one done"), "{:?}", next.context);
+}
+
+#[test]
+fn a_withdrawn_message_stops_spreading_and_its_claude_code_reader_is_told_to_disregard_it() {
+    let f = Fixture::new();
+    f.start_session("claude-code", ALICE);
+    f.start_session("codex", BOB);
+    f.start_session("codex", CAROL);
+    let (alice, bob, carol) = (
+        format!("claude-code.{ALICE}"),
+        format!("codex.{BOB}"),
+        format!("codex.{CAROL}"),
+    );
+    f.send(&[
+        "message",
+        "work",
+        "do not touch b.txt, I am migrating it",
+        "--from",
+        &bob,
+        "--request-id",
+        "m-9",
+    ]);
+    assert!(mentions(
+        &f.prompt("claude-code", ALICE),
+        "I am migrating it"
+    ));
+
+    let retract = [
+        "messages",
+        "retract",
+        "work",
+        "last",
+        "--from",
+        &bob,
+        "--request-id",
+        "r-1",
+        "--json",
+    ];
+    let first: Value = serde_json::from_str(&f.send(&retract)).unwrap();
+    assert_eq!(
+        first["outcome"],
+        json!({"type": "message_retracted", "message_id": "m-9",
+               "withdrawn_unread": [carol], "told_to_disregard": [alice]}),
+        "{first}"
+    );
+    let again: Value = serde_json::from_str(&f.send(&retract)).unwrap();
+    assert_eq!(
+        again["outcome"], first["outcome"],
+        "a retry returns the first result"
+    );
+    assert_eq!(again["replayed"], true);
+
+    let told = f.prompt("claude-code", ALICE);
+    assert!(
+        mentions(
+            &told,
+            &format!(
+                r#"- Session {bob} withdrew its message "do not touch b.txt, I am migrating it": disregard it."#
+            )
+        ),
+        "{:?}",
+        told.context
+    );
+    assert!(
+        !mentions(&f.prompt("claude-code", ALICE), "withdrew"),
+        "told once"
+    );
+    let carol_prompt = f.prompt("codex", CAROL);
+    assert!(
+        !mentions(&carol_prompt, "migrating"),
+        "never delivered to a session that had not received it: {:?}",
+        carol_prompt.context
+    );
+
+    let (_, recap) = f.cli(&["recap", "work", "--json"]);
+    let recap: Value = serde_json::from_str(&recap).unwrap();
+    let messages = recap["outcome"]["recap"]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1, "{recap}");
+    assert_eq!(messages[0]["message_id"], "m-9");
+    assert_eq!(messages[0]["retracted"], true);
+    let (_, recap) = f.cli(&["recap", "work"]);
+    assert!(recap.contains("Withdrawn message m-9"), "{recap}");
+
+    // Only its sender, or the owner, may withdraw a message.
+    f.send(&[
+        "message",
+        "work",
+        "rebasing",
+        "--from",
+        &bob,
+        "--request-id",
+        "m-10",
+    ]);
+    let (code, text) = f.cli(&[
+        "messages",
+        "retract",
+        "work",
+        "m-10",
+        "--from",
+        &alice,
+        "--request-id",
+        "r-2",
+    ]);
+    assert_eq!(code, 1);
+    assert!(text.contains("not_sender"), "{text}");
+    let (code, text) = f.cli(&[
+        "messages",
+        "retract",
+        "work",
+        "m-404",
+        "--request-id",
+        "r-3",
+    ]);
+    assert_eq!(code, 1);
+    assert!(text.contains("unknown_message"), "{text}");
+    let owner = f.send(&["messages", "retract", "work", "m-10", "--request-id", "r-4"]);
+    assert!(owner.starts_with("Withdrew m-10."), "{owner}");
+}
+
+#[test]
+fn a_withdrawn_handoff_is_not_taken_by_the_next_session() {
+    let f = Fixture::new();
+    f.start_session("claude-code", ALICE);
+    let alice = format!("claude-code.{ALICE}");
+    f.send(&[
+        "handoff",
+        &alice,
+        "Migration half done in a.txt",
+        "--request-id",
+        "h1",
+    ]);
+    f.send(&[
+        "messages",
+        "retract",
+        "work",
+        "h1",
+        "--from",
+        &alice,
+        "--request-id",
+        "r1",
+    ]);
+    let bob = f.start_session("codex", BOB);
+    assert!(!mentions(&bob, "Migration half done"), "{:?}", bob.context);
+    assert!(!mentions(&f.prompt("codex", BOB), "Migration half done"));
+}
+
+#[test]
+fn a_codex_session_that_received_a_withdrawn_message_is_told_at_its_next_prompt() {
+    let f = Fixture::new();
+    f.start_session("codex", BOB);
+    let bob = format!("codex.{BOB}");
+    f.send(&[
+        "message",
+        "work",
+        "freeze a.txt",
+        "--to",
+        &bob,
+        "--request-id",
+        "m1",
+    ]);
+    assert!(mentions(&f.prompt("codex", BOB), "freeze a.txt"));
+    let out = f.send(&["messages", "retract", "work", "last", "--request-id", "r1"]);
+    assert!(
+        out.contains(&format!("disregard it at their next briefing: {bob}.")),
+        "{out}"
+    );
+    let told = f.prompt("codex", BOB);
+    assert!(
+        mentions(
+            &told,
+            r#"- The owner withdrew the message "freeze a.txt": disregard it."#
+        ),
+        "{:?}",
+        told.context
+    );
+    assert!(!mentions(&f.prompt("codex", BOB), "withdrew"), "once");
 }

@@ -668,6 +668,18 @@ impl Store {
                 after,
                 limit,
             } => self.changes(workspace_id, *after, *limit)?,
+            // A hook run inside the interval writes nothing, not even a
+            // receipt, so a burst of them costs no storage (roadmap J12).
+            Command::SessionSeen { .. } => {
+                let decision = decide(&self.state, prepared, request_id, now_ms);
+                if !decision.events.is_empty() {
+                    self.commit(
+                        &decision.events,
+                        Some((request_id, original, &decision.outcome)),
+                    )?;
+                }
+                decision.outcome
+            }
             _ => {
                 let decision = decide(&self.state, prepared, request_id, now_ms);
                 self.commit(
@@ -1048,7 +1060,8 @@ impl Store {
 
     /// One message as it was sent, read from its `message_sent` event, so
     /// it is there after every recipient has acknowledged it and the
-    /// projection has dropped it. Read-only and never recorded. Messages
+    /// projection has dropped it, and marked retracted when a later
+    /// `message_retracted` event withdrew it. Read-only and never recorded. Messages
     /// are rare, so the scan reads few rows past the cheap prefix test; a
     /// sent message is at most 400 bytes of text and 8 paths, so the answer
     /// fits a frame.
@@ -1067,10 +1080,10 @@ impl Store {
                 message: error.message,
             });
         }
-        let stored: Option<String> = self
+        let stored: Option<(i64, String)> = self
             .connection
             .query_row(
-                r#"SELECT event_json FROM events
+                r#"SELECT seq, event_json FROM events
                  WHERE event_json LIKE '{"type":"message_sent",%'
                    AND json_valid(event_json)
                    AND json_extract(event_json, '$.type') = 'message_sent'
@@ -1078,10 +1091,10 @@ impl Store {
                    AND json_extract(event_json, '$.message.message_id') = ?2
                  ORDER BY seq DESC LIMIT 1"#,
                 params![workspace_id, message_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some(stored) = stored else {
+        let Some((sent_seq, stored)) = stored else {
             // Retention deletes the oldest events. Once any were deleted, an
             // ID not found may be a message whose event went with them, and
             // the log cannot tell that from one never sent: say so plainly.
@@ -1100,9 +1113,21 @@ impl Store {
                 ),
             });
         };
-        let Event::MessageSent { message } = serde_json::from_str(&stored)? else {
+        let Event::MessageSent { mut message } = serde_json::from_str(&stored)? else {
             return Err("a message_sent row holds another event".into());
         };
+        // A withdrawal is its own later event; the sent one never changes.
+        message.retracted = self.connection.query_row(
+            r#"SELECT EXISTS (SELECT 1 FROM events
+                 WHERE seq > ?1
+                   AND event_json LIKE '{"type":"message_retracted",%'
+                   AND json_valid(event_json)
+                   AND json_extract(event_json, '$.type') = 'message_retracted'
+                   AND json_extract(event_json, '$.workspace_id') = ?2
+                   AND json_extract(event_json, '$.message_id') = ?3)"#,
+            params![sent_seq, workspace_id, message_id],
+            |row| row.get(0),
+        )?;
         Ok(Outcome::MessageShown {
             message: message.into(),
         })

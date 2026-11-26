@@ -52,8 +52,8 @@ unchanged. `ShowMessage` (`langspan messages show`, MCP
 `message_sent` event with that ID in that workspace, so it works after
 acknowledgement, after the cap drops the message from state, and across
 restarts; it is never recorded and acknowledges nothing. It returns the ID,
-sender, recipient, text, paths and `retracted`, always false until a message
-can be retracted (roadmap E11). An unknown ID is `unknown_message`;
+sender, recipient, text, paths and `retracted`, true when a later
+`message_retracted` event (roadmap E11) withdrew it. An unknown ID is `unknown_message`;
 once retention (roadmap J7) has deleted the oldest events, it is
 `message_not_kept`, naming the first kept sequence and saying a message sent
 before it no longer has its full text. It reads
@@ -116,6 +116,35 @@ SESSION MESSAGE`, and pending messages in `langspan recap`. MCP tools
 `langspan_send_message` (the caller's `session_id` is the sender) and
 `langspan_handoff`, both mutations with a caller `request_id`. Wire protocol stays version 3: the new commands, events and the optional
 field are additions, with golden vectors in `fixtures/`.
+
+**Withdrawal** (25 November 2026, [issue #66](https://github.com/Langspan/LangSpan.dev/issues/66)).
+`RetractMessage` (`langspan messages retract WORKSPACE MESSAGE|last [--from
+SESSION]`, MCP `langspan_retract_message`) names a message by ID, or with no ID
+the newest message its sender sent. The sender may withdraw its own; the owner,
+without a session, may withdraw any; anyone else is refused with `not_sender`.
+An unknown message, one the 64-message cap dropped, and one already withdrawn
+are refused. `decide` emits one `MessageRetracted` event: applying it removes
+the message from those held, so no session that had not received it will, and a
+handoff not yet taken is not taken. To know who had received it, the state keeps
+a derived history of the latest 64 messages sent per workspace, each with every
+session that acknowledged it (a message to one session leaves the held list once
+acknowledged, so the held list alone cannot say). Each such reader is owed a
+`RetractedMessage` with the first 120 bytes of the text, delivered once in the
+`retracted` field of its next briefing, start, prompt or mid-turn, and used up
+by a `RetractionDelivered` event in the same decision, like a message. The core
+selects withdrawals first, inside the same 1,500-byte message budget. The hook
+renders each under the messages heading as `- Session S withdrew its message
+"..." (first 120 bytes): disregard it.` The result names the sessions still
+owed it (`withdrawn_unread`: the recipient, or for everyone the current
+sessions not yet reached; none for a handoff) and the readers
+(`told_to_disregard`). `last` reads only that history, so it never reaches
+past a newer message that left it; an older message still held is withdrawn by
+its ID, and is then not listed as withdrawn. The recap and the dashboard list
+withdrawn messages from the history with `retracted: true`; `status --all` reads the history and the
+withdrawals still owed. `MessageSent` is never rewritten. Wire protocol stays
+version 3; the command, outcome, events and optional fields are additions with
+golden vectors in `fixtures/`. The sender is named with `--from` as for
+`message`: it is not recorded from the running session.
 
 ## Consequences and limits
 
