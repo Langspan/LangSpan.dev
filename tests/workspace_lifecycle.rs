@@ -856,6 +856,19 @@ fn a_checkout_replaced_by_a_link_to_its_new_place_is_still_the_same_checkout() {
     ]);
     assert_eq!(home.workspaces().len(), 1, "no second workspace");
     home.ok(&["remember", "app", NOTE, "--request-id", "note"]);
+    // A session there is admitted through the link.
+    home.ok(&["session", "start", "s1", "app", "--request-id", "s1"]);
+    home.ok(&[
+        "admit",
+        "s1",
+        "src/a.rs",
+        "--ttl-ms",
+        "1",
+        "--request-id",
+        "admit",
+    ]);
+    // Let the one-millisecond admission lapse before the move.
+    std::thread::sleep(Duration::from_millis(200));
 
     // Moving to the link's target needs no --switch and records it.
     home.ok(&[
@@ -978,6 +991,17 @@ fn a_link_to_another_repository_at_the_registered_root_is_an_identity_change() {
         assert!(Instant::now() < deadline, "no identity change: {failure}");
         std::thread::sleep(Duration::from_millis(50));
     }
+    // Nor is a session there admitted through the link.
+    home.ok(&["session", "start", "s1", "app", "--request-id", "s1"]);
+    let refused = home.json(&["admit", "s1", "src/a.rs", "--request-id", "admit"]);
+    assert_eq!(refused["outcome"]["type"], "error", "{refused}");
+    assert!(
+        refused["outcome"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("identity changed"),
+        "{refused}"
+    );
     let changes = home.json(&["changes", "app", "--after", "0", "--limit", "1"]);
     assert_ne!(
         changes["outcome"]["scan"]["head_oid"],

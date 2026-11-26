@@ -2180,11 +2180,11 @@ mod unix {
                 // directory it now leads to.
                 let link = match fs::canonicalize(old) {
                     Ok(target) if target != old => format!(
-                        ", through a symbolic link, as {}, a different directory from NEW_ROOT",
+                        ": it is reached through a symbolic link and resolves to {}, not to NEW_ROOT",
                         target.display()
                     ),
                     Err(_) if old.is_symlink() => {
-                        ", as a symbolic link whose target cannot be resolved".into()
+                        ": it is a symbolic link whose target cannot be resolved".into()
                     }
                     _ => String::new(),
                 };
@@ -2492,14 +2492,22 @@ mod unix {
             return Err("session workspace is missing".into());
         };
         let root = Path::new(&workspace.root);
+        // A root reached through a link is the checkout the link leads to,
+        // unless the scan found that to be another repository.
         let current_root = fs::canonicalize(root)?;
-        if current_root != root && !crate::observer::same_root(root, &current_root) {
+        if current_root != root
+            && state
+                .scan_failures
+                .get(&session.workspace_id)
+                .is_some_and(|failure| failure.detail == crate::store::IDENTITY_CHANGED)
+        {
             return Err("workspace root identity changed; use a new workspace registration".into());
         }
         let mut keys = paths
             .iter()
             .map(|path| -> Result<String, crate::Error> {
-                let key = file_key(root, path)?;
+                // Resolved paths are compared with the resolved root.
+                let key = file_key(&current_root, path)?;
                 let full = root.join(&key);
                 if state.workspaces.values().any(|workspace| {
                     let descendant = Path::new(&workspace.root);

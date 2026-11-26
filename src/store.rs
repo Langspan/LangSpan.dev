@@ -14,6 +14,11 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 use std::time::Duration;
 
+/// The scan failure recorded when a workspace's root or Git directory now
+/// names another checkout. Admission reads it back from the state.
+pub const IDENTITY_CHANGED: &str =
+    "Git identity changed since the previous scan; register the replacement as a new workspace";
+
 /// The wall clock in Unix milliseconds; 0 if it reads before the epoch.
 pub fn wall_now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -388,7 +393,7 @@ impl Store {
                     .unwrap_or(false)
                 }))
         }) {
-            return Err("Git identity changed since the previous scan; register the replacement as a new workspace".into());
+            return Err(IDENTITY_CHANGED.into());
         }
         let changes = crate::observer::diff(&previous, snapshot);
         let sequence: i64 =
