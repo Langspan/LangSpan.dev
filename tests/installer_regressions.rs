@@ -431,6 +431,7 @@ mod filesystem {
             (install::Vendor::Codex, "codex"),
         ] {
             let output = std::process::Command::new("/bin/sh")
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["-c", &registration.command_for(vendor)])
                 .output()
                 .unwrap();

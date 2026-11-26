@@ -90,6 +90,7 @@ impl Fixture {
     fn start(&mut self) {
         self.child = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -120,6 +121,7 @@ impl Fixture {
     }
     fn run(&self, vendor: &str, anchor: &Path, extra: &[&str], event: &Value) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", vendor, "--state-dir"])
             .arg(self.state_dir())
             .args(["--workspace"])
@@ -700,6 +702,7 @@ fn install_hooks(f: &Fixture, vendor: &str, root: &Path) {
 /// `install_hooks`, with `extra` options (such as an opt-out) for the hook.
 fn install_hooks_with(f: &Fixture, vendor: &str, root: &Path, extra: &[&str]) {
     let installed = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["hooks", "install", vendor, "--workspace"])
         .arg(root.file_name().unwrap())
         .arg("--root")
@@ -904,6 +907,7 @@ fn an_unconfirmed_host_decides_in_a_worktree_with_its_own_install_rather_than_st
 /// What `doctor --root root` says that names `tree`: (ok, detail) pairs.
 fn doctor_about(f: &Fixture, root: &Path, tree: &Path) -> Vec<(bool, String)> {
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["doctor", "--json", "--state-dir"])
         .arg(f.state_dir())
         .arg("--home")
@@ -1055,6 +1059,7 @@ fn a_worktree_installs_prompt_opt_outs_hold_when_the_main_checkouts_hook_decides
         f.start();
         let events = || {
             let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .arg("--state-dir")
                 .arg(f.state_dir())
                 .args(["events", "--limit", "1000", "--json"])
@@ -1130,6 +1135,7 @@ fn presence_repository(f: &Fixture) {
 /// What `langspan` prints for `args` against the fixture's coordinator.
 fn cli(f: &Fixture, args: &[&str]) -> String {
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .arg("--state-dir")
         .arg(f.state_dir())
         .args(args)
