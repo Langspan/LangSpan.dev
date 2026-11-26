@@ -12,7 +12,11 @@ The daemon stores canonical workspace locations, logical session IDs, user-suppl
 intent summaries, file keys, typed operation digests, grant/denial receipts,
 process-incarnation observations, disk/branch observations and event history.
 SQLite and its sidecars live in an owner-only state directory. A different state
-directory remains an independent coordination domain.
+directory remains an independent coordination domain. A running daemon stops,
+logging why, once its state directory is opened to others, removed or replaced
+by another folder at the same path, so it never keeps answering for a folder
+that is no longer the private one it opened. The check runs once a second: a
+change is served for at most that long.
 
 M3 expands the read boundary. The Git observer reads bounded repository metadata
 and file contents to compute digests, including symlink target text without

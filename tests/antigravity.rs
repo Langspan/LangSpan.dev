@@ -154,15 +154,17 @@ impl Fixture {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
+        // Owned before anything can panic, so `Drop` stops it (issue #239).
+        let fixture = Self {
+            base,
+            child: Some(child),
+        };
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !base.join("state/daemon.sock").exists() {
+        while !fixture.base.join("state/daemon.sock").exists() {
             assert!(Instant::now() < deadline, "daemon did not become ready");
             std::thread::sleep(Duration::from_millis(10));
         }
-        Self {
-            base,
-            child: Some(child),
-        }
+        fixture
     }
 
     fn root(&self) -> PathBuf {
@@ -605,6 +607,9 @@ fn project_install_round_trips_hooks_mcp_and_rule_keeping_the_owners_bytes() {
     let mut child = Process::new("sh")
         .arg("-c")
         .arg(command)
+        // No coordinator runs for `state`, and the hook must not start one
+        // that nothing here would stop (issue #239).
+        .env("LANGSPAN_AUTOSTART", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

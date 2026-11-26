@@ -781,7 +781,7 @@ fn local_coordination_keeps_working_while_a_credential_helper_hangs_the_remote()
         .parse()
         .unwrap();
     assert!(
-        support::alive(pid),
+        support::running(pid),
         "the helper is still hanging the remote pass"
     );
     let _ = rustix::process::kill_process(
