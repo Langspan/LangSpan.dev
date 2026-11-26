@@ -67,8 +67,10 @@ nothing is held or refused through the text.
   block. Its text is `src/guidance.md`, compiled in, at most 1,500 bytes with
   its markers. It says that LangSpan coordinates the repository; to register
   the workspace and a session when no hook did; to call `langspan_brief` and
-  `langspan_intent_set` before starting, `langspan_admit` before an edit and
-  `langspan_complete` after it; in a shared checkout, to commit with
+  `langspan_intent_set` before starting; without hooks, to call
+  `langspan_admit` before an edit and `langspan_complete` after it, and with
+  hooks to edit as usual, because a manual lease would hold the session's own
+  hooked edit (a test drives the real hook to that refusal); in a shared checkout, to commit with
   `langspan_commit_mine` when LangSpan's hooks run, and otherwise with
   `git commit -m "..." -- PATH...` naming only files that hold nothing but
   the session's own changes, because only hooks fill the write journal that

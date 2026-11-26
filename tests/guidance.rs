@@ -442,3 +442,124 @@ async fn the_blocks_commit_advice_for_a_session_without_hooks_is_what_works_for_
     assert_eq!(git_in(&work, &["log", "--format=%s"]), "Mine\nstart\n");
     assert_eq!(git_in(&work, &["status", "--porcelain=v1"]), "");
 }
+
+/// One Claude Code hook event, through the real hook executable; its
+/// permission decision, if it gave one.
+#[cfg(unix)]
+fn claude_hook(state: &Path, work: &Path, event: &serde_json::Value) -> Option<String> {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .args(["hook", "claude-code", "--state-dir"])
+        .arg(state)
+        .args(["--workspace", "work", "--root"])
+        .arg(work)
+        .env_remove("CLAUDE_CODE_SESSION_ATTENDED")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(event.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let reply: Option<serde_json::Value> = serde_json::from_slice(&output.stdout).ok();
+    reply.and_then(|reply| {
+        let output = &reply["hookSpecificOutput"];
+        Some(format!(
+            "{}: {}",
+            output["permissionDecision"].as_str()?,
+            output["permissionDecisionReason"].as_str().unwrap_or("")
+        ))
+    })
+}
+
+/// A session whose hooks are active and that also calls `langspan_admit`,
+/// as the block's admission bullet once told every session to, holds a
+/// manual lease that its own hooked edit then conflicts with: the pre-tool
+/// hook refuses the edit. So the block tells only sessions without hooks to
+/// admit and complete by hand.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_blocks_admission_advice_is_only_for_sessions_without_hooks() {
+    use rmcp::{ServiceExt, transport::TokioChildProcess};
+    use serde_json::json;
+    use std::{
+        os::unix::fs::PermissionsExt,
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+
+    let repo = Repo(std::env::temp_dir().join(format!("ls-gh-{}", std::process::id())));
+    std::fs::create_dir(&repo.0).unwrap();
+    let base = std::fs::canonicalize(&repo.0).unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let work = base.join("work");
+    let state = base.join("state");
+    std::fs::create_dir(&work).unwrap();
+    std::fs::write(work.join("a.txt"), "alpha\n").unwrap();
+    git_in(&work, &["init", "-q"]);
+
+    let _daemon = Daemon(
+        Command::new(env!("CARGO_BIN_EXE_langspan"))
+            .args(["daemon", "--state-dir"])
+            .arg(&state)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::os::unix::net::UnixStream::connect(state.join("daemon.sock")).is_err() {
+        assert!(Instant::now() < deadline, "daemon did not become ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // The hooks register the session when it first reads the file.
+    let host = "00000000-0000-4000-8000-0000000000a7";
+    let file = work.join("a.txt");
+    let read = json!({
+        "session_id": host, "cwd": work, "hook_event_name": "PostToolUse",
+        "tool_name": "Read", "tool_use_id": "read-1", "tool_input": {"file_path": file},
+    });
+    claude_hook(&state, &work, &read);
+
+    // The session then admits the file by hand.
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.arg("mcp").arg("--state-dir").arg(&state);
+    let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+    call_tool(
+        &client,
+        "langspan_admit",
+        json!({"request_id": "manual", "session_id": format!("claude-code.{host}"),
+               "paths": ["a.txt"], "ttl_ms": 60000}),
+    )
+    .await;
+    client.cancel().await.unwrap();
+
+    // Its own hooked edit is refused on that manual lease.
+    let edit = json!({
+        "session_id": host, "cwd": work, "hook_event_name": "PreToolUse",
+        "tool_name": "Edit", "tool_use_id": "edit-1",
+        "tool_input": {"file_path": file, "old_string": "alpha", "new_string": "beta"},
+    });
+    let refused = claude_hook(&state, &work, &edit).unwrap_or_default();
+    assert!(refused.starts_with("deny: "), "{refused}");
+    let own = format!("held by session claude-code.{host} (admission manual)");
+    assert!(refused.contains(&own), "{refused}");
+
+    // So only the bullet for sessions without hooks names the manual
+    // admission, and a hooked session is told to leave it to the hooks.
+    let block = printed_block();
+    let admit = bullet(&block, "Without LangSpan's hooks");
+    assert!(admit.contains("`langspan_admit`"), "{admit}");
+    assert!(admit.contains("`langspan_complete`"), "{admit}");
+    assert!(admit.contains("With hooks, edit as usual"), "{admit}");
+    let rest = block.replacen(&admit, "", 1);
+    assert!(!rest.contains("langspan_admit"), "{block}");
+    assert!(!rest.contains("langspan_complete"), "{block}");
+}
