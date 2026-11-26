@@ -135,6 +135,7 @@ input.control { min-width: 0; width: 190px; }
 .panel-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
 .filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .filters label { font-size: 12px; color: var(--text-muted); }
+.filter { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; }
 .panel-foot { padding: 10px 16px 12px; font-size: 12px; color: var(--text-muted); border-top: 1px solid var(--rule); }
 .panel-foot p + p { margin-top: 4px; }
 .empty { padding: 22px 16px; color: var(--text-muted); font-size: 13px; }
@@ -166,6 +167,10 @@ input.control { min-width: 0; width: 190px; }
 .group-row th { background: var(--panel); padding: 0; }
 .group-button { position: sticky; left: 0; display: flex; align-items: center; gap: 8px; min-height: 36px;
   padding: 6px 12px; font-size: 12px; color: var(--text-muted); max-width: min(100vw - 80px, 900px); }
+/* On a narrow screen the header's parts wrap whole instead of squeezing. */
+.group-button { flex-wrap: wrap; row-gap: 2px; }
+.group-button > * { flex: none; white-space: nowrap; }
+.group-button > .mono { flex: 0 1 auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .group-button strong { color: var(--text); font-weight: 650; }
 .group-button .icon { width: 14px; height: 14px; }
 .session { display: flex; align-items: flex-start; gap: 9px; width: 100%; min-height: 54px; padding: 8px 12px; }
@@ -181,6 +186,7 @@ input.control { min-width: 0; width: 190px; }
 .session-task { display: block; font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
 .state { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; margin-top: 2px; }
+.state .mono { font-size: 11px; font-weight: 400; white-space: nowrap; }
 .state-editing { color: var(--accent-text); } .state-active, .state-published { color: var(--good); }
 .state-idle, .state-unheard, .state-earlier_run { color: var(--text-muted); }
 .state-ended, .state-exited { color: var(--warn); }
@@ -198,7 +204,7 @@ input.control { min-width: 0; width: 190px; }
 .mark-notice { color: var(--warn); }
 .mark-published { color: var(--peer); }
 .mark-recent { color: var(--text-muted); font-weight: 500; }
-.mark-extra { font-size: 10px; color: var(--text-muted); font-weight: 600; margin-left: 2px; }
+.mark-extra { font-size: 11px; color: var(--text-muted); font-weight: 600; margin-left: 2px; }
 /* A mark that the coordinator newly reports rings once; nothing else moves. */
 .is-new { animation: ls-arrive 600ms var(--action-ease); }
 @keyframes ls-arrive { from { box-shadow: 0 0 0 3px var(--coral); } to { box-shadow: 0 0 0 0 transparent; } }
@@ -344,18 +350,18 @@ details.explain dl { margin-top: 10px; }
       <div class="panel-head">
         <div class="panel-title" id="scope-title-icon"><div><h2 id="scope-heading">Traffic scope</h2><p class="panel-sub" id="scope-sub"></p></div></div>
         <div class="filters">
-          <label for="path-view">Paths</label>
+          <span class="filter"><label for="path-view">Paths</label>
           <select class="control" id="path-view">
             <option value="signals">Coordination signals</option>
             <option value="all">All observed paths</option>
-          </select>
-          <label for="session-view">Sessions</label>
+          </select></span>
+          <span class="filter"><label for="session-view">Sessions</label>
           <select class="control" id="session-view">
             <option value="current">Current</option>
             <option value="all">All listed</option>
             <option value="local">This machine</option>
             <option value="peer">Teammates</option>
-          </select>
+          </select></span>
           <label class="sr-only" for="path-text">Filter paths</label>
           <input class="control" id="path-text" type="search" placeholder="Filter paths" autocomplete="off" spellcheck="false">
         </div>
@@ -501,7 +507,8 @@ function sessionLabel(row, rows) {
   const id = str(row.session_id);
   const parent = rows.filter((other) => other !== row && other.local && other.session_id && id.startsWith(str(other.session_id) + '.'))
     .sort((a, b) => str(b.session_id).length - str(a.session_id).length)[0];
-  if (parent) label += ' subagent ' + id.slice(str(parent.session_id).length + 1).slice(0, 8);
+  row.subagent = parent ? id.slice(str(parent.session_id).length + 1).slice(0, 8) : '';
+  if (parent) label += ' subagent ' + row.subagent;
   return label;
 }
 
@@ -786,9 +793,11 @@ function renderScope(d) {
     const [dir, file] = splitPath(col.path);
     const isSelected = selected && selected.kind === 'path' && selected.key === col.key;
     const head = button('path-head' + (col.overlap ? ' has-shared' : '') + (isSelected ? ' is-selected' : ''), 'path', col.key,
-      el('span', 'path-dir', dir || ' '), el('span', 'path-file', file), el('span', 'path-signal', signalText(col)));
+      el('span', 'sr-only', 'Inspect '), el('span', 'path-dir', dir ||' '), el('span', 'path-file', file),
+      el('span', 'sr-only', ': '), el('span', 'path-signal', signalText(col)));
+    // The accessible name is the visible text plus hidden words, never an
+    // aria-label that replaces it (WCAG 2.5.3, label in name).
     head.title = col.path;
-    head.setAttribute('aria-label', 'Inspect ' + col.path + ': ' + signalText(col));
     if (isSelected) head.setAttribute('aria-current', 'true');
     const th = add(el('th', 'col-path'), head);
     th.scope = 'col';
@@ -822,14 +831,17 @@ function renderScope(d) {
         const tr = el('tr');
         const isSelected = selected && selected.kind === 'session' && selected.key === row.key;
         const state = str(row.state).replace(/_/g, ' ');
+        const avatar = el('span', 'avatar' + (row.local ? '' : ' is-peer'), initials(row.host));
+        avatar.setAttribute('aria-hidden', 'true');
         const sessionButton = button('session' + (isSelected ? ' is-selected' : ''), 'session', row.key,
-          el('span', 'avatar' + (row.local ? '' : ' is-peer'), initials(row.host)),
+          el('span', 'sr-only', 'Inspect session '), avatar,
           add(el('span', 'session-text'),
+            // A subagent shares its parent's short session name; say which.
             add(el('span', 'session-name'), hostName(row.host) + ' ', el('span', 'mono', str(row.session))),
             el('span', 'session-task', row.task || row.intent || (row.local ? 'Task not recorded' : 'Task not shared')),
-            add(el('span', 'state state-' + str(row.state)), el('span', 'status-dot'), state || 'unknown')));
+            add(el('span', 'state state-' + str(row.state)), el('span', 'status-dot'), state || 'unknown',
+              row.subagent ? el('span', 'mono muted', ' · subagent ' + row.subagent) : null)));
         sessionButton.title = row.label;
-        sessionButton.setAttribute('aria-label', 'Inspect session ' + row.label + ', ' + state);
         if (isSelected) sessionButton.setAttribute('aria-current', 'true');
         const th2 = add(el('th', 'col-session'), sessionButton);
         th2.scope = 'row';
@@ -841,10 +853,12 @@ function renderScope(d) {
           if (found.length) {
             const [kind, iconName, text] = found[0];
             const mark = add(el('span', 'mark mark-' + kind), icon(iconName), text);
-            const cell = button('cell-button', 'path', col.key, mark,
-              found.length > 1 ? el('span', 'mark-extra', '+' + (found.length - 1)) : null);
+            const extra = found.length > 1 ? el('span', 'mark-extra', '+' + (found.length - 1)) : null;
+            if (extra) extra.setAttribute('aria-hidden', 'true');
+            const cell = button('cell-button', 'path', col.key, mark, extra,
+              el('span', 'sr-only', (found.length > 1 ? ', ' + found.slice(1).map((m) => m[2]).join(', ') : '')
+                + ': ' + row.label + ', ' + col.path));
             cell.dataset.focus = 'cell\u0000' + row.key + '\u0000' + col.key;
-            cell.setAttribute('aria-label', row.label + ', ' + col.path + ': ' + found.map((m) => m[2]).join(', '));
             cell.title = found.map((m) => m[2]).join(', ');
             if (ui.fresh.has(row.key + '\u0000' + col.key + '\u0000' + kind)) mark.classList.add('is-new');
             add(td, cell);
@@ -1099,7 +1113,12 @@ function renderHealth(d) {
   cards.push(add(el('div', 'health-card'), add(el('h3'), icon('peer'), 'Publication'),
     el('p', 'caveat', 'Publication failures are written to the daemon’s log, not recorded in state; a sequence that keeps rising means publications are being pushed. Teammates’ work is advisory and never refuses a local edit.')));
   byId('health').replaceChildren(...cards);
-  byId('health-sub').textContent = plural(list(d.workspaces).length, 'workspace') + ' · ' + plural(hosts.length, 'host') + ' not coordinated';
+  // Problems are counted in the summary, so a reader sees them without
+  // reading every workspace card.
+  const failedScans = list(d.workspaces).filter((w) => w.scan_failure && typeof w.scan_failure === 'object').length;
+  byId('health-sub').replaceChildren(plural(list(d.workspaces).length, 'workspace') + ' · ',
+    failedScans ? el('span', 't-bad', failedScans + ' with a failed last scan') : 'scans completing',
+    ' · ' + plural(hosts.length, 'host') + ' not coordinated');
 }
 function renderDefinitions() {
   byId('definitions').replaceChildren(...[
