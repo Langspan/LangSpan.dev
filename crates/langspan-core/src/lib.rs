@@ -816,6 +816,10 @@ fn one() -> u32 {
     1
 }
 
+fn default_path_hops() -> u32 {
+    DEFAULT_PATH_HOPS
+}
+
 fn is_one(value: &u32) -> bool {
     *value == 1
 }
@@ -1646,6 +1650,80 @@ pub struct ImpactFile {
     pub via: String,
     /// The file at the previous level (the queried file for level 1).
     pub from: String,
+}
+
+/// The most `calls` steps a `graph path` chain may have, and the number
+/// asked for when none is given (roadmap D3).
+pub const MAX_PATH_HOPS: u32 = 6;
+pub const DEFAULT_PATH_HOPS: u32 = 4;
+/// Chains one `graph path` answer lists at most.
+pub const MAX_PATHS: usize = 5;
+/// Edges one `graph path` search visits at most: one per definition a call
+/// may reach, and one per called name with no definition.
+pub const MAX_PATH_EDGES: u32 = 10_000;
+/// The deepest `graph map` area, and the areas and edges it lists at most.
+pub const MAX_MAP_DEPTH: u32 = 3;
+pub const MAX_MAP_AREAS: usize = 64;
+pub const MAX_MAP_EDGES: usize = 256;
+
+/// One step of a `graph path` chain (roadmap D3): a definition, and the
+/// call in it that the next step's definition answers to, or, for the last
+/// step, the definition alone.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PathStep {
+    pub path: String,
+    /// The call's line, or for the last step the definition's first line.
+    pub line: u32,
+    /// The definition's name.
+    pub name: String,
+    /// `calls`, or `defines` for the last step.
+    pub edge: String,
+    /// The called name, which the next step defines. Absent on the last step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callee: Option<String>,
+    /// How this step's definition was found: `name` (every function,
+    /// method or type of the name; the first step is always one) or `path`
+    /// (only those in files the calling file imports, resolved by path).
+    pub resolution: String,
+    /// The name had more than one such definition, so this step may be one
+    /// the program never takes.
+    pub ambiguous: bool,
+}
+
+/// One chain of calls from `graph path`'s first name to its second.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolPath {
+    pub steps: Vec<PathStep>,
+    /// Any step is `ambiguous`.
+    pub ambiguous: bool,
+}
+
+/// One area of a `graph map` (roadmap D3): the files whose module path
+/// starts with `path`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MapArea {
+    pub path: String,
+    pub files: u32,
+    /// Definitions visible outside their file.
+    pub exported: u32,
+    /// Indexed languages of its files, in name order.
+    pub languages: Vec<String>,
+}
+
+/// Edges of one kind from one `graph map` area to another, counted.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MapEdge {
+    pub from: String,
+    pub to: String,
+    /// `imports` (resolved by path) or `calls` (to a name with exactly one
+    /// function, method or type definition, found by name).
+    pub kind: String,
+    pub resolution: String,
+    pub count: u32,
 }
 
 /// How much of a workspace the index covers, so a short answer is not read
@@ -4272,6 +4350,24 @@ pub enum Command {
         workspace_id: String,
         limit: u32,
     },
+    /// Read-only: the shortest chains of calls from a definition named
+    /// `from` to one named `to`, at most `max_hops` calls long (1 to
+    /// `MAX_PATH_HOPS`), found by name and by import path (roadmap D3).
+    GraphPath {
+        workspace_id: String,
+        from: String,
+        to: String,
+        #[serde(default = "default_path_hops")]
+        max_hops: u32,
+    },
+    /// Read-only: the workspace's areas at `depth` (1 to `MAX_MAP_DEPTH`)
+    /// with their files, exports and languages, and the edges between them
+    /// (roadmap D3).
+    GraphMap {
+        workspace_id: String,
+        #[serde(default = "one")]
+        depth: u32,
+    },
     /// Read-only: for each name that is defined in the workspace, up to
     /// `limit` definitions and the files that mention it. Never recorded.
     GraphContext {
@@ -5132,6 +5228,18 @@ enum CommandWire {
         workspace_id: String,
         limit: u32,
     },
+    GraphPath {
+        workspace_id: String,
+        from: String,
+        to: String,
+        #[serde(default = "default_path_hops")]
+        max_hops: u32,
+    },
+    GraphMap {
+        workspace_id: String,
+        #[serde(default = "one")]
+        depth: u32,
+    },
     /// Read-only: for each name that is defined in the workspace, up to
     /// `limit` definitions and the files that mention it. Never recorded.
     GraphContext {
@@ -5785,6 +5893,31 @@ pub enum Outcome {
     /// a worktree without a complete scan contributes nothing.
     GraphInflight {
         inflight: Vec<InflightNotice>,
+        coverage: GraphCoverage,
+        truncated: bool,
+    },
+    /// The shortest chains of calls between two names (roadmap D3), at
+    /// most `MAX_PATHS`, in path and line order of their steps. Empty when
+    /// none is within the hops asked for. `edges_visited` counts what the
+    /// search read; `truncated` says a bound, the deadline or the chain
+    /// limit cut it, so a missing or longer chain may still exist.
+    GraphPath {
+        /// The query, as asked.
+        from: String,
+        to: String,
+        max_hops: u32,
+        paths: Vec<SymbolPath>,
+        edges_visited: u32,
+        coverage: GraphCoverage,
+        truncated: bool,
+    },
+    /// The workspace's areas and the edges between them (roadmap D3), in
+    /// area order and then by count. `truncated`: some areas or edges are
+    /// not listed.
+    GraphMap {
+        depth: u32,
+        areas: Vec<MapArea>,
+        edges: Vec<MapEdge>,
         coverage: GraphCoverage,
         truncated: bool,
     },
@@ -8523,6 +8656,8 @@ fn decide_checked(
         | Command::GraphReferences { .. }
         | Command::GraphImpact { .. }
         | Command::GraphBlindSpots { .. }
+        | Command::GraphPath { .. }
+        | Command::GraphMap { .. }
         | Command::GraphContext { .. }
         | Command::GraphInflight { .. }
         | Command::GraphExport { .. }

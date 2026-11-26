@@ -201,6 +201,8 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_symbol"
                 | "langspan_references"
                 | "langspan_impact"
+                | "langspan_path"
+                | "langspan_map"
                 | "langspan_blind_spots"
                 | "langspan_recap"
                 | "langspan_show_message"
@@ -1198,6 +1200,130 @@ async fn stdio_impact_with_depth_returns_levels_by_name() {
     .await;
     let text = serde_json::to_string(&refused.structured_content).unwrap();
     assert!(text.contains("depth must be between 1 and 3"), "{text}");
+    disconnect(client).await;
+}
+
+/// `langspan_path` and `langspan_map` through a real MCP client, daemon,
+/// indexer and Git repository (roadmap D3): the chain names each step, the
+/// import of `./store` is resolved by path, and the map counts the edge.
+#[tokio::test]
+async fn stdio_path_and_map_follow_calls_and_imports() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let workspace = directory.workspace();
+    fs::create_dir_all(workspace.join("src/api")).expect("create directory");
+    for (path, text) in [
+        (
+            "src/api/handler.ts",
+            "import { service } from \"../service\";\nexport function handler() {\n  return service();\n}\n",
+        ),
+        (
+            "src/service.ts",
+            "import { save } from \"./store\";\nexport function service() {\n  return save();\n}\n",
+        ),
+        ("src/store.ts", "export function save() {\n  return 1;\n}\n"),
+    ] {
+        fs::write(workspace.join(path), text).expect("write source");
+    }
+    for args in [
+        &["init", "--quiet", "--initial-branch=main"][..],
+        &["add", "."],
+        &["commit", "--quiet", "-m", "init"],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?}");
+    }
+    let _daemon = Daemon::start(&state_dir).await;
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"workspace-register", "workspace_id":"workspace", "root":workspace}),
+        )
+        .await,
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let outcome = loop {
+        let answer = call_tool(
+            &client,
+            "langspan_path",
+            json!({"workspace_id":"workspace", "from":"handler", "to":"save"}),
+        )
+        .await;
+        let outcome = answer.structured_content.unwrap_or_default()["outcome"].clone();
+        let coverage = &outcome["coverage"];
+        if coverage["scanned"] == true
+            && coverage["current_files"] == coverage["indexable_files"]
+            && outcome["paths"]
+                .as_array()
+                .is_some_and(|paths| !paths.is_empty())
+        {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "never found: {outcome:#}");
+        sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        outcome["paths"],
+        json!([{"ambiguous": false, "steps": [
+            {"path": "src/api/handler.ts", "line": 3, "name": "handler", "edge": "calls",
+             "callee": "service", "resolution": "name", "ambiguous": false},
+            {"path": "src/service.ts", "line": 3, "name": "service", "edge": "calls",
+             "callee": "save", "resolution": "path", "ambiguous": false},
+            {"path": "src/store.ts", "line": 1, "name": "save", "edge": "defines",
+             "resolution": "path", "ambiguous": false},
+        ]}]),
+        "{outcome:#}"
+    );
+    assert_eq!(outcome["max_hops"], 4, "the default");
+    assert_eq!(outcome["truncated"], false);
+
+    let map = response(
+        call_tool(
+            &client,
+            "langspan_map",
+            json!({"workspace_id":"workspace", "depth":1}),
+        )
+        .await,
+    );
+    let Outcome::GraphMap { areas, edges, .. } = map.outcome else {
+        panic!("{:?}", map.outcome);
+    };
+    assert!(
+        areas
+            .iter()
+            .any(|area| area.path == "src/api" && area.files == 1),
+        "{areas:?}"
+    );
+    let imports: Vec<(&str, &str, u32)> = edges
+        .iter()
+        .filter(|edge| edge.kind == "imports")
+        .map(|edge| (edge.from.as_str(), edge.to.as_str(), edge.count))
+        .collect();
+    assert_eq!(
+        imports,
+        [
+            ("src/api", "src/service", 1),
+            ("src/service", "src/store", 1)
+        ],
+        "{edges:?}"
+    );
+
+    let refused = call_tool(
+        &client,
+        "langspan_path",
+        json!({"workspace_id":"workspace", "from":"handler", "to":"save", "max_hops":7}),
+    )
+    .await;
+    let text = serde_json::to_string(&refused.structured_content).unwrap();
+    assert!(text.contains("max_hops must be between 1 and 6"), "{text}");
     disconnect(client).await;
 }
 

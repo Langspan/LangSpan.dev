@@ -102,7 +102,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 - [D1: Look up a symbol with its calls, callers, digest and notes](https://github.com/Langspan/LangSpan.dev/issues/50): a symbol lookup gives its definition but not its calls, callers, changes or notes. Built with `--detail`; a real-host run remains.
 - [D2: Show a change's blast radius level by level](https://github.com/Langspan/LangSpan.dev/issues/51): `graph impact` stops at direct dependents, hiding breaks two steps away. Built with `--depth`; a real-host run remains.
-- [D3: Typed edges, paths between symbols and a repository map](https://github.com/Langspan/LangSpan.dev/issues/52): name mentions alone cannot follow a call chain or show how modules relate.
+- [D3: Typed edges, paths between symbols and a repository map](https://github.com/Langspan/LangSpan.dev/issues/52): name mentions alone cannot follow a call chain or show how modules relate. Built as `graph path`, `graph map`, `langspan_path` and `langspan_map`; a real-host run remains.
 - [D4: Show the history of a definition](https://github.com/Langspan/LangSpan.dev/issues/53): an agent cannot see who changed a definition recently, why, or who reverted the same change. Built as `langspan graph history` and `langspan_history`; a real-host run remains.
 - [D6: Index more languages, one grammar at a time](https://github.com/Langspan/LangSpan.dev/issues/55): Java and C# are indexed; Ruby and C++ repositories get no source-index answers or interface notices.
 - [D8: Report where the index is blind](https://github.com/Langspan/LangSpan.dev/issues/57): an empty impact answer does not say which files the index could not read. Built as `graph blind-spots` and `coverage.blind_in_scope`; a real-host run remains.
