@@ -211,8 +211,11 @@ Fixed on `main` since the validation:
 - Across machines: a change of approach caused by another machine's facts,
   simultaneous edits with both sides told, landing, and network failure.
 
-**Releases.** No release, checksum, SBOM or attestation has been produced
-yet.
+**Releases.** [v0.1.0](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0)
+was published on 25 November 2026. Four macOS/Linux archives, matching CycloneDX
+SBOMs, SHA256SUMS and a Sigstore provenance bundle are listed on the release.
+This describes published artifacts; it does not extend the native-host
+acceptance evidence above. No Homebrew tap has been published.
 
 **Known open issues.**
 

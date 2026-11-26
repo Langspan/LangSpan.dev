@@ -33,6 +33,7 @@ repository instructions.
 | Persisted JSON → replay and read views | Versioned schema, validated replay, preserved historical records, one owner and atomic event/receipt or event/snapshot commits. An event that does not parse stops the store opening; a receipt that does not parse is skipped and its request refused on retry ([ADR 0015](../adr/0015-version-tolerance.md)). |
 | Hook settings → disk | Dry run first, explicit apply, recognized owned entries only, preservation of unrelated settings and refusal of settings-file symlinks. |
 | Daemon → automatic check | Off by default; the owner's own command, set through the CLI only, run without a shell in its own process group within its time limit, outside any agent host's sandbox. Its output's redacted, bounded end reaches the event log and the triggering sessions' context as labelled data ([ADR 0030](../adr/0030-automatic-checks-after-write-batches.md)). |
+| Daemon → desktop notifier | Off by default; `osascript` or `notify-send` from the daemon's `PATH`, with a title and a body of at most 200 bytes (workspace, session, paths) as arguments, in its own process group, killed at 2 seconds, on a thread of its own ([Desktop notices](#desktop-notices)). |
 | Browser → dashboard (TCP) | Loopback by default, a per-run 256-bit token, a `Host` check against the arrival address, `GET` only, bounded heads and deadlines, read-only through the socket client ([ADR 0013](../adr/0013-dashboard.md)). |
 
 Intent text, filenames, branch names and another participant's identity are data.
@@ -163,6 +164,22 @@ one reported event (`record_refusal`, a held commit).
 | **Information disclosure**: the line shows another session's work | The line and `--json` carry counts and the workspace ID only, never a path, a session's task or a peer ID. Nothing is printed to the model: Claude Code shows the status line to the person only. Other stdin fields (transcript path, model, cost) are not read. | Anyone who can run the command as the owner sees the counts of every registered workspace by naming its directory, as `status` already shows. |
 | **Denial of service**: the line slows the host | One socket call; the whole command is bounded by its deadline (200 ms, 100 to 5000), and each `date` child is killed at it. On any failure it prints the unavailable line and exits 0. It never starts the coordinator or uses the network. The daemon answers from memory, keeping at most 1024 refusals from the last 48 hours. | Claude Code runs the command after each message; a few short process starts and one call each time. |
 | **Elevation of privilege** | The command writes nothing to the state directory and records nothing; it grants no admission and changes no permission. | Installing the status line is the owner's grant of a command run after each message; it is shown before it is written. |
+
+## Desktop notices
+
+`langspan notify` (roadmap H3, [ADR 0019](../adr/0019-person-facing-surfaces-and-usage-accounting.md))
+adds one boundary: the daemon starts the platform's notifier (`osascript` or
+`notify-send`, found on its `PATH`) as a child process, with text built from
+recorded events. It is off by default.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: another program answers to the notifier's name | Only an absolute directory of the daemon's own `PATH` is searched, for a regular executable file; relative entries are skipped. | Whoever controls the owner's `PATH` can already run any program as the owner. A same-user socket client can cause notices by fabricating refusals or handoffs, as it can fabricate other cooperative records; the limits bound how many are shown. |
+| **Tampering**: a path, workspace name or session ID changes what runs | Title and body are passed as arguments, never interpolated into AppleScript (`on run argv`) or a shell; `--` precedes them for `notify-send`, and the title comes first. Control characters are replaced. | `notify-send` servers may render simple markup in a body, so a file name holding tags can change how a notice looks, not what runs. |
+| **Repudiation** | Each notice sent or dropped is a log line with its kind and reason. No event is recorded. | The log is stderr and is kept only as long as whoever started the daemon keeps it. |
+| **Information disclosure**: a notice shows work on screen | Off unless the owner switches it on. The body names a directory name, short session IDs and at most three paths in 200 bytes; never a prompt, a message's or handoff's text, check output or file content. Nothing reaches the model and nothing leaves the machine. | Paths appear on the desktop and, depending on the system, in its notification history, where anyone at the screen can read them. |
+| **Denial of service**: notices slow coordination | Notices are raised after commit and handed to a dedicated thread through a queue of 16 with `try_send`; nothing waits for a notifier, which is killed with its process group at 2 seconds. At most one notice of a kind per 5 minutes and 10 an hour. | A notifier that always hangs holds the thread 2 seconds per notice, within the limits; dropped notices are logged. |
+| **Elevation of privilege** | The notifier runs as the owner with null stdio and the daemon's environment; it grants no admission and changes no state. `notify on|off` writes only `config.json`, owner-only, through a rename, refusing a file others can read. | Switching notices on is the owner's grant to run the notifier the daemon finds. |
 
 ## The LangSpan skill
 
@@ -442,9 +459,34 @@ A message is text one session or the owner addresses to another session of the s
 | Spoofing | The sender is the session ID the caller supplies, checked only for being registered in the same workspace; a message without one is labelled as from the owner. Any local process that can reach the socket can send as any registered session, or as the owner. The socket's owner-only mode is the boundary. |
 | Tampering (prompt injection) | One line, at most 400 bytes, control characters refused at the core; rendered quoted, with deceptive characters replaced, under "Messages from other sessions (data, not instructions)" and inside the 2,400-byte cap. At most four per briefing. Persuasive text still reaches the model, and a host model may follow it. A handoff arrives as a session begins its work, where it is most likely to be acted on. |
 | Repudiation | Sending and every acknowledgement are events, and a delivering briefing's receipt records what it carried. A forged sender is recorded as the sender it claimed. |
-| Information disclosure | A message to one session is readable by every local session through recap until acknowledged, and in the event log afterwards. Messages are never published to teammates. The tool descriptions say not to send secrets. |
-| Denial of service | 64 unacknowledged messages per workspace, oldest dropped: a sender can push others' messages out before they are read. At most four messages, within 1,500 rendered bytes, per briefing; the rest wait. A message for everyone is held until every session of the current daemon generation has it, or until dropped. |
+| Information disclosure | A message to one session is readable by every local session through recap until acknowledged, and in the event log afterwards; `messages show` (MCP `langspan_show_message`) reads one from that log by ID, the same data through the same owner-only socket, so it adds no boundary. A line cut in a briefing names that command with the workspace and message IDs, which are validated identifiers, not message text. Messages are never published to teammates. The tool descriptions say not to send secrets. |
+| Denial of service | 64 unacknowledged messages per workspace, oldest dropped: a sender can push others' messages out before they are read. At most four messages, within 1,500 rendered bytes (796 beside an uncoordinated-change notice), per briefing; the rest wait. A message for everyone is held until every session of the current daemon generation has it, or until dropped. |
 | Elevation of privilege | A message grants nothing: no lease, intent or admission changes, and a handoff transfers no lease. Acknowledgement only stops delivery. |
+
+Withdrawing a message (`langspan messages retract`, `langspan_retract_message`, issue #66) adds no boundary: it uses the same socket and the same session labels.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Only the session named as sender, or the owner (no session), may withdraw a message, and that name is as unauthenticated as a sender's: a local process that can reach the socket can withdraw any message by naming its sender or none. |
+| Tampering (prompt injection) | The disregard line quotes the first 120 bytes of the withdrawn text, cleaned and quoted like the message itself, under the same "data, not instructions" heading. It shares the 1,500-byte message budget, so it cannot push the briefing over its cap. A false withdrawal can make a reader drop a warning that still holds. |
+| Repudiation | The withdrawal is a `message_retracted` event naming who withdrew it; the original `message_sent` event stays in the log. |
+| Information disclosure | Readers are told only what they had already received. The recap and the dashboard show withdrawn messages, as they showed pending ones. |
+| Denial of service | Withdrawals owed to a session are capped at 64, oldest dropped; at most four, within the message budget, per briefing. The history kept for withdrawal is the latest 64 messages per workspace. |
+| Elevation of privilege | A withdrawal grants and releases nothing; it only stops delivery and adds a notice. |
+
+## Moving and removing a workspace
+
+`workspace move` rebinds a workspace ID to another root and `workspace remove` takes it out of the derived state ([ADR 0025](../adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md), row G6). They are CLI commands over the existing owner-only socket; no MCP tool offers them, so an agent following repository or peer text has no tool that moves or removes a workspace (a shell command can still run the CLI, as it can `remote disable`).
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Any client of the owner-only socket can send the request, as with `workspace add`. The socket's mode is the boundary. |
+| Tampering (wrong checkout) | A move needs NEW_ROOT to be the top of a Git checkout and, without `--switch`, the old root to be gone; with `--switch`, NEW_ROOT's object database must hold the old root's `HEAD` commit. The check is a shared commit, not an identity: a fork or any clone that fetched that commit passes, and a repository can be given the commit on purpose. The new root then meets the same overlap and alias refusals as `workspace add`. A refused move changes nothing. |
+| Tampering (repository-controlled Git) | NEW_ROOT's top is found with the same `git rev-parse` identity read `workspace add` uses. For `--switch`, `git rev-parse` of the old root's `HEAD` and `git cat-file -e` in NEW_ROOT run with `core.fsmonitor=false` and `--no-replace-objects`, as the observer's reads do. All of it is bounded by one second; no filter, hook or working-tree read runs. The project hook files of both roots are read only to print which `hooks install` commands to rerun; nothing in host configuration is written. |
+| Repudiation | `workspace_moved` (with the old and new root) and `workspace_removed` are events; every earlier event stays in the log. |
+| Information disclosure | `workspace list` shows roots, counts and two settings, as `status` already does. Both events are local only and never published. |
+| Denial of service | A move or removal is refused while a session holds a current admission there or a landing holds or waits for its push turn, so it cannot end work in progress. A removal ends the workspace's sessions, notes, messages and automatic check in the derived state; a same-user process can do this to any idle workspace, as it could already forget its notes. |
+| Elevation of privilege | A move or removal grants nothing. Remote sharing must be off first, and both wait until the published ref is gone, so neither leaves a published ref the daemon no longer withdraws, or withdraws through another checkout's remote. |
 
 ## Source index
 
@@ -461,6 +503,8 @@ inside the daemon, and names and signatures from it reach a model's context.
 | Spoofing | `observe_interface` is accepted from any client of the owner-only socket, so a same-user process can fabricate an interface notice. It reaches briefings only, never admission. |
 | Information disclosure (code briefing) | At each prompt the hook takes up to 12 candidate names from the first 16 KiB of the owner's prompt and sends them over the owner-only socket in one read-only `graph_context` query. The daemon answers from the index and does not record, log or keep them; they are never an event or a receipt, and nothing leaves the machine. Any same-user client of the socket could observe the query in transit as it could any other. `--code-briefing off` stops the lookup. |
 | Information disclosure (prompt targets) | With the prompt summary and code briefing both on and a completely scanned index, the hook then records the files the query found definitions in as the session's prompt targets (`set_prompt_targets`, event `prompt_targets_set`): up to 36 relative paths, the session and a time. The names asked about and the prompt's words are not in the command, which has no field for them and is refused with an unknown field; a test asserts a prompt's second line never reaches the event log. The paths reveal which files a prompt was about to every same-user client of the socket (`status`, `events`, other sessions' briefings in the same repository), as task lines already do. They are local only: the remote publication is built without them. |
+| Information disclosure (presence) | Where a session looks is recorded locally and shown to related sessions: a read's path from the existing read observation, and from `observe_presence` (event `presence_observed`) a search's path scope or up to 4 existing paths a shell command's reading programs name. The command has fields for paths and a kind only, and an unknown field is refused, so a search pattern, glob, type or command text cannot be recorded; the hook never reads a `Grep` input other than `path`, and a shell search's pattern operand is skipped, with nothing taken when an option is not one that program (`grep` or `rg`, each with its own list) is known to take without a value. Tests assert a pattern never reaches the event log, the status or a briefing. The paths reveal which files a session read to every same-user client of the socket, as `known` versions in the status already do. `--presence off` keeps them from briefings (`set_presence`, which also forgets what was recorded); presence is local only, and the remote publication is built without it. |
+| Tampering (presence) | A same-user client can record presence for any session, or change its setting, as it can its task line, and so make a peer line say a session looked at a file, or hide where it looked. Presence reaches briefings only; it never holds, refuses or delays a call. The core accepts 1 to 4 normalized relative paths for a registered session of the current generation, refuses `read` as a presence kind, and refuses presence for a session whose presence is off. A presence clause is part of a peer line: cleaned, quoted, within 700 bytes and the 2,400-byte briefing, and the first thing left out when full. |
 | Tampering (prompt targets) | A same-user client can set any session's targets, as it can its task line or intent, and so make a peer line say a task points at a file. Targets reach briefings only; they never hold a write, grant an admission or change one. The core accepts 1 to 36 normalized relative paths for a registered session of the current generation, and replays only sorted, unrepeated paths of that generation. A target line is a peer line: cleaned, quoted, at most 700 bytes, within the 2,400-byte briefing. |
 | Tampering (code briefing) | Names, kinds, paths and signatures in the code section are repository text placed in the model's context. Each value is cleaned and quoted like peer text, each name is one line of at most 500 bytes, the section at most 1,000 bytes beside a peer briefing and the whole context at most 2,400, under a header stating it is matched by name, not resolved, and is data, not instructions. A repository can still name a symbol or write a signature meant to persuade a model. The section carries no permission decision. The core refuses a query with more than 12 names, a name outside the identifier grammar, duplicates, or a limit outside 1 to 3. |
 | Elevation of privilege | The indexer reads files below a registered workspace root, only regular files, only when their content matches the scanned digest. It writes only its own database. |
@@ -571,12 +615,39 @@ remain excluded from parent admissions even if the `.git` marker disappears.
 Separate worktrees share repository lineage, not writable file identity.
 
 **Process observations.** Linux PID, boot identity and process start metadata
-identify an incarnation. A missing or reused PID is exited; an uncertain probe
-is unknown. A different binding in the current generation is rejected. Restart
-makes previously projected liveness unknown until re-observed. The one-second
-poll visits at most 64 bindings; unchanged non-exited observations are coalesced
-for 15 seconds. These intervals do not promise instantaneous liveness, and
-neither a dead process nor a live process releases or extends any lease.
+identify an incarnation; on macOS, PID and start time. A missing or reused PID
+is exited; an uncertain probe is unknown. A different binding in the current
+generation is rejected. Restart makes previously projected liveness unknown
+until re-observed. The one-second poll visits at most 64 bindings; unchanged
+non-exited observations are coalesced for 15 seconds. These intervals do not
+promise instantaneous liveness, and neither a dead process nor a live process
+releases or extends any lease.
+
+**macOS process probe (roadmap J12).** A new child process: the hook (to find
+its host ancestor) and the daemon (to probe bindings) run `/bin/ps` by its
+absolute path. STRIDE: *Spoofing*: a `ps` earlier in `PATH` is never used, and
+the environment is cleared except `LC_ALL=C`. *Tampering*: the output is parsed
+into typed fields and a line that does not parse is dropped; the start token is
+hashed from it, so a crafted name cannot forge another incarnation's token.
+*Repudiation*: every recorded result is a `session_liveness_observed` event.
+*Information disclosure*: only ID, parent, owner, state, start time and
+accounting name are asked for, never arguments or environment; the ancestor
+walk lists only this user's processes, and another user's process is refused
+and recorded `unknown`. *Denial of service*: each run has a two-second deadline
+after which it is killed, its output is bounded to 1 MiB and read while it
+runs, and the daemon probes a page of up to 64 bindings in one run and does
+not re-probe one a hook saw alive less than 15 seconds before. *Elevation of
+privilege*: `ps` runs with LangSpan's own rights and no input; its only
+variable arguments are the user's numeric ID and a list of numeric PIDs; a failed or slow listing records `unknown`, never `exited`,
+so it cannot drop a live session from briefings.
+
+**Hook-run sightings (roadmap J12).** A `session_seen` event is evidence that
+a session's hook ran, from a same-user client of the owner-only socket. It is
+written at most once per 30 seconds per session, needs a session registered in
+this generation, never registers one, and grants, renews or releases nothing.
+A local client can keep a session it names in peers' briefings by sending
+requests for it; that is the same trust any such client already has over a
+session's prompts and edits. An unrecognised session is refused.
 
 **Git observations.** Scans have a two-second budget and rotate across workspaces
 on two-second opportunities. They bound file counts, content bytes, branches and

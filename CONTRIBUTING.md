@@ -68,6 +68,7 @@ raises the minor version.
 - An update to [docs/security/threat-model.md](docs/security/threat-model.md)
   for any change that adds or widens a trust boundary.
 - Updated docs where behaviour changed.
+- New and changed text written to [docs/writing-style.md](docs/writing-style.md).
 
 Copied code needs a licence that allows it, and is listed in [NOTICE](NOTICE).
 Never copy from source whose licence forbids it.

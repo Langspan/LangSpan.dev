@@ -433,6 +433,7 @@ fn message(id: &str, text: &str, paths: &[&str], at_ms: Option<u64>) -> Event {
             text: text.into(),
             paths: paths.iter().map(|path| (*path).into()).collect(),
             acknowledged: Vec::new(),
+            retracted: false,
         },
         at: stamp(at_ms),
     }

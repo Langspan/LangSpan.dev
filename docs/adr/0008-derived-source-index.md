@@ -135,8 +135,9 @@ daemon is refused as an unknown field, like `detail`; restart the daemon
 after upgrading. Test: `blind_spots_name_the_files_the_index_cannot_answer_for`
 (`tests/graph.rs`) reads every such answer with a strict copy of the earlier
 coverage, over the daemon's socket; it failed before the change. Paths only; nothing
-guesses what a blind file contains. With no complete scan the answer has
-`scanned: false`, and the last scan failure, if one is recorded, is in
+guesses what a blind file contains. With no complete scan of the workspace's
+current registration ([ADR 0025](0025-distribution-lifecycle-and-store-beyond-the-first-release.md))
+the answer has `scanned: false`, and the last scan failure, if one is recorded, is in
 `scan_failure`. Lists past one 64 KiB frame are cut to the longest common
 prefix that fits, with `truncated`.
 

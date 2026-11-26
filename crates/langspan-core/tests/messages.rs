@@ -1,7 +1,8 @@
 //! Messages between sessions and handoffs: who receives what, exactly once,
 //! within the bounds, and the same after replay.
 use langspan_core::{
-    Command, Event, MAX_MESSAGES, Message, Outcome, Recipient, State, apply, decide,
+    Command, Event, MAX_MESSAGES, MESSAGE_BYTES, Message, Outcome, RETRACTED_TEXT_BYTES, Recipient,
+    State, apply, decide,
 };
 
 /// Decide and apply, keeping every persisted event for the replay check.
@@ -612,5 +613,530 @@ mod headless_handoffs {
         handoff_from(&mut state, "step-1");
         assert!(takes(&state, "step-2"));
         assert!(takes(&state, "carol"), "whichever comes first takes it");
+    }
+}
+
+/// Withdrawing a sent message (issue #66): copies not yet delivered are
+/// removed, and each session that received it is told once to disregard it.
+mod retraction {
+    use super::*;
+
+    fn retract(workspace: &str, from: Option<&str>, message: Option<&str>) -> Command {
+        Command::RetractMessage {
+            workspace_id: workspace.into(),
+            from: from.map(str::to_owned),
+            message_id: message.map(str::to_owned),
+        }
+    }
+
+    /// `(message_id, withdrawn_unread, told_to_disregard)`.
+    fn retracted(outcome: Outcome) -> (String, Vec<String>, Vec<String>) {
+        match outcome {
+            Outcome::MessageRetracted {
+                message_id,
+                withdrawn_unread,
+                told_to_disregard,
+            } => (message_id, withdrawn_unread, told_to_disregard),
+            other => panic!("expected a withdrawal, got {other:?}"),
+        }
+    }
+
+    /// The withdrawals a delivered briefing carried, by message ID.
+    fn told(state: &mut State, log: &mut Vec<Event>, session: &str, id: &str) -> Vec<String> {
+        match run(state, log, id, brief(session, true, false)) {
+            Outcome::Briefing { briefing } => {
+                assert!(
+                    briefing.retracted.is_empty() || briefing.changed,
+                    "a withdrawal is news"
+                );
+                briefing
+                    .retracted
+                    .into_iter()
+                    .map(|withdrawn| withdrawn.message_id)
+                    .collect()
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_withdrawn_message_is_not_delivered_to_a_session_that_had_not_received_it() {
+        let (mut state, mut log) = ready();
+        run(
+            &mut state,
+            &mut log,
+            "m1",
+            send(Some("alice"), Some("bob"), "do not touch src/db.rs", &[]),
+        );
+        let (id, unread, disregard) = retracted(run(
+            &mut state,
+            &mut log,
+            "r1",
+            retract("work", Some("alice"), Some("m1")),
+        ));
+        assert_eq!(id, "m1");
+        assert_eq!(unread, ["bob"]);
+        assert!(disregard.is_empty());
+        assert!(delivered(&mut state, &mut log, "bob", "b1").is_empty());
+        assert!(
+            told(&mut state, &mut log, "bob", "b2").is_empty(),
+            "a session that never had it is not told to disregard it"
+        );
+    }
+
+    #[test]
+    fn a_session_that_received_it_is_told_once_at_its_next_briefing() {
+        let (mut state, mut log) = ready();
+        run(
+            &mut state,
+            &mut log,
+            "m1",
+            send(
+                Some("alice"),
+                None,
+                "do not touch src/db.rs, I am migrating it",
+                &["src/db.rs"],
+            ),
+        );
+        assert_eq!(
+            delivered(&mut state, &mut log, "bob", "b1"),
+            ["do not touch src/db.rs, I am migrating it"]
+        );
+        let (_, unread, disregard) = retracted(run(
+            &mut state,
+            &mut log,
+            "r1",
+            retract("work", Some("alice"), Some("m1")),
+        ));
+        assert_eq!(unread, ["carol"], "carol was still owed it");
+        assert_eq!(disregard, ["bob"]);
+        // A look from the terminal shows it without using it up.
+        match run(&mut state, &mut log, "look", brief("bob", false, false)) {
+            Outcome::Briefing { briefing } => assert_eq!(briefing.retracted.len(), 1),
+            other => panic!("{other:?}"),
+        }
+        let notice = match run(&mut state, &mut log, "b2", brief("bob", true, false)) {
+            Outcome::Briefing { briefing } => briefing.retracted,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(notice.len(), 1);
+        assert_eq!(notice[0].message_id, "m1");
+        assert_eq!(notice[0].from.as_deref(), Some("alice"));
+        assert_eq!(notice[0].text, "do not touch src/db.rs, I am migrating it");
+        assert!(!notice[0].cut);
+        assert!(told(&mut state, &mut log, "bob", "b3").is_empty(), "once");
+        assert!(told(&mut state, &mut log, "alice", "a1").is_empty());
+        assert!(delivered(&mut state, &mut log, "carol", "c1").is_empty());
+        assert!(told(&mut state, &mut log, "carol", "c2").is_empty());
+    }
+
+    #[test]
+    fn a_delivered_direct_message_can_still_be_withdrawn_and_its_reader_told_mid_turn() {
+        let (mut state, mut log) = ready();
+        let long = "x".repeat(300);
+        run(
+            &mut state,
+            &mut log,
+            "m1",
+            send(None, Some("bob"), &long, &[]),
+        );
+        delivered(&mut state, &mut log, "bob", "b1");
+        assert!(state.messages.get("work").is_none_or(Vec::is_empty));
+        let (_, unread, disregard) = retracted(run(
+            &mut state,
+            &mut log,
+            "r1",
+            retract("work", None, Some("m1")),
+        ));
+        assert!(unread.is_empty());
+        assert_eq!(disregard, ["bob"]);
+        let notice = match run(&mut state, &mut log, "b2", brief("bob", true, true)) {
+            Outcome::Briefing { briefing } => briefing.retracted,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(notice.len(), 1, "told mid-turn too");
+        assert_eq!(notice[0].from, None, "the owner withdrew it");
+        assert_eq!(notice[0].text.len(), RETRACTED_TEXT_BYTES);
+        assert!(notice[0].cut);
+    }
+
+    #[test]
+    fn last_withdraws_the_senders_newest_message_and_no_other() {
+        let (mut state, mut log) = ready();
+        for (id, from) in [("m1", "alice"), ("m2", "alice"), ("m3", "bob")] {
+            run(
+                &mut state,
+                &mut log,
+                id,
+                send(Some(from), Some("carol"), id, &[]),
+            );
+        }
+        let (id, unread, _) = retracted(run(
+            &mut state,
+            &mut log,
+            "r1",
+            retract("work", Some("alice"), None),
+        ));
+        assert_eq!((id.as_str(), unread), ("m2", vec!["carol".to_owned()]));
+        assert_eq!(delivered(&mut state, &mut log, "carol", "c1"), ["m3", "m1"]);
+        // The newest is already withdrawn: `last` does not reach past it.
+        assert_eq!(
+            error_code(run(
+                &mut state,
+                &mut log,
+                "r2",
+                retract("work", Some("alice"), None)
+            )),
+            "already_retracted"
+        );
+        // The owner's newest is the owner's own, not anyone's.
+        assert_eq!(
+            error_code(run(&mut state, &mut log, "r3", retract("work", None, None))),
+            "unknown_message"
+        );
+        run(&mut state, &mut log, "m4", send(None, None, "owner", &[]));
+        let (id, _, _) = retracted(run(&mut state, &mut log, "r4", retract("work", None, None)));
+        assert_eq!(id, "m4");
+    }
+
+    #[test]
+    fn only_the_sender_or_the_owner_may_withdraw_it() {
+        let (mut state, mut log) = ready();
+        run(
+            &mut state,
+            &mut log,
+            "m1",
+            send(Some("alice"), None, "hello", &[]),
+        );
+        assert_eq!(
+            error_code(run(
+                &mut state,
+                &mut log,
+                "r1",
+                retract("work", Some("bob"), Some("m1"))
+            )),
+            "not_sender"
+        );
+        assert_eq!(
+            error_code(run(
+                &mut state,
+                &mut log,
+                "r2",
+                retract("work", Some("dave"), Some("m1"))
+            )),
+            "sender_not_in_workspace"
+        );
+        assert_eq!(
+            error_code(run(
+                &mut state,
+                &mut log,
+                "r3",
+                retract("other", None, Some("m1"))
+            )),
+            "unknown_message",
+            "a message of another workspace is not found there"
+        );
+        assert_eq!(
+            delivered(&mut state, &mut log, "bob", "b1"),
+            ["hello"],
+            "a refused withdrawal changes nothing"
+        );
+        let (_, _, disregard) = retracted(run(
+            &mut state,
+            &mut log,
+            "r4",
+            retract("work", None, Some("m1")),
+        ));
+        assert_eq!(disregard, ["bob"], "the owner may withdraw any message");
+        assert_eq!(
+            error_code(run(
+                &mut state,
+                &mut log,
+                "r5",
+                retract("work", None, Some("m1"))
+            )),
+            "already_retracted"
+        );
+        assert_eq!(
+            error_code(run(
+                &mut state,
+                &mut log,
+                "r6",
+                retract("work", None, Some("nope"))
+            )),
+            "unknown_message"
+        );
+    }
+
+    #[test]
+    fn a_withdrawn_handoff_is_not_taken_by_the_next_session() {
+        let (mut state, mut log) = ready();
+        run(
+            &mut state,
+            &mut log,
+            "h1",
+            Command::Handoff {
+                session_id: "carol".into(),
+                text: "finish the migration".into(),
+                paths: Vec::new(),
+            },
+        );
+        let (_, unread, disregard) = retracted(run(
+            &mut state,
+            &mut log,
+            "r1",
+            retract("work", Some("carol"), None),
+        ));
+        assert!(unread.is_empty() && disregard.is_empty());
+        assert!(delivered(&mut state, &mut log, "bob", "b1").is_empty());
+        assert!(delivered(&mut state, &mut log, "alice", "a1").is_empty());
+    }
+
+    #[test]
+    fn a_recap_shows_a_withdrawn_message_as_retracted() {
+        let (mut state, mut log) = ready();
+        run(
+            &mut state,
+            &mut log,
+            "m1",
+            send(None, Some("bob"), "one", &[]),
+        );
+        run(
+            &mut state,
+            &mut log,
+            "m2",
+            send(None, Some("bob"), "two", &[]),
+        );
+        run(
+            &mut state,
+            &mut log,
+            "r1",
+            retract("work", None, Some("m1")),
+        );
+        let recap = match run(
+            &mut state,
+            &mut log,
+            "read",
+            Command::Recap {
+                workspace_id: "work".into(),
+            },
+        ) {
+            Outcome::Recap { recap } => recap,
+            other => panic!("{other:?}"),
+        };
+        let shown: Vec<(&str, bool)> = recap
+            .messages
+            .iter()
+            .map(|message| (message.message_id.as_str(), message.retracted))
+            .collect();
+        assert_eq!(shown, [("m2", false), ("m1", true)]);
+        let wire = serde_json::to_value(&recap).unwrap();
+        assert_eq!(wire["messages"][1]["retracted"], true);
+        assert!(
+            wire["messages"][0].get("retracted").is_none(),
+            "a message that stands is written as before"
+        );
+    }
+
+    #[test]
+    fn a_message_the_cap_dropped_cannot_be_withdrawn() {
+        let (mut state, mut log) = ready();
+        for index in 0..=MAX_MESSAGES {
+            run(
+                &mut state,
+                &mut log,
+                &format!("m{index}"),
+                send(None, Some("bob"), "hello", &[]),
+            );
+        }
+        assert_eq!(
+            error_code(run(
+                &mut state,
+                &mut log,
+                "r1",
+                retract("work", None, Some("m0"))
+            )),
+            "unknown_message"
+        );
+        retracted(run(
+            &mut state,
+            &mut log,
+            "r2",
+            retract("work", None, Some("m1")),
+        ));
+    }
+
+    #[test]
+    fn last_never_reaches_past_a_newer_message_that_was_dropped() {
+        let (mut state, mut log) = ready();
+        run(
+            &mut state,
+            &mut log,
+            "a",
+            send(Some("alice"), Some("bob"), "older", &[]),
+        );
+        run(
+            &mut state,
+            &mut log,
+            "b",
+            send(Some("alice"), Some("carol"), "newer", &[]),
+        );
+        delivered(&mut state, &mut log, "carol", "c0");
+        // Enough later traffic that "b" leaves the history; "a" is still held.
+        for index in 0..MAX_MESSAGES {
+            let id = format!("o{index}");
+            run(
+                &mut state,
+                &mut log,
+                &id,
+                send(None, Some("carol"), "x", &[]),
+            );
+            run(
+                &mut state,
+                &mut log,
+                &format!("ack-{id}"),
+                Command::AckMessage {
+                    session_id: "carol".into(),
+                    message_id: id,
+                },
+            );
+        }
+        assert_eq!(
+            error_code(run(
+                &mut state,
+                &mut log,
+                "r1",
+                retract("work", Some("alice"), None)
+            )),
+            "unknown_message",
+            "alice's newest is gone; the older one is not taken for it"
+        );
+        let (id, unread, _) = retracted(run(
+            &mut state,
+            &mut log,
+            "r2",
+            retract("work", Some("alice"), Some("a")),
+        ));
+        assert_eq!((id.as_str(), unread), ("a", vec!["bob".to_owned()]));
+        assert!(delivered(&mut state, &mut log, "bob", "b1").is_empty());
+    }
+
+    #[test]
+    fn withdrawals_share_the_room_messages_have_in_a_briefing_and_none_is_lost() {
+        let (mut state, mut log) = ready();
+        let text = "\"".repeat(MESSAGE_BYTES);
+        for index in 0..6 {
+            run(
+                &mut state,
+                &mut log,
+                &format!("m{index}"),
+                send(Some("alice"), Some("bob"), &text, &[]),
+            );
+        }
+        // Bob reads them over several briefings, then alice withdraws all.
+        let mut read = 0;
+        for round in 0..6 {
+            read += delivered(&mut state, &mut log, "bob", &format!("b{round}")).len();
+        }
+        assert_eq!(read, 6);
+        for index in 0..6 {
+            retracted(run(
+                &mut state,
+                &mut log,
+                &format!("r{index}"),
+                retract("work", Some("alice"), Some(&format!("m{index}"))),
+            ));
+        }
+        run(
+            &mut state,
+            &mut log,
+            "m9",
+            send(Some("alice"), Some("bob"), "new", &[]),
+        );
+        let mut withdrawn = Vec::new();
+        let mut messages = Vec::new();
+        for round in 0..6 {
+            match run(
+                &mut state,
+                &mut log,
+                &format!("t{round}"),
+                brief("bob", true, false),
+            ) {
+                Outcome::Briefing { briefing } => {
+                    assert!(briefing.retracted.len() <= langspan_core::BRIEF_MESSAGES);
+                    withdrawn.extend(briefing.retracted.into_iter().map(|w| w.message_id));
+                    messages.extend(briefing.messages.into_iter().map(|m| m.text));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        withdrawn.sort();
+        assert_eq!(withdrawn, ["m0", "m1", "m2", "m3", "m4", "m5"]);
+        assert_eq!(messages, ["new"], "a message waits for room, then arrives");
+    }
+
+    #[test]
+    fn replaying_withdrawals_reproduces_the_same_state() {
+        let (mut state, mut log) = ready();
+        run(
+            &mut state,
+            &mut log,
+            "m1",
+            send(Some("alice"), None, "one", &[]),
+        );
+        delivered(&mut state, &mut log, "bob", "b1");
+        run(
+            &mut state,
+            &mut log,
+            "m2",
+            send(None, Some("carol"), "two", &[]),
+        );
+        delivered(&mut state, &mut log, "carol", "c1");
+        run(
+            &mut state,
+            &mut log,
+            "r1",
+            retract("work", Some("alice"), Some("m1")),
+        );
+        run(
+            &mut state,
+            &mut log,
+            "r2",
+            retract("work", None, Some("m2")),
+        );
+        told(&mut state, &mut log, "bob", "b2");
+        let mut replayed = State::default();
+        for event in &log {
+            let wire = serde_json::to_string(event).unwrap();
+            assert!(!wire.contains("\"retracted\":false"));
+            let event: Event = serde_json::from_str(&wire).unwrap();
+            apply(&mut replayed, &event).unwrap();
+        }
+        assert_eq!(replayed, state);
+        assert!(log.iter().any(|event| matches!(event, Event::MessageSent { message, .. } if message.message_id == "m1")),
+            "the original stays in the event log");
+        // `status --all` reads the history and the withdrawals still owed.
+        assert!(state.retracted_notices.contains_key("carol"));
+        let mut rebuilt = State::default();
+        for (_, record) in langspan_core::status_records(&state, None).unwrap().1 {
+            record.apply(&mut rebuilt).unwrap();
+        }
+        assert_eq!(rebuilt.message_history, state.message_history);
+        assert_eq!(rebuilt.retracted_notices, state.retracted_notices);
+        // A sent event cannot arrive already withdrawn.
+        let mut forged = state.message_history["work"][0].clone();
+        forged.message_id = "forged".into();
+        forged.acknowledged.clear();
+        forged.retracted = true;
+        assert!(
+            apply(
+                &mut replayed,
+                &Event::MessageSent {
+                    message: forged,
+                    at: None
+                }
+            )
+            .is_err()
+        );
     }
 }
