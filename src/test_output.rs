@@ -107,6 +107,7 @@ pub fn results(named: &Named, all_passed: bool, prefer: &[String]) -> Option<Tes
             .collect()
     };
     Some(TestResults {
+        more_failed: failed.len() < named.failed.len(),
         failed,
         passed,
         skipped,

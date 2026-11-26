@@ -262,7 +262,10 @@ Decided and built 25 November 2026.
   oldest event it leaves (or the newest start, if it leaves none) and every
   start after it, even when they are older than the window; older starts go.
   The snapshot also records the derived fields the state leaves out of every
-  reply (the clock anchor and the recent refusals of the status line).
+  reply: the clock anchor and the recent refusals of the status line, each
+  workspace's registration revision, and the kept test results, first
+  writes and runs of writes by which a check's failures are classified
+  (ADR 0030).
 - **Retries and publications.** A retry whose receipt was removed is a new
   request, which is why the window is at least 7 days. `remote sent` keeps
   every `remote_published` record within the window and says from which date
