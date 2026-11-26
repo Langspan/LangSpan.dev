@@ -22,13 +22,10 @@ pub const MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash";
 pub const POST_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash|Read|Grep";
 pub const CODEX_EVENTS: [&str; 2] = ["PreToolUse", "PostToolUse"];
 pub const CODEX_MATCHER: &str = "^(apply_patch|Bash)$";
-pub const GEMINI_EVENTS: [&str; 2] = ["BeforeTool", "AfterTool"];
-/// Gemini CLI matches tool hooks by regular expression on the tool name.
-pub const GEMINI_MATCHER: &str = "^(write_file|replace|run_shell_command)$";
-pub const GEMINI_POST_MATCHER: &str = "^(write_file|replace|run_shell_command|read_file)$";
-/// Gemini CLI names each hook; the name is shown in `/hooks` and is what
-/// `hooksConfig.disabled` lists.
-pub const GEMINI_HOOK_NAME: &str = "langspan";
+/// The tool events an earlier release registered for Gemini CLI, whose
+/// support is removed (issue #246, ADR 0033). Kept only so `uninstall` and
+/// `hooks remove` can find and take out what that release wrote.
+const GEMINI_EVENTS: [&str; 2] = ["BeforeTool", "AfterTool"];
 /// Antigravity's tool hooks (<https://antigravity.google/docs/hooks/>), matched
 /// by regular expression on the tool name ([ADR 0035](../docs/adr/0035-antigravity-adapter.md)).
 pub const ANTIGRAVITY_EVENTS: [&str; 2] = ["PreToolUse", "PostToolUse"];
@@ -64,17 +61,24 @@ pub enum Vendor {
     ClaudeCode,
     Codex,
     Cursor,
+    /// Gemini CLI, no longer supported (issue #246, ADR 0033). For one
+    /// release LangSpan still recognizes what an earlier install wrote, so
+    /// `uninstall`, `hooks remove` and `doctor` can deal with it; nothing
+    /// installs it, and `langspan hook gemini-cli` does nothing.
     Gemini,
     Antigravity,
 }
 
+/// What a refused Gemini CLI install says.
+pub const GEMINI_REMOVED: &str = "Gemini CLI support was removed: Google replaced Gemini CLI with the Antigravity CLI, which LangSpan supports as `antigravity`. `langspan uninstall --hosts gemini-cli --apply` and `langspan hooks remove gemini-cli --root DIR --apply` remove an earlier install. Nothing was changed";
+
 impl Vendor {
-    /// Every host, in the order help text and checks list them.
-    pub const ALL: [Self; 5] = [
+    /// Every supported host, in the order help text and checks list them.
+    /// Gemini CLI is not one of them: see `Vendor::Gemini`.
+    pub const ALL: [Self; 4] = [
         Self::ClaudeCode,
         Self::Codex,
         Self::Cursor,
-        Self::Gemini,
         Self::Antigravity,
     ];
 
@@ -88,13 +92,25 @@ impl Vendor {
         }
     }
 
-    /// The host a command-line name stands for.
+    /// The host a command-line name stands for, Gemini CLI's included so
+    /// that removing it works; `gemini` also names it.
     pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|vendor| vendor.name() == name)
+        if name == "gemini" {
+            return Some(Self::Gemini);
+        }
+        Self::ALL
+            .into_iter()
+            .chain([Self::Gemini])
+            .find(|vendor| vendor.name() == name)
     }
 
-    /// Cursor lists hook entries directly under each event. Claude Code,
-    /// Codex and Gemini CLI nest them in groups that carry the matcher.
+    /// Whether the host is no longer supported: only removal works for it.
+    pub fn removed(self) -> bool {
+        self == Self::Gemini
+    }
+
+    /// Cursor lists hook entries directly under each event. Claude Code and
+    /// Codex nest them in groups that carry the matcher, as Gemini CLI did.
     /// Antigravity nests them for its tool events and lists them directly
     /// under its other events.
     fn flat(self, event: &str) -> bool {
@@ -135,8 +151,8 @@ impl Vendor {
     /// the end of a reply and of a tool batch ([ADR 0027](../docs/adr/0027-turn-and-batch-events.md)).
     /// Codex has no StopFailure or PostToolBatch, and its SubagentStop names
     /// a subagent whose tool events carry the parent's session ID, which this
-    /// adapter does not cover. Cursor's and Gemini CLI's end-of-reply events
-    /// are not registered until they are checked on a real host. Antigravity
+    /// adapter does not cover. Cursor's end-of-reply events are not
+    /// registered until they are checked on a real host. Antigravity
     /// has no session-end event, and its `Stop` requires a decision, so it
     /// is not registered either (ADR 0035).
     fn lifecycle_events(self) -> &'static [&'static str] {
@@ -152,6 +168,7 @@ impl Vendor {
             ],
             Self::Codex => &["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"],
             Self::Cursor => &["sessionStart", "beforeSubmitPrompt", "sessionEnd"],
+            // What an earlier release registered; never installed now.
             Self::Gemini => &["SessionStart", "BeforeAgent", "SessionEnd"],
             Self::Antigravity => &["SessionStart", "PreInvocation"],
         }
@@ -181,8 +198,8 @@ impl Vendor {
             Self::Codex => CODEX_MATCHER,
             Self::Cursor if event == "postToolUse" => CURSOR_POST_MATCHER,
             Self::Cursor => CURSOR_MATCHER,
-            Self::Gemini if event == "AfterTool" => GEMINI_POST_MATCHER,
-            Self::Gemini => GEMINI_MATCHER,
+            // Never installed, so no matcher is written or compared.
+            Self::Gemini => "",
             Self::Antigravity if event == "PostToolUse" => ANTIGRAVITY_POST_MATCHER,
             Self::Antigravity => ANTIGRAVITY_MATCHER,
         }
@@ -285,21 +302,12 @@ impl Vendor {
         }
     }
 
-    /// One hook entry running `command` for `event`. Gemini CLI takes its
-    /// timeout in milliseconds and names each hook; the other hosts take
-    /// seconds.
+    /// One hook entry running `command` for `event`, its timeout in seconds.
     fn hook_entry(self, event: &str, command: String) -> Map<String, Value> {
         let mut entry = Map::new();
-        if self == Self::Gemini {
-            entry.insert("name".into(), GEMINI_HOOK_NAME.into());
-        }
         entry.insert("type".into(), "command".into());
         entry.insert("command".into(), command.into());
-        let timeout = match self {
-            Self::Gemini => self.timeout(event) * 1000,
-            _ => self.timeout(event),
-        };
-        entry.insert("timeout".into(), timeout.into());
+        entry.insert("timeout".into(), self.timeout(event).into());
         entry
     }
 }
@@ -918,15 +926,8 @@ fn plan_hooks(
             "settings `{table}` must be a JSON object; nothing was changed"
         ));
     }
-    if vendor == Vendor::Gemini
-        && let Some(command) = command
-        && let Some(text) = vendor
-            .hook_events()
-            .into_iter()
-            .map(command)
-            .find(|text| text.contains('$'))
-    {
-        return Err(unexpandable(&text));
+    if vendor.removed() && command.is_some() {
+        return Err(GEMINI_REMOVED.into());
     }
     // Retain existing key positions when replacing a registration. Removal
     // prunes only containers emptied by our own entries, using ordered removal.
@@ -967,15 +968,6 @@ fn plan_hooks(
         }
     }
     Ok(Value::Object(settings))
-}
-
-/// Gemini CLI replaces `$NAME` and `${NAME}` in every string of its
-/// settings, and `$GEMINI_PROJECT_DIR` and its like again in a hook command,
-/// before it runs anything: a path with `$` in it would name another file.
-pub fn unexpandable(text: &str) -> String {
-    format!(
-        "Gemini CLI would expand the `$` in {text:?} as a variable; install LangSpan and its state directory at paths without `$`. Nothing was changed"
-    )
 }
 
 fn settings_metadata(path: &Path) -> Result<Option<fs::Metadata>, crate::Error> {
@@ -1807,18 +1799,12 @@ mod tests {
     }
 
     #[test]
-    fn cursor_and_gemini_keep_their_lifecycle_events_and_gain_no_end_of_reply_event() {
-        let cursor = plan_for(Vendor::Cursor, None, Some(&registration("/r"))).unwrap();
-        let gemini = plan_for(Vendor::Gemini, None, Some(&registration("/r"))).unwrap();
-        for (vendor, settings) in [(Vendor::Cursor, &cursor), (Vendor::Gemini, &gemini)] {
-            let registered: Vec<_> = settings["hooks"].as_object().unwrap().keys().collect();
-            assert_eq!(registered, vendor.hook_events(), "{}", vendor.name());
-            assert!(
-                missing_events(vendor, settings, |hook| is_managed_for(vendor, hook)).is_empty(),
-                "{}",
-                vendor.name()
-            );
-        }
+    fn cursor_keeps_its_lifecycle_events_and_gains_no_end_of_reply_event() {
+        let vendor = Vendor::Cursor;
+        let cursor = plan_for(vendor, None, Some(&registration("/r"))).unwrap();
+        let registered: Vec<_> = cursor["hooks"].as_object().unwrap().keys().collect();
+        assert_eq!(registered, vendor.hook_events());
+        assert!(missing_events(vendor, &cursor, |hook| is_managed_for(vendor, hook)).is_empty());
         for event in [
             "stop",
             "subagentStop",
@@ -1828,18 +1814,55 @@ mod tests {
         ] {
             assert!(cursor["hooks"].get(event).is_none(), "cursor {event}");
         }
-        for event in ["AfterAgent", "Stop", "StopFailure", "SubagentStop"] {
-            assert!(gemini["hooks"].get(event).is_none(), "gemini {event}");
-        }
-        // The per-event timeout goes through each host's own entry shape.
+        // The per-event timeout goes through the host's own entry shape.
         assert_eq!(cursor["hooks"]["sessionEnd"][0]["timeout"], 5);
+    }
+
+    #[test]
+    fn gemini_cli_is_never_installed_but_an_earlier_install_is_removed() {
+        let vendor = Vendor::Gemini;
+        assert!(!Vendor::ALL.contains(&vendor));
+        assert_eq!(Vendor::from_name("gemini-cli"), Some(vendor));
+        assert_eq!(Vendor::from_name("gemini"), Some(vendor));
         assert_eq!(
-            gemini["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"],
-            5000
+            plan_for(vendor, Some(json!({})), Some(&registration("/r"))),
+            Err(GEMINI_REMOVED.into())
+        );
+        let user = UserRegistration {
+            executable: "/bin/langspan".into(),
+            state_dir: "/state".into(),
+            share_prompt: true,
+            presence: Presence::default(),
+        };
+        assert_eq!(
+            plan_user_for(vendor, Some(json!({})), Some(&user)),
+            Err(GEMINI_REMOVED.into())
+        );
+        // What the last release with the adapter wrote, beside the owner's hook.
+        let owner = json!({"matcher": "write_file", "hooks": [{"type": "command", "command": "/x/guard.sh"}]});
+        let mut settings = json!({"hooks": {"BeforeTool": [owner.clone()]}});
+        for (event, command) in vendor.hook_events().into_iter().map(|event| {
+            (
+                event,
+                format!(
+                    "'/bin/langspan' hook gemini-cli --state-dir '/state'{}",
+                    vendor.user_marker()
+                ),
+            )
+        }) {
+            let entry = json!({"hooks": [{"name": "langspan", "type": "command", "command": command, "timeout": 5000}]});
+            match settings["hooks"][event].as_array_mut() {
+                Some(groups) => groups.push(entry),
+                None => settings["hooks"][event] = json!([entry]),
+            }
+        }
+        assert_eq!(
+            managed_hooks(&settings, |hook| is_user_managed_for(vendor, hook)).len(),
+            5
         );
         assert_eq!(
-            gemini["hooks"]["SessionEnd"][0]["hooks"][0]["name"],
-            GEMINI_HOOK_NAME
+            plan_user_for(vendor, Some(settings), None).unwrap(),
+            json!({"hooks": {"BeforeTool": [owner]}})
         );
     }
 

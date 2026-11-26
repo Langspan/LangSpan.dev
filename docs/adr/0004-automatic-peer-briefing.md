@@ -136,8 +136,8 @@ defined in several files points at each of them.
 
 **Presence (added later, roadmap A13).** Where a session is looking is shown
 to its peers before it writes. Reads come from the existing `source_observed`
-records with origin `read` (Claude Code `Read`, Cursor `Read`, Gemini CLI
-`read_file`). Searches and shell commands are recorded by a new command,
+records with origin `read` (Claude Code `Read`, Cursor `Read`; Gemini CLI
+`read_file` before its removal, ADR 0033). Searches and shell commands are recorded by a new command,
 `observe_presence` (event `presence_observed`): the session, `kind` `search` or
 `shell`, 1 to 4 sorted relative paths and the time, never a pattern or command
 text. The issue proposed a `search_observed` event; one event with a kind

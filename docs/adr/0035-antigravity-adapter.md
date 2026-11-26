@@ -4,16 +4,18 @@
 from Antigravity's documentation and then corrected against the first real
 run, on Antigravity CLI (`agy`) 1.5.14 (issue #110), which showed that the
 documented tool names and the empty `PreToolUse` answer do not hold there
-(issue #187). See [Antigravity 1.5.14](#antigravity-1514) and
-[Evidence](#evidence). A repeat real-host run of the corrected adapter is
-pending.
+(issue #187). A repeat real-host run of the corrected adapter on `agy` 1.5.14
+verified admission, conflict and stale-source refusals, and the install
+([issue #110 evidence](https://github.com/Langspan/LangSpan.dev/issues/110#issuecomment-7182408496)).
+See [Antigravity 1.5.14](#antigravity-1514), [What is unverified](#what-is-unverified)
+and [Evidence](#evidence). Antigravity is LangSpan's Google host: Gemini CLI
+support was removed (issue #246, [ADR 0033](0033-gemini-cli-adapter.md)).
 
 ## Context
 
-People who sign in to Gemini CLI with a personal Google account are directed
-to the Antigravity suite, whose command-line agent is `agy`. Its hooks are not
-Gemini CLI's ([ADR 0033](0033-gemini-cli-adapter.md)): other event names, other
-files, other answers. Four differences shape this adapter:
+Google deprecated Gemini CLI in favor of the Antigravity suite, whose
+command-line agent is `agy`. Antigravity's hooks are not Gemini CLI's: other
+event names, other files, other answers. Four differences shape this adapter:
 
 1. **An event does not name itself, as documented.** The documented fields
    common to every event are `conversationId`, `workspacePaths`,
@@ -138,16 +140,15 @@ checked: `PreToolUse` takes no context to carry it.
 
 **Not registered.** `Stop` requires a `decision`, and any value but
 `continue` lets the agent stop; what a hook that gives none does is not
-documented, so `Stop` is left out, as Cursor's and Gemini CLI's end-of-reply
-events are. There is no session-end event: an Antigravity session is never
+documented, so `Stop` is left out, as Cursor's end-of-reply event is. There is no session-end event: an Antigravity session is never
 marked ended; it ages out as any silent session does. `PostInvocation` adds
 nothing `PreInvocation` does not.
 
 **Installation.** `hooks install antigravity` writes `.agents/hooks.json` and
 registers `langspan mcp` in `.agents/mcp_config.json` (`command` and `args`).
 `install --hosts antigravity` writes `~/.gemini/config/hooks.json` and
-`~/.gemini/config/mcp_config.json`; it is chosen only by name, as Gemini CLI is,
-since both use `~/.gemini`. LangSpan's entries are the hook definition named
+`~/.gemini/config/mcp_config.json`; it is chosen only by name, because other
+Google tools, the earlier Gemini CLI among them, also use `~/.gemini`. LangSpan's entries are the hook definition named
 `langspan`; the owner's definitions are its siblings and are written back
 unchanged, so an owner's file in the standard two-space JSON layout round-trips
 byte for byte. A definition emptied by removal goes with it. Each command
@@ -163,20 +164,18 @@ missing events, the MCP entry and the skill.
 
 **Deferring to a project install.** Antigravity reads `.agents/hooks.json` at
 the workspace root. The user-level hook steps aside only when the event's
-workspace folder holds a LangSpan project hook, as for Gemini CLI. The workspace
+workspace folder holds a LangSpan project hook. The workspace
 folder is the most specific one in `workspacePaths` that holds the target file
 (for `run_command`, its `Cwd`), compared by whole path components, else the
 first. A linked worktree listed inside its repository is therefore its own
 folder whatever the order, and `/work/repo2` is never inside `/work/repo`. A command run below that folder is
 still resolved from the folder, since that is where Antigravity reads its
 hooks. A project definition with `"enabled": false` runs none of its hooks,
-so it covers nothing: the user-level hook decides there. The other hosts'
-documented switches are not per definition: Claude Code's `disableAllHooks`
-and Gemini CLI's `hooksConfig.enabled` turn hooks off as a whole, and Gemini
-CLI's `hooksConfig.disabled` names a hook, and LangSpan's user and project
-hooks share the name `langspan`. Where they apply, the user-level hook is off
-too, so deferring changes nothing, and their deferral is unchanged. This
-reading of their settings has not been checked in a live run.
+so it covers nothing: the user-level hook decides there. Claude Code's
+documented switch is not per definition: `disableAllHooks` turns hooks off as
+a whole. Where it applies, the user-level hook is off too, so deferring
+changes nothing, and Claude Code's deferral is unchanged. This reading of its
+settings has not been checked in a live run.
 
 ## Antigravity 1.5.14
 
@@ -188,9 +187,9 @@ in `fixtures/antigravity-1.5.14/`.
 - **(a) `PreToolUse` without a decision is a refusal.** Every `run_command`
   the hook answered `{}` failed with `tool call denied by pre-tool hook:` and
   an empty reason. `{}` on `PostToolUse` has no effect. So the hook answers
-  the explicit `{"decision":"allow"}`. Its acceptance as a pass-through comes
-  from the documentation; the repeat real-host run must confirm that 1.5.14
-  runs an allowed call under its own policy.
+  the explicit `{"decision":"allow"}`. In the repeat real-host run, 1.5.14
+  honored all 7 allow answers, with no flag or mode that skips approvals in
+  effect.
 - **(b) `invocationNum` restarts at 0 each execution** and counts up once per
   model call within it. A resumed conversation (`--conversation`) starts at 0
   again, with `initialNumSteps` counting the steps already in it, and sends no
@@ -230,13 +229,6 @@ in `fixtures/antigravity-1.5.14/`.
 
 ## What is unverified
 
-- **That a call's `PreToolUse` and `PostToolUse` share its `stepIdx`.** Both
-  equal the call's step in the run's output, but no call that reached
-  LangSpan's `PreToolUse` completed in the first run, so no pair was captured.
-  If they differ, a call's completion does not match its admission, and the
-  admission lapses at its TTL (30 seconds by default).
-- **That `{"decision":"allow"}` keeps Antigravity's own permission prompts.**
-  The documented meaning; the repeat real-host run checks it.
 - **Invalid JSON, a non-zero exit or a timeout** on `PreToolUse`. Not
   observed; the hook prints the allow answer before it exits for any of its
   own failures.
@@ -246,17 +238,56 @@ in `fixtures/antigravity-1.5.14/`.
 - **Linked worktrees.** Which `.agents/hooks.json` runs for a workspace in a
   linked worktree has not been observed, so the main checkout's hook decides
   there too ([ADR 0003](0003-native-coordination-observation.md)).
-- **`~/.gemini/GEMINI.md`** is read by both Gemini CLI and Antigravity. With
-  both skills installed, Antigravity reads the skill twice.
+- **Mixed-host runs** with Antigravity and another host in one checkout, and
+  whether a briefing changes what the receiving Antigravity session does.
+
+Known limits:
+
+- **`admit --ttl-ms` is capped at 60 seconds.**
+- **A resumed conversation (`--conversation`) sends no `SessionStart`.** Its
+  first `PreInvocation` registers its session, as
+  [Antigravity 1.5.14](#antigravity-1514) explains.
+- **`~/.gemini/GEMINI.md`.** An earlier Gemini CLI install may have written
+  LangSpan's skill section there, and Antigravity also reads that file.
+  `langspan uninstall --hosts gemini-cli --apply` removes the section.
 
 ## Evidence
 
-Verified: the documentation above, read for this adapter, and the first real
-run on Antigravity 1.5.14. There, `injectSteps` delivered briefings at
-`SessionStart` and `PreInvocation`, and a shell write to a held file was
-refused with LangSpan's reason, which Antigravity showed and the model
-heeded. Edits and reads were not seen and harmless commands were refused, as
+Verified: the documentation above, read for this adapter, and two real runs
+on Antigravity 1.5.14.
+
+In the first run, `injectSteps` delivered briefings at `SessionStart` and
+`PreInvocation`, and a shell write to a held file was refused with LangSpan's
+reason, which Antigravity showed and the model heeded. Edits and reads were
+not seen and harmless commands were refused, as
 [Antigravity 1.5.14](#antigravity-1514) explains.
+
+The repeat run used the corrected adapter on main after PR #191, in a separate
+Antigravity profile with Keychain access denied, with no flag or mode that
+skips approvals, in a throwaway repository
+([issue #110 evidence](https://github.com/Langspan/LangSpan.dev/issues/110#issuecomment-7182408496)).
+It showed:
+
+- **Admission.** An `edit_file` got `{"decision":"allow"}`, then its lease was
+  granted, the edit completed successfully and the lease was completed. The
+  `read_file` before it was recorded.
+- **A harmless command.** `git diff` got allow and ran, with exit code 0.
+- **Conflict.** An `edit_file` of a file another session held was refused
+  with the conflict reason, and the file was unchanged. A shell append to the
+  same file was refused too. The model reported the hold and stopped.
+- **Stale source.** The file changed outside Antigravity between its
+  `read_file` and `edit_file`. LangSpan refused the edit as stale; the model
+  read the file again, and the retry was admitted and completed.
+- **Install.** An empty `mcp_config.json` at project and user level installed
+  cleanly, and `doctor` reported every Antigravity line OK.
+- **Briefing label.** A peer's briefing read
+  "antigravity session … in this checkout".
+- **Allow and `stepIdx`.** Antigravity honored all 7 allow answers, and each
+  `PostToolUse` carried the same `stepIdx` as its `PreToolUse`.
+
+In that run, the first `run_command` of a turn sometimes failed with
+Antigravity's own terminal sandbox error inside the confined profile. The
+error came from Antigravity, not LangSpan, and Antigravity's retry worked.
 
 `tests/antigravity.rs` replays the captured 1.5.14 events through the real
 hook executable, a real daemon and real Git: an `edit_file` is allowed,
@@ -269,11 +300,10 @@ command run in `.agents` resolves the workspace from the event; an empty
 `doctor` reports FIX for the first install's matchers. The constructed
 fixtures in `fixtures/antigravity-constructed/` still cover the documented
 tool names, and install, uninstall and `doctor` round-trip the project and
-user files with the owner's bytes kept. No `edit_file` `PreToolUse` was
-captured, so the tests build it from the captured `PostToolUse`.
+user files with the owner's bytes kept. The first run captured no `edit_file`
+`PreToolUse`, so the tests build it from the captured `PostToolUse`.
 
-Not verified: a real run of the corrected adapter, which repeats the
-admission, conflict and stale-source scenarios on issue #110.
+Not verified: the items in [What is unverified](#what-is-unverified).
 
 ## Consequences
 

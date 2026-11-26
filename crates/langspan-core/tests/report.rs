@@ -558,7 +558,9 @@ fn a_refusal_recorded_before_input_digests_were_kept_is_no_retry() {
 fn host_totals_are_the_sum_of_every_session_listed_or_not() {
     let sessions: Vec<String> = (0..40)
         .map(|index| {
-            let host = ["claude-code", "codex", "cursor", "gemini", "manual"][index % 5];
+            // `gemini.`: a session recorded before Gemini CLI support was
+            // removed, which counts as `other`.
+            let host = ["claude-code", "codex", "cursor", "antigravity", "gemini"][index % 5];
             format!("{host}.s{index:02}")
         })
         .collect();
@@ -594,7 +596,10 @@ fn host_totals_are_the_sum_of_every_session_listed_or_not() {
     assert_eq!(report.sessions.len(), REPORT_SESSIONS);
     assert_eq!(report.omitted_sessions as usize, 40 - REPORT_SESSIONS);
     let hosts: Vec<&str> = report.hosts.iter().map(|row| row.host.as_str()).collect();
-    assert_eq!(hosts, ["claude-code", "codex", "cursor", "gemini", "other"]);
+    assert_eq!(
+        hosts,
+        ["claude-code", "codex", "cursor", "antigravity", "other"]
+    );
     let all = log.report_from(0, false);
     assert_eq!(
         all.hosts.iter().map(|row| row.sessions).sum::<u32>(),

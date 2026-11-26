@@ -218,7 +218,9 @@ is still to be retained.
 **Coordination report (H8), built 26 November 2026.** `langspan report
 WORKSPACE [--since RFC3339] [--json]` and the read-only MCP tool
 `langspan_report` count, for each session and in total for each host kind
-(`claude-code`, `codex`, `cursor`, `gemini`, `other`), from the event log:
+(`claude-code`, `codex`, `cursor`, `antigravity`, `other`; `antigravity`
+replaced the `gemini` kind when Gemini CLI support was removed, ADR 0033,
+and earlier Gemini CLI sessions count as `other`), from the event log:
 tool calls admitted (`edits_admitted`), those with a file whose version was
 not compared (`edits_base_unknown`), shell runs seen only after the command
 (`shell_writes_after`), reads the host reported, intents set, ended and left

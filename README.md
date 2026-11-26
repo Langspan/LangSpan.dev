@@ -72,6 +72,15 @@ Edit holds cover supported operations within a checkout. Interface notices are a
 
 Native Claude Code and Codex coordination has recorded host evidence. For all adapters, platform requirements and unverified behavior, see [implementation status](docs/IMPLEMENTATION_STATUS.md).
 
+| Host | Status |
+| --- | --- |
+| Claude Code | Verified on a real host |
+| Codex | Verified on a real host (codex-cli 0.171.0) |
+| Antigravity, the Google host | Verified on Antigravity CLI (`agy`) 1.5.14: edit admission, conflict and stale-source refusals, and the install ([evidence](https://github.com/Langspan/LangSpan.dev/issues/110#issuecomment-7182408496)). `admit --ttl-ms` is capped at 60 seconds, and a resumed conversation sends no `SessionStart`; its first `PreInvocation` registers it. |
+| Cursor | Built from documentation; not yet verified on a real host |
+
+Gemini CLI support was removed after Google deprecated it. To remove an earlier install, run `langspan uninstall --hosts gemini-cli --apply`.
+
 ## Documentation
 
 [Install and verify](docs/install.md) · [Usage](docs/usage.md) · [MCP](docs/usage.md#mcp) · [Architecture](docs/adr/0001-local-coordination.md) · [Evidence and compatibility](docs/reference-overview.md) · [Benchmarks](benchmarks/coordination/README.md)

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::dashboard::host_and_prefix;
 use crate::today::{Placement, event_facts};
 use crate::{
-    CLAUDE_CODE_HOST, CODEX_HOST, CURSOR_HOST, ClockAnchor, Event, GEMINI_HOST, LeaseRelation,
+    ANTIGRAVITY_HOST, CLAUDE_CODE_HOST, CODEX_HOST, CURSOR_HOST, ClockAnchor, Event, LeaseRelation,
     RecordedEvent, SHELL_TOOL, SourceOrigin, TodayWindow, ToolResult, is_false, is_zero,
 };
 
@@ -25,8 +25,9 @@ pub const REPORT_SESSIONS: usize = 16;
 /// The host kind of a session whose ID names none of the hooked hosts, such
 /// as one registered by hand.
 pub const OTHER_HOST: &str = "other";
-/// The hooked hosts, in the order their totals are listed.
-const HOSTS: [&str; 4] = [CLAUDE_CODE_HOST, CODEX_HOST, CURSOR_HOST, GEMINI_HOST];
+/// The hooked hosts, in the order their totals are listed. A session of a
+/// host no longer supported (Gemini CLI's `gemini.`) counts as `other`.
+const HOSTS: [&str; 4] = [CLAUDE_CODE_HOST, CODEX_HOST, CURSOR_HOST, ANTIGRAVITY_HOST];
 
 /// What one session, or every session of one host kind, did in the window.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

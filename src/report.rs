@@ -241,7 +241,7 @@ mod tests {
     }
 
     fn report(sessions: usize) -> Report {
-        let hosts = ["claude-code", "codex", "cursor", "gemini", "other"];
+        let hosts = ["claude-code", "codex", "cursor", "antigravity", "other"];
         Report {
             workspace_id: "demo".into(),
             window: TodayWindow {
@@ -304,7 +304,13 @@ mod tests {
         // The core lists at most 16; the adapter must fit whatever it gets.
         let text = mcp_text(&full);
         assert!(text.len() <= MCP_BYTES, "{} bytes", text.len());
-        for host in ["claude-code ", "codex ", "cursor ", "gemini ", "other "] {
+        for host in [
+            "claude-code ",
+            "codex ",
+            "cursor ",
+            "antigravity ",
+            "other ",
+        ] {
             assert!(
                 text.lines().any(|line| line.starts_with(host)),
                 "{host}: {text}"
