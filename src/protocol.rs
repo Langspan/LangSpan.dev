@@ -8,15 +8,17 @@ use std::io::{self, BufRead, BufReader, Read};
 /// measurement: a session activity's `told`, `told_at_ms` and `context`, a
 /// briefing's `unchanged`, a briefing delivery's `told` and `told_at_ms`,
 /// and the `context_added` and `told_forgotten` events (with the
-/// `forget_told` request that records the second). Version 4 is version 3 with roadmap D7's
-/// rename fields in interface changes, history entries and in-flight
-/// symbols. Requests of an earlier version are requests of this one.
+/// `forget_told` request that records the second); and with roadmap H9's
+/// `refusal_outcomes` in a report's counts. Version 4 is version 3 with
+/// roadmap D7's rename fields in interface changes, history entries and
+/// in-flight symbols. Requests of an earlier version are requests of this
+/// one.
 pub const PROTOCOL_VERSION: u16 = 5;
 /// The version before `PROTOCOL_VERSION`, answered in its own shape.
 pub const PROTOCOL_VERSION_4: u16 = 4;
 /// The earliest version the daemon still answers, in that version's shape
-/// (`protocol_3_shape`), so that a client of an earlier build keeps working
-/// after the daemon is upgraded.
+/// (`encode_for`), so that a client of an earlier build keeps working after
+/// the daemon is upgraded.
 pub const OLDEST_PROTOCOL_VERSION: u16 = 3;
 
 /// Whether the daemon answers requests of `version`.
@@ -28,22 +30,23 @@ pub fn answers(version: u16) -> bool {
 /// earlier version read the objects later versions extended with
 /// `deny_unknown_fields`, so an answer carrying a field they lack would fail
 /// to read as a whole: theirs is encoded without what later versions added
-/// (`protocol_4_outcome`, then `protocol_3_shape`).
+/// (`protocol_4_outcome` and `protocol_4_shape`, then `protocol_3_shape`).
 pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::Error> {
     if version >= PROTOCOL_VERSION {
         return encode(response);
     }
     let mut earlier = response.clone();
     protocol_4_outcome(&mut earlier.outcome);
-    if version >= PROTOCOL_VERSION_4 {
-        return encode(&earlier);
-    }
     let mut value = serde_json::to_value(&earlier)?;
-    protocol_3_shape(&mut value);
+    protocol_4_shape(&mut value);
+    if version < PROTOCOL_VERSION_4 {
+        protocol_3_shape(&mut value);
+    }
     encode(&value)
 }
 
-/// `outcome` without what version 5 added. Every field it added is skipped
+/// `outcome` without issue #222's part of version 5 (`protocol_4_shape`
+/// removes H9's). Every field it added is skipped
 /// when empty, so emptying it leaves it out; the `context_added` and
 /// `told_forgotten` events, which version 4 has no variant for, are left
 /// out of an event page.
@@ -81,6 +84,27 @@ fn protocol_4_outcome(outcome: &mut Outcome) {
         }
         Outcome::Briefing { briefing } => briefing.unchanged = 0,
         Outcome::Events { events: page } | Outcome::Changes { events: page, .. } => events(page),
+        _ => {}
+    }
+}
+
+/// The field roadmap H9 added to a report's counts in version 5
+/// (`ReportCounts`: the only objects of the protocol with both
+/// `edits_admitted` and `retried_unchanged`).
+const COUNTS_FIELD_SINCE_5: &str = "refusal_outcomes";
+
+/// `value` without H9's part of version 5 (`protocol_4_outcome` removes
+/// issue #222's).
+fn protocol_4_shape(value: &mut serde_json::Value) {
+    use serde_json::Value;
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(protocol_4_shape),
+        Value::Object(fields) => {
+            if fields.contains_key("edits_admitted") && fields.contains_key("retried_unchanged") {
+                fields.shift_remove(COUNTS_FIELD_SINCE_5);
+            }
+            fields.values_mut().for_each(protocol_4_shape);
+        }
         _ => {}
     }
 }

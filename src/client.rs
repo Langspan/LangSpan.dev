@@ -36,9 +36,9 @@ mod unix {
         crate::hook::redact_command(&mut request.command);
         let mut response = exchange(state_dir, &request, deadline)?;
         // A daemon of an earlier build refuses this version before it reads
-        // the command, so the same request in the version it names cannot
-        // take effect twice. A request of this version is a request of each
-        // earlier one it falls back to.
+        // the command, and answers in its own (version 4 or 3), so the same
+        // request in the version it names cannot take effect twice. A request
+        // of this version is a request of each earlier one it falls back to.
         if request.version == PROTOCOL_VERSION
             && (OLDEST_PROTOCOL_VERSION..PROTOCOL_VERSION).contains(&response.version)
             && matches!(&response.outcome, Outcome::Error { code, .. } if code == "unsupported_version")
@@ -301,11 +301,12 @@ mod unix {
             assert!(error.contains("retry with the same request_id"), "{error}");
         }
 
-        /// Roadmap D7 (review comment 4707749784) and issue #222 (review
-        /// comment 4711375982): a daemon of an earlier build answers only
-        /// protocol version 3, or only up to 4. It refuses this build's
-        /// version, as that build does, and the client asks again once in
-        /// the version it names, with the same request, and reads that answer.
+        /// Roadmap D7 (review comment 4707749784), issue #222 (review
+        /// comment 4711375982) and H9 (review comment 4711096877): a daemon
+        /// of an earlier build answers only protocol version 3, or only up
+        /// to 4. It refuses this build's version in its own, as that build
+        /// does, and the client asks again once in that version, with the
+        /// same request, and reads that answer.
         #[test]
         fn a_daemon_of_an_earlier_build_is_asked_again_in_its_version() {
             for version in [
@@ -341,7 +342,7 @@ mod unix {
                         serde_json::json!({"type": "error", "code": "answered", "message": "in its version"})
                     } else {
                         serde_json::json!({"type": "error", "code": "unsupported_version",
-                            "message": "expected an earlier protocol version; restart the daemon after upgrading LangSpan"})
+                            "message": "expected another protocol version; restart the daemon after upgrading LangSpan"})
                     };
                     let reply = serde_json::json!({"version": version, "request_id": request["request_id"],
                         "replayed": false, "generation": 1, "lease_valid": null, "outcome": outcome});

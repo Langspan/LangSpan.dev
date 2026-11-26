@@ -39,6 +39,13 @@ pub fn private_directory(path: &Path) -> Result<(), crate::Error> {
     Ok(())
 }
 
+/// Whether `metadata`, read without following a link, is an owner-only
+/// directory of this user: the check `private_directory` makes.
+#[cfg(unix)]
+pub fn check_private_directory(metadata: &fs::Metadata) -> Result<(), crate::Error> {
+    check_owner(metadata, true)
+}
+
 #[cfg(unix)]
 pub fn prepare_directory(path: &Path) -> Result<PathBuf, crate::Error> {
     private_directory(path)?;

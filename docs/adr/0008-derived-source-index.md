@@ -334,7 +334,10 @@ structures (it failed before the change);
 and `a_version_3_reply_leaves_out_rename_fields_and_private_changes`
 (`tests/protocol.rs`); and
 `a_daemon_of_an_earlier_build_is_asked_again_in_its_version`
-(`src/client.rs`).
+(`src/client.rs`). Version 5 (roadmap H9) later added `refusal_outcomes` to
+a report's counts in the same way; a client now asks an earlier daemon again
+in the version it answers in, 4 or 3
+([ADR 0019](0019-person-facing-surfaces-and-usage-accounting.md)).
 
 Signatures are compared in a normalised form and shown as written (added 24
 November 2026, backlog item 15). The comparison removes whitespace next to

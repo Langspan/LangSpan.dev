@@ -82,17 +82,18 @@ impl Fixture {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let socket = base.join("state/daemon.sock");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
-            assert!(Instant::now() < deadline, "daemon did not become ready");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // Owned before anything can panic, so `Drop` stops it (issue #239).
         let fixture = Self {
             base,
             child: Some(child),
             calls: AtomicU64::new(0),
         };
+        let socket = fixture.base.join("state/daemon.sock");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         // As the first hook run would.
         let root = fixture.work().to_string_lossy().into_owned();
         let (code, text) = fixture.cli(&["workspace", "add", "work", &root, "--request-id", "w"]);
