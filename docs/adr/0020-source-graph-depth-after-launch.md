@@ -30,7 +30,7 @@ about graph depth waits.
 | D8 | Parse states and a blind-spots query | Coverage on every answer, with `blind_in_scope`; whole-file fallback; `doctor`; `graph blind-spots` | Built 25 November 2026 ([issue #57](https://github.com/Langspan/LangSpan.dev/issues/57)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Not yet called on a host |
 | D9 | Symbol-level merge simulation | Git-level combine plus a real check (ADR 0007) | Not now. A real check of the combined tree is the stronger evidence |
 | C2 | Prompt briefing ranked with dependents | Unranked names | Not now |
-| C7 | In-flight unpushed signatures told to dependents | Peers' files | Not now |
+| C7 | In-flight unpushed signatures told to dependents | Exported names another worktree of the repository added or changed and not committed, told by name to sessions whose files mention them; `graph inflight` | Built 25 November 2026 at the owner's request ([issue #44](https://github.com/Langspan/LangSpan.dev/issues/44)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Linked worktrees on one machine only. Not yet run on a host |
 | A11 | Declining a whole-file read once and returning an outline | None | Not now. It changes what the host's read returns |
 | A12 | The index's answer attached to a grep result | None | Not now |
 

@@ -57,6 +57,7 @@ impl Index {
                  DROP TABLE IF EXISTS refs; DROP TABLE IF EXISTS imports;
                  DROP TABLE IF EXISTS baselines; DROP TABLE IF EXISTS calls;
                  DROP TABLE IF EXISTS unread; DROP TABLE IF EXISTS scan_summary;
+                 DROP TABLE IF EXISTS inflight_files; DROP TABLE IF EXISTS inflight;
                  CREATE TABLE files (
                     workspace_id TEXT NOT NULL, path TEXT NOT NULL,
                     scan_digest TEXT NOT NULL, digest TEXT, partial INTEGER NOT NULL DEFAULT 0,
@@ -106,6 +107,20 @@ impl Index {
             "CREATE TABLE IF NOT EXISTS roots (
                 workspace_id TEXT NOT NULL PRIMARY KEY, root TEXT NOT NULL,
                 revision INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;",
+        )?;
+        // Each file's in-flight set (roadmap C7): the exported symbols its
+        // indexed content adds or changes against the worktree's `HEAD`,
+        // and the indexed digest and `HEAD` blob it was compared at. Added
+        // without a schema change: an index without them computes them at
+        // its next pass.
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS inflight_files (
+                workspace_id TEXT NOT NULL, path TEXT NOT NULL, digest TEXT NOT NULL,
+                head_object TEXT, PRIMARY KEY (workspace_id, path)) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS inflight (
+                workspace_id TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL,
+                kind TEXT NOT NULL, signature TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS inflight_by_path ON inflight(workspace_id, path);",
         )?;
         Ok(Self { connection })
     }
@@ -308,6 +323,8 @@ impl Index {
             "imports",
             "baselines",
             "calls",
+            "inflight_files",
+            "inflight",
         ] {
             transaction.execute(
                 &format!("DELETE FROM {table} WHERE workspace_id = ?1"),
@@ -391,7 +408,16 @@ impl Index {
         }
         let transaction = self.connection.transaction()?;
         for path in indexed.keys().filter(removed) {
-            for table in ["files", "symbols", "refs", "imports", "baselines", "calls"] {
+            for table in [
+                "files",
+                "symbols",
+                "refs",
+                "imports",
+                "baselines",
+                "calls",
+                "inflight_files",
+                "inflight",
+            ] {
                 transaction.execute(
                     &format!("DELETE FROM {table} WHERE workspace_id = ?1 AND path = ?2"),
                     params![workspace_id, path],
@@ -539,7 +565,256 @@ impl Index {
                 )?);
             }
         }
+        self.update_inflight(workspace_id, root, scan, deadline)?;
         Ok(notices)
+    }
+
+    /// Bring the workspace's in-flight set up to the scan (roadmap C7): for
+    /// each file that differs from `HEAD` and is indexed at its scanned
+    /// content, the exported symbols that `HEAD`'s version of the file
+    /// lacks or has with another signature. A file the scan found clean,
+    /// or no longer lists, has none. A file parsed partially, at either
+    /// version, says nothing. Reads at most `FILES_PER_PASS` blobs from Git
+    /// and stops at `deadline`; the rest wait for the next pass.
+    fn update_inflight(
+        &mut self,
+        workspace_id: &str,
+        root: &Path,
+        scan: &ScanView,
+        deadline: Instant,
+    ) -> Result<(), Failure> {
+        type Compared = BTreeMap<String, (String, Option<String>)>;
+        let compared: Compared = self
+            .connection
+            .prepare_cached(
+                "SELECT path, digest, head_object FROM inflight_files WHERE workspace_id = ?1",
+            )?
+            .query_map([workspace_id], |row| {
+                Ok((row.get(0)?, (row.get(1)?, row.get(2)?)))
+            })?
+            .collect::<Result<_, _>>()?;
+        let transaction = self.connection.transaction()?;
+        for path in compared.keys() {
+            // Not read by this scan: what was said of it still holds.
+            if scan.dirty.contains_key(path) || scan.unobserved.contains(path) {
+                continue;
+            }
+            for table in ["inflight_files", "inflight"] {
+                transaction.execute(
+                    &format!("DELETE FROM {table} WHERE workspace_id = ?1 AND path = ?2"),
+                    params![workspace_id, path],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        let mut reads = 0;
+        for (path, head_object) in &scan.dirty {
+            if Instant::now() >= deadline || reads >= FILES_PER_PASS {
+                break;
+            }
+            // Only a file indexed at the scanned content: until then the
+            // index cannot say what it defines.
+            let indexed: Option<(Option<String>, bool)> = self
+                .connection
+                .query_row(
+                    "SELECT digest, partial FROM files WHERE workspace_id = ?1 AND path = ?2",
+                    params![workspace_id, path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((Some(digest), partial)) = indexed else {
+                continue;
+            };
+            if scan.files.get(path) != Some(&digest) {
+                continue;
+            }
+            let at = (digest.clone(), head_object.clone());
+            if compared.get(path) == Some(&at) {
+                continue;
+            }
+            let inflight = if partial {
+                Vec::new()
+            } else {
+                let head = match head_object {
+                    Some(object) => {
+                        reads += 1;
+                        head_graph(root, path, object, deadline)
+                    }
+                    None => Some(FileGraph::default()),
+                };
+                match head {
+                    Some(head) => self.added_or_changed(workspace_id, path, &head)?,
+                    None => Vec::new(),
+                }
+            };
+            let transaction = self.connection.transaction()?;
+            transaction.execute(
+                "DELETE FROM inflight WHERE workspace_id = ?1 AND path = ?2",
+                params![workspace_id, path],
+            )?;
+            for symbol in &inflight {
+                transaction.execute(
+                    "INSERT INTO inflight VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        workspace_id,
+                        path,
+                        symbol.name,
+                        symbol.kind.name(),
+                        symbol.signature
+                    ],
+                )?;
+            }
+            transaction.execute(
+                "INSERT INTO inflight_files VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(workspace_id, path) DO UPDATE SET digest = excluded.digest,
+                    head_object = excluded.head_object",
+                params![workspace_id, path, digest, head_object],
+            )?;
+            transaction.commit()?;
+        }
+        Ok(())
+    }
+
+    /// The exported symbols indexed for `path` that `head` does not export
+    /// with the same name, kind and signature (whitespace aside).
+    fn added_or_changed(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        head: &FileGraph,
+    ) -> Result<Vec<Symbol>, Failure> {
+        let compared = |signature: &str| signature.split_whitespace().collect::<String>();
+        let before: BTreeSet<(&str, SymbolKind, String)> = head
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.exported)
+            .map(|symbol| {
+                (
+                    symbol.name.as_str(),
+                    symbol.kind,
+                    compared(&symbol.signature),
+                )
+            })
+            .collect();
+        let mut statement = self.connection.prepare_cached(
+            "SELECT name, kind, signature FROM symbols
+             WHERE workspace_id = ?1 AND path = ?2 AND exported = 1 ORDER BY line",
+        )?;
+        let symbols = statement
+            .query_map(params![workspace_id, path], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(symbols
+            .into_iter()
+            .filter_map(|(name, kind, signature)| {
+                let kind = SymbolKind::parse(&kind)?;
+                if before.contains(&(name.as_str(), kind, compared(&signature))) {
+                    return None;
+                }
+                Some(Symbol {
+                    name,
+                    kind,
+                    line: 0,
+                    end_line: 0,
+                    signature,
+                    exported: true,
+                    bytes: 0..0,
+                })
+            })
+            .collect())
+    }
+
+    /// The workspace's in-flight symbols, in path and name order, at most
+    /// `limit`: `(path, name, kind, signature)`.
+    pub fn inflight(
+        &self,
+        workspace_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String, String)>, Failure> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT path, name, kind, signature FROM inflight WHERE workspace_id = ?1
+             ORDER BY path, name, signature LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(params![workspace_id, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The workspace's files that mention `name`, or that import (in
+    /// `imports`, from `imports_of`) a path whose last part is `name` or
+    /// the module of `path` (see `module_name`). Only files in `among` when
+    /// given. A name match, at most `limit`, in path order.
+    pub fn mentioning(
+        &self,
+        workspace_id: &str,
+        (path, name): (&str, &str),
+        imports: &[(String, String)],
+        among: Option<&BTreeSet<String>>,
+        limit: usize,
+    ) -> Result<Vec<String>, Failure> {
+        let module = module_name(path);
+        let mut found = BTreeSet::new();
+        let mut statement = self.connection.prepare_cached(
+            "SELECT DISTINCT path FROM refs WHERE workspace_id = ?1 AND name = ?2
+             ORDER BY path LIMIT 4096",
+        )?;
+        for row in
+            statement.query_map(params![workspace_id, name], |row| row.get::<_, String>(0))?
+        {
+            found.insert(row?);
+        }
+        for (file, target) in imports {
+            let last = import_tail(target);
+            if last.is_some_and(|last| last == name || Some(last) == module) {
+                found.insert(file.clone());
+            }
+        }
+        Ok(found
+            .into_iter()
+            .filter(|file| among.is_none_or(|among| among.contains(file)))
+            .take(limit)
+            .collect())
+    }
+
+    /// The import targets of the workspace's files in `among`, or of all of
+    /// them (the first 20,000), as `(path, target)`.
+    pub fn imports_of(
+        &self,
+        workspace_id: &str,
+        among: Option<&BTreeSet<String>>,
+    ) -> Result<Vec<(String, String)>, Failure> {
+        Ok(match among {
+            Some(among) => {
+                let mut statement = self.connection.prepare_cached(
+                    "SELECT path, target FROM imports WHERE workspace_id = ?1 AND path = ?2",
+                )?;
+                let mut imports = Vec::new();
+                for file in among {
+                    for row in statement.query_map(params![workspace_id, file], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })? {
+                        imports.push(row?);
+                    }
+                }
+                imports
+            }
+            None => self
+                .connection
+                .prepare_cached(
+                    "SELECT path, target FROM imports WHERE workspace_id = ?1
+                     ORDER BY path LIMIT 20000",
+                )?
+                .query_map([workspace_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()?,
+        })
     }
 
     /// Run `reads` and measure coverage as one answer, from one read
@@ -1119,6 +1394,72 @@ fn read_exact_version(root: &Path, path: &str, digest: &str, max: usize) -> Opti
         .then_some(bytes)
 }
 
+/// The structure of `path`'s blob `object` at the worktree's `HEAD`, read
+/// raw from Git (never through filters), within the parse bound. `None`
+/// when it cannot be read or parsed completely: then nothing is said of
+/// the file.
+fn head_graph(root: &Path, path: &str, object: &str, deadline: Instant) -> Option<FileGraph> {
+    let language = Language::for_path(path)?;
+    if object.len() < 40 || object.len() > 64 || !object.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let bytes = crate::git::output(
+        root,
+        &[
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
+            "cat-file",
+            "blob",
+            object,
+        ],
+        deadline,
+        MAX_SOURCE_BYTES,
+    )
+    .ok()?;
+    let graph = langspan_graph::extract(language, &bytes).ok()?;
+    (!graph.partial).then_some(graph)
+}
+
+/// The module name a file is imported by: its file name without the
+/// extension, or its directory's name for a Go file and for `mod.rs`,
+/// `lib.rs`, `main.rs`, `index.*` and `__init__.py`.
+fn module_name(path: &str) -> Option<&str> {
+    let mut parts = path.rsplit('/');
+    let file = parts.next()?;
+    let stem = file.split_once('.').map_or(file, |(stem, _)| stem);
+    let by_directory = matches!(stem, "mod" | "lib" | "main" | "index" | "__init__")
+        || Language::for_path(path) == Some(Language::Go);
+    if by_directory {
+        parts.next().filter(|directory| !directory.is_empty())
+    } else {
+        Some(stem).filter(|stem| !stem.is_empty())
+    }
+}
+
+/// The last part of an import target as written: `crate::quota`,
+/// `"./quota.js"`, `app.quota` and `"example.com/app/quota"` all end in
+/// `quota`.
+fn import_tail(target: &str) -> Option<&str> {
+    const SOURCE: &[&str] = &[
+        "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "py", "go", "rs",
+    ];
+    let target = target.trim().trim_matches(['"', '\'', '`']);
+    let parts: Vec<&str> = target
+        .split(['/', ':', '.', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    match parts.as_slice() {
+        [.., last, extension]
+            if SOURCE.contains(extension) && target.ends_with(&format!(".{extension}")) =>
+        {
+            Some(last)
+        }
+        [.., last] => Some(last),
+        [] => None,
+    }
+}
+
 /// The indexable part of a complete scan: regular files in a supported
 /// language, with the digest the scan recorded.
 pub fn indexable(snapshot: &crate::observer::Snapshot) -> BTreeMap<String, String> {
@@ -1164,6 +1505,9 @@ pub struct ScanView {
     pub files: BTreeMap<String, String>,
     pub unobserved: BTreeSet<String>,
     pub blind: ScanBlind,
+    /// The indexable files that differ from the worktree's `HEAD`, each with
+    /// its blob at `HEAD` when `HEAD` holds it (roadmap C7).
+    pub dirty: BTreeMap<String, Option<String>>,
 }
 
 impl ScanView {
@@ -1198,10 +1542,18 @@ impl ScanView {
                 *blind.languages.entry(format!(".{extension}")).or_default() += 1;
             }
         }
+        let files = indexable(snapshot);
+        let dirty = snapshot
+            .files
+            .iter()
+            .filter(|(path, version)| version.dirty && files.contains_key(*path))
+            .map(|(path, _)| (path.clone(), snapshot.head_objects.get(path).cloned()))
+            .collect();
         Self {
-            files: indexable(snapshot),
+            files,
             unobserved: snapshot.unobserved.clone(),
             blind,
+            dirty,
         }
     }
 }

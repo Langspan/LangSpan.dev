@@ -591,6 +591,175 @@ mod unix {
         Ok(Outcome::GraphContext { matches, coverage })
     }
 
+    /// In-flight symbols read from one worktree's index, at most.
+    const INFLIGHT_PER_WORKTREE: usize = 128;
+    /// In-flight symbols compared with the asking workspace's files, at most.
+    const INFLIGHT_OFFERED: usize = 256;
+
+    /// What other worktrees of `workspace_id`'s repository have in flight
+    /// (roadmap C7) that the workspace's files mention: the files in
+    /// `among` for a briefing, any file for `graph inflight`. Neither a
+    /// worktree without a complete scan nor an asking workspace without one
+    /// says anything. `keep` decides which items count toward `limit`; the
+    /// flag says more were found. The coverage is the asking workspace's.
+    fn inflight_mentioned(
+        graph: &crate::graph::Index,
+        state: &State,
+        workspace_id: &str,
+        among: Option<&std::collections::BTreeSet<String>>,
+        limit: usize,
+        keep: impl Fn(&langspan_core::InflightSymbol) -> bool,
+    ) -> Result<
+        (
+            Vec<langspan_core::InflightSymbol>,
+            langspan_core::GraphCoverage,
+            bool,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let nothing = Ok((Vec::new(), langspan_core::GraphCoverage::default(), false));
+        let (Some(of), Some(git)) = (
+            Registration::of(state, workspace_id),
+            state.workspace_git.get(workspace_id),
+        ) else {
+            return nothing;
+        };
+        let mut offered = Vec::new();
+        for (other, other_git) in &state.workspace_git {
+            if other == workspace_id || other_git.repository_id != git.repository_id {
+                continue;
+            }
+            let Some(at) = Registration::of(state, other) else {
+                continue;
+            };
+            let (rows, coverage) =
+                graph.with_coverage(&at, |graph| graph.inflight(other, INFLIGHT_PER_WORKTREE))?;
+            if coverage.scanned {
+                offered.extend(rows.into_iter().map(|row| (other.clone(), row)));
+            }
+            if offered.len() >= INFLIGHT_OFFERED {
+                offered.truncate(INFLIGHT_OFFERED);
+                break;
+            }
+        }
+        if offered.is_empty() {
+            return nothing;
+        }
+        let ((found, more), coverage) = graph.with_coverage(&of, |graph| {
+            let imports = graph.imports_of(workspace_id, among)?;
+            let mut found = Vec::new();
+            for (other, (path, name, kind, signature)) in offered {
+                let mentioned_in = graph.mentioning(
+                    workspace_id,
+                    (&path, &name),
+                    &imports,
+                    among,
+                    langspan_core::INFLIGHT_MENTIONS,
+                )?;
+                if mentioned_in.is_empty() {
+                    continue;
+                }
+                let item = langspan_core::InflightSymbol {
+                    workspace_id: other,
+                    path,
+                    name,
+                    kind,
+                    signature,
+                    mentioned_in,
+                };
+                if !keep(&item) {
+                    continue;
+                }
+                if found.len() == limit {
+                    return Ok((found, true));
+                }
+                found.push(item);
+            }
+            Ok((found, false))
+        })?;
+        if !coverage.scanned {
+            return Ok((Vec::new(), coverage, false));
+        }
+        Ok((found, coverage, more))
+    }
+
+    /// `Brief` with what the index finds in flight in other worktrees for
+    /// the session's own files. An index that cannot be read leaves it out.
+    fn prepare_brief(
+        state: &State,
+        graph: Option<&crate::graph::Index>,
+        command: &Command,
+    ) -> Command {
+        let Command::Brief {
+            session_id,
+            max_peers,
+            deliver,
+            mid_turn,
+        } = command
+        else {
+            return command.clone();
+        };
+        let inflight = graph
+            .zip(langspan_core::briefing_concern(state, session_id, now_ms()))
+            .filter(|(_, (_, concerned))| !concerned.is_empty())
+            .and_then(|(graph, (workspace_id, concerned))| {
+                inflight_mentioned(
+                    graph,
+                    state,
+                    &workspace_id,
+                    Some(&concerned),
+                    langspan_core::INFLIGHT_CANDIDATES,
+                    |item| !langspan_core::inflight_told(state, session_id, item),
+                )
+                .inspect_err(|error| {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({"level":"warn","event":"inflight_unavailable","detail":error.to_string()})
+                    );
+                })
+                .ok()
+            })
+            .map(|(found, _, _)| found)
+            .unwrap_or_default();
+        Command::BriefPrepared {
+            session_id: session_id.clone(),
+            max_peers: *max_peers,
+            deliver: *deliver,
+            mid_turn: *mid_turn,
+            inflight,
+        }
+    }
+
+    /// `graph inflight`: what other worktrees have in flight that any of
+    /// the workspace's files mention.
+    fn graph_inflight(
+        graph: Option<&crate::graph::Index>,
+        state: &State,
+        workspace_id: &str,
+    ) -> Result<Outcome, String> {
+        if !state.workspaces.contains_key(workspace_id) {
+            return Err("workspace is not registered".into());
+        }
+        let graph = graph.ok_or("the index is not available yet; try again shortly")?;
+        let (found, coverage, truncated) = inflight_mentioned(
+            graph,
+            state,
+            workspace_id,
+            None,
+            crate::graph::MAX_RESULTS as usize,
+            |_| true,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(Outcome::GraphInflight {
+            inflight: found
+                .iter()
+                .filter_map(|item| langspan_core::inflight_notice(state, item))
+                .collect(),
+            coverage,
+            truncated,
+        })
+    }
+
     /// The write-time break check (ADR 0029). The calls are used for this
     /// answer only: never logged or recorded. What is recorded, when a
     /// break is found, is which notices the session was alerted to.
@@ -1864,8 +2033,13 @@ mod unix {
                 | Command::GraphImpact { .. }
                 | Command::GraphBlindSpots { .. }
                 | Command::GraphContext { .. }
+                | Command::GraphInflight { .. }
         ) {
             let answer = match &command {
+                Command::GraphInflight { workspace_id } => {
+                    graph_inflight(graph, store.state(), workspace_id)
+                        .map_err(|message| ("index_unavailable", message))
+                }
                 Command::GraphBlindSpots {
                     workspace_id,
                     limit,
@@ -1937,6 +2111,8 @@ mod unix {
                     return error(request_id, store.state().generation, code, message);
                 }
             }
+        } else if let Command::Brief { .. } = &command {
+            prepare_brief(store.state(), graph, &command)
         } else {
             match prepare(store.state(), &command) {
                 Ok(command) => command,

@@ -265,6 +265,46 @@ changed, and is not remembered as delivered. Nothing is added when the index
 has no complete scan or nothing matched, and any failure adds nothing.
 `--code-briefing off` on the hook, or on `hooks install`, turns it off.
 
+**Another worktree's in-flight signatures (added later, roadmap C7).** The
+observer keeps, for each file that differs from the worktree's `HEAD`, the
+blob ID that `HEAD` holds for it, if any. After each indexing pass the indexer
+compares each such file, once it is indexed at its scanned content, with that
+blob: it reads the blob raw with `git cat-file blob` (no filters, within the
+1 MiB parse bound and the pass's deadline, at most 200 reads per pass) and
+parses it like any file. The exported symbols of the working version that
+the `HEAD` version lacks, or exports with a different signature (whitespace
+aside), are the file's in-flight set. A file new since `HEAD` puts all its
+exports in it. The set lives in `graph.sqlite3` (`inflight` and
+`inflight_files`, the latter with the indexed digest and `HEAD` blob it was
+computed at), added without a schema change, so an existing index computes
+it at its next pass. A file found clean again, or gone, has none. A partial
+parse at either version says nothing. When the daemon answers `Brief`, it
+reads the in-flight sets of the other worktrees of the asking workspace's
+repository, at most 128 symbols each and 256 in all, and compares them with
+the asking workspace's index. A symbol counts when one of the session's own
+files (edited, held, declared or read) mentions its name, or imports a path
+whose last part is the name or the file's module name: the file name without
+its extension, or the directory for Go and for `mod.rs`, `lib.rs`, `main.rs`,
+`index.*` and `__init__.py`. Symbols already told to the session are left
+out, and at most 32 go to the core in a prepared command that only the
+daemon builds, like `WorkspaceRegisterVerified`. The core names the worktree
+root and the session that last reported editing the file, and selects at most
+3 within 600 bytes by `inflight_cost`, never more than what an adapter
+renders. It selects none for a briefing that carries a message, a withdrawal,
+an uncoordinated change or a check result: those take the briefing's room
+and are each delivered once, so the in-flight lines wait, counted. A
+delivered briefing records the keys of the signatures it told
+(`InflightDelivered`), at most 128 per session, so each signature is told
+once and a changed one again. `graph inflight WORKSPACE` answers the same
+comparison for any file of the workspace, read-only. Neither a worktree nor
+an asking workspace without a complete scan contributes anything. Tests:
+`another_worktrees_uncommitted_signature_is_told_to_the_session_whose_file_mentions_it`
+and `in_flight_lines_keep_to_their_share_and_the_rest_are_counted_and_told_later`
+in `tests/graph.rs`,
+`a_codex_session_is_told_a_signature_claude_code_has_in_flight_in_a_linked_worktree`
+in `tests/briefing.rs`, and the in-flight tests in
+`crates/langspan-core/tests/briefing.rs`.
+
 ## Consequences and limits
 
 - **Dependencies.** Tree-sitter and four grammars are compiled C, linked into
@@ -280,7 +320,10 @@ has no complete scan or nothing matched, and any failure adds nothing.
   level compounds the false positives of the one before, and nothing is
   resolved. Import targets are stored but not yet used to narrow matches.
 - Notices cover one physical workspace. A teammate on another machine or in
-  another worktree is not yet told of an interface change.
+  another worktree is not yet told of an interface change. A session in
+  another worktree of the repository is told of new or changed exports that
+  are not committed (in flight), matched by name; once committed they are no
+  longer in flight until they change again. Other machines get neither.
 - False positives are expected for common names. False negatives occur for
   dynamic uses, reflection, string-built names, macros and generated code.
 - Formatter changes the normalised comparison does not absorb still read as
