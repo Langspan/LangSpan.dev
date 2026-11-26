@@ -1464,6 +1464,8 @@ commit the last scan saw) stops the scan with `Git identity changed`.
 without `--switch` and records NEW_ROOT. When the old root is a link to a
 different directory, the `old_root_exists` refusal names the directory it
 leads to; use `--switch` only if that is another checkout you mean to leave.
+The checkout a registered link leads to cannot be registered, or receive a
+moved workspace, under another ID.
 
 User-level hooks need nothing: an event from NEW_ROOT joins the moved ID.
 Project-level hooks name their root in the host's configuration, which the

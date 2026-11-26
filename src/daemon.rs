@@ -2070,6 +2070,8 @@ mod unix {
 
     /// The other workspaces whose roots overlap `canonical` as distinct
     /// linked worktrees of one repository. Any other overlap is refused.
+    /// A registered root is kept as given, so it is compared both as given
+    /// and resolved: a root that is now a link to `canonical` overlaps it.
     fn verified_overlaps(
         state: &State,
         workspace_id: &str,
@@ -2078,10 +2080,14 @@ mod unix {
     ) -> Result<Vec<String>, String> {
         let mut verified = Vec::new();
         for old in state.workspaces.values() {
-            let other = Path::new(&old.root);
+            let given = Path::new(&old.root);
+            let resolved = fs::canonicalize(given).ok();
+            let overlaps =
+                |other: &Path| canonical.starts_with(other) || other.starts_with(canonical);
             if old.workspace_id != workspace_id
-                && (canonical.starts_with(other) || other.starts_with(canonical))
+                && (overlaps(given) || resolved.as_deref().is_some_and(overlaps))
             {
+                let other = resolved.as_deref().unwrap_or(given);
                 let linked = crate::git::identity(canonical, deadline)
                     .and_then(|a| crate::git::identity(other, deadline).map(|b| (a, b)))
                     .is_ok_and(|(a, b)| {

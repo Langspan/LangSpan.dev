@@ -1010,6 +1010,82 @@ fn a_link_to_another_repository_at_the_registered_root_is_an_identity_change() {
     );
 }
 
+/// A registered root that is now a link to the checkout's new place still
+/// holds that checkout: a second ID for the link's target, by registration
+/// or by moving another workspace there, is refused, so two workspaces never
+/// admit the same physical file.
+#[test]
+fn a_second_id_for_the_checkout_a_registered_link_leads_to_is_refused() {
+    let mut home = Home::new();
+    home.start();
+    let old = home.repo("disk1/app");
+    home.ok(&["workspace", "add", "a", text(&old), "--request-id", "add-a"]);
+    fs::create_dir(home.base.join("disk2")).unwrap();
+    let new = home.base.join("disk2/app");
+    fs::rename(&old, &new).unwrap();
+    std::os::unix::fs::symlink(&new, &old).unwrap();
+
+    let refused = home.json(&["workspace", "add", "b", text(&new), "--request-id", "add-b"]);
+    assert_eq!(refused["outcome"]["type"], "error", "{refused}");
+    assert!(
+        refused["outcome"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("overlaps an existing physical workspace"),
+        "{refused}"
+    );
+    // Nor inside it.
+    let refused = home.json(&[
+        "workspace",
+        "add",
+        "b",
+        text(&new.join("src")),
+        "--request-id",
+        "add-b-src",
+    ]);
+    assert_eq!(refused["outcome"]["type"], "error", "{refused}");
+
+    // Nor by moving another workspace onto the link's target.
+    let other = home.repo("other");
+    home.ok(&[
+        "workspace",
+        "add",
+        "c",
+        text(&other),
+        "--request-id",
+        "add-c",
+    ]);
+    fs::remove_dir_all(&other).unwrap();
+    let refused = home.json(&[
+        "workspace",
+        "move",
+        "c",
+        text(&new),
+        "--request-id",
+        "move-c",
+    ]);
+    assert_eq!(
+        refused["outcome"]["code"], "workspace_conflict",
+        "{refused}"
+    );
+
+    let ids: Vec<_> = home
+        .workspaces()
+        .iter()
+        .map(|w| w["workspace_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, ["a", "c"]);
+    // Through the link, the registration of `a` is unchanged.
+    home.ok(&[
+        "workspace",
+        "add",
+        "a",
+        text(&old),
+        "--request-id",
+        "add-a-again",
+    ]);
+}
+
 fn head(root: &Path) -> String {
     let output = Process::new("git")
         .args(["rev-parse", "HEAD"])
