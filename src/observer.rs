@@ -108,6 +108,55 @@ impl Default for Limits {
     }
 }
 
+/// Whether two workspace roots name the same directory now: equal once
+/// symbolic links are resolved, and the same device and inode. A registered
+/// root is kept as given, so a checkout reached through a link (a moved
+/// folder with a link left at its old path, or a home directory reached
+/// through one) matches the canonical root Git reports. A root that does
+/// not resolve matches nothing. Every comparison of a registered root with
+/// a resolved one uses this.
+pub fn same_root(a: &Path, b: &Path) -> bool {
+    let (Ok(resolved_a), Ok(resolved_b)) = (std::fs::canonicalize(a), std::fs::canonicalize(b))
+    else {
+        return false;
+    };
+    if resolved_a != resolved_b {
+        return false;
+    }
+    let (Ok(meta_a), Ok(meta_b)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta_a.is_dir() && meta_a.dev() == meta_b.dev() && meta_a.ino() == meta_b.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        meta_a.is_dir() && meta_b.is_dir()
+    }
+}
+
+/// Whether the object database of the checkout at `root` holds the commit
+/// `oid`, read as the observer runs Git (no fsmonitor program, no replace
+/// refs). An error is the reason Git could not be asked.
+pub fn holds_commit(root: &Path, oid: &str, deadline: Instant) -> Result<bool, String> {
+    let object = format!("{oid}^{{commit}}");
+    let arguments = [
+        "--no-replace-objects",
+        "-c",
+        "core.fsmonitor=false",
+        "cat-file",
+        "-e",
+        &object,
+    ];
+    Ok(
+        crate::git::run_with_env(root, &arguments, &[], deadline, 256)?
+            .0
+            .success(),
+    )
+}
+
 pub fn scan(root: &Path, deadline: Instant) -> Result<Snapshot, String> {
     scan_with_limits(root, deadline, Limits::default())
 }

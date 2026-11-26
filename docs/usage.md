@@ -1337,6 +1337,45 @@ prompts: code an agent writes runs without the host asking. A command that
 looks like it holds a secret is refused; pass secrets through the environment.
 See [ADR 0030](adr/0030-automatic-checks-after-write-batches.md).
 
+#### The wider check after an interface change
+
+A fast check often builds only the package a session changed, so a broken
+caller in another package shows up later, in someone else's work. Give the
+automatic check a second, wider command:
+
+```sh
+langspan check auto WORKSPACE --name fast -- cargo test -p core \
+  --on-interface-change all --timeout-s 1800 -- cargo test --workspace
+```
+
+The first `--timeout-s` (before the first `--`) is the regular command's; the
+one after `--on-interface-change NAME` is the wider command's (default 1800 s).
+Both commands are refused if they look like they hold a secret.
+
+When the source index reports that a session's writes changed an exported
+name that other files mention (an interface notice), the wider command runs
+after the regular one finishes, on the same tree, with the same rules: no
+shell, its own process group, cancelled and restarted with the regular
+command when a session writes again and the tree changes. LangSpan runs the
+owner's whole command and never adds paths to it, so a dependency the index
+misses still gets tested. A body-only change produces no notice and runs only
+the regular command. A change no other file mentions runs nothing extra.
+
+The wider result is an ordinary check record under its own name, graded
+`kept` when it passed and `broke` when it failed. The session that made the
+change, and any session working on or having read a mentioning file, are told
+at their next briefing:
+
+```text
+LangSpan: the automatic check ran its wider command. Interface change to parse_upload in core/src/lib.rs: "pub fn parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) -> u32": the wider check all failed (exit 101); files that mention it: cli/src/main.rs (a name lookup, not resolved uses). On working tree ...
+```
+
+The mentioning files come from the index's name lookup. The line shows at
+most 8 of them and counts the rest; a session working on any of them, shown
+or not, is told. The line also says how many source files the index could not read in full. If the
+index has no complete scan of the workspace, no interface change can be found:
+the regular result says so and the wider command does not run.
+
 #### Tests that flip on unchanged code
 
 Two results of the same check (name and command, compared by its whole
@@ -1617,6 +1656,27 @@ which check failed: `not_checkout_top`, `old_root_exists`,
 `old_root_missing`, `root_derived_id`, `different_repository` or
 `workspace_conflict` (NEW_ROOT
 is registered already or overlaps another workspace).
+
+A checkout reached through a symbolic link is the same checkout. LangSpan
+compares a registered root with the root Git reports by resolving links and
+checking that both name the same directory (same device and inode). If you
+move a checkout and leave a link at its old path, the workspace keeps
+scanning, and sessions started through the link join it, under the
+registered path. A link to a checkout of another repository (one without the
+commit the last scan saw) stops the scan with `Git identity changed`.
+`workspace move ID NEW_ROOT` to the link's target succeeds
+without `--switch` and records NEW_ROOT. When the old root is a link to a
+different directory, the `old_root_exists` refusal names the directory it
+leads to; use `--switch` only if that is another checkout you mean to leave.
+The checkout a registered link leads to cannot be registered, or receive a
+moved workspace, under another ID. Its linked worktrees still can, at their
+resolved paths: register a new one under the checkout's new place, or move
+one registered under the old root to its resolved path. While the workspace
+at the link holds an admission, such a registration is refused with
+`workspace_in_use`; complete the admission or wait for it to expire.
+If a registered root becomes a link to another registered workspace's
+checkout, both workspaces refuse admission until you move or remove one of
+them.
 
 User-level hooks need nothing: an event from NEW_ROOT joins the moved ID.
 Project-level hooks name their root in the host's configuration, which the

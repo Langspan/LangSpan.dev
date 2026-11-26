@@ -438,6 +438,21 @@ model.
 | Denial of service | Off by default. One run per workspace at a time; a burst of batches waits for a pause of `auto_check_debounce_ms` (50 ms to 60 s) and at most 30 s; the command is killed with its process group at its limit (1 to 3,600 s) and whenever it ends. The trigger queue holds 256 and never blocks the state owner; output kept while running is 8 KiB. Each run takes two snapshots of the working tree, plus one per trigger while it runs. If the daemon stops, a running check's process group is not killed and runs to its end. |
 | Elevation of privilege | **The command runs outside the agent host**: as the daemon's user, with the daemon's environment, in the workspace root, not in the host's sandbox and not behind its permission prompts. Code an agent writes and the command executes (tests, build scripts, a `Makefile`) therefore runs without the host asking, and a prompt-injected agent can use that to run code the host would have refused. Turning the check on is the owner's grant of this. There is no MCP tool for it; the CLI and any other client of the owner-only socket can set it, so an agent that runs `langspan check auto` through its shell does so under the host's own prompt for that shell command. An owner who runs agents in a sandbox for safety should leave it off. |
 
+### The wider check after an interface change
+
+The wider command (issue #71, ADR 0030) adds a second owner-chosen command to
+the automatic check, run outside the agent host like the first, and relays
+index-derived file names to more sessions.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | The wider command starts only from an interface notice the daemon's own indexer reported (`observe_interface` reaches the worker only through the state owner, and a replayed request starts nothing). A same-user client can send `observe_interface` itself and so make the configured wider command run, bounded like any trigger: one run per workspace, after the debounce. It cannot choose what runs. |
+| Tampering (prompt injection) | The briefing quotes repository text: an export's name and signatures, cleaned and capped (128 and 160 bytes), and at most 8 file paths, cleaned and capped, labelled as a name lookup and not resolved uses, inside the check section's 1,200-byte cap with the output tail's existing label. A crafted signature can still put words in the model's context. |
+| Repudiation | The wider result is an ordinary `check_recorded` and `check_reported` event, with the grade and the change; the sessions told are named in the event. |
+| Information disclosure | The sessions working on a mentioning file now receive the wider check's output tail, which was before sent only to the sessions whose writes triggered the check. All are sessions of the same workspace on the same machine. Nothing is published to a remote. |
+| Denial of service | At most 16 ungraded changes per workspace; the wider run shares the one-run-per-workspace rule, the debounce, its own 1 to 3,600 s limit and the tree-change cancellation, and is never rerun for flaky-test learning. Each boundary in a workspace with a wider command reads the index's coverage once, a bounded query of a local file. |
+| Elevation of privilege | **The wider command runs outside the agent host**, as the regular command does: as the daemon's user, not in the host's sandbox. Setting it is the owner's grant, from the CLI or another client of the owner-only socket; there is no MCP tool, and a command that looks like it holds a secret is refused by the daemon. |
+
 ### Tests that flip on unchanged code
 
 Learning which tests flip (issue #70, ADR 0030) widens three things: a quick
@@ -503,6 +518,7 @@ Withdrawing a message (`langspan messages retract`, `langspan_retract_message`, 
 | --- | --- |
 | Spoofing | Any client of the owner-only socket can send the request, as with `workspace add`. The socket's mode is the boundary. |
 | Tampering (wrong checkout) | A move needs NEW_ROOT to be the top of a Git checkout and, without `--switch`, the old root to be gone; with `--switch`, NEW_ROOT's object database must hold the old root's `HEAD` commit. The check is a shared commit, not an identity: a fork or any clone that fetched that commit passes, and a repository can be given the commit on purpose. The new root then meets the same overlap and alias refusals as `workspace add`. A refused move changes nothing. |
+| Tampering (symbolic link at a registered root) | A registered root and the root Git reports are the same checkout when they resolve to the same path and name the same device and inode, so a link left where a checkout used to be keeps it coordinated, and a move to the link's target needs no `--switch`. A link resolves everything under it, so on its own that comparison would accept a link to any checkout: the scan also requires the checkout now reached to hold the `HEAD` commit the previous scan saw (one bounded `git cat-file -e`, with the observer's safe options, once per change of path). A link to another repository stops the scan as an identity change, and admission through the link is refused while that failure holds. Until the first scan after the link changes, admission follows the link. A link to a clone of the same repository passes this check, as `--switch` would; a same-user process able to replace the registered root can already change the checkout's files. When that clone is itself registered under another ID, both IDs resolve to one root, so admission in either is refused until one of them moves or is removed. An accepted scan keeps the previous one as its baseline under the new paths, so a change made while the link replaced the root is still observed with its earlier version. Registration and `workspace move` compare every other workspace's root both as given and resolved, so the checkout a registered link leads to, or a directory inside it, cannot be registered under a second ID, where both IDs would admit the same file. A distinct linked worktree there still registers: the core accepts the adapter's verified overlap without the two roots overlapping as text, and refuses it while the linked workspace holds any current admission, since it cannot tell which paths that admission covers. |
 | Tampering (repository-controlled Git) | NEW_ROOT's top is found with the same `git rev-parse` identity read `workspace add` uses. For `--switch`, `git rev-parse` of the old root's `HEAD` and `git cat-file -e` in NEW_ROOT run with `core.fsmonitor=false` and `--no-replace-objects`, as the observer's reads do. All of it is bounded by one second; no filter, hook or working-tree read runs. The project hook files of both roots are read only to print which `hooks install` commands to rerun; nothing in host configuration is written. |
 | Repudiation | `workspace_moved` (with the old and new root) and `workspace_removed` are events; every earlier event stays in the log. |
 | Information disclosure | `workspace list` shows roots, counts and two settings, as `status` already does. Both events are local only and never published. |
@@ -637,6 +653,8 @@ registration after checking distinct Git toplevels and their common directory.
 The wire command cannot assert that verification. An active parent lease over
 child files blocks a new child registration. Once registered, descendant paths
 remain excluded from parent admissions even if the `.git` marker disappears.
+The daemon compares the resolved roots, so the exclusion still holds when the
+parent's registered root is a link to its checkout.
 Separate worktrees share repository lineage, not writable file identity.
 
 **Process observations.** Linux PID, boot identity and process start metadata
