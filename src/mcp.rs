@@ -343,6 +343,10 @@ struct GraphSymbolArgs {
     /// by name), `notes` on its file and `last_check`.
     #[serde(default)]
     detail: bool,
+    /// When `name` was renamed, look up its newest name instead; the
+    /// answer's `renamed` lists the recorded renames followed.
+    #[serde(default)]
+    renamed: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1516,6 +1520,7 @@ impl McpAdapter {
                 limit: args.limit,
                 detail: args.detail,
                 blind_in_scope: true,
+                renamed: args.renamed,
             },
         )
         .await

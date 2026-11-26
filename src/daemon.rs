@@ -249,11 +249,8 @@ mod unix {
         else {
             return;
         };
-        let refused = if version != PROTOCOL_VERSION {
-            Some(refuse(
-                "unsupported_version",
-                "expected protocol version 3; restart the daemon after upgrading LangSpan".into(),
-            ))
+        let refused = if !protocol::answers(version) {
+            Some(refuse("unsupported_version", unsupported_version()))
         } else if let Err(e) = validate_request_id(&request_id) {
             Some(refuse(&e.code, e.message))
         } else if !Path::new(path).is_absolute() || path.len() > 4096 || path.contains('\0') {
@@ -478,9 +475,11 @@ mod unix {
                         std::thread::sleep(report_delay());
                     }
                     for notice in notices {
-                        // One request per version of the file in one
-                        // registration: redelivery is a replay, and the same
-                        // change in a later registration is a new request. A
+                        // One request per transition of the file in one index
+                        // pass of one registration: redelivery is a replay,
+                        // and the same transition in a later pass (a file
+                        // moved back and forth) or a later registration is a
+                        // new request. A
                         // pass of a checkout the workspace has since left, by
                         // a move or a removal, is refused.
                         ask_as(
@@ -495,6 +494,7 @@ mod unix {
                                     &notice.path,
                                     &notice.before_digest,
                                     &notice.digest,
+                                    &notice.pass.to_string(),
                                 ],
                             ),
                             Command::ObserveInterface {
@@ -567,10 +567,28 @@ mod unix {
         let graph = graph.ok_or("the index is not available yet; try again shortly")?;
         let failed = |error: Box<dyn std::error::Error + Send + Sync>| error.to_string();
         let detail = matches!(command, Command::GraphSymbol { detail: true, .. });
+        // Roadmap D7: an old name asked for with `--renamed` is looked up
+        // under the newest name its recorded renames lead to.
+        let mut renamed = match command {
+            Command::GraphSymbol {
+                name,
+                renamed: true,
+                ..
+            } => langspan_core::renamed_to(state, workspace_id, name),
+            _ => None,
+        };
         let started = Instant::now();
         let ((mut symbols, mut references, levels), coverage) = graph
             .with_coverage(&of, |graph| match command {
                 Command::GraphSymbol { name, .. } => {
+                    if let Some(hops) = renamed.as_mut() {
+                        defined_again(graph, workspace_id, hops)?;
+                    }
+                    renamed = renamed.take().filter(|hops| !hops.is_empty());
+                    let name = renamed
+                        .as_ref()
+                        .and_then(|hops| hops.last())
+                        .map_or(name, |hop| &hop.after_name);
                     let mut symbols = graph.symbol(workspace_id, name, limit)?;
                     if detail {
                         for symbol in symbols.iter_mut().take(limit as usize) {
@@ -615,6 +633,7 @@ mod unix {
             coverage,
             truncated,
             levels,
+            renamed,
         })
     }
 
@@ -657,6 +676,28 @@ mod unix {
                 cut = true;
             }
         }
+    }
+
+    /// Cut `hops` at the first rename whose old name the index defines
+    /// again, exported and of the same kind (roadmap D7). A file's first
+    /// indexing tells no addition, so a name a new file brings back is
+    /// found here, not from the notices.
+    fn defined_again(
+        graph: &crate::graph::Index,
+        workspace_id: &str,
+        hops: &mut Vec<langspan_core::Rename>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for (at, hop) in hops.iter().enumerate() {
+            let defined = graph
+                .symbol(workspace_id, &hop.name, crate::graph::MAX_RESULTS)?
+                .iter()
+                .any(|symbol| symbol.exported && symbol.kind == hop.kind);
+            if defined {
+                hops.truncate(at);
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// What the coordinator, not the index, knows about each definition's
@@ -1061,14 +1102,25 @@ mod unix {
         let ((found, more), coverage) = graph.with_coverage(of, |graph| {
             let imports = graph.imports_of(workspace_id, among)?;
             let mut found = Vec::new();
-            for (place, (other, (path, name, kind, signature))) in offered.into_iter().enumerate() {
-                let mentioned_in = graph.mentioning(
-                    workspace_id,
-                    (&path, &name),
-                    &imports,
-                    among,
-                    langspan_core::INFLIGHT_MENTIONS,
-                )?;
+            for (place, (other, (path, name, kind, signature, renamed_from))) in
+                offered.into_iter().enumerate()
+            {
+                // A rename (roadmap D7) is told to files that still use the
+                // old name as well as to those that use the new one.
+                let mut mentioned_in = std::collections::BTreeSet::new();
+                for name in std::iter::once(&name).chain(renamed_from.as_ref()) {
+                    mentioned_in.extend(graph.mentioning(
+                        workspace_id,
+                        (&path, name),
+                        &imports,
+                        among,
+                        langspan_core::INFLIGHT_MENTIONS,
+                    )?);
+                }
+                let mentioned_in: Vec<String> = mentioned_in
+                    .into_iter()
+                    .take(langspan_core::INFLIGHT_MENTIONS)
+                    .collect();
                 if mentioned_in.is_empty() {
                     continue;
                 }
@@ -1079,6 +1131,7 @@ mod unix {
                     kind,
                     signature,
                     mentioned_in,
+                    renamed_from,
                 };
                 if !keep(&item) {
                     continue;
@@ -2558,6 +2611,14 @@ mod unix {
         ))
     }
 
+    /// Why a request of another protocol version is refused.
+    fn unsupported_version() -> String {
+        format!(
+            "expected protocol version {} to {PROTOCOL_VERSION}; restart the daemon after upgrading LangSpan",
+            protocol::OLDEST_PROTOCOL_VERSION
+        )
+    }
+
     fn error(id: String, generation: u64, code: &str, message: impl Into<String>) -> Response {
         Response {
             version: PROTOCOL_VERSION,
@@ -2926,12 +2987,12 @@ mod unix {
             request_id,
             command,
         } = request;
-        if version != PROTOCOL_VERSION {
+        if !protocol::answers(version) {
             return error(
                 request_id,
                 store.state().generation,
                 "unsupported_version",
-                "expected protocol version 3; restart the daemon after upgrading LangSpan",
+                unsupported_version(),
             );
         }
         if let Err(e) = validate_request_id(&request_id) {
@@ -3132,9 +3193,14 @@ mod unix {
             }
             Ok(bytes)
         };
-        let reply = match timeout(Duration::from_millis(config.io_timeout_ms), read).await {
+        // Answered in the version the client asked in, and in that
+        // version's shape; a request that does not parse, in the version it
+        // names when the daemon answers that one.
+        let mut asked = PROTOCOL_VERSION;
+        let mut reply = match timeout(Duration::from_millis(config.io_timeout_ms), read).await {
             Ok(Ok(bytes)) => match serde_json::from_slice::<Request>(&bytes) {
                 Ok(mut request) => {
+                    asked = request.version;
                     // Clients redact before sending; a client that did not
                     // still cannot have a secret recorded.
                     crate::hook::redact_command(&mut request.command);
@@ -3170,12 +3236,21 @@ mod unix {
                         ),
                     }
                 }
-                Err(_) => error(
-                    String::new(),
-                    0,
-                    "invalid_request",
-                    "expected a typed version 1 request; unknown fields are rejected",
-                ),
+                Err(_) => {
+                    if let Some(version) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .ok()
+                        .and_then(|request| request.get("version")?.as_u64())
+                        .and_then(|version| u16::try_from(version).ok())
+                    {
+                        asked = version;
+                    }
+                    error(
+                        String::new(),
+                        0,
+                        "invalid_request",
+                        "expected a typed version 1 request; unknown fields are rejected",
+                    )
+                }
             },
             Ok(Err(e)) => error(String::new(), 0, "invalid_frame", e.to_string()),
             Err(_) => error(
@@ -3185,7 +3260,20 @@ mod unix {
                 "JSON request was not received before the I/O deadline",
             ),
         };
-        let bytes=protocol::encode(&reply).or_else(|_|protocol::encode(&error(reply.request_id,reply.generation,"response_too_large","response exceeds 64 KiB; reduce the event page size, or page the state with `status --all`")));
+        if !protocol::answers(asked) {
+            asked = PROTOCOL_VERSION;
+        }
+        reply.version = asked;
+        let bytes = protocol::encode_for(asked, &reply).or_else(|_| {
+            let mut too_large = error(
+                reply.request_id,
+                reply.generation,
+                "response_too_large",
+                "response exceeds 64 KiB; reduce the event page size, or page the state with `status --all`",
+            );
+            too_large.version = asked;
+            protocol::encode(&too_large)
+        });
         if let Ok(bytes) = bytes {
             let _ = timeout(
                 Duration::from_millis(config.io_timeout_ms),
@@ -3813,6 +3901,7 @@ mod unix {
                     coverage,
                     truncated: true,
                     levels: None,
+                    renamed: None,
                 },
             };
             protocol::encode(&response).expect("fits one frame");
@@ -3852,6 +3941,7 @@ mod unix {
                     coverage,
                     truncated: true,
                     levels: Some(levels),
+                    renamed: None,
                 },
             };
             protocol::encode(&response).expect("fits one frame");

@@ -8,6 +8,12 @@
 
 **Run agents in parallel. Build as a team.**
 
+[![Latest stable release](https://img.shields.io/github/v/release/Langspan/LangSpan.dev?style=flat-square&labelColor=151513&display_name=tag&sort=date&color=A34A34)](https://github.com/Langspan/LangSpan.dev/releases/latest) [![Rust checks on main](https://github.com/Langspan/LangSpan.dev/actions/workflows/check.yml/badge.svg?branch=main&event=push)](https://github.com/Langspan/LangSpan.dev/actions/workflows/check.yml) [![Core license](https://img.shields.io/github/license/Langspan/LangSpan.dev?style=flat-square&labelColor=151513&color=3F3E44)](https://github.com/Langspan/LangSpan.dev/blob/main/LICENSE) [![Supported release platforms: macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-3F3E44?style=flat-square&labelColor=151513)](https://langspan.dev/#start) [![Project website](https://img.shields.io/badge/website-langspan.dev-3F3E44?style=flat-square&labelColor=151513)](https://langspan.dev/)
+
+[![Rust (pinned on main)](https://img.shields.io/badge/dynamic/toml?style=flat-square&labelColor=151513&url=https%3A%2F%2Fraw.githubusercontent.com%2FLangspan%2FLangSpan.dev%2Fmain%2Frust-toolchain.toml&query=%24.toolchain.channel&label=Rust&color=3F3E44&logo=rust)](https://github.com/Langspan/LangSpan.dev/blob/main/rust-toolchain.toml) [![MCP SDK (pinned on main)](https://img.shields.io/badge/dynamic/toml?style=flat-square&labelColor=151513&url=https%3A%2F%2Fraw.githubusercontent.com%2FLangspan%2FLangSpan.dev%2Fmain%2FCargo.toml&query=%24.dependencies.rmcp.version&label=MCP%20SDK&color=3F3E44)](https://github.com/Langspan/LangSpan.dev/blob/main/Cargo.toml) [![rusqlite (pinned on main)](https://img.shields.io/badge/dynamic/toml?style=flat-square&labelColor=151513&url=https%3A%2F%2Fraw.githubusercontent.com%2FLangspan%2FLangSpan.dev%2Fmain%2FCargo.toml&query=%24.dependencies.rusqlite.version&label=rusqlite&color=3F3E44)](https://github.com/Langspan/LangSpan.dev/blob/main/Cargo.toml) [![Tree-sitter (pinned on main)](https://img.shields.io/badge/dynamic/toml?style=flat-square&labelColor=151513&url=https%3A%2F%2Fraw.githubusercontent.com%2FLangspan%2FLangSpan.dev%2Fmain%2Fcrates%2Flangspan-graph%2FCargo.toml&query=%24.dependencies%5B%22tree-sitter%22%5D&label=Tree-sitter&color=3F3E44)](https://github.com/Langspan/LangSpan.dev/blob/main/crates/langspan-graph/Cargo.toml) [![Tokio (pinned on main)](https://img.shields.io/badge/dynamic/toml?style=flat-square&labelColor=151513&url=https%3A%2F%2Fraw.githubusercontent.com%2FLangspan%2FLangSpan.dev%2Fmain%2FCargo.toml&query=%24.dependencies.tokio.version&label=Tokio&color=3F3E44)](https://github.com/Langspan/LangSpan.dev/blob/main/Cargo.toml)
+
+<sub>Dependency badges show the exact pins on the main branch. Released binaries have their own SBOMs and provenance.</sub>
+
 LangSpan is the open-source coordination layer for parallel agentic development.
 Keep your existing coding agents. Share relevant work across sessions,
 worktrees and machines, coordinate supported local edits, and verify combined
@@ -20,7 +26,7 @@ validation is pending.
 
 **Available for macOS and Linux.** [Download the latest stable release](https://github.com/Langspan/LangSpan.dev/releases/latest) or [build from source](#build-from-source).
 
-[Get started](#get-started) · [Parallel work](https://langspan.dev/#scale) · [Explore capabilities](https://langspan.dev/#demo) · [Research](https://langspan.dev/#research) ·
+[Get started](#get-started) · [LangSpan Live](https://langspan.dev/#langspan-live) · [Parallel work](https://langspan.dev/#scale) · [Explore capabilities](https://langspan.dev/#demo) · [Research](https://langspan.dev/#research) ·
 [Usage guide](docs/usage.md) · [Implementation status](docs/IMPLEMENTATION_STATUS.md)
 
 <a href="https://langspan.dev/#edit-coordination">

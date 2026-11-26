@@ -1,10 +1,85 @@
-//! Version 3 of the local IPC contract. One bounded JSON line per connection.
+//! Version 4 of the local IPC contract. One bounded JSON line per connection.
 
 use langspan_core::{Command, Outcome};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader, Read};
 
-pub const PROTOCOL_VERSION: u16 = 3;
+/// Version 4 is version 3 with roadmap D7's rename fields in interface
+/// changes, history entries and in-flight symbols. Requests are the same in both.
+pub const PROTOCOL_VERSION: u16 = 4;
+/// The earliest version the daemon still answers, in that version's shape
+/// (`langspan_core::in_protocol_3_shape`), so that a client of an earlier
+/// build keeps working after the daemon is upgraded.
+pub const OLDEST_PROTOCOL_VERSION: u16 = 3;
+
+/// Whether the daemon answers requests of `version`.
+pub fn answers(version: u16) -> bool {
+    (OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&version)
+}
+
+/// `response` as one frame for a client of `version`. Version 3 clients
+/// read interface changes and history entries with `deny_unknown_fields`,
+/// so an answer carrying a field version 4 added would fail to read as a
+/// whole: theirs is encoded in the version 3 shape (`protocol_3_shape`).
+pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::Error> {
+    if version >= PROTOCOL_VERSION {
+        return encode(response);
+    }
+    let mut value = serde_json::to_value(response)?;
+    protocol_3_shape(&mut value);
+    encode(&value)
+}
+
+/// The fields version 4 added to an interface change (`InterfaceChange`,
+/// which has `name`) and to a history entry (`HistoryEntry`, which has
+/// `seq`).
+const CHANGE_FIELDS_SINCE_4: [&str; 4] = ["before_name", "evidence", "before_path", "private"];
+const ENTRY_FIELDS_SINCE_4: [&str; 3] = ["after_name", "evidence", "before_path"];
+/// The field version 4 added to an in-flight symbol (`InflightSymbol`,
+/// `InflightNotice`: the only objects with `signature` and `mentioned_in`).
+const INFLIGHT_FIELD_SINCE_4: &str = "renamed_from";
+
+/// An interface change or a history entry: the objects of the protocol
+/// with all of `kind`, `change`, `before` and `after`. A write check's
+/// signature change (`WriteCheckSymbol`, roadmap B26) has them too; it
+/// carries none of the fields version 4 added, so it passes unchanged.
+fn is_change(fields: &serde_json::Map<String, serde_json::Value>) -> bool {
+    ["kind", "change", "before", "after"]
+        .iter()
+        .all(|key| fields.contains_key(*key))
+}
+
+/// `value` without the fields version 4 added, and without interface
+/// changes of definitions that are not exported (`private`, history only).
+fn protocol_3_shape(value: &mut serde_json::Value) {
+    use serde_json::Value;
+    match value {
+        Value::Array(items) => {
+            items.retain(|item| {
+                !matches!(item, Value::Object(fields)
+                    if is_change(fields) && fields.get("private") == Some(&Value::Bool(true)))
+            });
+            items.iter_mut().for_each(protocol_3_shape);
+        }
+        Value::Object(fields) => {
+            if is_change(fields) {
+                let added: &[&str] = if fields.contains_key("seq") {
+                    &ENTRY_FIELDS_SINCE_4
+                } else {
+                    &CHANGE_FIELDS_SINCE_4
+                };
+                for key in added {
+                    fields.shift_remove(*key);
+                }
+            }
+            if fields.contains_key("signature") && fields.contains_key("mentioned_in") {
+                fields.shift_remove(INFLIGHT_FIELD_SINCE_4);
+            }
+            fields.values_mut().for_each(protocol_3_shape);
+        }
+        _ => {}
+    }
+}
 pub const MAX_FRAME_BYTES: usize = 65_536;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

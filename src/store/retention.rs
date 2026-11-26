@@ -11,8 +11,8 @@
 use super::{Store, StoreResult, redact_event};
 use langspan_core::{
     ClockAnchor, CompactionReport, Event, KeptTests, LeaseStatus, MAX_RETENTION_DAYS,
-    MIN_RETENTION_DAYS, Outcome, PathRefusal, RecentRefusal, State, UnsettledRefusal, WriteRun,
-    apply,
+    MIN_RETENTION_DAYS, Outcome, PathRefusal, RecentRefusal, Rename, State, UnsettledRefusal,
+    WriteRun, apply,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,9 @@ struct SnapshotRecord {
     /// Each session's refusals not yet settled (ADR 0036).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     unsettled: BTreeMap<String, Vec<UnsettledRefusal>>,
+    /// Each workspace's remembered renames (roadmap D7).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    renames: BTreeMap<String, Vec<Rename>>,
 }
 
 impl SnapshotRecord {
@@ -68,6 +71,7 @@ impl SnapshotRecord {
             write_runs: state.write_runs.clone(),
             conflict_waits: state.conflict_waits.clone(),
             unsettled: state.unsettled.clone(),
+            renames: state.renames.clone(),
         }
     }
     fn into_state(self) -> State {
@@ -81,6 +85,7 @@ impl SnapshotRecord {
         state.write_runs = self.write_runs;
         state.conflict_waits = self.conflict_waits;
         state.unsettled = self.unsettled;
+        state.renames = self.renames;
         state
     }
 }

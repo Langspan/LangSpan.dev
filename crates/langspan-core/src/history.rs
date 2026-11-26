@@ -29,6 +29,9 @@ pub const HISTORY_RELATED: usize = 4;
 /// answer is drawn from. Older ones are reached by asking again with
 /// `before_seq`.
 pub const HISTORY_EVENTS: usize = 20_000;
+/// The newest files moved whole (roadmap D7), at most, that one answer
+/// follows, whatever its `before_seq`.
+pub const HISTORY_MOVES: usize = 1_000;
 /// The longest name asked about, in bytes.
 pub const HISTORY_NAME_BYTES: usize = 128;
 
@@ -76,6 +79,16 @@ pub struct HistoryEntry {
     pub before: Option<String>,
     /// Absent for a removal.
     pub after: Option<String>,
+    /// For a rename: the new name, what links the two names, and for a file
+    /// moved whole, where it was (roadmap D7). Absent otherwise, and from
+    /// renames recorded before each was kept. Left out of replies to
+    /// protocol version 3 clients (`protocol::encode_for` in the daemon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_path: Option<String>,
     /// The last session that reported editing the file. A correlation, not
     /// proof of who made the change.
     pub by_session: Option<String>,
@@ -136,6 +149,11 @@ pub struct HistoryQuery<'a> {
     /// Logged events, in any order: interface changes, prompts, notes,
     /// forgettings, messages and withdrawals. Others are ignored.
     pub events: &'a [RecordedEvent],
+    /// The workspace's files moved whole (`file_moved` notices), read
+    /// whatever `before_seq` is, so that every page follows a file to the
+    /// paths it had (roadmap D7). Only their moves are read; moves in
+    /// `events` count too.
+    pub moves: &'a [RecordedEvent],
     /// Every generation's clock anchor that the log holds.
     pub anchors: &'a [ClockAnchor],
     /// The daemon's clock now, in the current generation.
@@ -157,8 +175,193 @@ fn apart(a: Stamp, b: Stamp, anchors: &[ClockAnchor]) -> Option<u64> {
     Some(wall(a)?.abs_diff(wall(b)?))
 }
 
-fn names_file(paths: &[String], text: &str, path: &str) -> bool {
-    paths.iter().any(|named| named == path) || text.contains(path)
+/// Whether a note or message at `seq` names the file under the path it had
+/// then: a listed path, or one its text contains.
+fn names_file(paths: &[String], text: &str, seq: u64, file: &[Span<'_>]) -> bool {
+    file.iter().any(|span| {
+        span.holds(seq)
+            && (paths.iter().any(|named| named == span.path) || text.contains(span.path))
+    })
+}
+
+/// One file moved whole (roadmap D7): at event `seq`, from `from` to `to`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Move<'a> {
+    seq: u64,
+    from: &'a str,
+    to: &'a str,
+}
+
+/// Each file moved whole in `events`, oldest first, once each: the
+/// `file_moved` renames of the workspace's notices.
+fn moves<'a>(
+    events: impl IntoIterator<Item = &'a RecordedEvent>,
+    workspace_id: &str,
+) -> Vec<Move<'a>> {
+    let mut moves: Vec<Move<'a>> = events
+        .into_iter()
+        .filter_map(|recorded| match &recorded.event {
+            Event::InterfaceChanged { notice } if notice.workspace_id == workspace_id => {
+                Some((recorded.seq, notice))
+            }
+            _ => None,
+        })
+        .flat_map(|(seq, notice)| {
+            notice
+                .changes
+                .iter()
+                .filter(|change| change.evidence.as_deref() == Some(crate::FILE_MOVED))
+                .filter_map(|change| change.before_path.as_deref())
+                .map(move |from| Move {
+                    seq,
+                    from,
+                    to: notice.path.as_str(),
+                })
+        })
+        .collect();
+    moves.sort_unstable();
+    moves.dedup();
+    moves
+}
+
+/// The events `from..until` recorded under `path`, during one file's time
+/// there. A `trail` is a path the file left, until another file is recorded
+/// there: a note or message naming it still means this file, while an
+/// interface change there never can.
+#[derive(Debug, Clone, Copy)]
+struct Span<'a> {
+    path: &'a str,
+    from: u64,
+    until: u64,
+    trail: bool,
+}
+
+impl<'a> Span<'a> {
+    fn new(path: &'a str, from: u64, until: u64) -> Self {
+        Self {
+            path,
+            from,
+            until,
+            trail: false,
+        }
+    }
+    fn holds(&self, seq: u64) -> bool {
+        (self.from..self.until).contains(&seq)
+    }
+}
+
+/// Where each file was seen: every move, and each interface notice's path
+/// at its event.
+struct Paths<'a> {
+    moves: Vec<Move<'a>>,
+    notices: Vec<(u64, &'a str)>,
+}
+
+impl<'a> Paths<'a> {
+    /// `path` after a file left it at `left`, until another file is
+    /// recorded or moved there.
+    fn trail(&self, path: &'a str, left: u64) -> Span<'a> {
+        let taken = self
+            .moves
+            .iter()
+            .filter(|step| step.seq > left && step.to == path)
+            .map(|step| step.seq)
+            .chain(
+                self.notices
+                    .iter()
+                    .filter(|(seq, at)| *seq > left && *at == path)
+                    .map(|(seq, _)| *seq),
+            )
+            .min()
+            .unwrap_or(u64::MAX);
+        Span {
+            path,
+            from: left,
+            until: taken,
+            trail: true,
+        }
+    }
+
+    /// The whole life of the file at `path` at event `seq`, through the
+    /// moves in event order: back through each move into the path it was
+    /// at, and on through each move out of it. A path a file left belongs
+    /// to whatever comes there next, so another file there is never part of
+    /// this one.
+    fn lifetime(&self, path: &'a str, seq: u64) -> Vec<Span<'a>> {
+        let moves = &self.moves;
+        let mut spans = Vec::new();
+        // Back: the event at `seq` and those before it.
+        let (mut at, mut until) = (path, seq.saturating_add(1));
+        for _ in 0..=moves.len() {
+            let newest = moves
+                .iter()
+                .rev()
+                .find(|step| step.seq < until && (step.from == at || step.to == at));
+            match newest {
+                Some(step) if step.to == at => {
+                    spans.push(Span::new(at, step.seq, until));
+                    spans.push(self.trail(step.from, step.seq));
+                    (at, until) = (step.from, step.seq);
+                }
+                // Another file left this path before: what came earlier is
+                // its.
+                Some(step) => {
+                    spans.push(Span::new(at, step.seq + 1, until));
+                    break;
+                }
+                None => {
+                    spans.push(Span::new(at, 0, until));
+                    break;
+                }
+            }
+        }
+        // On: the events after `seq`.
+        let (mut at, mut from, mut after) = (path, seq.saturating_add(1), seq);
+        for _ in 0..=moves.len() {
+            let oldest = moves
+                .iter()
+                .find(|step| step.seq > after && (step.from == at || step.to == at));
+            match oldest {
+                Some(step) if step.from == at => {
+                    spans.push(Span::new(at, from, step.seq));
+                    spans.push(self.trail(at, step.seq));
+                    (at, from, after) = (step.to, step.seq, step.seq);
+                }
+                // Another file moved here: this one was gone by then.
+                Some(step) => {
+                    spans.push(Span::new(at, from, step.seq));
+                    break;
+                }
+                None => {
+                    spans.push(Span::new(at, from, u64::MAX));
+                    break;
+                }
+            }
+        }
+        spans
+    }
+
+    /// What `graph history --path PATH` covers: the newest file at `path`,
+    /// all its life. When the newest move at `path` took a file away, that
+    /// file is the one meant, along with anything recorded at `path` since.
+    fn asked(&self, path: &'a str) -> Vec<Span<'a>> {
+        let left = self
+            .moves
+            .iter()
+            .rev()
+            .find(|step| step.from == path || step.to == path)
+            .filter(|step| step.from == path);
+        let mut spans = match left {
+            Some(step) => {
+                let mut spans = self.lifetime(path, step.seq.saturating_sub(1));
+                spans.push(Span::new(path, step.seq + 1, u64::MAX));
+                spans
+            }
+            None => self.lifetime(path, u64::MAX - 1),
+        };
+        spans.retain(|span| !span.trail);
+        spans
+    }
 }
 
 /// The recorded changes of `query.name`, including a rename to it, newest
@@ -186,6 +389,22 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
     }
     let mut events: Vec<&RecordedEvent> = query.events.iter().collect();
     events.sort_by_key(|recorded| recorded.seq);
+    // A file moved whole keeps its history: asked about by its new path,
+    // what was recorded under the old one while it was there is included
+    // (roadmap D7), on every page.
+    let paths = Paths {
+        moves: moves(query.events.iter().chain(query.moves), query.workspace_id),
+        notices: events
+            .iter()
+            .filter_map(|recorded| match &recorded.event {
+                Event::InterfaceChanged { notice } if notice.workspace_id == query.workspace_id => {
+                    Some((recorded.seq, notice.path.as_str()))
+                }
+                _ => None,
+            })
+            .collect(),
+    };
+    let asked = query.path.map(|path| paths.asked(path));
 
     // Every change of the name, oldest first.
     let mut found: Vec<(u64, &InterfaceNotice, &InterfaceChange)> = Vec::new();
@@ -194,7 +413,11 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
             continue;
         };
         if notice.workspace_id != query.workspace_id
-            || query.path.is_some_and(|path| notice.path != path)
+            || asked.as_ref().is_some_and(|file| {
+                !file
+                    .iter()
+                    .any(|span| span.path == notice.path && span.holds(recorded.seq))
+            })
         {
             continue;
         }
@@ -279,6 +502,8 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
                     _ => None,
                 })
         });
+        // A note or message about the file under the path it had then.
+        let file = paths.lifetime(&notice.path, *seq);
         let mut notes: Vec<HistoryNote> = Vec::new();
         let mut messages: Vec<HistoryMessage> = Vec::new();
         for recorded in &events {
@@ -288,7 +513,7 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
                         && notes.len() < HISTORY_RELATED
                         && !forgotten.contains(note.note_id.as_str())
                         && !notes.iter().any(|held| held.note_id == note.note_id)
-                        && names_file(&note.paths, &note.text, &notice.path)
+                        && names_file(&note.paths, &note.text, recorded.seq, &file)
                         && near(*when) =>
                 {
                     notes.push(HistoryNote {
@@ -307,7 +532,7 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
                     && !messages
                         .iter()
                         .any(|held| held.message_id == message.message_id)
-                    && names_file(&message.paths, &message.text, &notice.path)
+                    && names_file(&message.paths, &message.text, recorded.seq, &file)
                     && near(
                         at_ms
                             .zip(*generation)
@@ -332,6 +557,9 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
             path: notice.path.clone(),
             before: change.before.clone(),
             after: change.after.clone(),
+            after_name: change.after_name.clone(),
+            evidence: change.evidence.clone(),
+            before_path: change.before_path.clone(),
             by_session: notice.by_session.clone(),
             task,
             notes,
