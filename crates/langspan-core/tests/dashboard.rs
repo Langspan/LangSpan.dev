@@ -6,6 +6,8 @@ use langspan_core::{
     RemoteWork, SessionActivity, State, ToolResult, TouchedPath, apply, decide,
 };
 
+use std::collections::{BTreeMap, BTreeSet};
+
 const THEM: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn run(state: &mut State, id: &str, command: Command, now: u64) -> Outcome {
@@ -455,6 +457,345 @@ fn a_crowded_state_is_bounded_with_counts_of_what_was_left_out() {
     assert!(bytes.len() < 48 * 1024, "{} bytes", bytes.len());
 }
 
+fn register(state: &mut State, session: &str, workspace: &str) {
+    run(
+        state,
+        &format!("s-{session}"),
+        Command::SessionRegister {
+            session_id: session.into(),
+            workspace_id: workspace.into(),
+            parent: None,
+            headless: false,
+        },
+        0,
+    );
+}
+
+fn workspace(state: &mut State, workspace: &str, repository: &str) {
+    run(
+        state,
+        &format!("w-{workspace}"),
+        Command::WorkspaceRegister {
+            workspace_id: workspace.into(),
+            root: format!("/repos/{workspace}"),
+        },
+        0,
+    );
+    run(
+        state,
+        &format!("g-{workspace}"),
+        Command::ObserveWorkspaceGit {
+            workspace_id: workspace.into(),
+            repository_id: repository.into(),
+            branch_ref: Some(format!("refs/heads/{workspace}")),
+        },
+        0,
+    );
+}
+
+fn heard(state: &mut State, participant: &str, name: &str, session: &str, recent: &str, now: u64) {
+    if !state.remote_links.contains_key("work") {
+        run(
+            state,
+            "remote",
+            Command::RemoteEnable {
+                workspace_id: "work".into(),
+                remote: "origin".into(),
+                participant: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                name: "Alice".into(),
+                share_task: false,
+                publish_as_branch: false,
+            },
+            0,
+        );
+    }
+    run(
+        state,
+        &format!("heard-{participant}-{now}"),
+        Command::ObserveRemote {
+            workspace_id: "work".into(),
+            publication: Publication {
+                participant: participant.into(),
+                name: name.into(),
+                sequence: now,
+                work: vec![RemoteWork {
+                    host: "codex".into(),
+                    session: session.into(),
+                    branch_ref: None,
+                    summary: None,
+                    editing: vec![],
+                    recent: vec![recent.into()],
+                }],
+                withdrawn: false,
+            },
+        },
+        now,
+    );
+}
+
+/// The agent row an overlap member names, by its stable ID.
+fn row_of<'a>(d: &'a Dashboard, id: &str) -> Vec<&'a langspan_core::AgentRow> {
+    d.agents
+        .iter()
+        .filter(|row| row.id.as_deref() == Some(id))
+        .collect()
+}
+
+/// Two local sessions share a label (the same host and first eight
+/// characters), and two teammates share a published name and session: each
+/// overlap member still names exactly one row, by an ID a label cannot fake.
+#[test]
+fn overlap_members_name_their_sessions_by_stable_id_when_labels_collide() {
+    let mut state = ready();
+    let first = "claude-code.alice-12-first";
+    let second = "claude-code.alice-12-second";
+    register(&mut state, first, "work");
+    register(&mut state, second, "work");
+    edited(&mut state, first, "src/upload.rs", 1_000);
+    edited(&mut state, second, "src/upload.rs", 1_000);
+    heard(
+        &mut state,
+        THEM,
+        "Carol",
+        "c0ffee00",
+        "src/upload.rs",
+        1_000,
+    );
+    heard(
+        &mut state,
+        "cccccccccccccccccccccccccccccccc",
+        "Carol",
+        "c0ffee00",
+        "src/upload.rs",
+        1_000,
+    );
+    let d = view(&state, 2_000);
+    let overlap = &d.overlaps[0];
+    assert_eq!(overlap.path, "src/upload.rs");
+    assert_eq!(
+        overlap.agents,
+        [
+            "Carol: codex c0ffee00",
+            "Carol: codex c0ffee00",
+            "claude-code alice-12",
+            "claude-code alice-12",
+        ],
+        "the labels collide"
+    );
+    assert_eq!(overlap.members.len(), overlap.agents.len());
+    assert_eq!(overlap.more_agents, Some(0));
+    let distinct: BTreeSet<&String> = overlap.members.iter().collect();
+    assert_eq!(distinct.len(), 4, "{:?}", overlap.members);
+    for (member, label) in overlap.members.iter().zip(&overlap.agents) {
+        let rows = row_of(&d, member);
+        assert_eq!(rows.len(), 1, "{member} names one row");
+        let row = rows[0];
+        let shown = match &row.machine {
+            Some(machine) => format!("{machine}: {} {}", row.host, row.session),
+            None => format!("{} {}", row.host, row.session),
+        };
+        assert_eq!(&shown, label, "member {member} is aligned with its label");
+        assert_eq!(row.group, overlap.group, "{member}");
+    }
+    let locals: Vec<_> = d
+        .agents
+        .iter()
+        .filter(|row| row.session_id.as_deref() == Some(first))
+        .collect();
+    assert_eq!(
+        locals[0].id.as_deref(),
+        Some("local:claude-code.alice-12-first")
+    );
+    assert!(
+        d.agents
+            .iter()
+            .all(|row| row.id.is_some() && row.group.is_some()),
+        "every row has an identity and a group"
+    );
+}
+
+/// The page scopes a path's messages and notes to the path's overlap group
+/// through each record's workspace. Notes on one relative path in a linked
+/// worktree and in an unrelated repository resolve to the right groups.
+#[test]
+fn notes_on_one_path_in_unrelated_repositories_resolve_to_different_groups() {
+    let mut state = ready();
+    workspace(&mut state, "work", "repo-one");
+    workspace(&mut state, "work-linked", "repo-one");
+    workspace(&mut state, "other", "repo-two");
+    for workspace in ["work", "work-linked", "other"] {
+        run(
+            &mut state,
+            &format!("note-{workspace}"),
+            Command::Remember {
+                workspace_id: workspace.into(),
+                author: None,
+                text: format!("about src/api.rs in {workspace}"),
+                paths: vec!["src/api.rs".into()],
+            },
+            100,
+        );
+    }
+    let d = view(&state, 2_000);
+    let group_of_note = |workspace: &str| {
+        let note = d
+            .notes
+            .iter()
+            .find(|n| n.workspace_id == workspace)
+            .unwrap_or_else(|| panic!("a note in {workspace}: {:?}", d.notes));
+        d.workspaces
+            .iter()
+            .find(|w| w.workspace_id == note.workspace_id)
+            .and_then(|w| w.group.clone())
+            .unwrap_or_else(|| panic!("a group for {workspace}"))
+    };
+    assert_eq!(group_of_note("work"), group_of_note("work-linked"));
+    assert_ne!(group_of_note("work"), group_of_note("other"));
+}
+
+/// Linked worktrees of one repository share relative paths, so their work
+/// on one file is one overlap; an unrelated repository's file with the same
+/// name is not. Holds stay in the physical checkout that admitted them.
+#[test]
+fn linked_worktrees_share_an_overlap_group_and_other_repositories_do_not() {
+    let mut state = ready();
+    workspace(&mut state, "work", "repo-one");
+    workspace(&mut state, "work-linked", "repo-one");
+    workspace(&mut state, "other", "repo-two");
+    let here = "claude-code.alice-1234567890";
+    let linked = "codex.dana-1234567890";
+    let elsewhere = "codex.erin-1234567890";
+    register(&mut state, linked, "work-linked");
+    register(&mut state, elsewhere, "other");
+    edited(&mut state, here, "src/lib.rs", 1_000);
+    run(
+        &mut state,
+        "hold-linked",
+        Command::Admit {
+            session_id: linked.into(),
+            paths: vec!["src/lib.rs".into()],
+            ttl_ms: 30_000,
+        },
+        1_000,
+    );
+    edited(&mut state, elsewhere, "src/lib.rs", 1_000);
+    let d = view(&state, 2_000);
+    let group = |session: &str| {
+        d.agents
+            .iter()
+            .find(|row| row.session_id.as_deref() == Some(session))
+            .unwrap()
+            .group
+            .clone()
+            .unwrap()
+    };
+    assert_eq!(group(here), group(linked));
+    assert_ne!(group(here), group(elsewhere));
+    assert_eq!(d.overlaps.len(), 1, "{:?}", d.overlaps);
+    let overlap = &d.overlaps[0];
+    assert_eq!(overlap.group.as_deref(), Some(group(here).as_str()));
+    let mut members = overlap.members.clone();
+    members.sort();
+    assert_eq!(
+        members,
+        [format!("local:{here}"), format!("local:{linked}")],
+        "the unrelated repository's session is not a member"
+    );
+    assert!(overlap.editing);
+    assert_eq!(d.editing.len(), 1);
+    assert_eq!(
+        d.editing[0].workspace_id, "work-linked",
+        "the hold stays in its checkout"
+    );
+    let groups: BTreeMap<&str, Option<&str>> = d
+        .workspaces
+        .iter()
+        .map(|row| (row.workspace_id.as_str(), row.group.as_deref()))
+        .collect();
+    assert_eq!(groups["work"], groups["work-linked"]);
+    assert_ne!(groups["work"], groups["other"]);
+    assert_eq!(groups["work"], Some(group(here).as_str()));
+}
+
+/// An overlap lists at most eight labels; the rest are counted, so a long
+/// list is never read as a complete one.
+#[test]
+fn overlap_participants_beyond_the_label_limit_are_counted() {
+    let mut state = ready();
+    for n in 0..11 {
+        let session = format!("codex.many-{n:02}-session");
+        register(&mut state, &session, "work");
+        edited(&mut state, &session, "src/crowded.rs", 1_000);
+    }
+    let d = view(&state, 2_000);
+    let overlap = &d.overlaps[0];
+    assert_eq!(overlap.agents.len(), 8);
+    assert_eq!(overlap.members.len(), 8);
+    assert_eq!(overlap.more_agents, Some(3));
+}
+
+/// A teammate past the horizon keeps its identity and group but leaves the
+/// overlaps; the same teammate session heard again is the same row ID.
+#[test]
+fn a_stale_publication_keeps_its_identity_and_leaves_the_overlaps() {
+    let mut state = ready();
+    let alice = "claude-code.alice-1234567890";
+    edited(&mut state, alice, "src/upload.rs", 1_000);
+    heard(
+        &mut state,
+        THEM,
+        "Carol",
+        "c0ffee00",
+        "src/upload.rs",
+        1_000,
+    );
+    let fresh = view(&state, 2_000);
+    let carol = fresh.agents.iter().find(|row| !row.local).unwrap();
+    let id = carol.id.clone().unwrap();
+    assert_eq!(id, format!("peer:{THEM}:codex:c0ffee00"));
+    assert!(fresh.overlaps[0].members.contains(&id));
+    let stale = view(&state, 1_000 + REMOTE_HORIZON_MS + 1);
+    let carol = stale.agents.iter().find(|row| !row.local).unwrap();
+    assert_eq!(carol.state, AgentState::Unheard);
+    assert_eq!(carol.id.as_deref(), Some(id.as_str()));
+    assert!(carol.group.is_some());
+    assert!(stale.overlaps.is_empty());
+}
+
+/// A view from a coordinator that predates the identity fields still
+/// decodes, with each field absent rather than invented.
+#[test]
+fn a_view_without_identity_fields_from_an_older_coordinator_still_decodes() {
+    let mut state = ready();
+    let alice = "claude-code.alice-1234567890";
+    let bob = "codex.bob-0987654321";
+    edited(&mut state, alice, "src/upload.rs", 1_000);
+    edited(&mut state, bob, "src/upload.rs", 1_000);
+    let mut value = serde_json::to_value(view(&state, 2_000)).unwrap();
+    for row in value["agents"].as_array_mut().unwrap() {
+        let row = row.as_object_mut().unwrap();
+        assert!(row.remove("id").is_some() && row.remove("group").is_some());
+    }
+    for row in value["overlaps"].as_array_mut().unwrap() {
+        let row = row.as_object_mut().unwrap();
+        for field in ["group", "members", "more_agents"] {
+            assert!(row.remove(field).is_some(), "{field}");
+        }
+    }
+    for row in value["workspaces"].as_array_mut().unwrap() {
+        assert!(row.as_object_mut().unwrap().remove("group").is_some());
+    }
+    let old: Dashboard = serde_json::from_value(value).unwrap();
+    assert!(
+        old.agents
+            .iter()
+            .all(|row| row.id.is_none() && row.group.is_none())
+    );
+    assert!(old.overlaps[0].members.is_empty());
+    assert_eq!(old.overlaps[0].more_agents, None, "unknown, not zero");
+    assert_eq!(old.overlaps[0].agents.len(), 2);
+}
+
 #[test]
 fn a_parent_and_its_subagents_on_one_file_are_an_overlap_with_distinct_labels() {
     let mut state = ready();
@@ -505,4 +846,17 @@ fn a_parent_and_its_subagents_on_one_file_are_an_overlap_with_distinct_labels() 
             ),
         ]
     );
+    // Each subagent is its own row and its own member, by its full ID.
+    let gate = d
+        .overlaps
+        .iter()
+        .find(|row| row.path == "src/gate.rs")
+        .unwrap();
+    assert_eq!(
+        gate.members,
+        [format!("local:{first}"), format!("local:{second}")]
+    );
+    for id in [parent, first, second] {
+        assert_eq!(row_of(&d, &format!("local:{id}")).len(), 1, "{id}");
+    }
 }

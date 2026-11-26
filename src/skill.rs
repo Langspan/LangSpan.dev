@@ -451,6 +451,9 @@ mod tests {
     use super::*;
 
     const OWNER: &str = "# My notes\n\nUse tabs.\n";
+    /// What to do when a form is over a host's limit. The limit comes from
+    /// the host's documentation, so it is never raised.
+    const SHORTEN: &str = "Do not raise the limit: shorten src/skill.md, or move detail a session needs only on demand to docs/usage.md or a command's or tool's own help";
 
     #[test]
     fn the_bytes_codex_must_read_end_with_langspans_section() {
@@ -479,10 +482,15 @@ mod tests {
     fn every_form_stays_within_each_hosts_documented_limit() {
         for vendor in Vendor::ALL {
             let text = render(vendor);
-            assert!(text.lines().count() <= MAX_LINES, "{}", vendor.name());
+            assert!(
+                text.lines().count() <= MAX_LINES,
+                "{}: {} lines, over {MAX_LINES}. {SHORTEN}",
+                vendor.name(),
+                text.lines().count()
+            );
             assert!(
                 text.len() <= MAX_BYTES,
-                "{}: {} bytes",
+                "{}: {} bytes, over {MAX_BYTES}. {SHORTEN}",
                 vendor.name(),
                 text.len()
             );

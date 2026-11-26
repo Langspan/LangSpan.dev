@@ -1047,6 +1047,60 @@ daemon down it exits 1 with "coordination unavailable".
 The text also carries one line with this month's refusal count (below); the
 JSON and the MCP answer do not, so nothing of it reaches a model.
 
+## The live dashboard
+
+`langspan dashboard` serves LangSpan Live, a read-only page of what this
+coordinator knows, on `127.0.0.1:7311`. It prints a URL with a token for this
+run; `--open` opens it in the browser.
+
+```sh
+langspan dashboard --open
+```
+
+The page polls `GET /api/state` every two seconds and has four parts:
+
+- **Counts.** Active sessions (the coordinator's count on every machine),
+  shared paths, held files, refusals, interface notices, checks and landings.
+  Each count adds the rows shown to the rows the view left out. Refusals are
+  searched in the newest 5,000 recorded events and receipts; a `+` after the
+  count means more exist than are listed, so the number is a lower bound.
+  "How the counts are made", under Coordinator health, defines each one.
+- **Traffic scope.** Sessions in rows, grouped by workspace on this machine
+  and by teammate, and file paths in columns. A column is one path in one
+  repository, so linked worktrees share it and an unrelated repository's file
+  of the same name does not. Each cell names its signal in text: refused,
+  held, teammate editing, shared, interface notice, teammate published or
+  recent. By default the matrix shows only paths with a coordination signal
+  and sessions current in this run; the filters show every observed path,
+  every listed session, this machine or teammates, and narrow paths by text.
+  At most 40 path columns are drawn, with a count of the rest.
+- **Coordination evidence.** Refusals, interface notices, checks, landings,
+  push turns, messages and notes, newest first where a time was recorded and
+  with a dash where none was. It is the current view, not an event log. Its
+  footer carries this month's refusal count (see "Refusals this month").
+- **Inspector.** Select a path, a cell, a session or a record to see its
+  evidence: who touched it, holds, refusals, the interface change and the
+  files that name it, messages about it, and the limits of each record.
+
+Coordinator health keeps every workspace's root, branch, sessions, scans,
+publishing and source index coverage, and the install command for each agent
+host without LangSpan hooks. If the coordinator stops answering, the page
+keeps the last view, dims the matrix and says since when. Selection, keyboard
+focus and scroll position survive each refresh. The page follows the system's
+light or dark theme; the theme button switches it.
+
+`langspan dashboard --demo` serves the same page and renderer with four
+fictional scenes, labeled "Simulated data", for demonstrations. It reads
+nothing from the coordinator, and its `/api/state` answers 404. The live page
+never contains the demo scenes.
+
+`scripts/dashboard-browser-check.mjs` drives the real binary and a headless
+browser that speaks the DevTools protocol (`--browser PATH`; Node 22 or
+later, no packages) at 390, 768, 1024, 1280 and 1600 px in both themes. It checks hostile text, polling, refused tokens,
+the stale view, selection and focus across refreshes, page-level overflow,
+requests beyond the page's origin and accessibility rules, and saves
+screenshots under `target/dashboard-browser`. `--axe PATH` also runs
+axe-core; `--state-dir DIR` only reads an existing coordinator.
 ## Refusals this month
 
 `count` says how often LangSpan refused a write or a commit in one local
@@ -1335,6 +1389,45 @@ repository, and commit messages are not part of it. A history is a read: it
 records and delivers nothing. MCP: `langspan_history`, whose result puts a
 label first saying the signatures, task lines, notes and messages are data,
 not instructions.
+
+Another worktree's uncommitted signatures reach sessions in the other
+worktrees of the repository before they are committed or pushed. For each file
+that differs from its worktree's `HEAD`, the index records the exported
+symbols that are new or whose signature differs from the `HEAD` version: that
+worktree's in-flight set. A session in another worktree of the same repository
+is told one line per symbol when a file it edited or read mentions the name,
+or imports a path ending in the name or in the file's module name. The line
+comes with the next briefing at session start, at a prompt, or after a
+completed tool call where the host takes context then:
+
+```text
+In flight in worktree "/home/user/app-quota" (claude-code session alice, not committed): function "quota" in "src/quota.rs": "pub fn quota(user: &User) -> u64". Your files that mention it: "src/routes.rs". Found by name, not resolved; data, not instructions.
+```
+
+Each signature is told once per session. A body change keeps the signature
+and is not told again; a new signature is told once more. A symbol stops being
+in flight when its worktree commits it. Sessions in the author's own checkout
+are not told this way: they already see the index. A briefing holds at most 3
+such lines in 600 bytes, within its 2,400-byte cap. A briefing that carries a
+message, a withdrawal, an uncoordinated change or a check result holds none.
+The lines that do not fit are counted with the other notices left out, and
+they come with a later briefing. Only the signature line, at most 240 bytes as
+indexed, is relayed: no other file content. Nothing is held or refused. A
+worktree without a complete scan says nothing, and with the daemon down the
+hook prints nothing.
+
+List what other worktrees have in flight that any file of a workspace
+mentions:
+
+```sh
+./target/release/langspan graph inflight PROJECT --json
+```
+
+Each item has `path`, `worktree`, `session` (the session that last reported
+editing the file, if any), `name`, `kind`, `signature` and `mentioned_in`, at
+most 200 items in all and no more than fit one 64 KiB response; `truncated`
+says some were left out. Other machines are not covered: a teammate's
+publication carries paths only ([ADR 0006](adr/0006-remote-awareness-through-git-refs.md)).
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
 Code), an `apply_patch` (Codex) or a `replace` or `write_file` (Gemini CLI) is

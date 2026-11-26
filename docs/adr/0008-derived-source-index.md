@@ -375,6 +375,82 @@ changed, and is not remembered as delivered. Nothing is added when the index
 has no complete scan or nothing matched, and any failure adds nothing.
 `--code-briefing off` on the hook, or on `hooks install`, turns it off.
 
+**Another worktree's in-flight signatures (added later, roadmap C7).** The
+observer keeps, for each file that differs from the worktree's `HEAD`, the
+blob ID that `HEAD` holds for it, if any. After each indexing pass the indexer
+compares each such file, once it is indexed at its scanned content, with that
+blob: it reads the blob raw with `git cat-file blob` (no filters, within the
+1 MiB parse bound and the pass's deadline, at most 200 reads per pass) and
+parses it like any file. The exported symbols of the working version that
+the `HEAD` version lacks, or exports with a different signature, are the
+file's in-flight set. Signatures are compared by their tokens as a reformat
+is ([ADR 0011](0011-shell-writes.md)): spacing between tokens aside, but a
+string literal's whitespace counts. Every indexed language is split into
+words, Go and Java by the TypeScript rules, so removing spacing never joins
+two tokens (`chan int` is not `chanint`). Every outcome of reading a file
+for the index or for this comparison is terminal for that version or tried
+again with a bound. A `HEAD` blob over the parse bound, or one that does not
+parse completely, says nothing and is remembered until the file or `HEAD`
+changes. A working file or blob that could not be read for now (removed,
+changed, not a regular file or not readable since the scan, or a timeout or
+missing object in Git) is tried again after a wait that doubles from one
+pass up to 32, and given up on for that version after 10 failures. Versions
+not tried yet are read before any retry, so files that keep failing never
+take a pass's budget from the others. The retries live in `graph.sqlite3`
+(`retries`, with each workspace's pass count in `passes`). A
+file new since `HEAD` puts all its
+exports in it. The set lives in `graph.sqlite3` (`inflight` and
+`inflight_files`, the latter with the indexed digest and `HEAD` blob it was
+computed at), added without a schema change, so an existing index computes
+it at its next pass. A file found clean again, or gone, has none. A partial
+parse at either version says nothing. When the daemon answers `Brief`, it
+reads at most 256 in-flight symbols of the other worktrees of the asking
+workspace's repository, in worktree, path and name order, and compares them
+with the asking workspace's index. Each briefing reads on from where the
+session's last one found nothing to offer, or from just before the first
+symbol it offered, and wraps to the first symbol after the last. So a
+symbol past the first 256 is reached once those before it are told or not
+mentioned, and no one is read again before the others have had their turn.
+The place is kept in the daemon's memory only; a restart starts again from
+the first symbol. A symbol counts when one of the session's own
+files (edited, held, declared or read) mentions its name, or imports a path
+whose last part is the name or the file's module name: the file name without
+its extension, or the directory for Go and for `mod.rs`, `lib.rs`, `main.rs`,
+`index.*` and `__init__.py`. Symbols already told to the session are left
+out, and at most 32 go to the core in a prepared command that only the
+daemon builds, like `WorkspaceRegisterVerified`. The core names the worktree
+root and the session that last reported editing the file, and selects at most
+3 within 600 bytes by `inflight_cost`, never more than what an adapter
+renders. It selects none for a briefing that carries a message, a withdrawal,
+an uncoordinated change or a check result: those take the briefing's room
+and are each delivered once, so the in-flight lines wait, counted. A
+delivered briefing records the keys of the signatures it told
+(`InflightDelivered`), at most 1,024 per session, so each signature is told
+once and a changed one again. A session told more than 1,024 signatures
+that are all still in flight forgets the oldest, which is told again when
+the window next reaches it. `graph inflight WORKSPACE` answers the same
+comparison for any file of the workspace, read-only, from the first 128
+symbols of each other worktree and 256 in all. Neither a worktree nor
+an asking workspace without a complete scan contributes anything; an empty
+answer still carries the asking workspace's coverage. Its answer keeps the
+leading items that fit one response frame and is marked `truncated` when any
+are left out. Tests:
+`another_worktrees_uncommitted_signature_is_told_to_the_session_whose_file_mentions_it`,
+`in_flight_lines_keep_to_their_share_and_the_rest_are_counted_and_told_later`,
+`an_empty_inflight_answer_still_reports_the_asking_workspaces_coverage`,
+`a_changed_string_default_is_in_flight_but_respacing_is_not`,
+`a_go_channel_type_joined_into_one_name_is_in_flight`,
+`every_inflight_signature_past_the_briefing_window_is_told_once`,
+`inflight_signatures_behind_unmentioned_ones_are_told_in_a_later_briefing`,
+`many_long_inflight_notices_are_trimmed_to_one_response_frame` and
+`a_head_version_that_could_not_be_read_is_compared_on_a_later_pass`
+in `tests/graph.rs`, the read-outcome and starvation tests after
+`an_oversized_head_blob_is_remembered_for_that_version_and_not_read_again`
+in `src/graph.rs`,
+`a_codex_session_is_told_a_signature_claude_code_has_in_flight_in_a_linked_worktree`
+in `tests/briefing.rs`, and the in-flight tests in
+`crates/langspan-core/tests/briefing.rs`.
+
 **Export and import (added later, roadmap D5).** `langspan graph export
 WORKSPACE --out FILE` writes what the index holds for the workspace's
 current registration as JSON Lines; `langspan graph import WORKSPACE --in
@@ -443,7 +519,10 @@ current: 3,850 loaded, and 200 kept that the first pass had already parsed.
   level compounds the false positives of the one before, and nothing is
   resolved. Import targets are stored but not yet used to narrow matches.
 - Notices cover one physical workspace. A teammate on another machine or in
-  another worktree is not yet told of an interface change.
+  another worktree is not yet told of an interface change. A session in
+  another worktree of the repository is told of new or changed exports that
+  are not committed (in flight), matched by name; once committed they are no
+  longer in flight until they change again. Other machines get neither.
 - False positives are expected for common names. False negatives occur for
   dynamic uses, reflection, string-built names, macros and generated code.
 - Formatter changes the normalised comparison does not absorb still read as
