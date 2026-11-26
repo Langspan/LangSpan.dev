@@ -162,6 +162,18 @@ context) and to an explicit request (`langspan brief SESSION` or the MCP tool
   told with it, since the clock cannot order the two.
 - *Mid-turn presence.* Where a peer is looking is still not news by itself
   during a turn: it stays out of the told keys and waits for the next prompt.
+- *What the text did not place (review comment 4711375989).* The core records
+  the keys when it delivers, before the hook renders the text within its
+  limits. The renderer also returns what it placed in full: a peer line or
+  notice left out ("more sessions not shown", "more notices not shown"), a
+  notice line cut short, a path or a task past a peer line's cut, and presence
+  without room are not placed. The hook then sends `ForgetTold` with the keys
+  of the items it did not place (from `briefing_keys`), at most 256, and the
+  core records `ToldForgotten` and drops them from the told keys, so the next
+  briefing of changes only names them. A retry, or keys the session was not
+  told, records nothing. When the forget does not reach the daemon within the
+  hook's deadline, the items stay told, as a missed deadline already leaves
+  them; it never hides an item.
 - *The pointer.* A briefing that left anything out says so: it opens with
   "What changed since your last briefing", and in place of the closing
   paragraph about holds, which the full view gave, it ends with one line that
@@ -177,8 +189,12 @@ context) and to an explicit request (`langspan brief SESSION` or the MCP tool
 places text in a session's context records how many bytes it placed:
 `RecordContext` and its event `ContextAdded`, a measurement only. Session
 start and prompt hooks record one at every turn, with zero bytes when they
-had nothing to add, so the count of turns is exact; mid-turn hooks record only
-when they add something. The session's activity keeps the turns, the bytes,
+had nothing to add, so the count of turns is exact. A tool hook records the
+`additionalContext` its final reply carries, whatever placed it there: a
+mid-turn briefing, an interface alert at a write (ADR 0029, including the
+Gemini CLI one given after the tool), a formatter's notice, or a batch's
+briefing (review comment 4711488164). It records only when it adds something,
+once per hook run and phase. The session's activity keeps the turns, the bytes,
 and the largest turn (its own context and the mid-turn notes after it).
 `langspan status` prints them per session with an estimate in tokens at 4
 bytes per token (`BYTES_PER_TOKEN`), an estimate only; `status --json` has the
@@ -192,6 +208,19 @@ session measured 158 bytes per turn (2,054 bytes over 13 turns) with briefings
 of changes only, and 338 bytes per turn (4,397 bytes) with the full view on
 every change; one run each. The skill is in every turn's context too: its test
 keeps every form at most 90% of each host's documented limit.
+
+**Protocol version 5 (added 26 November 2026, review comment 4711375982).**
+A client of version 4 reads session activity, briefings and events with
+`deny_unknown_fields`, so a status answer carrying `told`, `told_at_ms` or
+`context`, a briefing with `unchanged`, or an event page with the new events
+would fail to read as a whole once a newer hook had recorded them. The wire
+protocol is version 5. To a version 4 or 3 client, the daemon answers without
+them: activity without `told`, `told_at_ms` and `context`, a briefing without
+`unchanged`, a `briefing_delivered` event without its keys and time, and an
+event page without `context_added` and `told_forgotten` events. Version 3
+replies also leave out what version 4 added (ADR 0008). Requests of version 4
+are requests of version 5, so a version 5 client that a daemon of an earlier
+build refuses asks again once in the version that daemon names.
 
 **Prompt targets (added later, roadmap C8).** A prompt's code briefing finds
 where the prompt's names are defined (at most 12 names, 3 definitions each).
@@ -371,9 +400,11 @@ core does with an eight-hour gap.
   hold expired without a finished edit, or whose work aged out, is simply no
   longer listed. A model that still believes a file is held only waits or is
   admitted; the full view shows the current state.
-- The hook's own text limits can still leave a told item unshown (a peer that
-  did not fit is counted in "more sessions not shown"); its key is recorded
-  as told. The full view shows it.
+- An item the hook's text could not place is told again at the next briefing
+  of changes only. A briefing that is itself full can leave it out again; it
+  waits for a briefing with room, and the full view shows it.
+- The context count is what the hook's reply carries. A host that reads less
+  of a reply's `additionalContext` makes the count high.
 - Whether a smaller briefing changes a host model's behavior, and the cache
   token reduction in a benchmark rerun, are not measured here: the
   measurements above are the hook's bytes in a stand-in session.

@@ -1,15 +1,22 @@
-//! Version 4 of the local IPC contract. One bounded JSON line per connection.
+//! Version 5 of the local IPC contract. One bounded JSON line per connection.
 
-use langspan_core::{Command, Outcome};
+use langspan_core::{Command, ContextUse, Event, Outcome, RecordedEvent, SessionActivity};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader, Read};
 
-/// Version 4 is version 3 with roadmap D7's rename fields in interface
-/// changes, history entries and in-flight symbols. Requests are the same in both.
-pub const PROTOCOL_VERSION: u16 = 4;
+/// Version 5 is version 4 with issue #222's briefing memory and context
+/// measurement: a session activity's `told`, `told_at_ms` and `context`, a
+/// briefing's `unchanged`, a briefing delivery's `told` and `told_at_ms`,
+/// and the `context_added` and `told_forgotten` events (with the
+/// `forget_told` request that records the second). Version 4 is version 3 with roadmap D7's
+/// rename fields in interface changes, history entries and in-flight
+/// symbols. Requests of an earlier version are requests of this one.
+pub const PROTOCOL_VERSION: u16 = 5;
+/// The version before `PROTOCOL_VERSION`, answered in its own shape.
+pub const PROTOCOL_VERSION_4: u16 = 4;
 /// The earliest version the daemon still answers, in that version's shape
-/// (`langspan_core::in_protocol_3_shape`), so that a client of an earlier
-/// build keeps working after the daemon is upgraded.
+/// (`protocol_3_shape`), so that a client of an earlier build keeps working
+/// after the daemon is upgraded.
 pub const OLDEST_PROTOCOL_VERSION: u16 = 3;
 
 /// Whether the daemon answers requests of `version`.
@@ -17,17 +24,65 @@ pub fn answers(version: u16) -> bool {
     (OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&version)
 }
 
-/// `response` as one frame for a client of `version`. Version 3 clients
-/// read interface changes and history entries with `deny_unknown_fields`,
-/// so an answer carrying a field version 4 added would fail to read as a
-/// whole: theirs is encoded in the version 3 shape (`protocol_3_shape`).
+/// `response` as one frame for a client of `version`. Clients of an
+/// earlier version read the objects later versions extended with
+/// `deny_unknown_fields`, so an answer carrying a field they lack would fail
+/// to read as a whole: theirs is encoded without what later versions added
+/// (`protocol_4_outcome`, then `protocol_3_shape`).
 pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::Error> {
     if version >= PROTOCOL_VERSION {
         return encode(response);
     }
-    let mut value = serde_json::to_value(response)?;
+    let mut earlier = response.clone();
+    protocol_4_outcome(&mut earlier.outcome);
+    if version >= PROTOCOL_VERSION_4 {
+        return encode(&earlier);
+    }
+    let mut value = serde_json::to_value(&earlier)?;
     protocol_3_shape(&mut value);
     encode(&value)
+}
+
+/// `outcome` without what version 5 added. Every field it added is skipped
+/// when empty, so emptying it leaves it out; the `context_added` and
+/// `told_forgotten` events, which version 4 has no variant for, are left
+/// out of an event page.
+fn protocol_4_outcome(outcome: &mut Outcome) {
+    fn activity(activity: &mut SessionActivity) {
+        activity.told = Vec::new();
+        activity.told_at_ms = 0;
+        activity.context = ContextUse::default();
+    }
+    fn events(events: &mut Vec<RecordedEvent>) {
+        events.retain(|recorded| {
+            !matches!(
+                recorded.event,
+                Event::ContextAdded { .. } | Event::ToldForgotten { .. }
+            )
+        });
+        for recorded in events {
+            if let Event::BriefingDelivered {
+                told, told_at_ms, ..
+            } = &mut recorded.event
+            {
+                *told = Vec::new();
+                *told_at_ms = None;
+            }
+        }
+    }
+    match outcome {
+        Outcome::Status { state, .. } => state.activity.values_mut().for_each(activity),
+        Outcome::StatusRecords { records, .. } => {
+            for record in records {
+                if let langspan_core::StatusRecord::Activity { activity: a, .. } = record {
+                    activity(a);
+                }
+            }
+        }
+        Outcome::Briefing { briefing } => briefing.unchanged = 0,
+        Outcome::Events { events: page } | Outcome::Changes { events: page, .. } => events(page),
+        _ => {}
+    }
 }
 
 /// The fields version 4 added to an interface change (`InterfaceChange`,

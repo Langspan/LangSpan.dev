@@ -911,6 +911,77 @@ fn untold_after(run: &Run) {
     );
 }
 
+/// The context LangSpan's hooks added to `session`, as `status` reports it.
+fn context_bytes(w: &World, session: &str) -> u64 {
+    let (_, text) = w.cli(&["status", "--json"]);
+    let status: Value = serde_json::from_str(&text).unwrap();
+    status["outcome"]["state"]["activity"][session]["context"]["bytes"]
+        .as_u64()
+        .unwrap_or(0)
+}
+
+fn added(runs: &[&Run]) -> u64 {
+    runs.iter()
+        .map(|run| run.context.as_ref().map_or(0, String::len) as u64)
+        .sum()
+}
+
+/// Review comment 4711488164: an alert a tool hook gives at a write is
+/// context added to the session, counted like a briefing: before a Claude
+/// Code write, and after a Gemini CLI one, where Gemini reads it. What a
+/// session's status reports is exactly what its hooks' replies carried.
+#[test]
+fn the_context_an_alert_adds_at_a_write_is_counted_for_the_session_on_both_hosts() {
+    let w = World::new(true);
+    w.wait_for_index();
+    // Bob and Gina are at work before Alice changes anything.
+    let input =
+        |content: &str| json!({"file_path": w.work().join("src/main.rs"), "content": content});
+    let bob = |call: &str, content: &str| {
+        let pre = w.claude("bob", call, "Write", input(content), "PreToolUse");
+        let post = w.claude("bob", call, "Write", input(content), "PostToolUseFailure");
+        (pre, post)
+    };
+    let (pre, post) = bob("b0", "mod api;\nfn main() {}\n");
+    let mut bob_runs = vec![pre, post];
+    let (before, after) = gemini_replace(
+        &w,
+        "gina",
+        "    return scale(2)\n",
+        "    return scale(2)\n\n",
+        true,
+    );
+    let mut gina_runs = vec![before, after];
+    w.rewrites(
+        "alice",
+        "a0",
+        "src/api.rs",
+        "pub fn resize(width: u32, height: u32) -> u32 {\n    width * height\n}\n",
+    );
+    w.wait_for_notice("resize", "height: u32");
+    scale_takes_two(&w);
+
+    let (pre, post) = bob("b1", "mod api;\nfn main() {\n    api::resize(1);\n}\n");
+    let alert_bytes = alert(&pre).len() as u64;
+    bob_runs.extend([pre, post]);
+    let counted = context_bytes(&w, "claude-code.bob");
+    assert!(counted >= alert_bytes, "{counted} < {alert_bytes}");
+    assert_eq!(counted, added(&bob_runs.iter().collect::<Vec<_>>()));
+
+    let (before, after) = gemini_replace(
+        &w,
+        "gina",
+        "    return scale(2)\n",
+        "    total = scale(2)\n    return total\n",
+        true,
+    );
+    let alert_bytes = told_after(&after).len() as u64;
+    gina_runs.extend([before, after]);
+    let counted = context_bytes(&w, &format!("{}.gina", langspan_core::GEMINI_HOST));
+    assert!(counted >= alert_bytes, "{counted} < {alert_bytes}");
+    assert_eq!(counted, added(&gina_runs.iter().collect::<Vec<_>>()));
+}
+
 #[test]
 fn a_gemini_replace_is_told_of_a_broken_call_with_its_result_once() {
     let w = World::new(true);

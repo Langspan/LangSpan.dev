@@ -669,13 +669,17 @@ Three items are told again after they were told, once each time the session
 reads or edits one of their files: another session's hold on a file in this
 checkout that the session works on, an interface change to a name its files
 use, and a file it read that a peer has since edited. Refusals are never left
-out: admission refuses each attempt and says why. [ADR
-0004](adr/0004-automatic-peer-briefing.md) lists what each item is and what
-repeats.
+out: admission refuses each attempt and says why. An item the hook's text had
+no room for (counted as "more session(s) not shown" or "more notice(s) not
+shown", a path past a line's cut, or where a peer looks) is not told, and the
+next briefing names it. [ADR 0004](adr/0004-automatic-peer-briefing.md) lists
+what each item is and what repeats.
 
 `langspan status` shows, for each session, the context LangSpan's hooks added
-to it in this daemon run: bytes over its turns, bytes and estimated tokens per
-turn, and the largest turn. Tokens are estimated at four bytes each:
+to it in this daemon run: briefings, the code section, mid-turn briefings, and
+the alerts and notices a hook adds at a tool call. It counts bytes over its
+turns, bytes and estimated tokens per turn, and the largest turn. Tokens are
+estimated at four bytes each:
 
 ```text
   Added context: 2054 bytes over 13 turn(s), 158 bytes (about 40 tokens) per turn; the largest turn 722 bytes (about 181 tokens). Tokens are estimated at 4 bytes each.
@@ -2416,11 +2420,13 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol is version 4 and the SQLite schema marker version 4
-(retention). The daemon also answers version 3 clients, without the rename
-fields version 4 added, and a client asks a daemon of an earlier build in
-version 3. Upgrade the daemon and clients together. Earlier persisted
-records remain readable; a build older than the marker refuses the file.
+The current wire protocol is version 5 and the SQLite schema marker version 4
+(retention). The daemon also answers version 4 clients, without the briefing
+memory and context counts version 5 added, and version 3 clients, without the
+rename fields version 4 added too. A client asks a daemon of an earlier build
+again in the version that daemon names. Upgrade the daemon and clients
+together. Earlier persisted records remain readable; a build older than the
+marker refuses the file.
 
 Receipts are kept until [retention](#retention) removes them, at the
 earliest 7 days after they were recorded; a retry after that is a new

@@ -312,6 +312,54 @@ fn many_turns_while_peers_keep_to_the_same_files_repeat_nothing_after_the_first(
     }
 }
 
+/// Review comment 4711375989: a briefing whose lines do not all fit its
+/// budget leaves some peers out ("more session(s) not shown"). Those were
+/// never placed in the model's context, so they are not told: the next
+/// prompt names them, though nothing about them changed, and the peers that
+/// were shown are not repeated.
+#[test]
+fn peers_a_full_briefing_could_not_show_are_named_at_the_next_prompt() {
+    let f = Fixture::new();
+    let peers: Vec<String> = (1..=5)
+        .map(|n| format!("{n}{n}{n}{n}{n}{n}{n}{n}-0000-4000-8000-00000000000{n}"))
+        .collect();
+    let line = |peer: &str| format!("claude-code session {}", &peer[..8]);
+    // Each peer's line fits whole; the five together do not.
+    for (n, peer) in peers.iter().enumerate() {
+        for file in 0..4 {
+            let name = format!("peer{n}_{file}_{}.txt", "x".repeat(90));
+            fs::write(f.root().join(&name), "hello\n").unwrap();
+            f.write(peer, &format!("w-{n}-{file}"), &name, "changed\n");
+        }
+    }
+    f.wait_for_repository();
+    let first = f.start_session(ALICE);
+    let context = first.context.expect("the start carries a briefing");
+    assert!(context.contains("more session(s) not shown"), "{context}");
+    let unshown: Vec<&String> = peers
+        .iter()
+        .filter(|peer| !context.contains(&line(peer)))
+        .collect();
+    assert!(!unshown.is_empty(), "{context}");
+
+    let next = f.prompt(ALICE);
+    let context = next.context.expect("the peers left out are news");
+    for peer in &unshown {
+        assert!(
+            context.contains(&line(peer)),
+            "{} not named: {context}",
+            line(peer)
+        );
+    }
+    for peer in peers.iter().filter(|peer| !unshown.contains(peer)) {
+        assert!(
+            !context.contains(&line(peer)),
+            "{} repeated: {context}",
+            line(peer)
+        );
+    }
+}
+
 #[test]
 fn when_a_peer_changes_something_the_next_turn_names_only_that_change() {
     let f = Fixture::new();

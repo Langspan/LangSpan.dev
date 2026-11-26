@@ -1,5 +1,6 @@
 use langspan::protocol::{
-    OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, Response, encode, encode_for, read_frame,
+    OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, PROTOCOL_VERSION_4, Request, Response, encode,
+    encode_for, read_frame,
 };
 use langspan_core::Command;
 
@@ -972,7 +973,7 @@ fn v3_index_export_and_import_match_the_committed_golden_vectors() {
 fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() {
     let wire = include_bytes!("../fixtures/rename-history-response-v4.json");
     let mut response: Response = serde_json::from_slice(wire).unwrap();
-    assert_eq!(response.version, PROTOCOL_VERSION);
+    assert_eq!(response.version, PROTOCOL_VERSION_4);
     let langspan_core::Outcome::History { history } = &response.outcome else {
         panic!("{response:?}");
     };
@@ -981,6 +982,7 @@ fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() 
         history.entries[1].before_path.as_deref(),
         Some("app/old_users.py")
     );
+    assert_eq!(encode_for(PROTOCOL_VERSION_4, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
 
     response.version = OLDEST_PROTOCOL_VERSION;
@@ -1105,4 +1107,123 @@ fn a_version_3_reply_leaves_out_an_inflight_renames_old_name() {
     assert!(
         matches!(&current.outcome, Outcome::GraphInflight { inflight: read, .. } if read == &[inflight])
     );
+}
+
+/// Issue #222 (review comment 4711375982): version 5 added what a session
+/// was told (`told`, `told_at_ms`), the context its hooks added
+/// (`context`), a briefing's `unchanged` count, the told keys of a briefing
+/// delivery and the `context_added` event. A client of version 4 or 3 reads
+/// activity, briefings and events with `deny_unknown_fields`: its reply
+/// leaves every one of them out, in every outcome that carries them, while a
+/// version 5 client reads them all.
+#[test]
+fn a_version_4_reply_leaves_out_what_version_5_added_to_activity_briefings_and_events() {
+    use langspan_core::{
+        ContextUse, Event, Outcome, RecordedEvent, SessionActivity, State, StatusRecord,
+    };
+    let activity = SessionActivity {
+        told: vec![7, 9],
+        told_at_ms: 1_000,
+        context: ContextUse {
+            turns: 2,
+            bytes: 300,
+            largest_turn_bytes: 200,
+            turn_bytes: 100,
+        },
+        ..SessionActivity::default()
+    };
+    let mut state = State::default();
+    state.activity.insert("codex.bob".into(), activity.clone());
+    let wire = include_bytes!("../fixtures/briefing-response-v3.json");
+    let Outcome::Briefing { mut briefing } =
+        serde_json::from_slice::<Response>(wire).unwrap().outcome
+    else {
+        panic!("a briefing fixture");
+    };
+    briefing.unchanged = 3;
+    let events = vec![
+        RecordedEvent {
+            seq: 1,
+            event: Event::BriefingDelivered {
+                session_id: "codex.bob".into(),
+                signature: "sig".into(),
+                told: vec![7, 9],
+                told_at_ms: Some(1_000),
+            },
+        },
+        RecordedEvent {
+            seq: 2,
+            event: Event::ContextAdded {
+                session_id: "codex.bob".into(),
+                bytes: 120,
+                turn: true,
+                generation: 1,
+            },
+        },
+        RecordedEvent {
+            seq: 3,
+            event: Event::ToldForgotten {
+                session_id: "codex.bob".into(),
+                keys: vec![9],
+            },
+        },
+    ];
+    let outcomes = [
+        Outcome::Status {
+            state,
+            summary: None,
+        },
+        Outcome::StatusRecords {
+            records: vec![StatusRecord::Activity {
+                key: "codex.bob".into(),
+                activity,
+            }],
+            next: None,
+        },
+        Outcome::Briefing { briefing },
+        Outcome::Events {
+            events: events.clone(),
+        },
+        Outcome::Changes { events, scan: None },
+    ];
+    const ADDED_IN_5: [&str; 6] = [
+        "told",
+        "told_at_ms",
+        "context",
+        "unchanged",
+        "context_added",
+        "told_forgotten",
+    ];
+    for outcome in outcomes {
+        let response = Response {
+            version: PROTOCOL_VERSION,
+            request_id: "r".into(),
+            replayed: false,
+            generation: 1,
+            lease_valid: None,
+            outcome,
+        };
+        let current = String::from_utf8(encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+        assert!(
+            ADDED_IN_5
+                .iter()
+                .any(|field| current.contains(&format!("\"{field}\""))),
+            "a version 5 client reads them: {current}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Response>(&current).unwrap(),
+            response
+        );
+        for version in [PROTOCOL_VERSION_4, OLDEST_PROTOCOL_VERSION] {
+            let earlier = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
+            for field in ADDED_IN_5 {
+                assert!(
+                    !earlier.contains(&format!("\"{field}\"")),
+                    "version {version} has {field}: {earlier}"
+                );
+            }
+            // What is left still reads as a response.
+            serde_json::from_str::<Response>(&earlier).unwrap();
+        }
+    }
 }

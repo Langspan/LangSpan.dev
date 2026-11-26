@@ -3,7 +3,7 @@
 //! stored before it, and the context each turn added.
 use langspan_core::{
     Briefing, Command, ContextUse, Event, InterfaceChange, MAX_TOLD, Outcome, PresenceKind, State,
-    ToolResult, apply, decide,
+    ToolResult, apply, briefing_keys, decide,
 };
 
 fn run(state: &mut State, id: &str, command: Command, now: u64) -> Outcome {
@@ -357,4 +357,172 @@ fn context_records_count_turns_bytes_and_the_largest_turn() {
             Outcome::Error { .. }
         ));
     }
+}
+
+/// Forget, for `session`, what `shown` holds of `delivered` and the hook
+/// did not place: everything in `delivered` but not in `placed`.
+fn forget_unplaced(
+    state: &mut State,
+    session: &str,
+    delivered: &Briefing,
+    placed: &Briefing,
+    now: u64,
+) -> Outcome {
+    let placed = briefing_keys(placed);
+    let keys: Vec<u64> = briefing_keys(delivered)
+        .into_iter()
+        .filter(|key| !placed.contains(key))
+        .collect();
+    run(
+        state,
+        &format!("forget-{session}-{now}"),
+        Command::ForgetTold {
+            session_id: session.into(),
+            keys,
+        },
+        now,
+    )
+}
+
+/// Review comment 4711375989: a briefing's hook may leave out a line that
+/// does not fit its budget. What it did not place is forgotten, so the next
+/// briefing of changes only tells it, though nothing about it changed; what
+/// it placed stays told.
+#[test]
+fn an_item_the_hook_could_not_place_is_news_again_at_the_next_prompt() {
+    let mut state = ready();
+    edited(&mut state, "bob", "src/a.rs", 1_000);
+    edited(&mut state, "carol", "src/b.rs", 1_000);
+    // The full view at a start: the hook placed Bob's line, not Carol's.
+    let first = brief_as(&mut state, "alice", 2_000, false, false);
+    assert_eq!(names(&first), ["bob", "carol"]);
+    let mut placed = first.clone();
+    placed.peers.retain(|peer| peer.session_id == "bob");
+    let Outcome::ToldForgotten { forgotten, .. } =
+        ok(forget_unplaced(&mut state, "alice", &first, &placed, 2_000))
+    else {
+        panic!("not a forget");
+    };
+    assert_eq!(forgotten, 2, "Carol's line and her file");
+    let next = prompt(&mut state, "alice", 3_000);
+    assert!(next.changed, "{next:?}");
+    assert_eq!(names(&next), ["carol"]);
+    assert_eq!(next.unchanged, 2, "Bob's line and his file stay told");
+    assert!(!prompt(&mut state, "alice", 4_000).changed);
+
+    // Within a briefing of changes only: Carol's new file did not fit.
+    edited(&mut state, "carol", "src/c.rs", 5_000);
+    let delta = prompt(&mut state, "alice", 6_000);
+    assert_eq!(names(&delta), ["carol"]);
+    let mut placed = delta.clone();
+    placed.peers[0].recent.clear();
+    ok(forget_unplaced(&mut state, "alice", &delta, &placed, 6_000));
+    let again = prompt(&mut state, "alice", 7_000);
+    let paths: Vec<&str> = again.peers[0]
+        .recent
+        .iter()
+        .map(|recent| recent.path.as_str())
+        .collect();
+    assert_eq!(paths, ["src/c.rs"], "{again:?}");
+}
+
+/// The same for every kind of keyed item: a notice, an interface change, a
+/// remembered note and where a peer looks are each told again when their
+/// line was not placed.
+#[test]
+fn every_kind_of_item_the_hook_could_not_place_is_told_again() {
+    let mut state = ready();
+    edited(&mut state, "alice", "src/api.rs", 1_000);
+    edited(&mut state, "bob", "src/store.rs", 1_000);
+    ok(run(
+        &mut state,
+        "interface-1",
+        Command::ObserveInterface {
+            workspace_id: "main".into(),
+            path: "src/store.rs".into(),
+            changes: vec![signature_change("save")],
+            dependents: vec!["src/api.rs".into()],
+        },
+        1_001,
+    ));
+    ok(run(
+        &mut state,
+        "note-1",
+        Command::Remember {
+            workspace_id: "main".into(),
+            author: Some("bob".into()),
+            text: "run the store tests with --features sqlite".into(),
+            paths: vec!["src/api.rs".into()],
+        },
+        1_002,
+    ));
+    ok(run(
+        &mut state,
+        "look-bob",
+        Command::ObservePresence {
+            session_id: "bob".into(),
+            kind: PresenceKind::Search,
+            paths: vec!["src/z.rs".into()],
+        },
+        1_003,
+    ));
+    let first = brief_as(&mut state, "alice", 2_000, false, false);
+    assert_eq!(first.interface_changes.len(), 1, "{first:?}");
+    assert_eq!(first.notes.len(), 1, "{first:?}");
+    assert_eq!(first.peers[0].looking.len(), 1, "{first:?}");
+    // Only the peer's own line was placed.
+    let mut placed = first.clone();
+    placed.interface_changes.clear();
+    placed.notes.clear();
+    placed.peers[0].looking.clear();
+    ok(forget_unplaced(&mut state, "alice", &first, &placed, 2_000));
+    let next = prompt(&mut state, "alice", 3_000);
+    assert_eq!(next.interface_changes.len(), 1, "{next:?}");
+    assert_eq!(next.notes.len(), 1, "{next:?}");
+    assert_eq!(next.peers.len(), 1, "{next:?}");
+    assert_eq!(next.peers[0].looking.len(), 1, "{next:?}");
+    assert!(next.peers[0].recent.is_empty(), "Bob's file stays told");
+}
+
+/// Forgetting is bounded, for a current session only, and a retry, or a
+/// key the session was never told, forgets nothing and records nothing.
+#[test]
+fn forgetting_is_bounded_idempotent_and_for_a_current_session() {
+    let mut state = ready();
+    edited(&mut state, "bob", "src/a.rs", 1_000);
+    let first = prompt(&mut state, "alice", 2_000);
+    let keys = briefing_keys(&first);
+    let forget = |keys: Vec<u64>, session: &str| Command::ForgetTold {
+        session_id: session.into(),
+        keys,
+    };
+    let decision = decide(&state, &forget(vec![u64::MAX], "alice"), "f0", 2_000);
+    assert!(decision.events.is_empty(), "never told: nothing recorded");
+    assert!(matches!(
+        decision.outcome,
+        Outcome::ToldForgotten { forgotten: 0, .. }
+    ));
+    ok(run(&mut state, "f1", forget(keys.clone(), "alice"), 2_000));
+    assert!(state.activity["alice"].told.is_empty());
+    let retry = decide(&state, &forget(keys, "alice"), "f2", 2_000);
+    assert!(retry.events.is_empty(), "a retry forgets nothing");
+    let too_many = forget((0..=MAX_TOLD as u64).collect(), "alice");
+    assert!(matches!(
+        run(&mut state, "f3", too_many, 2_000),
+        Outcome::Error { .. }
+    ));
+    assert!(matches!(
+        run(&mut state, "f4", forget(vec![1], "nobody"), 2_000),
+        Outcome::Error { .. }
+    ));
+    // The event itself is bounded as the delivery is.
+    let refused = apply(
+        &mut state,
+        &Event::ToldForgotten {
+            session_id: "alice".into(),
+            keys: (0..=MAX_TOLD as u64).collect(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "invalid_event");
 }

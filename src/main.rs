@@ -4870,6 +4870,10 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             session_id,
             context,
         } => println!("Session {session_id}: {}", context_line(context)),
+        Outcome::ToldForgotten {
+            session_id,
+            forgotten,
+        } => println!("Session {session_id}: {forgotten} briefing item(s) will be told again."),
         Outcome::Intent { intent } => println!(
             "Intent for {}: {} on {:?}.",
             intent.session_id,

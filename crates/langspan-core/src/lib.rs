@@ -3093,6 +3093,12 @@ pub enum Event {
         turn: bool,
         generation: u64,
     },
+    /// These told items were not placed in the session's context: they are
+    /// told again (review comment 4711375989). At most `MAX_TOLD` keys.
+    ToldForgotten {
+        session_id: String,
+        keys: Vec<u64>,
+    },
     /// These in-flight signatures were placed in the session's context with
     /// a briefing (roadmap C7). Each is told once.
     InflightDelivered {
@@ -3462,6 +3468,14 @@ pub enum Command {
         bytes: u64,
         #[serde(default, skip_serializing_if = "is_false")]
         turn: bool,
+    },
+    /// The hook could not place these briefing items in the session's
+    /// context (its text budget was full): they are no longer told, so the
+    /// next briefing of changes only tells them (review comment 4711375989).
+    /// At most `MAX_TOLD` keys, from `briefing_keys`.
+    ForgetTold {
+        session_id: String,
+        keys: Vec<u64>,
     },
     IntentSet {
         session_id: String,
@@ -4223,6 +4237,14 @@ enum CommandWire {
         #[serde(default, skip_serializing_if = "is_false")]
         turn: bool,
     },
+    /// The hook could not place these briefing items in the session's
+    /// context (its text budget was full): they are no longer told, so the
+    /// next briefing of changes only tells them (review comment 4711375989).
+    /// At most `MAX_TOLD` keys, from `briefing_keys`.
+    ForgetTold {
+        session_id: String,
+        keys: Vec<u64>,
+    },
     IntentSet {
         session_id: String,
         paths: Vec<String>,
@@ -4915,6 +4937,12 @@ pub enum Outcome {
         session_id: String,
         context: ContextUse,
     },
+    /// How many of the named items the session had been told and now has
+    /// not; zero when none was, and nothing is recorded.
+    ToldForgotten {
+        session_id: String,
+        forgotten: u32,
+    },
     Intent {
         intent: Intent,
     },
@@ -5517,6 +5545,45 @@ fn decide_checked(
                 outcome: Outcome::ContextRecorded {
                     session_id: session_id.clone(),
                     context: after,
+                },
+            })
+        }
+        Command::ForgetTold { session_id, keys } => {
+            current_session(state, session_id)?;
+            if keys.len() > MAX_TOLD {
+                return Err(error(
+                    "invalid_request",
+                    "Forget at most 256 briefing item keys at once",
+                ));
+            }
+            let named: BTreeSet<u64> = keys.iter().copied().collect();
+            let told: Vec<u64> = state
+                .activity
+                .get(session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map(|activity| {
+                    activity
+                        .told
+                        .iter()
+                        .copied()
+                        .filter(|key| named.contains(key))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let forgotten = u32::try_from(told.len()).unwrap_or(u32::MAX);
+            Ok(Decision {
+                // A retry, or keys never told, record nothing.
+                events: if told.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Event::ToldForgotten {
+                        session_id: session_id.clone(),
+                        keys: told,
+                    }]
+                },
+                outcome: Outcome::ToldForgotten {
+                    session_id: session_id.clone(),
+                    forgotten,
                 },
             })
         }
@@ -9763,8 +9830,9 @@ fn peer_paths<'a>(peer: &'a PeerWork, kind: &str) -> Vec<&'a str> {
 
 /// Every item key of `briefing`, in the order a reader meets them. Messages,
 /// withdrawals, check results, in-flight signatures, uncoordinated changes
-/// and left work are not keyed: each is delivered once already.
-fn briefing_keys(briefing: &Briefing) -> Vec<u64> {
+/// and left work are not keyed: each is delivered once already. A hook
+/// names the keys of the items it could not place to `Command::ForgetTold`.
+pub fn briefing_keys(briefing: &Briefing) -> Vec<u64> {
     let mut keys = Vec::new();
     keys.extend(briefing.stale_reads.iter().map(stale_key));
     keys.extend(briefing.checkout_changes.iter().map(checkout_key));
@@ -12328,6 +12396,18 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 ));
             }
             activity_mut(state, session_id).context.add(*bytes, *turn);
+        }
+        Event::ToldForgotten { session_id, keys } => {
+            current_session(state, session_id)?;
+            if keys.len() > MAX_TOLD {
+                return Err(error(
+                    "invalid_event",
+                    "A forget names at most 256 briefing item keys",
+                ));
+            }
+            activity_mut(state, session_id)
+                .told
+                .retain(|key| !keys.contains(key));
         }
         Event::InflightDelivered { session_id, keys } => {
             current_session(state, session_id)?;
