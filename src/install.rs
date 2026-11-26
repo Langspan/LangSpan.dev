@@ -2296,7 +2296,6 @@ mod tests {
         let removed = plan_user_for(Vendor::ClaudeCode, Some(user), None).unwrap();
         assert!(watchers(&removed).is_empty(), "{removed:#}");
         // The other hosts document no between-step delivery.
-        // Gemini CLI installs are refused (support was removed).
         for vendor in [Vendor::Codex, Vendor::Cursor, Vendor::Antigravity] {
             let settings = plan_for(vendor, None, Some(&registration("/r"))).unwrap();
             assert!(watchers(&settings).is_empty(), "{}", vendor.name());
