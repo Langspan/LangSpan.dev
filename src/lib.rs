@@ -27,6 +27,7 @@ pub mod store;
 pub mod test_output;
 pub mod today;
 pub mod user_install;
+mod zone;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 

@@ -135,7 +135,8 @@ acknowledgement. Three choices were needed:
   the first open of that store. The text is at most 40
   lines and eight files per session; the MCP text, labelled as data, at most
   2,400 bytes, as a briefing. Local midnight is found by `local_day` from the
-  zone's offsets near that date's 00:00, read from `date` (2 s deadline), so
+  zone's offsets near that date's 00:00, read in-process from the system's
+  zone files (see *Zone rules read in-process* below), so
   a day the clocks change starts at its own midnight; times are shown at the
   offset now for the whole window.
 
@@ -166,8 +167,22 @@ holds the text against a list of words that would claim an outcome. Choices:
   its local days' starts and the next month's first (2 to 33 instants,
   strictly increasing, checked by the daemon), each from `local_day` with
   the zone's offsets for that date, so a day the clocks change is 23 or 25
-  hours long. Finding them asks `date` about a hundred times within one 2 s
-  deadline; the local page asks once per month per run and keeps them. The
+  hours long. Finding them takes about a hundred offsets from the zone's
+  rules, read once; the local page finds them once per month per run and
+  keeps them.
+- *Zone rules read in-process.* Offsets first came from one `date` child per
+  instant. A month needs about a hundred, and on a loaded macOS CI runner
+  they did not all finish within the 2 s deadline, even 32 at a time, so
+  `today` and `count` refused the month. `local_day` now reads the zone the
+  way the C library does: the TZif file (RFC 8536) that `TZ` or
+  `/etc/localtime` names, its 64-bit transitions and footer rule, or a POSIX
+  `TZ` rule. Unlike the C library, a `TZ` that is neither is refused rather
+  than taken as UTC. No child process is started, so no `date` arguments
+  differ between GNU and BSD, and no deadline applies. Reading a file
+  that is no zone file, or one of more than 256 KiB, gives no offset.
+  Leap-second zones are read as plain Unix time, at most half a minute off
+  at their changes. A Linux test compares the reader with GNU `date` in ten
+  zones and rules every 5 hours of 2024 to 2027. The
   core places each refusal in wall time by its generation's anchor and on a
   day by those instants; a refusal of a generation without an anchor is
   `undated`, in no month.
@@ -221,7 +236,7 @@ Code only, the one launch host with a status-line command:
   with the wall clock); a refusal is placed in wall time by its generation's
   anchor as it is applied, and a refusal of an unanchored generation (older
   history) is never counted. The CLI finds local midnight with the system's
-  time-zone rules for that date, asking `date` for the offset at the
+  time-zone rules for that date, reading the zone's offset at the
   instants around midnight (so a daylight-saving day starts at its own
   00:00, not an hour off), falling back to UTC. At most 1024 refusals from
   the last 48 hours are kept in memory for the count; they are derived from the events on replay.

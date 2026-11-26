@@ -75,8 +75,8 @@ struct Context {
     state_dir: PathBuf,
     token: String,
     csp: String,
-    /// The local month last counted and its day starts: finding them asks
-    /// `date` about a hundred times, so once a month per run.
+    /// The local month last counted and its day starts, found once a month
+    /// per run.
     month: Mutex<Option<(count::Month, Vec<u64>)>>,
 }
 

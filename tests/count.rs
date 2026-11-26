@@ -478,14 +478,28 @@ fn a_truncated_month_says_so_wherever_its_count_is_shown() {
 fn a_month_whose_day_starts_cannot_all_be_read_is_not_counted() {
     let mut w = World::new();
     w.start();
-    // A `date` that answers once and then fails.
+    // A zone file that is not one: no offset can be read.
+    let bad = w.base.join("not-a-zone");
+    fs::write(&bad, "not a zone file\n").unwrap();
+    let bad = bad.to_str().unwrap().to_owned();
+    for tz in [bad.as_str(), "No/Such_Zone"] {
+        let (code, out, err) = w.cli(&["count", "--month", "2027-03"], Some(tz));
+        assert_eq!(code, 1, "{tz}: {out}{err}");
+        assert!(out.is_empty(), "no count from an unread month: {out}");
+        assert!(err.contains("time zone"), "{err}");
+    }
+}
+
+/// A `date` first on `PATH` that records every call and fails, as BSD
+/// `date` fails GNU-only arguments such as `-d`.
+fn failing_date(w: &World) -> (String, PathBuf) {
     let bin = w.base.join("bin");
     fs::create_dir(&bin).unwrap();
     let calls = w.base.join("date-calls");
     fs::write(
         bin.join("date"),
         format!(
-            "#!/bin/sh\nif [ -e '{0}' ]; then exit 1; fi\n: > '{0}'\necho +0000\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\necho 'date: illegal option' >&2\nexit 1\n",
             calls.display()
         ),
     )
@@ -496,21 +510,74 @@ fn a_month_whose_day_starts_cannot_all_be_read_is_not_counted() {
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
-        .arg("--state-dir")
-        .arg(w.state())
-        .args(["count", "--month", "2027-03"])
-        .env("PATH", path)
-        .output()
-        .unwrap();
-    let (out, err) = (
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+    (path, calls)
+}
+
+#[test]
+fn today_count_and_the_status_line_read_the_zone_without_starting_date() {
+    let mut w = World::new();
+    w.start();
+    w.started("alice");
+    w.started("bob");
+    assert!(!w.write("bob", "hold", "src/lib.rs", "PreToolUse"));
+    assert!(w.write("alice", "try-1", "src/lib.rs", "PreToolUse"));
+    let (path, calls) = failing_date(&w);
+    let run = |args: &[&str], tz: Option<&str>, input: Option<String>| {
+        let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
+        command
+            .arg("--state-dir")
+            .arg(w.state())
+            .args(args)
+            .env("PATH", &path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(tz) = tz {
+            command.env("TZ", tz);
+        }
+        let mut child = command.spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        if let Some(input) = input {
+            stdin.write_all(input.as_bytes()).unwrap();
+        }
+        drop(stdin);
+        let output = child.wait_with_output().unwrap();
+        (
+            output.status.code().unwrap(),
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    for tz in [
+        None,
+        Some("America/New_York"),
+        Some("EST5EDT,M3.2.0,M11.1.0"),
+    ] {
+        let (code, out, err) = run(&["count", "--json"], tz, None);
+        assert_eq!(code, 0, "{tz:?}: {out}{err}");
+        let count: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(count["refusals"], 1, "{tz:?}: {count:#}");
+
+        let (code, today, err) = run(&["today", "app"], tz, None);
+        assert_eq!(code, 0, "{tz:?}: {today}{err}");
+        assert!(today.contains("(since 00:00)"), "{tz:?}: {today}");
+        let line = today
+            .lines()
+            .find(|line| line.starts_with("This month, "))
+            .unwrap_or_else(|| panic!("{tz:?}: {today}"));
+        assert!(line.contains(" 1 in app"), "{tz:?}: {line}");
+
+        let input = include_str!("../fixtures/claude-code-statusline-constructed.json")
+            .replace("__CWD__", &w.work().to_string_lossy());
+        let (code, status, err) = run(&["statusline"], tz, Some(input));
+        assert_eq!(code, 0, "{tz:?}: {status}{err}");
+        assert!(status.contains("1 refusal today"), "{tz:?}: {status}");
+    }
+    assert!(
+        !calls.exists(),
+        "`date` was started: {}",
+        fs::read_to_string(&calls).unwrap_or_default()
     );
-    assert!(calls.exists(), "the first offset was read");
-    assert_eq!(output.status.code(), Some(1), "{out}{err}");
-    assert!(out.is_empty(), "no count from a partial month: {out}");
-    assert!(err.contains("time zone"), "{err}");
 }
 
 /// Copy the log's first refusal once into each of `workspaces`, with the

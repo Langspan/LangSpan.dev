@@ -12,7 +12,6 @@
 //! saved: every text carries `DISCLAIMER`.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use langspan_core::{COUNT_KINDS, Command, Outcome, RefusalCount};
 use serde::Serialize;
@@ -26,8 +25,6 @@ use crate::{
 /// The line every count carries until refusals are tied to outcomes (H9)
 /// and a measurement.
 pub const DISCLAIMER: &str = "A refusal is not proof of avoided rework.";
-/// How long the `date` calls for one month may take together.
-const DATE_BUDGET: Duration = Duration::from_secs(2);
 /// Workspaces named in the text; the rest are counted.
 const TEXT_WORKSPACES: usize = 8;
 const DAY_MS: i64 = 86_400_000;
@@ -285,9 +282,8 @@ pub fn month(text: Option<&str>, now_ms: u64) -> Result<Month, String> {
     match text {
         Some(text) => Month::parse(text),
         None => {
-            let deadline = Instant::now() + DATE_BUDGET;
-            let offset = local_day::offset_at(now_ms, deadline, None).ok_or_else(|| {
-                "could not read the local time zone (`date` gave no offset within 2 s); pass --month"
+            let offset = local_day::offset_at(now_ms, None).ok_or_else(|| {
+                "could not read the local time zone rules (check TZ and /etc/localtime); pass --month"
                     .to_owned()
             })?;
             Ok(Month::of(now_ms, offset))
@@ -297,14 +293,12 @@ pub fn month(text: Option<&str>, now_ms: u64) -> Result<Month, String> {
 
 /// The month's local day starts, from the system's zone rules.
 pub fn day_starts(month: Month) -> Result<Vec<u64>, String> {
-    let deadline = Instant::now() + DATE_BUDGET;
-    local_day::with_offsets(deadline, None, |offset_at| month.day_starts(offset_at))
-        .ok_or_else(|| {
-            format!(
-                "could not read the local time zone for every day of {} (`date` failed or gave no offset within 2 s); no count is shown from a partial month",
-                month.key()
-            )
-        })
+    local_day::with_offsets(None, |offset_at| month.day_starts(offset_at)).ok_or_else(|| {
+        format!(
+            "could not read the local time zone rules for every day of {} (check TZ and /etc/localtime); no count is shown from a partial month",
+            month.key()
+        )
+    })
 }
 
 /// Ask the daemon for one month's count. An unreachable daemon is an

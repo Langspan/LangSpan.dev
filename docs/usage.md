@@ -184,9 +184,11 @@ directory. It asks the coordinator once with a 200 ms deadline
 (`--deadline-ms`, 100 to 5000). When the coordinator is not running or does
 not answer in time it prints `langspan · coordinator not running` and exits 0;
 it never starts the coordinator, never uses the network, and writes nothing.
-"Local midnight" follows the system's time zone (honouring `TZ`): `date`
-gives the offset at the instants around midnight, so on a day the clocks
-change the count still starts at that day's 00:00. If `date` fails, midnight
+"Local midnight" follows the system's time zone (honoring `TZ`): LangSpan
+reads the zone's rules from the system's zone files (`/etc/localtime`, or the
+file or POSIX rule `TZ` names) and takes the offset at the instants around
+midnight, so on a day the clocks change the count still starts at that day's
+00:00. No `date` program is started. If the rules cannot be read, midnight
 UTC is used. A day of more than 1024 refusals shows 1024.
 
 User-level installation has been tested with a temporary home and real daemon,
@@ -802,8 +804,8 @@ handoffs not taken up, checks whose latest result failed).
 ```
 
 Without a workspace it covers every workspace. The window starts at local
-midnight, found from the system's time zone rules for that date (offsets read
-from `date`, so a day the clocks change still starts at its 00:00), or at an
+midnight, found from the system's time zone rules for that date (read from the
+system's zone files, so a day the clocks change still starts at its 00:00), or at an
 RFC 3339 `--since` time;
 a time before the first event covers everything. Times in the text are shown
 at the current local offset, so on a day the clocks change, times before the

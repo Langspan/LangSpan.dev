@@ -3,12 +3,10 @@
 //! log (`langspan_core::today`); this adapter supplies wall-clock time.
 //!
 //! The default window starts at local midnight, found by `local_day` from
-//! the system's own time zone rules for that date (offsets read from `date`
-//! under a deadline): on a day the clocks change, midnight's offset is not
+//! the system's own time zone rules for that date (read in-process from the
+//! zone files): on a day the clocks change, midnight's offset is not
 //! the offset now. Times in the text are shown at the offset now, so on such
 //! a day a time before the change is shown an hour off.
-
-use std::time::{Duration, Instant};
 
 use langspan_core::{Today, TodaySession};
 
@@ -20,8 +18,6 @@ pub const TEXT_LINES: usize = 40;
 pub const MCP_BYTES: usize = crate::hook::BRIEFING_LIMIT;
 /// One line's size at most, so no single path can fill the result.
 const LINE_BYTES: usize = 240;
-/// How long `date` may take.
-const DATE_BUDGET: Duration = Duration::from_secs(2);
 
 /// The window's start and the offset to show times at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,25 +38,26 @@ fn window_start_in(since: Option<&str>, now_ms: u64, tz: Option<&str>) -> Result
     match since {
         Some(text) => parse_rfc3339(text),
         None => {
-            let deadline = Instant::now() + DATE_BUDGET;
-            let offset = local_day::offset_at(now_ms, deadline, tz).ok_or_else(|| {
-                "could not read the local time zone (`date` gave no offset within 2 s); pass --since"
+            let offset = local_day::offset_at(now_ms, tz).ok_or_else(|| {
+                "could not read the local time zone rules (check TZ and /etc/localtime); pass --since"
                     .to_owned()
             })?;
-            Ok(midnight_in(now_ms, offset, deadline, tz))
+            Ok(midnight_in(now_ms, offset, tz))
         }
     }
 }
 
 /// The local midnight before `now_ms`, from the zone's rules for that date:
 /// `offset` (minutes east of UTC at `now_ms`) is not always midnight's.
-fn midnight_in(now_ms: u64, offset: i32, deadline: Instant, tz: Option<&str>) -> u64 {
-    local_day::local_midnight_ms(now_ms, |at| {
-        if at == now_ms {
-            Some(offset)
-        } else {
-            local_day::offset_at(at, deadline, tz)
-        }
+fn midnight_in(now_ms: u64, offset: i32, tz: Option<&str>) -> u64 {
+    local_day::with_offsets(tz, |offset_at| {
+        local_day::local_midnight_ms(now_ms, |at| {
+            if at == now_ms {
+                Some(offset)
+            } else {
+                offset_at(at)
+            }
+        })
     })
 }
 
@@ -71,14 +68,13 @@ pub fn shown(window: &langspan_core::TodayWindow) -> Since {
 }
 
 fn shown_in(window: &langspan_core::TodayWindow, tz: Option<&str>) -> Since {
-    let deadline = Instant::now() + DATE_BUDGET;
-    let offset = local_day::offset_at(window.to_ms, deadline, tz);
+    let offset = local_day::offset_at(window.to_ms, tz);
     Since {
         from_ms: window.from_ms,
         offset_minutes: offset.unwrap_or(0),
         midnight: window.from_ms
             == match offset {
-                Some(offset) => midnight_in(window.to_ms, offset, deadline, tz),
+                Some(offset) => midnight_in(window.to_ms, offset, tz),
                 None => local_day::local_midnight_ms(window.to_ms, |_| None),
             },
     }
