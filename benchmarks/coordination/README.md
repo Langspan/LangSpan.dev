@@ -259,8 +259,9 @@ python3 benchmarks/coordination/driver.py summarize /path/to/k1/*/
 ```
 
 It groups trials by agent, family, session count, stagger and arm, so
-staggered trials stay apart, and gives per group the trials, those refused or
-`change_not_made` (counted, contributing no figure), those passed without
+staggered trials stay apart, and gives per group the trials, those refused,
+those whose tool check failed (`tool_check_failed`) and those
+`change_not_made` (each counted, contributing no task, result or figure), those passed without
 repair, repairs run and succeeded, correct results, tasks total and accepted,
 the summed `run`, `repair` and `total` figures, the cost per accepted task,
 and `unreported`, the trials with no total cost. A group figure is `null`

@@ -1186,7 +1186,7 @@ class DriverUnitTests(Temporary):
         self.assertEqual((record["cost"]["correct_result"], record["cost"]["cost_per_accepted_task"]), (True, 0.375))
 
     def summary_record(self, arm, run_cost, repair_status, repair_cost=None, succeeded=None, accepted=2,
-                       change="made", status="succeeded"):
+                       change="made", status="succeeded", tool_check="passed"):
         def figures(cost):
             if cost is None:
                 return {"tokens": None, "turns": None, "cost_usd": None}
@@ -1203,6 +1203,7 @@ class DriverUnitTests(Temporary):
         correct = True if repair_status == "not_needed" else (succeeded if repair_status == "ran" else False)
         return {"schema_version": driver.SCHEMA_VERSION, "arm": arm, "family": "discovered_change", "sessions": 2,
                 "agent": "claude-code", "stagger_s": 0, "status": status, "interface_change": change,
+                "tool_check": {"status": tool_check, "failed_sessions": [1] if tool_check == "failed" else []},
                 "tasks_total": 2, "repair": {"status": repair_status, "succeeded": succeeded},
                 "cost": {"run": run, "repair": repair, "total": total, "tasks_accepted": accepted,
                          "correct_result": correct,
@@ -1243,6 +1244,17 @@ class DriverUnitTests(Temporary):
         group = driver.summarize(records[:2] + [refused])[0]
         self.assertEqual((group["trials"], group["refused"], group["compared"], group["total"]["cost_usd"]),
                          (3, 1, 2, 2.5))
+
+    def test_the_summary_counts_a_failed_tool_check_apart_from_the_arm_comparison(self):
+        # A failed tool check is a host configuration failure: the trial does
+        # not count, so it adds no task, result or figure to its arm.
+        records = [self.summary_record("langspan", 1.0, "not_needed"),
+                   self.summary_record("langspan", 1.5, "not_needed"),
+                   self.summary_record("langspan", 2.0, "not_run", status="failed", tool_check="failed", accepted=0)]
+        group = driver.summarize(records)[0]
+        self.assertEqual((group["trials"], group["tool_check_failed"], group["compared"], group["correct_results"],
+                          group["tasks_total"], group["tasks_accepted"], group["total"]["cost_usd"],
+                          group["repairs_not_run"]), (3, 1, 2, 2, 4, 4, 2.5, 0))
 
     def test_the_summary_command_reads_record_files_and_refuses_an_older_record(self):
         good = self.root / "a"

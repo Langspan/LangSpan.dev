@@ -1565,11 +1565,25 @@ def load_schema():
 SUMMARY_KEY = ("agent", "family", "sessions", "stagger_s", "arm")
 
 
+def excluded_as(record):
+    """Why the arm comparison leaves a trial out, or None when it counts:
+    `refused`, `tool_check_failed` (the trial does not count, as in
+    repair_decision) or `change_not_made`, checked in that order."""
+    if record["status"] == "refused":
+        return "refused"
+    if record["tool_check"]["status"] == "failed":
+        return "tool_check_failed"
+    if record["interface_change"] == "change_not_made":
+        return "change_not_made"
+    return None
+
+
 def summarize(records):
     """Per arm, from run records: how many trials reached a correct result,
     with and without the repair round, and the run, repair and total figures
-    summed over the trials the comparison counts. A refused trial and a
-    change_not_made trial are counted but contribute no figure. A figure is
+    summed over the trials the comparison counts. A refused trial, a trial
+    whose tool check failed and a change_not_made trial are each counted but
+    contribute no task, result or figure. A figure is
     None when any counted trial lacks it, never zero. Trials group by agent,
     family, session count and stagger, so staggered trials stay apart."""
     groups = {}
@@ -1578,7 +1592,8 @@ def summarize(records):
     summary = []
     for key in sorted(groups, key=lambda key: tuple(str(part) for part in key)):
         trials = groups[key]
-        compared = [r for r in trials if r["status"] != "refused" and r["interface_change"] != "change_not_made"]
+        kinds = [excluded_as(r) for r in trials]
+        compared = [r for r, kind in zip(trials, kinds) if kind is None]
         figures = {part: None for part in ("run", "repair", "total")}
         if compared:
             for part in figures:
@@ -1590,9 +1605,8 @@ def summarize(records):
         repairs = [r for r in compared if r["repair"]["status"] == "ran"]
         summary.append({
             **dict(zip(SUMMARY_KEY, key)),
-            "trials": len(trials), "refused": sum(r["status"] == "refused" for r in trials),
-            "change_not_made": sum(r["status"] != "refused" and r["interface_change"] == "change_not_made"
-                                   for r in trials),
+            "trials": len(trials), "refused": kinds.count("refused"),
+            "tool_check_failed": kinds.count("tool_check_failed"), "change_not_made": kinds.count("change_not_made"),
             "compared": len(compared),
             "passed_without_repair": sum(r["repair"]["status"] == "not_needed" for r in compared),
             "repairs": len(repairs), "repairs_succeeded": sum(r["repair"]["succeeded"] is True for r in repairs),
