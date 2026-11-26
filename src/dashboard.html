@@ -610,7 +610,13 @@ function buildModel(d) {
   }
   const rowsByKey = new Map(rows.map((row) => [row.key, row]));
   for (const col of columns.values()) {
-    col.score = col.refusals.length ? 5 : col.holds.length ? 4 : col.overlap ? 3 : col.notices.length ? 2 : 1;
+    // The coordinator bounds its editing list separately from each row's, so a
+    // row can list a held path the list omits: still a hold, details unknown.
+    col.unleased = [...col.touches].filter(([key, kind]) => kind === 'held'
+      && !col.holds.some((h) => (bySession.get(str(h.session_id)) || []).some((row) => row.key === key)))
+      .map(([key]) => rowsByKey.get(key)).filter(Boolean);
+    col.held = col.holds.length > 0 || col.unleased.length > 0;
+    col.score = col.refusals.length ? 5 : col.held ? 4 : col.overlap ? 3 : col.notices.length ? 2 : 1;
     col.signal = col.score > 1;
   }
   const sorted = [...columns.values()].sort((a, b) => b.score - a.score || a.path.localeCompare(b.path) || a.group.localeCompare(b.group));
@@ -750,7 +756,7 @@ function groupOf(row) {
 function signalText(col) {
   const parts = [];
   if (col.refusals.length) parts.push(plural(col.refusals.length, 'refusal'));
-  if (col.holds.length) parts.push('held');
+  if (col.held) parts.push('held');
   if (col.overlap) parts.push(plural(strings(col.overlap.agents).length + count(col.overlap.more_agents), 'session') + ' shared');
   if (col.notices.length) parts.push('notice');
   return parts.length ? parts.join(' · ') : 'observed';
@@ -968,10 +974,12 @@ function inspectPath(col, d) {
     items.length ? add(el('div', 'items'), ...items) : el('p', 'caveat', 'No listed session.'),
     overlap && count(overlap.more_agents) ? el('p', 'caveat', count(overlap.more_agents) + ' more not listed.') : null,
     overlap && overlap.editing ? el('p', 'caveat', 'At least one of them is editing it now.') : null));
-  if (col.holds.length) {
+  if (col.held) {
     out.push(block('lock', 'Held on this machine', add(el('div', 'items'), ...col.holds.map((h) => add(el('div', 'item'),
       el('div', 'mono', str(h.session_id)), el('div', 'muted', 'in ' + str(h.workspace_id) + ' · held for ' + Math.ceil(count(h.expires_in_ms) / 1000) + ' s more'
-        + (h.base_unknown ? ' · no recorded read to compare' : '')))))));
+        + (h.base_unknown ? ' · no recorded read to compare' : '')))),
+      ...col.unleased.map((row) => add(el('div', 'item'),
+        el('div', 'mono', str(row.session_id)), el('div', 'muted', 'in ' + str(row.workspace_id) + ' · hold details not in this view'))))));
   }
   if (col.refusals.length) {
     out.push(block('ban', 'Refused edits', add(el('div', 'items'), ...col.refusals.map((r) => add(el('div', 'item'),

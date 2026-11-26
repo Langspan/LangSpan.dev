@@ -340,6 +340,19 @@ async function main() {
       + " return { members: [...col.members].map((k) => m.rowsByKey.get(k).group), unmatched: col.unmatched }; })()");
     check(grouped && grouped.members.length === 2 && grouped.members.every((g) => g === 'repo:one') && grouped.unmatched.length === 0,
       'live: an overlap joins only rows in its own repository (' + JSON.stringify(grouped) + ')');
+    // The coordinator bounds its editing list separately from each row's, so
+    // a row can list a held path the editing list omits: it is still a hold.
+    const truncated = await p.eval("(() => { const agents = [], editing = [];"
+      + " for (let s = 0; s < 4; s++) { const paths = []; for (let f = 0; f < 6; f++) paths.push('s' + s + '/f' + f + '.rs');"
+      + " agents.push({ id: 'local:s' + s, local: true, session_id: 's' + s, host: 'codex', session: 's' + s, workspace_id: 'w1', group: 'repo:one', editing: paths }); }"
+      + " for (const a of agents) for (const path of a.editing) if (editing.length < 20) editing.push({ path, session_id: a.session_id, workspace_id: 'w1', expires_in_ms: 60000 });"
+      + " const m = buildModel({ agents, editing, workspaces: [{ workspace_id: 'w1', group: 'repo:one' }] });"
+      + " const hidden = m.columns.filter((c) => !c.signal).map((c) => c.path);"
+      + " const col = m.columns.find((c) => c.path === 's3/f5.rs');"
+      + " return { columns: m.columns.length, hidden, score: col.score, text: signalText(col), inspect: inspectPath(col, {}).map((n) => n.textContent).join(' ') }; })()");
+    check(truncated && truncated.columns === 24 && truncated.hidden.length === 0 && truncated.score === 4 && truncated.text === 'held'
+      && truncated.inspect.includes('Held on this machine') && truncated.inspect.includes('not in this view'),
+      'live: a row-level hold the editing list omits is still a held signal (' + JSON.stringify(truncated) + ')');
     const polled = await p.eval("performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/state')).length");
     await sleep(4500);
     const polledLater = await p.eval("performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/state')).length");
