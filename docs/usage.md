@@ -712,8 +712,10 @@ A read is outlined only when all of these hold:
   afresh, and another session gets its own outline once.
 
 The outline lists each definition's kind, name and lines, marking exported
-ones, in line order. When they do not all fit in 2,400 bytes, the largest come
-first and the last line before the ending says how many were left out. Names
+ones, in line order. A file with more than 200 definitions gets its 200
+largest. When they do not all fit in 2,400 bytes, the largest come first.
+Whenever any definition is not listed, the last line before the ending says
+how many. Names
 come from the repository and are cleaned and capped; no other text of the file,
 not even a signature, is in it.
 
@@ -2880,8 +2882,10 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol is version 7 and the SQLite schema marker version 4
-(retention). The daemon also answers version 6 clients, without the briefing
+The current wire protocol is version 8 and the SQLite schema marker version 4
+(retention). The daemon also answers version 7 clients, without the outline
+reads (`outlined` in session activity and the `read_outlined` event) version
+8 added; version 6 clients, also without the briefing
 memory and context counts version 7 added; version 5 clients, also without
 the `rebased` and `adapted` that version 6 added to a landing; version 4
 clients, also without the `refusal_outcomes` that version 5 added to a

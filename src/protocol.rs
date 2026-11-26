@@ -1,4 +1,4 @@
-//! Version 7 of the local IPC contract. One bounded JSON line per connection.
+//! Version 8 of the local IPC contract. One bounded JSON line per connection.
 
 use langspan_core::{
     Command, ContextUse, Event, Outcome, RecordedEvent, SessionActivity, StatusRecord,
@@ -6,7 +6,10 @@ use langspan_core::{
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader, Read};
 
-/// Version 7 is version 6 with issue #222's briefing memory and context
+/// Version 8 is version 7 with roadmap A11's outline reads: a session
+/// activity's `outlined`, the `read_outlined` event, and the `outline_read`
+/// request with its `read_outline` answer. Version 7 is version 6 with
+/// issue #222's briefing memory and context
 /// measurement: a session activity's `told`, `told_at_ms` and `context`, a
 /// briefing's `unchanged`, a briefing delivery's `told` and `told_at_ms`,
 /// and the `context_added` and `told_forgotten` events (with the
@@ -18,7 +21,9 @@ use std::io::{self, BufRead, BufReader, Read};
 /// roadmap D7's rename fields in interface changes, history entries and
 /// in-flight symbols. Apart from recording a rebased or adapted landing,
 /// requests of an earlier version are requests of this one.
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
+/// Issue #222's version, answered in its own shape.
+pub const PROTOCOL_VERSION_7: u16 = 7;
 /// Roadmap F5's version, answered in its own shape.
 pub const PROTOCOL_VERSION_6: u16 = 6;
 /// The version of roadmap H9 and issue #214, answered in its own shape.
@@ -39,15 +44,18 @@ pub fn answers(version: u16) -> bool {
 /// earlier version read the objects later versions extended with
 /// `deny_unknown_fields`, so an answer carrying a field they lack would fail
 /// to read as a whole: theirs is encoded without what later versions added
-/// (`protocol_6_outcome`, then `protocol_5_shape`, `protocol_4_shape` and
-/// `protocol_3_shape`). A state record given in parts is encoded by
+/// (`protocol_7_outcome`, `protocol_6_outcome`, then `protocol_5_shape`,
+/// `protocol_4_shape` and `protocol_3_shape`). A state record given in parts is encoded by
 /// `encode_record_for` before it is cut.
 pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::Error> {
     if version >= PROTOCOL_VERSION {
         return encode(response);
     }
     let mut earlier = response.clone();
-    protocol_6_outcome(&mut earlier.outcome);
+    protocol_7_outcome(&mut earlier.outcome);
+    if version < PROTOCOL_VERSION_7 {
+        protocol_6_outcome(&mut earlier.outcome);
+    }
     let mut value = serde_json::to_value(&earlier)?;
     earlier_shape(version, &mut value);
     encode(&value)
@@ -63,7 +71,10 @@ pub fn encode_record_for(version: u16, record: &StatusRecord) -> Result<String, 
     }
     let mut earlier = record.clone();
     if let StatusRecord::Activity { activity, .. } = &mut earlier {
-        protocol_6_activity(activity);
+        protocol_7_activity(activity);
+        if version < PROTOCOL_VERSION_7 {
+            protocol_6_activity(activity);
+        }
     }
     let mut value = serde_json::to_value(&earlier)?;
     earlier_shape(version, &mut value);
@@ -84,7 +95,7 @@ fn earlier_shape(version: u16, value: &mut serde_json::Value) {
     }
 }
 
-/// `activity` without what version 7 added. Every such field is skipped
+/// `activity` without what version 7 (issue #222) added. Every such field is skipped
 /// when empty, so emptying it leaves it out.
 fn protocol_6_activity(activity: &mut SessionActivity) {
     activity.told = Vec::new();
@@ -92,13 +103,52 @@ fn protocol_6_activity(activity: &mut SessionActivity) {
     activity.context = ContextUse::default();
 }
 
+/// `activity` without what version 8 (roadmap A11) added: `outlined`,
+/// skipped when empty.
+fn protocol_7_activity(activity: &mut SessionActivity) {
+    activity.outlined = Vec::new();
+}
+
+/// Apply `activity` to each session activity `outcome` carries, and
+/// `events` to each event page.
+fn reshape(
+    outcome: &mut Outcome,
+    activity: fn(&mut SessionActivity),
+    events: fn(&mut Vec<RecordedEvent>),
+) {
+    match outcome {
+        Outcome::Status { state, .. } => state.activity.values_mut().for_each(activity),
+        Outcome::StatusRecords { records, .. } => {
+            for record in records {
+                if let StatusRecord::Activity { activity: a, .. } = record {
+                    activity(a);
+                }
+            }
+        }
+        Outcome::Events { events: page } | Outcome::Changes { events: page, .. } => events(page),
+        _ => {}
+    }
+}
+
+/// `outcome` without what version 8 (roadmap A11) added: a session
+/// activity's `outlined`, and the `read_outlined` event, which version 7
+/// has no variant for, left out of an event page. No earlier client sends
+/// `outline_read`, so its `read_outline` answer needs no earlier shape.
+fn protocol_7_outcome(outcome: &mut Outcome) {
+    reshape(outcome, protocol_7_activity, |page| {
+        page.retain(|recorded| !matches!(recorded.event, Event::ReadOutlined { .. }));
+    });
+}
+
 /// `outcome` without what version 7 (issue #222) added. Every field it
 /// added is skipped when empty, so emptying it leaves it out; the
 /// `context_added` and `told_forgotten` events, which version 6 has no
 /// variant for, are left out of an event page.
 fn protocol_6_outcome(outcome: &mut Outcome) {
-    let activity = protocol_6_activity;
-    fn events(events: &mut Vec<RecordedEvent>) {
+    if let Outcome::Briefing { briefing } = outcome {
+        briefing.unchanged = 0;
+    }
+    reshape(outcome, protocol_6_activity, |events| {
         events.retain(|recorded| {
             !matches!(
                 recorded.event,
@@ -114,20 +164,7 @@ fn protocol_6_outcome(outcome: &mut Outcome) {
                 *told_at_ms = None;
             }
         }
-    }
-    match outcome {
-        Outcome::Status { state, .. } => state.activity.values_mut().for_each(activity),
-        Outcome::StatusRecords { records, .. } => {
-            for record in records {
-                if let langspan_core::StatusRecord::Activity { activity: a, .. } = record {
-                    activity(a);
-                }
-            }
-        }
-        Outcome::Briefing { briefing } => briefing.unchanged = 0,
-        Outcome::Events { events: page } | Outcome::Changes { events: page, .. } => events(page),
-        _ => {}
-    }
+    });
 }
 
 /// The first version that can record a rebased or adapted landing.

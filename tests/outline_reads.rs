@@ -310,6 +310,109 @@ fn a_whole_read_of_a_large_indexed_file_is_outlined_once_then_admitted() {
     assert!(other_again.stdout.is_empty(), "{}", other_again.stdout);
 }
 
+/// Review comment 4713905468, through the real hook and daemon: a file of
+/// 250 one-line definitions and then one of 30 lines. The outline names the
+/// large one, which comes after the daemon's limit in line order, and
+/// counts every definition it does not list.
+#[test]
+fn a_large_definition_past_many_small_ones_is_in_the_outline() {
+    let world = World::new();
+    let mut text = String::new();
+    for n in 0..250 {
+        text.push_str(&format!("fn tiny_{n}() {{}}\n"));
+    }
+    text.push_str("pub fn the_big_one() {\n");
+    for _ in 0..28 {
+        text.push_str("    let _ = 1;\n");
+    }
+    text.push_str("}\n");
+    for n in 0..1800 {
+        text.push_str(&format!("// filler {n}\n"));
+    }
+    let path = world.work().join("src/many.rs");
+    fs::write(&path, &text).unwrap();
+    git(&world.work(), &["add", "."]);
+    git(&world.work(), &["commit", "--quiet", "-m", "many"]);
+    world.wait_for_index(3);
+    let deadline = Instant::now() + WAIT;
+    let reason = loop {
+        let run = world.pre_read(ALICE, json!({"file_path": path}), true);
+        if let Some(reason) = run.reason {
+            break reason;
+        }
+        assert!(Instant::now() < deadline, "never outlined: {}", run.detail);
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        reason.contains("\nfunction the_big_one lines 251-280 (exported)\n"),
+        "{reason}"
+    );
+    let listed = reason.lines().count() - 3;
+    assert!(
+        reason.contains(&format!(
+            "\n{} more definitions not listed.\n",
+            251 - listed
+        )),
+        "{reason}"
+    );
+}
+
+/// Review comment 4714078108, through the real daemon: once a session was
+/// given an outline, a client of protocol version 7 still reads status,
+/// state records and events, which carry neither `outlined` nor the
+/// `read_outlined` event; a version 8 client's carry both.
+#[test]
+fn a_version_7_client_reads_status_and_events_after_an_outline() {
+    use langspan::protocol::{PROTOCOL_VERSION, PROTOCOL_VERSION_7, Request};
+    use langspan_core::Command;
+    use std::io::{BufRead, BufReader};
+    let world = World::new();
+    assert!(world.pre_read(ALICE, world.whole(), true).reason.is_some());
+    let socket = world.base.join("state/daemon.sock");
+    // The daemon's own bytes, as a client of `version` receives them.
+    let ask = |version: u16, id: &str, command: Command| -> String {
+        let request = Request {
+            version,
+            request_id: format!("{id}-{version}"),
+            command,
+        };
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        stream.set_read_timeout(Some(WAIT)).unwrap();
+        stream
+            .write_all(&langspan::protocol::encode(&request).unwrap())
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["version"], version, "{line}");
+        assert_ne!(reply["outcome"]["type"], "error", "{line}");
+        line
+    };
+    for version in [PROTOCOL_VERSION_7, PROTOCOL_VERSION] {
+        let status = ask(version, "status", Command::Status);
+        let records = ask(
+            version,
+            "records",
+            Command::StatusRecords {
+                after: None,
+                page_bytes: None,
+            },
+        );
+        let events = ask(
+            version,
+            "events",
+            Command::Events {
+                after: 0,
+                limit: 1000,
+            },
+        );
+        let current = version == PROTOCOL_VERSION;
+        assert_eq!(status.contains("\"outlined\""), current, "{status}");
+        assert_eq!(records.contains("\"outlined\""), current, "{records}");
+        assert_eq!(events.contains("\"read_outlined\""), current, "{events}");
+    }
+}
+
 #[test]
 fn a_read_with_a_line_range_is_never_refused() {
     let world = World::new();

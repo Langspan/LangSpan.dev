@@ -308,11 +308,12 @@ mod unix {
 
         /// Roadmap D7 (review comment 4707749784), H9 (review comment
         /// 4711096877) and issue #222 (review comments 4711375982 and
-        /// 4712860167): a daemon of an earlier build answers only protocol
-        /// version 3, or only up to 4, 5 or 6 (roadmap F5's build). It
-        /// refuses this build's version in its own, as that build does, and
-        /// the client asks again once in that version, with the same
-        /// request, and reads that answer.
+        /// 4712860167), roadmap A11 (review comment 4714078108): a daemon
+        /// of an earlier build answers only protocol version 3, or only up
+        /// to 4, 5, 6 (roadmap F5's build) or 7 (issue #222's). It refuses
+        /// this build's version in its own, as that build does, and the
+        /// client asks again once in that version, with the same request,
+        /// and reads that answer.
         #[test]
         fn a_daemon_of_an_earlier_build_is_asked_again_in_its_version() {
             for version in [
@@ -320,6 +321,7 @@ mod unix {
                 crate::protocol::PROTOCOL_VERSION_4,
                 crate::protocol::PROTOCOL_VERSION_5,
                 crate::protocol::PROTOCOL_VERSION_6,
+                crate::protocol::PROTOCOL_VERSION_7,
             ] {
                 ask_an_earlier_daemon(version);
             }

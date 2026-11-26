@@ -1781,17 +1781,18 @@ impl Index {
         self.symbols_where("s.name = ?2", workspace_id, name, limit + 1)
     }
 
-    /// The definitions of `path` for its outline (roadmap A11), in line
-    /// order, at most `limit + 1` so truncation shows: only when the index
-    /// holds that file whole at `digest`. `None` when it holds another
-    /// version, a partial parse, or no row for it.
+    /// The definitions of `path` for its outline (roadmap A11): how many
+    /// the index holds, and the `limit` largest by lines spanned (the
+    /// earlier of equal ones), in line order. Only when the index holds
+    /// that file whole at `digest`; `None` when it holds another version, a
+    /// partial parse, or no row for it.
     pub fn outline(
         &self,
         workspace_id: &str,
         path: &str,
         digest: &str,
         limit: u32,
-    ) -> Result<Option<Vec<SymbolRef>>, Failure> {
+    ) -> Result<Option<(u32, Vec<SymbolRef>)>, Failure> {
         let whole: bool = self
             .connection
             .prepare_cached(
@@ -1802,7 +1803,22 @@ impl Index {
         if !whole {
             return Ok(None);
         }
-        Ok(Some(self.symbols_in(workspace_id, path, limit + 1)?))
+        let total: u32 = self
+            .connection
+            .prepare_cached("SELECT count(*) FROM symbols WHERE workspace_id = ?1 AND path = ?2")?
+            .query_row(params![workspace_id, path], |row| row.get(0))?;
+        let mut symbols = self
+            .connection
+            .prepare_cached(
+                "SELECT s.path, s.name, s.kind, s.line, s.end_line, s.signature, s.exported, f.digest
+                 FROM symbols s JOIN files f ON f.workspace_id = s.workspace_id AND f.path = s.path
+                 WHERE s.workspace_id = ?1 AND s.path = ?2
+                 ORDER BY s.end_line - s.line DESC, s.line, s.end_line LIMIT ?3",
+            )?
+            .query_map(params![workspace_id, path, limit], symbol_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        symbols.sort_by_key(|symbol| (symbol.line, symbol.end_line));
+        Ok(Some((total, symbols)))
     }
 
     /// Definitions in the file `path`, in line order, at most `limit`.
@@ -3467,10 +3483,16 @@ mod review_regressions {
             .unwrap();
         let names: Vec<_> = outline
             .unwrap()
+            .1
             .into_iter()
             .map(|symbol| (symbol.name, symbol.exported))
             .collect();
         assert_eq!(names, [("upload".into(), true), ("helper".into(), false)]);
+        let (total, _) = index
+            .outline("w", "src/api.rs", &digest(api.1), 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(total, 2);
         // The file on disk differs from its indexed version.
         let changed = digest("pub fn upload(x: u8) {}\n");
         assert_eq!(
@@ -3484,6 +3506,49 @@ mod review_regressions {
             index.outline("w", "src/none.rs", &broken, 10).unwrap(),
             None
         );
+    }
+
+    /// Review comment 4713905468: a file with more definitions than the
+    /// outline holds keeps its largest, wherever they are in the file, back
+    /// in line order, and reports how many the index holds in all. Ties
+    /// keep the earlier definition. At exactly the limit nothing is cut.
+    #[test]
+    fn an_outline_keeps_the_largest_definitions_past_the_limit() {
+        let (dir, mut index) = setup("outline-largest");
+        let digest = |text: &str| crate::sha256::hex(&crate::sha256::digest(text.as_bytes()));
+        // 250 one-line helpers, then one function of 30 lines, then a
+        // two-line function: the large ones come after the limit in line
+        // order.
+        let mut text = String::new();
+        for n in 0..250 {
+            text.push_str(&format!("fn small_{n}() {{}}\n"));
+        }
+        text.push_str("pub fn large() {\n");
+        for _ in 0..28 {
+            text.push_str("    let _ = 1;\n");
+        }
+        text.push_str("}\n");
+        text.push_str("fn pair() {\n}\n");
+        pass(&dir, &mut index, &[("src/many.rs", &text)]);
+        let (total, symbols) = index
+            .outline("w", "src/many.rs", &digest(&text), 200)
+            .unwrap()
+            .unwrap();
+        assert_eq!(total, 252);
+        assert_eq!(symbols.len(), 200);
+        let names: Vec<_> = symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+        // The two larger ones, after the first 198 helpers, in line order.
+        assert_eq!(names[..2], ["small_0", "small_1"]);
+        assert_eq!(names[197], "small_197");
+        assert_eq!(names[198..], ["large", "pair"]);
+        assert!(symbols.windows(2).all(|pair| pair[0].line < pair[1].line));
+
+        // At the limit, every definition, and the total is the same count.
+        let (total, symbols) = index
+            .outline("w", "src/many.rs", &digest(&text), 252)
+            .unwrap()
+            .unwrap();
+        assert_eq!((total, symbols.len()), (252, 252));
     }
 
     #[test]

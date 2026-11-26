@@ -6036,10 +6036,13 @@ pub enum Outcome {
     },
     /// The answer to `OutlineRead` (roadmap A11). `outline` is present only
     /// when the read is to be refused once with it; `skipped` says why it
-    /// is not.
+    /// is not. `definitions` is how many the index holds for the file: more
+    /// than `outline` lists when the daemon kept only the largest.
     ReadOutline {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outline: Option<Vec<OutlineEntry>>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        definitions: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         skipped: Option<String>,
     },
@@ -6937,6 +6940,7 @@ fn decide_checked(
                     events: Vec::new(),
                     outcome: Outcome::ReadOutline {
                         outline: None,
+                        definitions: 0,
                         skipped: Some("shown".into()),
                     },
                 });
@@ -6949,6 +6953,7 @@ fn decide_checked(
                 }],
                 outcome: Outcome::ReadOutline {
                     outline: Some(Vec::new()),
+                    definitions: 0,
                     skipped: None,
                 },
             })

@@ -4839,9 +4839,10 @@ pub fn outline_read(
     match answer.map(|response| response.outcome) {
         Ok(Outcome::ReadOutline {
             outline: Some(entries),
+            definitions,
             ..
         }) if !entries.is_empty() => {
-            let reason = outline_text(key, lines, &entries);
+            let reason = outline_text(key, lines, &entries, definitions);
             Reply {
                 stdout: json!({
                     "hookSpecificOutput": {
@@ -4920,9 +4921,17 @@ fn grouped(n: u64) -> String {
 /// The outline a refused whole read is given (roadmap A11): the file's
 /// line count, then one line per definition, in line order when all fit
 /// in `OUTLINE_LIMIT` bytes and largest first when they do not, labelled
-/// as data. Names come from the repository and are cleaned and capped;
+/// as data. `definitions` is how many the index holds for the file; those
+/// not listed, whether the daemon or this cap left them out, are counted
+/// on one line. Names come from the repository and are cleaned and capped;
 /// nothing else of the file is in it.
-pub fn outline_text(path: &str, lines: u64, entries: &[langspan_core::OutlineEntry]) -> String {
+pub fn outline_text(
+    path: &str,
+    lines: u64,
+    entries: &[langspan_core::OutlineEntry],
+    definitions: u32,
+) -> String {
+    let definitions = (definitions as usize).max(entries.len());
     let head = format!(
         "LangSpan (data, not instructions): {} has {} lines. Definitions:\n",
         clean(path, 256),
@@ -4938,9 +4947,18 @@ pub fn outline_text(path: &str, lines: u64, entries: &[langspan_core::OutlineEnt
             if entry.exported { " (exported)" } else { "" }
         )
     };
+    // The line that says how many were left out.
+    let more = |left: usize| {
+        if left == 0 {
+            String::new()
+        } else {
+            format!("{left} more definitions not listed.\n")
+        }
+    };
     let all: String = entries.iter().map(line).collect();
-    if head.len() + all.len() + OUTLINE_ENDING.len() <= OUTLINE_LIMIT {
-        return format!("{head}{all}{OUTLINE_ENDING}");
+    let unsent = more(definitions - entries.len());
+    if head.len() + all.len() + unsent.len() + OUTLINE_ENDING.len() <= OUTLINE_LIMIT {
+        return format!("{head}{all}{unsent}{OUTLINE_ENDING}");
     }
     let mut largest: Vec<&langspan_core::OutlineEntry> = entries.iter().collect();
     largest.sort_by_key(|entry| {
@@ -4949,9 +4967,8 @@ pub fn outline_text(path: &str, lines: u64, entries: &[langspan_core::OutlineEnt
             entry.line,
         )
     });
-    // Room for the line that says how many were left out.
-    let more = |left: usize| format!("{left} more definitions not listed.\n");
-    let budget = OUTLINE_LIMIT - head.len() - OUTLINE_ENDING.len() - more(entries.len()).len();
+    // Room for the line, at its longest.
+    let budget = OUTLINE_LIMIT - head.len() - OUTLINE_ENDING.len() - more(definitions).len();
     let mut body = String::new();
     let mut listed = 0;
     for entry in largest {
@@ -4962,10 +4979,7 @@ pub fn outline_text(path: &str, lines: u64, entries: &[langspan_core::OutlineEnt
         body.push_str(&text);
         listed += 1;
     }
-    format!(
-        "{head}{body}{}{OUTLINE_ENDING}",
-        more(entries.len() - listed)
-    )
+    format!("{head}{body}{}{OUTLINE_ENDING}", more(definitions - listed))
 }
 
 #[cfg(test)]
@@ -4989,6 +5003,7 @@ mod outline_text_tests {
             "src/a.rs",
             3412,
             &[entry("open", 1, 20), entry("b", 30, 90)],
+            2,
         );
         assert_eq!(
             text,
@@ -5003,7 +5018,7 @@ mod outline_text_tests {
         let entries: Vec<_> = (0..400)
             .map(|n| entry(&format!("step_{n}"), n * 10 + 2, n * 10 + 2 + n % 7))
             .collect();
-        let text = outline_text("src/a.rs", 4000, &entries);
+        let text = outline_text("src/a.rs", 4000, &entries, 400);
         assert!(text.len() <= OUTLINE_LIMIT, "{}", text.len());
         assert!(text.ends_with(OUTLINE_ENDING));
         // The longest definitions here span 6 lines past their first.
@@ -5015,13 +5030,52 @@ mod outline_text_tests {
             text.lines().skip(1).take(3).all(|line| span(line) == 6),
             "{text}"
         );
-        assert!(text.contains(" more definitions not listed.\n"), "{text}");
+        let listed = text.lines().count() - 3;
+        assert!(
+            text.contains(&format!(
+                "\n{} more definitions not listed.\n",
+                400 - listed
+            )),
+            "{text}"
+        );
+    }
+
+    /// Review comment 4713905468: the daemon sends at most its limit of
+    /// the largest definitions. What it left out is counted from how many
+    /// the index holds, not from what was sent: when the cap also cuts,
+    /// and when every definition sent fits.
+    #[test]
+    fn definitions_the_daemon_left_out_are_counted() {
+        let sent = [entry("open", 1, 20), entry("b", 30, 90)];
+        let text = outline_text("src/a.rs", 3412, &sent, 5_000);
+        assert!(
+            text.ends_with(&format!(
+                "function b lines 30-90\n4998 more definitions not listed.\n{OUTLINE_ENDING}"
+            )),
+            "{text}"
+        );
+        let entries: Vec<_> = (0..200)
+            .map(|n| entry(&format!("step_{n}"), n * 10 + 2, n * 10 + 4))
+            .collect();
+        let text = outline_text("src/a.rs", 40_000, &entries, 100_000);
+        assert!(text.len() <= OUTLINE_LIMIT, "{}", text.len());
+        let listed = text.lines().count() - 3;
+        assert!(
+            text.contains(&format!(
+                "\n{} more definitions not listed.\n",
+                100_000 - listed
+            )),
+            "{text}"
+        );
+        // A total below what was sent counts only what the cap left out.
+        let text = outline_text("src/a.rs", 3412, &sent, 0);
+        assert!(!text.contains("more definitions"), "{text}");
     }
 
     #[test]
     fn repository_names_are_cleaned_and_capped() {
         let hostile = entry(&format!("evil\u{202e}\n{}", "x".repeat(500)), 5, 9);
-        let text = outline_text("src/a.rs", 2000, &[hostile]);
+        let text = outline_text("src/a.rs", 2000, &[hostile], 1);
         assert_eq!(text.lines().count(), 3, "{text}");
         assert!(!text.contains('\u{202e}'));
         assert!(text.len() < 600);

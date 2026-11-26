@@ -1,6 +1,7 @@
 use langspan::protocol::{
     OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, PROTOCOL_VERSION_4, PROTOCOL_VERSION_5,
-    PROTOCOL_VERSION_6, Request, Response, encode, encode_for, encode_record_for, read_frame,
+    PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, Request, Response, encode, encode_for,
+    encode_record_for, read_frame,
 };
 use langspan_core::Command;
 
@@ -1148,7 +1149,7 @@ fn v5_report_response_and_its_version_4_and_3_forms_match_the_golden_vectors() {
     assert_eq!(encode_for(PROTOCOL_VERSION_5, &response).unwrap(), wire);
     // Version 6 changed landings and version 7 (issue #222) activity,
     // briefings and events: their report is the version 5 form.
-    for later in [PROTOCOL_VERSION_6, PROTOCOL_VERSION] {
+    for later in [PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, PROTOCOL_VERSION] {
         let mut current = response.clone();
         current.version = later;
         assert_eq!(
@@ -1498,7 +1499,7 @@ const ADDED_IN_7: [&str; 6] = [
     "context_added",
     "told_forgotten",
 ];
-/// Every version the daemon answers before the current one.
+/// Every version the daemon answers before version 7.
 const EARLIER_VERSIONS: [u16; 4] = [
     PROTOCOL_VERSION_6,
     PROTOCOL_VERSION_5,
@@ -1657,6 +1658,10 @@ fn an_earlier_reply_leaves_out_what_version_7_added_to_activity_briefings_and_ev
                 .any(|field| current.contains(&format!("\"{field}\""))),
             "a version 7 client reads them: {current}"
         );
+        // Version 8 (roadmap A11) left them as they are.
+        let seventh =
+            String::from_utf8(encode_for(PROTOCOL_VERSION_7, &response).unwrap()).unwrap();
+        assert_eq!(seventh, current);
         assert_eq!(
             serde_json::from_str::<Response>(&current).unwrap(),
             response
@@ -1672,6 +1677,109 @@ fn an_earlier_reply_leaves_out_what_version_7_added_to_activity_briefings_and_ev
             // What is left still reads as a response.
             serde_json::from_str::<Response>(&earlier).unwrap();
         }
+    }
+}
+
+/// Review comment 4714078108: version 8 (roadmap A11) added the file
+/// versions a session was given an outline of (`outlined`) and the
+/// `read_outlined` event. A client of version 7 or earlier reads activity
+/// and events with `deny_unknown_fields`: in every outcome and state record
+/// that carries them, its reply leaves both out, and what is left reads in
+/// that version's own shape. A version 8 client reads them.
+#[test]
+fn an_earlier_reply_leaves_out_what_version_8_added_to_activity_and_events() {
+    use langspan_core::{
+        Event, Outcome, OutlinedRead, RecordedEvent, SessionActivity, State, StatusRecord,
+    };
+    let activity = SessionActivity {
+        outlined: vec![OutlinedRead {
+            path: "big.rs".into(),
+            digest: "a".repeat(64),
+        }],
+        ..SessionActivity::default()
+    };
+    let mut state = State::default();
+    state.activity.insert("codex.bob".into(), activity.clone());
+    let outlined = RecordedEvent {
+        seq: 1,
+        event: Event::ReadOutlined {
+            session_id: "codex.bob".into(),
+            path: "big.rs".into(),
+            digest: "a".repeat(64),
+        },
+    };
+    let kept = RecordedEvent {
+        seq: 2,
+        event: Event::ToldForgotten {
+            session_id: "codex.bob".into(),
+            keys: vec![9],
+        },
+    };
+    let events = vec![outlined, kept.clone()];
+    let outcomes = [
+        Outcome::Status {
+            state,
+            summary: None,
+        },
+        Outcome::StatusRecords {
+            records: vec![StatusRecord::Activity {
+                key: "codex.bob".into(),
+                activity: activity.clone(),
+            }],
+            next: None,
+        },
+        Outcome::Events {
+            events: events.clone(),
+        },
+        Outcome::Changes { events, scan: None },
+    ];
+    for outcome in outcomes {
+        let response = Response {
+            version: PROTOCOL_VERSION,
+            request_id: "r".into(),
+            replayed: false,
+            generation: 1,
+            lease_valid: None,
+            outcome,
+        };
+        let current = String::from_utf8(encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+        assert!(
+            current.contains("\"outlined\"") || current.contains("\"read_outlined\""),
+            "a version 8 client reads them: {current}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Response>(&current).unwrap(),
+            response
+        );
+        for version in std::iter::once(PROTOCOL_VERSION_7).chain(EARLIER_VERSIONS) {
+            let earlier = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
+            assert!(!earlier.contains("\"outlined\""), "{version}: {earlier}");
+            assert!(!earlier.contains("read_outlined"), "{version}: {earlier}");
+            let read = serde_json::from_str::<Response>(&earlier).unwrap();
+            // Version 7 keeps what it added; earlier versions lose it too.
+            if let Outcome::Events { events } | Outcome::Changes { events, .. } = read.outcome {
+                let expected = if version == PROTOCOL_VERSION_7 {
+                    vec![kept.clone()]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(events, expected, "{version}");
+            }
+        }
+    }
+    // A state record given in parts, in each earlier version's shape.
+    let record = StatusRecord::Activity {
+        key: "codex.bob".into(),
+        activity,
+    };
+    assert!(
+        encode_record_for(PROTOCOL_VERSION, &record)
+            .unwrap()
+            .contains("\"outlined\"")
+    );
+    for version in std::iter::once(PROTOCOL_VERSION_7).chain(EARLIER_VERSIONS) {
+        let text = encode_record_for(version, &record).unwrap();
+        assert!(!text.contains("\"outlined\""), "{version}: {text}");
     }
 }
 

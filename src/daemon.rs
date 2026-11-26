@@ -1904,17 +1904,19 @@ mod unix {
         else {
             unreachable!("matched by the caller");
         };
-        let answer = |outline: Option<Vec<langspan_core::OutlineEntry>>, skipped: &str| Response {
-            version: PROTOCOL_VERSION,
-            request_id: request_id.clone(),
-            replayed: false,
-            generation,
-            lease_valid: None,
-            outcome: Outcome::ReadOutline {
-                outline,
-                skipped: (!skipped.is_empty()).then(|| skipped.into()),
-            },
-        };
+        let answer =
+            |outline: Option<(u32, Vec<langspan_core::OutlineEntry>)>, skipped: &str| Response {
+                version: PROTOCOL_VERSION,
+                request_id: request_id.clone(),
+                replayed: false,
+                generation,
+                lease_valid: None,
+                outcome: Outcome::ReadOutline {
+                    definitions: outline.as_ref().map_or(0, |(total, _)| *total),
+                    outline: outline.map(|(_, entries)| entries),
+                    skipped: (!skipped.is_empty()).then(|| skipped.into()),
+                },
+            };
         let (min_lines, min_bytes) = OUTLINE_MIN
             .get()
             .copied()
@@ -1943,9 +1945,12 @@ mod unix {
                 graph.outline(&of.workspace_id, path, digest, OUTLINE_ENTRIES)
             })
         });
-        let mut symbols = match found {
-            Some(Ok((Some(symbols), coverage))) if coverage.scanned && !symbols.is_empty() => {
-                symbols
+        // The largest definitions, in line order, and how many there are.
+        let (total, symbols) = match found {
+            Some(Ok((Some((total, symbols)), coverage)))
+                if coverage.scanned && !symbols.is_empty() =>
+            {
+                (total, symbols)
             }
             Some(Ok(_)) | None => return answer(None, "not_indexed"),
             Some(Err(failure)) => {
@@ -1957,17 +1962,6 @@ mod unix {
                 );
             }
         };
-        // The largest definitions, back in line order.
-        if symbols.len() > OUTLINE_ENTRIES as usize {
-            symbols.sort_by_key(|symbol| {
-                (
-                    std::cmp::Reverse(symbol.end_line.saturating_sub(symbol.line)),
-                    symbol.line,
-                )
-            });
-            symbols.truncate(OUTLINE_ENTRIES as usize);
-            symbols.sort_by_key(|symbol| (symbol.line, symbol.end_line));
-        }
         let entries = symbols
             .into_iter()
             .map(|symbol| langspan_core::OutlineEntry {
@@ -1982,7 +1976,7 @@ mod unix {
             Ok(execution) => match execution.outcome {
                 Outcome::ReadOutline {
                     outline: Some(_), ..
-                } if !execution.replayed => answer(Some(entries), ""),
+                } if !execution.replayed => answer(Some((total, entries)), ""),
                 Outcome::ReadOutline { .. } => answer(None, "shown"),
                 outcome @ Outcome::Error { .. } => Response {
                     outcome,

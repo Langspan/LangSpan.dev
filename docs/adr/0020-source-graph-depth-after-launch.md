@@ -57,17 +57,24 @@ Each is the smallest that meets the issue's criteria.
   when the index row for the path has that digest and no partial parse, the
   scan is complete, the file has at least one definition, and the session's
   record (`read_outlined`, at most 64 versions per session, one per path)
-  does not hold that version. Only then is `read_outlined` appended. No new
-  protocol version: requests were already additive, and an older
-  coordinator answers the unknown command with an error, which is no
+  does not hold that version. Only then is `read_outlined` appended. An
+  older coordinator answers the unknown command with an error, which is no
   decision.
+- Wire protocol version 8 (review comment 4714078108). A client of an
+  earlier build reads session activity and events with
+  `deny_unknown_fields`, so a session activity's `outlined` and the
+  `read_outlined` event would break its status and event queries. To a
+  version 7 or earlier client, the coordinator answers without them,
+  including in state records given in parts.
 - Each outline line is `KIND NAME lines A-B`, with ` (exported)` for an
   exported definition. `KIND` is the index's own name (`function`,
   `method`, `type`, `interface`, `constant`, `module`), not the language's
   keyword. Signatures are left out, so the outline holds names alone.
-- The coordinator sends at most 200 definitions, the largest when a file has
-  more. The hook lists them in line order when all fit in 2,400 bytes;
-  otherwise largest first, ending with a count of those left out.
+- The coordinator sends at most 200 definitions, the largest by lines
+  spanned when a file has more (the index ranks them before it limits
+  them, review comment 4713905468), with how many the index holds. The hook
+  lists them in line order when all fit in 2,400 bytes; otherwise largest
+  first. Either way, a last line counts the definitions not listed.
 - Session identity is the host's, so a subagent with its own identity gets
   its own outline.
 

@@ -57,10 +57,12 @@ fn read(state: &mut State, id: &str, session: &str, path: &str, version: u8) -> 
         Outcome::ReadOutline {
             outline: Some(_),
             skipped: None,
+            ..
         } => true,
         Outcome::ReadOutline {
             outline: None,
             skipped: Some(why),
+            ..
         } => {
             assert_eq!(why, "shown");
             false

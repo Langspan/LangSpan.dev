@@ -5888,8 +5888,16 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             "Session {session_id} will not be alerted again to {} notice(s).",
             notice_ids.len()
         ),
-        Outcome::ReadOutline { outline, skipped } => match (outline, skipped) {
-            (Some(outline), _) => println!("Outlined: {} definition(s).", outline.len()),
+        Outcome::ReadOutline {
+            outline,
+            definitions,
+            skipped,
+        } => match (outline, skipped) {
+            (Some(outline), _) => println!(
+                "Outlined: {} of {} definition(s).",
+                outline.len(),
+                definitions.max(&(outline.len() as u32))
+            ),
             (None, why) => println!("Not outlined ({}).", why.as_deref().unwrap_or("unknown")),
         },
         Outcome::BetweenSteps {
