@@ -2062,6 +2062,20 @@ impl Index {
         max_edges: u32,
         deadline: Instant,
     ) -> Result<(Vec<langspan_core::SymbolPath>, u32, bool), Failure> {
+        self.symbol_paths_by(workspace_id, (from, to), max_hops, max_edges, || {
+            Instant::now() >= deadline
+        })
+    }
+
+    /// `symbol_paths`, with `late` saying whether the deadline has passed.
+    fn symbol_paths_by(
+        &self,
+        workspace_id: &str,
+        (from, to): (&str, &str),
+        max_hops: u32,
+        max_edges: u32,
+        mut late: impl FnMut() -> bool,
+    ) -> Result<(Vec<langspan_core::SymbolPath>, u32, bool), Failure> {
         let mut search = PathSearch::default();
         let starts = self.definitions(workspace_id, from, MAX_RESULTS + 1)?;
         search.truncated = starts.len() > MAX_RESULTS as usize;
@@ -2086,7 +2100,7 @@ impl Index {
             }
             let mut next = Vec::new();
             'expand: for &node in &frontier {
-                if Instant::now() >= deadline {
+                if late() {
                     (search.truncated, stopped) = (true, true);
                     break;
                 }
@@ -2096,23 +2110,22 @@ impl Index {
                     imports.insert(at.path.clone(), resolved);
                 }
                 for (callee, line) in self.callees(workspace_id, &at)? {
-                    if edges >= max_edges {
+                    if edges >= max_edges || late() {
                         (search.truncated, stopped) = (true, true);
                         break 'expand;
                     }
                     let room = max_edges - edges;
-                    let mut reached = self.definitions(workspace_id, &callee, MAX_RESULTS + 1)?;
+                    // The imported files' definitions are read on their own,
+                    // so the bound never drops one of them for another
+                    // file's definition of the name.
                     let imported = &imports[&at.path];
-                    let by_path: Vec<Definition> = reached
-                        .iter()
-                        .filter(|definition| imported.contains(&definition.path))
-                        .cloned()
-                        .collect();
-                    let resolution = if by_path.is_empty() {
-                        "name"
+                    let by_path =
+                        self.definitions_in(workspace_id, &callee, imported, MAX_RESULTS + 1)?;
+                    let (mut reached, resolution) = if by_path.is_empty() {
+                        let any = self.definitions(workspace_id, &callee, MAX_RESULTS + 1)?;
+                        (any, "name")
                     } else {
-                        reached = by_path;
-                        "path"
+                        (by_path, "path")
                     };
                     let ambiguous = reached.len() > 1;
                     if reached.len() > room.min(MAX_RESULTS) as usize {
@@ -2166,6 +2179,42 @@ impl Index {
             })?
             .collect::<Result<_, _>>()?;
         Ok(rows)
+    }
+
+    /// `definitions` of `name` in `paths` only, in path and line order, at
+    /// most `limit`.
+    fn definitions_in(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        paths: &BTreeSet<String>,
+        limit: u32,
+    ) -> Result<Vec<Definition>, Failure> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT line, end_line FROM symbols
+             WHERE workspace_id = ?1 AND path = ?2 AND name = ?3
+             AND kind IN ('function', 'method', 'type')
+             ORDER BY line LIMIT ?4",
+        )?;
+        let mut found = Vec::new();
+        for path in paths {
+            let room = limit.saturating_sub(u32::try_from(found.len()).unwrap_or(u32::MAX));
+            if room == 0 {
+                break;
+            }
+            let rows = statement
+                .query_map(params![workspace_id, path, name, room], |row| {
+                    Ok(Definition {
+                        path: path.clone(),
+                        line: row.get(0)?,
+                        end_line: row.get(1)?,
+                        name: name.to_owned(),
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            found.extend(rows);
+        }
+        Ok(found)
     }
 
     /// The names called within `definition`'s lines, each with its first
@@ -2369,11 +2418,16 @@ pub const MAP_ROWS: u32 = 200_000;
 /// path without the extension, or its directory for a Go file (a package is
 /// a directory) and for `mod.rs`, `lib.rs`, `main.rs`, `index.*` and
 /// `__init__.py`, so `src/api.ts`, `src/api/index.ts` and
-/// `src/api/handler.ts` are all in `src/api` at depth 1.
+/// `src/api/handler.ts` are all in `src/api` at depth 1. Only the last
+/// extension goes (a `.d.ts` declaration file loses both), so `src/api.v1.ts`
+/// and `src/api.v2.ts` are two areas.
 fn map_area(path: &str, depth: u32) -> String {
     let mut parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     let file = parts.pop().unwrap_or_default();
-    let stem = file.split_once('.').map_or(file, |(stem, _)| stem);
+    let stem = file
+        .strip_suffix(".d.ts")
+        .or_else(|| file.rsplit_once('.').map(|(stem, _)| stem))
+        .unwrap_or(file);
     let by_directory = matches!(stem, "mod" | "lib" | "main" | "index" | "__init__")
         || Language::for_path(path) == Some(Language::Go);
     if !by_directory && !stem.is_empty() {
@@ -3230,7 +3284,9 @@ mod review_regressions {
     ) -> Vec<Notice> {
         let mut digests = BTreeMap::new();
         for (path, text) in files {
-            fs::write(dir.0.join(path), text).unwrap();
+            let file = dir.0.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, text).unwrap();
             digests.insert(
                 (*path).to_owned(),
                 crate::sha256::hex(&crate::sha256::digest(text.as_bytes())),
@@ -3729,6 +3785,95 @@ mod review_regressions {
     }
 
     #[test]
+    fn a_deadline_passed_while_expanding_callees_stops_the_search_and_says_so() {
+        let (dir, mut index) = setup("paths-late-callee");
+        pass(
+            &dir,
+            &mut index,
+            &[
+                (
+                    "src/a.rs",
+                    "fn handler() {\n    one();\n    two();\n    three();\n}\n",
+                ),
+                ("src/b.rs", "fn one() {}\nfn two() {}\nfn three() {}\n"),
+            ],
+        );
+        // In time for the definition, late from its first callee on: the
+        // search stops before reading any callee, even at its last hop.
+        let mut asked = 0;
+        let (paths, edges, truncated) = index
+            .symbol_paths_by(
+                "w",
+                ("handler", "three"),
+                1,
+                langspan_core::MAX_PATH_EDGES,
+                || {
+                    asked += 1;
+                    asked > 1
+                },
+            )
+            .unwrap();
+        assert!(paths.is_empty(), "{paths:?}");
+        assert_eq!(edges, 0);
+        assert!(truncated, "the deadline cut the search");
+        // In time throughout, the same search finds the chain.
+        let (found, edges, truncated) = chains(&index, "handler", "three", 1);
+        assert_eq!(found, [["src/a.rs:4 handler", "src/b.rs:3 three"]]);
+        assert!(edges == 3 && !truncated);
+    }
+
+    #[test]
+    fn every_imported_definition_is_reached_however_many_others_share_the_name() {
+        let (dir, mut index) = setup("paths-imported-past-bound");
+        let caller = "import { save } from './a/store';\nimport { save as keep } from './z/store';\n\
+                      export function handler() {\n  save();\n}\n";
+        let mut files = vec![
+            ("src/caller.ts".to_owned(), caller.to_owned()),
+            (
+                "src/a/store.ts".into(),
+                "export function save() {}\n".into(),
+            ),
+            (
+                "src/z/store.ts".into(),
+                "export function save() {}\n".into(),
+            ),
+            // Imports nothing: every `save` is a candidate, past the bound.
+            (
+                "src/loose.ts".into(),
+                "export function loose() {\n  save();\n}\n".into(),
+            ),
+        ];
+        // More definitions of `save` than the bound, between the two
+        // imported files in path order.
+        for n in 0..=MAX_RESULTS {
+            files.push((
+                format!("src/m/s{n:03}.ts"),
+                "export function save() {}\n".into(),
+            ));
+        }
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        pass(&dir, &mut index, &borrowed);
+        pass(&dir, &mut index, &borrowed);
+        let (found, edges, truncated) = chains(&index, "handler", "save", 1);
+        assert_eq!(
+            found,
+            [
+                ["src/caller.ts:4 handler", "src/a/store.ts:1 save"],
+                ["src/caller.ts:4 handler", "src/z/store.ts:1 save"]
+            ]
+        );
+        assert_eq!(edges, 2);
+        assert!(!truncated, "both imported definitions were reached");
+        // By name, the same call reaches more definitions than the bound.
+        let (_, edges, truncated) = chains(&index, "loose", "save", 1);
+        assert_eq!(edges, MAX_RESULTS, "cut at the bound");
+        assert!(truncated, "more definitions of `save` than the bound");
+    }
+
+    #[test]
     fn a_map_area_is_a_module_path_cut_to_its_depth() {
         for (path, depth, area) in [
             ("src/api.ts", 1, "src/api"),
@@ -3741,6 +3886,16 @@ mod review_regressions {
             ("app/__init__.py", 1, "app"),
             ("main.go", 1, "."),
             ("setup.py", 2, "setup"),
+            // Only the last extension goes: dotted basenames stay apart.
+            ("src/api.v1.ts", 1, "src/api.v1"),
+            ("src/api.v2.ts", 1, "src/api.v2"),
+            ("src/api.test.ts", 1, "src/api.test"),
+            ("src/.eslintrc.js", 1, "src/.eslintrc"),
+            // A declaration file is its module's.
+            ("src/api.d.ts", 1, "src/api"),
+            ("src/api/index.d.ts", 1, "src/api"),
+            ("src/api/index.test.ts", 2, "src/api/index.test"),
+            ("src/README", 1, "src/README"),
         ] {
             assert_eq!(map_area(path, depth), area, "{path} at {depth}");
         }

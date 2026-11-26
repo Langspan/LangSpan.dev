@@ -290,7 +290,9 @@ definition to the names called within its lines, from the `calls` table),
   named `TO`. A call of a name reaches the definitions of that name in files
   the calling file imports by path, when there are any (`resolution:
   "path"`); otherwise it reaches every function, method or type of the name
-  (`"name"`). More than one reached is `ambiguous`, and each is a separate
+  (`"name"`). The imported files' definitions are read on their own, so
+  other files' definitions of a common name never push one of them past the
+  bound. More than one reached is `ambiguous`, and each is a separate
   chain. A module, constant or interface of the name is never reached, so
   `mod service;` is no second `service`. A type's step follows every call in
   its lines, its methods' among them, since a constructor call is not told
@@ -303,17 +305,20 @@ definition to the names called within its lines, from the `calls` table),
   the last step), the definition, its `callee`, its `resolution` and
   `ambiguous`. The search visits at most 10,000 edges (`MAX_PATH_EDGES`): one
   per definition a call reaches, and one per called name that reaches none.
-  It may take 500 ms (`PATH_BUDGET`), and the answer must fit one frame.
+  It may take 500 ms (`PATH_BUDGET`), checked before each called name is
+  read, and the answer must fit one frame.
   Past any of these, or with more than 5 chains, it returns what it found
   with `truncated: true` and the `edges_visited` count. A name of more than
   128 bytes or with whitespace is refused.
 - **`graph map WORKSPACE [--depth D]` (`graph_map`, `langspan_map`).** A
   file's area is its module path cut to its first `D + 1` parts (`D` is 1 to
   3, `MAX_MAP_DEPTH`, default 1). The module path is the file's path without
-  its extension, or its directory for a Go file (a package is a directory)
-  and for `mod.rs`, `lib.rs`, `main.rs`, `index.*` and `__init__.py`. So
-  `src/api.ts` and `src/api/handler.ts` are both `src/api` at depth 1, which
-  a plain directory cut could not give for the first. Each area has its file
+  its last extension (and without `.d.ts` for a declaration file), or its
+  directory for a Go file (a package is a directory) and for `mod.rs`,
+  `lib.rs`, `main.rs`, `index.*` and `__init__.py`. So `src/api.ts` and
+  `src/api/handler.ts` are both `src/api` at depth 1, which a plain directory
+  cut could not give for the first, while `src/api.v1.ts` and `src/api.v2.ts`
+  stay two areas. Each area has its file
   count, exported definitions and languages. Edges between two different
   areas are counted per kind: `imports` resolved by path, and `calls` by name
   of a name with exactly one function, method or type definition (a common

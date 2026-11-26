@@ -1563,10 +1563,11 @@ Areas at depth 1. Imports are resolved by path; calls are counted by name, only 
 ```
 
 An area is a file's module path cut to its first `--depth D` + 1 parts (D is
-1 to 3, default 1). The module path is the file's path without its extension,
-or its directory for a Go file, `mod.rs`, `lib.rs`, `main.rs`, `index.*` and
-`__init__.py`. So `src/api.ts`, `src/api/index.ts` and `src/api/handler.ts`
-are all in `src/api` at depth 1. Each area has its file count, its `exported`
+1 to 3, default 1). The module path is the file's path without its last
+extension (`.d.ts` for a declaration file), or its directory for a Go file,
+`mod.rs`, `lib.rs`, `main.rs`, `index.*` and `__init__.py`. So `src/api.ts`,
+`src/api/index.ts` and `src/api/handler.ts` are all in `src/api` at depth 1,
+while `src/api.v1.ts` and `src/api.v2.ts` are two areas. Each area has its file count, its `exported`
 definitions and its languages. Edges between two areas are counted per kind:
 `imports` resolved by path, and `calls` of a name with exactly one function,
 method or type definition. The map lists at most 64 areas in path order and
