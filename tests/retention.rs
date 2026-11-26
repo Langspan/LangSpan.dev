@@ -105,6 +105,10 @@ fn assert_same_state(left: &State, right: &State) {
         left.refusals, right.refusals,
         "state field refusals differs"
     );
+    assert_eq!(
+        left.path_refusals, right.path_refusals,
+        "state field path_refusals differs"
+    );
     let mut unanchored = right.clone();
     unanchored.clock_anchor = left.clock_anchor;
     assert!(

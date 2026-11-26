@@ -862,3 +862,49 @@ fn a_window_before_the_retention_cutoff_is_truncated_though_every_event_left_was
     assert_eq!(both.covered_from_ms, Some(WALL + 40 * MINUTE));
     assert_eq!(row(&both, alice).edits_admitted, 1, "{both:#?}");
 }
+
+/// The report and the monthly count (H5) share one retention rule: a window
+/// starting before the cutoff may miss removed events, and one starting at
+/// or after it is complete. Each says so in its own field.
+#[test]
+fn the_report_and_the_refusal_count_read_the_retention_cutoff_alike() {
+    let cutoff = WALL + 30 * MINUTE;
+    let none = BTreeMap::new();
+    for from_ms in [cutoff - 1, cutoff, cutoff + 1] {
+        let report = report(&ReportQuery {
+            workspace_id: "work",
+            window: TodayWindow {
+                from_ms,
+                to_ms: WALL + 600 * MINUTE,
+            },
+            events: &[],
+            anchor: None,
+            earlier: false,
+            retained_from_ms: Some(cutoff),
+            open_intents: &none,
+            session_workspaces: &none,
+        });
+        let count = langspan_core::count_refusals(
+            &langspan_core::CountQuery {
+                days: &[from_ms, WALL + 600 * MINUTE],
+                refusals: &[],
+                anchors: &[],
+                earlier: false,
+                retained_since_ms: Some(cutoff),
+            },
+            |_, _, _, _| Ok::<_, ()>(false),
+        )
+        .unwrap();
+        assert_eq!(
+            report.truncated,
+            count.retained_since_ms.is_some(),
+            "from {from_ms}: {report:#?} {count:#?}"
+        );
+        assert_eq!(report.truncated, from_ms < cutoff, "from {from_ms}");
+        assert_eq!(
+            count.retained_since_ms,
+            (from_ms < cutoff).then_some(cutoff),
+            "from {from_ms}"
+        );
+    }
+}

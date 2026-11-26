@@ -246,6 +246,14 @@ fn cut(text: &str, limit: usize) -> String {
     cut
 }
 
+/// The one rule for whether retention cut a window starting at `from_ms`:
+/// the cutoff, when retention removed the records before it and the window
+/// starts before it, so the window's removed part may be missing. Both the
+/// report (and `today`) and the monthly count read it.
+pub(crate) fn retention_cut(retained_from_ms: Option<u64>, from_ms: u64) -> Option<u64> {
+    retained_from_ms.filter(|cutoff| *cutoff > from_ms)
+}
+
 /// Places the events of the log, read oldest first, on the wall clock.
 pub(crate) struct Placement {
     anchor: Option<ClockAnchor>,
@@ -322,7 +330,7 @@ impl Placement {
         retained_from_ms: Option<u64>,
         from_ms: u64,
     ) -> bool {
-        retained_from_ms.is_some_and(|cutoff| cutoff > from_ms)
+        retention_cut(retained_from_ms, from_ms).is_some()
             || earlier
                 && match self.bound {
                     Some(Some(first)) => first >= from_ms,

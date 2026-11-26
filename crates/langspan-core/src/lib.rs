@@ -6,6 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+mod count;
 mod dashboard;
 mod flaky;
 mod history;
@@ -17,6 +18,10 @@ mod status;
 mod status_line;
 mod today;
 mod workspaces;
+pub use count::{
+    COUNT_DAYS, COUNT_KINDS, COUNT_REFUSALS, COUNT_WORKSPACES, CountQuery, RefusalCount,
+    count_refusals, validate_count_days,
+};
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
@@ -3192,6 +3197,12 @@ pub enum Command {
         workspace_id: String,
         from_ms: u64,
     },
+    /// Read-only, answered from the event log: refusals in the local days
+    /// starting at each of `days` (wall clock, Unix milliseconds), the last
+    /// being the end, once per session, kind and path set per day (H5).
+    Count {
+        days: Vec<u64>,
+    },
     /// Read-only: the person's status line for the directory `root`, with
     /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
     StatusLine {
@@ -3811,6 +3822,12 @@ enum CommandWire {
         workspace_id: String,
         from_ms: u64,
     },
+    /// Read-only, answered from the event log: refusals in the local days
+    /// starting at each of `days` (wall clock, Unix milliseconds), the last
+    /// being the end, once per session, kind and path set per day (H5).
+    Count {
+        days: Vec<u64>,
+    },
     /// Read-only: the person's status line for the directory `root`, with
     /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
     StatusLine {
@@ -4341,6 +4358,9 @@ pub enum Outcome {
     },
     Report {
         report: Report,
+    },
+    Count {
+        count: RefusalCount,
     },
     StatusLine {
         line: StatusLine,
@@ -6536,6 +6556,7 @@ fn decide_checked(
         Command::Events { .. }
         | Command::Today { .. }
         | Command::Report { .. }
+        | Command::Count { .. }
         | Command::History { .. }
         | Command::StatusRecords { .. }
         | Command::Changes { .. }
