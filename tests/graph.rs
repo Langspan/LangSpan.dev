@@ -3195,3 +3195,148 @@ fn a_git_mv_of_a_file_without_exports_keeps_its_notes_under_the_new_path() {
         "{detail:#}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #194: a rename in one worktree reaches a peer in another worktree of
+// the same repository at the write that adds a caller of the old name.
+// ---------------------------------------------------------------------------
+
+const PARSE_CONFIG: &[(&str, &str)] = &[
+    (
+        "src/config.rs",
+        "pub fn parse_config(text: &str) -> usize {\n    text.len()\n}\n",
+    ),
+    (
+        "src/main.rs",
+        "mod config;\nmod report;\nfn main() {\n    let _ = config::parse_config(\"a\");\n}\n",
+    ),
+    ("src/report.rs", "pub fn report() -> usize {\n    0\n}\n"),
+];
+const LOAD_CONFIG: &str = "pub fn load_config(text: &str) -> usize {\n    text.len()\n}\n";
+const CALLS_PARSE_CONFIG: &str =
+    "pub fn report() -> usize {\n    crate::config::parse_config(\"b\")\n}\n";
+
+/// A checkout and a linked worktree `tree` of it, both indexed. Bob is at
+/// work in the checkout; Alice, in the worktree, renames `parse_config` to
+/// `load_config` and saves. Returns once the coordinator holds the rename.
+fn parse_config_renamed_in_another_worktree() -> (World, PathBuf) {
+    let w = World::with_files(Vec::new(), PARSE_CONFIG);
+    let tree = w.linked_tree();
+    for workspace in ["app", "tree"] {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let (_, text) = w.cli(&["graph", "symbol", workspace, "parse_config", "--json"]);
+            let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+            if outcome["coverage"]["current_files"] == 3 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{workspace} never indexed: {outcome:#}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    assert!(
+        w.prompt("bob")
+            .is_none_or(|context| !context.contains("parse_config"))
+    );
+    w.edits_in("tree", &tree, "alice", "a1", "src/config.rs", LOAD_CONFIG);
+    let deadline = Instant::now() + WAIT;
+    while !rename_notice(&w).is_some_and(|notice| notice.to_string().contains("load_config")) {
+        assert!(Instant::now() < deadline, "no rename notice");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    (w, tree)
+}
+
+/// The worktree's interface notice for `src/config.rs`.
+fn rename_notice(w: &World) -> Option<Value> {
+    let (_, status) = w.cli(&["status", "--json"]);
+    let status: Value = serde_json::from_str(&status).unwrap();
+    status["outcome"]["state"]["interface_notices"]["tree"]
+        .as_array()?
+        .iter()
+        .find(|notice| notice["path"] == "src/config.rs")
+        .cloned()
+}
+
+/// Bob's Claude Code `Write` of `src/report.rs` in the checkout, before it
+/// lands: its additional context.
+fn bob_writes_a_caller(w: &World, call: &str) -> Option<String> {
+    let root = w.work();
+    let (coverage, context, detail) = w.hook_in(
+        "app",
+        &root,
+        json!({
+            "session_id": "bob", "cwd": root, "hook_event_name": "PreToolUse",
+            "tool_name": "Write", "tool_use_id": call,
+            "tool_input": {"file_path": root.join("src/report.rs"), "content": CALLS_PARSE_CONFIG},
+        }),
+        &[],
+    );
+    assert_eq!(coverage, "admitted", "{detail}");
+    context
+}
+
+/// Issue #194, first acceptance criterion: Bob's write that calls the old
+/// name gets the break alert naming the rename at that write, before any
+/// later prompt.
+#[test]
+fn a_peers_rename_in_another_worktree_is_told_at_the_write_that_calls_the_old_name() {
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    let context = bob_writes_a_caller(&w, "b1").expect("no alert at the write");
+    assert!(
+        context.starts_with("LangSpan: a call in this write"),
+        "{context}"
+    );
+    let expected = format!(
+        r#""src/report.rs":2 calls "parse_config", which was renamed to "load_config" in "src/config.rs" in worktree "{}" by claude-code.alice"#,
+        tree.display()
+    );
+    assert!(context.contains(&expected), "{context}");
+    assert!(
+        context.contains(r#""pub fn load_config(text: &str) -> usize""#),
+        "{context}"
+    );
+    assert!(context.contains("not instructions"), "{context}");
+    let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
+    assert!(events.contains("interface_alerted"), "{events}");
+    // Told once per notice: the same call again is not repeated.
+    assert!(
+        bob_writes_a_caller(&w, "b2").is_none_or(|context| !context.contains("parse_config")),
+        "repeated"
+    );
+}
+
+/// Issue #194, second acceptance criterion: once Bob has written his caller
+/// in the checkout, the worktree's rename notice lists Bob's file among the
+/// files of other worktrees that mention the old name.
+#[test]
+fn a_rename_notice_lists_a_caller_written_later_in_another_worktree() {
+    let (w, _tree) = parse_config_renamed_in_another_worktree();
+    let before = rename_notice(&w).unwrap();
+    assert_eq!(before["dependents"], json!(["src/main.rs"]), "{before:#}");
+    w.edits("bob", "b1", "src/report.rs", CALLS_PARSE_CONFIG);
+    let listed = |notice: &Value, path: &str| {
+        notice["elsewhere"]
+            .as_array()
+            .is_some_and(|files| files.contains(&json!({"workspace_id": "app", "path": path})))
+    };
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let notice = rename_notice(&w).unwrap();
+        if listed(&notice, "src/report.rs") {
+            // The checkout's `src/main.rs` calls the old name too.
+            assert!(listed(&notice, "src/main.rs"), "{notice:#}");
+            // The notice's own worktree's dependents stay as they were.
+            assert_eq!(notice["dependents"], json!(["src/main.rs"]), "{notice:#}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Bob's file never listed: {notice:#}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}

@@ -1,3 +1,4 @@
+use langspan::today::utc;
 use langspan::{
     client,
     hosts::UserHome,
@@ -148,6 +149,12 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  What each session did since local midnight (or the
                                  time given), refusals by kind, checks, landings, and
                                  what is still open. Reads only; acknowledges nothing
+  report WORKSPACE [--since RFC3339]
+                                 Per session and per host kind: edits admitted, those
+                                 not compared with a read, shell writes seen only
+                                 after, reads, intents set/ended/left open, refusals,
+                                 unchanged retries, briefings. Counts of recorded
+                                 events (all of them without --since). Reads only
   count [--month YYYY-MM]        Refusals in one local month (default: this one), by
                                  kind and workspace, once per session, kind and files
                                  a day, and how many were retried and let through.
@@ -3987,6 +3994,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                     langspan::store::wall_now_ms(),
                 )?,
             },
+            ["report", workspace] => Command::Report {
+                workspace_id: (*workspace).into(),
+                from_ms: match options.remove("--since") {
+                    Some(since) => langspan::today::parse_rfc3339(&since)?,
+                    None => 0,
+                },
+            },
             ["remember", workspace, text, paths @ ..] => Command::Remember {
                 workspace_id: (*workspace).into(),
                 author: options.remove("--session"),
@@ -4079,6 +4093,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::MessageStatus { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
+                | Command::Report { .. }
                 | Command::Compact { .. }
                 | Command::History { .. }
                 | Command::WorkspaceList { .. }
@@ -4812,6 +4827,9 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             notice.changes.len(),
             notice.dependents.len()
         ),
+        Outcome::InterfaceDependentsObserved { notice_id, added } => {
+            println!("Interface notice {notice_id}: {added} file(s) of another worktree added.")
+        }
         Outcome::CallBreaks { ready: false, .. } => {
             println!("Not checked: the source index has no complete scan of this workspace yet.")
         }
@@ -5137,6 +5155,7 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 langspan::today::text(today, &langspan::today::shown(&today.window), None)
             );
         }
+        Outcome::Report { report } => println!("{}", langspan::report::text(report)),
         Outcome::Count { count } => println!(
             "{} refusals from {} to {} (UTC).",
             count.refusals,
@@ -5594,7 +5613,6 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
     Ok(())
 }
 
-/// Unix milliseconds as an ISO 8601 UTC time, for people.
 /// `value` with a comma between each group of three digits.
 fn grouped(value: u64) -> String {
     let digits = value.to_string();
@@ -5643,18 +5661,6 @@ fn print_compaction(report: &langspan_core::CompactionReport) {
     if !report.applied {
         println!("dry run: add --apply to compact");
     }
-}
-
-fn utc(ms: u64) -> String {
-    let seconds = ms / 1000;
-    let (days, rest) = (seconds / 86_400, seconds % 86_400);
-    let (year, month, day) = langspan::today::civil_from_days(days as i64);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
 }
 
 /// `messages status` for a person: the message, then one line per
@@ -5724,13 +5730,6 @@ fn print_message_status(status: &langspan_core::MessageStatus) {
 
 #[cfg(test)]
 mod time_tests {
-    #[test]
-    fn unix_milliseconds_are_shown_as_utc() {
-        assert_eq!(super::utc(0), "1970-01-01T00:00:00Z");
-        assert_eq!(super::utc(951_782_400_000), "2000-02-29T00:00:00Z");
-        assert_eq!(super::utc(1_795_521_906_123), "2026-11-24T12:05:06Z");
-    }
-
     #[test]
     fn counts_and_sizes_read_as_people_write_them() {
         assert_eq!(super::grouped(0), "0");

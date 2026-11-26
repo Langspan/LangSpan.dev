@@ -1290,6 +1290,387 @@ fn a_compaction_keeps_the_registration_revision_of_a_moved_workspace() {
     );
 }
 
+/// The coordination report folds the events before those it reads into
+/// which sessions held an intent and which workspace each session was in.
+/// After a compaction those events are in the snapshot: Bob's intent and
+/// Alice's registration in `work` come from it. Bob's end leaves his intent
+/// open, and Alice's read counts for `work`, where she was, though she has
+/// since registered in `elsewhere` (review 4704154106).
+#[test]
+fn the_report_takes_intents_and_memberships_from_before_a_compaction() {
+    let directory = Directory::new();
+    let path = directory.file("state.sqlite3");
+    let wall = Wall::at(START_MS);
+    let mut store = wall.open(&path);
+    let workspace = |id: &str| Command::WorkspaceRegister {
+        workspace_id: id.into(),
+        root: format!("/retention-{id}"),
+    };
+    let register = |session: &str, workspace: &str| Command::SessionRegister {
+        session_id: session.into(),
+        workspace_id: workspace.into(),
+        parent: None,
+        headless: false,
+    };
+    let ok = |execution: langspan::store::Execution| {
+        assert!(
+            !matches!(execution.outcome, Outcome::Error { .. }),
+            "{:?}",
+            execution.outcome
+        );
+    };
+    let (alice, bob) = ("claude-code.alice", "claude-code.bob");
+    ok(run(&mut store, "w-work", workspace("work"), 0));
+    ok(run(&mut store, "w-elsewhere", workspace("elsewhere"), 0));
+    ok(run(&mut store, "s-alice", register(alice, "work"), 0));
+    ok(run(&mut store, "s-bob", register(bob, "work"), 0));
+    ok(run(
+        &mut store,
+        "i-bob",
+        Command::IntentSet {
+            session_id: bob.into(),
+            paths: vec!["src/lib.rs".into()],
+            summary: "rework the parser".into(),
+        },
+        1_000,
+    ));
+    wall.set(START_MS + 10 * DAY_MS);
+    let applied = report(store.compact(7, true).unwrap());
+    assert!(applied.applied && applied.events > 0, "{applied:?}");
+    let registrations: i64 = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events
+              WHERE json_extract(event_json, '$.type') IN ('session_registered', 'intent_set')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(registrations, 0, "the older events were not removed");
+
+    ok(run(
+        &mut store,
+        "e-bob",
+        Command::SessionEnd {
+            session_id: bob.into(),
+        },
+        2_000,
+    ));
+    ok(run(
+        &mut store,
+        "read",
+        Command::ObserveSource {
+            session_id: alice.into(),
+            files: vec![langspan_core::ObservedFile {
+                path: "src/lib.rs".into(),
+                state: langspan_core::FileState::Missing,
+            }],
+            origin: langspan_core::SourceOrigin::Read,
+        },
+        2_000,
+    ));
+    ok(run(
+        &mut store,
+        "r-work",
+        Command::WorkspaceRemove {
+            workspace_id: "work".into(),
+            apply: true,
+        },
+        3_000,
+    ));
+    ok(run(
+        &mut store,
+        "s-again",
+        register(alice, "elsewhere"),
+        3_000,
+    ));
+    ok(run(&mut store, "w-work-again", workspace("work"), 3_000));
+
+    let counts = |workspace: &str, session: &str| {
+        let outcome = store.report(workspace, 0, u64::MAX / 2).unwrap();
+        let Outcome::Report { report } = outcome else {
+            panic!("{outcome:?}");
+        };
+        report
+            .sessions
+            .iter()
+            .find(|row| row.session_id == session)
+            .unwrap_or_else(|| panic!("no row for {session}: {report:#?}"))
+            .counts
+            .clone()
+    };
+    assert_eq!(counts("work", bob).intents_left_open, 1);
+    assert_eq!(counts("work", alice).reads_reported, 1);
+    assert_eq!(counts("elsewhere", alice).reads_reported, 0);
+}
+
+/// A store whose generation is anchored on the test's wall clock, with
+/// workspace `work` and session `claude-code.alice` in it. Each `day` places
+/// a prompt and a completed read on that day, on the daemon's clock and on
+/// the wall clock that stamps records' ages for retention.
+struct Days {
+    directory: Directory,
+    wall: Wall,
+    store: Store,
+    /// The generation's anchor: the daemon's clock at a wall time.
+    anchor: langspan_core::ClockAnchor,
+    step: u64,
+}
+
+const ALICE: &str = "claude-code.alice";
+
+impl Days {
+    fn open() -> Self {
+        let directory = Directory::new();
+        let wall = Wall::at(START_MS);
+        let store = wall.open(&directory.file("state.sqlite3"));
+        let anchor = store.state().clock_anchor.expect("the start is anchored");
+        assert_eq!(
+            anchor.wall_ms, START_MS,
+            "the generation is anchored on the store's wall clock"
+        );
+        let mut days = Self {
+            directory,
+            wall,
+            store,
+            anchor,
+            step: 0,
+        };
+        days.run(Command::WorkspaceRegister {
+            workspace_id: "work".into(),
+            root: "/retention-days".into(),
+        });
+        days.run(Command::SessionRegister {
+            session_id: ALICE.into(),
+            workspace_id: "work".into(),
+            parent: None,
+            headless: false,
+        });
+        days
+    }
+
+    fn now(&self) -> u64 {
+        self.anchor.clock_ms + (self.wall.now() - self.anchor.wall_ms)
+    }
+
+    fn run(&mut self, command: Command) -> Outcome {
+        self.step += 1;
+        let now = self.now();
+        let outcome = run(
+            &mut self.store,
+            &format!("days-{}", self.step),
+            command,
+            now,
+        )
+        .outcome;
+        assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+        outcome
+    }
+
+    /// Move both clocks to `day` and record a prompt and a read there.
+    fn day(&mut self, day: u64) {
+        self.wall.set(START_MS + day * DAY_MS);
+        self.run(Command::SessionPrompt {
+            session_id: ALICE.into(),
+            summary: format!("day {day}"),
+            line_digests: Vec::new(),
+        });
+        self.run(Command::ObserveSource {
+            session_id: ALICE.into(),
+            files: vec![langspan_core::ObservedFile {
+                path: format!("src/day{day}.rs"),
+                state: langspan_core::FileState::Missing,
+            }],
+            origin: langspan_core::SourceOrigin::Read,
+        });
+    }
+
+    fn compact(&mut self, day: u64, keep_days: u32) -> CompactionReport {
+        self.wall.set(START_MS + day * DAY_MS);
+        let applied = report(self.store.compact(keep_days, true).unwrap());
+        assert!(applied.applied && applied.events > 0, "{applied:?}");
+        applied
+    }
+
+    fn report(&self, from_day: u64) -> langspan_core::Report {
+        let outcome = self
+            .store
+            .report("work", START_MS + from_day * DAY_MS, self.wall.now() + 1)
+            .unwrap();
+        let Outcome::Report { report } = outcome else {
+            panic!("{outcome:?}");
+        };
+        report
+    }
+
+    fn reads(report: &langspan_core::Report) -> u32 {
+        report
+            .sessions
+            .iter()
+            .find(|row| row.session_id == ALICE)
+            .map_or(0, |row| row.counts.reads_reported)
+    }
+}
+
+/// The generation markers recorded on day 0 that are still in the log.
+fn day_zero_markers(days: &Days) -> i64 {
+    Connection::open(days.directory.file("state.sqlite3"))
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE recorded_at_ms < ?1
+               AND json_extract(event_json, '$.type') IN ('booted', 'clock_anchored')",
+            [i64::try_from(START_MS + DAY_MS).unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// Review 4704557874. A compaction on day 10 keeping 7 days removes the
+/// day-0 events but keeps the generation markers of day 0, whose anchor is
+/// the oldest time read. A report from day 1 reaches before the cutoff on
+/// day 3: it is truncated and covers from the cutoff, though every event
+/// left was read. One from day 4 is complete.
+#[test]
+fn a_report_reaching_before_the_retention_cutoff_is_truncated_though_its_anchor_was_kept() {
+    let mut days = Days::open();
+    days.day(0);
+    days.day(5);
+    let applied = days.compact(10, 7);
+    assert_eq!(applied.cutoff_ms, START_MS + 3 * DAY_MS);
+    assert_eq!(day_zero_markers(&days), 2, "the day-0 anchor was not kept");
+
+    let before = days.report(1);
+    assert!(before.truncated, "{before:#?}");
+    assert_eq!(before.covered_from_ms, Some(START_MS + 3 * DAY_MS));
+    assert_eq!(Days::reads(&before), 1, "{before:#?}");
+
+    let after = days.report(4);
+    assert!(!after.truncated, "{after:#?}");
+    assert_eq!(after.covered_from_ms, None);
+    assert_eq!(Days::reads(&after), 1, "{after:#?}");
+}
+
+/// The daily summary reads the same events and decides the same way.
+#[test]
+fn a_daily_summary_reaching_before_the_retention_cutoff_is_truncated_though_its_anchor_was_kept() {
+    let mut days = Days::open();
+    days.day(0);
+    days.day(5);
+    days.compact(10, 7);
+    let today = |from_day: u64| {
+        let outcome = days
+            .store
+            .today(
+                Some("work"),
+                START_MS + from_day * DAY_MS,
+                days.wall.now() + 1,
+                days.now(),
+            )
+            .unwrap();
+        let Outcome::Today { today } = outcome else {
+            panic!("{outcome:?}");
+        };
+        today
+    };
+    assert!(today(1).truncated, "{:#?}", today(1));
+    assert!(!today(4).truncated, "{:#?}", today(4));
+}
+
+/// Two compactions: keeping 30 days on day 40 (cutoff on day 10), then 7
+/// on day 41 (cutoff on day 34). The newer cutoff bounds what is complete:
+/// a report from day 15 is truncated, though it starts after the first.
+#[test]
+fn the_newest_retention_cutoff_bounds_a_complete_report() {
+    let mut days = Days::open();
+    days.day(0);
+    days.day(20);
+    days.day(38);
+    days.compact(40, 30);
+    assert!(!days.report(15).truncated, "{:#?}", days.report(15));
+    let second = days.compact(41, 7);
+    assert_eq!(second.cutoff_ms, START_MS + 34 * DAY_MS);
+    let from_15 = days.report(15);
+    assert!(from_15.truncated, "{from_15:#?}");
+    assert_eq!(from_15.covered_from_ms, Some(START_MS + 34 * DAY_MS));
+    assert_eq!(Days::reads(&from_15), 1, "{from_15:#?}");
+    assert!(!days.report(35).truncated, "{:#?}", days.report(35));
+}
+
+/// A message pending since day 1 holds the compaction on day 10 before it,
+/// so the events from day 1 on stay, older than the cutoff on day 3. Events
+/// before the message went all the same: a report from before it is
+/// truncated, though its oldest event read is older than the window's start.
+#[test]
+fn events_kept_for_a_pending_message_do_not_make_a_report_before_the_cutoff_complete() {
+    let mut days = Days::open();
+    days.run(Command::SessionRegister {
+        session_id: "claude-code.bob".into(),
+        workspace_id: "work".into(),
+        parent: None,
+        headless: false,
+    });
+    days.day(0);
+    days.wall.set(START_MS + DAY_MS);
+    days.run(Command::SendMessage {
+        workspace_id: "work".into(),
+        from: Some(ALICE.into()),
+        to: Some("claude-code.bob".into()),
+        text: "held".into(),
+        paths: Vec::new(),
+    });
+    days.day(2);
+    days.day(5);
+    let applied = days.compact(10, 7);
+    assert!(applied.held_by.is_some(), "{applied:?}");
+    let from_half = {
+        let outcome = days
+            .store
+            .report("work", START_MS + DAY_MS / 2, days.wall.now() + 1)
+            .unwrap();
+        let Outcome::Report { report } = outcome else {
+            panic!("{outcome:?}");
+        };
+        report
+    };
+    assert!(from_half.truncated, "{from_half:#?}");
+    assert_eq!(from_half.covered_from_ms, Some(START_MS + 3 * DAY_MS));
+    assert_eq!(Days::reads(&from_half), 2, "{from_half:#?}");
+    assert!(!days.report(4).truncated, "{:#?}", days.report(4));
+}
+
+/// A start after the compaction begins a new generation with its own
+/// anchor, after the kept markers of the old one. Events of both
+/// generations are placed on their days: a report from day 4 counts the
+/// reads of day 5 and day 11 and is complete; one from day 1 is truncated.
+#[test]
+fn a_start_after_compaction_keeps_both_generations_placed_and_the_cutoff_in_force() {
+    let mut days = Days::open();
+    days.day(0);
+    days.day(5);
+    days.compact(10, 7);
+    days.wall.set(START_MS + 11 * DAY_MS);
+    let path = days.directory.file("state.sqlite3");
+    days.store = days.wall.open(&path);
+    let anchor = days.store.state().clock_anchor.expect("anchored");
+    assert_eq!(anchor.wall_ms, START_MS + 11 * DAY_MS);
+    days.anchor = anchor;
+    days.run(Command::SessionRegister {
+        session_id: ALICE.into(),
+        workspace_id: "work".into(),
+        parent: None,
+        headless: false,
+    });
+    days.day(11);
+    let from_4 = days.report(4);
+    assert!(!from_4.truncated, "{from_4:#?}");
+    assert_eq!(Days::reads(&from_4), 2, "{from_4:#?}");
+    let from_6 = days.report(6);
+    assert_eq!(Days::reads(&from_6), 1, "{from_6:#?}");
+    let from_1 = days.report(1);
+    assert!(from_1.truncated, "{from_1:#?}");
+    assert_eq!(from_1.covered_from_ms, Some(START_MS + 3 * DAY_MS));
+}
+
 /// What the classification of failing tests keeps per workspace and session
 /// (issue #69, ADR 0030) is derived outside the status reply: the retained
 /// test results, each session's first write and the runs of writes. A

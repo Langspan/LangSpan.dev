@@ -395,6 +395,7 @@ fn notice(
             path: path.into(),
             changes,
             dependents: Vec::new(),
+            elsewhere: Vec::new(),
             by_session: by.map(str::to_owned),
             at_ms,
             generation,

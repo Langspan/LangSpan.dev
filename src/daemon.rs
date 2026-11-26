@@ -928,6 +928,117 @@ mod unix {
             .collect()
     }
 
+    /// After a scan of `workspace_id`: its files that the index finds
+    /// mention a name changed by a held notice of another worktree of its
+    /// repository are added to that notice's `elsewhere` (issue #194). Only
+    /// notices of this generation within the briefing horizon are read, and
+    /// the notice's own file is left out, as in its own worktree. The index
+    /// lags the scan by a pass, so a file is found at a later scan than the
+    /// one that saw it change. Nothing is found while the workspace's index
+    /// has no complete scan; a failure is logged and the next scan tries
+    /// again.
+    fn observe_elsewhere(
+        store: &mut Store,
+        graph: Option<&crate::graph::Index>,
+        workspace_id: &str,
+        now: u64,
+    ) {
+        let state = store.state();
+        let (Some(graph), Some(of), Some(git)) = (
+            graph,
+            Registration::of(state, workspace_id),
+            state.workspace_git.get(workspace_id),
+        ) else {
+            return;
+        };
+        let wanted: Vec<&langspan_core::InterfaceNotice> = state
+            .interface_notices
+            .iter()
+            .filter(|(other, _)| {
+                *other != workspace_id
+                    && state
+                        .workspace_git
+                        .get(*other)
+                        .is_some_and(|other| other.repository_id == git.repository_id)
+            })
+            .flat_map(|(_, notices)| notices)
+            .filter(|notice| {
+                notice.generation == state.generation
+                    && now.saturating_sub(notice.at_ms) <= langspan_core::BRIEF_HORIZON_MS
+                    && notice.elsewhere.len() < langspan_core::NOTICE_DEPENDENTS
+            })
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let looked_up = graph.with_coverage(&of, |graph| {
+            let mut found = Vec::new();
+            for notice in &wanted {
+                let names: Vec<&str> = notice
+                    .changes
+                    .iter()
+                    .filter(|change| change.change != "added")
+                    .map(|change| change.name.as_str())
+                    .collect();
+                let paths: Vec<String> = graph
+                    .dependents(workspace_id, Some(&notice.path), &names)?
+                    .into_iter()
+                    .filter(|path| {
+                        !notice
+                            .elsewhere
+                            .iter()
+                            .any(|file| file.workspace_id == workspace_id && file.path == *path)
+                    })
+                    .collect();
+                if !paths.is_empty() {
+                    found.push(Command::ObserveInterfaceDependents {
+                        notice_workspace_id: notice.workspace_id.clone(),
+                        notice_id: notice.notice_id.clone(),
+                        workspace_id: workspace_id.to_owned(),
+                        paths,
+                    });
+                }
+            }
+            Ok(found)
+        });
+        let commands = match looked_up {
+            Ok((commands, coverage)) if coverage.scanned => commands,
+            Ok(_) => return,
+            Err(failure) => {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"level":"warn","event":"elsewhere_dependents_unavailable","workspace_id":workspace_id,"detail":failure.to_string()})
+                );
+                return;
+            }
+        };
+        for command in commands {
+            let Command::ObserveInterfaceDependents {
+                notice_id, paths, ..
+            } = &command
+            else {
+                continue;
+            };
+            let mut parts = vec![notice_id.as_str(), workspace_id];
+            parts.extend(paths.iter().map(String::as_str));
+            let id = crate::hook::wire_id("interface-elsewhere", &parts);
+            let failure = match store.execute(&id, &command, &command, now) {
+                Ok(Execution {
+                    outcome: Outcome::Error { message, .. },
+                    ..
+                }) => Some(message),
+                Ok(_) => None,
+                Err(failure) => Some(failure.to_string()),
+            };
+            if let Some(detail) = failure {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"level":"warn","event":"elsewhere_dependents_not_recorded","workspace_id":workspace_id,"detail":detail})
+                );
+            }
+        }
+    }
+
     /// Up to `budget` in-flight rows of other worktrees after `after`, in
     /// order, and whether they run to the last row.
     fn inflight_after(
@@ -1294,40 +1405,81 @@ mod unix {
                 );
             }
         }
-        // The new signatures and the coverage they are judged with come from
-        // one snapshot of the index.
-        let looked_up = graph.with_coverage(&of, |graph| {
-            let mut current = Vec::new();
-            for name in &candidates {
-                current.extend(graph.symbol(&workspace_id, name, crate::graph::MAX_RESULTS)?);
+        // Each workspace's new signatures and the coverage they are judged
+        // with come from one snapshot of its index. A change in another
+        // worktree is judged in that worktree's index (issue #194), and
+        // only once it has a complete scan.
+        let mut current = std::collections::BTreeMap::new();
+        let mut coverage = None;
+        for (notice_workspace, names) in &candidates {
+            let own = *notice_workspace == workspace_id;
+            let registration = if own {
+                Some(of.clone())
+            } else {
+                Registration::of(store.state(), notice_workspace)
+            };
+            let Some(registration) = registration else {
+                continue;
+            };
+            let looked_up = graph.with_coverage(&registration, |graph| {
+                let mut found = Vec::new();
+                for name in names {
+                    found.extend(graph.symbol(
+                        notice_workspace,
+                        name,
+                        crate::graph::MAX_RESULTS,
+                    )?);
+                }
+                Ok(found)
+            });
+            match looked_up {
+                Ok((definitions, scanned)) if scanned.scanned => {
+                    current.insert(
+                        notice_workspace.clone(),
+                        langspan_core::IndexedNames {
+                            definitions,
+                            // An absent name is gone only when the index
+                            // reads every file.
+                            complete: scanned.blind_in_scope == 0,
+                        },
+                    );
+                    if own {
+                        coverage = Some(scanned);
+                    }
+                }
+                Ok((_, scanned)) if own => return not_ready(Some(scanned)),
+                Ok(_) => {}
+                Err(failure) => {
+                    return error(
+                        request_id,
+                        generation,
+                        "index_unavailable",
+                        failure.to_string(),
+                    );
+                }
             }
-            Ok(current)
-        });
-        let (current, coverage) = match looked_up {
-            Ok((current, coverage)) if coverage.scanned => (current, coverage),
-            Ok((_, coverage)) => return not_ready(Some(coverage)),
-            Err(failure) => {
-                return error(
-                    request_id,
-                    generation,
-                    "index_unavailable",
-                    failure.to_string(),
-                );
-            }
+        }
+        // The answer's coverage is the asking workspace's.
+        let coverage = match coverage {
+            Some(coverage) => coverage,
+            None => match graph.with_coverage(&of, |_| Ok(())) {
+                Ok(((), coverage)) if coverage.scanned => coverage,
+                Ok(((), coverage)) => return not_ready(Some(coverage)),
+                Err(failure) => {
+                    return error(
+                        request_id,
+                        generation,
+                        "index_unavailable",
+                        failure.to_string(),
+                    );
+                }
+            },
         };
-        // An absent name is gone only when the index reads every file.
-        let complete = coverage.blind_in_scope == 0;
-        let breaks = match langspan_core::call_breaks(
-            store.state(),
-            session_id,
-            calls,
-            &current,
-            complete,
-            now,
-        ) {
-            Ok(breaks) => breaks,
-            Err(e) => return error(request_id, generation, &e.code, e.message),
-        };
+        let breaks =
+            match langspan_core::call_breaks(store.state(), session_id, calls, &current, now) {
+                Ok(breaks) => breaks,
+                Err(e) => return error(request_id, generation, &e.code, e.message),
+            };
         // Only the notices the hook's alert will show are recorded: one
         // left out for room stays to be told at a later write. The hook
         // lays the alert out with the same function.
@@ -1632,6 +1784,7 @@ mod unix {
                             };
                             let id = format!("scan-outcome-{}-{now}", store.state().generation);
                             let _ = store.execute(&id, &command, &command, now);
+                            observe_elsewhere(&mut store, graph_reader.as_ref(), &workspace_id, now);
                         }
                         match recorded {
                             Ok(_) => {

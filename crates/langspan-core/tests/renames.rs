@@ -394,6 +394,7 @@ fn notice(id: &str, path: &str, change: InterfaceChange) -> Event {
             path: path.into(),
             changes: vec![change],
             dependents: Vec::new(),
+            elsewhere: Vec::new(),
             by_session: None,
             at_ms: 10,
             generation: 1,
