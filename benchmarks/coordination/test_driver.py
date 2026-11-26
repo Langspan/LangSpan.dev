@@ -613,13 +613,14 @@ class DriverUnitTests(Temporary):
                    "    today = datetime.date.today()\n\n    def left(day):\n        try:\n"
                    "            return days_left(day, today)\n        except TypeError:\n"
                    "            return days_left(day)\n"
-                   "    return [name for name, day in items if 0 <= left(day) <= within]\n")
+                   "    return [name for name, day in items if left(day) is not None and left(day) <= within]\n")
         code, verdict = tree("follow", content=guarded)
         self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, False])
         # A dependent that imports the helper under another name still calls it.
         aliased = ("import datetime\n\nfrom shelf.dates import days_left as remaining_days\n\n\n"
                    "def expiring_soon(items, within):\n    today = datetime.date.today()\n"
-                   "    return [name for name, day in items if 0 <= remaining_days(day, today) <= within]\n")
+                   "    return [name for name, day in items\n"
+                   "            if remaining_days(day, today) is not None and remaining_days(day, today) <= within]\n")
         code, verdict = tree("follow", content=aliased)
         self.assertEqual((code, verdict["integrated_tests"]), (0, "passed"), verdict)
         self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, True])
@@ -630,14 +631,15 @@ class DriverUnitTests(Temporary):
         self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, False])
         self.assertIn("old form", verdict["tasks"][1]["detail"])
         # A changer that keeps old calls working with a default hedges; so
-        # its dependent's old call fits, and is still not the changed form.
+        # its dependent's old call fits, and is not judged: the change was
+        # not made.
         code, verdict = tree("hedge", "ignore")
-        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [False, False])
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [False, None])
         self.assertIn("default", verdict["tasks"][0]["detail"])
         self.assertEqual(verdict["semantic_conflicts"], [])
-        # Without the change the clock decides, and the changer's own function is wrong.
+        # A changer that wrote nothing fails, and its dependent is not judged.
         code, verdict = tree(None, "ignore")
-        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [False, False])
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [False, None])
         # A changer that leaves the package's caller on the old form breaks it.
         tree("follow", "follow")
         orders = self.root / "checkout" / "shelf" / "orders.py"
@@ -646,6 +648,79 @@ class DriverUnitTests(Temporary):
         self.assertEqual([t["accepted"] for t in verdict["tasks"]], [False, True])
         self.assertIn("shelf/orders.py", verdict["tasks"][0]["detail"])
         self.assertEqual(verdict["fixture_tests"], "failed")
+
+    def test_a_changer_that_works_around_the_change_fails_and_the_trial_is_change_not_made(self):
+        """Issue #218: in the third pilot a changer subtracted two
+        one-argument calls instead of changing `days_left`. That workaround
+        must fail the changer's own task, and the trial must say the change
+        was not made instead of failing every dependent."""
+        changer = dict(tasks.CHANGER, role="changer")
+        dependent = dict(tasks.dependent_task(*tasks.DATED_FEATURES[1]), role="dependent")
+        plan = {"family": "discovered_change", "tasks": [changer, dependent], "config_users": [],
+                "integration": [{"session": 1, "merged": True}, {"session": 2, "merged": True}]}
+        checkout = self.root / "checkout"
+
+        def tree(changer_mode, dependent_mode):
+            shutil.rmtree(checkout, ignore_errors=True)
+            shutil.copytree(HERE / "fixture", checkout)
+            self.apply(checkout, changer["standin"][changer_mode])
+            self.apply(checkout, dependent["standin"][dependent_mode])
+
+        # The value `expired` needs cannot be derived from one-argument
+        # calls: the workaround returns the wrong names, or raises, on the
+        # oracle's own checks.
+        tree("workaround", "ignore")
+        probe = ("import datetime, json, sys\nsys.path.insert(0, sys.argv[1])\n"
+                 "from shelf.expiry import expired\n"
+                 "day = datetime.date(2026, 3, 4)\n"
+                 "for items, want in json.loads(sys.argv[2]):\n"
+                 "    dated = [(name, day + datetime.timedelta(days=offset)) for name, offset in items]\n"
+                 "    try:\n        got = expired(dated, day)\n"
+                 "    except Exception as error:\n        got = type(error).__name__\n"
+                 "    print(json.dumps(got == want))\n")
+        checks = [[arguments[0], want] for arguments, want in changer["checks"]]
+        done = subprocess.run([sys.executable, "-I", "-B", "-c", probe, str(checkout), json.dumps(checks)],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("true", done.stdout.split(), "a one-argument workaround still finds the expired items")
+        code, verdict = self.oracle(plan, checkout)
+        self.assertEqual((code, verdict["integrated_tests"]), (1, "failed"))
+        self.assertEqual(verdict["interface_change"], "change_not_made")
+        self.assertEqual(verdict["tasks"][0]["accepted"], False)
+        self.assertTrue(verdict["tasks"][0]["detail"].startswith("change_not_made"), verdict["tasks"][0])
+        # The dependent is not judged: nothing changed for it to follow.
+        self.assertEqual((verdict["tasks"][1]["completed"], verdict["tasks"][1]["accepted"]), (None, None))
+        self.assertTrue(verdict["tasks"][1]["detail"].startswith("change_not_made"), verdict["tasks"][1])
+        self.assertEqual(verdict["semantic_conflicts"], [])
+        # A default for the new parameter is not the change either.
+        tree("hedge", "ignore")
+        self.assertEqual(self.oracle(plan, checkout)[1]["interface_change"], "change_not_made")
+        # The change, made on the changer's branch, is recorded as made, and
+        # a dependent on the old form fails as before.
+        tree("follow", "ignore")
+        code, verdict = self.oracle(plan, checkout)
+        self.assertEqual(verdict["interface_change"], "made")
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, False])
+        # The changer's own branch decides, not the merged tree: a change
+        # that only another session's branch made is not the changer's.
+        unchanged = (HERE / "fixture" / "shelf" / "dates.py").read_text()
+        _, verdict = self.oracle(dict(plan, interface_source=unchanged), checkout)
+        self.assertEqual(verdict["interface_change"], "change_not_made")
+        _, verdict = self.oracle(dict(plan, interface_source=(checkout / tasks.DATES).read_text()), checkout)
+        self.assertEqual(verdict["interface_change"], "made")
+        # A branch that deleted the helper's file, broke it, or kept a
+        # wrapper that takes anything has not made the change.
+        for source in (None, "def days_left(day, today:\n", "def days_left(*args):\n    pass\n"):
+            _, verdict = self.oracle(dict(plan, interface_source=source), checkout)
+            self.assertEqual(verdict["interface_change"], "change_not_made", source)
+        # A required keyword-only parameter is the change; the last definition counts.
+        source = "def days_left(day):\n    pass\n\n\ndef days_left(day, *, today):\n    pass\n"
+        self.assertEqual(self.oracle(dict(plan, interface_source=source), checkout)[1]["interface_change"], "made")
+        # Other families have no interface change to make.
+        rename = {"family": "rename_vs_new_caller", "tasks": [dict(tasks.RENAME, role="rename")],
+                  "config_users": [], "integration": [{"session": 1, "merged": True}]}
+        tree("follow", "follow")
+        self.assertIsNone(self.oracle(rename, checkout)[1]["interface_change"])
 
     def test_every_claude_session_has_auto_memory_off_and_a_shared_directory_is_refused(self):
         """Claude Code keys auto memory by repository, so the worktrees of
@@ -1286,11 +1361,9 @@ class DryRun(Temporary):
         if family == "discovered_change":
             # The changer keeps old calls working with a default, and each
             # dependent counts the days itself: the tree works, and no task
-            # is what it asked for.
-            self.assertEqual(record["integrated_tests"], "failed")
-            self.assertEqual((record["merge_conflicts"], record["semantic_conflicts"]), ([], 0))
-            self.assertEqual(record["fixture_tests"], "passed")
-            self.assertEqual([t["accepted"] for t in record["tasks"]], [False] * n)
+            # is what it asked for. A default is not the change, so no
+            # dependent is judged.
+            self.check_change_not_made(record, n)
             return
         layout = self.layout(record)
         self.assertIn("alone", layout, "every N = 5 layout has a task without a partner")
@@ -1301,6 +1374,18 @@ class DryRun(Temporary):
         self.assertTrue(all("no other task" in t["detail"] for t, kind in zip(record["tasks"], layout)
                             if kind == "alone"))
 
+    def check_change_not_made(self, record, n):
+        """A discovered_change trial whose changer did not change the
+        interface: the changer fails, and no dependent is judged."""
+        self.assertEqual(record["interface_change"], "change_not_made")
+        self.assertEqual(record["integrated_tests"], "failed")
+        self.assertEqual((record["merge_conflicts"], record["semantic_conflicts"]), ([], 0))
+        self.assertEqual(record["fixture_tests"], "passed")
+        self.assertEqual(record["tasks_accepted"], 0)
+        roles = [t["role"] for t in record["tasks"]]
+        self.assertEqual([t["accepted"] for t in record["tasks"]], [False if r == "changer" else None for r in roles])
+        self.assertTrue(all(t["detail"].startswith("change_not_made") for t in record["tasks"]), record["tasks"])
+
     def check_arm(self, arm, sizes, modes=("ignore", "follow")):
         for family in tasks.FAMILIES:
             # Peer task text informs the awareness arm, except where no task
@@ -1310,6 +1395,9 @@ class DryRun(Temporary):
                 for mode in modes:
                     with self.subTest(family=family, n=n, mode=mode):
                         record = self.run_driver(arm, family, n, mode)
+                        if mode != "hedge":
+                            self.assertEqual(record["interface_change"],
+                                             "made" if family == "discovered_change" else "not_applicable")
                         if family == "rename_vs_new_caller":
                             triggered = [t["role"] == "new_caller" for t in record["tasks"]]
                         elif family == "discovered_change":
@@ -1363,6 +1451,17 @@ class DryRun(Temporary):
                 with self.subTest(family=family, arm=arm):
                     record = self.run_driver(arm, family, 5, "hedge")
                     self.check_hedged(record, family, 5)
+
+    def test_dry_run_a_changer_that_works_around_the_change_is_change_not_made_in_every_arm(self):
+        """Issue #218: a changer that finishes without changing `days_left`
+        fails its own task, and the trial is reported as change_not_made,
+        not as a failure of every dependent."""
+        for arm in driver.ARMS:
+            with self.subTest(arm=arm):
+                record = self.run_driver(arm, "discovered_change", 5, "workaround")
+                self.check_change_not_made(record, 5)
+                changer = next(t for t in record["tasks"] if t["role"] == "changer")
+                self.assertIn("days_left", changer["detail"])
 
     def test_dry_run_with_stagger_tells_every_dependent_before_its_first_write(self):
         """Issue #194's third criterion: the changing session starts first,

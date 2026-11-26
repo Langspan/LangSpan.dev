@@ -9,6 +9,9 @@ task defines (see tasks.py) in the current directory:
 - ``hedge`` makes the edit that holds up whatever peers do, without
   knowing: for a contradiction task, its value set locally and the shared
   default kept, as the pilot's sessions did.
+- ``workaround`` makes a changer finish without the interface change, as
+  the third pilot's did by subtracting two one-argument calls. Every other
+  task makes the same edit as ``ignore``.
 - ``follow`` reads the information its arm gives about peers: in the
   awareness-only arm, the peer task text in its prompt; in the LangSpan arm,
   the briefings LangSpan's hooks return and ``langspan brief``. When that
@@ -249,8 +252,8 @@ def apply_edits(session, ops):
 
 
 def main(argv):
-    if len(argv) != 3 or argv[2] not in ("ignore", "follow", "hedge"):
-        print("usage: standin_agent.py PLAN SESSION ignore|follow|hedge", file=sys.stderr)
+    if len(argv) != 3 or argv[2] not in ("ignore", "follow", "hedge", "workaround"):
+        print("usage: standin_agent.py PLAN SESSION ignore|follow|hedge|workaround", file=sys.stderr)
         return 2
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, stop_on_signal)
@@ -290,7 +293,12 @@ def main(argv):
         for name in task.get("reads", []):
             session.read(Path(name))
         informed = mode == "follow" and told()
-        edits = "follow" if informed else ("hedge" if mode == "hedge" else "ignore")
+        if informed:
+            edits = "follow"
+        elif mode == "hedge" or (mode == "workaround" and "workaround" in task["standin"]):
+            edits = mode
+        else:
+            edits = "ignore"
         edited = apply_edits(session, task["standin"][edits])
         if mode == "follow" and sharing:
             if task.get("leads"):
