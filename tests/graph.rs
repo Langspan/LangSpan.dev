@@ -1934,3 +1934,36 @@ fn an_import_from_a_fifo_is_refused_without_blocking_the_indexer() {
     let (code, text) = w.cli(&["graph", "import", "app", "--in", file.to_str().unwrap()]);
     assert_eq!(code, 0, "{text}");
 }
+
+/// Review finding 4704176293: a TypeScript arrow-function variable whose
+/// name is longer than an import accepts is left out when indexed, so an
+/// export of that file imports in full instead of being skipped as over
+/// the limits with its other symbols.
+#[test]
+fn an_export_with_an_over_long_arrow_function_name_imports_its_other_symbols() {
+    let long = "a".repeat(129);
+    let source = format!(
+        "export const {long} = (x: number) => x;\nexport const short = (x: number) => x;\nexport function plain(): void {{}}\n"
+    );
+    let w = World::with_files(Vec::new(), &[("src/app.ts", source.as_str())]);
+    w.wait_for("the first index", "symbol", "plain", |outcome| {
+        outcome["coverage"]["current_files"] == 1
+    });
+    let file = w.base.join("index.jsonl");
+    let (code, text) = w.cli(&["graph", "export", "app", "--out", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        !fs::read_to_string(&file).unwrap().contains(&long),
+        "the over-long name is not exported"
+    );
+
+    let second = Second::start(&w, Some(0));
+    let imported = second.import(&file, true);
+    assert_eq!(
+        (imported["loaded"].clone(), imported["over_limits"].clone()),
+        (json!(1), json!(0)),
+        "{imported:#}"
+    );
+    let short = second.outcome(&["graph", "symbol", "app", "short"]);
+    assert_eq!(short["symbols"][0]["path"], "src/app.ts", "{short:#}");
+}

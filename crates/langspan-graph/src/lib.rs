@@ -623,6 +623,11 @@ fn visit(
         )
     {
         let name_text = text(name, source);
+        // The same bound as every other definition, so an export of this
+        // file stays importable.
+        if name_text.is_empty() || name_text.len() > NAME_BYTES {
+            return Some(name.id());
+        }
         let end = value
             .child_by_field_name("body")
             .map(|body| body.start_byte())
