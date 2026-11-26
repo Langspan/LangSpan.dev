@@ -152,6 +152,14 @@ impl Fixture {
             }),
         )
     }
+    /// `messages status WORKSPACE MESSAGE --json`: the status it reports.
+    fn status(&self, message: &str) -> Value {
+        let (code, text) = self.cli(&["messages", "status", "work", message, "--json"]);
+        assert_eq!(code, 0, "{text}");
+        let reply: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(reply["outcome"]["type"], "message_status", "{reply}");
+        reply["outcome"]["status"].clone()
+    }
     fn send(&self, args: &[&str]) -> String {
         let (code, text) = self.cli(args);
         assert_eq!(code, 0, "{args:?}: {text}");
@@ -176,6 +184,7 @@ fn lifecycle(name: &str, session: &str, cwd: &Path) -> Value {
     });
     match name {
         "SessionStart" => event["source"] = json!("startup"),
+        "SessionEnd" => event["reason"] = json!("other"),
         _ => event["prompt"] = json!("continue"),
     }
     event
@@ -836,4 +845,336 @@ fn a_codex_session_that_received_a_withdrawn_message_is_told_at_its_next_prompt(
         told.context
     );
     assert!(!mentions(&f.prompt("codex", BOB), "withdrew"), "once");
+}
+
+/// The status of each recipient of a status reply, by session ID.
+fn recipient_statuses(status: &Value) -> Vec<(String, String)> {
+    status["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|recipient| {
+            (
+                recipient["session_id"].as_str().unwrap().to_owned(),
+                recipient["status"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_message_to_one_session_is_pending_until_its_prompt_and_a_terminal_brief_does_not_deliver_it() {
+    let mut f = Fixture::new();
+    f.start_session("claude-code", ALICE);
+    let alice = format!("claude-code.{ALICE}");
+    f.send(&[
+        "message",
+        "work",
+        "stop editing a.txt",
+        "a.txt",
+        "--to",
+        &alice,
+        "--request-id",
+        "m1",
+    ]);
+    let pending = f.status("m1");
+    assert_eq!(pending["message_id"], "m1");
+    assert_eq!(pending["from"], Value::Null, "from the owner");
+    assert_eq!(
+        pending["to"],
+        json!({"kind": "session", "session_id": alice})
+    );
+    assert_eq!(pending["state"], "pending", "{pending}");
+    assert!(pending["sent_age_ms"].as_u64().is_some(), "{pending}");
+    assert_eq!(
+        pending["recipients"],
+        json!([{"session_id": alice, "status": "pending", "age_ms": null, "via": null}])
+    );
+    assert!(
+        pending["delivered_means"]
+            .as_str()
+            .unwrap()
+            .contains("not that it acted on it"),
+        "{pending}"
+    );
+
+    // A look from the terminal is not a delivery.
+    let (code, peek) = f.cli(&["brief", &alice, "--request-id", "peek-1"]);
+    assert_eq!(code, 0);
+    assert!(peek.contains("stop editing a.txt"), "{peek}");
+    assert_eq!(f.status("m1")["recipients"][0]["status"], "pending");
+    assert_eq!(f.status("last")["message_id"], "m1", "the owner's newest");
+
+    assert!(mentions(
+        &f.prompt("claude-code", ALICE),
+        "stop editing a.txt"
+    ));
+    let delivered = f.status("m1");
+    assert_eq!(delivered["state"], "done", "{delivered}");
+    let recipient = &delivered["recipients"][0];
+    assert_eq!(recipient["session_id"], alice.as_str());
+    assert_eq!(recipient["status"], "delivered");
+    assert_eq!(recipient["via"], "briefing");
+    assert!(recipient["age_ms"].as_u64().is_some(), "{recipient}");
+    assert_eq!(delivered.get("partial"), None, "{delivered}");
+
+    let (code, human) = f.cli(&["messages", "status", "work", "m1"]);
+    assert_eq!(code, 0, "{human}");
+    assert!(
+        human.starts_with(&format!("m1 from the owner to {alice}, sent ")),
+        "{human}"
+    );
+    assert!(
+        human.contains(&format!("- {alice}  delivered ")) && human.contains("(briefing)"),
+        "{human}"
+    );
+    assert!(
+        human.contains("Delivered means placed in the session's context, not that it acted on it."),
+        "{human}"
+    );
+
+    // After a restart the daemon's clock is not compared with the earlier
+    // one: the delivery and its path stay, the ages are unknown.
+    if let Some(mut child) = f.child.take() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    f.start();
+    let restarted = f.status("m1");
+    assert_eq!(restarted["state"], "done", "{restarted}");
+    assert_eq!(restarted["sent_age_ms"], Value::Null, "{restarted}");
+    assert_eq!(
+        restarted["recipients"],
+        json!([{"session_id": alice, "status": "delivered", "age_ms": null, "via": "briefing"}])
+    );
+    let (_, human) = f.cli(&["messages", "status", "work", "m1"]);
+    assert!(
+        human.contains("sent before the daemon last started")
+            && human.contains("delivered (briefing)"),
+        "{human}"
+    );
+
+    // Unknown IDs and workspaces are explicit errors.
+    let (code, unknown) = f.cli(&["messages", "status", "work", "m-404"]);
+    assert_eq!(code, 1);
+    assert!(unknown.contains("unknown_message"), "{unknown}");
+    let (code, unknown) = f.cli(&["messages", "status", "nowhere", "m1"]);
+    assert_eq!(code, 1);
+    assert!(unknown.contains("unknown_workspace"), "{unknown}");
+}
+
+#[test]
+fn a_message_to_everyone_lists_each_session_and_an_ended_one_as_ended() {
+    let f = Fixture::new();
+    f.start_session("claude-code", ALICE);
+    f.start_session("codex", BOB);
+    f.start_session("codex", CAROL);
+    let alice = format!("claude-code.{ALICE}");
+    let bob = format!("codex.{BOB}");
+    let carol = format!("codex.{CAROL}");
+    f.send(&[
+        "message",
+        "work",
+        "Rebasing main at noon",
+        "--from",
+        &alice,
+        "--request-id",
+        "all-1",
+    ]);
+    let (code, none) = f.cli(&["messages", "status", "work", "last"]);
+    assert_eq!(code, 1, "the owner sent none: {none}");
+    assert!(none.contains("unknown_message"), "{none}");
+    let (code, last) = f.cli(&[
+        "messages", "status", "work", "last", "--from", &alice, "--json",
+    ]);
+    assert_eq!(code, 0, "{last}");
+    assert!(last.contains(r#""message_id":"all-1""#), "{last}");
+    let sent = f.status("all-1");
+    assert_eq!(sent["state"], "pending");
+    assert_eq!(
+        recipient_statuses(&sent),
+        [
+            (bob.clone(), "pending".to_owned()),
+            (carol.clone(), "pending".to_owned())
+        ],
+        "every current session but its sender: {sent}"
+    );
+
+    assert!(mentions(&f.prompt("codex", BOB), "Rebasing main"));
+    f.run("codex", &lifecycle("SessionEnd", CAROL, &f.root()));
+    let status = f.status("all-1");
+    assert_eq!(status["state"], "pending", "{status}");
+    assert_eq!(
+        recipient_statuses(&status),
+        [
+            (bob.clone(), "delivered".to_owned()),
+            (carol.clone(), "ended".to_owned())
+        ],
+        "{status}"
+    );
+    assert_eq!(status["recipients"][0]["via"], "briefing");
+    assert_eq!(status["recipients"][1]["via"], Value::Null);
+
+    // A session acknowledging a message from the CLI is delivered `via: "ack"`.
+    f.send(&[
+        "message",
+        "work",
+        "hi",
+        "--to",
+        &bob,
+        "--request-id",
+        "direct-1",
+    ]);
+    f.send(&["ack", &bob, "direct-1", "--request-id", "a1"]);
+    let acked = f.status("direct-1");
+    assert_eq!(acked["state"], "done", "{acked}");
+    assert_eq!(acked["recipients"][0]["status"], "delivered");
+    assert_eq!(acked["recipients"][0]["via"], "ack");
+}
+
+#[test]
+fn a_message_delivered_mid_turn_says_so() {
+    let f = Fixture::new();
+    f.prompt("claude-code", ALICE);
+    let alice = format!("claude-code.{ALICE}");
+    f.send(&[
+        "message",
+        "work",
+        "Stop before touching b.txt",
+        "--to",
+        &alice,
+        "--request-id",
+        "mid-1",
+    ]);
+    f.write(ALICE, "w1", "PreToolUse");
+    assert!(mentions(
+        &f.write(ALICE, "w1", "PostToolUse"),
+        "Stop before"
+    ));
+    let status = f.status("mid-1");
+    assert_eq!(status["recipients"][0]["status"], "delivered");
+    assert_eq!(status["recipients"][0]["via"], "mid_turn");
+}
+
+#[test]
+fn a_handoff_is_pending_until_a_session_takes_it() {
+    let f = Fixture::new();
+    f.start_session("claude-code", ALICE);
+    let alice = format!("claude-code.{ALICE}");
+    f.send(&[
+        "handoff",
+        &alice,
+        "pick up the parser",
+        "--request-id",
+        "h1",
+    ]);
+    let waiting = f.status("h1");
+    assert_eq!(waiting["state"], "pending");
+    assert_eq!(waiting["recipients"], json!([]), "no session has taken it");
+    f.start_session("codex", BOB);
+    let taken = f.status("h1");
+    assert_eq!(taken["state"], "done");
+    assert_eq!(
+        recipient_statuses(&taken),
+        [(format!("codex.{BOB}"), "delivered".to_owned())]
+    );
+}
+
+#[test]
+fn a_message_pushed_out_by_newer_ones_is_dropped_and_a_withdrawn_one_retracted() {
+    let f = Fixture::new();
+    f.start_session("claude-code", ALICE);
+    f.start_session("codex", BOB);
+    let alice = format!("claude-code.{ALICE}");
+    // Given to both sessions, so done before the rest are sent.
+    f.send(&["message", "work", "noon rebase", "--request-id", "e-done"]);
+    assert!(mentions(&f.prompt("claude-code", ALICE), "noon rebase"));
+    assert!(mentions(&f.prompt("codex", BOB), "noon rebase"));
+    assert_eq!(f.status("e-done")["state"], "done");
+    // Then one for everyone that no session takes before 64 newer ones push
+    // it out of the held list.
+    f.send(&["message", "work", "freeze", "--request-id", "e-drop"]);
+    for n in 0..64 {
+        let id = format!("m{n}");
+        f.send(&[
+            "message",
+            "work",
+            "hello",
+            "--to",
+            &alice,
+            "--request-id",
+            &id,
+        ]);
+    }
+    let dropped = f.status("e-drop");
+    assert_eq!(dropped["state"], "dropped", "{dropped}");
+    assert_eq!(
+        recipient_statuses(&dropped),
+        [
+            (alice.clone(), "pending".to_owned()),
+            (format!("codex.{BOB}"), "pending".to_owned())
+        ],
+        "never given it: {dropped}"
+    );
+    // Older than every message the state keeps, and still told apart.
+    let done = f.status("e-done");
+    assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(done.get("partial"), None, "{done}");
+    assert_eq!(recipient_statuses(&done).len(), 2, "{done}");
+    // A message to one session pushed out unread is dropped too.
+    f.send(&[
+        "message",
+        "work",
+        "hello",
+        "--to",
+        &alice,
+        "--request-id",
+        "m64",
+    ]);
+    assert_eq!(f.status("m0")["state"], "dropped");
+    assert_eq!(f.status("m0")["recipients"][0]["status"], "pending");
+    assert_eq!(f.status("m1")["state"], "pending");
+
+    f.send(&["messages", "retract", "work", "m2", "--request-id", "r1"]);
+    assert_eq!(f.status("m2")["state"], "retracted");
+}
+
+#[test]
+fn a_held_message_whose_sent_event_was_removed_is_answered_in_part() {
+    let f = Fixture::new();
+    f.start_session("claude-code", ALICE);
+    let alice = format!("claude-code.{ALICE}");
+    f.send(&[
+        "message",
+        "work",
+        "hello",
+        "--to",
+        &alice,
+        "--request-id",
+        "m-old",
+    ]);
+    let database = rusqlite::Connection::open(f.state_dir().join("state.sqlite3")).unwrap();
+    database.busy_timeout(Duration::from_secs(5)).unwrap();
+    let cut: i64 = database
+        .query_row(
+            r#"SELECT seq FROM events WHERE json_extract(event_json, '$.type') = 'message_sent'
+               AND json_extract(event_json, '$.message.message_id') = 'm-old'"#,
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    database
+        .execute("DELETE FROM events WHERE seq <= ?1", [cut])
+        .unwrap();
+    drop(database);
+    // The daemon's state still holds the message; its sent time is gone.
+    let status = f.status("m-old");
+    assert_eq!(status["state"], "pending", "{status}");
+    assert_eq!(status["partial"], true, "{status}");
+    assert_eq!(status["sent_age_ms"], Value::Null);
+    assert_eq!(status["recipients"][0]["status"], "pending");
+    // An ID neither held nor in the log is no longer kept.
+    let (code, gone) = f.cli(&["messages", "status", "work", "m-never"]);
+    assert_eq!(code, 1);
+    assert!(gone.contains("message_not_kept"), "{gone}");
 }

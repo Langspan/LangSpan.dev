@@ -1456,9 +1456,10 @@ fn hosts_reports_a_host_added_after_install_and_changes_nothing() {
     let home = Home::new();
     home.claude_and_codex();
     home.ok(&["install", "--hosts", "claude-code", "--apply"]);
-    // Installed afterwards: Cursor, and a Gemini CLI directory.
+    // Installed afterwards: Cursor, and Gemini CLI and Antigravity directories.
     fs::create_dir(home.home().join(".cursor")).unwrap();
     home.write(".gemini/settings.json", "{}\n");
+    home.write(".gemini/config/hooks.json", "{}\n");
     let before = contents(&home.home());
 
     let report: Value = serde_json::from_str(&home.ok(&["hosts", "--json"])).unwrap();
@@ -1483,6 +1484,18 @@ fn hosts_reports_a_host_added_after_install_and_changes_nothing() {
     assert_eq!(gemini["present"], true, "{report}");
     assert_eq!(gemini["user_install"], "none", "{report}");
     assert_eq!(gemini["next_step"], Value::Null, "{report}");
+    // So is Antigravity, whose files are under `~/.gemini/config`.
+    let antigravity = host(&report, "antigravity");
+    assert_eq!(antigravity["present"], true, "{report}");
+    assert_eq!(antigravity["user_install"], "none", "{report}");
+    assert_eq!(
+        antigravity["config_dir"],
+        home.home()
+            .join(".gemini/config")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(antigravity["next_step"], Value::Null, "{report}");
 
     // An install for another state directory talks to another coordinator.
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
@@ -1545,6 +1558,7 @@ fn the_daemon_notes_an_uninstalled_host_once_until_it_is_installed() {
     home.ok(&["install", "--hosts", "claude-code,codex", "--apply"]);
     fs::create_dir(home.home().join(".cursor")).unwrap();
     home.write(".gemini/settings.json", "{}\n");
+    home.write(".gemini/config/hooks.json", "{}\n");
     fs::create_dir(home.state_dir()).unwrap();
     fs::set_permissions(home.state_dir(), fs::Permissions::from_mode(0o700)).unwrap();
     let config = home.state_dir().join("config.json");
@@ -1576,7 +1590,8 @@ fn the_daemon_notes_an_uninstalled_host_once_until_it_is_installed() {
         }
     };
     let state = held(true);
-    // Gemini CLI is never proposed unless named; installed hosts are covered.
+    // Gemini CLI and Antigravity are never proposed unless named; installed
+    // hosts are covered.
     assert_eq!(
         state.uninstalled_hosts.keys().collect::<Vec<_>>(),
         ["cursor"]
