@@ -1244,10 +1244,9 @@ mod unix {
                         next_liveness = Instant::now() + Duration::from_secs(1);
                     }
                     // Facts already committed, whoever asked for them.
-                    for event in store.take_tapped() {
-                        if let Some(notice) = notify::notice_for(store.state(), &event) {
-                            raise(notice);
-                        }
+                    let tapped = store.take_tapped();
+                    for notice in notify::notices_for(store.state(), &tapped) {
+                        raise(notice);
                     }
                     if !scan_pending && (!urgent.is_empty() || Instant::now() >= next_scan) {
                         let workspace = std::iter::from_fn(|| urgent.pop_front())

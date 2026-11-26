@@ -1482,13 +1482,38 @@ The result is an ordinary check record of that tree (`check status` shows it,
 briefing point (a completed tool call, the next batch, or the next prompt):
 passed, failed with the exit code, stopped at its time limit, or inconclusive,
 with the tree ID and, unless it passed, up to 20 of the last output lines,
-redacted and labelled as the command's own text. Failures are not classified
-as new or already failing, but when the output is that of `cargo test`,
-`go test -v` or `pytest`, the failing tests it named are listed. The command runs as you, with
+redacted and labelled as the command's own text. When the output is that of
+`cargo test`, `go test -v` or `pytest`, the failing tests it named are listed,
+and compared with the session's baseline when it has one (below). The command runs as you, with
 the daemon's environment, outside the agent host's sandbox and permission
 prompts: code an agent writes runs without the host asking. A command that
 looks like it holds a secret is refused; pass secrets through the environment.
 See [ADR 0030](adr/0030-automatic-checks-after-write-batches.md).
+
+#### Which tests a write broke
+
+A session's baseline is the newest result of the same check (name and
+whole argument list) with named tests whose tree was taken before the session's
+first write: a `check run` you made before the agents started, or an
+automatic run after another session's writes. A run during which any write
+was recorded is no baseline. The session's results are then
+compared with it, test by test:
+
+```text
+LangSpan: the automatic check tests failed (exit 101) after your writes, on working tree 4b1c9e2… (took 41.0 s; recorded as check 7f3a…).
+2 new failures: parser::rejects_empty, parser::keeps_order.
+1 already failing before your writes: net::times_out.
+1 fixed since before your writes: old::was_broken.
+This tree also holds writes by codex session bob since the check before your writes.
+```
+
+A test the baseline did not name, or skipped, is listed as failing and not
+named by the check before. The writers are the other sessions whose writes
+were recorded between the two trees. With no baseline (run `langspan check
+run WORKSPACE --name NAME -- COMMAND...` with the automatic check's command
+before the agents start, so every session has one), or output no parser
+recognises, the result is reported as before. The comparison never changes
+the record: `check status` and `land` see the same failure.
 
 #### The wider check after an interface change
 

@@ -6,6 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+mod classes;
 mod count;
 mod dashboard;
 mod flaky;
@@ -17,6 +18,9 @@ mod status;
 mod status_line;
 mod today;
 mod workspaces;
+pub use classes::{
+    FailureClass, KeptTests, MAX_FIXED_NAMED, MAX_WRITE_RUNS, MAX_WRITERS_NAMED, WriteRun,
+};
 pub use count::{
     COUNT_DAYS, COUNT_KINDS, COUNT_REFUSALS, COUNT_WORKSPACES, CountQuery, RefusalCount,
     count_refusals, validate_count_days,
@@ -1112,13 +1116,29 @@ pub struct CheckNotice {
     /// to flip on unchanged code. Empty when no test was named.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<TestFailure>,
+    /// Its output named more failing tests than `failures` holds.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub more_failures: bool,
+    /// The record its failures were compared with: the session's baseline
+    /// (issue #69). `None` when nothing was compared, and then no failure
+    /// has a class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_check_id: Option<String>,
+    /// Tests that failed in the baseline and pass now, at most
+    /// `MAX_FIXED_NAMED`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixed: Vec<String>,
+    /// Other sessions that wrote between the baseline's tree and this one,
+    /// at most `MAX_WRITERS_NAMED`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writers: Vec<String>,
     /// A wider check's grade: `kept` when it passed, `broke` when it failed,
     /// absent when it was inconclusive or is no wider check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface_grade: Option<InterfaceGrade>,
     /// The interface change a wider check ran for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interface: Option<InterfaceCause>,
+    pub interface: Option<Box<InterfaceCause>>,
     /// See [`CheckReport::index_incomplete`].
     #[serde(default, skip_serializing_if = "is_false")]
     pub index_incomplete: bool,
@@ -2328,6 +2348,21 @@ pub struct State {
     /// can read it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub writes: BTreeMap<String, u64>,
+    /// Per workspace, then check ID: the per-test results of the records it
+    /// holds, for comparing a later run with them (issue #69). Derived on
+    /// replay; not part of the status reply.
+    #[serde(skip)]
+    pub kept_tests: BTreeMap<String, BTreeMap<String, KeptTests>>,
+    /// Per session, the workspace's write count just before the session's
+    /// first write since it registered. Derived on replay; not part of the
+    /// status reply.
+    #[serde(skip)]
+    pub first_writes: BTreeMap<String, u64>,
+    /// Per workspace, its sessions' runs of consecutive writes, oldest
+    /// first, at most `MAX_WRITE_RUNS`. Derived on replay; not part of the
+    /// status reply.
+    #[serde(skip)]
+    pub write_runs: BTreeMap<String, Vec<WriteRun>>,
 }
 
 /// Checkout changes kept per workspace.
@@ -2608,6 +2643,10 @@ pub enum Event {
     },
     CheckRecorded {
         check: CheckRecord,
+        /// The per-test results of a working-tree record, kept to compare a
+        /// later run with (issue #69). Absent from older logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tests: Option<KeptTests>,
     },
     AutoCheckEnabled {
         check: AutoCheck,
@@ -5598,8 +5637,27 @@ fn decide_checked(
                 changed_since: false,
             };
             validate_check(state, &check)?;
+            // Kept with the record so that a later run can be compared with
+            // it; validated with the test results below.
+            let kept = match (tests, *writes_before, command_id) {
+                (Some(results), Some(writes_before), Some(command_id)) => Some(KeptTests {
+                    results: results.clone(),
+                    writes_before,
+                    command_id: command_id.clone(),
+                }),
+                _ => None,
+            };
+            // The write generation the run took before its tree. A write
+            // recorded since, even one undone before the run (or its rerun)
+            // ended, means its results are not of unchanged code: they are
+            // checked but learned from by neither this record nor a later
+            // one, and are no baseline (a write counted between the count
+            // and the tree would be in the tree it tested).
+            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
+            let unchanged = *writes_before == Some(writes);
             let mut events = vec![Event::CheckRecorded {
                 check: check.clone(),
+                tests: kept.clone().filter(|_| unchanged),
             }];
             // What this record teaches about tests that flip, learned on a
             // copy so that its notice is labelled with it.
@@ -5630,13 +5688,6 @@ fn decide_checked(
                     ));
                 }
             };
-            // The write generation the run took before its tree. A write
-            // recorded since, even one undone before the run (or its rerun)
-            // ended, means its results are not of unchanged code: they are
-            // checked but learned from by neither this record nor a later
-            // one.
-            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
-            let unchanged = *writes_before == Some(writes);
             let runs = tests
                 .iter()
                 .map(|results| (results, false))
@@ -5670,17 +5721,46 @@ fn decide_checked(
                     at_ms: now_ms,
                 });
             }
-            let failures = tests
-                .iter()
-                .flat_map(|results| &results.failed)
-                .map(|test| TestFailure {
-                    test: test.clone(),
-                    flaky: learning.label(name, test),
-                })
-                .collect();
+            let notice = |comparison: Option<&classes::Comparison>| CheckNotice {
+                check_id: check.check_id.clone(),
+                name: check.name.clone(),
+                tree_oid: check.tree_oid.clone(),
+                result: check.result.clone(),
+                duration_ms: check.duration_ms,
+                timed_out_s: report.as_ref().and_then(|report| report.timed_out_s),
+                tail: report
+                    .as_ref()
+                    .map(|report| report.tail.clone())
+                    .unwrap_or_default(),
+                failures: tests
+                    .iter()
+                    .flat_map(|results| &results.failed)
+                    .enumerate()
+                    .map(|(at, test)| TestFailure {
+                        test: test.clone(),
+                        flaky: learning.label(name, test),
+                        class: comparison
+                            .and_then(|comparison| comparison.classes.get(at).copied()),
+                    })
+                    .collect(),
+                more_failures: tests.as_ref().is_some_and(|results| results.more_failed),
+                baseline_check_id: comparison
+                    .map(|comparison| comparison.baseline_check_id.clone()),
+                fixed: comparison.map_or_else(Vec::new, |comparison| comparison.fixed.clone()),
+                writers: comparison.map_or_else(Vec::new, |comparison| comparison.writers.clone()),
+                interface_grade: interface_grade(
+                    report
+                        .as_ref()
+                        .and_then(|report| report.interface.as_deref()),
+                    &check.result,
+                ),
+                interface: report.as_ref().and_then(|report| report.interface.clone()),
+                index_incomplete: report
+                    .as_ref()
+                    .is_some_and(|report| report.index_incomplete),
+            };
             if let Some(report) = report {
                 let mut session_ids = report.session_ids.clone();
-                let interface_grade = interface_grade(report.interface.as_deref(), &check.result);
                 validate_dependent_paths(report)?;
                 if let Some(cause) = &report.interface {
                     validate_interface_cause(cause)?;
@@ -5698,24 +5778,27 @@ fn decide_checked(
                         }
                     }
                 }
-                let reported = Event::CheckReported {
-                    session_ids,
-                    notice: CheckNotice {
-                        check_id: check.check_id.clone(),
-                        name: check.name.clone(),
-                        tree_oid: check.tree_oid.clone(),
-                        result: check.result.clone(),
-                        duration_ms: check.duration_ms,
-                        timed_out_s: report.timed_out_s,
-                        tail: report.tail.clone(),
-                        failures,
-                        interface_grade,
-                        interface: report.interface.as_deref().cloned(),
-                        index_incomplete: report.index_incomplete,
+                validate_check_report(
+                    state,
+                    &check.workspace_id,
+                    &Event::CheckReported {
+                        session_ids: session_ids.clone(),
+                        notice: notice(None),
                     },
-                };
-                validate_check_report(state, &check.workspace_id, &reported)?;
-                events.push(reported);
+                )?;
+                // Each session's failures are compared with its own baseline:
+                // one report per group of sessions told the same.
+                let groups = classes::group(&session_ids, |session| {
+                    classes::compare(state, workspace_id, name, kept.as_ref()?, session)
+                });
+                for (comparison, session_ids) in groups {
+                    let reported = Event::CheckReported {
+                        session_ids,
+                        notice: notice(comparison.as_ref()),
+                    };
+                    validate_check_report(state, &check.workspace_id, &reported)?;
+                    events.push(reported);
+                }
             }
             Ok(Decision {
                 events,
@@ -8844,11 +8927,41 @@ fn validate_check_report(
     }
     validate_request_id(&notice.check_id)?;
     validate_oid(&notice.tree_oid)?;
+    // A comparison (issue #69) is whole: a baseline, and a class for every
+    // failure, or neither.
+    let compared = notice.baseline_check_id.is_some();
+    if let Some(baseline) = &notice.baseline_check_id {
+        validate_request_id(baseline)?;
+    }
+    let names_ok = notice.fixed.len() <= MAX_FIXED_NAMED
+        && notice.fixed.iter().all(|test| {
+            !test.is_empty()
+                && test.len() <= MAX_TEST_NAME_BYTES
+                && !test.chars().any(char::is_control)
+        });
+    if !names_ok
+        || notice.writers.len() > MAX_WRITERS_NAMED
+        || (!compared && !(notice.fixed.is_empty() && notice.writers.is_empty()))
+        || notice
+            .failures
+            .iter()
+            .any(|failure| failure.class.is_some() != compared)
+    {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A check report compared with a baseline classes every failure and names at most {MAX_FIXED_NAMED} fixed tests and {MAX_WRITERS_NAMED} writers; one not compared has none of them"
+            ),
+        ));
+    }
+    for writer in &notice.writers {
+        validate_id(writer, "session ID")?;
+    }
     if let Some(cause) = &notice.interface {
         validate_interface_cause(cause)?;
     }
     // A grade is the wider check's result, and only a wider check has one.
-    if notice.interface_grade != interface_grade(notice.interface.as_ref(), &notice.result) {
+    if notice.interface_grade != interface_grade(notice.interface.as_deref(), &notice.result) {
         return Err(error(
             "invalid_check_report",
             "An interface grade is kept for a passed wider check and broke for a failed one",
@@ -8872,9 +8985,8 @@ fn interface_grade(
 /// A write was recorded in the workspace: its write generation moves on, so
 /// no check result is compared with one from before it to learn which tests
 /// flip.
-fn wrote_in(state: &mut State, workspace_id: &str) {
-    let writes = state.writes.entry(workspace_id.to_owned()).or_default();
-    *writes = writes.saturating_add(1);
+fn wrote_in(state: &mut State, workspace_id: &str, session_id: Option<&str>) {
+    classes::wrote(state, workspace_id, session_id);
 }
 
 fn validate_forget_flaky(name: Option<&str>, test: &str) -> Result<(), CoreError> {
@@ -9645,6 +9757,15 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         }
         Event::SessionRegistered { session } => {
             validate_session_registration(state, session)?;
+            // A new registration, or one in another workspace, has written
+            // nothing yet; a daemon restart's registers again in place.
+            if state
+                .sessions
+                .get(&session.session_id)
+                .is_none_or(|old| old.workspace_id != session.workspace_id)
+            {
+                state.first_writes.remove(&session.session_id);
+            }
             state
                 .sessions
                 .insert(session.session_id.clone(), session.clone());
@@ -9761,7 +9882,11 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             // decisions rather than rejecting an existing event log.
             if observation.result == ToolResult::Succeeded {
                 if !observation.paths.is_empty() {
-                    wrote_in(state, &observation.workspace_id);
+                    wrote_in(
+                        state,
+                        &observation.workspace_id,
+                        Some(&observation.session_id),
+                    );
                 }
                 let activity = activity_mut(state, &observation.session_id);
                 activity.wrote_since_boundary |= !observation.paths.is_empty();
@@ -10344,14 +10469,39 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 notices.truncate(MAX_NOTICES);
             }
         }
-        Event::CheckRecorded { check } => {
+        Event::CheckRecorded { check, tests } => {
             validate_check(state, check)?;
+            if let Some(kept) = tests {
+                let passed = match check.result {
+                    CheckResult::Passed {} => true,
+                    CheckResult::Failed { .. } => false,
+                    CheckResult::Inconclusive {} => {
+                        return Err(error(
+                            "invalid_event",
+                            "An inconclusive record has no test results",
+                        ));
+                    }
+                };
+                if !check.inputs.is_empty() || !flaky::is_command_id(&kept.command_id) {
+                    return Err(error(
+                        "invalid_event",
+                        "Test results belong to a working-tree record and name their command's identity",
+                    ));
+                }
+                flaky::validate_test_results(&kept.results, passed)?;
+            }
             let records = state.checks.entry(check.workspace_id.clone()).or_default();
             // One record per name and tree: a rerun replaces the earlier result.
             records
                 .retain(|record| !(record.name == check.name && record.tree_oid == check.tree_oid));
             records.insert(0, check.clone());
             records.truncate(MAX_CHECKS);
+            // Kept only when no write was counted after the run took its
+            // count; an earlier version also stored results whose count had
+            // moved, and on replay they are no baseline either.
+            let writes = state.writes.get(&check.workspace_id).copied().unwrap_or(0);
+            let kept = tests.as_ref().filter(|tests| tests.writes_before == writes);
+            classes::keep(state, &check.workspace_id, &check.check_id, kept);
         }
         Event::AutoCheckEnabled { check } => {
             validate_auto_check(state, check)?;
@@ -10682,7 +10832,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 .as_ref()
                 .is_some_and(|before| before != &observation.after);
             if changed {
-                wrote_in(state, &observation.workspace_id);
+                wrote_in(state, &observation.workspace_id, None);
             }
             if changed && let Some(records) = state.checks.get_mut(&observation.workspace_id) {
                 for record in records.iter_mut().filter(|record| record.inputs.is_empty()) {
