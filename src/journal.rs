@@ -1022,6 +1022,81 @@ pub fn forget(
     }
 }
 
+/// The sessions that wrote `entries`, with the paths each wrote.
+pub fn writers(entries: &[Entry]) -> BTreeMap<&str, BTreeSet<&str>> {
+    let mut writers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for entry in entries {
+        writers
+            .entry(entry.session_id.as_str())
+            .or_default()
+            .insert(entry.path.as_str());
+    }
+    writers
+}
+
+/// Credit `from`'s entries (and its subagents') in the physical workspace at
+/// `root` to `to`: an adoption (issue #161). The entries of a subagent in
+/// `live` (one that has not ended, or that another session adopted) and of
+/// its own subagents stay where they are. Each
+/// entry keeps its file name and modification time, so it expires when it
+/// would have, and a retry finds nothing left to move. Returns the paths of
+/// the entries moved.
+pub fn reassign(
+    state_dir: &Path,
+    root: &Path,
+    from: &str,
+    live: &[String],
+    to: &str,
+) -> Result<BTreeSet<String>, String> {
+    let directory = workspace_dir(state_dir, root);
+    let mut moved = BTreeSet::new();
+    for (file, modified) in workspace_listing(&directory) {
+        let Some(mut entry) = read_entry(&file) else {
+            continue;
+        };
+        if !crate::commit::is_own(from, &entry.session_id)
+            || live
+                .iter()
+                .any(|running| crate::commit::is_own(running, &entry.session_id))
+        {
+            continue;
+        }
+        entry.session_id = to.to_owned();
+        let (Some(directory), Some(name)) = (file.parent(), file.file_name()) else {
+            continue;
+        };
+        let bytes = serde_json::to_vec(&entry).map_err(|e| format!("journal: {e}"))?;
+        let at = UNIX_EPOCH + std::time::Duration::from_millis(modified);
+        rewrite_private(directory, &name.to_string_lossy(), &bytes, at)?;
+        moved.insert(entry.path);
+    }
+    Ok(moved)
+}
+
+/// Replace one entry file, keeping its modification time.
+#[cfg(unix)]
+fn rewrite_private(
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+    modified: std::time::SystemTime,
+) -> Result<(), String> {
+    use std::io::Write;
+    let temporary = directory.join(format!(".{name}.tmp-{}", std::process::id()));
+    let _ = fs::remove_file(&temporary);
+    let mut file =
+        crate::local::private_file(&temporary, true).map_err(|e| format!("journal: {e}"))?;
+    file.write_all(bytes).map_err(|e| format!("journal: {e}"))?;
+    file.set_modified(modified)
+        .map_err(|e| format!("journal: {e}"))?;
+    fs::rename(&temporary, directory.join(name)).map_err(|e| format!("journal: {e}"))
+}
+
+#[cfg(not(unix))]
+fn rewrite_private(_: &Path, _: &str, _: &[u8], _: std::time::SystemTime) -> Result<(), String> {
+    Err("the line journal requires Unix".into())
+}
+
 /// Held commits a session was told about, by fingerprint: each is held once.
 fn held_path(state_dir: &Path, session_id: &str) -> (PathBuf, String) {
     (
@@ -1132,6 +1207,58 @@ mod tests {
 
     fn reads() -> usize {
         entry_reads()
+    }
+
+    #[test]
+    fn an_adoption_credits_the_ended_sessions_and_its_subagents_entries_keeping_their_age() {
+        let dirs = Dirs::new("reassign");
+        let directory = workspace_dir(&dirs.state, &dirs.root);
+        let now = now_ms();
+        for (operation, session, path) in [
+            ("op-1", "a", "src/one.rs"),
+            ("op-2", "a.helper", "src/two.rs"),
+            ("op-3", "ab", "src/one.rs"),
+            ("op-4", "c", "src/one.rs"),
+        ] {
+            write_entry(&directory, operation, &entry_of(session, path, now)).unwrap();
+        }
+        let ages = |dirs: &Dirs| {
+            let mut ages: Vec<u64> = workspace_listing(&workspace_dir(&dirs.state, &dirs.root))
+                .into_iter()
+                .map(|(_, modified)| modified)
+                .collect();
+            ages.sort();
+            ages
+        };
+        let before = ages(&dirs);
+        let moved = reassign(&dirs.state, &dirs.root, "a", &[], "b").unwrap();
+        assert_eq!(
+            moved,
+            BTreeSet::from(["src/one.rs".to_owned(), "src/two.rs".to_owned()])
+        );
+        let mut owners: Vec<(String, String)> = entries(&dirs.state, &dirs.root)
+            .into_iter()
+            .map(|entry| (entry.session_id, entry.path))
+            .collect();
+        owners.sort();
+        let owned = |session: &str, path: &str| (session.to_owned(), path.to_owned());
+        // "ab" is another session, not a subagent of "a"; "c" keeps its own.
+        assert_eq!(
+            owners,
+            vec![
+                owned("ab", "src/one.rs"),
+                owned("b", "src/one.rs"),
+                owned("b", "src/two.rs"),
+                owned("c", "src/one.rs"),
+            ]
+        );
+        assert_eq!(ages(&dirs), before, "entries expire when they would have");
+        // Nothing is left to move a second time.
+        assert!(
+            reassign(&dirs.state, &dirs.root, "a", &[], "b")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

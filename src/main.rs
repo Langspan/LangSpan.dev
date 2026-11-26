@@ -164,6 +164,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  staged or not. Refuses (exit 1) a hunk whose author is
                                  not known. Without --session, the session whose shell
                                  call is running it now
+  adopt SESSION [--session ID] [--root DIR]
+                                 Take over the uncommitted lines an ended session left
+                                 in this workspace: status --mine and commit --mine then
+                                 treat them as this session's; lines another session
+                                 also wrote stay shared. Refused for a live session and
+                                 for one of another workspace. Recorded as an event.
+                                 Session found as for commit --mine
   message WORKSPACE TEXT [PATH...] [--to SESSION] [--from SESSION]
                                  Send one line to a session, or without --to to every
                                  other session of the workspace. Without --from it is
@@ -1977,6 +1984,37 @@ fn notify(
     Ok(0)
 }
 
+/// `adopt SESSION`: take over an ended session's uncommitted lines (issue
+/// #161). The adopting session is `--session`, or the one running this
+/// command through its shell tool.
+fn adopt(
+    state_dir: &std::path::Path,
+    from: &str,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    let root = match options.remove("--root") {
+        Some(root) => PathBuf::from(root),
+        None => std::env::current_dir()?,
+    };
+    let session = options.remove("--session");
+    let request_id = options.remove("--request-id");
+    no_unused_options(options)?;
+    let session = match session {
+        Some(session) => session,
+        None => langspan::commit::running_session(state_dir, &root)?,
+    };
+    let request_id = request_id.unwrap_or_else(|| unique("adopt", &[&session, from]));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let report = langspan::adopt::adopt(state_dir, &request_id, &session, from, deadline)?;
+    if json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        println!("{}", report.text());
+    }
+    Ok(0)
+}
+
 /// `status --mine`: this session's uncommitted lines, read-only (issue #40).
 fn status_mine(
     state_dir: &std::path::Path,
@@ -3768,6 +3806,11 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             return notify(&state_dir, action, &mut options, json);
         }
         ["commit"] => return commit_mine(&state_dir, &mut options, json),
+        // `adopt SESSION` or `adopt -- SESSION`, for an ID that begins with
+        // a hyphen.
+        ["adopt"] | ["adopt", _] if words.len() == 2 => {
+            return adopt(&state_dir, words[1], &mut options, json);
+        }
         ["status"] if options.remove("--mine").is_some() => {
             return status_mine(&state_dir, &mut options, json);
         }
@@ -3920,6 +3963,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 // A look from the terminal is not a delivery to the session.
                 deliver: false,
                 mid_turn: false,
+                left: Vec::new(),
                 recent: options.remove("--recent").is_some(),
                 recent_window_ms: None,
                 mcp: false,
@@ -4621,6 +4665,10 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::SessionEnded { session_id } => {
             println!("Session {session_id} marked ended.")
         }
+        Outcome::Adopted { adoption, .. } => println!(
+            "Session {} adopted the uncommitted work of session {}.",
+            adoption.session_id, adoption.from
+        ),
         Outcome::AutoCheck { check } => {
             println!(
                 "Automatic check {} is on for workspace {}: after a session's writes, {:?} runs on the exact working tree (time limit {} s).",
@@ -5194,6 +5242,15 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                         ))
                         .unwrap_or_default()
                 );
+                if let Some(adopter) = &session.adopted_by {
+                    println!("  Its uncommitted work was adopted by session {adopter}.");
+                }
+                if !session.adopted.is_empty() {
+                    println!(
+                        "  Adopted the uncommitted work of ended session(s) {}.",
+                        session.adopted.join(", ")
+                    );
+                }
             }
             if recap.omitted_sessions > 0 {
                 println!("({} more session(s) not shown.)", recap.omitted_sessions);
@@ -5459,6 +5516,12 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                     Some(age) => println!("  Last hook run: {} s ago.", age / 1000),
                     None => println!("  Last hook run: none recorded in this generation."),
                 }
+            }
+            for adoption in state.adoptions.values() {
+                println!(
+                    "Adoption: session {} took over the uncommitted work of ended session {}.",
+                    adoption.session_id, adoption.from
+                );
             }
             for intent in state.intents.values() {
                 println!(
