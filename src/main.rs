@@ -5184,6 +5184,10 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 change.files
             )
         ),
+        Outcome::CheckoutRunObserved { run } => println!(
+            "Checkout change by session {} recorded for {}.",
+            run.session_id, run.workspace_id
+        ),
         Outcome::UncoordinatedObserved { sessions, paths } => println!(
             "Uncoordinated change recorded: sessions {}; files {}.",
             sessions.join(", "),

@@ -2384,7 +2384,8 @@ pub struct Briefing {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retracted: Vec<RetractedMessage>,
     /// The checkout this session works in changed under it since it last
-    /// read or edited a file there. Newest first.
+    /// read or edited a file there, other than by its own shell command.
+    /// Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkout_changes: Vec<CheckoutNotice>,
     /// Changes on disk in this checkout that no session reported, with the
@@ -2473,6 +2474,11 @@ pub struct State {
     /// Checkout changes per workspace, newest first, at most `MAX_CHECKOUTS`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub checkouts: BTreeMap<String, Vec<CheckoutChange>>,
+    /// Sessions' shell runs that moved the checkout, per workspace, newest
+    /// first: the newest `MAX_CHECKOUT_RUNS`, and any older run that
+    /// explains a held checkout change (at most `MAX_CHECKOUTS` more).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub checkout_runs: BTreeMap<String, Vec<CheckoutRun>>,
     /// Uncoordinated changes per workspace, newest first, at most
     /// `MAX_UNCOORDINATED`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2567,7 +2573,8 @@ pub struct UninstalledHost {
 /// its branch changed, its HEAD moved and files changed with it, or several
 /// changed files went back to their committed version at once (`git
 /// checkout`, `switch`, `reset --hard`, `stash`, `pull`). Built from the
-/// scan's branch observation. Who did it is not known.
+/// scan's branch observation. Who did it is not known, unless a session's
+/// shell command explains it (`CheckoutRun`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CheckoutChange {
@@ -2641,6 +2648,94 @@ pub struct CheckoutNotice {
     pub to_head: Option<String>,
     pub files: u32,
     pub age_ms: u64,
+    /// The other session whose shell command explains the change, when one
+    /// does (`CheckoutRun`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_session: Option<String>,
+    /// That command's line, redacted and capped by its hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// Shell runs that moved a checkout, kept per workspace.
+pub const MAX_CHECKOUT_RUNS: usize = 8;
+/// A checkout change first observed up to this long after a run finished,
+/// at the state the run left, is the run's: the observer scans every few
+/// seconds and may see the change only after the run's hook reported it.
+pub const CHECKOUT_RUN_GRACE_MS: u64 = 60_000;
+/// The longest a checkout run is taken to have run: a shell call's
+/// supported lifetime, two hours.
+pub const MAX_CHECKOUT_RUN_MS: u64 = 2 * 60 * 60 * 1000;
+/// The command text a checkout run keeps, at most, in bytes.
+pub const MAX_CHECKOUT_COMMAND_BYTES: usize = 256;
+
+/// One session's shell command ran a Git operation that changes the
+/// checkout (`git merge`, `pull`, `rebase`, `reset`, `checkout`, `switch`,
+/// `stash` and the like) and the checkout changed while it ran: reported by
+/// that session's post-tool hook. A checkout change it explains is not news
+/// to that session, and other sessions are told whose command it was.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CheckoutRun {
+    pub run_id: String,
+    pub workspace_id: String,
+    pub session_id: String,
+    /// The command line, redacted and capped by the hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// The checkout the command left.
+    pub to_branch: Option<String>,
+    pub to_head: Option<String>,
+    /// When the command started and finished on the daemon's clock, placed
+    /// back from the report's arrival by the durations its hook measured
+    /// (never after the arrival), whenever it is reported.
+    pub started_ms: u64,
+    pub finished_ms: u64,
+    pub generation: u64,
+    /// The command changed no file's content: it moved HEAD or the branch
+    /// only, as a commit does. Absent from an earlier record.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub files_unchanged: bool,
+}
+
+impl CheckoutRun {
+    /// Whether this run explains `change`: observed while the command ran,
+    /// or the first change observed after it finished, within
+    /// `CHECKOUT_RUN_GRACE_MS`, at the checkout the command left, unless a
+    /// change while it ran already showed that checkout or the command
+    /// changed no file and the change left branch and HEAD in place.
+    /// `changes` are the workspace's changes, to find the first.
+    pub fn explains(&self, change: &CheckoutChange, changes: &[CheckoutChange]) -> bool {
+        if change.workspace_id != self.workspace_id
+            || change.generation != self.generation
+            || change.at_ms < self.started_ms
+        {
+            return false;
+        }
+        if change.at_ms <= self.finished_ms {
+            return true;
+        }
+        let left = |other: &CheckoutChange| {
+            other.to_head == self.to_head && other.to_branch == self.to_branch
+        };
+        // A run that changed no file (a commit) explains no later change
+        // with branch and HEAD in place (a restore): the scan records no
+        // change for such a run, so that one came after it.
+        let moved = change.from_head != change.to_head || change.from_branch != change.to_branch;
+        change.at_ms <= self.finished_ms.saturating_add(CHECKOUT_RUN_GRACE_MS)
+            && left(change)
+            && (moved || !self.files_unchanged)
+            && !changes.iter().any(|other| {
+                other.change_id != change.change_id
+                    && other.workspace_id == self.workspace_id
+                    && other.generation == self.generation
+                    && other.at_ms < change.at_ms
+                    // Another change after the run came first; one while it
+                    // ran at the state it left already showed its result.
+                    && (other.at_ms > self.finished_ms
+                        || (other.at_ms >= self.started_ms && left(other)))
+            })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2999,6 +3094,9 @@ pub enum Event {
     CheckoutChanged {
         change: CheckoutChange,
     },
+    CheckoutRunObserved {
+        run: CheckoutRun,
+    },
     /// A scan saw files change that no session reported, with Codex
     /// sessions registered in the checkout (issue #129).
     UncoordinatedChanged {
@@ -3061,16 +3159,22 @@ impl Command {
     /// Whether `other`, sent under this command's request ID, is the same
     /// request: an identical retry, answered with the recorded outcome.
     /// What the sender measures anew on every send is not compared: the age
-    /// of each written-lines entry of an admission (`WrittenLines::age_ms`),
-    /// which changes between two deliveries of one tool call.
+    /// of each written-lines entry of an admission (`WrittenLines::age_ms`)
+    /// and a checkout run's `finished_ago_ms`, which change between two
+    /// deliveries of one tool call.
     pub fn same_request(&self, other: &Command) -> bool {
         fn ageless(command: &Command) -> Option<Command> {
             let mut command = command.clone();
-            let Command::AdmitTool { overwrites, .. } = &mut command else {
-                return None;
-            };
-            for entry in overwrites.iter_mut() {
-                entry.age_ms = 0;
+            match &mut command {
+                Command::AdmitTool { overwrites, .. } => {
+                    for entry in overwrites.iter_mut() {
+                        entry.age_ms = 0;
+                    }
+                }
+                Command::ObserveCheckoutRun {
+                    finished_ago_ms, ..
+                } => *finished_ago_ms = 0,
+                _ => return None,
             }
             Some(command)
         }
@@ -3442,6 +3546,28 @@ pub enum Command {
         from_head: Option<String>,
         to_head: Option<String>,
         files: u32,
+    },
+    /// A session's shell command ran a Git operation that changed its
+    /// checkout (`CheckoutRun`). Sent by the session's post-tool hook.
+    ObserveCheckoutRun {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        to_branch: Option<String>,
+        to_head: Option<String>,
+        /// How long the command ran, as its hook measured it.
+        ran_ms: u64,
+        /// How long ago the command finished, as its hook measured it when
+        /// sending: a report redelivered later keeps the command's own
+        /// window. A duration, not a time: the daemon places the finish
+        /// this long before its own now, never after it. Absent from an
+        /// earlier hook, which reported as the command finished.
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        finished_ago_ms: u64,
+        /// The command changed no file's content (`CheckoutRun`). Absent
+        /// from an earlier hook.
+        #[serde(default, skip_serializing_if = "is_false")]
+        files_unchanged: bool,
     },
     /// Files a scan saw change outside a checkout change, at their new
     /// versions. The core keeps those no session of the workspace reported
@@ -4129,6 +4255,28 @@ enum CommandWire {
         to_head: Option<String>,
         files: u32,
     },
+    /// A session's shell command ran a Git operation that changed its
+    /// checkout (`CheckoutRun`). Sent by the session's post-tool hook.
+    ObserveCheckoutRun {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        to_branch: Option<String>,
+        to_head: Option<String>,
+        /// How long the command ran, as its hook measured it.
+        ran_ms: u64,
+        /// How long ago the command finished, as its hook measured it when
+        /// sending: a report redelivered later keeps the command's own
+        /// window. A duration, not a time: the daemon places the finish
+        /// this long before its own now, never after it. Absent from an
+        /// earlier hook, which reported as the command finished.
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        finished_ago_ms: u64,
+        /// The command changed no file's content (`CheckoutRun`). Absent
+        /// from an earlier hook.
+        #[serde(default, skip_serializing_if = "is_false")]
+        files_unchanged: bool,
+    },
     /// Files a scan saw change outside a checkout change, at their new
     /// versions. The core keeps those no session of the workspace reported
     /// and names its Codex sessions (issue #129). Internal to the daemon's
@@ -4749,6 +4897,9 @@ pub enum Outcome {
     },
     CheckoutObserved {
         change: CheckoutChange,
+    },
+    CheckoutRunObserved {
+        run: CheckoutRun,
     },
     /// The Codex sessions named and the files kept; both empty when every
     /// change was explained or nothing new was recorded.
@@ -6916,6 +7067,44 @@ fn decide_checked(
                 outcome: Outcome::CheckoutObserved { change },
             })
         }
+        Command::ObserveCheckoutRun {
+            session_id,
+            command,
+            to_branch,
+            to_head,
+            ran_ms,
+            finished_ago_ms,
+            files_unchanged,
+        } => {
+            let Some(session) = state.sessions.get(session_id) else {
+                return Err(error(
+                    "unknown_session",
+                    "A checkout run names a registered session; register it first",
+                ));
+            };
+            // When the command ran, not when its report arrived: a
+            // redelivered report credits no later change. Placed back from
+            // the daemon's own now by durations, so never after it; a run
+            // two hours at most, a shell call's lifetime.
+            let finished_ms = now_ms.saturating_sub(*finished_ago_ms);
+            let run = CheckoutRun {
+                run_id: request_id.into(),
+                workspace_id: session.workspace_id.clone(),
+                session_id: session_id.clone(),
+                command: command.clone(),
+                to_branch: to_branch.clone(),
+                to_head: to_head.clone(),
+                started_ms: finished_ms.saturating_sub((*ran_ms).min(MAX_CHECKOUT_RUN_MS)),
+                finished_ms,
+                generation: state.generation,
+                files_unchanged: *files_unchanged,
+            };
+            validate_checkout_run(state, &run)?;
+            Ok(Decision {
+                events: vec![Event::CheckoutRunObserved { run: run.clone() }],
+                outcome: Outcome::CheckoutRunObserved { run },
+            })
+        }
         Command::ObserveUncoordinated {
             workspace_id,
             files,
@@ -8733,13 +8922,24 @@ fn brief(
         .collect();
     // A checkout change matters to a session that read or edited files
     // here before it: what it knows may no longer be on disk.
+    // A change a session's own shell command explains is not news to it;
+    // others are told whose command it was.
     let mut checkout_ids = Vec::new();
-    let checkout_changes: Vec<CheckoutNotice> = state
+    let changes = state
         .checkouts
         .get(&me.workspace_id)
         .map(Vec::as_slice)
-        .unwrap_or(&[])
+        .unwrap_or(&[]);
+    let runs = state
+        .checkout_runs
+        .get(&me.workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let explained_by =
+        |change: &CheckoutChange| runs.iter().find(|run| run.explains(change, changes));
+    let checkout_changes: Vec<CheckoutNotice> = changes
         .iter()
+        .filter(|change| explained_by(change).is_none_or(|run| run.session_id != session_id))
         .filter(|change| {
             change.generation == state.generation
                 && now_ms.saturating_sub(change.at_ms) <= BRIEF_HORIZON_MS
@@ -8761,7 +8961,10 @@ fn brief(
         .take(2)
         .map(|change| {
             checkout_ids.push(change.change_id.clone());
+            let run = explained_by(change);
             CheckoutNotice {
+                by_session: run.map(|run| run.session_id.clone()),
+                command: run.and_then(|run| run.command.clone()),
                 from_branch: change.from_branch.clone(),
                 to_branch: change.to_branch.clone(),
                 from_head: change.from_head.clone(),
@@ -10846,6 +11049,31 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             changes.insert(0, change.clone());
             changes.truncate(MAX_CHECKOUTS);
         }
+        Event::CheckoutRunObserved { run } => {
+            validate_checkout_run(state, run)?;
+            let runs = state
+                .checkout_runs
+                .entry(run.workspace_id.clone())
+                .or_default();
+            runs.insert(0, run.clone());
+            // Commits add runs and no change, so the two lists move apart.
+            // An older run stays while it explains a change still held, so
+            // that change keeps its attribution.
+            let changes = state
+                .checkouts
+                .get(&run.workspace_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let explaining: BTreeSet<usize> = changes
+                .iter()
+                .filter_map(|change| runs.iter().position(|run| run.explains(change, changes)))
+                .collect();
+            let mut index = 0;
+            runs.retain(|_| {
+                index += 1;
+                index <= MAX_CHECKOUT_RUNS || explaining.contains(&(index - 1))
+            });
+        }
         Event::UncoordinatedChanged { change } => {
             validate_uncoordinated(state, change)?;
             if !change.delivered.is_empty() {
@@ -12026,10 +12254,58 @@ fn validate_checkout(state: &State, change: &CheckoutChange) -> Result<(), CoreE
         &change.workspace_id,
         change.generation,
     )?;
-    for reference in [&change.from_branch, &change.to_branch]
-        .into_iter()
-        .flatten()
+    validate_checkout_state(
+        [&change.from_branch, &change.to_branch],
+        [&change.from_head, &change.to_head],
+    )?;
+    if change.from_branch == change.to_branch
+        && change.from_head == change.to_head
+        && change.files == 0
     {
+        return Err(error(
+            "invalid_checkout",
+            "A checkout change needs a different branch or HEAD, or changed files",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_checkout_run(state: &State, run: &CheckoutRun) -> Result<(), CoreError> {
+    validate_fact_header(state, &run.run_id, &run.workspace_id, run.generation)?;
+    if state
+        .sessions
+        .get(&run.session_id)
+        .is_none_or(|session| session.workspace_id != run.workspace_id)
+    {
+        return Err(error(
+            "unknown_session",
+            "A checkout run names a session registered in its workspace",
+        ));
+    }
+    validate_checkout_state([&run.to_branch], [&run.to_head])?;
+    if run.command.as_ref().is_some_and(|command| {
+        command.len() > MAX_CHECKOUT_COMMAND_BYTES || command.chars().any(char::is_control)
+    }) {
+        return Err(error(
+            "invalid_command",
+            "A checkout run's command is at most 256 bytes without control characters",
+        ));
+    }
+    if run.started_ms > run.finished_ms {
+        return Err(error(
+            "invalid_event",
+            "A checkout run cannot start after it finished",
+        ));
+    }
+    Ok(())
+}
+
+/// Branches are nonempty `refs/heads/` names; heads are Git object IDs.
+fn validate_checkout_state<const B: usize, const H: usize>(
+    branches: [&Option<String>; B],
+    heads: [&Option<String>; H],
+) -> Result<(), CoreError> {
+    for reference in branches.into_iter().flatten() {
         if reference.len() > 512
             || reference.chars().any(char::is_control)
             || !reference
@@ -12042,17 +12318,8 @@ fn validate_checkout(state: &State, change: &CheckoutChange) -> Result<(), CoreE
             ));
         }
     }
-    for oid in [&change.from_head, &change.to_head].into_iter().flatten() {
+    for oid in heads.into_iter().flatten() {
         validate_oid(oid)?;
-    }
-    if change.from_branch == change.to_branch
-        && change.from_head == change.to_head
-        && change.files == 0
-    {
-        return Err(error(
-            "invalid_checkout",
-            "A checkout change needs a different branch or HEAD, or changed files",
-        ));
     }
     Ok(())
 }
