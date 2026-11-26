@@ -164,7 +164,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  the user-level install under the home, each with
                                  whether the LangSpan skill is installed and current
   hosts [--home DIR]             List each agent host LangSpan knows (Claude Code,
-                                 Codex, Cursor, Gemini CLI): whether its configuration
+                                 Codex, Cursor, Gemini CLI, Antigravity): whether its configuration
                                  directory exists, its user-level install (none,
                                  current, outdated, other_state_dir, unknown) and the
                                  command that installs it. Reads only
@@ -199,23 +199,28 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   changes WORKSPACE [--after SEQ] [--limit N]
                                  Read disk and local-branch observations and scan freshness
   request JSON                   Send a complete version 3 request envelope
-  hook claude-code|codex|cursor|gemini-cli [--workspace ID --root DIR]
+  hook claude-code|codex|cursor|gemini-cli|antigravity [--event NAME]
+       [--workspace ID --root DIR]
                                  PreToolUse/PostToolUse(Failure) adapter for Edit,
                                  Write, MultiEdit, NotebookEdit, Read, Grep and Bash
                                  (Codex: apply_patch and Bash; Cursor: Write, Delete,
                                  Shell, Read and Grep; Gemini CLI: BeforeTool and AfterTool
                                  for write_file, replace, read_file and
-                                 run_shell_command. Cursor and Gemini CLI are built
-                                 from documentation and not yet verified on a real
-                                 host); reads one event on stdin. Shell commands are
-                                 covered partly (ADR 0011).
+                                 run_shell_command; Antigravity: PreToolUse and
+                                 PostToolUse for write_to_file, replace_file_content,
+                                 multi_replace_file_content, run_command and
+                                 view_file, whose events do not name themselves, so
+                                 --event NAME is required for it alone. Cursor, Gemini
+                                 CLI and Antigravity are built from documentation and
+                                 not yet verified on a real host); reads one event on
+                                 stdin. Shell commands are covered partly (ADR 0011).
                                  Without --workspace and --root (the user-level form),
                                  the repository is the Git toplevel of the event's cwd;
                                  outside a repository, or where a project-level LangSpan
                                  hook covers it, the hook does nothing.
                                  Optional --ttl-ms (default 30000), --budget-ms (1500)
                                  SessionStart and UserPromptSubmit (Gemini CLI:
-                                 BeforeAgent) register the
+                                 BeforeAgent; Antigravity: PreInvocation) register the
                                  session and print relevant peer work for the model;
                                  --prompt-summary off keeps the prompt's first line
                                  out of what peers are told. At a prompt, names it
@@ -228,20 +233,24 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  looking (never a pattern or command text);
                                  --presence off stops that, --presence-minutes N
                                  (1-30, default 10) is how old a peer's is shown
-  hooks install claude-code|codex|cursor|gemini-cli --workspace ID --root DIR
+  hooks install claude-code|codex|cursor|gemini-cli|antigravity --workspace ID --root DIR
                                  [--settings FILE] [--prompt-summary off]
                                  [--code-briefing off] [--presence off]
                                  [--presence-minutes N] [--skill] [--apply]
-  hooks remove claude-code|codex|cursor|gemini-cli --root DIR [--settings FILE] [--apply]
+  hooks remove claude-code|codex|cursor|gemini-cli|antigravity --root DIR
+               [--settings FILE] [--apply]
                                  Show (default) or apply the change to project Claude
                                  settings, Codex hooks, Cursor's .cursor/hooks.json and
-                                 .cursor/mcp.json, or Gemini CLI settings
-                                 (.gemini/settings.json), preserving other settings.
-                                 Cursor only: --skill also writes the LangSpan skill as
-                                 the project rule .cursor/rules/langspan.mdc, which
-                                 hooks remove cursor removes
-  install [--home DIR] [--hosts claude-code,codex,cursor,gemini-cli] [--prompt-summary off]
-          [--presence off] [--presence-minutes N] [--skill] [--statusline on|off] [--apply]
+                                 .cursor/mcp.json, Gemini CLI settings
+                                 (.gemini/settings.json), or Antigravity's
+                                 .agents/hooks.json and .agents/mcp_config.json,
+                                 preserving other settings. Cursor and Antigravity
+                                 only: --skill also writes the LangSpan skill as the
+                                 project rule .cursor/rules/langspan.mdc or
+                                 .agents/rules/langspan.md, which hooks remove removes
+  install [--home DIR] [--hosts claude-code,codex,cursor,gemini-cli,antigravity]
+          [--prompt-summary off] [--presence off] [--presence-minutes N]
+          [--skill] [--statusline on|off] [--apply]
                                  Install the hooks once for every repository, in each
                                  host's user configuration, and register `langspan mcp`
                                  as the MCP server `langspan`. Hosts default to those
@@ -252,7 +261,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  the LangSpan skill, which teaches an agent how to work
                                  with LangSpan: Claude Code skills/langspan/SKILL.md, a
                                  marked section of Codex's AGENTS.md and of Gemini
-                                 CLI's GEMINI.md. --statusline on sets Claude Code's
+                                 CLI's GEMINI.md, Antigravity's rule
+                                 ~/.gemini/config/rules/langspan.md. Gemini CLI and
+                                 Antigravity are chosen only by name in --hosts.
+                                 --statusline on sets Claude Code's
                                  statusLine to `langspan statusline` where none is
                                  set (never replacing one); off removes LangSpan's
   uninstall [--home DIR] [--hosts ...] [--apply]
@@ -310,8 +322,12 @@ fn hook(input: Vec<String>) -> ExitCode {
     use std::os::unix::fs::OpenOptionsExt;
     // Gemini CLI reads stderr as the answer when stdout is empty, and takes
     // plain text there from a failed process as a deny: whatever happens,
-    // it gets the empty answer first.
-    let gemini = input.get(1).map(String::as_str) == Some("gemini-cli");
+    // it gets the empty answer first. Antigravity documents a JSON answer
+    // for every event and nothing for an empty one, so it gets the same.
+    let gemini = matches!(
+        input.get(1).map(String::as_str),
+        Some("gemini-cli" | "antigravity")
+    );
     if gemini {
         let default = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -330,8 +346,27 @@ fn hook(input: Vec<String>) -> ExitCode {
             _ => None,
         }
         .ok_or(
-            "usage: langspan hook claude-code|codex|cursor|gemini-cli [--workspace ID --root DIR]",
+            "usage: langspan hook claude-code|codex|cursor|gemini-cli|antigravity [--event NAME] [--workspace ID --root DIR]",
         )?;
+        // Only a host whose events do not name themselves takes `--event`,
+        // and it must be one the install registers.
+        let event = match (vendor.names_event(), options.remove("--event")) {
+            (true, Some(event)) if vendor.hook_events().contains(&event.as_str()) => Some(event),
+            (true, Some(event)) => {
+                return Err(format!(
+                    "--event {event:?} is not an event LangSpan handles for {}",
+                    vendor.name()
+                )
+                .into());
+            }
+            (true, None) => {
+                return Err(format!("{} hooks need --event NAME", vendor.name()).into());
+            }
+            (false, Some(_)) => {
+                return Err(format!("--event is not used for {}", vendor.name()).into());
+            }
+            (false, None) => None,
+        };
         // Without a workspace and root, the hook is the user-level form and
         // takes both from each event's working directory.
         let (workspace_id, root, user_level) =
@@ -402,17 +437,19 @@ fn hook(input: Vec<String>) -> ExitCode {
                 langspan::install::Vendor::Gemini => {
                     langspan::gemini::run_until(bytes.as_slice(), &config, deadline)
                 }
+                langspan::install::Vendor::Antigravity => langspan::antigravity::run_until(
+                    bytes.as_slice(),
+                    &config,
+                    event.as_deref().unwrap_or_default(),
+                    deadline,
+                ),
                 langspan::install::Vendor::ClaudeCode => {
                     langspan::claude_code::run_until(bytes.as_slice(), &config, deadline)
                 }
             },
             Err(error) => langspan::hook::Reply {
                 // Gemini CLI reads stderr as the answer when stdout is empty.
-                stdout: if vendor == langspan::install::Vendor::Gemini {
-                    "{}".into()
-                } else {
-                    String::new()
-                },
+                stdout: if gemini { "{}".into() } else { String::new() },
                 ..langspan::hook::Reply::none(
                     if error.kind() == std::io::ErrorKind::TimedOut {
                         "timeout"
@@ -476,8 +513,9 @@ fn hooks(
         None
     };
     let with_skill = options.remove("--skill").is_some();
-    if with_skill && !(install && vendor == install::Vendor::Cursor) {
-        return Err("--skill is valid for `hooks install cursor` only: Cursor reads the LangSpan skill as a project rule. For claude-code, codex and gemini-cli, run `langspan install --skill`; `hooks remove cursor` removes the rule without it".into());
+    let project_skill = langspan::skill::PROJECT_HOSTS.contains(&vendor);
+    if with_skill && !(install && project_skill) {
+        return Err("--skill is valid for `hooks install cursor` and `hooks install antigravity` only: they read the LangSpan skill as a project rule. For claude-code, codex and gemini-cli, run `langspan install --skill`; `hooks remove` removes the rule without it".into());
     }
     no_unused_options(options)?;
     if let Some(registration) = &registration {
@@ -500,14 +538,18 @@ fn hooks(
         settings,
         Box::new(move |existing| install::plan_for(vendor, existing, registration)),
     )];
-    if vendor == install::Vendor::Cursor {
+    if let Some(mcp) = vendor.project_mcp_file() {
         files.push((
-            root.join(".cursor/mcp.json"),
+            root.join(mcp),
             Box::new(move |existing| {
-                langspan::user_install::plan_claude(
-                    existing.unwrap_or_else(|| serde_json::json!({})),
-                    server,
-                )
+                if vendor == install::Vendor::Antigravity {
+                    langspan::user_install::plan_antigravity(existing, server)
+                } else {
+                    langspan::user_install::plan_claude(
+                        existing.unwrap_or_else(|| serde_json::json!({})),
+                        server,
+                    )
+                }
             }),
         ));
     }
@@ -520,10 +562,10 @@ fn hooks(
         let unchanged = existing.as_ref() == Some(&planned) || (existing.is_none() && !install);
         planned_files.push((path, plan, original, planned, unchanged));
     }
-    // Cursor's project rule: written with --skill, removed with the hooks
-    // wherever LangSpan's is found.
-    let rule = if vendor == install::Vendor::Cursor && (with_skill || !install) {
-        let path = langspan::skill::path(vendor, &root);
+    // Cursor's and Antigravity's project rule: written with --skill, removed
+    // with the hooks wherever LangSpan's is found.
+    let rule = if project_skill && (with_skill || !install) {
+        let path = langspan::skill::project_path(vendor, &root);
         Some(langspan::skill::plan_file(vendor, &path, install)?)
     } else {
         None
@@ -600,6 +642,11 @@ fn hooks(
     if vendor == install::Vendor::Gemini && install {
         println!(
             "Gemini CLI: built from documentation, not yet verified on a real Gemini CLI (ADR 0033). Gemini CLI loads project settings only in a folder it trusts."
+        );
+    }
+    if vendor == install::Vendor::Antigravity && install {
+        println!(
+            "Antigravity: built from documentation, not yet verified on a real Antigravity (ADR 0035). Antigravity's App, CLI and IDE all read these files; `/hooks` in the CLI lists the hooks it loaded. They hold paths on this machine, so keep LangSpan's entries out of a commit."
         );
     }
     Ok(0)
@@ -702,14 +749,14 @@ fn user_install(
             .map(|name| {
                 Vendor::from_name(name.trim()).ok_or_else(|| {
                     format!(
-                        "unknown host {:?}; choose from claude-code, codex, cursor and gemini-cli",
+                        "unknown host {:?}; choose from claude-code, codex, cursor, gemini-cli and antigravity",
                         name.trim()
                     )
                 })
             })
             .collect::<Result<_, _>>()?,
-        // Gemini CLI is chosen only by name: its adapter has no live-host
-        // evidence yet, and `~/.gemini` is also made by other Google tools.
+        // Gemini CLI and Antigravity are chosen only by name: their adapters
+        // have no live-host evidence yet, and they share `~/.gemini`.
         None => [Vendor::ClaudeCode, Vendor::Codex, Vendor::Cursor]
             .into_iter()
             .filter(|vendor| home.files(*vendor).config_dir.is_dir())
@@ -717,7 +764,7 @@ fn user_install(
     };
     if vendors.is_empty() {
         return Err(format!(
-            "no host configuration found under {} (.claude, .codex or .cursor); choose --hosts claude-code,codex,cursor,gemini-cli",
+            "no host configuration found under {} (.claude, .codex or .cursor); choose --hosts claude-code,codex,cursor,gemini-cli,antigravity",
             home.home.display()
         )
         .into());
@@ -888,22 +935,27 @@ fn user_install(
                     ));
                 }
             },
-            // Cursor's mcp.json holds only MCP servers; LangSpan may create it.
-            Vendor::Cursor => {
+            // Cursor's mcp.json and Antigravity's mcp_config.json hold only
+            // MCP servers; LangSpan may create them.
+            Vendor::Cursor | Vendor::Antigravity => {
+                let plan_mcp = move |existing: Option<serde_json::Value>| {
+                    if vendor == Vendor::Antigravity {
+                        user_install::plan_antigravity(existing, server)
+                    } else {
+                        user_install::plan_claude(
+                            existing.unwrap_or_else(|| serde_json::json!({})),
+                            server,
+                        )
+                    }
+                };
                 let existing = hooks::parse_json(&files.mcp, original.as_deref())?;
-                let planned = user_install::plan_claude(
-                    existing.clone().unwrap_or_else(|| serde_json::json!({})),
-                    server,
-                )
-                .map_err(|e| format!("{}: {e}", files.mcp.display()))?;
+                let planned = plan_mcp(existing.clone())
+                    .map_err(|e| format!("{}: {e}", files.mcp.display()))?;
                 let path = files.mcp.clone();
                 let replan = move |now: Option<&[u8]>| -> Result<Vec<u8>, langspan::Error> {
                     let existing = hooks::parse_json(&path, now)?;
-                    let planned = user_install::plan_claude(
-                        existing.unwrap_or_else(|| serde_json::json!({})),
-                        server,
-                    )
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                    let planned =
+                        plan_mcp(existing).map_err(|e| format!("{}: {e}", path.display()))?;
                     hooks::json_bytes(&planned)
                 };
                 plans.push((
@@ -914,8 +966,11 @@ fn user_install(
                     // `{"version": 1}` is not Cursor's MCP shape: only `{}`.
                     emptied(Vendor::ClaudeCode),
                 ));
-                if install {
+                if install && vendor == Vendor::Cursor {
                     notes.push("Cursor: built from documentation, not yet verified on a real Cursor (ADR 0032). Cursor asks before it first uses an MCP server; approve `langspan` there.".into());
+                }
+                if install && vendor == Vendor::Antigravity {
+                    notes.push("Antigravity: built from documentation, not yet verified on a real Antigravity (ADR 0035). Its App, CLI and IDE all read these files. Antigravity also reads ~/.gemini/GEMINI.md, so with the Gemini CLI skill installed too it reads the skill twice.".into());
                 }
             }
             Vendor::Codex => {
@@ -2414,6 +2469,9 @@ fn doctor(
                     Ok(None) => (Vec::new(), Vec::new()),
                     Ok(Some(settings)) => {
                         let ours = |hook: &serde_json::Value| install::is_managed_for(vendor, hook);
+                        if install::switched_off(vendor, &settings) {
+                            note(false, switched_off_finding(vendor, &path));
+                        }
                         (
                             install::managed_hooks(&settings, ours)
                                 .iter()
@@ -2423,9 +2481,14 @@ fn doctor(
                         )
                     }
                 };
-            // Cursor and Gemini CLI are newer and optional: their absence is
-            // not a problem.
-            if managed.is_empty() && matches!(vendor, Vendor::Cursor | Vendor::Gemini) {
+            // Cursor, Gemini CLI and Antigravity are newer and optional: their
+            // absence is not a problem.
+            if managed.is_empty()
+                && matches!(
+                    vendor,
+                    Vendor::Cursor | Vendor::Gemini | Vendor::Antigravity
+                )
+            {
                 continue;
             }
             let Some(first) = managed.first() else {
@@ -2480,12 +2543,15 @@ fn doctor(
                             ". Cursor: built from documentation, not yet verified on a real Cursor (ADR 0032); Cursor runs project hooks only in a trusted workspace.",
                         Vendor::Gemini =>
                             ". Gemini CLI: built from documentation, not yet verified on a real Gemini CLI (ADR 0033); it loads them only in a folder it trusts, and warns once before it first runs them.",
+                        Vendor::Antigravity =>
+                            ". Antigravity: built from documentation, not yet verified on a real Antigravity (ADR 0035); `/hooks` in its CLI lists the hooks it loaded.",
                         Vendor::ClaudeCode => ".",
                     }
                 ),
             );
-            if vendor == Vendor::Cursor {
-                let mcp = root.join(".cursor/mcp.json");
+            if let Some(mcp) = vendor.project_mcp_file() {
+                let name = vendor.name();
+                let mcp = root.join(mcp);
                 match install::read(&mcp).map(|config| {
                     config
                         .as_ref()
@@ -2497,7 +2563,7 @@ fn doctor(
                     Ok(None) => note(
                         false,
                         format!(
-                            "cursor: the MCP server is not registered in {}; run `langspan hooks install cursor --workspace ID --root {} --apply`.",
+                            "{name}: the MCP server is not registered in {}; run `langspan hooks install {name} --workspace ID --root {} --apply`.",
                             mcp.display(),
                             root.display()
                         ),
@@ -2505,7 +2571,7 @@ fn doctor(
                     Ok(Some(None)) => note(
                         false,
                         format!(
-                            "cursor: an MCP server named `langspan` is registered in {} but LangSpan did not write it.",
+                            "{name}: an MCP server named `langspan` is registered in {} but LangSpan did not write it.",
                             mcp.display()
                         ),
                     ),
@@ -2513,7 +2579,7 @@ fn doctor(
                         install::same_directory(&server.state_dir, state_dir)
                             && server.executable.is_file(),
                         format!(
-                            "cursor: MCP server `langspan` registered in {}, state directory {}.",
+                            "{name}: MCP server `langspan` registered in {}, state directory {}.",
                             mcp.display(),
                             server.state_dir.display()
                         ),
@@ -2521,9 +2587,9 @@ fn doctor(
                 }
                 let (ok, text) = skill_finding(
                     vendor,
-                    &langspan::skill::path(vendor, root),
+                    &langspan::skill::project_path(vendor, root),
                     &format!(
-                        "langspan hooks install cursor --workspace ID --root {} --skill --apply",
+                        "langspan hooks install {name} --workspace ID --root {} --skill --apply",
                         root.display()
                     ),
                 );
@@ -2753,6 +2819,9 @@ fn user_level_findings(
             Ok(None) => (Vec::new(), Vec::new()),
             Ok(Some(settings)) => {
                 let ours = |hook: &serde_json::Value| install::is_user_managed_for(vendor, hook);
+                if install::switched_off(vendor, &settings) {
+                    findings.push((false, switched_off_finding(vendor, &files.hooks)));
+                }
                 (
                     install::managed_hooks(&settings, ours)
                         .iter()
@@ -2763,7 +2832,7 @@ fn user_level_findings(
             }
         };
         let server: Result<Option<user_install::McpServer>, String> = match vendor {
-            Vendor::ClaudeCode | Vendor::Cursor | Vendor::Gemini => match install::read(&files.mcp) {
+            Vendor::ClaudeCode | Vendor::Cursor | Vendor::Gemini | Vendor::Antigravity => match install::read(&files.mcp) {
                 Err(error) => Err(error.to_string()),
                 Ok(config) => match config
                     .as_ref()
@@ -2869,6 +2938,17 @@ fn user_level_findings(
         }
     }
     Ok(findings)
+}
+
+/// What `doctor` says when the host is told not to run LangSpan's hooks in
+/// the file at `path` at all.
+fn switched_off_finding(vendor: langspan::install::Vendor, path: &std::path::Path) -> String {
+    format!(
+        "{}: the `{}` hook definition in {} has \"enabled\": false, so none of LangSpan's hooks there run; remove that line or set it to true.",
+        vendor.name(),
+        langspan::install::ANTIGRAVITY_HOOK_NAME,
+        path.display()
+    )
 }
 
 /// What `doctor` says about the LangSpan skill in the file at `path`. Not
@@ -3448,11 +3528,11 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
                 }
             }
             "--state-dir" | "--request-id" | "--summary" | "--ttl-ms" | "--after" | "--limit"
-            | "--workspace" | "--root" | "--budget-ms" | "--settings" | "--prompt-summary"
-            | "--code-briefing" | "--presence" | "--presence-minutes" | "--max-peers"
-            | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s" | "--wait-s"
-            | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen" | "-m"
-            | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
+            | "--workspace" | "--root" | "--budget-ms" | "--event" | "--settings"
+            | "--prompt-summary" | "--code-briefing" | "--presence" | "--presence-minutes"
+            | "--max-peers" | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s"
+            | "--wait-s" | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen"
+            | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
             | "--sound" | "--depth" | "--path" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()

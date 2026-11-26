@@ -51,8 +51,9 @@ it never installs, upgrades or edits a host's configuration.
   another state directory would not coordinate with the coordinator that
   reported the host. `doctor` marks the host as needing attention only when sessions
   of another host use the coordinator.
-- Gemini CLI is reported but never proposed or recorded, as `install` does not
-  choose it by itself.
+- Gemini CLI and Antigravity ([ADR 0035](0035-antigravity-adapter.md)) are
+  reported but never proposed or recorded, as `install` does not choose them
+  by itself.
 - The issue asked for no file content to be read. Telling `none` from an
   install needs LangSpan's entries in the host's hook file, so the check reads
   them, bounded, and keeps nothing from the file but the host's name.
