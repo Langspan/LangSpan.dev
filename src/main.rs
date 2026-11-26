@@ -106,6 +106,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Files the index cannot answer for: partial, never
                                  parsed cleanly, waiting, too large, left out of the
                                  scan, and other languages by extension
+  graph export WORKSPACE --out FILE
+                                 Write the source index to a new owner-only FILE
+                                 (JSON Lines); it never replaces an existing file
+  graph import WORKSPACE --in FILE [--apply]
+                                 Dry run: how many exported files have the same
+                                 content here. --apply loads those the index does
+                                 not hold yet; the rest are indexed from disk
   recap WORKSPACE               A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
                                  messages not yet acknowledged, then withdrawn ones
@@ -3047,10 +3054,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     {
         return hooks(vendor, *action == "install", state_dir, &mut options, apply);
     }
-    let removes_workspace = matches!(words.as_slice(), ["workspace", "remove", _]);
-    if apply && !removes_workspace {
+    let takes_apply = matches!(
+        words.as_slice(),
+        ["workspace", "remove", _] | ["graph", "import", _]
+    );
+    if apply && !takes_apply {
         return Err(
-            "--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land` and `workspace remove`"
+            "--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `workspace remove` and `graph import`"
                 .into(),
         );
     }
@@ -3226,6 +3236,15 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                     },
                 }
             }
+            ["graph", "export", workspace] => Command::GraphExport {
+                workspace_id: (*workspace).into(),
+                path: absolute_option(&mut options, "--out")?,
+            },
+            ["graph", "import", workspace] => Command::GraphImport {
+                workspace_id: (*workspace).into(),
+                path: absolute_option(&mut options, "--in")?,
+                apply,
+            },
             ["graph", "blind-spots", workspace] => Command::GraphBlindSpots {
                 workspace_id: (*workspace).into(),
                 limit: u32::try_from(number(&mut options, "--limit", 50)?)
@@ -3323,6 +3342,8 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphReferences { .. }
                 | Command::GraphImpact { .. }
                 | Command::GraphBlindSpots { .. }
+                | Command::GraphExport { .. }
+                | Command::GraphImport { .. }
                 | Command::Recap { .. }
                 | Command::ShowMessage { .. }
                 | Command::Recall { .. }
@@ -3363,7 +3384,19 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             },
         )?;
     }
-    let response = client::call(&state_dir, &request)?;
+    let response = if matches!(
+        request.command,
+        Command::GraphExport { .. } | Command::GraphImport { .. }
+    ) {
+        // The daemon allows an index transfer up to two minutes.
+        client::call_until(
+            &state_dir,
+            &request,
+            std::time::Instant::now() + std::time::Duration::from_secs(125),
+        )?
+    } else {
+        client::call(&state_dir, &request)?
+    };
     if json {
         println!("{}", serde_json::to_string(&response)?);
     } else {
@@ -3438,7 +3471,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s" | "--wait-s"
             | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen" | "-m"
             | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
-            | "--sound" | "--depth" | "--path" => {
+            | "--sound" | "--depth" | "--path" | "--out" | "--in" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -3465,6 +3498,20 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
         json,
         apply,
     })
+}
+/// A required file option as an absolute path, so the daemon, which runs
+/// in another directory, opens the file the owner named.
+fn absolute_option(
+    options: &mut BTreeMap<String, String>,
+    name: &str,
+) -> Result<String, langspan::Error> {
+    let value = options
+        .remove(name)
+        .ok_or_else(|| format!("{name} FILE is required"))?;
+    let path = std::path::absolute(&value).map_err(|e| format!("cannot resolve {name}: {e}"))?;
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| format!("{name} must be a UTF-8 path").into())
 }
 fn no_unused_options(options: &BTreeMap<String, String>) -> Result<(), langspan::Error> {
     if let Some((name, _)) = options.first_key_value() {
@@ -4013,6 +4060,50 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             println!(
                 "Matches are by name, not resolved. Index: {} of {} supported files at their current content.",
                 coverage.current_files, coverage.indexable_files
+            );
+        }
+        Outcome::GraphExported {
+            workspace_id,
+            files,
+            partial_files,
+            bytes,
+        } => println!(
+            "Exported {files} files ({partial_files} partial, {bytes} bytes) from workspace {workspace_id}."
+        ),
+        Outcome::GraphImported {
+            workspace_id,
+            applied,
+            loaded,
+            different,
+            kept,
+            over_limits,
+            malformed,
+        } => {
+            let mut parts = vec![if *applied {
+                format!("Loaded {loaded} files into workspace {workspace_id}")
+            } else {
+                format!(
+                    "Dry run: {loaded} files have the same content here and can be loaded into workspace {workspace_id}"
+                )
+            }];
+            parts.push(format!(
+                "{different} differ or are missing here and are left to the indexer"
+            ));
+            if *kept > 0 {
+                parts.push(format!("{kept} are already indexed here and are kept"));
+            }
+            if *over_limits > 0 {
+                parts.push(format!(
+                    "{over_limits} lines over a parse bound were skipped"
+                ));
+            }
+            if *malformed > 0 {
+                parts.push(format!("{malformed} malformed lines were skipped"));
+            }
+            println!(
+                "{}.{}",
+                parts.join("; "),
+                if *applied { "" } else { " Add --apply." }
             );
         }
         Outcome::GraphBlindSpots {

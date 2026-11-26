@@ -24,7 +24,7 @@ about graph depth waits.
 | D2 | Blast radius level by level | One level | Built 25 November 2026 at the owner's request ([issue #51](https://github.com/Langspan/LangSpan.dev/issues/51)), ahead of the condition below: `graph impact --depth N` (1 to 3) and `langspan_impact` with `depth`; see [ADR 0008](0008-derived-source-index.md). Not yet called on a host |
 | D3 | Typed edges, paths between symbols, a repository map | Name mentions | Not now |
 | D4 | A definition's history with rationales and reverted attempts | Raw `events` and `recap` | Not now |
-| D5 | Graph export and import | None | Not now |
+| D5 | Graph export and import | `graph export` and `graph import` | Built 26 November 2026 ([issue #54](https://github.com/Langspan/LangSpan.dev/issues/54)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Not yet run between two machines |
 | D6 | 11 languages | 4 languages | Not now. A grammar is a new C-built dependency, each with a row in [dependencies](../dependencies.md) |
 | D7, B10 (renames) | Renames that keep history | A rename is a removal | Not now. Landing's adaptation to landed renames (track L7) is separate and in the bar |
 | D8 | Parse states and a blind-spots query | Coverage on every answer, with `blind_in_scope`; whole-file fallback; `doctor`; `graph blind-spots` | Built 25 November 2026 ([issue #57](https://github.com/Langspan/LangSpan.dev/issues/57)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Not yet called on a host |

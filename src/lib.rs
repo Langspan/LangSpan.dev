@@ -54,5 +54,6 @@ pub mod journal;
 pub mod spool;
 
 pub mod graph;
+pub mod index_file;
 pub mod integrate;
 pub mod landing;
