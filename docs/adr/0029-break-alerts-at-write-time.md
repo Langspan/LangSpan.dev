@@ -163,10 +163,15 @@ The core decides from these answers; it never runs Git. Before looking up any
 name, the daemon asks `standing_questions` for the notices of other worktrees
 that the write's calls name and that could count if committed, at most 8 per
 write, each workspace's newest first, and gives Git at most 250 ms for them
-all, four read-only processes per notice under `--no-optional-locks`. The
-working file is hashed as raw bytes (`hash-object --no-filters`), so no
-repository-configured filter runs; a symbolic link or other non-regular file
-is not hashed. A notice Git does not answer for (a timeout, a failure, a file
+all, at most five read-only processes per notice under
+`--no-optional-locks`. The working file is hashed as raw bytes
+(`hash-object --no-filters`), so no repository-configured filter runs; a
+symbolic link or other non-regular file is not hashed. When that hash differs
+from the `HEAD` blob and the file holds CRLF line endings, LangSpan reads at
+most 1 MiB of the file and the blob (`cat-file blob`) and compares them with
+CRLF turned into LF, the normalization Git applies under `core.autocrlf` or a
+`text`/`eol=crlf` attribute. A file that differs from its commit only in line
+endings therefore counts as committed. A notice Git does not answer for (a timeout, a failure, a file
 that never was in a commit) keeps the uncommitted rules, and the failure is
 logged at info level. Notices of the session's own workspace are never asked
 about. Using the newest commit that touches the file means a later commit of

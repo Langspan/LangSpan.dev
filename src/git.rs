@@ -256,7 +256,9 @@ fn owner_ssh(cwd: &Path, deadline: Instant) -> Result<bool, String> {
 /// `HEAD` that touches `path` is `Merged` when `base`'s `HEAD` contains it
 /// (`merge-base --is-ancestor`) and `Unmerged` when not. The file is hashed
 /// as its raw bytes (`hash-object --no-filters`), so no repository-configured
-/// filter runs. At most four read-only Git processes, all within `deadline`.
+/// filter runs; a file differing only by CRLF line endings is compared by
+/// `crlf_committed`. At most five read-only Git processes, all within
+/// `deadline`.
 pub fn standing(
     changed: &Path,
     path: &str,
@@ -308,7 +310,10 @@ pub fn standing(
         )?)?),
     };
     if committed != working {
-        return Ok(Standing::Uncommitted);
+        match (&committed, &working) {
+            (Some(blob), Some(_)) if crlf_committed(changed, path, blob, deadline)? => {}
+            _ => return Ok(Standing::Uncommitted),
+        }
     }
     let commit = object(output(
         changed,
@@ -327,6 +332,63 @@ pub fn standing(
         Some(0) => Ok(Standing::Merged),
         Some(1) => Ok(Standing::Unmerged),
         _ => Err("Git could not compare the commit with the checkout's HEAD".into()),
+    }
+}
+
+/// The most bytes `crlf_committed` reads from the working file and the blob.
+const CRLF_COMPARE_LIMIT: usize = 1 << 20;
+
+/// Whether the working file at `path` equals the `HEAD` blob `blob` once its
+/// CRLF line endings become LF: Git's built-in normalization under
+/// `core.autocrlf` or a `text`/`eol=crlf` attribute stores LF while the clean
+/// file on disk keeps CRLF. Done here rather than by Git, so no
+/// repository-configured filter program runs. A file without CRLF, or either
+/// side over `CRLF_COMPARE_LIMIT`, is not equal. At most one Git process
+/// (`cat-file blob`), within `deadline`.
+fn crlf_committed(
+    changed: &Path,
+    path: &str,
+    blob: &str,
+    deadline: Instant,
+) -> Result<bool, String> {
+    let mut working = Vec::new();
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    // `standing` saw a regular file; do not follow a link swapped in since.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        rustix::fs::OFlags::NOFOLLOW.bits() as i32,
+    );
+    options
+        .open(changed.join(path))
+        .and_then(|file| {
+            file.take(CRLF_COMPARE_LIMIT as u64 + 1)
+                .read_to_end(&mut working)
+        })
+        .map_err(|error| format!("cannot read the worktree's file: {error}"))?;
+    if working.len() > CRLF_COMPARE_LIMIT || !working.windows(2).any(|w| w == b"\r\n") {
+        return Ok(false);
+    }
+    let mut normalized = Vec::with_capacity(working.len());
+    let mut bytes = working.iter().peekable();
+    while let Some(&byte) = bytes.next() {
+        if byte == b'\r' && bytes.peek() == Some(&&b'\n') {
+            continue;
+        }
+        normalized.push(byte);
+    }
+    // One byte over the normalized length: a longer blob cannot be equal,
+    // and `output` fails on it rather than reading it all.
+    match output(
+        changed,
+        &["cat-file", "blob", blob],
+        deadline,
+        normalized.len() + 1,
+    ) {
+        Ok(committed) => Ok(committed == normalized),
+        Err(_) if Instant::now() < deadline => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -588,6 +650,23 @@ mod tests {
         assert_eq!(repo.of("b.rs"), Ok(Standing::Unmerged));
         // A path that never existed has no commit to compare.
         assert!(repo.of("never.rs").is_err());
+    }
+
+    #[test]
+    fn a_committed_file_with_crlf_on_disk_and_lf_in_head_is_committed() {
+        let repo = Repo::new("crlf");
+        let tree = repo.tree();
+        // `core.autocrlf=true` stores LF in the blob and keeps CRLF on disk.
+        git(&tree, &["config", "core.autocrlf", "true"]);
+        fs::write(tree.join("a.rs"), "pub fn renamed() {}\r\nfn x() {}\r\n").unwrap();
+        git(&tree, &["commit", "--quiet", "-am", "rename"]);
+        assert_eq!(repo.of("a.rs"), Ok(Standing::Unmerged));
+        // A change beyond line endings is still uncommitted.
+        fs::write(tree.join("a.rs"), "pub fn again() {}\r\nfn x() {}\r\n").unwrap();
+        assert_eq!(repo.of("a.rs"), Ok(Standing::Uncommitted));
+        // So is a working file that is only a prefix of the blob.
+        fs::write(tree.join("a.rs"), "pub fn renamed() {}\r\n").unwrap();
+        assert_eq!(repo.of("a.rs"), Ok(Standing::Uncommitted));
     }
 
     #[test]
