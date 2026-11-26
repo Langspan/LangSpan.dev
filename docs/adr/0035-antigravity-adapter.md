@@ -282,3 +282,6 @@ admission, conflict and stale-source scenarios on issue #110.
 - The installer can keep a host's entries in a named object of their own, not
   only under `hooks`, and a host's commands can name their event.
 - `hook antigravity` takes `--event`; no other host does.
+- No between-step delivery (issue #214): the hooks above run at a session's
+  start, an invocation and a tool call, so an interface notice reaches an
+  Antigravity session at its next hook call.

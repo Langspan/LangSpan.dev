@@ -106,6 +106,7 @@ fn stop(state: &mut State, session: &str, id: &str) -> bool {
         Command::SessionStop {
             session_id: session.into(),
             failure: None,
+            prompt_id: None,
         },
         7,
     ) {

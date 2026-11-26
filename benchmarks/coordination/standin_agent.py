@@ -70,11 +70,15 @@ MAX_PEERS = 16
 
 
 def hook_commands(settings, event, tool):
+    """The foreground command hooks for EVENT. A background hook (`async`
+    or `asyncRewake`, such as LangSpan's between-step watcher) is left out:
+    the stand-in has no model for it to wake, and run in the foreground it
+    would hold every prompt."""
     for entry in settings.get("hooks", {}).get(event, []):
         matcher = entry.get("matcher") or "*"
         if matcher == "*" or tool is None or re.fullmatch(matcher, tool):
             for hook in entry.get("hooks", []):
-                if hook.get("type") == "command":
+                if hook.get("type") == "command" and not (hook.get("async") or hook.get("asyncRewake")):
                     yield hook["command"], hook.get("timeout", HOOK_SECONDS)
 
 

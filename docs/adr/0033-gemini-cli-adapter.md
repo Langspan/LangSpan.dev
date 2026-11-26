@@ -165,3 +165,6 @@ README lists the capture steps to run once the CLI can sign in.
 - The shared lifecycle accepts `BeforeAgent` as the prompt event.
 - Small marker files under the state directory are a new piece of local state.
   They hold no content: only a digest of the tool and its target.
+- No between-step delivery (issue #214): the hooks above run at a session's
+  start, an agent turn and a tool call, so an interface notice reaches a
+  Gemini CLI session at its next hook call.
