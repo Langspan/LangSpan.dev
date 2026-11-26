@@ -62,7 +62,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [A6: Gemini CLI verified on a real session, and guidance for rules-file hosts](https://github.com/Langspan/LangSpan.dev/issues/14): the Gemini CLI adapter has never run live, and editors without hooks get nothing at all.
 - [A11: Outline first for whole reads of large files](https://github.com/Langspan/LangSpan.dev/issues/16): whole reads of large files spend context to find one function; nothing offers the file's shape first.
 - [A12: Index answers next to a search result](https://github.com/Langspan/LangSpan.dev/issues/17): a search result does not say where a name is defined, what depends on it or whether a peer is changing it.
-- [A13: Show where peers are looking](https://github.com/Langspan/LangSpan.dev/issues/18): a session that has read and planned but not written yet is missing from peers' briefings.
+- [A13: Show where peers are looking](https://github.com/Langspan/LangSpan.dev/issues/18): a session that has read and planned but not written yet is missing from peers' briefings. Built as presence; a real-host run remains.
 - [A14: Brief a session when it first reaches another repository](https://github.com/Langspan/LangSpan.dev/issues/19): a session that moves into a second repository is never briefed about the peers working there.
 - [A15: Deliver peers' changes during a Codex turn](https://github.com/Langspan/LangSpan.dev/issues/20): a long Codex turn hears about peers' changes only at its next prompt, after building on old state.
 - [A16: Push a message into an open session at once](https://github.com/Langspan/LangSpan.dev/issues/21): an urgent message waits for the receiving session's next hook, which may come after the harm.
@@ -121,9 +121,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [E4: Messages addressed to a file or a definition](https://github.com/Langspan/LangSpan.dev/issues/63): a message can go only to everyone or to one session ID, not to whoever uses some code.
 - [E7: Sender recorded from the running session](https://github.com/Langspan/LangSpan.dev/issues/64): a shell-sent message needs `--from`, and a wrong or missing value misattributes it.
 - [E9: Messages to sessions on other machines](https://github.com/Langspan/LangSpan.dev/issues/65): agents on two machines cannot message each other, so their owners relay by hand.
-- [E11: Withdraw a sent message](https://github.com/Langspan/LangSpan.dev/issues/66): a message that no longer holds keeps reaching sessions and steering them.
 - [E12: Ask who received a message](https://github.com/Langspan/LangSpan.dev/issues/67): a sender cannot tell whether its message has reached the other session yet.
-- [E13: Show a shortened message in full](https://github.com/Langspan/LangSpan.dev/issues/68): a message cut short in a briefing cannot be read in full.
 
 ## F. Checks and landing
 
@@ -132,10 +130,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [F5: Rebase landings and adapt identifier renames](https://github.com/Langspan/LangSpan.dev/issues/72): a landing refused over a rename leaves every use to fix by hand, and there is no linear-history landing.
 - [F8: An integration branch every session lands on](https://github.com/Langspan/LangSpan.dev/issues/73): each agent's own branch leaves the person merging six branches by hand to see the work together.
 - [F9: A LangSpan mark in pull requests](https://github.com/Langspan/LangSpan.dev/issues/74): a reviewer might want to know a pull request's tree was checked through LangSpan.
-
-## G. Cross-machine and team
-
-- [G6: Move, switch and remove a workspace](https://github.com/Langspan/LangSpan.dev/issues/75): a moved or re-cloned checkout loses its history, and an unused repository cannot be removed.
 
 ## H. The person's view
 
@@ -160,7 +154,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [J9: A hash-chained event log with replay](https://github.com/Langspan/LangSpan.dev/issues/91): a person cannot show what LangSpan told an agent at a moment, or that the record is unchanged.
 - [J10: Token accounting from host transcripts](https://github.com/Langspan/LangSpan.dev/issues/92): token spending per session cannot be seen or related to refusals and rework.
 - [J11: Telling peers that a session ran out of quota](https://github.com/Langspan/LangSpan.dev/issues/93): a session stopped by its usage limit still looks active to peers and the person.
-- [J12: Liveness from recent hook runs](https://github.com/Langspan/LangSpan.dev/issues/94): on macOS, busy read-only sessions drop out of briefings and closed ones linger.
 
 ## Not building: hosted-service features
 

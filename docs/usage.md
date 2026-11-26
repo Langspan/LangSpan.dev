@@ -2,7 +2,18 @@
 
 Build, connect native sessions, inspect coordination, and integrate through MCP.
 For the product overview and support summary, see [the README](../README.md).
-Commands below run from the LangSpan repository root unless stated otherwise.
+For a visual introduction, open the [interactive workflow](https://langspan.dev/#demo),
+[launch film](https://langspan.dev/#film) or [recorded dashboard evidence](https://langspan.dev/#evidence).
+Examples below use the binary built from the LangSpan repository root.
+If you installed a release binary on your PATH, replace
+`./target/release/langspan` with `langspan`.
+
+## Install a release
+
+[v0.1.0](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0) provides
+macOS and Linux binaries. Follow the [platform downloads, verification and
+installation instructions](../README.md#install) before starting the coordinator.
+A source build is optional.
 
 ## Build from source
 
@@ -209,6 +220,45 @@ session-end handling. Claude Code and Codex get end-of-reply handling
 `PostToolBatch` ([ADR 0027](adr/0027-turn-and-batch-events.md)). Existing unrelated settings and hooks are preserved. The
 host's own folder and hook trust requirements still apply. For Codex, review the
 project hooks through its native hook-trust flow.
+
+#### Codex: start and resume at the resolved path
+
+Codex keys its hook trust to the exact path of the project's hooks file. A
+session whose hooks were trusted with Codex started at `/tmp/work` and that is
+later reopened with `codex exec resume` at `/private/tmp/work` (the same
+directory on macOS, by another path) counts them as untrusted there: Codex runs
+none of LangSpan's hooks, prints no warning, and the session edits
+uncoordinated. A symbolic link anywhere in the path does the same. To avoid it:
+
+- Start Codex, trust LangSpan's hooks, and resume Codex in the checkout's
+  resolved path, with no symbolic links. `langspan hooks install codex` prints
+  it:
+
+  ```text
+  Codex: start and resume Codex in '/private/tmp/work', the resolved root with no symbolic links. ...
+  ```
+
+- If a session must be resumed under another path, trust the hooks again there
+  with `/hooks` before it edits.
+
+LangSpan cannot see a hook that never runs, but it notices the result. When
+the coordinator's scan sees a file's content change in a checkout and no
+session of the checkout reported it, while a Codex session is registered there, it records an
+`uncoordinated_changed` event naming up to two of the checkout's Codex
+sessions, most recently active first, as the likely cause (not a proven
+author: a hand edit looks the same). Files held by an admitted edit, versions a
+session read or wrote, and files a checkout change (a branch switch, reset or
+stash) accounts for are left out. The next briefing to each session of that
+checkout carries one line, once per session:
+
+```text
+LangSpan: edits not coordinated. Files in this checkout changed 12s ago and no session reported the edit. codex session 0198c0de may be running without LangSpan's hooks: ... Read these files again before changing them: "src/a.rs"
+```
+
+A Codex session named is not named again while that notice is held (the
+briefing horizon), and a file a session reports at that version afterwards
+drops out of the line. Without a registered Codex session nothing is recorded.
+`langspan status --json` shows the held notices under `uncoordinated`.
 
 Cursor: built from documentation, not yet verified on a real Cursor. Its
 installer writes `.cursor/hooks.json` (`preToolUse`, `postToolUse` and
@@ -473,6 +523,45 @@ Nothing is recorded with `--prompt-summary off` or `--code-briefing off`, or
 while the source index has no complete scan. `langspan status --json` shows
 each session's `prompt_targets` under its activity.
 
+A session that has read and searched but not written yet is still shown: its
+peer line ends with where it is looking, for example
+`task: "Rework token refresh"; looking at "src/auth.rs", "src/session.rs";`.
+This presence comes from Claude Code `Read` and `Grep`, Cursor `Read` and
+`Grep`, Gemini CLI `read_file`, and on every host the files a shell command
+reads: each operand of `cat`, `head`, `tail`, `less`, `more`, `wc`, `nl`,
+`ls`, `stat`, `file`, `diff`, `tree` or `du`, and the operands after the
+pattern of a `grep`, `egrep`, `fgrep` or `rg` whose options are all flags
+that program takes without a value (any other option, such as `rg -E` or
+`grep -e`, records nothing for that command). After `cd`, `pushd`, `popd`,
+`source`, `.` or `eval`, only absolute paths are taken. Only paths that exist inside the checkout are kept, at most 4
+per command. A search records only the path it was scoped to (its `path`
+input, else its working directory, never the whole checkout); its pattern,
+glob and type, and a shell command's text, are never recorded. Codex reports
+no reads, so a Codex session is shown only through its shell commands.
+
+At most 4 paths are shown per peer, newest first, within the 700-byte peer line
+and the 2,400-byte briefing, and only paths looked at in the last 10 minutes
+that the peer is not editing and has not edited. A peer known only by where it
+looked is listed after every peer with work. When the briefing is full, the
+clause is the first thing left out: every peer's line, local and remote, is
+placed without it, and it is added only where room is left. A peer seen
+reading a path it had not been shown reading is news at a session start or
+prompt, never mid-turn after a tool call; paths ageing out, or read again,
+are not news. Presence never
+holds, refuses or delays a read, search or shell call, and it is not published
+through the remote setup. The briefing JSON (`langspan brief --json`,
+`langspan_brief`) gives each peer a `looking` list of
+`{"path": "src/auth.rs", "kind": "read"|"search"|"shell", "age_s": 42}`, and
+`langspan status --json` (`langspan_status`) each session's `looking` with the
+times it was recorded.
+
+To keep a session's reads, searches and shell paths from peers, install with
+`--presence off` (for `install` and `hooks install`). Its reads are still
+recorded as versions for its own stale checks; nothing looked at while it is
+off is shown later. `--presence-minutes N` (1 to 30, default 10) sets how old a
+peer's presence that session is shown. When the coordinator is down, nothing
+is recorded and the host's call is unchanged.
+
 Relevant peers share the same checkout or a Git repository identified by the
 observer. Linked worktrees can share briefings while keeping separate physical
 admission domains. Another worktree's file is reported as a logical overlap,
@@ -678,7 +767,8 @@ proof a process is alive; Linux process observation is available through
 ## Recap, notes and messages
 
 `recap` gives a bounded account of one workspace's recorded state, including
-sessions, edits, checks, remembered notes and unacknowledged messages. Using the
+sessions, edits, checks, remembered notes, unacknowledged messages and recently
+withdrawn ones (`"retracted": true`). Using the
 workspace and sessions from the CLI example:
 
 ```sh
@@ -731,10 +821,48 @@ does not change leases, intents or recorded activity.
 
 Delivery acknowledges a message; it does not establish that the model acted on
 it. Terminal `brief` and `recap` are peeks and acknowledge nothing. To acknowledge
-one explicitly, use `langspan ack bob MESSAGE_ID --request-id ack-1`. Notes and
+one explicitly, use `langspan ack bob MESSAGE_ID --request-id ack-1`.
+
+A briefing renders each message on one line of at most 700 bytes. Quoting can
+take a 400-byte message with many quotes or long paths past that; the line is
+then cut and ends with `… (cut; langspan messages show -- WORKSPACE MESSAGE_ID)`,
+inside the 700 bytes. `langspan messages show demo m-9 [--json]` (MCP
+`langspan_show_message`) returns that message in full as it was sent: its ID,
+sender (`null` for the owner), recipient, whole text, every path and
+`retracted` (true once `langspan messages retract` withdrew it, in which case
+disregard it). It is read from the
+message's `message_sent` event, so it also works after the message was
+acknowledged or dropped from the pending list, and across daemon restarts. It is
+read-only and acknowledges nothing. An ID not sent in that workspace is the
+error `unknown_message`. Once retention has deleted the oldest events, an ID not
+found is `message_not_kept` instead: the message says from which event sequence
+the log is kept and that a message sent before then no longer has its full text
+(the log cannot tell such an ID from one never sent). With the daemon down the
+command reports coordination
+unavailable. Any local session or the owner can read any message, as with
+`recap`. Notes and
 messages stay local; remote Git-ref sharing does not publish them. Treat their
 text as data and leave secrets out. [ADR 0009](adr/0009-agent-messages-and-handoff.md)
 describes delivery, retention and the local identity boundary.
+
+A message or handoff that no longer holds can be withdrawn:
+
+```sh
+./target/release/langspan messages retract demo last --from alice --request-id retract-1 --json
+```
+
+`last` is the sender's newest message; otherwise name the message ID its send
+returned. Copies not yet delivered are removed, and a handoff not yet taken is
+not taken. Each session that already received it is told once, at its next
+briefing (start, prompt, or for Claude Code after a completed tool call):
+`- Session alice withdrew its message "..." (first 120 bytes): disregard it.`
+The result lists both groups:
+`{"message_id":"message-1","withdrawn_unread":["bob"],"told_to_disregard":[]}`.
+A session may withdraw only its own messages (`not_sender` otherwise); without
+`--from` it is the owner, who may withdraw any. An unknown message, one dropped
+by the 64-message limit, or one already withdrawn is refused, saying which; a
+retry with the same request ID returns the first result. The original
+`message_sent` event stays in the log, and withdrawal is local only.
 
 ## The day so far
 
@@ -1189,10 +1317,17 @@ so `cargo fmt --all` during another session's test run leaves each session's
 `commit --mine` able to take its own hunks, and a new file one session wrote
 stays that session's after another session's formatter rewrites it. Tokens
 are compared by language: Rust, TypeScript and JavaScript as words and
-punctuation, with a comma just before a closing `)`, `]` or `}` ignored (a
-formatter adds and drops those when it wraps a list); Markdown as words and
-punctuation; any other file as its text with all whitespace removed.
-Whitespace inside a string literal is not told apart from formatting.
+punctuation, each string or character literal one token whitespace and all,
+with a comma just before a closing `)`, `]` or `}` ignored (a formatter adds
+and drops those when it wraps a list); Markdown as words and punctuation;
+Python as words, punctuation and strings, with the indentation of each line
+that starts a statement as content, so re-wrapping a call inside its
+parentheses is formatting but re-indenting a block is not; YAML, Makefiles
+and other indentation-sensitive files (`.haml`, `.pug`, `.sass`, `.styl`,
+`.nim`, `.fs` and the others ADR 0011 lists) as words and punctuation with
+every line's indentation as content; any other file as its text with all
+whitespace removed. Trailing whitespace and blank lines are always
+formatting.
 
 A change that alters tokens (a rename, an added line) is credited as before:
 to the command's session when nothing else could have made it and it
@@ -1254,7 +1389,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_intent_end` | End advisory work independently of admission |
 | `langspan_admit` | Request an entire file set or inspect conflicts |
 | `langspan_complete` | Complete a currently valid held admission |
-| `langspan_status` | Inspect open admissions, live or recent sessions and liveness observations; `all` and `after` page through every record |
+| `langspan_status` | Inspect open admissions, live or recent sessions, liveness observations and each session's last hook run (`summary.last_hook_age_ms`); `all` and `after` page through every record |
 | `langspan_events` | Read an ordered page of persisted events |
 | `langspan_changes` | Read file and local-branch observations with scan freshness |
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
@@ -1273,7 +1408,9 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_forget` | Remove a remembered note by ID |
 | `langspan_recall` | Search a workspace's remembered notes: every query word in a note's text or paths, without case; best first, at most 50 |
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |
+| `langspan_show_message` | Read one message in full as it was sent, also after acknowledgement; for a briefing line marked `(cut; …)` |
 | `langspan_handoff` | Leave a message for the next other session to take up |
+| `langspan_retract_message` | Withdraw a message this session sent, by ID or `"last"`; its readers are told to disregard it |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |
 | `langspan_my_changes` | List this session's own uncommitted files and hunks in a shared checkout, as `langspan_commit_mine` would split them; changes nothing |
 
@@ -1287,6 +1424,71 @@ checkout, inside the `langspan mcp` process rather than the daemon; its output
 goes to that process's standard error. `langspan_land` with `apply` pushes as
 you, and `langspan_commit_mine` commits as you, running your Git hooks. Deny
 any of them in your host's permission settings if agents should not do this.
+
+## Move, switch and remove a workspace
+
+These are owner commands of the CLI only; no MCP tool moves or removes a
+workspace ([ADR 0025](adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md)).
+
+```sh
+langspan workspace list
+mv /path/to/src/app /path/to/work/app
+langspan workspace move app /path/to/work/app --request-id ws-move-1
+```
+
+```text
+Workspace app now at /path/to/work/app. Kept: 6 notes, 2 pending messages, 14 check records, 3 landings.
+Project hooks name the old root; rerun:
+  langspan hooks install claude-code --workspace 'app' --root '/path/to/work/app' --state-dir '…' --apply
+```
+
+`workspace list [--after ID] [--json]` shows every workspace with its root and
+whether it exists, its current sessions, notes, pending messages, check
+records, and whether its automatic check and remote sharing are on. It answers
+a page at a time, in workspace ID order: at most 100 workspaces, and fewer when
+long roots would not fit one frame. When more remain, the page ends with
+`More: langspan workspace list --after ID` (`next` in the JSON); run that for
+the next page. A cursor whose workspace was removed since still continues after
+it.
+
+`workspace move ID NEW_ROOT` is for a checkout you moved: the old root must be
+gone and NEW_ROOT must be the top of a Git checkout. With `--switch`, the old
+root still exists and NEW_ROOT is another checkout of the same repository
+(its object database holds the old root's `HEAD` commit), for example a fresh
+clone that replaces a broken one; the old root then stops being coordinated
+under the ID. `--switch` is refused (`root_derived_id`) when the ID is the one
+user-level hooks derived from the old root, since new sessions there would
+claim it again; move or delete the old checkout and run the move without
+`--switch`, or register NEW_ROOT with `workspace add`. The ID, notes, pending
+messages, check records, landings, the automatic check and the remote setting
+are kept; an automatic check waiting or running in the old root is cancelled,
+and the next writes in NEW_ROOT are checked there. File versions sessions read
+under the old root are dropped, so a session's next edit of an existing file
+has an unknown base until it reads it again; the next scan and the source
+index start again from NEW_ROOT. A refused move changes nothing and says
+which check failed: `not_checkout_top`, `old_root_exists`,
+`old_root_missing`, `root_derived_id`, `different_repository` or
+`workspace_conflict` (NEW_ROOT
+is registered already or overlaps another workspace).
+
+User-level hooks need nothing: an event from NEW_ROOT joins the moved ID.
+Project-level hooks name their root in the host's configuration, which the
+command does not edit; it prints the `hooks install` commands to rerun for the
+hosts whose project hooks name this workspace.
+
+`workspace remove ID` is a dry run that lists what would end: sessions,
+intents, notes, pending messages and the automatic check. `workspace remove ID
+--apply --request-id ID` takes the workspace out of `status`, `recap`,
+`workspace list`, briefings and the dashboard; `langspan events` keeps its
+history. A hook event from that root later registers it again, empty.
+
+Moving and removing are refused while a session holds an admission there or a
+landing holds or waits for its push turn (`workspace_busy`), and while remote
+sharing is on (`remote_sharing_on`): run `langspan remote disable ID` first,
+so the published ref is removed, and wait until that ref is gone (`langspan
+doctor` shows its progress): the daemon removes it through the old checkout's
+remote.
+A refusal is recorded under its request ID; retry with a new one.
 
 ## Retries and recovery
 
@@ -1312,6 +1514,18 @@ A daemon restart advances the generation and invalidates outstanding grants.
 Sessions and intents remain visible as stale. Reattach with a new registration
 request ID, then explicitly refresh intent. Process liveness observations never
 renew an admission or replace this recovery step.
+
+A session counts as current for peers' briefings, the status line and the
+dashboard while it is in this generation, not ended, not known to have exited,
+and its newest edit, prompt or hook run is at most 30 minutes old. Any hook run
+that reaches the daemon counts, reads, failed tool calls, tool batches, stops
+and shell commands included; the daemon records one `session_seen` event per
+session at most every 30 seconds. `langspan status` prints each session's last
+hook run and process observation, and its `--json` form and `langspan_status`
+give them as `summary.last_hook_age_ms` and `state.session_liveness`. Process
+observations are made on Linux and macOS for Claude Code and Codex hosts; a
+probe that fails, or of another user's process, records `unknown`, which does
+not drop a session.
 
 CLI exit codes: `0` successful result, `1` error/unavailable coordination or a
 failed check, `2` conflict or refused push, `3` an inactive historical admission,
@@ -1362,7 +1576,8 @@ landing report, is replaced by the error `reply_too_large`, which keeps the
 operation's `exit_code` and outcome; the CLI's `--json` gives the whole
 answer. The CLI's answers are unchanged. File admission accepts up to 64 distinct normalized keys, 512 bytes
 per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit
-and prompt summaries a 512-byte one. Summaries are redacted on receipt, and
+and prompt summaries a 512-byte one. A presence record names 1 to 4 paths, and
+each session keeps its 16 most recent looked-at paths. Summaries are redacted on receipt, and
 redaction never makes one longer than its limit: a summary that would outgrow
 it keeps its longest redacted prefix that fits, cut at a character boundary
 and ending in `[redacted]`, so a summary within its limit is never refused

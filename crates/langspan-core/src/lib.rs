@@ -14,6 +14,7 @@ mod recent;
 mod status;
 mod status_line;
 mod today;
+mod workspaces;
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
@@ -46,6 +47,9 @@ pub use today::{
     OpenAdmission, OpenCheck, OpenIntent, OpenMessage, TODAY_EVENTS, TODAY_FILES, TODAY_OPEN,
     TODAY_SESSIONS, Today, TodayChecks, TodayLandings, TodayOpen, TodayQuery, TodaySession,
     TodayWindow, today,
+};
+pub use workspaces::{
+    MAX_ENDING_SESSIONS, MAX_WORKSPACE_PAGE, WorkspaceEnding, WorkspaceKept, WorkspaceSummary,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -484,6 +488,11 @@ pub struct SessionActivity {
     pub session_id: String,
     pub generation: u64,
     pub last_ms: u64,
+    /// The last recorded hook run of any kind that reached the daemon for
+    /// this session (a read, a failed call, a batch, a stop): at most one
+    /// `SessionSeen` per `SESSION_SEEN_INTERVAL_MS`. Zero when none was.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub last_hook_ms: u64,
     /// The owner's own words for the current task, capped by the adapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -513,11 +522,133 @@ pub struct SessionActivity {
     /// the source index (roadmap C8). Paths only; never the prompt's words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_targets: Option<PromptTargets>,
+    /// Where the session was last seen looking: files it read, the path
+    /// scope of its searches, and paths its shell commands named. Newest
+    /// first, one entry per path, at most `MAX_LOOKING` (roadmap A13). Paths
+    /// only: never a search pattern or a command's text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub looking: Vec<LookedPath>,
     /// Digests of the leading non-empty lines of the session's last prompt,
     /// at most `MAX_PROMPT_LINES`: compared with live peers' to tell prompts
     /// started from one template apart (issue #114). Never the words.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub line_digests: Vec<String>,
+}
+
+/// How a session came to look at a path, for presence (roadmap A13).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceKind {
+    /// The host reported a completed read of the file.
+    Read,
+    /// A search (Claude Code's or Cursor's `Grep`) scoped to this path.
+    Search,
+    /// A shell command named this existing path as an operand.
+    Shell,
+}
+
+/// One path a session looked at, and when.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LookedPath {
+    pub path: String,
+    pub kind: PresenceKind,
+    pub at_ms: u64,
+}
+
+/// One path a peer was looking at, as a briefing shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PresencePath {
+    pub path: String,
+    pub kind: PresenceKind,
+    pub age_s: u64,
+}
+
+/// A session's own presence setting, kept only when it differs from the
+/// default (shown, `PRESENCE_WINDOW_MS`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PresenceSetting {
+    /// False: this session's reads, searches and shell paths are never
+    /// shown to peers (`--presence off`).
+    pub shown: bool,
+    /// How old a peer's presence this session is still shown.
+    pub window_ms: u64,
+}
+
+/// Looked-at paths kept per session.
+pub const MAX_LOOKING: usize = 16;
+/// Looked-at paths shown per peer, and named by one presence observation.
+pub const PRESENCE_PATHS: usize = 4;
+/// Presence older than this is not shown, unless the asking session chose
+/// another window (at most `BRIEF_HORIZON_MS`).
+pub const PRESENCE_WINDOW_MS: u64 = 10 * 60 * 1000;
+/// The shortest presence window a session can choose.
+pub const MIN_PRESENCE_WINDOW_MS: u64 = 60 * 1000;
+
+impl SessionActivity {
+    /// When the session was last known to be working: its newest edit,
+    /// prompt or recorded hook run. Whether it is current compares this, not
+    /// `last_ms` alone, with `BRIEF_HORIZON_MS` (roadmap J12).
+    pub fn last_seen_ms(&self) -> u64 {
+        self.last_ms.max(self.last_hook_ms)
+    }
+}
+
+/// A hook run is recorded as `SessionSeen` at most this often per session,
+/// so a burst of tool calls writes one event, not one per call.
+pub const SESSION_SEEN_INTERVAL_MS: u64 = 30 * 1000;
+
+/// The session a request is made on behalf of, when it is that session at
+/// work: every request a hook run sends for it, and the same requests from
+/// the CLI or MCP. A look from outside (`Brief` without `deliver`, a status
+/// read) and the end of a session are not. The daemon records a
+/// `SessionSeen` after each such request (roadmap J12).
+pub fn acting_session(command: &Command) -> Option<&str> {
+    match command {
+        Command::SessionRegister { session_id, .. }
+        | Command::ObserveSessionLiveness { session_id, .. }
+        | Command::IntentSet { session_id, .. }
+        | Command::IntentEnd { session_id }
+        | Command::Admit { session_id, .. }
+        | Command::AdmitTool { session_id, .. }
+        | Command::ObserveSource { session_id, .. }
+        | Command::ObservePresence { session_id, .. }
+        | Command::SetPresence { session_id, .. }
+        | Command::AckMessage { session_id, .. }
+        | Command::Handoff { session_id, .. }
+        | Command::RecordRefusal { session_id, .. }
+        | Command::CheckCalls { session_id, .. }
+        | Command::Complete { session_id, .. }
+        | Command::Observe { session_id, .. }
+        | Command::ObserveTool { session_id, .. }
+        | Command::SessionPrompt { session_id, .. }
+        | Command::SetPromptTargets { session_id, .. }
+        | Command::SessionStop { session_id, .. }
+        | Command::ObserveToolBatch { session_id, .. }
+        | Command::Brief {
+            session_id,
+            deliver: true,
+            ..
+        } => Some(session_id),
+        _ => None,
+    }
+}
+
+/// Whether a hook run of `session_id` at `now_ms` is recorded: the session
+/// is current and its last record is at least `SESSION_SEEN_INTERVAL_MS`
+/// old, or there is none in this generation.
+pub fn session_seen_due(state: &State, session_id: &str, now_ms: u64) -> bool {
+    if current_session(state, session_id).is_err() {
+        return false;
+    }
+    let last = state
+        .activity
+        .get(session_id)
+        .filter(|activity| activity.generation == state.generation)
+        .map_or(0, |activity| activity.last_hook_ms);
+    last == 0 || now_ms.saturating_sub(last) >= SESSION_SEEN_INTERVAL_MS
 }
 
 /// At most this many leading prompt lines are compared by digest.
@@ -547,7 +678,7 @@ fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 
@@ -567,12 +698,16 @@ const BRIEF_BYTES: usize = 40 * 1024;
 /// FNV-1a, 64 bits. It only tells one briefing from the next for the same
 /// session; a collision would withhold one repeat briefing and nothing else.
 fn fingerprint(text: &str) -> String {
+    format!("{:016x}", fingerprint_u64(text))
+}
+
+fn fingerprint_u64(text: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{hash:016x}")
+    hash
 }
 
 pub const MAX_TOUCHED: usize = 32;
@@ -619,6 +754,12 @@ pub struct PeerWork {
     /// subagent; absent for an unrelated session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relation: Option<PeerRelation>,
+    /// Where this peer was recently looking (presence, roadmap A13): at most
+    /// `PRESENCE_PATHS`, newest first, none it is editing or edited, within
+    /// the asking session's presence window. Advisory: it never holds,
+    /// refuses or delays anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub looking: Vec<PresencePath>,
 }
 
 /// A peer that belongs to the same host conversation as the asking session.
@@ -1338,9 +1479,61 @@ pub struct Message {
     pub text: String,
     /// Files it is about. May be empty.
     pub paths: Vec<String>,
-    /// Sessions that have acknowledged a message for everyone.
+    /// Sessions that have acknowledged it. A held message lists them only
+    /// for everyone; the history kept for withdrawal lists every reader.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub acknowledged: Vec<String>,
+    /// Withdrawn by its sender or the owner: no longer delivered, and each
+    /// session that had received it is told once to disregard it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retracted: bool,
+}
+
+/// A message a session received and that was then withdrawn: the session
+/// is told once, at its next briefing, to disregard it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetractedMessage {
+    pub message_id: String,
+    pub workspace_id: String,
+    /// The message's sender; `None` for the owner.
+    pub from: Option<String>,
+    /// The first `RETRACTED_TEXT_BYTES` of its text, cut at a character
+    /// boundary.
+    pub text: String,
+    /// True when `text` is shorter than the message was.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cut: bool,
+}
+
+/// One message in full, as it was sent: what `messages show` returns for a
+/// line a briefing cut. The text and paths are data from the sender, never
+/// instructions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ShownMessage {
+    pub message_id: String,
+    /// The sending session; `None` for the owner.
+    pub from: Option<String>,
+    pub to: Recipient,
+    pub text: String,
+    pub paths: Vec<String>,
+    /// Withdrawn by its sender or the owner since it was sent: its readers
+    /// have been or will be told to disregard it.
+    pub retracted: bool,
+}
+
+impl From<Message> for ShownMessage {
+    fn from(message: Message) -> Self {
+        Self {
+            message_id: message.message_id,
+            from: message.from,
+            to: message.to,
+            text: message.text,
+            paths: message.paths,
+            retracted: message.retracted,
+        }
+    }
 }
 
 /// The observer could not complete a scan of a workspace. Until one
@@ -1388,7 +1581,8 @@ pub struct Recap {
     pub checks: Vec<CheckRecord>,
     pub landings: Vec<Landing>,
     pub notes: Vec<Note>,
-    /// Messages still owed to at least one session, newest first.
+    /// Messages still owed to at least one session, newest first, then
+    /// recently withdrawn ones (`retracted`), newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<Message>,
     pub teammates: Vec<RemotePeer>,
@@ -1417,6 +1611,14 @@ pub const MESSAGE_LINE_LIMIT: usize = 700;
 /// every message selected for a briefing fits its text and none is
 /// acknowledged without being shown.
 pub const MESSAGE_BRIEF_BYTES: usize = 1500;
+/// The longest line an adapter renders for an uncoordinated change, before
+/// its ellipsis. A briefing that carries one takes this line, plus its
+/// ellipsis and newline, out of `MESSAGE_BRIEF_BYTES`: both are delivered
+/// once, so every message and withdrawal selected beside it must still be
+/// shown.
+pub const UNCOORDINATED_LINE_LIMIT: usize = 700;
+/// Bytes of a withdrawn message's text quoted when its readers are told.
+pub const RETRACTED_TEXT_BYTES: usize = 120;
 
 pub const MAX_NOTICES: usize = 32;
 pub const NOTICE_CHANGES: usize = 16;
@@ -1488,10 +1690,19 @@ pub struct Briefing {
     /// handoff, that it has not yet acknowledged. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<Message>,
+    /// Messages this session received that were since withdrawn: each is
+    /// delivered once, so the session disregards it. Newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retracted: Vec<RetractedMessage>,
     /// The checkout this session works in changed under it since it last
     /// read or edited a file there. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkout_changes: Vec<CheckoutNotice>,
+    /// Changes on disk in this checkout that no session reported, with the
+    /// Codex sessions that may have run without LangSpan's hooks. Each is
+    /// delivered once. Newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncoordinated: Vec<UncoordinatedNotice>,
     /// Results of the automatic check run after this session's writes, not
     /// yet delivered. Each is delivered once. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1545,6 +1756,15 @@ pub struct State {
     /// `MAX_MESSAGES`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub messages: BTreeMap<String, Vec<Message>>,
+    /// The latest messages sent per workspace, newest first, at most
+    /// `MAX_MESSAGES`, with every session that received each one and
+    /// whether it was withdrawn: what a withdrawal and the recap read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub message_history: BTreeMap<String, Vec<Message>>,
+    /// Withdrawn messages each session received and has not yet been told
+    /// to disregard, per session, newest first, at most `MAX_MESSAGES`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub retracted_notices: BTreeMap<String, Vec<RetractedMessage>>,
     /// Workspaces whose last scan attempt failed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scan_failures: BTreeMap<String, ScanFailure>,
@@ -1554,6 +1774,10 @@ pub struct State {
     /// Checkout changes per workspace, newest first, at most `MAX_CHECKOUTS`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub checkouts: BTreeMap<String, Vec<CheckoutChange>>,
+    /// Uncoordinated changes per workspace, newest first, at most
+    /// `MAX_UNCOORDINATED`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub uncoordinated: BTreeMap<String, Vec<UncoordinatedChange>>,
     /// The automatic check per workspace, for the workspaces where the owner
     /// turned one on.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1569,6 +1793,9 @@ pub struct State {
     /// not told.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub uninstalled_hosts: BTreeMap<String, UninstalledHost>,
+    /// Sessions whose presence setting is not the default, by session ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub presence: BTreeMap<String, PresenceSetting>,
     /// The current generation's clock anchor, once recorded. Derived from
     /// the events on replay; not part of the status reply.
     #[serde(skip)]
@@ -1582,6 +1809,14 @@ pub struct State {
     /// (roadmap C3). Derived on replay; not part of the status reply.
     #[serde(skip)]
     pub path_refusals: Vec<PathRefusal>,
+    /// How many times each workspace ID has been moved or removed: its
+    /// registration revision. With the root it names one registration, so
+    /// what was derived outside the log during an earlier one (the source
+    /// index, a worker's report) is started again or refused, even after a
+    /// switch back to an earlier root. Derived on replay; not part of the
+    /// status reply.
+    #[serde(skip)]
+    pub workspace_revisions: BTreeMap<String, u32>,
     /// Writes recorded per workspace since the event log was replayed: the
     /// write generation a check run takes before its tree and carries with
     /// its test results (`record_check.writes_before`). Derived on replay;
@@ -1630,6 +1865,48 @@ pub struct CheckoutChange {
     pub generation: u64,
 }
 
+/// Uncoordinated changes kept per workspace.
+pub const MAX_UNCOORDINATED: usize = 4;
+/// Changed files one uncoordinated change keeps, at most.
+pub const MAX_UNCOORDINATED_FILES: usize = 8;
+/// Codex sessions one uncoordinated change names, at most.
+pub const MAX_UNCOORDINATED_SESSIONS: usize = 2;
+/// Changed files one scan reports for comparison, at most.
+pub const MAX_UNCOORDINATED_OBSERVED: usize = 256;
+/// The host name that starts a Codex session's ID (`codex.<host session>`).
+pub const CODEX_HOST: &str = "codex";
+
+/// Files a scan saw change in one physical workspace that no session of it
+/// reported, while Codex sessions are registered there (issue #129). Codex
+/// trusts project hooks by the exact path of their file, so a session resumed
+/// under another path for the same directory runs none of them. The sessions
+/// named are the likely cause, not a proven author: a hand edit looks the same.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UncoordinatedChange {
+    pub change_id: String,
+    pub workspace_id: String,
+    /// The Codex sessions registered here, most recently active first.
+    pub sessions: Vec<String>,
+    /// The versions the scan saw, sorted by path.
+    pub files: Vec<ObservedFile>,
+    pub at_ms: u64,
+    pub generation: u64,
+    /// Sessions this change was delivered to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivered: Vec<String>,
+}
+
+/// An uncoordinated change as one session's briefing carries it: the files
+/// still at a version no session has reported.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UncoordinatedNotice {
+    pub sessions: Vec<String>,
+    pub paths: Vec<String>,
+    pub age_ms: u64,
+}
+
 /// A checkout change as one session's briefing carries it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1670,11 +1947,31 @@ pub enum Event {
     WorkspaceRegistered {
         workspace: Workspace,
     },
+    /// The owner rebound the workspace to another checkout root (roadmap
+    /// G6). Everything kept under its ID stays; file versions recorded
+    /// under `from_root` are dropped. Local only.
+    WorkspaceMoved {
+        workspace: Workspace,
+        from_root: String,
+    },
+    /// The owner took the workspace out of coordination (roadmap G6): it,
+    /// its sessions and everything derived for them leave the state. The
+    /// events before this one stay in the log. Local only.
+    WorkspaceRemoved {
+        workspace_id: String,
+    },
     SessionRegistered {
         session: Session,
     },
     SessionLivenessObserved {
         liveness: SessionLiveness,
+    },
+    /// A hook run of the session reached the daemon (roadmap J12). Evidence
+    /// that it is working; it grants, renews and releases nothing.
+    SessionSeen {
+        session_id: String,
+        at_ms: u64,
+        generation: u64,
     },
     IntentSet {
         intent: Intent,
@@ -1718,6 +2015,21 @@ pub enum Event {
         paths: Vec<String>,
         at_ms: u64,
         generation: u64,
+    },
+    /// Paths a session's search or shell command looked at (roadmap A13).
+    /// Paths only, never a pattern or command text. Local only: never
+    /// published. Reads are presence through `SourceObserved`.
+    PresenceObserved {
+        session_id: String,
+        kind: PresenceKind,
+        paths: Vec<String>,
+        at_ms: u64,
+        generation: u64,
+    },
+    /// The session's presence setting; the default removes its record.
+    PresenceSet {
+        session_id: String,
+        setting: PresenceSetting,
     },
     SessionEnded {
         session_id: String,
@@ -1889,6 +2201,18 @@ pub enum Event {
         message_id: String,
         session_id: String,
     },
+    /// The message was withdrawn by `by` (its sender; `None` for the
+    /// owner). The `MessageSent` event stays in the log.
+    MessageRetracted {
+        workspace_id: String,
+        message_id: String,
+        by: Option<String>,
+    },
+    /// The session was told to disregard a withdrawn message.
+    RetractionDelivered {
+        session_id: String,
+        message_id: String,
+    },
     ScanFailed {
         failure: ScanFailure,
     },
@@ -1902,6 +2226,17 @@ pub enum Event {
     },
     CheckoutChanged {
         change: CheckoutChange,
+    },
+    /// A scan saw files change that no session reported, with Codex
+    /// sessions registered in the checkout (issue #129).
+    UncoordinatedChanged {
+        change: UncoordinatedChange,
+    },
+    /// A briefing carried this uncoordinated change to this session.
+    UncoordinatedDelivered {
+        workspace_id: String,
+        change_id: String,
+        session_id: String,
     },
     /// A host check found this host present and not covered by any
     /// LangSpan install. Recorded once; repeated only after a
@@ -1989,6 +2324,38 @@ pub enum Command {
         root: String,
         verified_overlaps: Vec<String>,
     },
+    /// Read-only: one page of the registered workspaces with what each
+    /// holds, in ID order, after the workspace ID `after` (from the first
+    /// when absent). The daemon's store also bounds each page's bytes.
+    WorkspaceList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
+    /// Rebind the workspace to `root`: a checkout the owner moved (the old
+    /// root is gone), or with `switch` another checkout of the same
+    /// repository. The daemon checks the filesystem and Git before the core
+    /// decides; an owner command only, never an MCP tool.
+    WorkspaceMove {
+        workspace_id: String,
+        root: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        switch: bool,
+    },
+    /// Prepared adapter input only, as `WorkspaceRegisterVerified`: the
+    /// receipt stores the original `WorkspaceMove`.
+    #[serde(skip_serializing)]
+    WorkspaceMoveVerified {
+        workspace_id: String,
+        root: String,
+        verified_overlaps: Vec<String>,
+    },
+    /// Take the workspace out of coordination. Without `apply`, a read that
+    /// says what would end and changes nothing.
+    WorkspaceRemove {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        apply: bool,
+    },
     SessionRegister {
         session_id: String,
         workspace_id: String,
@@ -2001,6 +2368,11 @@ pub enum Command {
         session_id: String,
         process: ProcessIdentity,
         status: LivenessStatus,
+    },
+    /// A hook run of the session reached the daemon. Recorded only when the
+    /// last record is `SESSION_SEEN_INTERVAL_MS` old (roadmap J12).
+    SessionSeen {
+        session_id: String,
     },
     IntentSet {
         session_id: String,
@@ -2235,6 +2607,12 @@ pub enum Command {
         session_id: String,
         message_id: String,
     },
+    /// Read-only: one message as it was sent, from its `message_sent`
+    /// event, so also after every recipient has acknowledged it.
+    ShowMessage {
+        workspace_id: String,
+        message_id: String,
+    },
     /// Leave one line for the next other session that starts or is
     /// prompted in this session's workspace. Leases, intents and activity
     /// are unchanged.
@@ -2242,6 +2620,14 @@ pub enum Command {
         session_id: String,
         text: String,
         paths: Vec<String>,
+    },
+    /// Withdraw a sent message or handoff: `message_id` absent means the
+    /// newest message `from` sent. `from` is the sender, or absent for the
+    /// owner, who may withdraw any message.
+    RetractMessage {
+        workspace_id: String,
+        from: Option<String>,
+        message_id: Option<String>,
     },
     /// The observer's latest attempt: a failure with its reason, or `None`
     /// for a completed scan.
@@ -2261,6 +2647,14 @@ pub enum Command {
         from_head: Option<String>,
         to_head: Option<String>,
         files: u32,
+    },
+    /// Files a scan saw change outside a checkout change, at their new
+    /// versions. The core keeps those no session of the workspace reported
+    /// and names its Codex sessions (issue #129). Internal to the daemon's
+    /// scan, like `ObserveDisk`.
+    ObserveUncoordinated {
+        workspace_id: String,
+        files: Vec<ObservedFile>,
     },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
@@ -2422,6 +2816,22 @@ pub enum Command {
         session_id: String,
         paths: Vec<String>,
     },
+    /// Paths a search or shell command looked at: 1 to `PRESENCE_PATHS`
+    /// relative paths, never the pattern or the command. `kind` is `search`
+    /// or `shell`; reads arrive as `observe_source`.
+    ObservePresence {
+        session_id: String,
+        kind: PresenceKind,
+        paths: Vec<String>,
+    },
+    /// Whether peers are shown where this session looks, and how old a
+    /// peer's presence this session is shown (`window_ms`,
+    /// `MIN_PRESENCE_WINDOW_MS` to `BRIEF_HORIZON_MS`).
+    SetPresence {
+        session_id: String,
+        shown: bool,
+        window_ms: u64,
+    },
     SessionEnd {
         session_id: String,
     },
@@ -2504,6 +2914,21 @@ enum CommandWire {
         workspace_id: String,
         root: String,
     },
+    WorkspaceList {
+        #[serde(default)]
+        after: Option<String>,
+    },
+    WorkspaceMove {
+        workspace_id: String,
+        root: String,
+        #[serde(default)]
+        switch: bool,
+    },
+    WorkspaceRemove {
+        workspace_id: String,
+        #[serde(default)]
+        apply: bool,
+    },
     SessionRegister {
         session_id: String,
         workspace_id: String,
@@ -2516,6 +2941,11 @@ enum CommandWire {
         session_id: String,
         process: ProcessIdentity,
         status: LivenessStatus,
+    },
+    /// A hook run of the session reached the daemon. Recorded only when the
+    /// last record is `SESSION_SEEN_INTERVAL_MS` old (roadmap J12).
+    SessionSeen {
+        session_id: String,
     },
     IntentSet {
         session_id: String,
@@ -2748,6 +3178,12 @@ enum CommandWire {
         session_id: String,
         message_id: String,
     },
+    /// Read-only: one message as it was sent, from its `message_sent`
+    /// event, so also after every recipient has acknowledged it.
+    ShowMessage {
+        workspace_id: String,
+        message_id: String,
+    },
     /// Leave one line for the next other session that starts or is
     /// prompted in this session's workspace. Leases, intents and activity
     /// are unchanged.
@@ -2755,6 +3191,14 @@ enum CommandWire {
         session_id: String,
         text: String,
         paths: Vec<String>,
+    },
+    /// Withdraw a sent message or handoff: `message_id` absent means the
+    /// newest message `from` sent. `from` is the sender, or absent for the
+    /// owner, who may withdraw any message.
+    RetractMessage {
+        workspace_id: String,
+        from: Option<String>,
+        message_id: Option<String>,
     },
     /// The observer's latest attempt: a failure with its reason, or `None`
     /// for a completed scan.
@@ -2774,6 +3218,14 @@ enum CommandWire {
         from_head: Option<String>,
         to_head: Option<String>,
         files: u32,
+    },
+    /// Files a scan saw change outside a checkout change, at their new
+    /// versions. The core keeps those no session of the workspace reported
+    /// and names its Codex sessions (issue #129). Internal to the daemon's
+    /// scan, like `ObserveDisk`.
+    ObserveUncoordinated {
+        workspace_id: String,
+        files: Vec<ObservedFile>,
     },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
@@ -2935,6 +3387,22 @@ enum CommandWire {
         session_id: String,
         paths: Vec<String>,
     },
+    /// Paths a search or shell command looked at: 1 to `PRESENCE_PATHS`
+    /// relative paths, never the pattern or the command. `kind` is `search`
+    /// or `shell`; reads arrive as `observe_source`.
+    ObservePresence {
+        session_id: String,
+        kind: PresenceKind,
+        paths: Vec<String>,
+    },
+    /// Whether peers are shown where this session looks, and how old a
+    /// peer's presence this session is shown (`window_ms`,
+    /// `MIN_PRESENCE_WINDOW_MS` to `BRIEF_HORIZON_MS`).
+    SetPresence {
+        session_id: String,
+        shown: bool,
+        window_ms: u64,
+    },
     SessionEnd {
         session_id: String,
     },
@@ -3003,11 +3471,34 @@ pub enum Outcome {
     Workspace {
         workspace: Workspace,
     },
+    Workspaces {
+        workspaces: Vec<WorkspaceSummary>,
+        /// The cursor for the next page (`after`), when more remain.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+    },
+    WorkspaceMoved {
+        workspace: Workspace,
+        from_root: String,
+        kept: WorkspaceKept,
+    },
+    /// `applied` is false for a dry run: nothing ended.
+    WorkspaceRemoval {
+        workspace_id: String,
+        applied: bool,
+        ending: WorkspaceEnding,
+    },
     Session {
         session: Session,
     },
     SessionLiveness {
         liveness: SessionLiveness,
+    },
+    /// The session's last recorded hook run, this one or one less than
+    /// `SESSION_SEEN_INTERVAL_MS` earlier.
+    SessionSeen {
+        session_id: String,
+        last_hook_ms: u64,
     },
     Intent {
         intent: Intent,
@@ -3067,6 +3558,14 @@ pub enum Outcome {
     PromptTargets {
         session_id: String,
         paths: Vec<String>,
+    },
+    PresenceObserved {
+        session_id: String,
+        paths: u32,
+    },
+    Presence {
+        session_id: String,
+        setting: PresenceSetting,
     },
     SessionEnded {
         session_id: String,
@@ -3223,6 +3722,16 @@ pub enum Outcome {
         message_id: String,
         acknowledged: bool,
     },
+    MessageShown {
+        message: ShownMessage,
+    },
+    /// Sessions that were still owed it and now are not, and sessions that
+    /// had received it and will be told to disregard it.
+    MessageRetracted {
+        message_id: String,
+        withdrawn_unread: Vec<String>,
+        told_to_disregard: Vec<String>,
+    },
     ScanObserved {
         workspace_id: String,
         failed: bool,
@@ -3233,6 +3742,12 @@ pub enum Outcome {
     },
     CheckoutObserved {
         change: CheckoutChange,
+    },
+    /// The Codex sessions named and the files kept; both empty when every
+    /// change was explained or nothing new was recorded.
+    UncoordinatedObserved {
+        sessions: Vec<String>,
+        paths: Vec<String>,
     },
     Recap {
         recap: Recap,
@@ -3370,6 +3885,25 @@ fn decide_checked(
                 outcome: Outcome::Workspace { workspace },
             })
         }
+        Command::WorkspaceList { after } => {
+            let (workspaces, next) = workspaces::list(state, after.as_deref())?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Workspaces { workspaces, next },
+            })
+        }
+        Command::WorkspaceMove {
+            workspace_id, root, ..
+        } => workspaces::decide_move(state, workspace_id, root, &[], now_ms),
+        Command::WorkspaceMoveVerified {
+            workspace_id,
+            root,
+            verified_overlaps,
+        } => workspaces::decide_move(state, workspace_id, root, verified_overlaps, now_ms),
+        Command::WorkspaceRemove {
+            workspace_id,
+            apply,
+        } => workspaces::decide_remove(state, workspace_id, *apply, now_ms),
         Command::SessionRegister {
             session_id,
             workspace_id,
@@ -3419,6 +3953,31 @@ fn decide_checked(
             Ok(Decision {
                 events,
                 outcome: Outcome::SessionLiveness { liveness },
+            })
+        }
+        Command::SessionSeen { session_id } => {
+            current_session(state, session_id)?;
+            let due = session_seen_due(state, session_id, now_ms);
+            let last = state
+                .activity
+                .get(session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map_or(0, |activity| activity.last_hook_ms);
+            let events = if due {
+                vec![Event::SessionSeen {
+                    session_id: session_id.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::SessionSeen {
+                    session_id: session_id.clone(),
+                    last_hook_ms: if due { now_ms } else { last },
+                },
             })
         }
         Command::IntentSet {
@@ -3871,6 +4430,60 @@ fn decide_checked(
                 outcome: Outcome::PromptTargets {
                     session_id: session_id.clone(),
                     paths,
+                },
+            })
+        }
+        Command::ObservePresence {
+            session_id,
+            kind,
+            paths,
+        } => {
+            current_session(state, session_id)?;
+            let paths = presence_paths(*kind, paths)?;
+            if !presence_setting(state, session_id).shown {
+                return Err(error(
+                    "presence_off",
+                    "This session's presence is off; nothing it looks at is recorded",
+                ));
+            }
+            Ok(Decision {
+                events: vec![Event::PresenceObserved {
+                    session_id: session_id.clone(),
+                    kind: *kind,
+                    paths: paths.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }],
+                outcome: Outcome::PresenceObserved {
+                    session_id: session_id.clone(),
+                    paths: u32::try_from(paths.len()).unwrap_or(u32::MAX),
+                },
+            })
+        }
+        Command::SetPresence {
+            session_id,
+            shown,
+            window_ms,
+        } => {
+            known_session(state, session_id)?;
+            let setting = PresenceSetting {
+                shown: *shown,
+                window_ms: *window_ms,
+            };
+            validate_presence_setting(&setting)?;
+            let events = if presence_setting(state, session_id) == setting {
+                Vec::new()
+            } else {
+                vec![Event::PresenceSet {
+                    session_id: session_id.clone(),
+                    setting,
+                }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::Presence {
+                    session_id: session_id.clone(),
+                    setting,
                 },
             })
         }
@@ -4779,12 +5392,19 @@ fn decide_checked(
             // Delivered messages are acknowledged below and so are absent
             // from the next briefing: the remembered signature leaves them
             // out, and any message at all makes this briefing new.
-            briefing.changed = signature != previous
+            // Presence is news only at a session start or prompt, and only
+            // for a path not shown before. Mid-turn, or when some or all of
+            // it merely aged out, it is not (see `brief`).
+            let differs = without_presence(&signature) != without_presence(previous)
+                || (!*mid_turn && new_presence(&signature, previous));
+            briefing.changed = differs
                 || !briefing.messages.is_empty()
+                || !briefing.uncoordinated.is_empty()
+                || !briefing.retracted.is_empty()
                 || !briefing.checks.is_empty();
             let mut events = Vec::new();
             if *deliver {
-                if signature != previous {
+                if signature != previous && briefing.changed {
                     events.push(Event::BriefingDelivered {
                         session_id: session_id.clone(),
                         signature,
@@ -4800,10 +5420,25 @@ fn decide_checked(
                             session_id: session_id.clone(),
                         }),
                 );
+                events.extend(briefing.retracted.iter().map(|retracted| {
+                    Event::RetractionDelivered {
+                        session_id: session_id.clone(),
+                        message_id: retracted.message_id.clone(),
+                    }
+                }));
                 events.extend(briefing.checks.iter().map(|notice| Event::CheckDelivered {
                     session_id: session_id.clone(),
                     check_id: notice.check_id.clone(),
                 }));
+                events.extend(
+                    uncoordinated_owed(state, session_id, now_ms).map(|(change, _)| {
+                        Event::UncoordinatedDelivered {
+                            workspace_id: change.workspace_id.clone(),
+                            change_id: change.change_id.clone(),
+                            session_id: session_id.clone(),
+                        }
+                    }),
+                );
             }
             Ok(Decision {
                 events,
@@ -4899,6 +5534,11 @@ fn decide_checked(
                 },
             })
         }
+        Command::RetractMessage {
+            workspace_id,
+            from,
+            message_id,
+        } => retract(state, workspace_id, from.as_deref(), message_id.as_deref()),
         Command::Dashboard => Ok(Decision {
             events: Vec::new(),
             outcome: Outcome::Dashboard {
@@ -5094,6 +5734,71 @@ fn decide_checked(
                 outcome: Outcome::CheckoutObserved { change },
             })
         }
+        Command::ObserveUncoordinated {
+            workspace_id,
+            files,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            if files.is_empty() || files.len() > MAX_UNCOORDINATED_OBSERVED {
+                return Err(error(
+                    "invalid_path",
+                    &format!(
+                        "An uncoordinated change names 1 to {MAX_UNCOORDINATED_OBSERVED} changed files"
+                    ),
+                ));
+            }
+            let files = normalized_files(files)?;
+            // A file under an admitted edit is that edit's, whose report has
+            // not arrived yet; a version a session reported is explained.
+            let unexplained: Vec<ObservedFile> = files
+                .into_iter()
+                .filter(|file| {
+                    !leased(state, workspace_id, &file.path, now_ms)
+                        && !explained(state, workspace_id, file)
+                })
+                .take(MAX_UNCOORDINATED_FILES)
+                .collect();
+            // A Codex session already named in a notice still held is not
+            // named again: one notice per session until it ages out.
+            let named: BTreeSet<&str> = held_uncoordinated(state, workspace_id, now_ms)
+                .flat_map(|change| change.sessions.iter().map(String::as_str))
+                .collect();
+            let sessions = if unexplained.is_empty() {
+                Vec::new()
+            } else {
+                codex_sessions(state, workspace_id)
+                    .into_iter()
+                    .filter(|session| !named.contains(session.as_str()))
+                    .take(MAX_UNCOORDINATED_SESSIONS)
+                    .collect()
+            };
+            if sessions.is_empty() {
+                return Ok(Decision {
+                    events: Vec::new(),
+                    outcome: Outcome::UncoordinatedObserved {
+                        sessions: Vec::new(),
+                        paths: Vec::new(),
+                    },
+                });
+            }
+            let change = UncoordinatedChange {
+                change_id: request_id.into(),
+                workspace_id: workspace_id.clone(),
+                sessions: sessions.clone(),
+                files: unexplained,
+                at_ms: now_ms,
+                generation: state.generation,
+                delivered: Vec::new(),
+            };
+            validate_uncoordinated(state, &change)?;
+            Ok(Decision {
+                outcome: Outcome::UncoordinatedObserved {
+                    sessions,
+                    paths: change.files.iter().map(|file| file.path.clone()).collect(),
+                },
+                events: vec![Event::UncoordinatedChanged { change }],
+            })
+        }
         Command::Recap { workspace_id } => {
             validate_known_workspace(state, workspace_id)?;
             Ok(Decision {
@@ -5191,6 +5896,7 @@ fn decide_checked(
         | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
+        | Command::ShowMessage { .. }
         | Command::GraphSymbol { .. }
         | Command::GraphReferences { .. }
         | Command::GraphImpact { .. }
@@ -5198,7 +5904,7 @@ fn decide_checked(
         | Command::GraphContext { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
-            "Event history, status pages, change projections and index queries are answered by the daemon's stores",
+            "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores",
         )),
     }
 }
@@ -5238,6 +5944,7 @@ fn sent(
             normalized_paths(paths)?
         },
         acknowledged: Vec::new(),
+        retracted: false,
     };
     validate_message(&message)?;
     Ok(Decision {
@@ -5246,6 +5953,134 @@ fn sent(
         }],
         outcome: Outcome::MessageSent { message },
     })
+}
+
+/// The sent message `message_id` of the workspace, or with no ID the newest
+/// one `from` sent. The history is the latest messages sent, newest first,
+/// and lists every reader, so it answers first. A message older than the
+/// history but still held is found by its ID only: the sender's newest
+/// message is in the history if any of its messages is, so `last` never
+/// reaches past a newer message that was dropped.
+fn sent_message<'a>(
+    state: &'a State,
+    workspace_id: &str,
+    from: Option<&str>,
+    message_id: Option<&str>,
+) -> Option<&'a Message> {
+    let list = |lists: &'a BTreeMap<String, Vec<Message>>| {
+        lists.get(workspace_id).map(Vec::as_slice).unwrap_or(&[])
+    };
+    match message_id {
+        Some(id) => list(&state.message_history)
+            .iter()
+            .chain(list(&state.messages))
+            .find(|message| message.message_id == id),
+        None => list(&state.message_history)
+            .iter()
+            .find(|message| message.from.as_deref() == from),
+    }
+}
+
+fn retract(
+    state: &State,
+    workspace_id: &str,
+    from: Option<&str>,
+    message_id: Option<&str>,
+) -> Result<Decision, CoreError> {
+    validate_known_workspace(state, workspace_id)?;
+    if let Some(id) = message_id {
+        validate_request_id(id)?;
+    }
+    if let Some(from) = from
+        && known_session(state, from)?.workspace_id != workspace_id
+    {
+        return Err(error(
+            "sender_not_in_workspace",
+            "The withdrawing session belongs to another workspace; withdraw from the session that sent it, or leave out the sender to withdraw as the owner",
+        ));
+    }
+    let Some(message) = sent_message(state, workspace_id, from, message_id) else {
+        return Err(error(
+            "unknown_message",
+            match message_id {
+                Some(_) => {
+                    "No such message in this workspace: unknown, or dropped as the oldest of more than 64; `langspan recap WORKSPACE` lists those held"
+                }
+                None => {
+                    "This sender has none of the latest 64 messages sent in this workspace; withdraw an older one still held by its ID"
+                }
+            },
+        ));
+    };
+    if from.is_some() && message.from.as_deref() != from {
+        return Err(error(
+            "not_sender",
+            "Only the session that sent a message, or the owner (without a session), may withdraw it",
+        ));
+    }
+    if message.retracted {
+        return Err(error(
+            "already_retracted",
+            "That message was already withdrawn; its readers have been or will be told",
+        ));
+    }
+    let held = state.messages.get(workspace_id).and_then(|messages| {
+        messages
+            .iter()
+            .find(|held| held.message_id == message.message_id)
+    });
+    let withdrawn_unread: Vec<String> = match held.map(|held| (held, &held.to)) {
+        Some((_, Recipient::Session { session_id })) => vec![session_id.clone()],
+        Some((held, Recipient::Everyone {})) => state
+            .sessions
+            .values()
+            .filter(|session| {
+                session.workspace_id == workspace_id
+                    && session.generation == state.generation
+                    && owed_to(held, &session.session_id, false)
+            })
+            .map(|session| session.session_id.clone())
+            .collect(),
+        Some((_, Recipient::NextSession {})) | None => Vec::new(),
+    };
+    Ok(Decision {
+        events: vec![Event::MessageRetracted {
+            workspace_id: workspace_id.into(),
+            message_id: message.message_id.clone(),
+            by: from.map(str::to_owned),
+        }],
+        outcome: Outcome::MessageRetracted {
+            message_id: message.message_id.clone(),
+            withdrawn_unread,
+            told_to_disregard: readers(state, workspace_id, &message.message_id),
+        },
+    })
+}
+
+/// Every session that received the message, in ID order.
+fn readers(state: &State, workspace_id: &str, message_id: &str) -> Vec<String> {
+    let mut readers: Vec<String> = sent_message(state, workspace_id, None, Some(message_id))
+        .map(|message| message.acknowledged.clone())
+        .unwrap_or_default();
+    readers.sort();
+    readers.dedup();
+    readers
+}
+
+/// The first `RETRACTED_TEXT_BYTES` of `text`, at a character boundary, and
+/// whether anything was left out.
+fn retracted_text(text: &str) -> (String, bool) {
+    let mut end = text.len().min(RETRACTED_TEXT_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_owned(), end < text.len())
+}
+
+/// An upper bound on the bytes an adapter renders to tell a session to
+/// disregard a withdrawn message, counted like `message_cost`.
+fn retracted_cost(retracted: &RetractedMessage) -> usize {
+    (192 + 4 * retracted.text.len()).min(MESSAGE_LINE_LIMIT + 4)
 }
 
 fn validate_message(message: &Message) -> Result<(), CoreError> {
@@ -5308,8 +6143,8 @@ fn takes_handoff(state: &State, me: &Session, message: &Message) -> bool {
 
 /// An upper bound on the bytes an adapter renders for one message: a label
 /// of under 192 bytes (a session ID is at most 128), then text and paths
-/// that quoting can grow at most fourfold, cut at `MESSAGE_LINE_LIMIT` plus
-/// its ellipsis and newline.
+/// that quoting can grow at most fourfold, cut within `MESSAGE_LINE_LIMIT`
+/// (ellipsis and `messages show` pointer included) plus its newline.
 fn message_cost(message: &Message) -> usize {
     let raw = message.text.len()
         + message
@@ -5341,7 +6176,9 @@ fn recap(state: &State, workspace_id: &str, now_ms: u64) -> Recap {
                 .take(RECAP_ITEMS)
                 .collect();
             (
-                in_generation.map(|activity| activity.last_ms).unwrap_or(0),
+                in_generation
+                    .map(SessionActivity::last_seen_ms)
+                    .unwrap_or(0),
                 RecapSession {
                     session_id: session.session_id.clone(),
                     current: session.generation == state.generation,
@@ -5425,8 +6262,22 @@ fn recap(state: &State, workspace_id: &str, now_ms: u64) -> Recap {
         messages: state
             .messages
             .get(workspace_id)
-            .map(|messages| messages.iter().take(RECAP_SESSIONS).cloned().collect())
-            .unwrap_or_default(),
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .take(RECAP_SESSIONS)
+            .chain(
+                state
+                    .message_history
+                    .get(workspace_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter(|message| message.retracted)
+                    .take(RECAP_ITEMS),
+            )
+            .cloned()
+            .collect(),
         teammates: state
             .remote_peers
             .values()
@@ -6016,7 +6867,7 @@ fn publication(state: &State, link: &RemoteLink, now_ms: u64) -> (Publication, S
             .filter(|activity| {
                 link.share_task
                     && !activity.ended
-                    && now_ms.saturating_sub(activity.last_ms) <= BRIEF_HORIZON_MS
+                    && now_ms.saturating_sub(activity.last_seen_ms()) <= BRIEF_HORIZON_MS
             })
             .and_then(|activity| activity.summary.clone());
         if editing.is_empty() && recent.is_empty() && (summary.is_none() || ended) {
@@ -6240,6 +7091,35 @@ fn brief(
             .map(|targets| targets.paths.iter().cloned().collect())
             .unwrap_or_default()
     };
+    // Where a running peer that shows its presence was recently looking,
+    // within this session's window: newest first, none it edits or edited.
+    let window_ms = presence_setting(state, session_id).window_ms;
+    let looking = |id: &str, edited: &BTreeSet<String>| -> Vec<PresencePath> {
+        if !presence_setting(state, id).shown {
+            return Vec::new();
+        }
+        state
+            .activity
+            .get(id)
+            .filter(|activity| activity.generation == state.generation && !activity.ended)
+            .map(|activity| {
+                activity
+                    .looking
+                    .iter()
+                    .filter(|looked| {
+                        now_ms.saturating_sub(looked.at_ms) <= window_ms
+                            && !edited.contains(&looked.path)
+                    })
+                    .take(PRESENCE_PATHS)
+                    .map(|looked| PresencePath {
+                        path: looked.path.clone(),
+                        kind: looked.kind,
+                        age_s: now_ms.saturating_sub(looked.at_ms) / 1000,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     let (_, _, mine) = work_paths(session_id);
     // What a peer's work or task is compared with: this session's work and
     // the files its own task points at.
@@ -6280,14 +7160,30 @@ fn brief(
         // A session that only received briefings has shown no work of its own.
         let fresh = activity.is_some_and(|activity| {
             (activity.summary.is_some() || !activity.touched.is_empty())
-                && now_ms.saturating_sub(activity.last_ms) <= BRIEF_HORIZON_MS
+                && now_ms.saturating_sub(activity.last_seen_ms()) <= BRIEF_HORIZON_MS
         });
         let intent = state
             .intents
             .get(&peer.session_id)
             .filter(|intent| intent.generation == state.generation);
         let targets = prompt_targets(&peer.session_id);
-        if editing.is_empty() && intent.is_none() && !fresh && targets.is_empty() {
+        // Every file the peer holds or edited within the horizon, not only
+        // those listed: such a file is shown as edited, never as looked at.
+        let mut edited: BTreeSet<String> = editing.iter().cloned().collect();
+        edited.extend(activity.into_iter().flat_map(|activity| {
+            activity
+                .touched
+                .iter()
+                .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
+                .map(|touch| touch.path.clone())
+        }));
+        let looking = looking(&peer.session_id, &edited);
+        if editing.is_empty()
+            && intent.is_none()
+            && !fresh
+            && targets.is_empty()
+            && looking.is_empty()
+        {
             continue;
         }
         // A finished session matters only for the edits it left behind.
@@ -6307,7 +7203,7 @@ fn brief(
             .collect();
         editing.truncate(BRIEF_PATHS);
         recent.truncate(BRIEF_PATHS);
-        let last_ms = activity.map(|activity| activity.last_ms).unwrap_or(0);
+        let last_ms = activity.map(SessionActivity::last_seen_ms).unwrap_or(0);
         let relation = relation(me, peer);
         // A subagent's task is the asking parent's own request: its files
         // are news to the parent, its task line and declared intent are not.
@@ -6325,10 +7221,16 @@ fn brief(
                 .cloned()
                 .collect()
         };
+        // A peer without admissions, edits, intent or targets (one known by
+        // its task line or by where it looked) ranks after every peer with
+        // them, so presence never takes such a peer's place.
+        let no_work =
+            editing.is_empty() && recent.is_empty() && intent.is_none() && targets.is_empty();
         peers.push((
             (
                 overlap.is_empty() && target_overlap.is_empty(),
                 editing.is_empty(),
+                no_work,
                 u64::MAX - last_ms,
             ),
             PeerWork {
@@ -6353,18 +7255,27 @@ fn brief(
                 overlap,
                 target_overlap,
                 relation,
+                looking,
             },
         ));
     }
-    peers.sort_by(|a, b| (&a.0, &a.1.session_id).cmp(&(&b.0, &b.1.session_id)));
+    // A peer known only by where it looked ranks after every other, so it
+    // never takes a slot from a peer with work or a task.
+    let rank = |(key, peer): &((bool, bool, bool, u64), PeerWork)| {
+        (key.0, key.1, key.2, presence_only(peer), key.3)
+    };
+    peers.sort_by(|a, b| (rank(a), &a.1.session_id).cmp(&(rank(b), &b.1.session_id)));
     let total = peers.len();
+    // Peers are chosen by their work within the byte budget first; where
+    // they look is added after, in the space left, first peers first, so
+    // presence never takes the place of another peer's work.
     let mut bytes = 0;
-    let peers: Vec<PeerWork> = peers
+    let mut peers: Vec<PeerWork> = peers
         .into_iter()
         .map(|(_, peer)| peer)
         .take(max_peers as usize)
         .take_while(|peer| {
-            bytes += 256
+            let cost = 256
                 + peer.workspace_root.len()
                 + [&peer.summary, &peer.intent, &peer.branch_ref]
                     .into_iter()
@@ -6379,9 +7290,30 @@ fn brief(
                     .chain(peer.recent.iter().map(|recent| &recent.path))
                     .map(|path| path.len() + 32)
                     .sum::<usize>();
-            bytes <= BRIEF_BYTES
+            bytes += cost;
+            if bytes > BRIEF_BYTES {
+                bytes -= cost;
+                return false;
+            }
+            true
         })
         .collect();
+    // A peer there only for where it looked, without room for that, is left
+    // out and counted.
+    peers.retain_mut(|peer| {
+        let presence: usize = peer
+            .looking
+            .iter()
+            .map(|looked| looked.path.len() + 32)
+            .sum();
+        if bytes + presence <= BRIEF_BYTES {
+            bytes += presence;
+            return true;
+        }
+        let only = presence_only(peer);
+        peer.looking.clear();
+        !only
+    });
     let mut stale_reads: Vec<StaleRead> = known_versions(state, session_id)
         .iter()
         .filter_map(|version| {
@@ -6496,9 +7428,32 @@ fn brief(
         .take(4)
         .cloned()
         .collect();
-    // Messages owed to this session, newest first, as many as the text of
-    // one briefing is sure to hold; the rest wait for the next one.
+    // Withdrawals first, then messages owed to this session, each newest
+    // first, as many as the text of one briefing is sure to hold beside an
+    // owed uncoordinated change, whose line is reserved; the rest wait for
+    // the next one. The first always fits.
+    let uncoordinated: Vec<UncoordinatedNotice> = uncoordinated_owed(state, session_id, now_ms)
+        .map(|(_, notice)| notice)
+        .collect();
+    let message_bytes = if uncoordinated.is_empty() {
+        MESSAGE_BRIEF_BYTES
+    } else {
+        MESSAGE_BRIEF_BYTES - (UNCOORDINATED_LINE_LIMIT + 4)
+    };
     let mut bytes = 0;
+    let retracted: Vec<RetractedMessage> = state
+        .retracted_notices
+        .get(session_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .take(BRIEF_MESSAGES)
+        .take_while(|retracted| {
+            bytes += retracted_cost(retracted);
+            bytes <= message_bytes
+        })
+        .cloned()
+        .collect();
     let messages: Vec<Message> = state
         .messages
         .get(&me.workspace_id)
@@ -6515,7 +7470,7 @@ fn brief(
         .take(BRIEF_MESSAGES)
         .take_while(|message| {
             bytes += message_cost(message);
-            bytes <= MESSAGE_BRIEF_BYTES
+            bytes <= message_bytes
         })
         .map(|message| Message {
             acknowledged: Vec::new(),
@@ -6596,7 +7551,8 @@ fn brief(
     for stale in &stale_reads {
         signature.push_str(&format!("stale|{}|{}\n", stale.path, stale.session_id));
     }
-    for peer in &peers {
+    // A peer listed only for where it looked is presence, not work.
+    for peer in peers.iter().filter(|peer| !presence_only(peer)) {
         signature.push_str(&peer.session_id);
         for part in [&peer.editing, &peer.overlap] {
             signature.push('|');
@@ -6623,6 +7579,22 @@ fn brief(
         }
         signature.push_str(if peer.ended { "|ended\n" } else { "\n" });
     }
+    // Presence has a signature part of its own: alone it makes a briefing
+    // new only at a session start or prompt, never mid-turn, so a peer's
+    // reads do not interrupt a turn. The part is a set of bits, one pair per
+    // peer and path (`presence_bits`), so that a briefing is news only for
+    // a path not shown before: a path that ages out, or is read again, or
+    // the same files read in another order, is not.
+    let presence = presence_bits(&peers);
+    // Without presence the signature is as it was before presence existed,
+    // so a briefing stored then is not delivered again.
+    let mut signature = fingerprint(&signature);
+    if let Some(bits) = presence {
+        signature.push('+');
+        for byte in bits {
+            signature.push_str(&format!("{byte:02x}"));
+        }
+    }
     Ok((
         Briefing {
             session_id: session_id.into(),
@@ -6634,7 +7606,9 @@ fn brief(
             interface_changes,
             notes,
             messages,
+            retracted,
             checkout_changes,
+            uncoordinated,
             // One result per briefing, the newest: it always fits the
             // rendered text, and each delivered one is removed, so the rest
             // follow at the next briefings.
@@ -6647,8 +7621,221 @@ fn brief(
                 .collect(),
             recent: None,
         },
-        fingerprint(&signature),
+        signature,
     ))
+}
+
+/// Bytes in the presence part of a briefing signature: with the work
+/// fingerprint and its `+`, the signature stays within the 64 bytes an
+/// event holds.
+const PRESENCE_SIGNATURE_BYTES: usize = 23;
+
+/// The presence part of a briefing signature: for each peer and path it
+/// shows as presence, two bits set from that pair's fingerprint. None when
+/// it shows none. A path whose bits another pair already set is not news on
+/// its own; it is shown with the next briefing that is.
+fn presence_bits(peers: &[PeerWork]) -> Option<[u8; PRESENCE_SIGNATURE_BYTES]> {
+    const BITS: u64 = (PRESENCE_SIGNATURE_BYTES * 8) as u64;
+    let mut bits = [0u8; PRESENCE_SIGNATURE_BYTES];
+    let mut any = false;
+    for peer in peers {
+        for looked in &peer.looking {
+            let hash = fingerprint_u64(&format!("{}|{}", peer.session_id, looked.path));
+            for bit in [hash % BITS, (hash >> 32) % BITS] {
+                bits[(bit / 8) as usize] |= 1 << (bit % 8);
+            }
+            any = true;
+        }
+    }
+    any.then_some(bits)
+}
+
+/// Whether a briefing signature shows presence that `previous` did not:
+/// a bit set in its presence part that is clear in the previous one. A
+/// previous signature without a presence part, or from before this form,
+/// has shown none.
+fn new_presence(signature: &str, previous: &str) -> bool {
+    let bits = |signature: &str| -> Option<Vec<u8>> {
+        let (_, hex) = signature.split_once('+')?;
+        if hex.len() != PRESENCE_SIGNATURE_BYTES * 2 {
+            return None;
+        }
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+            .collect()
+    };
+    let Some(now) = bits(signature) else {
+        return false;
+    };
+    match bits(previous) {
+        Some(before) => now
+            .iter()
+            .zip(&before)
+            .any(|(now, before)| now & !before != 0),
+        None => true,
+    }
+}
+
+/// A briefing signature without its presence part.
+fn without_presence(signature: &str) -> &str {
+    signature
+        .split_once('+')
+        .map_or(signature, |(work, _)| work)
+}
+
+/// A peer in a briefing only for where it looked.
+fn presence_only(peer: &PeerWork) -> bool {
+    !peer.looking.is_empty()
+        && peer.editing.is_empty()
+        && peer.recent.is_empty()
+        && peer.overlap.is_empty()
+        && peer.target_overlap.is_empty()
+        && peer.summary.is_none()
+        && peer.intent.is_none()
+}
+
+/// Whether an active, unexpired lease of this workspace holds `path`.
+fn leased(state: &State, workspace_id: &str, path: &str, now_ms: u64) -> bool {
+    state.leases.values().any(|lease| {
+        lease.workspace_id == workspace_id
+            && lease.status == LeaseStatus::Active
+            && lease.generation == state.generation
+            && lease.expires_at_ms > now_ms
+            && lease.paths.iter().any(|held| held == path)
+    })
+}
+
+/// Whether a session of this workspace reported reading or writing the file
+/// at this version.
+fn explained(state: &State, workspace_id: &str, file: &ObservedFile) -> bool {
+    state
+        .sessions
+        .values()
+        .filter(|session| session.workspace_id == workspace_id)
+        .filter_map(|session| state.activity.get(&session.session_id))
+        .any(|activity| {
+            activity
+                .known
+                .iter()
+                .any(|known| known.path == file.path && known.state == file.state)
+        })
+}
+
+/// The Codex sessions registered in this workspace in this generation, most
+/// recently active first. An ended or exited one is kept: Codex reports no
+/// session end, and a resumed session is a new process.
+fn codex_sessions(state: &State, workspace_id: &str) -> Vec<String> {
+    let mut sessions: Vec<(u64, &str)> = state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.workspace_id == workspace_id
+                && session.generation == state.generation
+                && session
+                    .session_id
+                    .split_once('.')
+                    .is_some_and(|(host, _)| host == CODEX_HOST)
+        })
+        .map(|session| {
+            let last = state
+                .activity
+                .get(&session.session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map_or(0, |activity| activity.last_ms);
+            (last, session.session_id.as_str())
+        })
+        .collect();
+    sessions.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    sessions.into_iter().map(|(_, id)| id.to_owned()).collect()
+}
+
+/// The files of an uncoordinated change that are still at a version no
+/// session of its workspace reported: a report arriving after the scan
+/// explains the rest.
+fn still_unexplained(state: &State, change: &UncoordinatedChange) -> Vec<String> {
+    change
+        .files
+        .iter()
+        .filter(|file| !explained(state, &change.workspace_id, file))
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+/// This workspace's uncoordinated changes of this generation, within the
+/// briefing horizon, with a file still unexplained. Newest first.
+fn held_uncoordinated<'a>(
+    state: &'a State,
+    workspace_id: &str,
+    now_ms: u64,
+) -> impl Iterator<Item = &'a UncoordinatedChange> {
+    state
+        .uncoordinated
+        .get(workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter(move |change| {
+            change.generation == state.generation
+                && now_ms.saturating_sub(change.at_ms) <= BRIEF_HORIZON_MS
+                && !still_unexplained(state, change).is_empty()
+        })
+}
+
+/// The uncoordinated change owed to this session's next briefing, the
+/// newest, with the notice it carries: one always fits the rendered text, and
+/// each is delivered once, so the rest follow at the next briefings.
+fn uncoordinated_owed<'a>(
+    state: &'a State,
+    session_id: &'a str,
+    now_ms: u64,
+) -> impl Iterator<Item = (&'a UncoordinatedChange, UncoordinatedNotice)> {
+    let workspace = state
+        .sessions
+        .get(session_id)
+        .map_or("", |session| session.workspace_id.as_str());
+    held_uncoordinated(state, workspace, now_ms)
+        .filter(move |change| !change.delivered.iter().any(|held| held == session_id))
+        .take(1)
+        .map(move |change| {
+            (
+                change,
+                UncoordinatedNotice {
+                    sessions: change.sessions.clone(),
+                    paths: still_unexplained(state, change),
+                    age_ms: now_ms.saturating_sub(change.at_ms),
+                },
+            )
+        })
+}
+
+fn validate_uncoordinated(state: &State, change: &UncoordinatedChange) -> Result<(), CoreError> {
+    validate_fact_header(
+        state,
+        &change.change_id,
+        &change.workspace_id,
+        change.generation,
+    )?;
+    if change.files.is_empty()
+        || change.files.len() > MAX_UNCOORDINATED_FILES
+        || normalized_files(&change.files)? != change.files
+        || change.sessions.is_empty()
+        || change.sessions.len() > MAX_UNCOORDINATED_SESSIONS
+        || change.sessions.iter().any(|session| {
+            state
+                .sessions
+                .get(session)
+                .is_none_or(|known| known.workspace_id != change.workspace_id)
+        })
+    {
+        return Err(error(
+            "invalid_event",
+            &format!(
+                "An uncoordinated change names 1 to {MAX_UNCOORDINATED_FILES} sorted, unique files and 1 to {MAX_UNCOORDINATED_SESSIONS} sessions of its workspace"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether the session wrote a file since its last tool batch or stop.
@@ -7219,6 +8406,13 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 .workspaces
                 .insert(workspace.workspace_id.clone(), workspace.clone());
         }
+        Event::WorkspaceMoved {
+            workspace,
+            from_root,
+        } => workspaces::apply_moved(state, workspace, from_root)?,
+        Event::WorkspaceRemoved { workspace_id } => {
+            workspaces::apply_removed(state, workspace_id)?;
+        }
         Event::SessionRegistered { session } => {
             validate_session_registration(state, session)?;
             state
@@ -7230,6 +8424,21 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             state
                 .session_liveness
                 .insert(liveness.session_id.clone(), liveness.clone());
+        }
+        Event::SessionSeen {
+            session_id,
+            at_ms,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            if *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A hook-run record must belong to the current daemon generation",
+                ));
+            }
+            let activity = activity_mut(state, session_id);
+            activity.last_hook_ms = activity.last_hook_ms.max(*at_ms);
         }
         Event::IntentSet { intent } => {
             let session = current_session(state, &intent.session_id)?;
@@ -7399,6 +8608,45 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             });
             activity.last_ms = activity.last_ms.max(*at_ms);
         }
+        Event::PresenceObserved {
+            session_id,
+            kind,
+            paths,
+            at_ms,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            if presence_paths(*kind, paths)? != *paths || *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A presence record names sorted, unique paths in the current generation",
+                ));
+            }
+            // Recorded only while shown; a record kept from before the
+            // session turned presence off adds nothing.
+            if presence_setting(state, session_id).shown {
+                look(activity_mut(state, session_id), *kind, paths, *at_ms);
+            }
+        }
+        Event::PresenceSet {
+            session_id,
+            setting,
+        } => {
+            known_session(state, session_id)?;
+            validate_presence_setting(setting)?;
+            if !setting.shown {
+                // Off forgets what was recorded: turning it on again later
+                // never shows a path looked at while it was off or before.
+                if let Some(activity) = state.activity.get_mut(session_id) {
+                    activity.looking.clear();
+                }
+            }
+            if *setting == PresenceSetting::default() {
+                state.presence.remove(session_id);
+            } else {
+                state.presence.insert(session_id.clone(), *setting);
+            }
+        }
         Event::SessionEnded { session_id } => {
             known_session(state, session_id)?;
             activity_mut(state, session_id).ended = true;
@@ -7452,9 +8700,9 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::SourceObserved {
             session_id,
             files,
+            origin,
             at_ms,
             generation,
-            ..
         } => {
             current_session(state, session_id)?;
             if *generation != state.generation
@@ -7479,6 +8727,17 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 );
             }
             activity.known.truncate(MAX_KNOWN);
+            // A reported read is also where the session is looking
+            // (roadmap A13), unless its presence is off.
+            if *origin == SourceOrigin::Read && presence_setting(state, session_id).shown {
+                let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+                look(
+                    activity_mut(state, session_id),
+                    PresenceKind::Read,
+                    &paths,
+                    *at_ms,
+                );
+            }
         }
         Event::RemoteEnabled { link } => {
             validate_remote_link(state, link)?;
@@ -7564,16 +8823,18 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::MessageSent { message } => {
             validate_message(message)?;
             validate_known_workspace(state, &message.workspace_id)?;
-            if !message.acknowledged.is_empty() {
-                return Err(error("invalid_event", "A message is sent unacknowledged"));
+            if !message.acknowledged.is_empty() || message.retracted {
+                return Err(error(
+                    "invalid_event",
+                    "A message is sent unacknowledged and not withdrawn",
+                ));
             }
-            let messages = state
-                .messages
-                .entry(message.workspace_id.clone())
-                .or_default();
-            messages.retain(|held| held.message_id != message.message_id);
-            messages.insert(0, message.clone());
-            messages.truncate(MAX_MESSAGES);
+            for list in [&mut state.messages, &mut state.message_history] {
+                let messages = list.entry(message.workspace_id.clone()).or_default();
+                messages.retain(|held| held.message_id != message.message_id);
+                messages.insert(0, message.clone());
+                messages.truncate(MAX_MESSAGES);
+            }
         }
         Event::MessageAcknowledged {
             workspace_id,
@@ -7598,6 +8859,21 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                     .position(|message| &message.message_id == message_id)
                 {
                     let message = &mut messages[index];
+                    // The history keeps every reader, for a withdrawal.
+                    if owed_to(message, session_id, true)
+                        && let Some(record) =
+                            state
+                                .message_history
+                                .get_mut(workspace_id)
+                                .and_then(|history| {
+                                    history
+                                        .iter_mut()
+                                        .find(|record| &record.message_id == message_id)
+                                })
+                        && !record.acknowledged.contains(session_id)
+                    {
+                        record.acknowledged.push(session_id.clone());
+                    }
                     let done = match message.to {
                         Recipient::Everyone {} => {
                             if !message.acknowledged.contains(session_id) {
@@ -7612,6 +8888,75 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                     if done {
                         messages.remove(index);
                     }
+                }
+            }
+        }
+        Event::MessageRetracted {
+            workspace_id,
+            message_id,
+            by,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            validate_request_id(message_id)?;
+            if let Some(by) = by {
+                validate_id(by, "session ID")?;
+            }
+            let readers = readers(state, workspace_id, message_id);
+            let held = state.messages.get_mut(workspace_id).and_then(|messages| {
+                let index = messages
+                    .iter()
+                    .position(|message| &message.message_id == message_id)?;
+                Some(messages.remove(index))
+            });
+            if state.messages.get(workspace_id).is_some_and(Vec::is_empty) {
+                state.messages.remove(workspace_id);
+            }
+            // The history stays the latest messages sent, in send order: a
+            // held message older than it is withdrawn without joining it,
+            // so the recap does not list that one.
+            let record = state
+                .message_history
+                .get_mut(workspace_id)
+                .and_then(|history| {
+                    history
+                        .iter_mut()
+                        .find(|record| &record.message_id == message_id)
+                });
+            let withdrawn = match record {
+                Some(record) => {
+                    record.retracted = true;
+                    Some(record.clone())
+                }
+                None => held,
+            };
+            // A message no longer known has nothing left to withdraw.
+            if let Some(withdrawn) = withdrawn {
+                let (text, cut) = retracted_text(&withdrawn.text);
+                let notice = RetractedMessage {
+                    message_id: message_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    from: withdrawn.from.clone(),
+                    text,
+                    cut,
+                };
+                for reader in readers {
+                    let notices = state.retracted_notices.entry(reader).or_default();
+                    notices.retain(|held| held.message_id != *message_id);
+                    notices.insert(0, notice.clone());
+                    notices.truncate(MAX_MESSAGES);
+                }
+            }
+        }
+        Event::RetractionDelivered {
+            session_id,
+            message_id,
+        } => {
+            validate_id(session_id, "session ID")?;
+            validate_request_id(message_id)?;
+            if let Some(notices) = state.retracted_notices.get_mut(session_id) {
+                notices.retain(|notice| notice.message_id != *message_id);
+                if notices.is_empty() {
+                    state.retracted_notices.remove(session_id);
                 }
             }
         }
@@ -7666,6 +9011,42 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 .or_default();
             changes.insert(0, change.clone());
             changes.truncate(MAX_CHECKOUTS);
+        }
+        Event::UncoordinatedChanged { change } => {
+            validate_uncoordinated(state, change)?;
+            if !change.delivered.is_empty() {
+                return Err(error(
+                    "invalid_event",
+                    "A new uncoordinated change has not been delivered to any session",
+                ));
+            }
+            let changes = state
+                .uncoordinated
+                .entry(change.workspace_id.clone())
+                .or_default();
+            changes.insert(0, change.clone());
+            changes.truncate(MAX_UNCOORDINATED);
+        }
+        Event::UncoordinatedDelivered {
+            workspace_id,
+            change_id,
+            session_id,
+        } => {
+            if known_session(state, session_id)?.workspace_id != *workspace_id {
+                return Err(error(
+                    "invalid_event",
+                    "An uncoordinated change is delivered to a session of its workspace",
+                ));
+            }
+            // A change already truncated away has nothing left to mark.
+            if let Some(change) = state
+                .uncoordinated
+                .get_mut(workspace_id)
+                .and_then(|changes| changes.iter_mut().find(|c| c.change_id == *change_id))
+                && !change.delivered.contains(session_id)
+            {
+                change.delivered.push(session_id.clone());
+            }
         }
         Event::InterfaceChanged { notice } => {
             validate_notice(notice)?;
@@ -8425,6 +9806,65 @@ fn prompt_target_paths(paths: &[String]) -> Result<Vec<String>, CoreError> {
         ));
     }
     Ok(paths)
+}
+
+/// Presence paths, sorted and without repeats: 1 to `PRESENCE_PATHS`
+/// normalized relative paths, for a search or a shell command.
+fn presence_paths(kind: PresenceKind, paths: &[String]) -> Result<Vec<String>, CoreError> {
+    if kind == PresenceKind::Read {
+        return Err(error(
+            "invalid_presence",
+            "A read is recorded as an observed source version, not as presence",
+        ));
+    }
+    let paths = normalized_paths(paths)?;
+    if paths.len() > PRESENCE_PATHS {
+        return Err(error(
+            "too_many_paths",
+            &format!("A presence record names at most {PRESENCE_PATHS} paths"),
+        ));
+    }
+    Ok(paths)
+}
+
+impl Default for PresenceSetting {
+    fn default() -> Self {
+        Self {
+            shown: true,
+            window_ms: PRESENCE_WINDOW_MS,
+        }
+    }
+}
+
+/// A session's presence setting: its own, or the default.
+fn presence_setting(state: &State, session_id: &str) -> PresenceSetting {
+    state.presence.get(session_id).copied().unwrap_or_default()
+}
+
+fn validate_presence_setting(setting: &PresenceSetting) -> Result<(), CoreError> {
+    if !(MIN_PRESENCE_WINDOW_MS..=BRIEF_HORIZON_MS).contains(&setting.window_ms) {
+        return Err(error(
+            "invalid_limit",
+            "A presence window is between 1 and 30 minutes",
+        ));
+    }
+    Ok(())
+}
+
+/// Record that a session looked at `paths`: newest first, one entry per path.
+fn look(activity: &mut SessionActivity, kind: PresenceKind, paths: &[String], at_ms: u64) {
+    for path in paths.iter().rev() {
+        activity.looking.retain(|looked| looked.path != *path);
+        activity.looking.insert(
+            0,
+            LookedPath {
+                path: path.clone(),
+                kind,
+                at_ms,
+            },
+        );
+    }
+    activity.looking.truncate(MAX_LOOKING);
 }
 
 fn normalized_related_ids(ids: &[String]) -> Result<Vec<String>, CoreError> {

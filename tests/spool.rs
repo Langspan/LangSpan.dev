@@ -170,12 +170,18 @@ impl Fixture {
     }
 
     fn run(&self, event: Value, budget_ms: u64) -> Run {
+        self.run_with(&[], event, budget_ms)
+    }
+
+    /// A hook run with the install's own options, such as `--presence off`.
+    fn run_with(&self, extra: &[&str], event: Value, budget_ms: u64) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.state())
             .args(["--workspace", "work", "--root"])
             .arg(self.work())
             .args(["--budget-ms", &budget_ms.to_string()])
+            .args(extra)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .stdin(Stdio::piped())
@@ -421,4 +427,55 @@ fn a_shell_commands_changes_found_while_the_coordinator_was_down_are_recorded_on
     assert_eq!(f.observations(ALICE, "e.txt").len(), 1);
     f.write(BOB, "PreToolUse", "bob-2", "d.txt");
     assert_eq!(f.observations(ALICE, "e.txt").len(), 1, "recorded once");
+}
+
+/// A read kept while the coordinator was down keeps its own session's
+/// presence setting: a session with presence off whose report is sent again
+/// by another session's hook run, with the default setting, is not shown as
+/// looking at what it read, and the version it read is still recorded.
+#[test]
+fn a_kept_read_is_sent_again_with_its_own_sessions_presence_setting() {
+    let mut f = Fixture::new();
+    f.stop();
+    let down = f.run_with(
+        &["--presence", "off"],
+        json!({
+            "session_id": ALICE, "cwd": f.work(), "hook_event_name": "PostToolUse",
+            "tool_name": "Read", "tool_use_id": "alice-read",
+            "tool_input": {"file_path": f.work().join("a.txt")},
+            "tool_response": {"type": "text", "file": {"filePath": f.work().join("a.txt"), "content": "a line\n"}},
+        }),
+        2_000,
+    );
+    assert_eq!(down.coverage, "unavailable", "{down:?}");
+    assert!(down.detail.contains("kept to send again"), "{down:?}");
+    f.start();
+    let next = f.write(BOB, "PreToolUse", "bob-1", "c.txt");
+    assert!(
+        next.detail.contains("1 earlier observation(s) sent again"),
+        "{next:?}"
+    );
+    let (code, text) = f.cli(&["status", "--json"]);
+    assert_eq!(code, 0, "{text}");
+    let status: Value = serde_json::from_str(&text).unwrap();
+    let state = &status["outcome"]["state"];
+    let alice = format!("claude-code.{ALICE}");
+    assert_eq!(state["presence"][&alice]["shown"], json!(false), "{state}");
+    let activity = &state["activity"][&alice];
+    assert!(
+        activity["looking"]
+            .as_array()
+            .is_none_or(|looking| looking.is_empty()),
+        "{activity}"
+    );
+    assert!(
+        activity["known"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|known| known["path"] == "a.txt"),
+        "{activity}"
+    );
+    let context = f.prompt(BOB).context.unwrap_or_default();
+    assert!(!context.contains("looking at"), "{context}");
 }

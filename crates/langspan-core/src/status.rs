@@ -5,9 +5,10 @@
 
 use crate::{
     AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CoreError, Intent, InterfaceNotice,
-    Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, RemoteLink, RemotePeer,
-    ScanCoverage, ScanFailure, Session, SessionActivity, SessionLiveness, State, TestLearning,
-    Turn, TurnWaiter, UninstalledHost, Workspace, WorkspaceGit, error,
+    Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, PresenceSetting, RemoteLink,
+    RemotePeer, RetractedMessage, ScanCoverage, ScanFailure, Session, SessionActivity,
+    SessionLiveness, State, TestLearning, Turn, TurnWaiter, UninstalledHost, Workspace,
+    WorkspaceGit, error,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,6 +43,11 @@ pub struct StatusSummary {
     /// field name. Every record is still readable with `status --all`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub omitted: Vec<String>,
+    /// How long ago each shown session's last recorded hook run reached the
+    /// daemon, in this generation (roadmap J12). Absent for a session with
+    /// none; its process probe is in the view's `session_liveness`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_hook_age_ms: BTreeMap<String, u64>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -75,15 +81,23 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         scan_failures,
         scan_coverage,
         checkouts,
+        uncoordinated,
         auto_checks,
         check_notices,
         test_learning,
         uninstalled_hosts,
+        // Recap, the dashboard and briefings show withdrawn messages; the
+        // bounded view shows what is held, and `status --all` has these.
+        message_history: _,
+        retracted_notices: _,
+        presence,
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
         // Derived for a starting session's recent section; likewise.
         path_refusals: _,
+        // Derived for the source index; never part of the status reply.
+        workspace_revisions: _,
         // The write generation check runs carry: one count per workspace,
         // never trimmed.
         writes,
@@ -108,7 +122,9 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
                 liveness.status == LivenessStatus::Alive && liveness.generation == *generation
             })
             || match activity.get(id) {
-                Some(activity) => activity.last_ms.saturating_add(STATUS_RECENT_MS) >= now_ms,
+                Some(activity) => {
+                    activity.last_seen_ms().saturating_add(STATUS_RECENT_MS) >= now_ms
+                }
                 None => session.generation == *generation,
             }
     };
@@ -119,6 +135,13 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         .collect();
     summary.omitted_sessions = (sessions.len() - shown_sessions.len()) as u64;
     let of_shown = |id: &String| shown_sessions.contains_key(id);
+    summary.last_hook_age_ms = activity
+        .iter()
+        .filter(|(id, activity)| {
+            of_shown(id) && activity.generation == *generation && activity.last_hook_ms > 0
+        })
+        .map(|(id, activity)| (id.clone(), now_ms.saturating_sub(activity.last_hook_ms)))
+        .collect();
     let view = State {
         generation: *generation,
         workspaces: workspaces.clone(),
@@ -139,14 +162,19 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         scan_failures: scan_failures.clone(),
         scan_coverage: scan_coverage.clone(),
         checkouts: checkouts.clone(),
+        uncoordinated: uncoordinated.clone(),
         auto_checks: auto_checks.clone(),
         check_notices: keep(check_notices, of_shown),
         test_learning: test_learning.clone(),
         uninstalled_hosts: uninstalled_hosts.clone(),
+        retracted_notices: BTreeMap::new(),
+        message_history: BTreeMap::new(),
+        presence: keep(presence, of_shown),
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),
         path_refusals: Vec::new(),
+        workspace_revisions: BTreeMap::new(),
         writes: writes.clone(),
     };
     (view, summary)
@@ -208,7 +236,7 @@ macro_rules! activity {
 /// Parts of the view left out, in this order, while it does not fit: the
 /// bulkiest histories first, current coordination last. Each name is the one
 /// `StatusSummary::omitted` gives.
-const TRIMS: [Trim; 15] = [
+const TRIMS: [Trim; 17] = [
     activity!("activity.known", known),
     // `check flaky` reads it through its own command.
     field!("test_learning", test_learning),
@@ -216,11 +244,13 @@ const TRIMS: [Trim; 15] = [
     field!("landings", landings),
     field!("interface_notices", interface_notices),
     field!("checkouts", checkouts),
+    field!("uncoordinated", uncoordinated),
     field!("notes", notes),
     field!("remote_peers", remote_peers),
     activity!("activity.touched", touched),
     activity!("activity.alerted", alerted),
     activity!("activity.prompt_targets", prompt_targets),
+    activity!("activity.looking", looking),
     // Only the shown sessions' notices are in the view.
     Trim {
         name: "check_notices",
@@ -293,7 +323,10 @@ pub fn shrink_status(
         .keys()
         .filter(|id| !holding.contains(*id))
         .map(|id| {
-            let last = view.activity.get(id).map_or(0, |activity| activity.last_ms);
+            let last = view
+                .activity
+                .get(id)
+                .map_or(0, SessionActivity::last_seen_ms);
             (last, id.clone())
         })
         .collect();
@@ -310,6 +343,7 @@ pub fn shrink_status(
             view.session_liveness.remove(&id);
             view.activity.remove(&id);
             view.check_notices.remove(&id);
+            summary.last_hook_age_ms.remove(&id);
             summary.omitted_sessions += 1;
         }
     }
@@ -427,6 +461,20 @@ pub enum StatusRecord {
         key: String,
         host: UninstalledHost,
     },
+    /// One of the latest messages sent in workspace `key`, with its readers.
+    SentMessage {
+        key: String,
+        message: Message,
+    },
+    /// A withdrawal session `key` has not yet been told about.
+    RetractedNotice {
+        key: String,
+        notice: RetractedMessage,
+    },
+    Presence {
+        key: String,
+        setting: PresenceSetting,
+    },
     /// Part of one record too large for a page: `text` is its JSON from
     /// byte `offset`. The parts of a record come in order, the last with
     /// `last`, and joined they are that record's JSON. A part at offset 0
@@ -439,7 +487,7 @@ pub enum StatusRecord {
 }
 
 /// Record kinds in page order. The cursor names one of these.
-const KINDS: [&str; 23] = [
+const KINDS: [&str; 26] = [
     "workspace",
     "session",
     "intent",
@@ -463,6 +511,9 @@ const KINDS: [&str; 23] = [
     "check_notice",
     "test_learning",
     "uninstalled_host",
+    "sent_message",
+    "retracted_notice",
+    "presence",
 ];
 
 impl StatusRecord {
@@ -508,6 +559,13 @@ impl StatusRecord {
             }
             Self::TestLearning { key, learning } => drop(state.test_learning.insert(key, learning)),
             Self::UninstalledHost { key, host } => drop(state.uninstalled_hosts.insert(key, host)),
+            Self::SentMessage { key, message } => {
+                state.message_history.entry(key).or_default().push(message)
+            }
+            Self::RetractedNotice { key, notice } => {
+                state.retracted_notices.entry(key).or_default().push(notice)
+            }
+            Self::Presence { key, setting } => drop(state.presence.insert(key, setting)),
         }
         Ok(())
     }
@@ -694,7 +752,7 @@ pub fn status_records<'a>(
         .as_ref()
         .and_then(|after| Some((after.position.clone(), after.within?)));
     let after = after.as_ref();
-    let pages: [Page<'a>; 23] = [
+    let pages: [Page<'a>; 26] = [
         entries(0, &state.workspaces, after, |key, workspace| {
             StatusRecord::Workspace { key, workspace }
         }),
@@ -767,6 +825,15 @@ pub fn status_records<'a>(
         }),
         entries(22, &state.uninstalled_hosts, after, |key, host| {
             StatusRecord::UninstalledHost { key, host }
+        }),
+        lists(23, &state.message_history, after, |key, message| {
+            StatusRecord::SentMessage { key, message }
+        }),
+        lists(24, &state.retracted_notices, after, |key, notice| {
+            StatusRecord::RetractedNotice { key, notice }
+        }),
+        entries(25, &state.presence, after, |key, setting| {
+            StatusRecord::Presence { key, setting }
         }),
     ];
     Ok((resume, pages.into_iter().flatten()))
