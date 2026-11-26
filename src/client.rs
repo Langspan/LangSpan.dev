@@ -36,13 +36,14 @@ mod unix {
         crate::hook::redact_command(&mut request.command);
         let mut response = exchange(state_dir, &request, deadline)?;
         // A daemon of an earlier build refuses this version before it reads
-        // the command, so the same request in the version it names cannot
-        // take effect twice. Requests are the same in both versions.
+        // the command, and answers in its own (version 4 or 3), so the same
+        // request in the version it names cannot take effect twice.
+        // Requests are the same in every version it answers.
         if request.version == PROTOCOL_VERSION
-            && response.version == OLDEST_PROTOCOL_VERSION
+            && (OLDEST_PROTOCOL_VERSION..PROTOCOL_VERSION).contains(&response.version)
             && matches!(&response.outcome, Outcome::Error { code, .. } if code == "unsupported_version")
         {
-            request.version = OLDEST_PROTOCOL_VERSION;
+            request.version = response.version;
             response = exchange(state_dir, &request, deadline)?;
         }
         if response.version != request.version {
@@ -300,15 +301,23 @@ mod unix {
             assert!(error.contains("retry with the same request_id"), "{error}");
         }
 
-        /// Roadmap D7 (review comment 4707749784): a daemon of an earlier
-        /// build answers only protocol version 3. It refuses this build's
-        /// version, as that build does, and the client asks again once in
-        /// version 3, with the same request, and reads that answer.
+        /// Roadmap D7 (review comment 4707749784) and H9 (review comment
+        /// 4711096877): a daemon of an earlier build answers only its own
+        /// protocol version, 4 or 3. It refuses this build's version in its
+        /// own, as that build does, and the client asks again once in that
+        /// version, with the same request, and reads that answer.
         #[test]
         fn a_daemon_of_an_earlier_build_is_asked_again_in_its_version() {
+            for earlier in [4u16, 3] {
+                asked_again_in(earlier);
+            }
+        }
+
+        fn asked_again_in(earlier: u16) {
             use std::io::{BufRead, BufReader};
             use std::os::unix::fs::PermissionsExt;
-            let dir = std::env::temp_dir().join(format!("ls-earlier-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("ls-earlier-{earlier}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir(&dir).unwrap();
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -325,13 +334,13 @@ mod unix {
                     let mut line = String::new();
                     BufReader::new(&stream).read_line(&mut line).unwrap();
                     let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-                    let outcome = if request["version"] == 3 {
-                        serde_json::json!({"type": "error", "code": "answered", "message": "in version 3"})
+                    let outcome = if request["version"] == earlier {
+                        serde_json::json!({"type": "error", "code": "answered", "message": "in its version"})
                     } else {
                         serde_json::json!({"type": "error", "code": "unsupported_version",
-                            "message": "expected protocol version 3; restart the daemon after upgrading LangSpan"})
+                            "message": "expected another protocol version; restart the daemon after upgrading LangSpan"})
                     };
-                    let reply = serde_json::json!({"version": 3, "request_id": request["request_id"],
+                    let reply = serde_json::json!({"version": earlier, "request_id": request["request_id"],
                         "replayed": false, "generation": 1, "lease_valid": null, "outcome": outcome});
                     writeln!(&stream, "{reply}").unwrap();
                     asked.push(request);
@@ -351,11 +360,11 @@ mod unix {
                     .iter()
                     .map(|r| r["version"].clone())
                     .collect::<Vec<_>>(),
-                [serde_json::json!(4), serde_json::json!(3)]
+                [serde_json::json!(5), serde_json::json!(earlier)]
             );
             assert_eq!(asked[0]["command"], asked[1]["command"]);
             assert_eq!(asked[1]["request_id"], "read");
-            assert_eq!(response.version, 3);
+            assert_eq!(response.version, earlier);
             assert!(
                 matches!(&response.outcome, Outcome::Error { code, .. } if code == "answered"),
                 "{response:?}"
