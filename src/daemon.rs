@@ -1962,6 +1962,115 @@ mod unix {
     /// How often the daemon compacts when `retention_days` is set.
     const COMPACTION_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
+    /// How often the state owner checks that its state directory is still
+    /// the one it started with, and whether it has been idle too long.
+    const WATCH_EVERY: Duration = Duration::from_secs(1);
+
+    /// The state directory the daemon started with, by identity, so that a
+    /// folder made later at the same path is not taken for it (issue #239).
+    struct StateAnchor {
+        path: PathBuf,
+        device: u64,
+        inode: u64,
+    }
+    impl StateAnchor {
+        fn of(path: &Path) -> io::Result<Self> {
+            let metadata = fs::symlink_metadata(path)?;
+            Ok(Self {
+                path: path.to_owned(),
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+
+        /// Why the daemon must stop serving this directory, if it must: it
+        /// was removed, replaced by another folder, or is no longer
+        /// owner-only. The reason code and a detail for the log.
+        fn lost(&self) -> Option<(&'static str, String)> {
+            match fs::symlink_metadata(&self.path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Some((
+                    "state_directory_removed",
+                    format!("{} no longer exists", self.path.display()),
+                )),
+                // Unreadable is not proof that it is gone: the next check
+                // looks again.
+                Err(_) => None,
+                Ok(metadata) if metadata.dev() != self.device || metadata.ino() != self.inode => {
+                    Some((
+                        "state_directory_replaced",
+                        format!("{} is now another folder", self.path.display()),
+                    ))
+                }
+                Ok(metadata) => local::check_private_directory(&metadata)
+                    .err()
+                    .map(|error| ("state_directory_not_private", error.to_string())),
+            }
+        }
+    }
+
+    /// How long a debug-build daemon may go without a client before it
+    /// exits, so a coordinator left by a test that was killed ends by itself
+    /// (issue #239). Five minutes, or `LANGSPAN_TEST_IDLE_EXIT_MS` (at least
+    /// 100 ms; `0` turns it off). Not a setting: a release build has no idle
+    /// exit and never reads the variable.
+    #[cfg(debug_assertions)]
+    fn idle_limit() -> Option<Duration> {
+        idle_limit_of(std::env::var("LANGSPAN_TEST_IDLE_EXIT_MS").ok().as_deref())
+    }
+    #[cfg(not(debug_assertions))]
+    fn idle_limit() -> Option<Duration> {
+        None
+    }
+    #[cfg(debug_assertions)]
+    const DEBUG_IDLE_LIMIT: Duration = Duration::from_secs(300);
+    /// A value that is not a number keeps the default.
+    #[cfg(debug_assertions)]
+    fn idle_limit_of(value: Option<&str>) -> Option<Duration> {
+        match value.and_then(|text| text.trim().parse::<u64>().ok()) {
+            None => Some(DEBUG_IDLE_LIMIT),
+            Some(0) => None,
+            Some(ms) => Some(Duration::from_millis(ms.max(100))),
+        }
+    }
+
+    /// When a client last connected or finished, for the idle limit.
+    #[derive(Clone)]
+    struct Activity(Arc<std::sync::Mutex<Instant>>);
+    impl Activity {
+        fn new() -> Self {
+            Self(Arc::new(std::sync::Mutex::new(Instant::now())))
+        }
+        fn touch(&self) {
+            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        }
+        fn idle_for(&self) -> Duration {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).elapsed()
+        }
+    }
+
+    /// How long a stopping daemon waits for its running automatic checks to
+    /// stop their commands.
+    const CHECKS_STOP_WITHIN: Duration = Duration::from_secs(2);
+
+    /// Logs why the daemon is stopping, stops any automatic check still
+    /// running (its command's process group would otherwise outlive the
+    /// daemon that enforces its time limit) and ends the process. Called by
+    /// the state owner between requests, so no transaction of its own is
+    /// open.
+    fn stop(checks: &auto_check::Runs, level: &str, reason: &str, detail: &str, code: i32) -> ! {
+        eprintln!(
+            "{}",
+            serde_json::json!({"level":level,"event":"daemon_stopping","reason":reason,"detail":detail})
+        );
+        if !checks.cancel_all(CHECKS_STOP_WITHIN) {
+            eprintln!(
+                "{}",
+                serde_json::json!({"level":"warn","event":"auto_check_not_stopped","detail":format!("an automatic check was still running {} ms after it was cancelled", CHECKS_STOP_WITHIN.as_millis())})
+            );
+        }
+        std::process::exit(code)
+    }
+
     /// `LANGSPAN_TEST_COMPACT_PAUSE_MS`, at most 10 s: how long a compaction
     /// holds its transaction open before committing, so that a test can
     /// kill the daemon mid-compaction. Unset in normal use.
@@ -2024,6 +2133,10 @@ mod unix {
         let _ = STARTED_MS.set(now_ms());
         let directory = local::prepare_directory(&state_dir)
             .map_err(|e| format!("prepare state directory: {e}"))?;
+        let anchor =
+            StateAnchor::of(&directory).map_err(|e| format!("read the state directory: {e}"))?;
+        let idle_limit = idle_limit();
+        let activity = Activity::new();
         let lock = local::private_file(&directory.join("daemon.lock"), true)?;
         lock.try_lock()
             .map_err(|error| format!("another daemon may own this state directory: {error}"))?;
@@ -2087,10 +2200,12 @@ mod unix {
         }
         let (check_sender, check_receiver) = mpsc::sync_channel::<auto_check::Message>(256);
         let write_counts = auto_check::WriteCounts::default();
+        let check_runs = auto_check::Runs::default();
         {
             let sender = sender.clone();
             let check_sender = check_sender.clone();
             let write_counts = write_counts.clone();
+            let check_runs = check_runs.clone();
             let timing = auto_check::Timing {
                 debounce: Duration::from_millis(config.auto_check_debounce_ms),
                 rerun_max: Duration::from_secs(config.flaky_rerun_max_s),
@@ -2103,6 +2218,7 @@ mod unix {
                         check_receiver,
                         timing,
                         write_counts,
+                        check_runs,
                         |of: Option<&Registration>, id, command| {
                             ask_as(&sender, of.cloned(), id, command)
                         },
@@ -2126,8 +2242,12 @@ mod unix {
         }
         let handoff_after = Duration::from_millis(config.notify_handoff_after_ms);
         store.tap(notify::relevant);
+        let slots = Arc::new(Semaphore::new(config.max_clients));
         // A write check reads the line journal under the state directory.
         let owner_directory = directory.clone();
+        let owner_slots = slots.clone();
+        let owner_activity = activity.clone();
+        let max_clients = config.max_clients;
         std::thread::Builder::new()
             .name("langspan-owner".into())
             .spawn(move || {
@@ -2154,6 +2274,7 @@ mod unix {
                 // The first compaction runs as the writer starts, then one a
                 // day.
                 let mut next_compaction = Instant::now();
+                let mut next_watch = Instant::now() + WATCH_EVERY;
                 loop {
                     match receiver.recv_timeout(Duration::from_millis(100)) {
                         Ok(job) => {
@@ -2264,6 +2385,23 @@ mod unix {
                         }
                         next_liveness = Instant::now() + Duration::from_secs(1);
                     }
+                    // Between requests, so nothing this thread writes is cut
+                    // short (issue #239).
+                    if Instant::now() >= next_watch {
+                        next_watch = Instant::now() + WATCH_EVERY;
+                        if let Some((reason, detail)) = anchor.lost() {
+                            stop(&check_runs, "warn", reason, &detail, 1);
+                        }
+                        // A running automatic check is activity too: its
+                        // result is still to be recorded.
+                        if let Some(limit) = idle_limit
+                            && owner_slots.available_permits() == max_clients
+                            && !check_runs.any()
+                            && owner_activity.idle_for() >= limit
+                        {
+                            stop(&check_runs, "info", "idle", &format!("no client for {} ms", limit.as_millis()), 0);
+                        }
+                    }
                     // Facts already committed, whoever asked for them.
                     let tapped = store.take_tapped();
                     for notice in notify::notices_for(store.state(), &tapped) {
@@ -2321,18 +2459,20 @@ mod unix {
             "{}",
             serde_json::json!({"level":"info","event":"daemon_ready","generation":generation})
         );
-        let slots = Arc::new(Semaphore::new(config.max_clients));
         loop {
             let (stream, _) = listener.accept().await?;
+            activity.touch();
             let Ok(permit) = slots.clone().try_acquire_owned() else {
                 drop(stream);
                 continue;
             };
             let sender = sender.clone();
             let config = config.clone();
+            let activity = activity.clone();
             tokio::spawn(async move {
                 let _permit = permit;
                 serve_connection(stream, sender, config).await;
+                activity.touch();
             });
         }
     }
@@ -3269,6 +3409,19 @@ mod unix {
                 "secret_in_command",
                 message,
             );
+        }
+        if command == Command::Version {
+            return Response {
+                version: PROTOCOL_VERSION,
+                request_id,
+                replayed: false,
+                generation: store.state().generation,
+                lease_valid: None,
+                outcome: Outcome::Version {
+                    version: crate::binary_version::VERSION.into(),
+                    pid: std::process::id(),
+                },
+            };
         }
         if let Command::CheckCalls { session_id, calls } = &command {
             return check_calls(store, graph, request_id, session_id, calls);
@@ -4376,6 +4529,25 @@ mod unix {
                 },
             };
             protocol::encode(&response).expect("fits one frame");
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        fn the_debug_idle_limit_defaults_to_five_minutes_and_zero_turns_it_off() {
+            assert_eq!(idle_limit_of(None), Some(DEBUG_IDLE_LIMIT));
+            assert_eq!(idle_limit_of(Some("soon")), Some(DEBUG_IDLE_LIMIT));
+            assert_eq!(idle_limit_of(Some("0")), None);
+            assert_eq!(idle_limit_of(Some("5")), Some(Duration::from_millis(100)));
+            assert_eq!(
+                idle_limit_of(Some(" 2500 ")),
+                Some(Duration::from_millis(2500))
+            );
+        }
+
+        #[cfg(not(debug_assertions))]
+        #[test]
+        fn a_release_build_has_no_idle_limit() {
+            assert_eq!(idle_limit(), None);
         }
     }
 
