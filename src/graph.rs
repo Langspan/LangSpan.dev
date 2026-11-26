@@ -1703,6 +1703,60 @@ impl Index {
         Ok(rows)
     }
 
+    /// Definitions named `name` with the digest of each one's own bytes, at
+    /// most `limit + 1`, in path and line order (roadmap E1).
+    pub fn anchor_definitions(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        limit: u32,
+    ) -> Result<Vec<SymbolRef>, Failure> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT path, name, kind, line, end_line, body_digest FROM symbols
+             WHERE workspace_id = ?1 AND name = ?2 ORDER BY path, line LIMIT ?3",
+        )?;
+        let rows = statement
+            .query_map(params![workspace_id, name, limit + 1], |row| {
+                Ok(SymbolRef {
+                    path: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: row.get(2)?,
+                    line: row.get(3)?,
+                    end_line: row.get(4)?,
+                    body_digest: Some(row.get(5)?),
+                    ..SymbolRef::default()
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Of `paths`, those indexed at the content the last scan read, without
+    /// a syntax error or a bound reached: the files whose definitions the
+    /// index can vouch for now (roadmap E1).
+    pub fn fresh(
+        &self,
+        workspace_id: &str,
+        paths: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, Failure> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT 1 FROM files WHERE workspace_id = ?1 AND path = ?2
+             AND digest IS scan_digest AND partial = 0 AND NOT EXISTS (
+                SELECT 1 FROM unread u WHERE u.workspace_id = ?1 AND u.path = ?2)",
+        )?;
+        let mut fresh = BTreeSet::new();
+        for path in paths {
+            if statement
+                .query_row(params![workspace_id, path], |_| Ok(()))
+                .optional()?
+                .is_some()
+            {
+                fresh.insert(path.clone());
+            }
+        }
+        Ok(fresh)
+    }
+
     /// Add what the index knows around one definition: the digest of its
     /// own bytes, the names called within its lines, and the call sites of
     /// its name outside it. All by name; nothing is resolved.

@@ -680,6 +680,8 @@ mod tests {
                 author: None,
                 text: secret.into(),
                 paths: vec![],
+                symbol: None,
+                tags: Vec::new(),
             },
             Command::SendMessage {
                 workspace_id: "w".into(),

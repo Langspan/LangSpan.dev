@@ -6,6 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+mod anchors;
 mod classes;
 mod count;
 mod dashboard;
@@ -24,6 +25,10 @@ mod today;
 mod trail;
 mod workspaces;
 mod write_check;
+pub use anchors::{
+    ANCHOR_CANDIDATES, AnchorIndex, AnchorState, MAX_TAGS, NoteAnchor, SYMBOL_BYTES, TAG_BYTES,
+    anchored, validate_tag, validate_tags,
+};
 pub use classes::{
     FailureClass, KeptTests, MAX_FIXED_NAMED, MAX_WRITE_RUNS, MAX_WRITERS_NAMED, WriteRun,
 };
@@ -2088,6 +2093,17 @@ pub struct Note {
     pub text: String,
     /// Files it is about. Empty means the whole workspace.
     pub paths: Vec<String>,
+    /// The definition it is about (roadmap E1). Absent for a note about
+    /// files or the workspace, and for every note recorded before anchors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<NoteAnchor>,
+    /// Whether that definition is still as it was; present exactly when
+    /// `anchor` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_state: Option<AnchorState>,
+    /// Up to `MAX_TAGS`, each once, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// Who a message is for.
@@ -3446,6 +3462,15 @@ pub enum Event {
         workspace_id: String,
         note_id: String,
     },
+    /// An anchored note's definition, compared with a complete scan, is in
+    /// a new state (roadmap E1). `anchor` is filled in when the note held
+    /// only a name.
+    NoteAnchorChanged {
+        workspace_id: String,
+        note_id: String,
+        anchor: NoteAnchor,
+        state: AnchorState,
+    },
     /// `at_ms` and `generation` say when it was sent, on the daemon's
     /// clock; absent in records written before roadmap E12.
     MessageSent {
@@ -3881,11 +3906,25 @@ pub enum Command {
         workspace_id: String,
         paths: Vec<String>,
     },
+    /// `symbol` anchors the note to the one indexed definition of that name
+    /// in `paths` (or in the workspace when empty), roadmap E1. The daemon
+    /// looks it up (`RememberPrepared`); decided without its index, the
+    /// anchor is `unknown` until the next complete scan.
     Remember {
         workspace_id: String,
         author: Option<String>,
         text: String,
         paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        symbol: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
+    },
+    /// Compare the workspace's anchored notes with its index (roadmap E1),
+    /// asked by the indexer after each pass. Records only state changes; an
+    /// ask that changes nothing writes nothing, not even a receipt.
+    ObserveNoteAnchors {
+        workspace_id: String,
     },
     Forget {
         workspace_id: String,
@@ -3992,9 +4031,12 @@ pub enum Command {
     ObserveHosts {
         not_installed: Vec<String>,
     },
-    /// Read-only: a bounded account of one workspace.
+    /// Read-only: a bounded account of one workspace. With `tag`, only
+    /// notes carrying it are listed (roadmap E1).
     Recap {
         workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
     },
     /// Read-only: the newest trails ended sessions left in one workspace
     /// (roadmap C9), at most `limit` (1 to `MAX_TRAILS`, default 4).
@@ -4394,6 +4436,29 @@ pub enum Command {
         mcp: bool,
         left: Vec<String>,
         inflight: Vec<InflightSymbol>,
+        /// Names of anchored notes that the session's files mention, as
+        /// the index found them (roadmap E1).
+        mentioned: BTreeSet<String>,
+    },
+    /// Prepared adapter input only: the receipt stores the original
+    /// `Remember`. `index` is what the daemon's source index holds of
+    /// `symbol`, absent without a complete scan.
+    #[serde(skip_serializing)]
+    RememberPrepared {
+        workspace_id: String,
+        author: Option<String>,
+        text: String,
+        paths: Vec<String>,
+        symbol: Option<String>,
+        tags: Vec<String>,
+        index: Option<AnchorIndex>,
+    },
+    /// Prepared adapter input only: `ObserveNoteAnchors` with one snapshot
+    /// of the index. The daemon sends none without a complete scan.
+    #[serde(skip_serializing)]
+    NoteAnchorsPrepared {
+        workspace_id: String,
+        index: AnchorIndex,
     },
     /// Read-only: the bounded view of what matters now. Closed admissions
     /// are counted, not listed; the answer always fits one frame.
@@ -4712,11 +4777,25 @@ enum CommandWire {
         workspace_id: String,
         paths: Vec<String>,
     },
+    /// `symbol` anchors the note to the one indexed definition of that name
+    /// in `paths` (or in the workspace when empty), roadmap E1. The daemon
+    /// looks it up (`RememberPrepared`); decided without its index, the
+    /// anchor is `unknown` until the next complete scan.
     Remember {
         workspace_id: String,
         author: Option<String>,
         text: String,
         paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        symbol: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
+    },
+    /// Compare the workspace's anchored notes with its index (roadmap E1),
+    /// asked by the indexer after each pass. Records only state changes; an
+    /// ask that changes nothing writes nothing, not even a receipt.
+    ObserveNoteAnchors {
+        workspace_id: String,
     },
     Forget {
         workspace_id: String,
@@ -4823,9 +4902,12 @@ enum CommandWire {
     ObserveHosts {
         not_installed: Vec<String>,
     },
-    /// Read-only: a bounded account of one workspace.
+    /// Read-only: a bounded account of one workspace. With `tag`, only
+    /// notes carrying it are listed (roadmap E1).
     Recap {
         workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
     },
     /// Read-only: the newest trails ended sessions left in one workspace
     /// (roadmap C9), at most `limit` (1 to `MAX_TRAILS`, default 4).
@@ -5498,6 +5580,10 @@ pub enum Outcome {
     },
     Remembered {
         note: Note,
+    },
+    /// How many anchored notes an index pass moved to a new state.
+    NoteAnchorsObserved {
+        changed: u32,
     },
     Forgotten {
         note_id: String,
@@ -7436,20 +7522,31 @@ fn decide_checked(
                 ));
             }
             let window = recent::window(*recent_window_ms)?;
-            let inflight = match command {
-                Command::BriefPrepared { inflight, .. } => {
+            let none = BTreeSet::new();
+            let (inflight, mentioned) = match command {
+                Command::BriefPrepared {
+                    inflight,
+                    mentioned,
+                    ..
+                } => {
                     if inflight.len() > INFLIGHT_CANDIDATES {
                         return Err(error(
                             "invalid_limit",
                             "A briefing is offered at most 32 in-flight symbols",
                         ));
                     }
-                    inflight.as_slice()
+                    (inflight.as_slice(), mentioned)
                 }
-                _ => &[],
+                _ => (&[][..], &none),
             };
-            let (mut briefing, signature, inflight_keys) =
-                brief(state, session_id, *max_peers, !*mid_turn, now_ms, inflight)?;
+            let (mut briefing, signature, inflight_keys) = brief(
+                state,
+                session_id,
+                *max_peers,
+                !*mid_turn,
+                now_ms,
+                (inflight, mentioned),
+            )?;
             briefing.left_work = left_work(state, session_id, left)?;
             // Not part of the signature: a prompt's briefing never carries
             // it, so it must not make the next one look new.
@@ -7689,21 +7786,92 @@ fn decide_checked(
             author,
             text,
             paths,
+            symbol,
+            tags,
+        } => decide_checked(
+            state,
+            &Command::RememberPrepared {
+                workspace_id: workspace_id.clone(),
+                author: author.clone(),
+                text: text.clone(),
+                paths: paths.clone(),
+                symbol: symbol.clone(),
+                tags: tags.clone(),
+                index: None,
+            },
+            request_id,
+            now_ms,
+        ),
+        Command::ObserveNoteAnchors { workspace_id } => {
+            validate_known_workspace(state, workspace_id)?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::NoteAnchorsObserved { changed: 0 },
+            })
+        }
+        Command::NoteAnchorsPrepared {
+            workspace_id,
+            index,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            let events: Vec<Event> = state
+                .notes
+                .get(workspace_id)
+                .into_iter()
+                .flatten()
+                .filter_map(|note| {
+                    let (anchor, held) = note.anchor.as_ref().zip(note.anchor_state)?;
+                    let (anchor_now, state_now) = anchors::observe(anchor, &note.paths, index);
+                    (anchor_now != *anchor || state_now != held).then(|| Event::NoteAnchorChanged {
+                        workspace_id: workspace_id.clone(),
+                        note_id: note.note_id.clone(),
+                        anchor: anchor_now,
+                        state: state_now,
+                    })
+                })
+                .collect();
+            Ok(Decision {
+                outcome: Outcome::NoteAnchorsObserved {
+                    changed: u32::try_from(events.len()).unwrap_or(u32::MAX),
+                },
+                events,
+            })
+        }
+        Command::RememberPrepared {
+            workspace_id,
+            author,
+            text,
+            paths,
+            symbol,
+            tags,
+            index,
         } => {
             validate_known_workspace(state, workspace_id)?;
             if let Some(author) = author {
                 known_session(state, author)?;
             }
+            let paths = if paths.is_empty() {
+                Vec::new()
+            } else {
+                normalized_paths(paths)?
+            };
+            let tags = anchors::validate_tags(tags)?;
+            let (anchor, anchor_state) = match symbol {
+                Some(name) => {
+                    let (anchor, held) = anchors::resolve(name, &paths, index.as_ref())?;
+                    (Some(anchor), Some(held))
+                }
+                None => (None, None),
+            };
             let note = Note {
                 note_id: request_id.into(),
                 workspace_id: workspace_id.clone(),
                 author: author.clone(),
                 text: text.clone(),
-                paths: if paths.is_empty() {
-                    Vec::new()
-                } else {
-                    normalized_paths(paths)?
-                },
+                paths,
+                anchor,
+                anchor_state,
+                tags,
             };
             validate_note(&note)?;
             Ok(Decision {
@@ -7972,12 +8140,15 @@ fn decide_checked(
                 events: vec![Event::UncoordinatedChanged { change }],
             })
         }
-        Command::Recap { workspace_id } => {
+        Command::Recap { workspace_id, tag } => {
             validate_known_workspace(state, workspace_id)?;
+            if let Some(tag) = tag {
+                anchors::validate_tag(tag)?;
+            }
             Ok(Decision {
                 events: Vec::new(),
                 outcome: Outcome::Recap {
-                    recap: recap(state, workspace_id, now_ms),
+                    recap: recap(state, workspace_id, tag.as_deref(), now_ms),
                 },
             })
         }
@@ -8246,6 +8417,7 @@ fn validate_note(note: &Note) -> Result<(), CoreError> {
         || note.text.len() > NOTE_BYTES
         || note.text.chars().any(char::is_control)
         || note.paths.len() > BRIEF_PATHS
+        || !anchors::valid_note_anchor(note)
     {
         return Err(error(
             "invalid_note",
@@ -8492,7 +8664,7 @@ fn message_cost(message: &Message) -> usize {
 }
 
 /// A bounded account of one workspace, from projected state only.
-fn recap(state: &State, workspace_id: &str, now_ms: u64) -> Recap {
+fn recap(state: &State, workspace_id: &str, tag: Option<&str>, now_ms: u64) -> Recap {
     let mut sessions: Vec<(u64, RecapSession)> = state
         .sessions
         .values()
@@ -8604,7 +8776,14 @@ fn recap(state: &State, workspace_id: &str, now_ms: u64) -> Recap {
         notes: state
             .notes
             .get(workspace_id)
-            .map(|notes| notes.iter().take(RECAP_SESSIONS).cloned().collect())
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|note| tag.is_none_or(|tag| note.tags.iter().any(|held| held == tag)))
+                    .take(RECAP_SESSIONS)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default(),
         messages: state
             .messages
@@ -9540,7 +9719,7 @@ fn brief(
     max_peers: u32,
     handoffs: bool,
     now_ms: u64,
-    inflight: &[InflightSymbol],
+    (inflight, mentioned): (&[InflightSymbol], &BTreeSet<String>),
 ) -> Result<(Briefing, String, Vec<String>), CoreError> {
     let me = current_session(state, session_id)?;
     let repository = state
@@ -9863,8 +10042,11 @@ fn brief(
             })
             .take(BRIEF_INTERFACE_NOTICES)
             .unzip();
-    // Notes about the whole workspace, or about a file this session works on.
-    let notes: Vec<Note> = state
+    // Notes about the whole workspace, or about a file this session works
+    // on; an anchored note, about its definition's file or a file that
+    // mentions its name (roadmap E1). What still holds is chosen first,
+    // each kind newest first.
+    let mut notes: Vec<&Note> = state
         .notes
         .get(&me.workspace_id)
         .map(Vec::as_slice)
@@ -9872,11 +10054,11 @@ fn brief(
         .iter()
         .filter(|note| {
             note.author.as_deref() != Some(session_id)
-                && (note.paths.is_empty() || note.paths.iter().any(|path| concerned.contains(path)))
+                && anchors::note_reaches(note, &concerned, mentioned)
         })
-        .take(4)
-        .cloned()
         .collect();
+    notes.sort_by_key(|note| AnchorState::rank(note.anchor_state));
+    let notes: Vec<Note> = notes.into_iter().take(4).cloned().collect();
     // Withdrawals first, then messages owed to this session, each newest
     // first, as many as the text of one briefing is sure to hold beside an
     // owed uncoordinated change, whose line is reserved; the rest wait for
@@ -10048,8 +10230,14 @@ fn brief(
     for id in &checkout_ids {
         signature.push_str(&format!("checkout|{id}\n"));
     }
+    // A note whose definition changed state is news again.
     for note in &notes {
-        signature.push_str(&format!("note|{}\n", note.note_id));
+        match note.anchor_state {
+            Some(held) => {
+                signature.push_str(&format!("note|{}|{}\n", note.note_id, held.as_str()));
+            }
+            None => signature.push_str(&format!("note|{}\n", note.note_id)),
+        }
     }
     for impact in &interface_changes {
         signature.push_str(&format!("interface|{}|", impact.path));
@@ -12028,6 +12216,26 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         } => {
             if let Some(notes) = state.notes.get_mut(workspace_id) {
                 notes.retain(|note| &note.note_id != note_id);
+            }
+        }
+        Event::NoteAnchorChanged {
+            workspace_id,
+            note_id,
+            anchor,
+            state: anchor_state,
+        } => {
+            // A note forgotten or dropped since is left alone.
+            if let Some(note) = state
+                .notes
+                .get_mut(workspace_id)
+                .and_then(|notes| notes.iter_mut().find(|note| &note.note_id == note_id))
+                .filter(|note| note.anchor.is_some())
+            {
+                let mut changed = note.clone();
+                changed.anchor = Some(anchor.clone());
+                changed.anchor_state = Some(*anchor_state);
+                validate_note(&changed)?;
+                *note = changed;
             }
         }
         Event::MessageSent { message, .. } => {

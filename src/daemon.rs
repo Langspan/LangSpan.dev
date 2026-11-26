@@ -432,6 +432,7 @@ mod unix {
         };
         index.set_files_per_pass(files_per_pass());
         let mut last_failure: Option<String> = None;
+        let mut anchor_checks: u64 = 0;
         // Each workspace's last complete scan: an import loads only files
         // it lists, so the next pass cannot report a loaded file removed.
         let mut scans =
@@ -505,6 +506,28 @@ mod unix {
                             },
                         );
                     }
+                    // Roadmap E1: anchored notes are compared with the index
+                    // after every pass. A new ID each time, since a recheck
+                    // that changed something keeps a receipt; one that
+                    // changed nothing writes nothing.
+                    anchor_checks += 1;
+                    ask_as(
+                        &sender,
+                        Some(of.clone()),
+                        crate::hook::wire_id(
+                            "anchors",
+                            &[
+                                &of.workspace_id,
+                                &of.revision.to_string(),
+                                &std::process::id().to_string(),
+                                &now_ms().to_string(),
+                                &anchor_checks.to_string(),
+                            ],
+                        ),
+                        Command::ObserveNoteAnchors {
+                            workspace_id: of.workspace_id.clone(),
+                        },
+                    );
                 }
                 Err(error) => {
                     let detail = error.to_string();
@@ -766,6 +789,16 @@ mod unix {
                     .unwrap_or_default()
                     .iter()
                     .filter(|note| note.paths.contains(&symbol.path))
+                    // A line has no room for a state: an anchored note is
+                    // listed only with its own definition, and only while
+                    // that is unchanged (roadmap E1).
+                    .filter(|note| match (&note.anchor, note.anchor_state) {
+                        (None, _) => true,
+                        (Some(anchor), state) => {
+                            anchor.name == symbol.name
+                                && state == Some(langspan_core::AnchorState::Current)
+                        }
+                    })
                     .take(langspan_core::MAX_SYMBOL_NOTES)
                     .map(|note| langspan_core::SymbolNote {
                         id: note.note_id.clone(),
@@ -1445,6 +1478,20 @@ mod unix {
                 .ok()
             })
             .unwrap_or_default();
+        let mentioned = graph
+            .zip(langspan_core::briefing_concern(state, session_id, now_ms()))
+            .filter(|(_, (_, concerned))| !concerned.is_empty())
+            .and_then(|(graph, (workspace_id, concerned))| {
+                mentioned_anchors(graph, state, &workspace_id, &concerned)
+                    .inspect_err(|error| {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"level":"warn","event":"note_mentions_unavailable","detail":error.to_string()})
+                        );
+                    })
+                    .ok()
+            })
+            .unwrap_or_default();
         Command::BriefPrepared {
             session_id: session_id.clone(),
             max_peers: *max_peers,
@@ -1455,6 +1502,133 @@ mod unix {
             mcp: *mcp,
             left: left.clone(),
             inflight,
+            mentioned,
+        }
+    }
+
+    /// The names of the workspace's anchored notes that one of `concerned`
+    /// mentions, as the index finds them (roadmap E1). A name match, as
+    /// `langspan_references`. Empty without a scan of the current
+    /// registration; at most `MAX_NOTES` names are looked up.
+    fn mentioned_anchors(
+        graph: &crate::graph::Index,
+        state: &State,
+        workspace_id: &str,
+        concerned: &std::collections::BTreeSet<String>,
+    ) -> Result<std::collections::BTreeSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let (names, _) = langspan_core::anchored(state, workspace_id);
+        let Some(of) = Registration::of(state, workspace_id).filter(|_| !names.is_empty()) else {
+            return Ok(Default::default());
+        };
+        let (found, _) = graph.with_coverage(&of, |graph| {
+            let mut found = std::collections::BTreeSet::new();
+            for name in &names {
+                if !graph
+                    .mentioning(workspace_id, ("", name), &[], Some(concerned), 1)?
+                    .is_empty()
+                {
+                    found.insert(name.clone());
+                }
+            }
+            Ok(found)
+        })?;
+        Ok(found)
+    }
+
+    /// What the index holds of anchored `names` and of the files `paths`,
+    /// from one snapshot (roadmap E1). `None` without a complete scan of
+    /// the workspace's current registration.
+    fn anchor_index(
+        graph: Option<&crate::graph::Index>,
+        state: &State,
+        workspace_id: &str,
+        names: &std::collections::BTreeSet<String>,
+        paths: std::collections::BTreeSet<String>,
+    ) -> Result<Option<langspan_core::AnchorIndex>, Box<dyn std::error::Error + Send + Sync>> {
+        let (Some(graph), Some(of)) = (graph, Registration::of(state, workspace_id)) else {
+            return Ok(None);
+        };
+        let ((definitions, fresh), coverage) = graph.with_coverage(&of, |graph| {
+            let mut definitions = Vec::new();
+            for name in names {
+                definitions.extend(graph.anchor_definitions(
+                    workspace_id,
+                    name,
+                    crate::graph::MAX_RESULTS,
+                )?);
+            }
+            let asked = paths
+                .into_iter()
+                .chain(definitions.iter().map(|symbol| symbol.path.clone()))
+                .collect();
+            let fresh = graph.fresh(workspace_id, &asked)?;
+            Ok((definitions, fresh))
+        })?;
+        Ok(coverage.scanned.then_some(langspan_core::AnchorIndex {
+            definitions,
+            fresh,
+            complete: coverage.blind_in_scope == 0,
+        }))
+    }
+
+    /// `Remember` with what the index holds of its symbol, and
+    /// `ObserveNoteAnchors` with what it holds of every anchored note
+    /// (roadmap E1). A recheck without a complete scan is answered as one
+    /// that changed nothing.
+    fn prepare_anchors(
+        state: &State,
+        graph: Option<&crate::graph::Index>,
+        command: &Command,
+    ) -> Result<Command, (&'static str, String)> {
+        let unavailable = |error: Box<dyn std::error::Error + Send + Sync>| {
+            ("index_unavailable", error.to_string())
+        };
+        match command {
+            Command::Remember {
+                workspace_id,
+                author,
+                text,
+                paths,
+                symbol,
+                tags,
+            } => {
+                let index = match symbol {
+                    Some(name) => anchor_index(
+                        graph,
+                        state,
+                        workspace_id,
+                        &std::iter::once(name.clone()).collect(),
+                        paths.iter().cloned().collect(),
+                    )
+                    .map_err(unavailable)?,
+                    None => None,
+                };
+                Ok(Command::RememberPrepared {
+                    workspace_id: workspace_id.clone(),
+                    author: author.clone(),
+                    text: text.clone(),
+                    paths: paths.clone(),
+                    symbol: symbol.clone(),
+                    tags: tags.clone(),
+                    index,
+                })
+            }
+            Command::ObserveNoteAnchors { workspace_id } => {
+                let (names, paths) = langspan_core::anchored(state, workspace_id);
+                if names.is_empty() {
+                    return Ok(command.clone());
+                }
+                match anchor_index(graph, state, workspace_id, &names, paths)
+                    .map_err(unavailable)?
+                {
+                    Some(index) => Ok(Command::NoteAnchorsPrepared {
+                        workspace_id: workspace_id.clone(),
+                        index,
+                    }),
+                    None => Ok(command.clone()),
+                }
+            }
+            _ => Ok(command.clone()),
         }
     }
 
@@ -3525,6 +3699,16 @@ mod unix {
             }
         } else if let Command::Brief { .. } = &command {
             prepare_brief(store.state(), graph, &command)
+        } else if matches!(
+            command,
+            Command::Remember { .. } | Command::ObserveNoteAnchors { .. }
+        ) {
+            match prepare_anchors(store.state(), graph, &command) {
+                Ok(command) => command,
+                Err((code, message)) => {
+                    return error(request_id, store.state().generation, code, message);
+                }
+            }
         } else {
             match prepare(store.state(), &command) {
                 Ok(command) => command,

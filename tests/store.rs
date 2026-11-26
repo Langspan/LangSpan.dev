@@ -721,6 +721,8 @@ fn a_recap_of_the_largest_valid_notes_still_fits_one_frame() {
             author: None,
             text: "n".repeat(400),
             paths,
+            symbol: None,
+            tags: Vec::new(),
         };
         let outcome = store
             .execute(&format!("note-{index}"), &command, &command, 10)
@@ -730,6 +732,7 @@ fn a_recap_of_the_largest_valid_notes_still_fits_one_frame() {
     }
     let command = Command::Recap {
         workspace_id: "workspace".into(),
+        tag: None,
     };
     let outcome = store
         .execute("read", &command, &command, 20)

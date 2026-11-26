@@ -1851,6 +1851,7 @@ fn brief_with(
             mcp: false,
             left: Vec::new(),
             inflight,
+            mentioned: Default::default(),
         },
         now,
     )) {
@@ -1937,6 +1938,7 @@ fn an_in_flight_signature_is_told_once_per_signature_and_only_from_another_workt
             mcp: false,
             left: Vec::new(),
             inflight: found(v3),
+            mentioned: Default::default(),
         },
         7_000,
     )) {
@@ -1992,6 +1994,7 @@ fn in_flight_lines_are_at_most_three_within_their_share_and_the_rest_counted() {
             mcp: false,
             left: Vec::new(),
             inflight: too_many,
+            mentioned: Default::default(),
         },
         3_000,
     );
@@ -2127,6 +2130,7 @@ fn presence_and_an_in_flight_signature_are_each_news_once() {
             mcp: false,
             left: Vec::new(),
             inflight: found(v1),
+            mentioned: Default::default(),
         },
         3_500,
     )) {

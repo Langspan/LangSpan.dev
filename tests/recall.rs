@@ -402,6 +402,8 @@ async fn the_mcp_tool_labels_notes_as_data_and_fits_one_frame() {
                         paths: (0..8)
                             .map(|path| format!("src/{}/{index:02}-{path}.rs", "d".repeat(480)))
                             .collect(),
+                        symbol: None,
+                        tags: Vec::new(),
                     },
                 );
                 assert!(matches!(outcome, Outcome::Remembered { .. }), "{outcome:?}");
@@ -445,6 +447,8 @@ async fn the_mcp_tool_labels_notes_as_data_and_fits_one_frame() {
                         author: None,
                         text: format!("A small note {index}."),
                         paths: Vec::new(),
+                        symbol: None,
+                        tags: Vec::new(),
                     },
                 );
             }
@@ -508,6 +512,8 @@ async fn the_mcp_tool_fits_one_frame_when_notes_are_full_of_quotes_and_backslash
                         author: None,
                         text: format!("upload_id {index:02} {}", "\"\\".repeat(190)),
                         paths: Vec::new(),
+                        symbol: None,
+                        tags: Vec::new(),
                     },
                 );
                 assert!(matches!(outcome, Outcome::Remembered { .. }), "{outcome:?}");

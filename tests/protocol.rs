@@ -1451,13 +1451,15 @@ fn v6_landed_response_and_its_earlier_forms_match_the_golden_vectors() {
     use langspan_core::Outcome;
     let wire = include_bytes!("../fixtures/landed-response-v6.json");
     let mut response: Response = serde_json::from_slice(wire).unwrap();
-    assert_eq!(response.version, PROTOCOL_VERSION);
+    assert_eq!(response.version, 6);
     assert_eq!(
         response.outcome,
         Outcome::Landed {
             landing: rebased_landing()
         }
     );
+    // Version 7 changed nothing in a landing.
+    assert_eq!(encode_for(6, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
     let earlier_reads = |wire: &[u8]| {
         let value: serde_json::Value = serde_json::from_slice(wire).unwrap();
@@ -1493,7 +1495,7 @@ fn recording_a_rebased_or_adapted_landing_fits_only_version_6() {
     use langspan::protocol::fits;
     let wire = include_bytes!("../fixtures/record-landing-request-v6.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
-    assert_eq!(request.version, PROTOCOL_VERSION);
+    assert_eq!(request.version, 6);
     assert_eq!(encode(&request).unwrap(), wire);
     let with = |rebased: bool, adapted: bool| {
         let mut command = request.command.clone();
@@ -1517,6 +1519,7 @@ fn recording_a_rebased_or_adapted_landing_fits_only_version_6() {
     for (rebased, adapted) in [(true, true), (true, false), (false, true)] {
         let command = with(rebased, adapted);
         assert!(fits(PROTOCOL_VERSION, &command));
+        assert!(fits(6, &command));
         for version in [5, 4, OLDEST_PROTOCOL_VERSION] {
             assert!(
                 !fits(version, &command),
@@ -1526,5 +1529,128 @@ fn recording_a_rebased_or_adapted_landing_fits_only_version_6() {
     }
     for version in [PROTOCOL_VERSION, 5, 4, OLDEST_PROTOCOL_VERSION] {
         assert!(fits(version, &with(false, false)), "version {version}");
+    }
+}
+
+/// Version 7 (roadmap E1): a note carries `anchor`, `anchor_state` and
+/// `tags`. A client of version 6 or earlier reads a note with
+/// `deny_unknown_fields` and would show an anchored note without its state,
+/// so it is told an anchored note only while its definition is current, as
+/// a plain note; a changed, gone or unknown one is left out.
+#[test]
+fn anchored_notes_reach_an_earlier_client_only_while_current_and_without_the_new_fields() {
+    use langspan_core::{AnchorState, Note, NoteAnchor, Outcome, Recap};
+    let note = |id: &str, state: Option<AnchorState>| Note {
+        note_id: id.into(),
+        workspace_id: "app".into(),
+        author: None,
+        text: "keep it pure".into(),
+        paths: vec!["src/api.rs".into()],
+        anchor: state.map(|_| NoteAnchor {
+            name: "parse_upload".into(),
+            path: Some("src/api.rs".into()),
+            kind: Some("function".into()),
+            line: Some(1),
+            body_digest: Some("a".repeat(64)),
+        }),
+        anchor_state: state,
+        tags: if state.is_some() {
+            vec!["api".into()]
+        } else {
+            Vec::new()
+        },
+    };
+    let recap = Recap {
+        workspace_id: "app".into(),
+        root: "/repo".into(),
+        branch_ref: None,
+        sessions: Vec::new(),
+        omitted_sessions: 0,
+        omitted_items: 0,
+        interface_changes: Vec::new(),
+        checks: Vec::new(),
+        landings: Vec::new(),
+        notes: vec![
+            note("plain", None),
+            note("current", Some(AnchorState::Current)),
+            note("changed", Some(AnchorState::Changed)),
+            note("gone", Some(AnchorState::Gone)),
+            note("unknown", Some(AnchorState::Unknown)),
+        ],
+        messages: Vec::new(),
+        trails: Vec::new(),
+        teammates: Vec::new(),
+        publishing: None,
+        scan_failure: None,
+        scan_coverage: None,
+    };
+    let response = Response {
+        version: PROTOCOL_VERSION,
+        request_id: "r".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome: Outcome::Recap { recap },
+    };
+    let now: serde_json::Value =
+        serde_json::from_slice(&encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    assert_eq!(
+        now["outcome"]["recap"]["notes"].as_array().unwrap().len(),
+        5
+    );
+    assert_eq!(
+        now["outcome"]["recap"]["notes"][2]["anchor_state"],
+        "changed"
+    );
+    for version in [6, 5, 4, OLDEST_PROTOCOL_VERSION] {
+        let earlier: serde_json::Value =
+            serde_json::from_slice(&encode_for(version, &response).unwrap()).unwrap();
+        let notes = earlier["outcome"]["recap"]["notes"].as_array().unwrap();
+        let ids: Vec<&str> = notes
+            .iter()
+            .map(|held| held["note_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["plain", "current"], "version {version}");
+        for held in notes {
+            let fields: Vec<&String> = held.as_object().unwrap().keys().collect();
+            assert_eq!(
+                fields,
+                ["note_id", "workspace_id", "author", "text", "paths"],
+                "version {version}"
+            );
+        }
+    }
+}
+
+/// A note with a symbol or tags, and a recap by tag, need version 7; the
+/// same requests without them fit every version.
+#[test]
+fn a_note_with_a_symbol_or_tags_fits_only_version_7() {
+    use langspan::protocol::fits;
+    let remember = |symbol: Option<&str>, tags: &[&str]| Command::Remember {
+        workspace_id: "app".into(),
+        author: None,
+        text: "keep it pure".into(),
+        paths: Vec::new(),
+        symbol: symbol.map(str::to_owned),
+        tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+    };
+    let recap = |tag: Option<&str>| Command::Recap {
+        workspace_id: "app".into(),
+        tag: tag.map(str::to_owned),
+    };
+    for command in [
+        remember(Some("parse_upload"), &[]),
+        remember(None, &["api"]),
+        recap(Some("api")),
+    ] {
+        assert!(fits(PROTOCOL_VERSION, &command));
+        for version in [6, 5, 4, OLDEST_PROTOCOL_VERSION] {
+            assert!(!fits(version, &command), "version {version}: {command:?}");
+        }
+    }
+    for version in [PROTOCOL_VERSION, 6, OLDEST_PROTOCOL_VERSION] {
+        assert!(fits(version, &remember(None, &[])));
+        assert!(fits(version, &recap(None)));
     }
 }
