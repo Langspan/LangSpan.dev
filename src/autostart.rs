@@ -137,6 +137,8 @@ fn probe_deadline(deadline: Instant) -> Instant {
 }
 
 fn start(state_dir: &Path, executable: &Path, deadline: Instant) -> Result<Outcome, crate::Error> {
+    // A coordinator started here would exit at once.
+    local::check_socket_fits(state_dir)?;
     local::private_directory(state_dir)?;
     let directory = fs::canonicalize(state_dir)?;
     let mut lock = local::private_file(&directory.join(LOCK), true)?;
@@ -239,6 +241,12 @@ pub fn open_log(directory: &Path) -> Result<fs::File, crate::Error> {
         .mode(0o600)
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(&path)?)
+}
+
+/// Refuses a state directory too long for the coordinator's socket, before
+/// anything is changed for it.
+pub fn check_state_dir(state_dir: &Path) -> Result<(), crate::Error> {
+    local::check_socket_fits(state_dir)
 }
 
 /// Creates `state_dir` owner-only if it is missing, and refuses one that is

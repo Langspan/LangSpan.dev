@@ -1191,6 +1191,7 @@ fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langs
     options.insert("--skill".into(), String::new());
     let home = UserHome::new(options.get("--home").map(PathBuf::from))?;
     let state_dir = std::path::absolute(home.state_dir(options.get("--state-dir").cloned()))?;
+    langspan::autostart::check_state_dir(&state_dir)?;
     let executable = langspan::install::installed_executable(&std::env::current_exe()?)?;
     println!("LangSpan setup for {}", home.home.display());
     println!("State directory: {}", state_dir.display());
@@ -1289,8 +1290,12 @@ fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langs
                 langspan::autostart::Outcome::Running => {
                     println!("A coordinator is already running.")
                 }
-                langspan::autostart::Outcome::Started { pid, .. } => println!(
+                langspan::autostart::Outcome::Started { pid, ready: true } => println!(
                     "Started a coordinator in the background (process {pid}); it logs to {}.",
+                    langspan::autostart::log_path(&state_dir).display()
+                ),
+                langspan::autostart::Outcome::Started { pid, ready: false } => println!(
+                    "Started a coordinator (process {pid}), but it did not accept connections within 5 seconds; read {} for why.",
                     langspan::autostart::log_path(&state_dir).display()
                 ),
                 langspan::autostart::Outcome::Skipped(reason) => {

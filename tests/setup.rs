@@ -29,7 +29,10 @@ struct Base(PathBuf);
 
 impl Base {
     fn new() -> Self {
-        let base = std::env::temp_dir().join(format!(
+        // Not `temp_dir()`: on macOS it is a long path under `/var/folders`,
+        // and the home's `.local/state/langspan/daemon.sock` would not fit
+        // in a Unix socket address.
+        let base = Path::new("/tmp").join(format!(
             "ls-setup-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -181,6 +184,33 @@ fn setup_yes_without_a_service_starts_a_coordinator_and_a_second_run_changes_not
     assert!(!shown.contains("Wrote "), "{shown}");
     assert_eq!(base.snapshot(), before, "{shown}");
     assert_eq!(daemons_for(&base.0).len(), 1);
+}
+
+#[test]
+fn setup_refuses_a_state_directory_too_long_for_the_socket_and_changes_nothing() {
+    let base = Base::new();
+    let home = base.home().to_string_lossy().into_owned();
+    let long = base.0.join("s".repeat(120));
+    let before = base.snapshot();
+    let output = base.run(
+        &[
+            "setup",
+            "--home",
+            &home,
+            "--state-dir",
+            &long.to_string_lossy(),
+            "--yes",
+        ],
+        None,
+    );
+    let shown = text(&output);
+    assert!(!output.status.success(), "{shown}");
+    assert!(shown.contains("too long for a Unix socket"), "{shown}");
+    assert!(!shown.contains("Wrote "), "{shown}");
+    assert!(!shown.contains("Started a coordinator"), "{shown}");
+    assert_eq!(base.snapshot(), before, "{shown}");
+    assert!(!long.exists());
+    assert!(daemons_for(&base.0).is_empty());
 }
 
 #[test]
