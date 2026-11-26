@@ -1935,8 +1935,9 @@ code 2, with the reason, and each rename's `uncertain` says why.
 for linear history: the new commits keep their author, date and message, only
 the final tree is checked, and `rebased` lists each original and new commit. A
 commit whose replay conflicts stops the landing as `not_combinable` with that
-`commit` and its hunks; a branch with merge commits or more than 64 commits to
-replay is `not_rebased`. Landing the same branch again afterwards finds its
+`commit` and its hunks; a branch with merge commits, even one that would
+fast-forward, or a landing with more than 64 commits to replay across all its
+branches, is `not_rebased`. Landing the same branch again afterwards finds its
 changes on the target and reports nothing to land. Neither flag ever forces a
 push or changes your checkout. Both also work on `integrate check`, so a check
 recorded with the same flags is the evidence a later `land` with them uses;

@@ -427,13 +427,26 @@ pub fn combine(
             }
             notes.identifier_renames.extend(found.renames);
         }
+        // Linear history is checked before the fast-forward shortcut, so a
+        // rebase landing never brings in a merge commit unchanged.
+        if shape.rebase {
+            if let Some(reason) = merges(root, &current, &theirs, deadline)? {
+                return Ok(Combination::NotRebased {
+                    branch: branch.clone(),
+                    reason,
+                    notes,
+                });
+            }
+        }
         if is_ancestor(root, &current, &theirs, deadline)? {
             current = theirs;
             continue;
         }
         if shape.rebase {
             renames.extend(renames_followed(root, &current, &theirs, branch, deadline)?);
-            match replay(root, &current, &theirs, deadline)? {
+            // The bound is on the whole landing, as the core records it.
+            let room = langspan_core::MAX_REWRITTEN.saturating_sub(notes.rebased.len());
+            match replay(root, &current, &theirs, room, deadline)? {
                 Replayed::Done { tip, rewritten } => {
                     current = tip;
                     notes.rebased.extend(rewritten);
@@ -600,33 +613,52 @@ enum Replayed {
     Refused(String),
 }
 
+/// Why `theirs` cannot land with `--rebase` onto `onto`: it has merge
+/// commits `onto` lacks. `None` when that history is linear.
+fn merges(
+    root: &Path,
+    onto: &str,
+    theirs: &str,
+    deadline: Instant,
+) -> Result<Option<String>, String> {
+    let range = format!("{onto}..{theirs}");
+    let first = text(root, &["rev-list", "--merges", "-n", "1", &range], deadline)?;
+    Ok((!first.is_empty()).then(|| {
+        "it has merge commits, and a rebase landing replays only a linear branch; land it without --rebase, or make it linear first".to_owned()
+    }))
+}
+
 /// Replay the commits of `theirs` that `onto` lacks onto `onto`, oldest
 /// first, as `git rebase` would, entirely in the object database: each is
 /// a merge of the commit onto the result so far from the commit's parent,
 /// keeping its author and message. A commit whose change `onto` already has
 /// (`git cherry`) or that changes nothing once replayed is left out. A
-/// branch with merge commits, or more than `MAX_REWRITTEN` commits, is not
-/// replayed.
-fn replay(root: &Path, onto: &str, theirs: &str, deadline: Instant) -> Result<Replayed, String> {
+/// branch with more than `room` commits the target lacks is not replayed:
+/// `room` is what the branches before it left of `MAX_REWRITTEN`, the
+/// bound on a whole landing. The caller refuses merge commits first (see
+/// `merges`).
+fn replay(
+    root: &Path,
+    onto: &str,
+    theirs: &str,
+    room: usize,
+    deadline: Instant,
+) -> Result<Replayed, String> {
     use langspan_core::MAX_REWRITTEN;
     let range = format!("{onto}..{theirs}");
-    let count = |extra: &[&str]| -> Result<usize, String> {
-        let mut arguments = vec!["rev-list", "--count"];
-        arguments.extend_from_slice(extra);
-        arguments.push(&range);
-        text(root, &arguments, deadline)?
-            .parse()
-            .map_err(|_| "Git did not count the commits".to_owned())
-    };
-    if count(&["--merges"])? > 0 {
-        return Ok(Replayed::Refused(
-            "it has merge commits, and a rebase landing replays only a linear branch; land it without --rebase, or make it linear first".into(),
-        ));
-    }
-    if count(&[])? > MAX_REWRITTEN {
-        return Ok(Replayed::Refused(format!(
-            "it has more than {MAX_REWRITTEN} commits the target lacks; land it without --rebase"
-        )));
+    let count: usize = text(root, &["rev-list", "--count", &range], deadline)?
+        .parse()
+        .map_err(|_| "Git did not count the commits".to_owned())?;
+    if count > room {
+        return Ok(Replayed::Refused(if room == MAX_REWRITTEN {
+            format!(
+                "it has more than {MAX_REWRITTEN} commits the target lacks; land it without --rebase"
+            )
+        } else {
+            format!(
+                "it has {count} commits the target lacks, and a rebase landing replays at most {MAX_REWRITTEN} commits across all its branches, {room} after the branches before it; land it separately, or without --rebase"
+            )
+        }));
     }
     // `-` marks a commit whose change the target already has.
     let cherry = text(root, &["cherry", onto, theirs], deadline)?;

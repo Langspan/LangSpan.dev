@@ -2446,6 +2446,131 @@ fn a_branch_with_a_merge_commit_is_not_rebased_and_nothing_is_pushed() {
 }
 
 #[test]
+fn a_rebase_landing_refuses_merge_commits_even_when_it_would_fast_forward() {
+    let w = World::new();
+    let work = w.work();
+    git(&work, &["checkout", "--quiet", "-b", "merged", "feature-a"]);
+    git(
+        &work,
+        &["merge", "--quiet", "--no-ff", "-m", "merge b", "feature-b"],
+    );
+    git(&work, &["checkout", "--quiet", "main"]);
+    // The target has not moved: `merged` contains it, so it would
+    // fast-forward.
+    let original = w.hub_main();
+    for branches in [&["merged"][..], &["feature-a", "merged"][..]] {
+        let (code, report) = w.json(
+            &[
+                &["land", "app", "--onto", "main", "--name", "unit"][..],
+                branches,
+                &[
+                    "--apply",
+                    "--json",
+                    "--rebase",
+                    "--check-again",
+                    "--",
+                    "true",
+                ],
+            ]
+            .concat(),
+        );
+        assert_eq!(code, 2, "{branches:?}: {report}");
+        assert_eq!(report["result"], "not_rebased", "{branches:?}: {report}");
+        assert_eq!(report["branch"], "merged", "{branches:?}: {report}");
+        assert!(
+            report["reason"].as_str().unwrap().contains("merge commits"),
+            "{report}"
+        );
+        assert_eq!(w.hub_main(), original, "nothing was pushed");
+    }
+    // Without --rebase the same branch lands as a fast-forward.
+    let (code, report) = w.json(&land_args(
+        "merged",
+        &["--json", "--check-again", "--", "true"],
+    ));
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+}
+
+impl World {
+    /// Branch `name` from main with `count` commits, each adding one file.
+    fn many_commits(&self, name: &str, count: usize) {
+        let work = self.work();
+        git(&work, &["checkout", "--quiet", "-b", name, "main"]);
+        for n in 0..count {
+            let file = format!("{name}-{n}.txt");
+            fs::write(work.join(&file), "x\n").unwrap();
+            git(&work, &["add", &file]);
+            git(&work, &["commit", "--quiet", "-m", &file]);
+        }
+        git(&work, &["checkout", "--quiet", "main"]);
+    }
+}
+
+#[test]
+fn a_rebase_landing_bounds_the_rewritten_commits_of_all_its_branches_together() {
+    use langspan_core::MAX_REWRITTEN;
+    let w = World::new();
+    let half = MAX_REWRITTEN / 2;
+    // Each branch is within the bound; together they are one over it.
+    w.many_commits("first", half);
+    w.many_commits("second", half + 1);
+    let other = w.teammate("b.txt");
+    git(&other, &["push", "--quiet", "origin", "main"]);
+    let original = w.hub_main();
+    let land = |branches: &[&str]| {
+        w.json(
+            &[
+                &["land", "app", "--onto", "main", "--name", "unit"][..],
+                branches,
+                &[
+                    "--apply",
+                    "--json",
+                    "--rebase",
+                    "--check-again",
+                    "--",
+                    "true",
+                ],
+            ]
+            .concat(),
+        )
+    };
+    let (code, report) = land(&["first", "second"]);
+    assert_eq!(code, 2, "{report}");
+    assert_eq!(report["result"], "not_rebased", "{report}");
+    assert_eq!(report["branch"], "second", "{report}");
+    assert!(
+        report["reason"]
+            .as_str()
+            .unwrap()
+            .contains(&MAX_REWRITTEN.to_string()),
+        "{report}"
+    );
+    assert_eq!(w.hub_main(), original, "nothing was pushed");
+    assert!(
+        !w.events().iter().any(|event| event["type"] == "landed"),
+        "nothing was recorded"
+    );
+
+    // Exactly the bound lands, and the landing is recorded.
+    w.many_commits("third", half - 1);
+    let (code, report) = land(&["first", "third", "second"]);
+    assert_eq!(code, 2, "{report}");
+    assert_eq!(report["branch"], "second", "{report}");
+    let (code, report) = land(&["first", "third"]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+    assert_eq!(
+        report["rebased"].as_array().unwrap().len(),
+        MAX_REWRITTEN - 1,
+        "{report}"
+    );
+    let (code, report) = land(&["second"]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+}
+
+#[test]
 fn a_changed_file_that_does_not_parse_makes_rename_detection_say_so() {
     let w = World::new();
     w.renamed_target();

@@ -248,8 +248,10 @@ identity, as for a merge; a signature is not kept). A commit whose change the
 result already has (`git cherry` marks it `-`), or that changes nothing once
 replayed, is left out. A replay that conflicts stops with `not_combinable`
 naming that `commit` and its hunks, and nothing is pushed. A branch with merge
-commits, a root commit, a commit encoded other than as UTF-8 or more than 64
-commits to replay is not rebased (`not_rebased`, exit 2). Only the final tree
+commits (even one that would fast-forward), a root commit, a commit encoded
+other than as UTF-8, or more commits to replay than the 64 a landing records
+across all its branches is not rebased (`not_rebased`, exit 2), before anything
+is checked or pushed. Only the final tree
 is checked; the intermediate commits are trees that were never checked, which
 the result says by listing them in `rebased` (`from`, `to`) and the landing
 record keeps. The push is a fast-forward of the target, never forced. A
