@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.2.0](https://github.com/Langspan/LangSpan.dev/compare/v0.1.0...v0.2.0) (2026-11-26)
+
+
+### Features
+
+* a coordination report per session and host (H8) ([#183](https://github.com/Langspan/LangSpan.dev/issues/183)) ([efa5f8b](https://github.com/Langspan/LangSpan.dev/commit/efa5f8b753a5485e22de6a6386421d66325b5fd2))
+* a K1 family whose interface change no task text names, a staggered start, and no auto memory ([#215](https://github.com/Langspan/LangSpan.dev/issues/215)) ([da308e2](https://github.com/Langspan/LangSpan.dev/commit/da308e2c2e165a2490b3b8beb54576b972588f47))
+* a LangSpan block for AGENTS.md and rules files (I7) ([#155](https://github.com/Langspan/LangSpan.dev/issues/155)) ([6723e30](https://github.com/Langspan/LangSpan.dev/commit/6723e300557e03dae957c29e2ed55471d507df01))
+* a monthly refusal count, langspan count (H5) ([#151](https://github.com/Langspan/LangSpan.dev/issues/151)) ([c59310a](https://github.com/Langspan/LangSpan.dev/commit/c59310aff251f7e8149005274ad1394acee58638))
+* a shorter MCP tool list on hooked hosts (I11) ([#182](https://github.com/Langspan/LangSpan.dev/issues/182)) ([980f4c4](https://github.com/Langspan/LangSpan.dev/commit/980f4c4d3066532f8275e8048ce0f485fc096e6d))
+* add the K1 coordination benchmark driver, fixture and oracle ([#184](https://github.com/Langspan/LangSpan.dev/issues/184)) ([4b39f89](https://github.com/Langspan/LangSpan.dev/commit/4b39f89707b1a71e4e751f076e3fdbdec94c185b))
+* alert writes whose calls no longer fit a peer's signature, and follow renames (B9, B10) ([#179](https://github.com/Langspan/LangSpan.dev/issues/179)) ([4eb775b](https://github.com/Langspan/LangSpan.dev/commit/4eb775b21c2fa390c87f00063707a2dc3d83cc33))
+* an Antigravity host adapter (A18) ([#140](https://github.com/Langspan/LangSpan.dev/issues/140)) ([d4f1887](https://github.com/Langspan/LangSpan.dev/commit/d4f188711ac9527d2d822adf77f4a27e87e88dcd))
+* ask who received a message (E12) ([#186](https://github.com/Langspan/LangSpan.dev/issues/186)) ([43a35f4](https://github.com/Langspan/LangSpan.dev/commit/43a35f479640766d4a96c84d53438f21aa0ef621)), closes [#67](https://github.com/Langspan/LangSpan.dev/issues/67)
+* desktop notices for refusals, failed checks and waiting handoffs ([#145](https://github.com/Langspan/LangSpan.dev/issues/145)) ([fba8ff0](https://github.com/Langspan/LangSpan.dev/commit/fba8ff0673fe2efc4c72eb1041d00a809eb7fb29))
+* export and import the source index (D5) ([#185](https://github.com/Langspan/LangSpan.dev/issues/185)) ([8e0b37f](https://github.com/Langspan/LangSpan.dev/commit/8e0b37f861709e415df8eafbb066ec6f35b8b423))
+* index Java source files (D6, first language) ([#189](https://github.com/Langspan/LangSpan.dev/issues/189)) ([af098f0](https://github.com/Langspan/LangSpan.dev/commit/af098f0b2c644497dbb04451e4851539512cfa1d))
+* keep sessions current from recent hook runs, and probe processes on macOS (J12) ([#160](https://github.com/Langspan/LangSpan.dev/issues/160)) ([215b201](https://github.com/Langspan/LangSpan.dev/commit/215b201da3616a659546ad8b7fc296129fa639a5))
+* learn which tests flip on unchanged code (F2) ([#125](https://github.com/Langspan/LangSpan.dev/issues/125)) ([fd9391b](https://github.com/Langspan/LangSpan.dev/commit/fd9391bd3e9acd3d47a1d1c10aa7d04b7e2d3fa9))
+* let a session adopt an ended session's uncommitted work ([#176](https://github.com/Langspan/LangSpan.dev/issues/176)) ([22e9735](https://github.com/Langspan/LangSpan.dev/commit/22e97353c2deb4a3138ac283072d4b961742438e))
+* move, switch and remove a workspace (G6) ([#134](https://github.com/Langspan/LangSpan.dev/issues/134)) ([c943cb2](https://github.com/Langspan/LangSpan.dev/commit/c943cb245ba516d787ca6ee5bb98d8945806129a))
+* rebuild the dashboard as LangSpan Live ([#199](https://github.com/Langspan/LangSpan.dev/issues/199)) ([b264b7d](https://github.com/Langspan/LangSpan.dev/commit/b264b7dc01679622f7b6cd8e6484bcf4e16a670d))
+* retention limits for the event log (J7) ([#117](https://github.com/Langspan/LangSpan.dev/issues/117)) ([f48b57b](https://github.com/Langspan/LangSpan.dev/commit/f48b57b5aece4d4eaf169d21ef9f6e6cbdb364d9))
+* run the wider check when an interface changes (F3) ([#190](https://github.com/Langspan/LangSpan.dev/issues/190)) ([d354bc1](https://github.com/Langspan/LangSpan.dev/commit/d354bc191e7418a9d0ef71cc38d9692957b7d4ec))
+* say which tests a write broke (F1) ([#192](https://github.com/Langspan/LangSpan.dev/issues/192)) ([2090d68](https://github.com/Langspan/LangSpan.dev/commit/2090d68df1f7d76553092b4e4931b7571c36bf68))
+* set up in one command and keep the coordinator running ([#178](https://github.com/Langspan/LangSpan.dev/issues/178)) ([ef94746](https://github.com/Langspan/LangSpan.dev/commit/ef947469829e2441762f878e301067a2fe98367f))
+* show a message a briefing cut, in full (E13) ([#120](https://github.com/Langspan/LangSpan.dev/issues/120)) ([dc17e52](https://github.com/Langspan/LangSpan.dev/commit/dc17e525fbfe78ee45bfc4aa9fce1e0e833fb553))
+* show peers where a session is looking before it writes (A13) ([#156](https://github.com/Langspan/LangSpan.dev/issues/156)) ([822095d](https://github.com/Langspan/LangSpan.dev/commit/822095dd8fee39bd72596683a29f803dccc73bd1))
+* show the history of a definition with langspan graph history (D4) ([#157](https://github.com/Langspan/LangSpan.dev/issues/157)) ([b0b7fdd](https://github.com/Langspan/LangSpan.dev/commit/b0b7fdd204d4023f25b1222620bd27ba1ab7aab5))
+* tell a new session what changed recently in the repository (C3) ([#181](https://github.com/Langspan/LangSpan.dev/issues/181)) ([3702059](https://github.com/Langspan/LangSpan.dev/commit/3702059919ddd15dc59cc295678eda08d922c0a1))
+* tell dependents about another worktree's uncommitted signatures (C7) ([#180](https://github.com/Langspan/LangSpan.dev/issues/180)) ([f8ecd24](https://github.com/Langspan/LangSpan.dev/commit/f8ecd24ee0301d1a7025a12b5ffea3204993b828))
+* withdraw a sent message and tell its readers to disregard it ([#150](https://github.com/Langspan/LangSpan.dev/issues/150)) ([3d2cfb4](https://github.com/Langspan/LangSpan.dev/commit/3d2cfb4a78750b7ede8c156174342ee6cdad7d9c)), closes [#66](https://github.com/Langspan/LangSpan.dev/issues/66)
+
+
+### Bug fixes
+
+* bring the skill back under the host size limit ([#204](https://github.com/Langspan/LangSpan.dev/issues/204)) ([ab59259](https://github.com/Langspan/LangSpan.dev/commit/ab59259e43a658ed38ff403ec52b5a84d2ade323))
+* coordinate Antigravity 1.5.14's real tools and answers ([#191](https://github.com/Langspan/LangSpan.dev/issues/191)) ([dc134bf](https://github.com/Langspan/LangSpan.dev/commit/dc134bf8ec2f8a48da3fe8681eadf7243e2b7da1))
+* create the daemon socket owner-only before clients can see it ([#206](https://github.com/Langspan/LangSpan.dev/issues/206)) ([230c7b4](https://github.com/Langspan/LangSpan.dev/commit/230c7b403d5bbea8e5f1c0a08bd18c7b5c6b265f)), closes [#205](https://github.com/Langspan/LangSpan.dev/issues/205)
+* don't tell a session its checkout changed when its own Git command changed it ([#149](https://github.com/Langspan/LangSpan.dev/issues/149)) ([d92b92b](https://github.com/Langspan/LangSpan.dev/commit/d92b92b73ce2aecb2d502f11221f57107628d1b7))
+* indentation and string spacing are content, not formatting; tell sessions when files changed with no hook reported ([#162](https://github.com/Langspan/LangSpan.dev/issues/162)) ([0c57514](https://github.com/Langspan/LangSpan.dev/commit/0c57514d767cad5f8c54f44875e1664a6f9bf1de))
+* isolate K1 benchmark sessions, sum every result and make hedges fail ([#211](https://github.com/Langspan/LangSpan.dev/issues/211)) ([fba5277](https://github.com/Langspan/LangSpan.dev/commit/fba5277f13546a5f926d851cc9324166c35df314))
+* main's Go output classification and the benchmark dry run ([#216](https://github.com/Langspan/LangSpan.dev/issues/216)) ([13e0396](https://github.com/Langspan/LangSpan.dev/commit/13e03962f00bab14c7780560bdd8f708903fff57))
+* make the K1 harness arms distinguishable ([#193](https://github.com/Langspan/LangSpan.dev/issues/193), [#188](https://github.com/Langspan/LangSpan.dev/issues/188)) ([#197](https://github.com/Langspan/LangSpan.dev/issues/197)) ([d6c9912](https://github.com/Langspan/LangSpan.dev/commit/d6c9912e50079b44477f138497448cf41bb3dce4))
+* make the scan-bounds and following-briefings tests independent of machine speed ([#200](https://github.com/Langspan/LangSpan.dev/issues/200)) ([#202](https://github.com/Langspan/LangSpan.dev/issues/202)) ([a8a566d](https://github.com/Langspan/LangSpan.dev/commit/a8a566d43b2ef2095e2cd1cae274a9f068ae8e57))
+* tell a peer in another worktree of a rename at the write that calls it ([#209](https://github.com/Langspan/LangSpan.dev/issues/209)) ([0518671](https://github.com/Langspan/LangSpan.dev/commit/05186715a74d8313e1b8759a9ecb6ecd6acb0c63))
+* treat a checkout reached through a symbolic link as the same checkout ([#174](https://github.com/Langspan/LangSpan.dev/issues/174)) ([a7d58bb](https://github.com/Langspan/LangSpan.dev/commit/a7d58bbb598819f35e0fdf4dc36b7dada84cfe1e))
+
 ## 0.1.0 (2026-11-25)
 
 
