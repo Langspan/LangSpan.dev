@@ -2247,6 +2247,40 @@ fn adapt_renames_pushes_the_new_name_at_each_use_only_on_its_own_passing_check()
     assert_eq!(git(&w.work(), &["rev-parse", "calls"]), branch);
 }
 
+/// Review follow-up #267: a rebase landing replays the adapted commit too,
+/// so the adapted commit reported and recorded is the replayed one that
+/// landed, not its original, which no pushed commit reaches.
+#[test]
+fn a_rebased_adapted_landing_names_the_adapted_commit_that_landed() {
+    let w = World::new();
+    w.renamed_target();
+    let (code, report) = w.json(&land_args(
+        "calls",
+        &[
+            "--json",
+            "--rebase",
+            "--adapt-renames",
+            "--check-again",
+            "--",
+            "true",
+        ],
+    ));
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+    let landed = w.hub_main();
+    assert_eq!(report["adapted"][0]["commit"], landed.as_str(), "{report}");
+    let events = w.events();
+    let recorded = events
+        .iter()
+        .find(|event| event["type"] == "landed")
+        .unwrap();
+    assert_eq!(
+        recorded["landing"]["adapted"][0],
+        landed.as_str(),
+        "{recorded}"
+    );
+}
+
 #[test]
 fn a_rename_that_cannot_be_applied_with_certainty_stops_the_landing() {
     let w = World::new();
