@@ -1465,7 +1465,11 @@ without `--switch` and records NEW_ROOT. When the old root is a link to a
 different directory, the `old_root_exists` refusal names the directory it
 leads to; use `--switch` only if that is another checkout you mean to leave.
 The checkout a registered link leads to cannot be registered, or receive a
-moved workspace, under another ID.
+moved workspace, under another ID. Its linked worktrees still can, at their
+resolved paths: register a new one under the checkout's new place, or move
+one registered under the old root to its resolved path. While the workspace
+at the link holds an admission, such a registration is refused with
+`workspace_in_use`; complete the admission or wait for it to expire.
 
 User-level hooks need nothing: an event from NEW_ROOT joins the moved ID.
 Project-level hooks name their root in the host's configuration, which the

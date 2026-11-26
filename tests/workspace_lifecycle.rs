@@ -1093,6 +1093,91 @@ fn a_second_id_for_the_checkout_a_registered_link_leads_to_is_refused() {
     ]);
 }
 
+/// After a checkout moves and a link takes its place, its linked worktrees
+/// stay registrable: a new one under the new place, and one registered
+/// under the old root that moves to its resolved path. The registered
+/// parent's root is still the link, so the two roots do not overlap as text.
+/// While the parent holds an admission, the new registration waits, since
+/// the core cannot tell which of its paths the worktree covers.
+#[test]
+fn a_linked_worktree_of_a_checkout_moved_behind_a_link_registers() {
+    let mut home = Home::new();
+    home.start();
+    let old = home.repo("disk1/app");
+    git(&old, &["worktree", "add", "--quiet", ".worktrees/third"]);
+    home.ok(&["workspace", "add", "a", text(&old), "--request-id", "add-a"]);
+    home.ok(&[
+        "workspace",
+        "add",
+        "third",
+        text(&old.join(".worktrees/third")),
+        "--request-id",
+        "add-third",
+    ]);
+    fs::create_dir(home.base.join("disk2")).unwrap();
+    let new = home.base.join("disk2/app");
+    fs::rename(&old, &new).unwrap();
+    std::os::unix::fs::symlink(&new, &old).unwrap();
+    git(&new, &["worktree", "add", "--quiet", ".worktrees/second"]);
+    let second = new.join(".worktrees/second");
+
+    // A held parent admission makes the registration wait.
+    home.ok(&["session", "start", "s1", "a", "--request-id", "s1"]);
+    let admitted = home.json(&[
+        "admit",
+        "s1",
+        "src/a.rs",
+        "--ttl-ms",
+        "60000",
+        "--request-id",
+        "admit",
+    ]);
+    let lease = admitted["outcome"]["lease"]["lease_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{admitted}"))
+        .to_owned();
+    let waiting = home.json(&[
+        "workspace",
+        "add",
+        "second",
+        text(&second),
+        "--request-id",
+        "add-second-held",
+    ]);
+    assert_eq!(waiting["outcome"]["code"], "workspace_in_use", "{waiting}");
+    home.ok(&["complete", "s1", &lease, "--request-id", "complete"]);
+
+    home.ok(&[
+        "workspace",
+        "add",
+        "second",
+        text(&second),
+        "--request-id",
+        "add-second",
+    ]);
+    home.ok(&[
+        "workspace",
+        "move",
+        "third",
+        text(&new.join(".worktrees/third")),
+        "--request-id",
+        "move-third",
+    ]);
+    let roots: Vec<_> = home
+        .workspaces()
+        .iter()
+        .map(|w| w["root"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(roots.contains(&text(&second).to_owned()), "{roots:?}");
+    assert!(
+        roots.contains(&text(&new.join(".worktrees/third")).to_owned()),
+        "{roots:?}"
+    );
+    // The recorded links replay: a restart reads the same registrations.
+    home.restart();
+    assert_eq!(home.workspaces().len(), 3);
+}
+
 fn head(root: &Path) -> String {
     let output = Process::new("git")
         .args(["rev-parse", "HEAD"])
