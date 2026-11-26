@@ -20,7 +20,8 @@
 //!   string or character literal is one token, whitespace and all (#158).
 //!   Comments are words and other bytes. A comma just before a closing
 //!   `)`, `]` or `}` is not a token, as formatters add and remove such
-//!   trailing commas when they wrap a list.
+//!   trailing commas when they wrap a list; a Rust one-element tuple's
+//!   comma, `(u32,)`, is.
 //! - Prose (Markdown): words and other bytes, every comma kept.
 //! - Python: words, other bytes and string literals, as in Rust, and each
 //!   line that starts a logical line (outside brackets and strings) begins
@@ -402,26 +403,80 @@ fn closing(token: &[u8]) -> bool {
     matches!(token, b")" | b"]" | b"}")
 }
 
+fn opening(token: &[u8]) -> bool {
+    matches!(token, b"(" | b"[" | b"{")
+}
+
+/// Rust keywords after which `(` starts a tuple or a parenthesized
+/// expression or pattern, not an argument or parameter list.
+const TUPLE_AFTER: &[&[u8]] = &[
+    b"break", b"if", b"in", b"let", b"match", b"mut", b"ref", b"return", b"while", b"yield",
+];
+
+/// Whether the Rust `(` at `at` in `flat` opens a tuple rather than the
+/// arguments of a call, the parameters of a function or a macro's input:
+/// it is not just after a name (other than a keyword in `TUPLE_AFTER` or a
+/// lifetime), a generic list's `>`, a closing bracket, `!` or `?`.
+fn opens_tuple(flat: &[&[u8]], at: usize) -> bool {
+    let Some(before) = at.checked_sub(1).map(|at| flat[at]) else {
+        return true;
+    };
+    let earlier = at.checked_sub(2).map(|at| flat[at]);
+    if before.first().copied().is_some_and(word) {
+        return TUPLE_AFTER.contains(&before) || earlier == Some(b"'");
+    }
+    match before {
+        // `->` and `=>` end in `>` too.
+        b">" => matches!(earlier, Some(b"-" | b"=")),
+        b")" | b"]" | b"!" | b"?" => false,
+        _ => true,
+    }
+}
+
 /// Each line of a version as its tokens, with a Rust, TypeScript or
-/// JavaScript file's trailing commas dropped: a comma followed, on its line
-/// or the next with a token, by a closing bracket.
+/// JavaScript file's trailing commas dropped: a comma whose next token, on
+/// its line or a later one, is a closing bracket. A Rust one-element
+/// tuple's comma, `(u32,)`, is kept: it is the only comma in a tuple's
+/// parentheses, and without it the type or value is not a tuple.
 fn version_tokens(text: &[u8], language: Language) -> Vec<Vec<&[u8]>> {
     let mut lines = lex(text, language);
-    if matches!(language, Language::Rust | Language::Script) {
-        let mut following: Option<&[u8]> = None;
-        for line in lines.iter_mut().rev() {
-            let first = line.first().copied();
-            let mut kept = Vec::with_capacity(line.len());
-            for (at, token) in line.iter().enumerate() {
-                let after = line.get(at + 1).copied().or(following);
-                if *token == b"," && after.is_some_and(closing) {
-                    continue;
-                }
+    if !matches!(language, Language::Rust | Language::Script) {
+        return lines;
+    }
+    let flat: Vec<&[u8]> = lines.concat();
+    let mut dropped = vec![false; flat.len()];
+    // Each open bracket's position and the commas directly inside it.
+    let mut open: Vec<(usize, usize)> = Vec::new();
+    for (at, token) in flat.iter().enumerate() {
+        if opening(token) {
+            open.push((at, 0));
+        } else if *token == b"," {
+            if let Some((_, commas)) = open.last_mut() {
+                *commas += 1;
+            }
+        } else if closing(token) {
+            let group = open.pop();
+            if at == 0 || flat[at - 1] != b"," {
+                continue;
+            }
+            let tuple = language == Language::Rust
+                && *token == b")"
+                && group.is_some_and(|(start, commas)| {
+                    commas == 1 && flat[start] == b"(" && opens_tuple(&flat, start)
+                });
+            dropped[at - 1] = !tuple;
+        }
+    }
+    let mut at = 0;
+    for line in &mut lines {
+        let mut kept = Vec::with_capacity(line.len());
+        for token in line.iter() {
+            if !dropped[at] {
                 kept.push(*token);
             }
-            *line = kept;
-            following = first.or(following);
+            at += 1;
         }
+        *line = kept;
     }
     lines
 }
@@ -788,6 +843,43 @@ mod tests {
         let other = Language::Other;
         assert_eq!(tokens(b"let x", other), tokens(b"letx", other));
         assert_ne!(tokens(b"key: 1", other), tokens(b"key: 2", other));
+    }
+
+    /// A Rust one-element tuple's comma is not a trailing comma: `(u32,)`
+    /// is a tuple and `(u32)` is not (review comment 4704372475). A single
+    /// wrapped argument or parameter, `f(\n    x,\n)`, still is.
+    #[test]
+    fn a_rust_one_element_tuples_comma_is_a_token() {
+        let rust = Language::Rust;
+        for (tuple, scalar) in [
+            ("pub fn f(x: (u32,))", "pub fn f(x: (u32))"),
+            ("fn f() -> (u32,)", "fn f() -> (u32)"),
+            ("let (a,) = (b,);", "let (a) = (b);"),
+            ("return (x,)", "return (x)"),
+            ("match x { _ => (y,) }", "match x { _ => (y) }"),
+            ("fn f<'a>(x: &'a (u32,))", "fn f<'a>(x: &'a (u32))"),
+            ("type T = ((u32,),);", "type T = ((u32),);"),
+            ("type T = ((u32,),);", "type T = ((u32,));"),
+        ] {
+            assert!(!same(tuple, scalar, rust), "{tuple} and {scalar}");
+        }
+        for (wrapped, joined) in [
+            ("f(\n    x,\n)\n", "f(x)\n"),
+            (
+                "pub fn f(\n    x: (u32,),\n) -> u32",
+                "pub fn f(x: (u32,)) -> u32",
+            ),
+            ("f::<T>(\n    x,\n)", "f::<T>(x)"),
+            ("g()(\n    x,\n)", "g()(x)"),
+            ("m!(\n    x,\n)", "m!(x)"),
+            ("(a, b,)", "(a, b)"),
+            ("[x,]", "[x]"),
+            ("S { x, }", "S { x }"),
+        ] {
+            assert!(same(wrapped, joined, rust), "{wrapped} and {joined}");
+        }
+        // TypeScript and JavaScript have no one-element tuple syntax.
+        assert!(same("let a = (x,)", "let a = (x)", Language::Script));
     }
 
     #[test]

@@ -2106,6 +2106,62 @@ fn a_changed_string_default_is_in_flight_but_respacing_is_not() {
     });
 }
 
+/// A Rust one-element tuple's comma is part of a signature: `(&str,)`
+/// becoming `(&str)` is in flight, while a wrapped parameter list's
+/// trailing comma and spacing still are not (review comment 4704372475).
+#[test]
+fn a_rust_one_element_tuple_becoming_a_scalar_is_in_flight() {
+    let w = World::new();
+    let work = w.work();
+    fs::write(
+        work.join("src/upload.rs"),
+        "pub fn upload(path: (&str,)) -> bool {\n    !path.0.is_empty()\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        work.join("src/main.rs"),
+        "mod upload;\nfn main() {\n    upload::upload((\"a.txt\",));\n}\n",
+    )
+    .unwrap();
+    git(&work, &["add", "src/upload.rs", "src/main.rs"]);
+    git(&work, &["commit", "--quiet", "-m", "tuple"]);
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    // Wrapped, with a trailing comma after the only parameter: not in flight.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a1",
+        "src/upload.rs",
+        "pub fn upload(\n    path: ( &str, ),\n) -> bool {\n    !path.0.is_empty()\n}\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let outcome = w.inflight("app");
+        assert_eq!(
+            inflight_names(&outcome),
+            Vec::<String>::new(),
+            "{outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // The tuple becomes a parenthesized scalar: in flight.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a2",
+        "src/upload.rs",
+        "pub fn upload(path: (&str)) -> bool {\n    !path.is_empty()\n}\n",
+    );
+    w.wait_for_inflight("the tuple became a scalar", "app", |outcome| {
+        inflight_names(outcome) == ["upload: pub fn upload(path: (&str)) -> bool"]
+    });
+}
+
 /// Many long in-flight notices are trimmed to one response frame and
 /// marked truncated, not replaced by an error (review comment 4703451948).
 #[test]
