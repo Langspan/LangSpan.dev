@@ -43,8 +43,8 @@ jobs:
           manifest-file: .release-please-manifest.json
 
   # A pull request opened with GITHUB_TOKEN gets no pull_request run that can
-  # pass, so start check.yml on its branch; workflow_dispatch is the event
-  # GITHUB_TOKEN may start.
+  # pass, so start check.yml and content.yml (every required check) on its
+  # branch; workflow_dispatch is the event GITHUB_TOKEN may start.
   release-pr-checks:
     name: Start checks on the release pull request
     needs: release-please
@@ -52,9 +52,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      actions: write # start check.yml; this job only
+      actions: write # start check.yml and content.yml; this job only
     steps:
-      - name: Start check.yml on the release branch
+      - name: Start check.yml and content.yml on the release branch
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -67,6 +67,7 @@ jobs:
             exit 1
           fi
           gh workflow run check.yml --ref "$branch"
+          gh workflow run content.yml --ref "$branch"
 
   # The licence notices of every crate linked into the binaries, once for all
   # four targets. Each archive carries the file.
