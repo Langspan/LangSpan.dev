@@ -1358,6 +1358,26 @@ mod unix {
         snapshot: Result<crate::observer::Snapshot, String>,
     }
 
+    /// Remove a socket this user left at `path` from an earlier run. Anything
+    /// else there (a file, a link, another user's socket) is refused.
+    fn remove_own_socket(path: &Path) -> Result<(), crate::Error> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata)
+                if metadata.file_type().is_socket()
+                    && metadata.uid() == rustix::process::geteuid().as_raw() =>
+            {
+                Ok(fs::remove_file(path)?)
+            }
+            Ok(_) => Err(format!(
+                "refusing to replace a non-socket or foreign {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )
+            .into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub async fn run(state_dir: PathBuf) -> Result<(), crate::Error> {
         let _ = STARTED_MS.set(now_ms());
         let directory = local::prepare_directory(&state_dir)
@@ -1378,20 +1398,21 @@ mod unix {
         let retention_days = config.retention_days;
         let generation = store.state().generation;
         let socket = directory.join("daemon.sock");
-        match fs::symlink_metadata(&socket) {
-            Ok(metadata)
-                if metadata.file_type().is_socket()
-                    && metadata.uid() == rustix::process::geteuid().as_raw() =>
-            {
-                fs::remove_file(&socket)?
-            }
-            Ok(_) => return Err("refusing to replace a non-socket or foreign daemon.sock".into()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+        // Clients look only at `daemon.sock` and refuse one that is not
+        // owner-only. Binding creates the socket with the process umask, so
+        // bind it under another name, make it owner-only, then rename it into
+        // place: `daemon.sock` never exists with wider permissions, and once
+        // it exists it is listening (issue #205). The name is no longer than
+        // `daemon.sock`, so the state directory's length check covers it.
+        let binding = directory.join("daemon.bind");
+        for path in [&socket, &binding] {
+            remove_own_socket(path)?;
         }
         let listener =
-            UnixListener::bind(&socket).map_err(|e| format!("bind local Unix socket: {e}"))?;
-        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+            UnixListener::bind(&binding).map_err(|e| format!("bind local Unix socket: {e}"))?;
+        fs::set_permissions(&binding, fs::Permissions::from_mode(0o600))?;
+        fs::rename(&binding, &socket)
+            .map_err(|e| format!("move the local Unix socket into place: {e}"))?;
         let (sender, receiver) = mpsc::sync_channel::<Job>(config.max_clients);
         let (scan_sender, scan_receiver) = mpsc::sync_channel::<Registration>(1);
         let (scan_result_sender, scan_results) = mpsc::sync_channel::<ScanResult>(1);
