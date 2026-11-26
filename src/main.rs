@@ -161,6 +161,15 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  kind and workspace, once per session, kind and files
                                  a day, and how many were retried and let through.
                                  Says what LangSpan did, not what it saved. Reads only
+  policy WORKSPACE               The coordination policy table in effect: each kind
+                                 of case, advisory, wait or refuse, and whether it can
+                                 be set. Reads only
+  policy set WORKSPACE conflict refuse|wait [--wait-ms N] --request-id ID
+                                 What a write meets when another session holds its file
+                                 now: refuse at once (the default) or wait for the
+                                 holder, up to N ms (0 to 2000, default 2000; 0 is
+                                 refuse), never past half the hook's remaining budget,
+                                 then compare the file again. Every other kind is fixed
   remember WORKSPACE TEXT [PATH...] [--session ID]
                                  Keep a one-line note for the repository or for files;
                                  sessions working there are told. Survives restarts
@@ -4153,6 +4162,35 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                     None => 0,
                 },
             },
+            ["policy", workspace] => Command::Policy {
+                workspace_id: (*workspace).into(),
+            },
+            ["policy", "set", workspace, case, policy] => Command::SetPolicy {
+                workspace_id: (*workspace).into(),
+                case: langspan_core::PolicyCase::parse(case).ok_or_else(|| {
+                    format!(
+                        "unknown case {case:?}; the cases are {}",
+                        langspan_core::PolicyCase::ALL
+                            .iter()
+                            .map(|case| case.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?,
+                policy: match *policy {
+                    "refuse" => langspan_core::Policy::Refuse,
+                    "wait" => langspan_core::Policy::Wait,
+                    "advisory" => langspan_core::Policy::Advisory,
+                    _ => return Err("the policy is refuse, wait or advisory".into()),
+                },
+                wait_ms: options
+                    .remove("--wait-ms")
+                    .map(|ms| {
+                        ms.parse()
+                            .map_err(|_| "--wait-ms must be an integer from 0 to 2000")
+                    })
+                    .transpose()?,
+            },
             ["remember", workspace, text, paths @ ..] => Command::Remember {
                 workspace_id: (*workspace).into(),
                 author: options.remove("--session"),
@@ -4248,6 +4286,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::Report { .. }
                 | Command::Compact { .. }
                 | Command::History { .. }
+                | Command::Policy { .. }
                 | Command::WorkspaceList { .. }
                 | Command::WorkspaceRemove { apply: false, .. }
         ) {
@@ -4412,7 +4451,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--wait-s" | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen"
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
             | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" | "--keep-days"
-            | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools" => {
+            | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools"
+            | "--wait-ms" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -5312,6 +5352,28 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::RefusalRecorded { session_id } => {
             println!("Refusal recorded for session {session_id}.")
         }
+        Outcome::Policy { workspace_id, rows } => {
+            println!("Coordination policies for workspace {workspace_id}:");
+            for row in rows {
+                let wait = if row.wait_ms > 0 {
+                    format!(" up to {} ms", row.wait_ms)
+                } else {
+                    String::new()
+                };
+                let fixed = if row.configurable { "" } else { " (fixed)" };
+                println!(
+                    "  {:<18} {}{wait}{fixed}",
+                    row.case.name(),
+                    row.policy.name()
+                );
+            }
+        }
+        Outcome::Holders { holders } => {
+            println!("{} current holder(s).", holders.len());
+        }
+        Outcome::WaitRecorded { session_id } => {
+            println!("Wait recorded for session {session_id}.")
+        }
         Outcome::Recap { recap } => {
             println!(
                 "Workspace {} at {:?}{}.",
@@ -5908,6 +5970,8 @@ mod option_tests {
             "cursor",
             "--file",
             "AGENTS.md",
+            "--wait-ms",
+            "300",
         ]);
         for flag in ["--yes", "--recent", "--create"] {
             assert_eq!(options[flag], "", "{flag}");
@@ -5919,6 +5983,7 @@ mod option_tests {
             ("--month", "2026-11"),
             ("--format", "cursor"),
             ("--file", "AGENTS.md"),
+            ("--wait-ms", "300"),
         ] {
             assert_eq!(options[key], value, "{key}");
         }
