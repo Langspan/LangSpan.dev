@@ -51,6 +51,7 @@ fn record(
             inputs,
             result,
             duration_ms: 1200,
+            symbol_findings: None,
             report: None,
             tests: None,
             rerun: None,
@@ -290,4 +291,103 @@ fn invalid_check_records_are_rejected_without_events() {
         .is_err(),
         "unknown fields in a result are rejected at the wire"
     );
+}
+
+#[test]
+fn definition_findings_are_kept_with_a_combined_check_bounded_and_never_change_its_result() {
+    use langspan_core::{MAX_SYMBOL_FINDINGS, SymbolFinding, SymbolFindingKind, SymbolFindings};
+    let finding = SymbolFinding {
+        finding: SymbolFindingKind::ChangedAndCalled,
+        name: "save".into(),
+        branch: "feature-sync".into(),
+        path: "src/store.rs".into(),
+        line: 40,
+        before: "pub fn save(x: u32)".into(),
+        after: Some("pub fn save(x: u32, sync: bool)".into()),
+        renamed_to: None,
+        other_branch: "feature-import".into(),
+        other_path: "src/import.rs".into(),
+        other_line: 18,
+        other_after: None,
+        args: Some(1),
+        takes: None,
+    };
+    let found = |findings: Vec<SymbolFinding>| {
+        Some(Box::new(SymbolFindings {
+            findings,
+            more: 0,
+            files_indexed: 2,
+            files_skipped: 0,
+            note: None,
+        }))
+    };
+    let send = |state: &mut State, id: &str, inputs: Vec<String>, findings| {
+        run(
+            state,
+            id,
+            Command::RecordCheck {
+                workspace_id: "work".into(),
+                name: "test".into(),
+                command: "cargo test".into(),
+                tree_oid: oid('a'),
+                head_oid: Some(oid('9')),
+                inputs,
+                result: CheckResult::Passed {},
+                duration_ms: 1200,
+                symbol_findings: findings,
+                report: None,
+                tests: None,
+                rerun: None,
+                writes_before: None,
+                command_id: None,
+            },
+            10,
+        )
+    };
+    let mut state = ready();
+    let combined = vec![oid('1'), oid('2')];
+    match send(
+        &mut state,
+        "c1",
+        combined.clone(),
+        found(vec![finding.clone()]),
+    ) {
+        Outcome::CheckRecorded { check } => {
+            assert_eq!(check.result, CheckResult::Passed {});
+            assert_eq!(check.symbol_findings, found(vec![finding.clone()]));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        ready_for(&mut state, 'a').0,
+        "a finding never blocks landing"
+    );
+
+    let refused = |outcome: Outcome| matches!(outcome, Outcome::Error { code, .. } if code == "invalid_check");
+    assert!(
+        refused(send(
+            &mut state,
+            "c2",
+            Vec::new(),
+            found(vec![finding.clone()])
+        )),
+        "a working-tree check has no branches to compare"
+    );
+    assert!(refused(send(
+        &mut state,
+        "c3",
+        combined.clone(),
+        found(vec![finding.clone(); MAX_SYMBOL_FINDINGS + 1])
+    )));
+    let mut long = finding.clone();
+    long.before = "x".repeat(257);
+    assert!(refused(send(
+        &mut state,
+        "c4",
+        combined.clone(),
+        found(vec![long])
+    )));
+    let mut zero = finding;
+    zero.other_line = 0;
+    assert!(refused(send(&mut state, "c5", combined, found(vec![zero]))));
 }

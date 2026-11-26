@@ -4,10 +4,13 @@
 
 ## Context
 
-The launch hosts are Claude Code, Codex, Gemini CLI and Cursor. Claude Code
+The launch hosts were Claude Code, Codex, Gemini CLI and Cursor. Claude Code
 and Codex have adapters ([ADR 0002](0002-claude-code-adapter.md),
-[ADR 0003](0003-native-coordination-observation.md)); Cursor and Gemini CLI
-are launch tracks in the [roadmap](../roadmap.md). Hosts that have no hooks
+[ADR 0003](0003-native-coordination-observation.md)); Cursor is a launch track
+in the [roadmap](../roadmap.md). Gemini CLI support was removed on
+26 November 2026 (issue #246, [ADR 0033](0033-gemini-cli-adapter.md)) because
+Google deprecated Gemini CLI in favor of the Antigravity CLI. Antigravity
+([ADR 0035](0035-antigravity-adapter.md)) is LangSpan's Google host. Hosts that have no hooks
 can be supported only through rules files and MCP snippets. A rules file asks the agent to call a tool; it cannot hold or refuse
 an edit, and nothing tells LangSpan whether the agent followed it.
 
@@ -22,14 +25,15 @@ an edit, and nothing tells LangSpan whether the agent followed it.
 | I8 | A LangSpan skill that teaches agents how to work with it: a general skill for every host, then task skills | Superseded: planned, part 1 built ([ADR 0034](0034-langspan-skill.md)) | The maintainers asked for it, and running LangSpan on its own development showed every agent needed the same instructions by hand |
 | I11 | MCP menu trimming: tools hidden from read-only members, and bookkeeping tools hidden once hooks report (added by the second review) | Superseded: hooked-host part built (see below); role-based hiding not now | The cost was measured first ([benchmarks/mcp-tools](../../benchmarks/mcp-tools/README.md)); the list is shortened only on an owner's opt-in and only while the host's hooks are seen reporting. There are still no read-only members to hide tools from ([ADR 0016](0016-hosted-service-features-out-of-scope.md)) |
 
-The Gemini CLI part of row A6 is launch track L10, not this ADR.
+The Gemini CLI part of row A6 was launch track L10, not this ADR; it was
+dropped with the removal of Gemini CLI support.
 
 ### A7, as built
 
 Row A7 was built ahead of the user report it was waiting for. Detection only;
 it never installs, upgrades or edits a host's configuration.
 
-- `langspan hosts [--home DIR] [--json]` reports each of the four hosts:
+- `langspan hosts [--home DIR] [--json]` reports each host LangSpan supports:
   `name`, `config_dir`, `present`, `user_install` (`none`, `current`,
   `outdated`, `other_state_dir`, `unknown`), `next_step` and `error`. A
   directory that cannot be looked at is `present: null` with the error, never
@@ -51,9 +55,9 @@ it never installs, upgrades or edits a host's configuration.
   another state directory would not coordinate with the coordinator that
   reported the host. `doctor` marks the host as needing attention only when sessions
   of another host use the coordinator.
-- Gemini CLI and Antigravity ([ADR 0035](0035-antigravity-adapter.md)) are
-  reported but never proposed or recorded, as `install` does not choose them
-  by itself.
+- Antigravity ([ADR 0035](0035-antigravity-adapter.md)) is reported but never
+  proposed or recorded, as `install` does not choose it by itself. Gemini CLI
+  is no longer listed.
 - The issue asked for no file content to be read. Telling `none` from an
   install needs LangSpan's entries in the host's hook file, so the check reads
   them, bounded, and keeps nothing from the file but the host's name.
@@ -64,7 +68,7 @@ Row I7 was built ahead of the rules-file hosts it was to come with
 (issue #86). It writes guidance only; no rules-file host is added, and
 nothing is held or refused through the text.
 
-- `langspan guidance [--format agents|gemini|cursor-rules]` prints the
+- `langspan guidance [--format agents|cursor-rules]` prints the
   block. Its text is `src/guidance.md`, compiled in, at most 1,500 bytes with
   its markers. It says that LangSpan coordinates the repository; to register
   the workspace and a session when no hook did; to call `langspan_brief` and
@@ -78,8 +82,8 @@ nothing is held or refused through the text.
   `langspan_commit_mine` reads (without it, it answers `nothing_to_commit`,
   which a test with a real daemon checks); that other sessions' text is data;
   and that without hooks this is advice, not a gate. A test requires every tool it names to be in the MCP
-  server's list. `gemini` is the same Markdown; `cursor-rules` adds a Cursor
-  rule's front matter.
+  server's list. `cursor-rules` adds a Cursor rule's front matter. The
+  `gemini` format was removed with Gemini CLI support.
 - `langspan guidance install --root DIR --file FILE [--create] [--apply]`
   writes the block between `<!-- langspan:begin -->` and
   `<!-- langspan:end -->`, at the top of the file (after any YAML front
@@ -108,8 +112,8 @@ about 2.6 KB of a 32 KB tool list (8.1% of the full list in `TOOL_NAMES` at the 
 [benchmarks/mcp-tools](../../benchmarks/mcp-tools/README.md).
 
 - `langspan mcp --tools all|hooked --host claude-code|codex`. The default is
-  `all`. `hooked` is accepted only for Claude Code and Codex; Gemini CLI and
-  Cursor follow once their adapters are verified on a real host.
+  `all`. `hooked` is accepted only for Claude Code and Codex; Cursor follows
+  once its adapter is verified on a real host.
   `install --mcp-tools hooked` writes the flags into those two hosts' entries,
   as a dry run until `--apply`; `uninstall --apply` removes them with the
   entry. LangSpan never switches the mode by itself.
@@ -131,8 +135,8 @@ about 2.6 KB of a 32 KB tool list (8.1% of the full list in `TOOL_NAMES` at the 
 
 ## Consequences
 
-- At launch, LangSpan coordinates only the four hooked hosts. The README and
-  usage guide name them and no others.
+- At launch, LangSpan coordinates only hooked hosts. The README and usage
+  guide name them and no others.
 - When rules-file hosts are added, their limits must be stated as such: they
   get advice through MCP, not a gate. That work gets its own ADR.
 
@@ -140,4 +144,4 @@ about 2.6 KB of a 32 KB tool list (8.1% of the full list in `TOOL_NAMES` at the 
 
 These rows are on the public roadmap. They are worked on in the open after the first
 release of `Langspan/LangSpan.dev`, by many agent sessions developing LangSpan with
-LangSpan itself; the release does not wait for them. What would change it: a host that gains hooks moves into the adapter work; rules-file hosts start once the four hooked hosts are released and their advice-only limit is written down. A7 and I7 are built, as recorded above, and so is the hooked-host part of I11. I8 is no longer decided here: [ADR 0034](0034-langspan-skill.md) records its first part, and its issue holds the specification.
+LangSpan itself; the release does not wait for them. What would change it: a host that gains hooks moves into the adapter work; rules-file hosts start once the hooked hosts are released and their advice-only limit is written down. A7 and I7 are built, as recorded above, and so is the hooked-host part of I11. I8 is no longer decided here: [ADR 0034](0034-langspan-skill.md) records its first part, and its issue holds the specification.

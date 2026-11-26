@@ -459,6 +459,7 @@ fn a_failed_automatic_check_and_a_waiting_handoff_each_get_a_notice() {
                     inputs: Vec::new(),
                     result,
                     duration_ms: 10,
+                    symbol_findings: None,
                     report: Some(Box::new(CheckReport {
                         session_ids: vec![session.clone()],
                         tail: "assertion failed".into(),

@@ -256,21 +256,22 @@ This is a dry run that previews the proposed settings; for `~/.claude.json`,
 only LangSpan's MCP entry is shown. Add `--apply` to write them, with Claude
 Code closed. It writes `~/.claude/settings.json` (hooks) and the `mcpServers`
 entry of `~/.claude.json` for Claude Code, and `~/.codex/hooks.json` and a
-marked `[mcp_servers.langspan]` table in `~/.codex/config.toml` for Codex, and
-hooks and the `mcpServers` entry in `~/.gemini/settings.json` for Gemini CLI.
+marked `[mcp_servers.langspan]` table in `~/.codex/config.toml` for Codex.
 The hosts default to Claude Code, Codex and Cursor where their `~/.claude`,
-`~/.codex` or `~/.cursor` directory exists; Gemini CLI and Antigravity are
-added only by name, with `--hosts gemini-cli`, `--hosts antigravity` or
-`--hosts claude-code,codex,cursor,gemini-cli,antigravity`. Antigravity's are
-`~/.gemini/config/hooks.json` and `~/.gemini/config/mcp_config.json`.
+`~/.codex` or `~/.cursor` directory exists; Antigravity is added only by name,
+with `--hosts antigravity` or `--hosts claude-code,codex,cursor,antigravity`.
+Antigravity's files are `~/.gemini/config/hooks.json` and
+`~/.gemini/config/mcp_config.json`. LangSpan no longer supports Gemini CLI; to
+remove an earlier install, run `langspan uninstall --hosts gemini-cli --apply`
+([details](usage.md#removing-an-earlier-gemini-cli-install)).
 Other settings, hooks and MCP servers are left as they are, and an existing
 `langspan` server that LangSpan did not write stops the install with nothing
 written. Codex runs a new hook only after you review and trust it with
 `/hooks`. With `--hosts cursor`, or when `~/.cursor` exists, it also writes
-`~/.cursor/hooks.json` and `~/.cursor/mcp.json`. Cursor, Gemini CLI and Antigravity: built from documentation, not
-yet verified on a real host ([ADR 0032](adr/0032-cursor-adapter.md),
-[ADR 0033](adr/0033-gemini-cli-adapter.md),
-[ADR 0035](adr/0035-antigravity-adapter.md)).
+`~/.cursor/hooks.json` and `~/.cursor/mcp.json`. Cursor: built from
+documentation, not yet verified on a real host
+([ADR 0032](adr/0032-cursor-adapter.md)). Antigravity: verified on a real
+Antigravity CLI 1.5.14 ([ADR 0035](adr/0035-antigravity-adapter.md)).
 
 If Claude Code has not created `~/.claude.json` yet, the installer adds its
 hooks but leaves MCP registration for later. Start Claude Code once, close
@@ -296,12 +297,11 @@ langspan hooks install claude-code \
 ```
 
 This is a dry run. Add `--apply` to install the reviewed settings. Replace
-`claude-code` with `codex`, `cursor`, `gemini-cli` or `antigravity` for their
+`claude-code` with `codex`, `cursor` or `antigravity` for their
 adapters, then complete the host's own hook trust flow. Open your agent
 normally. `cursor` writes `.cursor/hooks.json` and `.cursor/mcp.json`;
-`gemini-cli` writes `.gemini/settings.json`; `antigravity` writes
-`.agents/hooks.json` and `.agents/mcp_config.json`. Cursor, Gemini CLI and
-Antigravity: built from documentation, not yet verified on a real host.
+`antigravity` writes `.agents/hooks.json` and `.agents/mcp_config.json`.
+Cursor: built from documentation, not yet verified on a real host.
 
 Sessions coordinating local edits use the same daemon and state directory. By
 default, briefings can include the first line of a peer's prompt as its task
@@ -358,9 +358,9 @@ without rereading the changed file.
 | Claude Code | `Edit` / `Write` coordination, completed `Read` tracking and peer briefing. [M2 edit evidence](evidence/m2-claude-code/README.md); [native SessionStart briefing receipt](evidence/m4-briefing/README.md). The end of a reply (`Stop`, `StopFailure`, `SubagentStop`) releases the reply's open holds, and each tool batch (`PostToolBatch`) is recorded and can carry news; these events were [observed on Claude Code 2.1.330](evidence/turn-events/README.md). |
 | Codex | Verified on a real Codex (codex-cli 0.171.0) on 25 November 2026: its hooks fire; an `apply_patch` over a function another session holds is refused, naming that session and function; LangSpan's own stale-source refusal fires and the retry after a re-read is admitted; a linked worktree with its own install is coordinated; the skill's `AGENTS.md` section is read; `langspan commit --mine` from Codex's shell commits only its hunks once Codex's sandbox may write `.git`. [Codex real-host evidence](evidence/codex-real-host/README.md). Codex reports no reads, so its first edit of a file is not compared. Codex ties hook trust to the exact path: a session resumed under another path to the same folder runs no LangSpan hook (#129). |
 | Cursor | Built from documentation, not yet verified on a real Cursor. `Write`, `Delete` and `Shell` are admitted, completed `Read`s recorded, and sessions briefed, all through `.cursor/hooks.json`. Tested with constructed events, the real daemon and Git, and the installed command run the way Cursor CLI 2026.11.22 runs it. No Cursor run has been captured. [Scope, sources and capture steps](adr/0032-cursor-adapter.md). |
-| Gemini CLI | Built from documentation, not yet verified on a real Gemini CLI. Gemini CLI's free personal Google sign-in has been withdrawn; it still runs with an API key or through Vertex AI. `write_file` / `replace` admission, completed `read_file` tracking, shell commands and briefings, from Gemini CLI 0.70.0's documentation and source. Tested with source-derived events through the real hook, daemon and Git; no live Gemini session yet. [Scope and limits](adr/0033-gemini-cli-adapter.md). |
-| Antigravity | Built from documentation and corrected against a first real Antigravity 1.5.14 run; a repeat run of the corrected adapter is pending. `edit_file` admission (and the documented `write_to_file`, `replace_file_content` and `multi_replace_file_content`), completed `read_file` and `view_file` tracking, `run_command` and briefings at `SessionStart` and `PreInvocation`. Tested with the run's captured events through the real hook, daemon and Git. [Scope and what is unverified](adr/0035-antigravity-adapter.md). |
-| Shell commands | Each host's shell tool (`Bash`; Cursor's `Shell`; Gemini CLI's `run_shell_command`; Antigravity's `run_command`), partly: literal writes (`> file`, `sed -i`, `mv`, `rm`, …) are held or refused like an edit before they run; other commands' changes are found afterwards by comparing Git status and recorded as the session's edits, or reported as not observed. A heredoc that rewrites a file (`cat > file <<'EOF'`) is not held yet, so it can overwrite another session's change from an old read; a fix is planned. Tested with the real daemon and Git; not yet on a host. [Scope and limits](adr/0011-shell-writes.md). |
+| Antigravity | LangSpan's Google host. Verified on a real Antigravity CLI (`agy`) 1.5.14: an `edit_file` is allowed, leased and completed after its recorded `read_file`; a harmless `git diff` runs; an `edit_file` and a shell append to a file another session holds are refused and the model stops; an edit after an outside change is refused as stale and the retry after a re-read is admitted; an empty `mcp_config.json` installs cleanly with `doctor` OK; Antigravity honored all 7 allow answers. [Real-host evidence](https://github.com/Langspan/LangSpan.dev/issues/110#issuecomment-7182408496). Limits: `admit --ttl-ms` is capped at 60 seconds, and a resumed conversation sends no `SessionStart` (its first `PreInvocation` registers it). Linked worktrees, subagents and mixed-host runs are not yet observed. [Scope and what is unverified](adr/0035-antigravity-adapter.md). |
+| Gemini CLI | Support removed (Google deprecated Gemini CLI for the Antigravity CLI). `langspan uninstall --hosts gemini-cli --apply` removes an earlier install. [Removal](adr/0033-gemini-cli-adapter.md#removal). |
+| Shell commands | Each host's shell tool (`Bash`; Cursor's `Shell`; Antigravity's `run_command`), partly: literal writes (`> file`, `sed -i`, `mv`, `rm`, …) are held or refused like an edit before they run; other commands' changes are found afterwards by comparing Git status and recorded as the session's edits, or reported as not observed. A heredoc that rewrites a file (`cat > file <<'EOF'`) is not held yet, so it can overwrite another session's change from an old read; a fix is planned. Tested with the real daemon and Git; not yet on a host. [Scope and limits](adr/0011-shell-writes.md). |
 | Regions within one file | Supported edits can hold separate symbols or line ranges, with whole-file fallback. Tested with the real daemon and hooks; live-host region acceptance remains unverified. [Placement and limits](adr/0012-region-admission.md). |
 | Source versions | Comparisons pass real-daemon tests. LangSpan's own stale-source refusal has fired on a real Codex, with the retry after a re-read admitted ([Codex real-host evidence](evidence/codex-real-host/README.md)). [An earlier Claude run](evidence/m6-stale-source/README.md) was stopped by Claude's own check first. |
 | Linked worktrees | Separate file holds and shared briefings, tested with real Git. A real Codex in a linked worktree with its own install was coordinated and refused a conflicting edit ([Codex real-host evidence](evidence/codex-real-host/README.md)). |
@@ -369,7 +369,7 @@ without rereading the changed file.
 | Commits in a shared checkout | A `git add -A`, `git commit -a` or similar that would take another live session's uncommitted lines is held once, naming the session and files; `langspan commit --mine` commits only the session's own files and hunks, with your identity and hooks. Tested with the real daemon, hooks and Git; `commit --mine` committed only Codex's hunks on a real Codex ([Codex real-host evidence](evidence/codex-real-host/README.md)). [Rules and limits](adr/0026-commit-guard-and-commit-mine.md). |
 | Checks and landing | Check records name a Git tree; combined branches are tested in a temporary checkout. Landing requires a matching pass and `--apply`; landings wait in a bounded line for the push turn, report conflict hunks and follow file renames that landed. Tested with local file remotes. [Scope and limits](adr/0007-check-evidence-integration-and-landing.md). |
 | Automatic checks | Off by default. `langspan check auto` runs the owner's command after a Claude Code or Codex session's write batch or reply, on the exact tree, and tells the session the result once at its next briefing: passed, failed with the exit code, stopped at its time limit, or inconclusive, with the output's last lines. Failing `cargo test`, `go test -v` and `pytest` tests are compared with the session's result from before its first write: new, already failing or fixed, with the other sessions whose writes the tree holds. The command runs as you, outside the agent host's sandbox. Tested with the real hook and daemon; not yet observed on a host. [ADR 0030](adr/0030-automatic-checks-after-write-batches.md). |
-| Break alerts at write time | A Claude Code, Codex or Gemini CLI write, or a quoted-heredoc shell write, whose calls no longer fit a peer's new signature is told the file, line and old and new argument counts with that write's result, once per change. Argument counts only; never a refusal. Cursor writes wait for a real capture of Cursor's write input. Tested with the real hook and daemon; not yet on a host. [ADR 0029](adr/0029-break-alerts-at-write-time.md). |
+| Break alerts at write time | A Claude Code or Codex write, or a quoted-heredoc shell write, whose calls no longer fit a peer's new signature is told the file, line and old and new argument counts with that write's result, once per change. Argument counts only; never a refusal. Cursor writes wait for a real capture of Cursor's write input. Tested with the real hook and daemon; not yet on a host. [ADR 0029](adr/0029-break-alerts-at-write-time.md). |
 | Source context | Definitions, name mentions and one-level exported-name impact queries are implemented. Interface notices stay within one physical workspace. Extraction and real-daemon tests pass; a native-agent run remains unverified. [Scope and limits](adr/0008-derived-source-index.md). |
 | Recap, notes and messages | Workspace recaps, persistent local notes, messages and handoffs are implemented. Delivery and acknowledgement have real-daemon tests; native-host delivery remains unverified. Messages stay in one workspace and do not wake idle sessions. [Message scope](adr/0009-agent-messages-and-handoff.md). |
 | User-level installation | Hooks and MCP registration have temporary-home integration tests. The complete user-level setup still needs a live Claude Code or Codex run. [Install scope and limits](adr/0010-user-level-install.md). |

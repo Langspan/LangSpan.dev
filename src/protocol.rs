@@ -6,10 +6,11 @@ use std::io::{self, BufRead, BufReader, Read};
 
 /// Version 6 is version 5 with roadmap F5's `rebased` and `adapted` in a
 /// landing and in the request that records one (`fits`). Version 5 is
-/// version 4 with roadmap H9's `refusal_outcomes` in a report's counts.
-/// Version 4 is version 3 with roadmap D7's rename fields in interface
-/// changes, history entries and in-flight symbols. Apart from recording a
-/// rebased or adapted landing, requests are the same in all four.
+/// version 4 with roadmap H9's `refusal_outcomes` in a report's counts and
+/// issue #214's `interface_notice_ids` in a briefing. Version 4 is version
+/// 3 with roadmap D7's rename fields in interface changes, history entries
+/// and in-flight symbols. Apart from recording a rebased or adapted
+/// landing, requests are the same in all four.
 pub const PROTOCOL_VERSION: u16 = 6;
 /// The earliest version the daemon still answers, in that version's shape
 /// (`encode_for`), so that a client of an earlier build keeps working after
@@ -90,8 +91,12 @@ fn protocol_5_shape(value: &mut serde_json::Value) {
 /// objects of the protocol with both `edits_admitted` and
 /// `retried_unchanged`).
 const COUNTS_FIELD_SINCE_5: &str = "refusal_outcomes";
+/// The field version 5 added to a briefing (`Briefing`, the only object
+/// with `changed` and `omitted_peers`): its interface notices' IDs, which
+/// a hook reports back once shown (issue #214).
+const BRIEFING_FIELD_SINCE_5: &str = "interface_notice_ids";
 
-/// `value` without the field version 5 added.
+/// `value` without the fields version 5 added.
 fn protocol_4_shape(value: &mut serde_json::Value) {
     use serde_json::Value;
     match value {
@@ -99,6 +104,9 @@ fn protocol_4_shape(value: &mut serde_json::Value) {
         Value::Object(fields) => {
             if fields.contains_key("edits_admitted") && fields.contains_key("retried_unchanged") {
                 fields.shift_remove(COUNTS_FIELD_SINCE_5);
+            }
+            if fields.contains_key("changed") && fields.contains_key("omitted_peers") {
+                fields.shift_remove(BRIEFING_FIELD_SINCE_5);
             }
             fields.values_mut().for_each(protocol_4_shape);
         }

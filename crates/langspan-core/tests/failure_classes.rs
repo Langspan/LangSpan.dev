@@ -113,6 +113,7 @@ fn record(
             inputs: Vec::new(),
             result,
             duration_ms: 900,
+            symbol_findings: None,
             report: (!sessions.is_empty()).then(|| {
                 Box::new(CheckReport {
                     session_ids: names(sessions),
@@ -311,6 +312,7 @@ fn the_sessions_that_wrote_between_the_two_trees_are_named() {
             inputs: Vec::new(),
             result: CheckResult::Failed { exit_code: 101 },
             duration_ms: 900,
+            symbol_findings: None,
             report: Some(Box::new(CheckReport {
                 session_ids: names(&["alice"]),
                 tail: String::new(),
@@ -394,6 +396,7 @@ fn a_result_of_another_command_with_the_same_summary_is_no_baseline() {
             inputs: Vec::new(),
             result: CheckResult::Passed {},
             duration_ms: 900,
+            symbol_findings: None,
             report: None,
             writes_before: Some(0),
             command_id: Some("d".repeat(64)),
@@ -454,6 +457,7 @@ fn record_taken_at(
             inputs: Vec::new(),
             result: CheckResult::Failed { exit_code: 101 },
             duration_ms: 900,
+            symbol_findings: None,
             report: None,
             writes_before: Some(writes_before),
             command_id: Some("c".repeat(64)),
@@ -516,6 +520,7 @@ fn an_older_record_whose_write_count_had_moved_is_no_baseline_on_replay() {
             inputs: Vec::new(),
             result: CheckResult::Failed { exit_code: 101 },
             duration_ms: 900,
+            symbol_findings: None,
             recorded_ms: 100,
             generation: 1,
             changed_since: false,
@@ -562,6 +567,7 @@ fn a_wider_check_is_graded_and_classified_for_each_session_it_tells() {
             inputs: Vec::new(),
             result: CheckResult::Failed { exit_code: 101 },
             duration_ms: 900,
+            symbol_findings: None,
             report: Some(Box::new(CheckReport {
                 session_ids: names(&["alice"]),
                 tail: String::new(),

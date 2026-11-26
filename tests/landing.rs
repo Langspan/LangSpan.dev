@@ -3101,3 +3101,377 @@ async fn two_agent_sessions_landing_through_mcp_land_in_arrival_order() {
     one.cancel().await.unwrap();
     two.cancel().await.unwrap();
 }
+
+/// `save` takes three arguments on the target; `load` is exported.
+const STORE: &str = "pub fn save(\n    x: u32,\n    y: u32,\n    z: u32,\n) {\n    let _ = (x, y, z);\n}\n\n\n\npub fn load() -> u32 {\n    0\n}\n";
+const IMPORT: &str = "pub fn run() {\n}\n";
+
+impl World {
+    /// Rust sources on the target, and branches that each change them so
+    /// that Git combines every pair cleanly: `feature-sync` adds a fourth
+    /// parameter to `save`, `feature-retry` changes its first one,
+    /// `feature-import` adds a call of `save` with three arguments,
+    /// `feature-drop` removes `load` and `feature-use` adds a file that
+    /// calls it.
+    ///
+    /// The branches are made in another clone and fetched, so the
+    /// workspace's checkout goes from no sources straight to the target's
+    /// two. It returns once the daemon's own index holds both at their
+    /// current content: that index follows the checkout in the background,
+    /// and a test that compares its bytes must start after it settles.
+    fn with_definitions(&self) {
+        let work = self.work();
+        fs::create_dir_all(work.join("src")).unwrap();
+        fs::write(work.join("src/store.rs"), STORE).unwrap();
+        fs::write(work.join("src/import.rs"), IMPORT).unwrap();
+        git(&work, &["add", "src"]);
+        git(&work, &["commit", "--quiet", "-m", "sources"]);
+        git(&work, &["push", "--quiet", "origin", "main"]);
+        let side = self.base.join("side");
+        git(
+            &self.base,
+            &[
+                "clone",
+                "--quiet",
+                self.hub().to_str().unwrap(),
+                side.to_str().unwrap(),
+            ],
+        );
+        git(&side, &["config", "user.name", "Dev"]);
+        git(&side, &["config", "user.email", "dev@example.invalid"]);
+        let edits: [(&str, &str, String); 5] = [
+            (
+                "feature-sync",
+                "src/store.rs",
+                STORE.replace("    z: u32,\n", "    z: u32,\n    sync: bool,\n"),
+            ),
+            (
+                "feature-retry",
+                "src/store.rs",
+                STORE.replace("    x: u32,\n", "    x: u64,\n"),
+            ),
+            (
+                "feature-import",
+                "src/import.rs",
+                "pub fn run() {\n    crate::store::save(1, 2, 3);\n}\n".into(),
+            ),
+            (
+                "feature-drop",
+                "src/store.rs",
+                STORE.replace("pub fn load() -> u32 {\n    0\n}\n", ""),
+            ),
+            (
+                "feature-use",
+                "src/report.rs",
+                "pub fn report() -> u32 {\n    crate::store::load()\n}\n".into(),
+            ),
+        ];
+        let mut fetch = vec!["fetch".to_string(), "--quiet".into(), "origin".into()];
+        for (branch, path, text) in edits {
+            git(&side, &["checkout", "--quiet", "-b", branch, "main"]);
+            fs::write(side.join(path), text).unwrap();
+            git(&side, &["add", path]);
+            git(&side, &["commit", "--quiet", "-m", branch]);
+            git(&side, &["push", "--quiet", "origin", branch]);
+            fetch.push(format!("{branch}:{branch}"));
+        }
+        git(&work, &fetch.iter().map(String::as_str).collect::<Vec<_>>());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let (_, text) = self.cli(&["graph", "symbol", "app", "save", "--json"]);
+            let outcome = serde_json::from_str::<serde_json::Value>(&text)
+                .map(|value| value["outcome"].clone())
+                .unwrap_or_default();
+            let coverage = &outcome["coverage"];
+            if coverage["indexable_files"] == 2
+                && coverage["current_files"] == 2
+                && coverage["partial_files"] == 0
+                && coverage.get("blind_in_scope").is_none()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the target's sources were never indexed: {text}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    fn check_json(&self, branches: &[&str], extra: &[&str], command: &[&str]) -> serde_json::Value {
+        let (code, text) = self.integrate(branches, &[&["--json"][..], extra].concat(), command);
+        assert!(code == 0 || code == 1, "{text}");
+        serde_json::from_str(text.lines().last().unwrap()).unwrap()
+    }
+    fn integrate(&self, branches: &[&str], extra: &[&str], command: &[&str]) -> (i32, String) {
+        self.cli(
+            &[
+                &[
+                    "integrate",
+                    "check",
+                    "app",
+                    "--onto",
+                    "main",
+                    "--name",
+                    "unit",
+                ][..],
+                extra,
+                branches,
+                &["--"],
+                command,
+            ]
+            .concat(),
+        )
+    }
+    /// Every row of the source index, by table and sorted, to show a run
+    /// put nothing there. The daemon rescans the workspace after Git
+    /// activity, and each rescan commits a pass, rewriting the same rows
+    /// and counting the pass in `passes`: neither the file bytes nor that
+    /// counter can show whether a check wrote anything.
+    fn graph_rows(&self) -> Vec<(String, Vec<String>)> {
+        let connection = rusqlite::Connection::open_with_flags(
+            self.base.join("state").join("graph.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        // One read snapshot for every table.
+        connection.execute_batch("BEGIN").unwrap();
+        let tables: Vec<String> = connection
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let rows = tables
+            .into_iter()
+            .filter(|table| table != "passes")
+            .map(|table| {
+                let mut statement = connection
+                    .prepare(&format!("SELECT * FROM \"{table}\""))
+                    .unwrap();
+                let width = statement.column_count();
+                let mut rows: Vec<String> = statement
+                    .query_map([], |row| {
+                        (0..width)
+                            .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                            .collect::<Result<Vec<_>, _>>()
+                            .map(|values| format!("{values:?}"))
+                    })
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                rows.sort();
+                (table, rows)
+            })
+            .collect();
+        connection.execute_batch("COMMIT").unwrap();
+        rows
+    }
+}
+
+#[test]
+fn symbols_name_a_call_that_a_clean_combination_breaks_and_never_change_the_result() {
+    let w = World::new();
+    w.with_definitions();
+    let graph = w.graph_rows();
+    assert!(
+        graph
+            .iter()
+            .any(|(table, rows)| table == "symbols" && !rows.is_empty()),
+        "the target is indexed before the checks: {graph:?}"
+    );
+    let pair = ["feature-sync", "feature-import"];
+    let report = w.check_json(&pair, &["--symbols", "--request-id", "s1"], &["true"]);
+    assert_eq!(report["check"]["result"]["type"], "passed", "{report}");
+    let found = &report["check"]["symbol_findings"];
+    assert_eq!(found["findings"].as_array().unwrap().len(), 1, "{report}");
+    let finding = &found["findings"][0];
+    for (field, value) in [
+        ("finding", "changed_and_called"),
+        ("name", "save"),
+        ("branch", "feature-sync"),
+        ("path", "src/store.rs"),
+        ("other_branch", "feature-import"),
+        ("other_path", "src/import.rs"),
+    ] {
+        assert_eq!(finding[field], value, "{field}: {report}");
+    }
+    assert_eq!(finding["line"], 1, "{report}");
+    assert_eq!(finding["other_line"], 2, "{report}");
+    assert_eq!(finding["args"], 3, "{report}");
+    assert_eq!(w.graph_rows(), graph, "the source index is not written");
+
+    // A finding never fails a passing check, and is told to a person.
+    let (code, text) = w.integrate(&pair, &["--symbols", "--request-id", "s2"], &["true"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("unit passed on the combined tree"), "{text}");
+    assert!(
+        text.contains("Definition findings (found by name; advisory):")
+            && text.contains(
+                "changed_and_called: \"save\" now takes 4 arguments (feature-sync, \"src/store.rs\":1); feature-import calls it with 3 at \"src/import.rs\":2"
+            ),
+        "{text}"
+    );
+    // Nor passes a failing one.
+    let (code, text) = w.integrate(&pair, &["--symbols", "--request-id", "s3"], &["false"]);
+    assert_eq!(code, 1, "{text}");
+
+    // Without --symbols the output is as before.
+    let plain = w.check_json(&pair, &["--request-id", "p1"], &["true"]);
+    assert!(!plain.to_string().contains("symbol_findings"), "{plain}");
+    let (code, text) = w.integrate(&pair, &["--request-id", "p2"], &["true"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(!text.contains("Definition findings"), "{text}");
+    assert_eq!(w.graph_rows(), graph, "the source index is not written");
+
+    // A landing compares nothing.
+    let (code, text) = w.cli(&[
+        "land",
+        "app",
+        "--onto",
+        "main",
+        "--name",
+        "unit",
+        "--symbols",
+        "feature-sync",
+    ]);
+    assert_ne!(code, 0, "{text}");
+    assert!(
+        text.contains("--symbols is valid only for `integrate check`"),
+        "{text}"
+    );
+}
+
+#[test]
+fn symbols_name_two_signature_changes_and_a_removal_that_git_combines_cleanly() {
+    let w = World::new();
+    w.with_definitions();
+    let both = w.check_json(
+        &["feature-sync", "feature-retry"],
+        &["--symbols"],
+        &["true"],
+    );
+    assert_eq!(both["result"], "checked", "Git combined them: {both}");
+    let findings = both["check"]["symbol_findings"]["findings"]
+        .as_array()
+        .unwrap();
+    assert_eq!(findings.len(), 1, "{both}");
+    assert_eq!(findings[0]["finding"], "both_changed", "{both}");
+    assert_eq!(findings[0]["name"], "save", "{both}");
+    assert_eq!(findings[0]["other_branch"], "feature-retry", "{both}");
+    assert!(
+        findings[0]["after"]
+            .as_str()
+            .unwrap()
+            .contains("sync: bool")
+            && findings[0]["other_after"]
+                .as_str()
+                .unwrap()
+                .contains("x: u64"),
+        "{both}"
+    );
+
+    let removed = w.check_json(&["feature-drop", "feature-use"], &["--symbols"], &["true"]);
+    let findings = removed["check"]["symbol_findings"]["findings"]
+        .as_array()
+        .unwrap();
+    assert_eq!(findings.len(), 1, "{removed}");
+    assert_eq!(findings[0]["finding"], "removed_and_used", "{removed}");
+    assert_eq!(findings[0]["name"], "load", "{removed}");
+    assert_eq!(findings[0]["other_path"], "src/report.rs", "{removed}");
+    assert_eq!(findings[0]["other_line"], 2, "{removed}");
+
+    // Unrelated branches give no finding, and say what was indexed.
+    let none = w.check_json(&["feature-retry", "feature-use"], &["--symbols"], &["true"]);
+    let found = &none["check"]["symbol_findings"];
+    assert_eq!(found["findings"], serde_json::json!([]), "{none}");
+    assert_eq!(found["files_indexed"], 2, "{none}");
+}
+
+#[test]
+fn symbols_past_their_time_limit_are_skipped_with_a_note_and_the_check_runs() {
+    let w = World::new();
+    w.with_definitions();
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
+        .env("LANGSPAN_TEST_SYMBOL_BUDGET_MS", "0")
+        .arg("--state-dir")
+        .arg(w.base.join("state"))
+        .args([
+            "integrate",
+            "check",
+            "app",
+            "--onto",
+            "main",
+            "--name",
+            "unit",
+            "--symbols",
+            "--json",
+            "feature-sync",
+            "feature-import",
+            "--",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    let report: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+    assert_eq!(report["check"]["result"]["type"], "passed", "{report}");
+    let found = &report["check"]["symbol_findings"];
+    assert_eq!(found["findings"], serde_json::json!([]), "{report}");
+    assert!(
+        found["note"].as_str().unwrap().contains("skipped"),
+        "{report}"
+    );
+}
+
+#[tokio::test]
+async fn agents_ask_for_definition_findings_through_mcp() {
+    use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+    let w = World::new();
+    w.with_definitions();
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.env("LANGSPAN_AUTOSTART", "off");
+    command
+        .arg("mcp")
+        .arg("--state-dir")
+        .arg(w.base.join("state"));
+    let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+    let call = |arguments: serde_json::Value| {
+        let request = CallToolRequestParams::new("langspan_integrate_check")
+            .with_arguments(arguments.as_object().unwrap().clone());
+        let client = &client;
+        async move {
+            let result = tokio::time::timeout(Duration::from_secs(60), client.call_tool(request))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.is_error, Some(false), "{result:?}");
+            result.structured_content.unwrap()
+        }
+    };
+    let arguments = serde_json::json!({
+        "request_id": "agent-symbols", "workspace_id": "app", "onto": "main",
+        "name": "unit", "branches": ["feature-sync", "feature-import"],
+        "command": ["true"], "timeout_s": 60, "symbols": true,
+    });
+    let first = call(arguments.clone()).await;
+    assert_eq!(first["exit_code"], 0, "{first}");
+    let findings = &first["check"]["symbol_findings"]["findings"];
+    assert_eq!(findings[0]["finding"], "changed_and_called", "{first}");
+    assert_eq!(findings[0]["other_path"], "src/import.rs", "{first}");
+    // A retry answers from the record, findings included.
+    let retry = call(arguments).await;
+    assert_eq!(retry["replayed"], true, "{retry}");
+    assert_eq!(retry["check"], first["check"]);
+    // Without symbols, nothing about definitions.
+    let plain = call(serde_json::json!({
+        "request_id": "agent-plain", "workspace_id": "app", "onto": "main",
+        "name": "unit", "branches": ["feature-sync", "feature-import"],
+        "command": ["true"], "timeout_s": 60,
+    }))
+    .await;
+    assert!(!plain.to_string().contains("symbol_findings"), "{plain}");
+    client.cancel().await.unwrap();
+}

@@ -110,7 +110,6 @@ fn guidance_prints_the_block_for_each_format() {
             .unwrap())
     };
     assert_eq!(run("agents"), agents);
-    assert_eq!(run("gemini"), agents);
     let rules = run("cursor-rules");
     assert!(rules.starts_with("---\n"), "{rules}");
     assert!(rules.contains("alwaysApply: true"), "{rules}");
@@ -119,7 +118,13 @@ fn guidance_prints_the_block_for_each_format() {
         .args(["guidance", "--format", "windsurf"])
         .output()
         .unwrap();
-    assert!(failed(&wrong).contains("agents|gemini|cursor-rules"));
+    assert!(failed(&wrong).contains("agents|cursor-rules"));
+    // Gemini CLI support is removed, and its format with it.
+    let gemini = Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .args(["guidance", "--format", "gemini"])
+        .output()
+        .unwrap();
+    assert!(failed(&gemini).contains("agents|cursor-rules"));
 }
 
 #[test]
@@ -182,15 +187,15 @@ fn apply_adds_one_block_keeps_the_rest_and_remove_restores_it() {
 fn a_file_with_a_leading_blank_line_or_nothing_in_it_round_trips() {
     for original in ["", "\n", "\n\nText\n", "x"] {
         let repo = Repo::new("edges");
-        repo.write("GEMINI.md", original);
-        ok(&repo.guidance(&["install", "--file", "GEMINI.md", "--apply"]));
-        assert_eq!(repo.read("GEMINI.md").matches(BEGIN).count(), 1);
-        ok(&repo.guidance(&["remove", "--file", "GEMINI.md", "--apply"]));
+        repo.write("RULES.md", original);
+        ok(&repo.guidance(&["install", "--file", "RULES.md", "--apply"]));
+        assert_eq!(repo.read("RULES.md").matches(BEGIN).count(), 1);
+        ok(&repo.guidance(&["remove", "--file", "RULES.md", "--apply"]));
         // An empty file is removed with the block: nothing of it is lost.
         if original.is_empty() {
-            assert!(!repo.path("GEMINI.md").exists());
+            assert!(!repo.path("RULES.md").exists());
         } else {
-            assert_eq!(repo.read("GEMINI.md"), original, "{original:?}");
+            assert_eq!(repo.read("RULES.md"), original, "{original:?}");
         }
     }
 }

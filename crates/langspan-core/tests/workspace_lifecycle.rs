@@ -114,6 +114,7 @@ fn ready() -> State {
             inputs: Vec::new(),
             result: CheckResult::Passed {},
             duration_ms: 10,
+            symbol_findings: None,
             report: None,
             tests: None,
             rerun: None,
@@ -511,6 +512,7 @@ fn a_removed_workspace_forgets_what_its_tests_taught() {
             inputs: Vec::new(),
             result: CheckResult::Passed {},
             duration_ms: 10,
+            symbol_findings: None,
             report: None,
             tests: Some(TestResults {
                 all_passed: true,

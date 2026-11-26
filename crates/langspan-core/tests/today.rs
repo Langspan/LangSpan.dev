@@ -486,6 +486,7 @@ fn a_queued_landing_today_after_yesterdays_prompt_edit_and_check_is_dated_today(
             inputs: Vec::new(),
             result: CheckResult::Passed {},
             duration_ms: 900,
+            symbol_findings: None,
             report: None,
             tests: None,
             rerun: None,
