@@ -974,6 +974,347 @@ class DriverUnitTests(Temporary):
         self.assertIn("Merge made", (run_dir / "merge-s1.log").read_text())
         self.assertEqual(integrated["notes"], ["notes/s1/s1.md", "notes/s2/s2.md"])
 
+    def test_the_repair_tree_keeps_every_branch_and_a_refused_merge_with_its_conflict_markers(self):
+        """Issue #221: the repair session works in the combined tree, so a
+        merge Git refused is in it too, as Git left it."""
+        work = self.root / "work"
+        work.mkdir()
+        repo, base, clones = driver.prepare_fixture(work, 3, "worktrees")
+        for index, (clone, value) in enumerate(zip(clones, (100, 10, None)), 1):
+            if value is not None:
+                settings = clone / "shelf" / "settings.py"
+                settings.write_text(settings.read_text().replace('"page_size": 20,', '"page_size": %d,' % value))
+            else:
+                (clone / "shelf" / "text.py").write_text("X = 1\n")
+            driver.git("add", "-A", cwd=clone)
+            driver.git("commit", "-q", "-m", "work", cwd=clone)
+        driver.collect_branches({"work": str(work), "sessions": 3}, repo)
+        checkout, conflicted = driver.prepare_repair(repo, base, 3, work)
+        self.assertEqual((checkout, conflicted), (work / "repair", [2]))
+        self.assertEqual(driver.git("rev-parse", "--abbrev-ref", "HEAD", cwd=checkout).stdout.strip(), "bench/repair")
+        text = (checkout / "shelf" / "settings.py").read_text()
+        self.assertIn("<<<<<<<", text)
+        self.assertIn('"page_size": 100,', text)
+        self.assertIn('"page_size": 10,', text)
+        self.assertEqual((checkout / "shelf" / "text.py").read_text(), "X = 1\n", "the merge after the refused one")
+        self.assertEqual(driver.git("status", "--porcelain", cwd=checkout).stdout, "", "every merge is committed")
+        for index in (1, 2, 3):
+            self.assertEqual(driver.git("merge-base", "--is-ancestor", driver.branch(index), "HEAD", cwd=checkout,
+                                        check=False).returncode, 0)
+
+    def test_the_repair_session_runs_under_the_same_limits_in_the_combined_tree_only(self):
+        work = Path("/runs/k1/work")
+        for arm in driver.ARMS:
+            plan = {"arm": arm, "agent": "claude", "model": None, "sessions": 3, "work": str(work)}
+            argv = driver.repair_argv("claude", "repair it", plan)
+            # The worktrees arm's configuration in every arm: the same repair job.
+            self.assertEqual(argv[3:], driver.claude_argv("claude", "repair it", "worktrees", None,
+                                                          driver.repair_denied_paths(work, 3))[3:])
+            self.assertEqual(self.option(argv, "--tools"), [",".join(driver.SESSION_TOOLS)])
+            self.assertIn("--strict-mcp-config", argv)
+            self.assertEqual(self.option(argv, "--settings"), [driver.MEMORY_SETTINGS])
+            self.assertFalse(set(argv) & set(driver.FORBIDDEN_CLAUDE_FLAGS))
+            denied = self.option(argv, "--disallowedTools")
+            for rule in ("ListAgents", "SendMessage", "Bash(git log *bench/*)", "Bash(git worktree*)",
+                         "Read(//runs/k1/work/s1/**)", "Edit(//runs/k1/work/s3/**)", "Read(//runs/k1/work/repo/**)",
+                         "Read(//runs/k1/work/integration/**)", "Read(//runs/k1/work/shared/**)"):
+                self.assertIn(rule, denied, arm)
+            self.assertFalse([rule for rule in denied if "/work/repair/" in rule], "the repair keeps its own tree")
+            env = driver.session_env(dict(plan, arm=driver.REPAIR_ARM), {"PATH": "/bin"}, "/config")
+            self.assertEqual(env[driver.MEMORY_ENV], "1")
+            self.assertNotIn("LANGSPAN_STATE_DIR", env)
+            self.assertFalse(driver.auto_memory_on(argv, env))
+
+    def test_a_claude_repair_session_gets_its_prompt_and_the_worktrees_arm_s_limits(self):
+        """`driver.py repair-session` starts Claude Code with the repair
+        prompt and REPAIR_ARM's command line through the tool guard, even in
+        the LangSpan arm."""
+        seen = self.root / "seen.json"
+        claude = self.root / "fake-claude"
+        claude.write_text(
+            "#!%s -I\nimport json, os, sys\n"
+            "json.dump({'argv': sys.argv[1:], 'memory': os.environ.get(%r)}, open(%r, 'w'))\n"
+            "print(json.dumps({'type': 'system', 'subtype': 'init', 'tools': %r, 'mcp_servers': []}))\n"
+            % (sys.executable, driver.MEMORY_ENV, str(seen), list(driver.SESSION_TOOLS)))
+        claude.chmod(0o755)
+        config = self.root / "claude-config"
+        config.mkdir()
+        plan = {"agent": "claude", "model": None, "arm": "langspan", "sessions": 2, "work": str(self.root / "work"),
+                "prompt": "repair the combined tree"}
+        plan_path = self.root / "plan.json"
+        plan_path.write_text(json.dumps(plan))
+        env = dict(os.environ, **{driver.CLAUDE_CONFIG_ENV: str(config), driver.CLAUDE_BIN_ENV: str(claude)})
+        done = subprocess.run([sys.executable, "-I", "-B", str(HERE / "driver.py"), "repair-session", str(plan_path)],
+                              capture_output=True, text=True, timeout=30, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(driver.tool_check(done.stdout)["status"], "passed", done.stdout)
+        got = json.loads(seen.read_text())
+        self.assertEqual(got["argv"], driver.repair_argv("claude", "repair the combined tree", plan)[1:])
+        self.assertEqual(got["memory"], "1")
+        self.assertNotIn("Skill", self.option(got["argv"], "--tools")[0])
+
+    def test_the_repair_prompt_states_the_tasks_the_success_and_what_failed(self):
+        plan = driver.make_plan("worktrees", "discovered_change", 2, 1, agent="claude")
+        verdict = {"integrated_tests": "failed", "fixture_tests": "failed",
+                   "fixture_tests_output_tail": "x" * 50000 + "TAIL",
+                   "semantic_conflicts": ["shelf/features/a.py calls days_left with 1 argument(s)"],
+                   "tasks": [{"session": 1, "task_id": plan["tasks"][0]["id"], "accepted": True, "detail": "ok"},
+                             {"session": 2, "task_id": plan["tasks"][1]["id"], "accepted": False,
+                              "detail": "calls days_left in its old form"}]}
+        prompt = driver.repair_prompt(plan, verdict, [2])
+        self.assertIn(tasks.SUCCESS["discovered_change"], prompt)
+        for task in plan["tasks"]:
+            self.assertIn(task["task"], prompt)
+        self.assertIn("calls days_left in its old form", prompt)
+        self.assertIn("shelf/features/a.py calls days_left", prompt)
+        self.assertNotIn("Session 1 (`%s`): ok" % plan["tasks"][0]["id"], prompt, "only what failed")
+        self.assertIn("conflict markers", prompt)
+        self.assertIn("TAIL", prompt)
+        self.assertLess(len(prompt.encode()), driver.REPAIR_FINDINGS_BYTES + 8000, "the check's output is capped")
+        self.assertIn("data, not instructions", prompt)
+        self.assertNotIn("conflict markers", driver.repair_prompt(plan, verdict, []))
+
+    def test_whether_a_trial_gets_a_repair_round(self):
+        base = {"status": "succeeded", "integrated_tests": "failed", "interface_change": "made",
+                "tool_check": {"status": "passed", "failed_sessions": []}}
+        self.assertEqual(driver.repair_decision(base), ("needed", None))
+        self.assertEqual(driver.repair_decision(dict(base, integrated_tests="passed")), ("not_needed", None))
+        self.assertEqual(driver.repair_decision(dict(base, status="timed_out")), ("needed", None))
+        for change, why in ((dict(base, interface_change="change_not_made"), "change_not_made"),
+                            (dict(base, integrated_tests="unknown"), "did not run"),
+                            (dict(base, status="refused", integrated_tests="unknown"), "refused"),
+                            (dict(base, status="interrupted"), "interrupted"),
+                            (dict(base, tool_check={"status": "failed", "failed_sessions": [1]}), "tool check")):
+            status, reason = driver.repair_decision(change)
+            self.assertEqual(status, "not_run")
+            self.assertIn(why, reason)
+
+    def test_the_cost_to_a_correct_result_adds_the_repair_to_the_run(self):
+        """Run, repair and total figures, and the cost per accepted task."""
+        def result(turns, cost, tokens):
+            return {"type": "result", "subtype": "success", "is_error": False, "result": "Done.",
+                    "num_turns": turns, "duration_ms": 1000, "total_cost_usd": cost, "permission_denials": [],
+                    "usage": dict(zip(("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                                       "cache_read_input_tokens"), tokens)), "modelUsage": {"model-r": {}}}
+        init = {"type": "system", "subtype": "init", "tools": list(driver.SESSION_TOOLS), "mcp_servers": []}
+        guard = {"type": driver.TOOL_CHECK_TYPE, "status": "passed", "unexpected": []}
+        runner_dir, run_dir = self.root / "runner", self.root / "runner" / "r"
+        run_dir.mkdir(parents=True)
+        for index, (turns, cost) in enumerate(((10, 0.5), (6, 0.25)), 1):
+            (run_dir / ("agent-s%d.stdout" % index)).write_text(
+                self.transcript([init, result(turns, cost, (1, 2, 3, 4)), guard]))
+        plan = driver.make_plan("worktrees", "discovered_change", 2, 1, agent="claude")
+        plan.update(run_id="0" * 32, output=str(self.root), plan_path=str(self.root / "plan.json"),
+                    work=str(self.root / "work"), repair_time_limit_s=900)
+        verdict = {"integrated_tests": "failed", "interface_change": "made", "fixture_tests": "passed",
+                   "semantic_conflicts": ["x"],
+                   "tasks": [{"completed": True, "accepted": True, "detail": "ok"},
+                             {"completed": False, "accepted": False, "detail": "old form"}]}
+        (run_dir / "oracle.json").write_text(json.dumps(verdict))
+        final = {"run_id": "0" * 32, "status": "succeeded", "agent_phase_elapsed_ns": 1,
+                 "commands": [{"phase": "agent", "id": "s%d" % i, "status": "succeeded",
+                               "stdout_path": "r/agent-s%d.stdout" % i} for i in (1, 2)]}
+        record = driver.build_record(plan, final, runner_dir, run_dir, None, "t", 0.0)
+        driver.validate(record, driver.load_schema())
+        # Built before the repair round, it says none ran.
+        self.assertEqual(record["repair"]["status"], "not_run")
+        self.assertIsNone(record["cost"]["total"]["cost_usd"])
+
+        repair_runner = self.root / "repair" / "runner"
+        (repair_runner / "q").mkdir(parents=True)
+        (repair_runner / "q" / "agent-repair.stdout").write_text(
+            self.transcript([init, result(4, 0.125, (5, 6, 7, 8)), guard]))
+        (repair_runner / "q" / "oracle.json").write_text(json.dumps(dict(
+            verdict, integrated_tests="passed", semantic_conflicts=[],
+            tasks=[{"completed": True, "accepted": True, "detail": "ok"}] * 2)))
+        repair = {"status": "ran", "reason": None, "runner_dir": repair_runner, "run_dir": repair_runner / "q",
+                  "conflicted_merges": [], "final": {
+                      "run_id": "1" * 32, "status": "succeeded", "agent_phase_elapsed_ns": 3 * 10 ** 9,
+                      "commands": [{"phase": "agent", "id": "repair", "status": "succeeded",
+                                    "stdout_path": "q/agent-repair.stdout"}]}}
+        record = driver.build_record(plan, final, runner_dir, run_dir, None, "t", 0.0, repair=repair)
+        driver.validate(record, driver.load_schema())
+        section = record["repair"]
+        self.assertEqual((section["status"], section["succeeded"], section["integrated_tests"],
+                          section["tasks_accepted"], section["time_limit_s"], section["elapsed_s"]),
+                         ("ran", True, "passed", 2, 900, 3.0))
+        self.assertEqual((section["turns"], section["cost_usd"], section["results"]), (4, 0.125, 1))
+        self.assertEqual(section["tool_check"], {"status": "passed", "unexpected": []})
+        self.assertEqual(section["permission_denials"],
+                         {"total": 0, "peer_checkout": 0, "outside_clone": 0, "not_allowed": 0})
+        self.assertEqual(section["evidence"]["transcript"], "repair/runner/q/agent-repair.stdout")
+        cost = record["cost"]
+        self.assertEqual(cost["run"], {"tokens": {"input": 2, "output": 4, "cache_creation": 6, "cache_read": 8},
+                                       "turns": 16, "cost_usd": 0.75})
+        self.assertEqual(cost["repair"], {"tokens": {"input": 5, "output": 6, "cache_creation": 7, "cache_read": 8},
+                                          "turns": 4, "cost_usd": 0.125})
+        self.assertEqual(cost["total"], {"tokens": {"input": 7, "output": 10, "cache_creation": 13, "cache_read": 16},
+                                         "turns": 20, "cost_usd": 0.875})
+        self.assertEqual((cost["correct_result"], cost["tasks_accepted"], cost["cost_per_accepted_task"]),
+                         (True, 2, 0.4375))
+        # The run's own figures stay the sessions' alone.
+        self.assertEqual((record["cost_usd"], record["turns"], record["tasks_accepted"]), (0.75, 16, 1))
+        self.assertIn("model-r", record["versions"]["models"])
+
+        # A repair that fails: the result is not correct, and the cost per
+        # accepted task counts only what the repaired tree accepts.
+        (repair_runner / "q" / "oracle.json").write_text(json.dumps(verdict))
+        record = driver.build_record(plan, final, runner_dir, run_dir, None, "t", 0.0, repair=repair)
+        driver.validate(record, driver.load_schema())
+        self.assertEqual((record["repair"]["succeeded"], record["cost"]["correct_result"],
+                          record["cost"]["tasks_accepted"], record["cost"]["cost_per_accepted_task"]),
+                         (False, False, 1, 0.875))
+        # A repair whose session reported no cost leaves the total unmeasured.
+        (repair_runner / "q" / "agent-repair.stdout").write_text(self.transcript([init, guard]))
+        record = driver.build_record(plan, final, runner_dir, run_dir, None, "t", 0.0, repair=repair)
+        driver.validate(record, driver.load_schema())
+        self.assertEqual(record["cost"]["total"], {"tokens": None, "turns": None, "cost_usd": None})
+        self.assertIsNone(record["cost"]["cost_per_accepted_task"])
+        # A repair whose tool guard failed keeps its evidence, but its result
+        # is a host configuration failure, not a correct or incorrect result.
+        failed_guard = dict(guard, status="failed", unexpected=["Bash"])
+        (repair_runner / "q" / "agent-repair.stdout").write_text(
+            self.transcript([init, result(4, 0.125, (5, 6, 7, 8)), failed_guard]))
+        (repair_runner / "q" / "oracle.json").write_text(json.dumps(dict(
+            verdict, integrated_tests="passed", semantic_conflicts=[],
+            tasks=[{"completed": True, "accepted": True, "detail": "ok"}] * 2)))
+        record = driver.build_record(plan, final, runner_dir, run_dir, None, "t", 0.0, repair=repair)
+        driver.validate(record, driver.load_schema())
+        self.assertEqual((record["repair"]["tool_check"], record["repair"]["succeeded"],
+                          record["repair"]["cost_usd"], record["tool_check"]["status"]),
+                         ({"status": "failed", "unexpected": ["Bash"]}, True, 0.125, "passed"))
+        self.assertIsNone(record["cost"]["correct_result"])
+        self.assertEqual(driver.excluded_as(record), "repair_tool_check_failed")
+
+        # A tree that passed needs no repair: its repair figures are zero.
+        verdict["integrated_tests"] = "passed"
+        verdict["tasks"][1].update(completed=True, accepted=True)
+        (run_dir / "oracle.json").write_text(json.dumps(verdict))
+        record = driver.build_record(plan, final, runner_dir, run_dir, None, "t", 0.0,
+                                     repair={"status": "not_needed", "reason": None})
+        driver.validate(record, driver.load_schema())
+        self.assertEqual(record["repair"]["status"], "not_needed")
+        self.assertIsNone(record["repair"]["succeeded"])
+        self.assertEqual(record["cost"]["repair"], {"tokens": dict.fromkeys(driver.TOKEN_FIELDS, 0), "turns": 0,
+                                                    "cost_usd": 0})
+        self.assertEqual(record["cost"]["total"], record["cost"]["run"])
+        self.assertEqual((record["cost"]["correct_result"], record["cost"]["cost_per_accepted_task"]), (True, 0.375))
+
+    def summary_record(self, arm, run_cost, repair_status, repair_cost=None, succeeded=None, accepted=2,
+                       change="made", status="succeeded", tool_check="passed", repair_tool_check=None):
+        def figures(cost):
+            if cost is None:
+                return {"tokens": None, "turns": None, "cost_usd": None}
+            return {"tokens": dict.fromkeys(driver.TOKEN_FIELDS, 1), "turns": 2, "cost_usd": cost}
+        repair = figures(0) if repair_status == "not_needed" else figures(repair_cost)
+        if repair_status == "not_needed":
+            repair["tokens"] = dict.fromkeys(driver.TOKEN_FIELDS, 0)
+            repair["turns"] = 0
+        run = figures(run_cost)
+        total = {"tokens": None if run["tokens"] is None or repair["tokens"] is None else
+                 {key: run["tokens"][key] + repair["tokens"][key] for key in driver.TOKEN_FIELDS},
+                 "turns": None if run["turns"] is None or repair["turns"] is None else run["turns"] + repair["turns"],
+                 "cost_usd": None if run_cost is None or repair["cost_usd"] is None else run_cost + repair["cost_usd"]}
+        correct = True if repair_status == "not_needed" else (succeeded if repair_status == "ran" else False)
+        return {"schema_version": driver.SCHEMA_VERSION, "arm": arm, "family": "discovered_change", "sessions": 2,
+                "agent": "claude-code", "stagger_s": 0, "status": status, "interface_change": change,
+                "tool_check": {"status": tool_check, "failed_sessions": [1] if tool_check == "failed" else []},
+                "tasks_total": 2, "repair": {
+                    "status": repair_status, "succeeded": succeeded,
+                    "tool_check": None if repair_status != "ran" else
+                    {"status": repair_tool_check or "passed", "unexpected": []}},
+                "cost": {"run": run, "repair": repair, "total": total, "tasks_accepted": accepted,
+                         "correct_result": correct,
+                         "cost_per_accepted_task": total["cost_usd"] / accepted if total["cost_usd"] and accepted else None}}
+
+    def test_the_summary_reports_each_arm_s_cost_to_a_correct_result(self):
+        records = [
+            self.summary_record("langspan", 1.0, "not_needed"),
+            self.summary_record("langspan", 1.5, "not_needed"),
+            self.summary_record("worktrees", 1.0, "ran", 0.5, True),
+            self.summary_record("worktrees", 1.0, "ran", 0.25, False, accepted=1),
+            # Counted apart: the changer made no change, so nothing was compared.
+            self.summary_record("worktrees", 0.75, "not_run", change="change_not_made", accepted=0),
+            self.summary_record("awareness_only", 1.0, "ran", None, True),
+        ]
+        groups = {group["arm"]: group for group in driver.summarize(records)}
+        langspan, worktrees, aware = groups["langspan"], groups["worktrees"], groups["awareness_only"]
+        self.assertEqual((langspan["trials"], langspan["compared"], langspan["passed_without_repair"],
+                          langspan["repairs"], langspan["correct_results"]), (2, 2, 2, 0, 2))
+        self.assertEqual(langspan["total"]["cost_usd"], 2.5)
+        self.assertEqual(langspan["repair"]["cost_usd"], 0)
+        self.assertEqual(langspan["cost_per_accepted_task"], 0.625)
+        self.assertEqual((worktrees["trials"], worktrees["change_not_made"], worktrees["compared"],
+                          worktrees["repairs"], worktrees["repairs_succeeded"], worktrees["correct_results"]),
+                         (3, 1, 2, 2, 1, 1))
+        self.assertEqual((worktrees["tasks_total"], worktrees["tasks_accepted"]), (4, 3))
+        self.assertEqual((worktrees["run"]["cost_usd"], worktrees["repair"]["cost_usd"],
+                          worktrees["total"]["cost_usd"]), (2.0, 0.75, 2.75))
+        self.assertEqual(worktrees["total"]["turns"], 8)
+        self.assertEqual(worktrees["total"]["tokens"]["input"], 4)
+        self.assertEqual(worktrees["cost_per_accepted_task"], round(2.75 / 3, 6))
+        # One repair reported no cost: the arm's repair and total cost are unmeasured, never zero.
+        self.assertEqual((aware["repair"]["cost_usd"], aware["total"]["cost_usd"], aware["cost_per_accepted_task"],
+                          aware["unreported"]), (None, None, None, 1))
+        self.assertEqual(aware["run"]["cost_usd"], 1.0)
+        # A refused trial is counted, and no figure comes from it.
+        refused = self.summary_record("langspan", None, "not_run", status="refused", accepted=None)
+        group = driver.summarize(records[:2] + [refused])[0]
+        self.assertEqual((group["trials"], group["refused"], group["compared"], group["total"]["cost_usd"]),
+                         (3, 1, 2, 2.5))
+
+    def test_the_summary_counts_a_failed_tool_check_apart_from_the_arm_comparison(self):
+        # A failed tool check is a host configuration failure: the trial does
+        # not count, so it adds no task, result or figure to its arm.
+        records = [self.summary_record("langspan", 1.0, "not_needed"),
+                   self.summary_record("langspan", 1.5, "not_needed"),
+                   self.summary_record("langspan", 2.0, "not_run", status="failed", tool_check="failed", accepted=0)]
+        group = driver.summarize(records)[0]
+        self.assertEqual((group["trials"], group["tool_check_failed"], group["compared"], group["correct_results"],
+                          group["tasks_total"], group["tasks_accepted"], group["total"]["cost_usd"],
+                          group["repairs_not_run"]), (3, 1, 2, 2, 4, 4, 2.5, 0))
+
+    def test_the_summary_counts_a_failed_repair_tool_check_apart_from_the_arm_comparison(self):
+        # The sessions' guard passed but the repair session's failed: a host
+        # configuration failure in the repair, so the trial does not count,
+        # whether the repaired tree passed, failed or its cost went unreported.
+        for succeeded, cost in ((True, 0.5), (False, 0.5), (True, None)):
+            with self.subTest(succeeded=succeeded, cost=cost):
+                records = [self.summary_record("worktrees", 1.0, "ran", 0.25, True),
+                           self.summary_record("worktrees", 1.0, "ran", cost, succeeded,
+                                               repair_tool_check="failed")]
+                group = driver.summarize(records)[0]
+                self.assertEqual((group["trials"], group["repair_tool_check_failed"], group["tool_check_failed"],
+                                  group["compared"], group["repairs"], group["repairs_succeeded"],
+                                  group["correct_results"], group["tasks_total"], group["total"]["cost_usd"],
+                                  group["unreported"]), (2, 1, 0, 1, 1, 1, 1, 2, 1.25, 0))
+        # A repair guard that wrote no verdict (a session stopped from
+        # outside) is not a failed check: the trial counts, as for the sessions.
+        records = [self.summary_record("worktrees", 1.0, "ran", 0.25, True, repair_tool_check="unknown")]
+        group = driver.summarize(records)[0]
+        self.assertEqual((group["repair_tool_check_failed"], group["compared"]), (0, 1))
+        # A failed session guard and a failed repair guard count once, as the first.
+        records = [self.summary_record("worktrees", 1.0, "ran", 0.25, True, tool_check="failed",
+                                       repair_tool_check="failed")]
+        group = driver.summarize(records)[0]
+        self.assertEqual((group["tool_check_failed"], group["repair_tool_check_failed"], group["compared"]),
+                         (1, 0, 0))
+
+    def test_the_summary_command_reads_record_files_and_refuses_an_older_record(self):
+        good = self.root / "a"
+        good.mkdir()
+        (good / "record.json").write_text(json.dumps(self.summary_record("langspan", 1.0, "not_needed")))
+        old = self.root / "old.json"
+        old.write_text(json.dumps({"schema_version": 5, "arm": "langspan"}))
+        done = subprocess.run([sys.executable, "-I", "-B", str(HERE / "driver.py"), "summarize", str(good)],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["groups"][0]["total"]["cost_usd"], 1.0)
+        done = subprocess.run([sys.executable, "-I", "-B", str(HERE / "driver.py"), "summarize", str(good), str(old)],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("schema version 5", done.stderr)
+
 
 class StandinHooks(Temporary):
     """How the stand-in runs a hook: to completion within its own bound,
@@ -1261,6 +1602,7 @@ class DryRun(Temporary):
         self.assertEqual([r["record_type"] for r in rows], ["run_started", "run_finished"])
         self.assertEqual([c["phase"] for c in rows[1]["commands"]], ["version"] * 2 + ["agent"] * n + ["check"])
         self.assertEqual(rows[1]["metrics"]["integrated_correctness"]["status"], record["integrated_tests"])
+        self.check_repair(output, record)
         plan = json.loads((output / "plan.json").read_text())
         prompts = plan["prompts"]
         self.assertEqual(plan["driver_command"][2:4], ["--arm", arm], "the exact driver command is kept")
@@ -1297,6 +1639,47 @@ class DryRun(Temporary):
             self.assertIsNone(record["refusals"]["count"])
             self.assertEqual(record["coordinator_scans"]["status"], "not_applicable")
             self.assertEqual(record["evidence"]["events"], [])
+
+    def check_repair(self, output, record):
+        """Issue #221: one repair round for a failed tree and none for a
+        passing one, or for a trial whose changer made no change."""
+        repair, cost = record["repair"], record["cost"]
+        ran = record["integrated_tests"] == "failed" and record["interface_change"] != "change_not_made"
+        self.assertEqual(repair["status"], "ran" if ran else (
+            "not_needed" if record["integrated_tests"] == "passed" else "not_run"), repair)
+        self.assertEqual((output / "repair").exists(), ran)
+        # The stand-in reports no cost, so no total is measured in a dry run.
+        self.assertEqual(cost["run"], {"tokens": None, "turns": 1 * record["sessions"], "cost_usd": None})
+        self.assertIsNone(cost["total"]["cost_usd"])
+        self.assertIsNone(cost["cost_per_accepted_task"])
+        if not ran:
+            self.assertIsNone(repair["succeeded"])
+            self.assertEqual(cost["correct_result"], record["integrated_tests"] == "passed")
+            self.assertEqual(cost["tasks_accepted"], record["tasks_accepted"])
+            if repair["status"] == "not_run":
+                self.assertIn("change_not_made", repair["reason"])
+            return
+        self.assertIsInstance(repair["succeeded"], bool)
+        self.assertEqual(repair["succeeded"], repair["integrated_tests"] == "passed")
+        self.assertEqual(cost["correct_result"], repair["succeeded"])
+        self.assertEqual(cost["tasks_accepted"], repair["tasks_accepted"])
+        self.assertEqual((repair["process_status"], repair["time_limit_s"], repair["turns"], repair["results"]),
+                         ("succeeded", 1200, 1, 1))
+        self.assertEqual(repair["tool_check"], {"status": "passed", "unexpected": []})
+        self.assertEqual(repair["permission_denials"],
+                         {"total": 0, "peer_checkout": 0, "outside_clone": 0, "not_allowed": 0})
+        rows = [json.loads(line) for line in (output / repair["evidence"]["runner_journal"]).read_text().splitlines()]
+        self.assertEqual([r["record_type"] for r in rows], ["run_started", "run_finished"])
+        self.assertEqual([c["phase"] for c in rows[1]["commands"]], ["version"] * 2 + ["agent", "check"])
+        manifest = json.loads((output / "repair" / "manifest.json").read_text())
+        agents = next(iter(manifest["items"][0]["arms"].values()))["agents"]
+        self.assertEqual([(a["id"], Path(a["cwd"]).resolve()) for a in agents],
+                         [("repair", (output / "work" / "repair").resolve())])
+        transcript = (output / repair["evidence"]["transcript"]).read_text()
+        self.assertEqual(driver.tool_check(transcript)["status"], "passed")
+        self.assertTrue((output / repair["evidence"]["oracle"]).is_file())
+        # Nothing of LangSpan's reaches the repair tree.
+        self.assertFalse((output / "work" / "repair" / ".claude").exists())
 
     def refusal_report(self, output, record):
         """What a failed refusal check saw: each refusal, what LangSpan told
@@ -1339,6 +1722,10 @@ class DryRun(Temporary):
             self.assertEqual(record["semantic_conflicts"], n - 1, record["semantic_conflict_details"])
             self.assertEqual(record["tasks_accepted"], 1)
             self.assertEqual([t["accepted"] for t in record["tasks"] if t["role"] in ("rename", "changer")], [True])
+            # The stand-in's repair makes every task's informed edit, which fixes each call.
+            self.assertEqual((record["repair"]["status"], record["repair"]["succeeded"]), ("ran", True), record["repair"])
+            self.assertEqual((record["repair"]["tasks_accepted"], record["repair"]["conflicted_merges"]), (n, []))
+            self.assertEqual(record["cost"]["correct_result"], True)
         else:
             # Both sides of each pair change the same default: Git refuses the
             # second. A task with no partner was right to change it.
@@ -1350,6 +1737,14 @@ class DryRun(Temporary):
             self.assertEqual(record["semantic_conflicts"], 0)
             self.assertEqual([t["accepted"] for t in record["tasks"]], [kind != "pair" for kind in layout])
             self.assertEqual(sum(bool(t["completed"]) for t in record["tasks"]), n - pairs)
+            if pairs:
+                # The repair tree holds each refused merge with Git's conflict
+                # markers, which the stand-in does not resolve: the repair fails.
+                self.assertEqual(record["repair"]["status"], "ran")
+                self.assertEqual(record["repair"]["conflicted_merges"], [c["session"] for c in record["merge_conflicts"]])
+                self.assertEqual((record["repair"]["succeeded"], record["cost"]["correct_result"]), (False, False))
+            else:
+                self.assertEqual(record["repair"]["status"], "not_needed")
 
     def check_hedged(self, record, family, n):
         """Sessions that keep every shared default and set their value
@@ -1373,6 +1768,9 @@ class DryRun(Temporary):
         self.assertTrue(all(t["completed"] for t in record["tasks"]))
         self.assertTrue(all("no other task" in t["detail"] for t, kind in zip(record["tasks"], layout)
                             if kind == "alone"))
+        # The stand-in's repair makes the same local edit, so the default a
+        # task alone wanted changed still is not.
+        self.assertEqual((record["repair"]["status"], record["repair"]["succeeded"]), ("ran", False))
 
     def check_change_not_made(self, record, n):
         """A discovered_change trial whose changer did not change the
