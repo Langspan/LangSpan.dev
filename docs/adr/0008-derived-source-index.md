@@ -262,7 +262,11 @@ told to no dependent and never held, so that the file's notes and history
 follow it too. A file changed
 as well as moved stays a removal and a first indexing: similarity is not
 scored. The coordinator moves notes on the old path to the new one, and
-`graph history --path NEW` includes what was recorded under earlier paths.
+`graph history --path NEW` includes what was recorded under earlier paths,
+each only while the file was there: the moves are followed in event order, so
+a later file at a path this one left is never part of its history. The store
+reads the newest 1,000 moves through a partial index, whatever a page's
+cursor, so every page follows the same lineage.
 `graph symbol OLD --renamed` follows recorded renames to the newest name. A
 rename across files other than such a move is never inferred.
 

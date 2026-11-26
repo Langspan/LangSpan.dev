@@ -37,9 +37,9 @@ pub use flaky::{
     MAX_TEST_RESULT_BYTES, TestFailure, TestHistory, TestLearning, TestResults,
 };
 pub use history::{
-    HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_NAME_BYTES, HISTORY_RELATED,
-    HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote, HistoryQuery,
-    history as definition_history,
+    HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_MOVES, HISTORY_NAME_BYTES,
+    HISTORY_RELATED, HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote,
+    HistoryQuery, history as definition_history,
 };
 pub use recall::{
     RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,

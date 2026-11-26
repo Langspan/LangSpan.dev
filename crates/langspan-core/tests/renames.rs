@@ -445,6 +445,7 @@ fn the_history_of_a_moved_file_includes_what_was_recorded_under_its_old_path() {
             limit: 10,
             before_seq: None,
             events: &events,
+            moves: &[],
             anchors: &[],
             now_ms: 20,
         },
@@ -470,5 +471,96 @@ fn the_history_of_a_moved_file_includes_what_was_recorded_under_its_old_path() {
             .map(|note| note.note_id.as_str())
             .collect::<Vec<_>>(),
         ["note-a"]
+    );
+}
+
+/// A path another file takes after a move belongs to that file from then
+/// on: `a.py` moves to `b.py`, a new `a.py` is recorded and moves to
+/// `c.py`. Each of `b.py` and `c.py` has its own file's history and notes,
+/// never the other's.
+#[test]
+fn a_reused_path_keeps_each_files_history_to_its_own_lifetime() {
+    let state = ready();
+    let changed = |after: &str| InterfaceChange {
+        name: "save".into(),
+        change: "signature_changed".into(),
+        before: Some("def save(x)".into()),
+        after: Some(after.into()),
+        after_name: None,
+        before_name: None,
+        evidence: None,
+        ..renamed()
+    };
+    let events: Vec<RecordedEvent> = [
+        Event::Remembered {
+            note: Note {
+                note_id: "note-first".into(),
+                workspace_id: "work".into(),
+                author: None,
+                text: "the first save must stay idempotent".into(),
+                paths: vec!["src/a.py".into()],
+            },
+            at: Some(langspan_core::Stamp {
+                at_ms: 9,
+                generation: 1,
+            }),
+        },
+        notice("n1", "src/a.py", changed("def save(x, first)")),
+        notice("n2", "src/b.py", moved("save", "src/a.py")),
+        notice("n3", "src/a.py", changed("def save(x, second)")),
+        notice("n4", "src/c.py", moved("save", "src/a.py")),
+    ]
+    .into_iter()
+    .zip(1u64..)
+    .map(|(event, seq)| RecordedEvent { seq, event })
+    .collect();
+    let history_of = |path| {
+        definition_history(
+            &state,
+            &HistoryQuery {
+                workspace_id: "work",
+                name: "save",
+                path: Some(path),
+                limit: 10,
+                before_seq: None,
+                events: &events,
+                moves: &[],
+                anchors: &[],
+                now_ms: 20,
+            },
+        )
+        .unwrap()
+    };
+    let notices = |history: &langspan_core::History| -> Vec<(String, Vec<String>)> {
+        history
+            .entries
+            .iter()
+            .map(|entry| {
+                let notes = entry.notes.iter().map(|note| note.note_id.clone());
+                (entry.notice_id.clone(), notes.collect())
+            })
+            .collect()
+    };
+    let first = history_of("src/b.py");
+    assert_eq!(
+        notices(&first),
+        [
+            ("n2".into(), vec!["note-first".into()]),
+            ("n1".into(), vec!["note-first".into()])
+        ],
+        "{first:#?}"
+    );
+    let second = history_of("src/c.py");
+    assert_eq!(
+        notices(&second),
+        [("n4".into(), vec![]), ("n3".into(), vec![])],
+        "{second:#?}"
+    );
+    // Asked by the path the second file left, it is that file's history.
+    let left = history_of("src/a.py");
+    assert_eq!(
+        notices(&left),
+        [("n4".into(), vec![]), ("n3".into(), vec![])],
+        "{left:#?}"
     );
 }

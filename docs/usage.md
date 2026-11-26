@@ -1367,7 +1367,10 @@ past from there, before an agent changes it again. A rename appears in the
 history of both the old name and the new one. Asked with `--path NEW_PATH`, a
 history includes what was recorded under the file's earlier paths, through
 files moved whole, and notes or messages naming an earlier path count as
-naming the file:
+naming the file. Each earlier path counts only while the file was there: once
+another file is recorded at a path the file left, that path's later records
+belong to the other file. Every page of a history follows the same moves,
+the newest 1,000 in the log, whatever its `--before`:
 
 ```sh
 ./target/release/langspan graph history PROJECT save --json

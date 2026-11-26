@@ -477,6 +477,7 @@ fn ask(
             limit,
             before_seq,
             events,
+            moves: &[],
             anchors,
             now_ms,
         },
@@ -852,6 +853,7 @@ fn a_history_query_is_validated() {
         limit,
         before_seq: None,
         events: &[],
+        moves: &[],
         anchors: &[],
         now_ms: 0,
     };
