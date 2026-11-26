@@ -641,9 +641,12 @@ A session with no recorded version of a file (a Codex session's first edit of
 it, for example) has nothing for the comparison above to use. For such a
 session the core also checks the lines other sessions wrote recently
 ([ADR 0028](adr/0028-line-ownership.md)). At admission the hook works out which
-lines the edit changes: an `Edit` or `MultiEdit` applied in memory, a `Write`'s
-new content compared with the file, or each `apply_patch` hunk where it
-matches. It then looks those lines up in the line journal of the commit guard
+lines the edit changes: an `Edit` or `MultiEdit` applied in memory, the new
+content of a Claude Code `Write` or a Cursor `Write` compared with the file,
+or each `apply_patch` hunk where it matches. A shell write the parser names
+(`> path`, `tee path`, `sed -i`), on the Claude Code, Codex or Cursor shell
+tool, may change any line of its target. It then looks those
+lines up in the line journal of the commit guard
 ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)), which records the lines
 each session's writes added, by content.
 
@@ -667,6 +670,14 @@ holds another session's recent write of the file with unknown lines, any
 unread edit that changes lines of it is refused once, and the denial says the
 lines could not be placed. An ended or exited session's lines no longer count.
 The journal is kept on disk, so a daemon restart does not lose them.
+
+The check refuses only on what it has read. With the daemon down, the journal
+unreadable or less than half the hook budget left, the lines are not checked
+and nothing is refused for them. A shell command whose write set is unknown (a
+heredoc, a loop or a variable, until B5) or whose snapshot is incomplete gets
+no decision, and its coverage says why (`shell_observing` or
+`shell_unobserved`). An append (`>> path`, `tee -a`) is a shell write like any
+other, so it is refused over another session's recent lines too.
 
 ## Coordination policies
 

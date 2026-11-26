@@ -43,7 +43,7 @@ as done is in its row.
 
 | Track | Rows | Status, 25 November 2026 |
 | --- | --- | --- |
-| L1. Line protection without a recorded read: a per-session journal of written lines; a write that changes another live session's recent lines is refused unless that session read them since | B4 | Built ([ADR 0028](adr/0028-line-ownership.md)). Shell writes, `NotebookEdit` and Codex add, delete and move are not located. Not yet observed on a host |
+| L1. Line protection without a recorded read: a per-session journal of written lines; a write that changes another live session's recent lines is refused unless that session read them since | B4 | Built ([ADR 0028](adr/0028-line-ownership.md)) for edit tools, Cursor `Write` and parsed shell writes on the Claude Code, Codex and Cursor shell tools. Shell writes, `NotebookEdit` and Codex add, delete and move are not located (any line may change); heredocs wait for B5. Not yet observed on a host |
 | L2. Codex reads, Stop and SessionEnd | A3 | Built: Stop and SessionEnd registered; Codex reports no reads, so a first patch records a `snapshot` version instead ([ADR 0027](adr/0027-turn-and-batch-events.md)). Observed on a real Codex on 26 November 2026 ([evidence](evidence/codex-turn-events/README.md)): Stop released the open admission, SessionEnd ended the session, and a stale patch after a peer's change was refused once and its retry admitted. A Codex subagent's tool event is not yet observed |
 | L3. Claude Code Stop, StopFailure, SubagentStop and PostToolBatch hooks | A2 | Done: observed on Claude Code 2.1.330 ([ADR 0027](adr/0027-turn-and-batch-events.md)). Quota and usage detection from StopFailure is J11 |
 | L4. Shared-checkout commit guard and commit of only this session's hunks | B6, B7 | Built ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)); observed with real Claude Code sessions, and `commit --mine` with a real Codex session ([evidence](evidence/codex-real-host/README.md)). The guard and `commit --mine` are tested with Codex and Cursor events; the guard is not yet observed on those hosts |
@@ -72,7 +72,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## B. Write coordination
 
-- [B4: Protect another session's recent lines from an unread write](https://github.com/Langspan/LangSpan.dev/issues/23): a session that never read a file can replace lines a peer wrote seconds ago, silently.
 - [B5: Know a shell command's writes before it runs](https://github.com/Langspan/LangSpan.dev/issues/24): a heredoc rewrite or script can overwrite a peer's newer change with no refusal.
 - [B6: Hold a broad commit that would take another session's changes](https://github.com/Langspan/LangSpan.dev/issues/25): `git commit -a` in a shared checkout takes another live session's half-finished edits.
 - [B8: Guard commits made outside agent shells](https://github.com/Langspan/LangSpan.dev/issues/27): commits from a terminal, IDE or script bypass the agent-shell commit guard.
