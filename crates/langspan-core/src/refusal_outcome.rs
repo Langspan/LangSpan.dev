@@ -122,12 +122,6 @@ impl Pending {
             Some(_) => RefusalOutcome::Adapted,
         }
     }
-
-    /// A conflict still waiting for its holder to let go: the one state a
-    /// lease ending can change.
-    fn awaits_holder(&self) -> bool {
-        self.holder_known && !self.holder_ended
-    }
 }
 
 /// A session and a path: the key of the session-and-path indexes.
@@ -142,8 +136,9 @@ pub(crate) struct Settler {
     pending: BTreeMap<String, BTreeMap<GroupKey, Pending>>,
     /// Session and refused path to the session's pending groups with it.
     by_path: BTreeMap<SessionPath, BTreeSet<GroupKey>>,
-    /// Holder and refused path to the conflicts waiting for that holder
-    /// (`Pending::awaits_holder`), by refused session and group.
+    /// Holder and refused path to the conflicts whose holder is known, by
+    /// refused session and group, until they settle: the holder letting go
+    /// or taking a path again changes them.
     by_holder: BTreeMap<SessionPath, BTreeSet<(String, GroupKey)>>,
     /// Pending groups by deadline, earliest first.
     deadlines: BTreeSet<(u64, String, GroupKey)>,
@@ -232,7 +227,7 @@ impl Settler {
         for path in &group.paths {
             unindex(&mut self.by_path, key(session, path), group);
         }
-        if let (true, Some(peer)) = (pending.awaits_holder(), pending.peer.as_deref()) {
+        if let (true, Some(peer)) = (pending.holder_known, pending.peer.as_deref()) {
             self.stop_awaiting(session, group, peer);
         }
         self.deadlines
@@ -300,7 +295,6 @@ impl Settler {
             if group.paths.iter().any(|path| self.holds(&holder, path)) {
                 continue;
             }
-            self.stop_awaiting(&session, &group, &holder);
             if let Some(pending) = self
                 .pending
                 .get_mut(&session)
@@ -321,6 +315,24 @@ impl Settler {
             Event::LeaseGranted { lease } => {
                 for path in &lease.paths {
                     *self.held.entry(key(&lease.session_id, path)).or_default() += 1;
+                }
+                // The holder holds a refused path again: its conflicts wait
+                // for it once more.
+                let resumed: BTreeSet<(String, GroupKey)> = lease
+                    .paths
+                    .iter()
+                    .filter_map(|path| self.by_holder.get(&key(&lease.session_id, path)))
+                    .flatten()
+                    .cloned()
+                    .collect();
+                for (session, group) in resumed {
+                    if let Some(pending) = self
+                        .pending
+                        .get_mut(&session)
+                        .and_then(|groups| groups.get_mut(&group))
+                    {
+                        pending.holder_ended = false;
+                    }
                 }
                 if let Some((holder, replaced)) = self.leases.insert(
                     lease.lease_id.clone(),
@@ -460,7 +472,7 @@ impl Settler {
                 .or_default()
                 .insert(group.clone());
         }
-        if let (true, Some(peer)) = (pending.awaits_holder(), pending.peer.as_deref()) {
+        if let (true, Some(peer)) = (pending.holder_known, pending.peer.as_deref()) {
             self.await_holder(session, &group, peer);
         }
         self.deadlines
