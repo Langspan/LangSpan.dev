@@ -531,6 +531,47 @@ fn the_on_demand_start_can_be_turned_off() {
     assert!(daemons_for(&base.0).is_empty());
 }
 
+/// `langspan mcp` with the shorter tool list still starts a missing
+/// coordinator, and a tool-list option it refuses starts nothing.
+#[test]
+fn mcp_with_a_tool_list_starts_a_coordinator_and_a_refused_one_does_not() {
+    let base = Base::new();
+    let state_dir = base.0.join("state");
+    let mcp = |args: &[&str]| {
+        let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
+        support::in_home(&mut command, &base.home())
+            .arg("mcp")
+            .args(args)
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove(langspan::autostart::ENV)
+            .current_dir(&base.0)
+            .stdin(Stdio::null());
+        command.output().unwrap()
+    };
+    let refused = mcp(&["--tools", "hooked"]);
+    assert!(!refused.status.success(), "{}", text(&refused));
+    assert!(!state_dir.join("daemon.log").exists());
+    assert!(daemons_for(&base.0).is_empty());
+
+    let served = mcp(&["--tools", "hooked", "--host", "claude-code"]);
+    assert!(
+        text(&served).contains("\"event\":\"coordinator_started\""),
+        "{}",
+        text(&served)
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !client::accepts(&state_dir, Instant::now() + Duration::from_millis(200)) {
+        assert!(
+            Instant::now() < deadline,
+            "the started coordinator never accepted"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(daemons_for(&base.0).len(), 1);
+}
+
 /// `setup --home DIR` from a process whose `HOME` is another directory: the
 /// coordinator it starts checks hosts in `DIR`, not in `HOME`.
 #[test]
