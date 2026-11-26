@@ -267,6 +267,9 @@ each only while the file was there: the moves are followed in event order, so
 a later file at a path this one left is never part of its history. The store
 reads the newest 1,000 moves through a partial index, whatever a page's
 cursor, so every page follows the same lineage.
+A notice's request ID includes the index pass that found it, so a move or
+content change that repeats an earlier one (`a → b → a → b`) is recorded
+again, and a redelivery of one notice is still a replay.
 `graph symbol OLD --renamed` follows recorded renames to the newest name. A
 rename across files other than such a move is never inferred.
 

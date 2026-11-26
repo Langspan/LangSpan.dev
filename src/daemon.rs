@@ -478,9 +478,11 @@ mod unix {
                         std::thread::sleep(report_delay());
                     }
                     for notice in notices {
-                        // One request per version of the file in one
-                        // registration: redelivery is a replay, and the same
-                        // change in a later registration is a new request. A
+                        // One request per transition of the file in one index
+                        // pass of one registration: redelivery is a replay,
+                        // and the same transition in a later pass (a file
+                        // moved back and forth) or a later registration is a
+                        // new request. A
                         // pass of a checkout the workspace has since left, by
                         // a move or a removal, is refused.
                         ask_as(
@@ -495,6 +497,7 @@ mod unix {
                                     &notice.path,
                                     &notice.before_digest,
                                     &notice.digest,
+                                    &notice.pass.to_string(),
                                 ],
                             ),
                             Command::ObserveInterface {

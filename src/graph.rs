@@ -55,6 +55,11 @@ pub struct Notice {
     /// name one transition, so A→B and a later C→B are different notices.
     pub before_digest: String,
     pub digest: String,
+    /// The workspace's index pass that found it. A transition can repeat
+    /// (a file moved `a → b → a → b`, content `A → B → A → B`); the pass
+    /// tells each occurrence apart, and stays the same for every delivery
+    /// of one.
+    pub pass: i64,
     pub changes: Vec<InterfaceChange>,
     pub dependents: Vec<String>,
 }
@@ -397,6 +402,7 @@ impl Index {
         let names: Vec<&str> = changes.iter().map(|change| change.name.as_str()).collect();
         Ok(Some(Notice {
             path: path.into(),
+            pass: 0,
             before_digest,
             digest,
             dependents: self.dependents(workspace_id, Some(path), &names)?,
@@ -517,6 +523,7 @@ impl Index {
         let names: Vec<&str> = changes.iter().map(|change| change.name.as_str()).collect();
         Ok(Some(Notice {
             path: to.into(),
+            pass: 0,
             dependents: if exports {
                 self.dependents(workspace_id, Some(from), &names)?
             } else {
@@ -879,6 +886,9 @@ impl Index {
             }
         }
         self.update_inflight(workspace_id, root, scan, pass, deadline)?;
+        for notice in &mut notices {
+            notice.pass = pass;
+        }
         Ok(notices)
     }
 
@@ -3739,6 +3749,25 @@ mod review_regressions {
             again[0].changes[0].before.as_deref(),
             Some("pub fn upload(x: u16)")
         );
+    }
+
+    /// A→B, B→A, then A→B again: the third repeats the first transition and
+    /// is still its own occurrence (review comment 4707328127).
+    #[test]
+    fn a_repeated_transition_is_found_by_a_later_pass() {
+        let (dir, mut index) = setup("repeat");
+        let a = ("src/api.rs", "pub fn upload() {}\n");
+        let b = ("src/api.rs", "pub fn upload(x: u8) {}\n");
+        pass(&dir, &mut index, &[a, CALLER]);
+        let first = pass(&dir, &mut index, &[b, CALLER]);
+        pass(&dir, &mut index, &[a, CALLER]);
+        let again = pass(&dir, &mut index, &[b, CALLER]);
+        assert_eq!(
+            (&first[0].before_digest, &first[0].digest),
+            (&again[0].before_digest, &again[0].digest),
+            "the same transition"
+        );
+        assert!(again[0].pass > first[0].pass, "{first:?} {again:?}");
     }
 
     // Every outcome of reading a file for the in-flight comparison is

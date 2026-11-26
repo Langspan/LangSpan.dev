@@ -3229,6 +3229,49 @@ fn a_git_mv_of_a_file_without_exports_keeps_its_notes_under_the_new_path() {
     );
 }
 
+/// Roadmap D7 (review comment 4707328127): an unchanged file moved
+/// `a → b → a → b`, each move indexed before the next, is three moves. The
+/// third repeats the first's path and content, yet is recorded as its own
+/// change, and the file's notes follow it to `b` again.
+#[test]
+fn a_file_moved_back_and_forth_records_every_move_and_keeps_its_notes() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let (code, text) = w.cli(&[
+        "remember",
+        "app",
+        "upload must stay idempotent",
+        "src/upload.rs",
+        "--request-id",
+        "note-upload",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let moves = [
+        ("src/upload.rs", "src/transfer.rs"),
+        ("src/transfer.rs", "src/upload.rs"),
+        ("src/upload.rs", "src/transfer.rs"),
+    ];
+    for (count, (from, to)) in moves.into_iter().enumerate() {
+        git(&w.work(), &["mv", from, to]);
+        let found = history(&w, "upload", count + 1);
+        assert_eq!(found["entries"][0]["path"], to, "{found:#}");
+        assert_eq!(found["entries"][0]["before_path"], from, "{found:#}");
+        assert_eq!(found["entries"][0]["evidence"], "file_moved", "{found:#}");
+    }
+    let detail = w.detail("upload back under the new path", "upload", |outcome| {
+        upload_function(outcome).is_some_and(|symbol| {
+            symbol["path"] == "src/transfer.rs" && symbol["notes"] != json!([])
+        })
+    });
+    assert_eq!(
+        upload_function(&detail).unwrap()["notes"],
+        json!([{"id": "note-upload", "text": "upload must stay idempotent"}]),
+        "{detail:#}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Issue #194: a rename in one worktree reaches a peer in another worktree of
 // the same repository at the write that adds a caller of the old name.
