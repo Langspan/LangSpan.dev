@@ -663,6 +663,18 @@ impl Store {
                 after,
                 limit,
             } => self.changes(workspace_id, *after, *limit)?,
+            // A hook run inside the interval writes nothing, not even a
+            // receipt, so a burst of them costs no storage (roadmap J12).
+            Command::SessionSeen { .. } => {
+                let decision = decide(&self.state, prepared, request_id, now_ms);
+                if !decision.events.is_empty() {
+                    self.commit(
+                        &decision.events,
+                        Some((request_id, original, &decision.outcome)),
+                    )?;
+                }
+                decision.outcome
+            }
             _ => {
                 let decision = decide(&self.state, prepared, request_id, now_ms);
                 self.commit(

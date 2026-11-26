@@ -186,8 +186,10 @@ The daemon polls up to 64 bindings per one-second maintenance pass, rotating
 through larger sets. Unchanged non-exited results are coalesced for 15 seconds;
 an unchanged exited incarnation needs no repeated event. This is scheduling
 behavior, not a freshness SLA. Liveness never re-registers a session, renews,
-releases or grants a lease. Linux is the implemented process backend; other
-platforms report unknown or unsupported.
+releases or grants a lease. Linux reads `/proc`; macOS reads the kernel's
+process table through `/bin/ps` ([ADR 0025](0025-distribution-lifecycle-and-store-beyond-the-first-release.md),
+row J12); other platforms report unknown or unsupported. A recent hook run
+also keeps a session current where no process is bound (row J12).
 
 ### Bounded, passive Git observations
 
