@@ -1559,6 +1559,10 @@ pub struct CallBreak {
     pub change: String,
     /// The file whose exported signature changed.
     pub defined_in: String,
+    /// The root of the other worktree of the repository whose index holds
+    /// the change, when it is not the asking session's own workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
     pub by_session: String,
     pub before: String,
     /// Empty for `removed`.
@@ -1590,11 +1594,26 @@ pub struct InterfaceNotice {
     pub changes: Vec<InterfaceChange>,
     /// Other files in the workspace that mention a changed name.
     pub dependents: Vec<String>,
+    /// Files of other worktrees of the repository that mention a changed
+    /// name, as their indexes find them after the notice, at most
+    /// `NOTICE_DEPENDENTS` (issue #194). Absent from notices recorded
+    /// before it was kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub elsewhere: Vec<WorktreeFile>,
     /// The session that most recently reported editing `path`. A
     /// correlation, not proof of who made the change.
     pub by_session: Option<String>,
     pub at_ms: u64,
     pub generation: u64,
+}
+
+/// A file of one workspace, named by its path relative to that workspace's
+/// root.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeFile {
+    pub workspace_id: String,
+    pub path: String,
 }
 
 /// An interface change that touches the asking session's own files.
@@ -2912,6 +2931,13 @@ pub enum Event {
     InterfaceChanged {
         notice: InterfaceNotice,
     },
+    /// Files of another worktree found to mention a held notice's changed
+    /// names (issue #194).
+    InterfaceDependentsFound {
+        notice_workspace_id: String,
+        notice_id: String,
+        files: Vec<WorktreeFile>,
+    },
     Remembered {
         note: Note,
         /// When it was remembered. Absent from notes recorded before it was
@@ -3332,6 +3358,15 @@ pub enum Command {
         path: String,
         changes: Vec<InterfaceChange>,
         dependents: Vec<String>,
+    },
+    /// Files of `workspace_id` that the index finds mention a name changed
+    /// by the notice `notice_id` of `notice_workspace_id`, another worktree
+    /// of the same repository (issue #194). Internal to the daemon's scan.
+    ObserveInterfaceDependents {
+        notice_workspace_id: String,
+        notice_id: String,
+        workspace_id: String,
+        paths: Vec<String>,
     },
     Remember {
         workspace_id: String,
@@ -4010,6 +4045,15 @@ enum CommandWire {
         changes: Vec<InterfaceChange>,
         dependents: Vec<String>,
     },
+    /// Files of `workspace_id` that the index finds mention a name changed
+    /// by the notice `notice_id` of `notice_workspace_id`, another worktree
+    /// of the same repository (issue #194). Internal to the daemon's scan.
+    ObserveInterfaceDependents {
+        notice_workspace_id: String,
+        notice_id: String,
+        workspace_id: String,
+        paths: Vec<String>,
+    },
     Remember {
         workspace_id: String,
         author: Option<String>,
@@ -4658,6 +4702,12 @@ pub enum Outcome {
     },
     InterfaceObserved {
         notice: InterfaceNotice,
+    },
+    /// How many files of another worktree were added to the notice's
+    /// `elsewhere`; zero when every one was already listed or it is full.
+    InterfaceDependentsObserved {
+        notice_id: String,
+        added: u32,
     },
     Remembered {
         note: Note,
@@ -7011,6 +7061,7 @@ fn decide_checked(
                 path: path.clone(),
                 changes: changes.clone(),
                 dependents: dependents.clone(),
+                elsewhere: Vec::new(),
                 by_session: last_peer_edit(state, "", workspace_id, path, 0)
                     .map(|(session, _)| session.to_owned()),
                 at_ms: now_ms,
@@ -7022,6 +7073,69 @@ fn decide_checked(
                     notice: notice.clone(),
                 }],
                 outcome: Outcome::InterfaceObserved { notice },
+            })
+        }
+        Command::ObserveInterfaceDependents {
+            notice_workspace_id,
+            notice_id,
+            workspace_id,
+            paths,
+        } => {
+            validate_known_workspace(state, notice_workspace_id)?;
+            validate_known_workspace(state, workspace_id)?;
+            if workspace_id == notice_workspace_id
+                || !related_workspace(state, notice_workspace_id, workspace_id)
+            {
+                return Err(error(
+                    "invalid_notice",
+                    "Dependents found elsewhere are files of another worktree of the notice's repository",
+                ));
+            }
+            if paths.len() > NOTICE_DEPENDENTS {
+                return Err(error(
+                    "invalid_notice",
+                    "At most 32 dependent files are reported at once",
+                ));
+            }
+            for path in paths {
+                validate_relative_path(path)?;
+            }
+            let notice = state
+                .interface_notices
+                .get(notice_workspace_id)
+                .and_then(|notices| notices.iter().find(|n| n.notice_id == *notice_id))
+                .ok_or_else(|| {
+                    error(
+                        "unknown_notice",
+                        "The interface notice is not held: a newer one for its file replaced it, or it was never recorded",
+                    )
+                })?;
+            let room = NOTICE_DEPENDENTS.saturating_sub(notice.elsewhere.len());
+            let files: Vec<WorktreeFile> = paths
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|path| WorktreeFile {
+                    workspace_id: workspace_id.clone(),
+                    path: path.clone(),
+                })
+                .filter(|file| !notice.elsewhere.contains(file))
+                .take(room)
+                .collect();
+            Ok(Decision {
+                outcome: Outcome::InterfaceDependentsObserved {
+                    notice_id: notice_id.clone(),
+                    added: files.len() as u32,
+                },
+                events: if files.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Event::InterfaceDependentsFound {
+                        notice_workspace_id: notice_workspace_id.clone(),
+                        notice_id: notice_id.clone(),
+                        files,
+                    }]
+                },
             })
         }
         Command::Events { .. }
@@ -7454,13 +7568,18 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
     if notice.changes.is_empty()
         || notice.changes.len() > NOTICE_CHANGES
         || notice.dependents.len() > NOTICE_DEPENDENTS
+        || notice.elsewhere.len() > NOTICE_DEPENDENTS
     {
         return Err(error(
             "invalid_notice",
-            "An interface notice names 1 to 16 changes and at most 32 dependent files",
+            "An interface notice names 1 to 16 changes and at most 32 dependent files in its own worktree and 32 in others",
         ));
     }
-    for path in &notice.dependents {
+    for path in notice
+        .dependents
+        .iter()
+        .chain(notice.elsewhere.iter().map(|file| &file.path))
+    {
         validate_relative_path(path)?;
     }
     for change in &notice.changes {
@@ -9110,6 +9229,7 @@ fn validate_interface_cause(cause: &InterfaceCause) -> Result<(), CoreError> {
         path: cause.path.clone(),
         changes: vec![cause.change.clone()],
         dependents: Vec::new(),
+        elsewhere: Vec::new(),
         by_session: None,
         at_ms: 0,
         generation: 0,
@@ -10782,6 +10902,35 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 notices.truncate(MAX_NOTICES);
             }
         }
+        Event::InterfaceDependentsFound {
+            notice_workspace_id,
+            notice_id,
+            files,
+        } => {
+            if files.len() > NOTICE_DEPENDENTS {
+                return Err(error(
+                    "invalid_event",
+                    "At most 32 dependent files are found at once",
+                ));
+            }
+            for file in files {
+                validate_relative_path(&file.path)?;
+            }
+            // A notice replaced or dropped since then has nothing to add to.
+            if let Some(notice) = state
+                .interface_notices
+                .get_mut(notice_workspace_id)
+                .and_then(|notices| notices.iter_mut().find(|n| n.notice_id == *notice_id))
+            {
+                for file in files {
+                    if notice.elsewhere.len() < NOTICE_DEPENDENTS
+                        && !notice.elsewhere.contains(file)
+                    {
+                        notice.elsewhere.push(file.clone());
+                    }
+                }
+            }
+        }
         Event::CheckRecorded { check, tests } => {
             validate_check(state, check)?;
             if let Some(kept) = tests {
@@ -11322,11 +11471,12 @@ pub fn validate_calls(calls: &[CallSite]) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Changes to functions that another live session of this session's
-/// workspace made, in this generation and within the briefing horizon, that
-/// this session has not been alerted to: `(notice, change, the peer)`. A
-/// signature change counts only with the new parameter count; a rename and
-/// a removal always count. Newest notice first.
+/// Changes to functions that another live session made in this session's
+/// workspace or in another worktree of its repository (issue #194), in this
+/// generation and within the briefing horizon, that this session has not
+/// been alerted to: `(notice, change, the peer)`. A signature change counts
+/// only with the new parameter count; a rename and a removal always count.
+/// The session's own workspace first, each workspace's newest notice first.
 fn alertable<'a>(
     state: &'a State,
     session_id: &str,
@@ -11354,12 +11504,16 @@ fn alertable<'a>(
                 .is_none_or(|activity| !activity.ended)
     };
     let mut found = Vec::new();
-    for notice in state
+    let own = state.interface_notices.get(&me.workspace_id);
+    let others = state
         .interface_notices
-        .get(&me.workspace_id)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-    {
+        .iter()
+        .filter(|(workspace_id, _)| {
+            **workspace_id != me.workspace_id
+                && related_workspace(state, &me.workspace_id, workspace_id)
+        })
+        .map(|(_, notices)| notices);
+    for notice in own.into_iter().chain(others).flatten() {
         let Some(peer) = notice.by_session.as_deref() else {
             continue;
         };
@@ -11386,29 +11540,51 @@ fn alertable<'a>(
     Ok(found)
 }
 
-/// The names among `calls` that a write check must look up in the index:
-/// those of a change it could alert to, and a renamed function's new name.
-/// Usually none, and then nothing is looked up.
+/// The names among `calls` that a write check must look up in the index,
+/// by the workspace whose index holds the change: those of a change it
+/// could alert to, and a renamed function's new name. Usually none, and
+/// then nothing is looked up.
 pub fn call_candidates(
     state: &State,
     session_id: &str,
     calls: &[CallSite],
     now_ms: u64,
-) -> Result<BTreeSet<String>, CoreError> {
+) -> Result<BTreeMap<String, BTreeSet<String>>, CoreError> {
     validate_calls(calls)?;
-    Ok(alertable(state, session_id, now_ms)?
-        .into_iter()
-        .filter(|(_, change, _)| calls.iter().any(|call| call.name == change.name))
-        .flat_map(|(_, change, _)| [&change.name].into_iter().chain(&change.after_name))
-        .cloned()
-        .collect())
+    let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (notice, change, _) in alertable(state, session_id, now_ms)? {
+        if calls.iter().any(|call| call.name == change.name) {
+            candidates
+                .entry(notice.workspace_id.clone())
+                .or_default()
+                .extend(
+                    [&change.name]
+                        .into_iter()
+                        .chain(&change.after_name)
+                        .cloned(),
+                );
+        }
+    }
+    Ok(candidates)
+}
+
+/// What one workspace's index holds of a write check's candidate names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexedNames {
+    /// Every definition of a candidate name.
+    pub definitions: Vec<SymbolRef>,
+    /// The index reads every supported file of the workspace at its current
+    /// content (`GraphCoverage::blind_in_scope` is zero).
+    pub complete: bool,
 }
 
 /// The calls a peer's recent change makes wrong, at most `MAX_CALL_BREAKS`,
-/// from notices this session was not alerted to. `current` holds the
-/// index's definitions of every candidate name (`call_candidates`), and a
-/// change counts only while it is still true there, so a notice the index
-/// has moved past is never used:
+/// from notices this session was not alerted to. `current` holds, by
+/// workspace, the index's definitions of every candidate name
+/// (`call_candidates`), and a change counts only while it is still true in
+/// the index of the workspace it was made in, so a notice the index has
+/// moved past is never used, and a notice of a workspace missing from
+/// `current` is not used at all:
 ///
 /// - a signature change, while its file holds the new signature; a call
 ///   whose count does not fit it breaks;
@@ -11418,12 +11594,12 @@ pub fn call_candidates(
 /// - a removal, while no definition of the name is left anywhere; every
 ///   call of it breaks.
 ///
-/// "No definition left anywhere" is read from the index, so a rename or a
-/// removal counts only when `index_complete`: the index reads every
-/// supported file of the workspace at its current content
-/// (`GraphCoverage::blind_in_scope` is zero). A name moved into a file not
-/// indexed yet, partial or too large is otherwise missing from `current`
-/// without being gone.
+/// "No definition left anywhere" is read from that workspace's index, so a
+/// rename or a removal counts only when it is `complete`. A name moved into
+/// a file not indexed yet, partial or too large is otherwise missing from
+/// `current` without being gone. A change made in another worktree is
+/// judged in that worktree: the session's own checkout still defines the
+/// old name until the branches meet, which is the break being told.
 ///
 /// A same-count change is not alerted: calls are matched by name, and
 /// without the argument types at a call site nothing tells a right call
@@ -11432,19 +11608,28 @@ pub fn call_breaks(
     state: &State,
     session_id: &str,
     calls: &[CallSite],
-    current: &[SymbolRef],
-    index_complete: bool,
+    current: &BTreeMap<String, IndexedNames>,
     now_ms: u64,
 ) -> Result<Vec<CallBreak>, CoreError> {
     validate_calls(calls)?;
-    let gone = |name: &str| index_complete && !current.iter().any(|symbol| symbol.name == name);
-    let holds = |path: &str, name: &str, signature: &str| {
-        current.iter().any(|symbol| {
-            symbol.path == path && symbol.name == name && symbol.signature == signature
-        })
-    };
+    let own_workspace = &current_session(state, session_id)?.workspace_id;
     let mut breaks = Vec::new();
     for (notice, change, peer) in alertable(state, session_id, now_ms)? {
+        let Some(indexed) = current.get(&notice.workspace_id) else {
+            continue;
+        };
+        let gone = |name: &str| {
+            indexed.complete && !indexed.definitions.iter().any(|symbol| symbol.name == name)
+        };
+        let holds = |path: &str, name: &str, signature: &str| {
+            indexed.definitions.iter().any(|symbol| {
+                symbol.path == path && symbol.name == name && symbol.signature == signature
+            })
+        };
+        let worktree = (notice.workspace_id != *own_workspace)
+            .then(|| state.workspaces.get(&notice.workspace_id))
+            .flatten()
+            .map(|workspace| workspace.root.clone());
         let after = change.after.as_deref().unwrap_or("");
         // `Some`: a call breaks when its count does not fit; `None`: every
         // call of the name breaks.
@@ -11471,6 +11656,7 @@ pub fn call_breaks(
                 call: call.clone(),
                 change: change.change.clone(),
                 defined_in: notice.path.clone(),
+                worktree: worktree.clone(),
                 by_session: peer.to_owned(),
                 before: change.before.clone().unwrap_or_default(),
                 after: after.to_owned(),

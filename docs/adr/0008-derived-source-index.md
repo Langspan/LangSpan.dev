@@ -451,6 +451,31 @@ in `src/graph.rs`,
 in `tests/briefing.rs`, and the in-flight tests in
 `crates/langspan-core/tests/briefing.rs`.
 
+**Dependents in other worktrees (added later, issue #194).** A notice's
+`dependents` are files of its own workspace, fixed when the notice is
+recorded. A notice also keeps `elsewhere`: files of other worktrees of the
+same repository, each `{workspace_id, path}`, that mention a changed name
+(other than an addition), the notice's own path left out as in its own
+worktree. After each scan of a worktree, the state owner reads that
+worktree's index for the names of every held notice of the other worktrees
+of its repository from this generation and within the briefing horizon, and
+records the files not yet listed through `observe_interface_dependents`
+(event `interface_dependents_found`), at most 32 per notice. The index
+lags the scan by a pass, so a file written after the notice is listed a scan
+or two later, and one that mentioned the name before the notice is listed at
+the worktree's next scan. A replaced notice gains nothing. The paths are
+relative to the other worktree's root. Nothing of this leaves the machine
+([ADR 0035](0035-semantic-layer.md)). One command, one event, one outcome
+(`interface_dependents_observed`) and the optional `elsewhere` field: a
+store written by this build does not open in an earlier one
+([ADR 0015](0015-version-tolerance.md)), earlier stores open in this one, and
+the protocol stays at version 3. Tests:
+`a_rename_notice_lists_a_caller_written_later_in_another_worktree` in
+`tests/graph.rs`, and
+`another_worktrees_files_are_added_to_a_held_notice_once_each_up_to_the_cap`
+and `files_found_for_a_replaced_notice_change_nothing_when_replayed` in
+`crates/langspan-core/tests/elsewhere.rs`.
+
 **Export and import (added later, roadmap D5).** `langspan graph export
 WORKSPACE --out FILE` writes what the index holds for the workspace's
 current registration as JSON Lines; `langspan graph import WORKSPACE --in
@@ -518,11 +543,14 @@ current: 3,850 loaded, and 200 kept that the first pass had already parsed.
   With `--depth` it follows up to three levels of such name matches; each
   level compounds the false positives of the one before, and nothing is
   resolved. Import targets are stored but not yet used to narrow matches.
-- Notices cover one physical workspace. A teammate on another machine or in
-  another worktree is not yet told of an interface change. A session in
-  another worktree of the repository is told of new or changed exports that
-  are not committed (in flight), matched by name; once committed they are no
-  longer in flight until they change again. Other machines get neither.
+- A notice is recorded in one physical workspace, and its prompt briefing
+  stays there. A session in another worktree of the repository is told of a
+  renamed, removed or recounted function at the write that calls it
+  ([ADR 0029](0029-break-alerts-at-write-time.md), issue #194), and of new or
+  changed exports that are not committed (in flight), matched by name; once
+  committed they are no longer in flight until they change again. The
+  notice lists that worktree's files that mention the name in `elsewhere`.
+  Other machines get none of these.
 - False positives are expected for common names. False negatives occur for
   dynamic uses, reflection, string-built names, macros and generated code.
 - Formatter changes the normalised comparison does not absorb still read as

@@ -1525,6 +1525,22 @@ captured into the repository. Nothing is checked until
 the index has a complete scan of the workspace, and the hook's diagnostic
 says so. [ADR 0029](adr/0029-break-alerts-at-write-time.md) has the rules.
 
+The check also covers changes made in another worktree of the same
+repository on this machine. A session in the main checkout that writes a call
+to `parse_config`, which a session in a linked worktree has just renamed, is
+told at that write, with the worktree named:
+
+```text
+- "src/report.rs":2 calls "parse_config", which was renamed to "load_config" in "src/config.rs" in worktree "/home/user/app-config" by claude-code.alice 1m ago: "pub fn load_config(text: &str) -> usize".
+```
+
+The change is judged in that worktree's index, since the session's own
+checkout still defines the old name until the branches meet; a worktree
+without a complete scan adds nothing. The worktree's interface notice then
+lists, in `elsewhere` (`langspan status --json`), the files of other
+worktrees that mention the changed name, a scan or two after they are
+written.
+
 Extraction and real-daemon tests exercise files changing on disk. Native-agent
 acceptance and an improvement in a real agent's work have not been demonstrated.
 [ADR 0008](adr/0008-derived-source-index.md) describes extraction, coverage and
