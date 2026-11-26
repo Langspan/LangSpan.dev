@@ -116,7 +116,10 @@ any parameter shape not listed has no count, and its notice cannot alert.
   name's signature in that file and no definition of the old name anywhere
   in the workspace. For a removal, it holds no definition of the name
   anywhere in the workspace, so a function moved to another file, or one of
-  that name elsewhere, is not told as gone. The daemon looks up only names
+  that name elsewhere, is not told as gone. Absence counts only while the
+  index reads every supported file at its current content
+  (`blind_in_scope` zero): a name moved into a file still waiting, partial
+  or too large is not gone, so no rename or removal is told until then. The daemon looks up only names
   that appear in both the write and such a notice, and a renamed function's
   new name, usually none.
 

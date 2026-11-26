@@ -1059,7 +1059,9 @@ with the write's result. Each session is alerted once per change; a call with
 the new count gets nothing. A call to a function that such a session renamed
 gets a line naming the new name and its file; a call to one it removed, with
 no definition of that name left in the workspace, gets a line saying it was
-removed. Calls are matched by name, so a different function of the same name
+removed. A rename or removal is told only while the index reads every
+supported file in full, since a name missing from a file it cannot read is
+not gone. Calls are matched by name, so a different function of the same name
 can be named. A type or order change that keeps the count is left to the
 prompt notice. Gemini CLI reads no context before a tool runs, so its write's calls
 are found before the write and checked after it: the alert is added to the

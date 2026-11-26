@@ -9628,6 +9628,13 @@ pub fn call_candidates(
 /// - a removal, while no definition of the name is left anywhere; every
 ///   call of it breaks.
 ///
+/// "No definition left anywhere" is read from the index, so a rename or a
+/// removal counts only when `index_complete`: the index reads every
+/// supported file of the workspace at its current content
+/// (`GraphCoverage::blind_in_scope` is zero). A name moved into a file not
+/// indexed yet, partial or too large is otherwise missing from `current`
+/// without being gone.
+///
 /// A same-count change is not alerted: calls are matched by name, and
 /// without the argument types at a call site nothing tells a right call
 /// from a wrong one (ADR 0029). Pure; the caller records the alert.
@@ -9636,10 +9643,11 @@ pub fn call_breaks(
     session_id: &str,
     calls: &[CallSite],
     current: &[SymbolRef],
+    index_complete: bool,
     now_ms: u64,
 ) -> Result<Vec<CallBreak>, CoreError> {
     validate_calls(calls)?;
-    let defined = |name: &str| current.iter().any(|symbol| symbol.name == name);
+    let gone = |name: &str| index_complete && !current.iter().any(|symbol| symbol.name == name);
     let holds = |path: &str, name: &str, signature: &str| {
         current.iter().any(|symbol| {
             symbol.path == path && symbol.name == name && symbol.signature == signature
@@ -9656,10 +9664,10 @@ pub fn call_breaks(
                 _ => continue,
             },
             "renamed" => match &change.after_name {
-                Some(to) if holds(&notice.path, to, after) && !defined(&change.name) => None,
+                Some(to) if holds(&notice.path, to, after) && gone(&change.name) => None,
                 _ => continue,
             },
-            "removed" if !defined(&change.name) => None,
+            "removed" if gone(&change.name) => None,
             _ => continue,
         };
         for call in calls.iter().filter(|call| {

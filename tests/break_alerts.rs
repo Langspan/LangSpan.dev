@@ -1022,3 +1022,119 @@ fn a_quoted_heredoc_writing_a_broken_call_is_told_before_it_runs() {
     assert!(again.context.is_none(), "{:?}", again.context);
     assert!(again.detail.contains("break check"), "{}", again.detail);
 }
+
+/// Review 4703451339: a Gemini edit the user changes in its confirmation
+/// dialog keeps its call ID, but what lands is the changed input. The calls
+/// kept from the original input are not checked against it, and the notice
+/// is left for a later write that really has the broken call.
+#[test]
+fn a_gemini_edit_changed_at_confirmation_is_not_told_of_the_calls_it_no_longer_has() {
+    let w = World::new(true);
+    w.wait_for_index();
+    let (before, _) = gemini_replace(
+        &w,
+        "gina",
+        "    return scale(2)\n",
+        "    return scale(2)\n\n",
+        true,
+    );
+    assert_eq!(before.coverage, "admitted", "{}", before.detail);
+    scale_takes_two(&w);
+
+    let path = w.work().join("app/main.py");
+    let proposed = json!({"file_path": path, "old_string": "    return scale(2)\n",
+                          "new_string": "    total = scale(2)\n    return total\n"});
+    let corrected = json!({"file_path": path, "old_string": "    return scale(2)\n",
+                           "new_string": "    total = scale(2, 0)\n    return total\n"});
+    let event = |phase: &str, input: &Value, response: Value| {
+        json!({"session_id": "gina", "cwd": w.work(), "hook_event_name": phase,
+               "tool_name": "replace", "tool_input": input, "tool_response": response})
+    };
+    let before = w.hook("gemini-cli", &event("BeforeTool", &proposed, Value::Null));
+    quiet(&before);
+    assert!(
+        before.detail.contains("kept for the tool's result"),
+        "{}",
+        before.detail
+    );
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        text.replacen(
+            "    return scale(2)\n",
+            "    total = scale(2, 0)\n    return total\n",
+            1,
+        ),
+    )
+    .unwrap();
+    let after = w.hook(
+        "gemini-cli",
+        &event(
+            "AfterTool",
+            &corrected,
+            json!({"llmContent": "Successfully modified file."}),
+        ),
+    );
+    assert_eq!(after.coverage, "observed_mismatch", "{}", after.detail);
+    untold_after(&after);
+    let kept = w.base.join("state").join("break-calls");
+    assert!(
+        fs::read_dir(&kept).map_or(true, |mut entries| entries.next().is_none()),
+        "{kept:?}"
+    );
+
+    // The notice was not used up: a write that really has the broken call
+    // is still told.
+    let (_, after) = gemini_replace(
+        &w,
+        "gina",
+        "    total = scale(2, 0)\n",
+        "    total = scale(2)\n",
+        true,
+    );
+    let context = told_after(&after);
+    assert!(
+        context.contains(r#""app/main.py":5 calls "scale" with 1 argument; it now takes 2"#),
+        "{context}"
+    );
+}
+
+/// Review 4703578513: a name missing from the index is no proof it is gone
+/// while the index cannot read every file. Alice moves `Encode` into a file
+/// too large to index, then removes it from `cmd/api.go`; a call of it is
+/// not told it was removed, and the notice is not used up.
+#[test]
+fn a_removed_name_is_not_told_while_the_index_cannot_read_every_file() {
+    let w = World::new(true);
+    w.wait_for_index();
+    quiet(&w.writes("bob", "b0", "cmd/extra.go", "package main\n"));
+    let mut big =
+        String::from("package main\n\nfunc Encode(value int) int {\n\treturn value * 2\n}\n");
+    while big.len() <= 1 << 20 {
+        big.push_str("// padding to put the file over the index's size bound\n");
+    }
+    fs::write(w.work().join("cmd/codec.go"), &big).unwrap();
+    w.rewrites(
+        "alice",
+        "a1",
+        "cmd/api.go",
+        "package main\n\nfunc other() int {\n\treturn 0\n}\n",
+    );
+    w.wait_for_notice("Encode", "\"removed\"");
+    let deadline = Instant::now() + WAIT;
+    while !w
+        .cli(&["graph", "blind-spots", "app"])
+        .1
+        .contains("cmd/codec.go")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "codec.go never seen as too large"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let call = "package main\n\nfunc extra() int {\n\treturn Encode(5)\n}\n";
+    quiet(&w.writes("bob", "b1", "cmd/extra.go", call));
+    let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
+    assert!(!events.contains("interface_alerted"), "{events}");
+}

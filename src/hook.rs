@@ -2919,7 +2919,11 @@ impl Session<'_> {
 
     /// The post-tool run of a write. With `breaks_after`, the calls its
     /// pre-tool run kept are taken whatever the result, and checked only
-    /// when the write succeeded and was observed.
+    /// when the write succeeded and was observed with the input they were
+    /// kept from. An input changed after admission (a Gemini edit the user
+    /// changes in its confirmation dialog keeps its call ID) is observed as
+    /// a mismatch: the kept calls may not be what was written, so they are
+    /// dropped unchecked and no notice is used up on them.
     fn post(
         &mut self,
         ids: &Identities,
@@ -2938,7 +2942,7 @@ impl Session<'_> {
             && result == ToolResult::Succeeded
             && !matches!(
                 reply.coverage,
-                "timeout" | "unavailable" | "unknown" | "unsupported"
+                "timeout" | "unavailable" | "unknown" | "unsupported" | "observed_mismatch"
             )
         {
             add_alert(&mut reply, "PostToolUse", self.checked_calls(ids, calls));
