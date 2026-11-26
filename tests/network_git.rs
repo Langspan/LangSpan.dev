@@ -14,7 +14,7 @@ use std::{
 };
 
 mod support;
-use support::{alive, asks_for_credentials};
+use support::{asks_for_credentials, running};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -100,10 +100,10 @@ fn a_hanging_credential_helper_is_killed_with_its_process_group_at_the_deadline(
         .unwrap();
     // Killed processes are reaped by init; give that a bounded moment.
     let gone_by = Instant::now() + Duration::from_secs(10);
-    while alive(pid) && Instant::now() < gone_by {
+    while running(pid) && Instant::now() < gone_by {
         std::thread::sleep(Duration::from_millis(20));
     }
-    let survived = alive(pid);
+    let survived = running(pid);
     if survived {
         let _ = rustix::process::kill_process(
             rustix::process::Pid::from_raw(pid).unwrap(),

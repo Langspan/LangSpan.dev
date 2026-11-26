@@ -231,9 +231,30 @@ fn a_test_that_panics_leaves_no_coordinator_running() {
     let status = test.wait_with_output().status;
     assert!(!status.success(), "the supervised test was meant to fail");
     assert!(
-        !support::alive(pid),
+        !support::running(pid),
         "coordinator {pid} outlived the test that panicked"
     );
+}
+
+/// A process that has exited but that no parent has reaped is a zombie:
+/// signal 0 still finds it. A coordinator orphaned to an init that does not
+/// reap (some Linux containers) stays one after it exits, so the tests here
+/// wait with `support::running`, which counts a zombie as stopped.
+#[test]
+fn a_zombie_process_counts_as_stopped() {
+    let mut child = Process::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+    let pid = i32::try_from(child.id()).unwrap();
+    // Not reaped: until `wait`, it stays a zombie of this process.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while support::running(pid) {
+        assert!(Instant::now() < deadline, "{pid} never exited");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        support::alive(pid),
+        "{pid} was reaped before it was checked"
+    );
+    child.wait().unwrap();
 }
 
 /// Supervised by the test below: starts a coordinator with a short idle
@@ -267,7 +288,7 @@ fn a_killed_test_leaves_a_coordinator_that_ends_once_idle() {
     let _cleanup = KillOnDrop(pid);
     test.stop();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while support::alive(pid) {
+    while support::running(pid) {
         assert!(
             Instant::now() < deadline,
             "coordinator {pid} was still running 10 s after its test was killed: {}",

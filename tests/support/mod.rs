@@ -103,6 +103,24 @@ pub fn alive(pid: i32) -> bool {
     rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
 }
 
+/// Whether `pid` is still running: gone, or a zombie no parent has reaped
+/// yet, is not. A process orphaned to an init that does not reap (some
+/// Linux containers) stays a zombie, and [`alive`] still finds it. Use this
+/// to wait for a process to end.
+#[allow(dead_code)] // Not every test that includes this module waits for a process.
+pub fn running(pid: i32) -> bool {
+    if !alive(pid) {
+        return false;
+    }
+    let state = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("run ps");
+    let state = String::from_utf8_lossy(&state.stdout);
+    let state = state.trim();
+    !state.is_empty() && !state.starts_with('Z')
+}
+
 /// Runs a command built fresh by `make`, retrying while Linux says the
 /// program is busy (ETXTBSY). A test that copies a binary and runs it can hit
 /// this: a process another test thread forks while the copy is still open for
