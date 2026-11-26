@@ -136,6 +136,18 @@ const COUNT_INDEXES: &str = concat!(
     ";"
 );
 
+/// The report's refusal window (H9): `REFUSAL_WINDOW_MS`, or for tests only
+/// `LANGSPAN_TEST_REFUSAL_WINDOW_MS`, between 100 ms and that, so a test can
+/// see a refusal abandoned without waiting 30 minutes. Not a setting: it is
+/// undocumented for users and can only shorten the window.
+fn refusal_window_ms() -> u64 {
+    std::env::var("LANGSPAN_TEST_REFUSAL_WINDOW_MS")
+        .ok()
+        .and_then(|text| text.parse::<u64>().ok())
+        .map(|ms| ms.clamp(100, langspan_core::REFUSAL_WINDOW_MS))
+        .unwrap_or(langspan_core::REFUSAL_WINDOW_MS)
+}
+
 /// The newest `write_refused` rows, newest first.
 const REFUSAL_ROWS: &str = concat!(
     "SELECT seq, event_json FROM events WHERE ",
@@ -1540,10 +1552,10 @@ impl Store {
         Ok((open, members, known))
     }
 
-    /// The coordination report (roadmap H8): the newest `TODAY_EVENTS`
-    /// events at most, placed in wall time as `today` places them, counted
-    /// by the core. Reads only; it writes nothing and acknowledges no
-    /// message.
+    /// The coordination report (roadmap H8, with H9's refusal outcomes):
+    /// the newest `TODAY_EVENTS` events at most, placed in wall time as
+    /// `today` places them, counted by the core. Reads only; it writes
+    /// nothing and acknowledges no message.
     pub fn report(&self, workspace_id: &str, from_ms: u64, wall_ms: u64) -> StoreResult<Outcome> {
         if let Some(refused) = self.refused_window(Some(workspace_id), from_ms, wall_ms) {
             return Ok(refused);
@@ -1565,6 +1577,7 @@ impl Store {
             open_intents: &open_intents,
             session_workspaces: &session_workspaces,
             known: known.as_ref(),
+            refusal_window_ms: refusal_window_ms(),
         });
         report.shrink_until(|report| {
             serde_json::to_vec(report).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)

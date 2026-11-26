@@ -58,6 +58,58 @@ const TAIL_LINES: usize = 20;
 /// only if the state owner's count is still that when the record arrives.
 pub type WriteCounts = Arc<Mutex<BTreeMap<String, u64>>>;
 
+/// The automatic checks running now, each by run with its cancel flag. The
+/// daemon reads it so that it neither stops for idleness while a check runs
+/// nor exits leaving a check's command behind (issue #239).
+#[derive(Clone, Default)]
+pub struct Runs(Arc<Mutex<BTreeMap<u64, Arc<AtomicBool>>>>);
+
+impl Runs {
+    /// Counts `run` as running until the returned guard is dropped.
+    fn enter(&self, run: u64, cancel: Arc<AtomicBool>) -> Entered {
+        self.lock().insert(run, cancel);
+        Entered {
+            runs: self.clone(),
+            run,
+        }
+    }
+    /// Whether any automatic check is running.
+    pub fn any(&self) -> bool {
+        !self.lock().is_empty()
+    }
+    /// Cancels every running check and waits up to `limit` for them to
+    /// end. A cancelled command's process group is killed within about a
+    /// tenth of a second. Returns whether they all ended in time.
+    pub fn cancel_all(&self, limit: Duration) -> bool {
+        for cancel in self.lock().values() {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        let deadline = Instant::now() + limit;
+        while self.any() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, Arc<AtomicBool>>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A run counted in [`Runs`]; dropping it, however the run ends, uncounts it.
+struct Entered {
+    runs: Runs,
+    run: u64,
+}
+
+impl Drop for Entered {
+    fn drop(&mut self) {
+        self.runs.lock().remove(&self.run);
+    }
+}
+
 /// The daemon's timing for automatic checks (`config.json`).
 #[derive(Debug, Clone, Copy)]
 pub struct Timing {
@@ -294,13 +346,14 @@ struct Workspace {
 /// The worker loop. `record` sends a command to the state owner and returns
 /// its outcome, or `None` when the owner could not be reached. With a
 /// registration, the owner refuses the command unless the workspace still
-/// has that registration.
+/// has that registration. Every run is counted in `runs` while it goes.
 #[allow(clippy::too_many_lines)]
 pub fn worker(
     sender: mpsc::SyncSender<Message>,
     messages: mpsc::Receiver<Message>,
     timing: Timing,
     writes: WriteCounts,
+    runs: Runs,
     record: impl Fn(Option<&Registration>, String, Command) -> Option<Outcome>,
 ) {
     let debounce = timing.debounce;
@@ -542,9 +595,13 @@ pub fn worker(
                     writes.clone(),
                 );
                 let (workspace_id, run) = (workspace_id.clone(), next_run);
+                // Counted before the thread starts, so the daemon never sees
+                // a moment with the run going and uncounted.
+                let entered = runs.enter(run, cancel.clone());
                 let started = std::thread::Builder::new()
                     .name("langspan-auto-check".into())
                     .spawn(move || {
+                        let _entered = entered;
                         let ended = run_once(
                             &of.root,
                             &command,
@@ -1090,6 +1147,30 @@ fn tail(bytes: &[u8], cut: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_is_counted_until_its_guard_drops_and_cancel_all_cancels_each() {
+        let runs = Runs::default();
+        assert!(!runs.any());
+        assert!(runs.cancel_all(Duration::ZERO), "nothing to wait for");
+        let (one, two) = (Arc::<AtomicBool>::default(), Arc::<AtomicBool>::default());
+        let first = runs.enter(1, one.clone());
+        let second = runs.enter(2, two.clone());
+        drop(first);
+        assert!(runs.any(), "run 2 still goes");
+        // A run that does not end in time is reported, not waited on.
+        assert!(!runs.cancel_all(Duration::from_millis(50)));
+        assert!(!one.load(Ordering::SeqCst), "run 1 had ended");
+        assert!(two.load(Ordering::SeqCst));
+        // Ended on another thread while `cancel_all` waits.
+        let ender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(second);
+        });
+        assert!(runs.cancel_all(Duration::from_secs(10)));
+        assert!(!runs.any());
+        ender.join().unwrap();
+    }
 
     fn registration() -> Registration {
         Registration {

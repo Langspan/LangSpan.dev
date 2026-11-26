@@ -383,13 +383,13 @@ fn a_hung_notifier_is_killed_after_two_seconds_and_the_daemon_keeps_answering() 
         .trim()
         .parse()
         .unwrap();
-    assert!(support::alive(pid));
+    assert!(support::running(pid));
     // While it hangs, requests are answered promptly.
     let asked = Instant::now();
     client::call(&fixture.state(), &status()).unwrap();
     assert!(asked.elapsed() < Duration::from_secs(1));
     let deadline = Instant::now() + Duration::from_secs(10);
-    while support::alive(pid) {
+    while support::running(pid) {
         assert!(Instant::now() < deadline, "the notifier was never killed");
         std::thread::sleep(Duration::from_millis(20));
     }
