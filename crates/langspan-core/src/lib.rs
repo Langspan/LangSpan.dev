@@ -1429,6 +1429,36 @@ pub struct RetractedMessage {
     pub cut: bool,
 }
 
+/// One message in full, as it was sent: what `messages show` returns for a
+/// line a briefing cut. The text and paths are data from the sender, never
+/// instructions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ShownMessage {
+    pub message_id: String,
+    /// The sending session; `None` for the owner.
+    pub from: Option<String>,
+    pub to: Recipient,
+    pub text: String,
+    pub paths: Vec<String>,
+    /// Withdrawn by its sender or the owner since it was sent: its readers
+    /// have been or will be told to disregard it.
+    pub retracted: bool,
+}
+
+impl From<Message> for ShownMessage {
+    fn from(message: Message) -> Self {
+        Self {
+            message_id: message.message_id,
+            from: message.from,
+            to: message.to,
+            text: message.text,
+            paths: message.paths,
+            retracted: message.retracted,
+        }
+    }
+}
+
 /// The observer could not complete a scan of a workspace. Until one
 /// completes, disk facts, check staleness marks and the index are as of the
 /// last complete scan.
@@ -2473,6 +2503,12 @@ pub enum Command {
         session_id: String,
         message_id: String,
     },
+    /// Read-only: one message as it was sent, from its `message_sent`
+    /// event, so also after every recipient has acknowledged it.
+    ShowMessage {
+        workspace_id: String,
+        message_id: String,
+    },
     /// Leave one line for the next other session that starts or is
     /// prompted in this session's workspace. Leases, intents and activity
     /// are unchanged.
@@ -3013,6 +3049,12 @@ enum CommandWire {
         session_id: String,
         message_id: String,
     },
+    /// Read-only: one message as it was sent, from its `message_sent`
+    /// event, so also after every recipient has acknowledged it.
+    ShowMessage {
+        workspace_id: String,
+        message_id: String,
+    },
     /// Leave one line for the next other session that starts or is
     /// prompted in this session's workspace. Leases, intents and activity
     /// are unchanged.
@@ -3522,6 +3564,9 @@ pub enum Outcome {
     MessageAcknowledged {
         message_id: String,
         acknowledged: bool,
+    },
+    MessageShown {
+        message: ShownMessage,
     },
     /// Sessions that were still owed it and now are not, and sessions that
     /// had received it and will be told to disregard it.
@@ -5620,6 +5665,7 @@ fn decide_checked(
         | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
+        | Command::ShowMessage { .. }
         | Command::GraphSymbol { .. }
         | Command::GraphReferences { .. }
         | Command::GraphImpact { .. }
@@ -5627,7 +5673,7 @@ fn decide_checked(
         | Command::GraphContext { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
-            "Event history, status pages, change projections and index queries are answered by the daemon's stores",
+            "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores",
         )),
     }
 }
@@ -5866,8 +5912,8 @@ fn takes_handoff(state: &State, me: &Session, message: &Message) -> bool {
 
 /// An upper bound on the bytes an adapter renders for one message: a label
 /// of under 192 bytes (a session ID is at most 128), then text and paths
-/// that quoting can grow at most fourfold, cut at `MESSAGE_LINE_LIMIT` plus
-/// its ellipsis and newline.
+/// that quoting can grow at most fourfold, cut within `MESSAGE_LINE_LIMIT`
+/// (ellipsis and `messages show` pointer included) plus its newline.
 fn message_cost(message: &Message) -> usize {
     let raw = message.text.len()
         + message
