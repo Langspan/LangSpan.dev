@@ -92,7 +92,9 @@ stderr and to `daemon.log` in the state directory. Set
 keeps only the environment it needs (`HOME`, `PATH`, the locale, `XDG_*`, the
 host configuration directories `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
 `GEMINI_CLI_HOME`, the SSH agent socket and the desktop session variables),
-not a host's API keys. The login service sets `PATH` to the one setup ran
+not a host's API keys. A relative host configuration directory is made
+absolute against the caller's working directory, since the coordinator runs
+in `/`. The login service sets `PATH` to the one setup ran
 with, so automatic checks find the same tools, and keeps any of
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME` set then, so its host
 checks read the directories setup installed into.

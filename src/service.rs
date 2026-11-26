@@ -25,7 +25,8 @@ pub const MARKER: &str = "Written by `langspan setup`; `langspan uninstall --app
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 /// The host directory overrides a service keeps from setup's environment,
 /// the ones `UserHome::files` reads. Directory names only, never a secret.
-const HOST_DIRS: [&str; 3] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME"];
+/// A coordinator started on demand makes the same ones absolute.
+pub const HOST_DIRS: [&str; 3] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME"];
 /// The largest service file read.
 const MAX_FILE_BYTES: u64 = 64 << 10;
 

@@ -74,6 +74,8 @@ const HOME_OVERRIDES: [&str; 6] = [
 /// `home`, an explicit `--home`, `HOME` is that directory and the variables
 /// in `HOME_OVERRIDES` are dropped, so the coordinator's
 /// `UserHome::new(None)` finds the same directories as `UserHome::new(home)`.
+/// A relative override in `service::HOST_DIRS` is made absolute against this
+/// process's working directory, since the coordinator runs in `/`.
 pub fn child_environment(
     vars: impl IntoIterator<Item = (OsString, OsString)>,
     home: Option<&Path>,
@@ -85,6 +87,20 @@ pub fn child_environment(
                 (KEPT_ENV.contains(&name) || name.starts_with("XDG_") || name.starts_with("LC_"))
                     && !(home.is_some() && (name == "HOME" || HOME_OVERRIDES.contains(&name)))
             })
+        })
+        .map(|(name, value)| {
+            // The coordinator runs in `/`: a relative host directory
+            // resolves here, against the caller's working directory, as
+            // `UserHome` resolves it for setup and the hooks. A value that
+            // cannot be resolved is kept as written.
+            let relative = !value.is_empty() && !Path::new(&value).is_absolute();
+            if relative
+                && crate::service::HOST_DIRS.iter().any(|dir| name == *dir)
+                && let Ok(absolute) = std::path::absolute(&value)
+            {
+                return (name, absolute.into_os_string());
+            }
+            (name, value)
         })
         .collect();
     if let Some(home) = home {
@@ -341,6 +357,23 @@ mod tests {
         assert_eq!(value(&env, "XDG_STATE_HOME"), Some("/home/u/state"));
         assert_eq!(value(&env, "ANTHROPIC_API_KEY"), None);
         assert_eq!(value(&env, "OPENAI_API_KEY"), None);
+    }
+
+    #[test]
+    fn a_relative_host_directory_resolves_against_the_callers_directory() {
+        // The coordinator runs in `/`, so `./config/codex` kept as written
+        // would point it at `/config/codex`.
+        let mut vars = caller();
+        vars.retain(|(name, _)| name != "CODEX_HOME" && name != "GEMINI_CLI_HOME");
+        vars.push(("CODEX_HOME".into(), "./config/codex".into()));
+        vars.push(("GEMINI_CLI_HOME".into(), "".into()));
+        let env = child_environment(vars, None);
+        let expected = std::path::absolute("./config/codex").unwrap();
+        assert!(expected.is_absolute());
+        assert_eq!(value(&env, "CODEX_HOME"), expected.to_str());
+        assert_eq!(value(&env, "CLAUDE_CONFIG_DIR"), Some("/cfg/claude"));
+        // An empty override means none, as `UserHome` reads it.
+        assert_eq!(value(&env, "GEMINI_CLI_HOME"), Some(""));
     }
 
     #[test]

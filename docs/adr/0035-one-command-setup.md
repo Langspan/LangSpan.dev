@@ -61,7 +61,9 @@ Both files also keep each of `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
 directory, so the coordinator's host checks read the directories setup
 installed into rather than the defaults. The unit refuses one holding a
 control character, a quote, a backslash, `%` or `$` instead of dropping it,
-since dropping it would point the checks at another directory.
+since dropping it would point the checks at another directory. A coordinator
+started on demand keeps the same three, also made absolute against its
+caller's working directory, since it runs in `/`.
 Every manager command is bounded to 10 seconds. Linux
 without a reachable user manager (`systemctl --user show` fails), another
 platform, or `--home` (a home that is not the login user's) gets no service;
