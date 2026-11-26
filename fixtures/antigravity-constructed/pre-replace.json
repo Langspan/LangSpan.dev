@@ -1,0 +1,24 @@
+{
+  "conversationId": "00000000-0000-4000-8000-0000000000a1",
+  "workspacePaths": [
+    "/work/demo"
+  ],
+  "transcriptPath": "~/.gemini/antigravity-cli/brain/00000000-0000-4000-8000-0000000000a1/.system_generated/logs/transcript.jsonl",
+  "artifactDirectoryPath": "~/.gemini/antigravity-cli/brain/00000000-0000-4000-8000-0000000000a1",
+  "modelName": "placeholder-model",
+  "lastUserInput": "Rename the parser module",
+  "toolCall": {
+    "name": "replace_file_content",
+    "args": {
+      "TargetFile": "/work/demo/a.txt",
+      "Instruction": "Change the greeting",
+      "Description": "Change the greeting",
+      "AllowMultiple": false,
+      "TargetContent": "hello",
+      "ReplacementContent": "goodbye",
+      "StartLine": 1,
+      "EndLine": 1
+    }
+  },
+  "stepIdx": 5
+}

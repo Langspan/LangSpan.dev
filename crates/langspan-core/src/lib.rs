@@ -8177,7 +8177,8 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
         .values()
         .filter(|session| {
             session.workspace_id == me.workspace_id
-                && std::iter::once(from)
+                && [from]
+                    .into_iter()
                     .chain(earlier.iter().map(String::as_str))
                     .any(|source| {
                         session.parent.as_deref() == Some(source)
