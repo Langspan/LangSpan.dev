@@ -358,7 +358,12 @@ fn index(
                 // The new name is the branch's own definition, as an
                 // addition is.
                 branch.added.insert(to.clone());
-                (line_of(&old, &change.name, change.kind), before, None, Some(to))
+                (
+                    line_of(&old, &change.name, change.kind),
+                    before,
+                    None,
+                    Some(to),
+                )
             }
             Change::Added => {
                 branch.added.insert(change.name);
@@ -737,10 +742,7 @@ mod tests {
     #[test]
     fn a_file_that_did_not_parse_completely_changes_no_definition() {
         // Its parse finds nothing defined, which is not evidence `save` went.
-        let edit = branch(
-            "edit",
-            &[("src/s.rs", "pub fn save(x: u32) {}\n", ")\n")],
-        );
+        let edit = branch("edit", &[("src/s.rs", "pub fn save(x: u32) {}\n", ")\n")]);
         let caller = branch("caller", &[("src/i.rs", "", "fn c() { save(1); }\n")]);
         assert_eq!(compare(&[edit, caller]).0, Vec::new());
     }

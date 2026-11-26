@@ -7883,14 +7883,8 @@ fn decide_checked(
                                 .any(|known| known.path == stale.path && known.at_ms >= since)
                         })
                 };
-                let shown_keys = keep_changes(
-                    &mut briefing,
-                    &told,
-                    &acted,
-                    &stale_again,
-                    *mid_turn,
-                    once,
-                );
+                let shown_keys =
+                    keep_changes(&mut briefing, &told, &acted, &stale_again, *mid_turn, once);
                 briefing.changed = once || shown_anything(&briefing);
                 let next: Vec<u64> = keys
                     .iter()
@@ -10797,7 +10791,7 @@ fn keep_changes(
     briefing.notes.retain(|note| keep(note_key(note), false));
     // Each notice's ID goes with its change, so the hook's report of what it
     // showed names the right one (issue #269).
-    let mut ids = briefing.interface_notice_ids.drain(..).collect::<Vec<_>>().into_iter();
+    let mut ids = briefing.interface_notice_ids.clone().into_iter();
     let mut kept_ids = Vec::new();
     briefing.interface_changes.retain(|impact| {
         let id = ids.next();
