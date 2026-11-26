@@ -429,14 +429,14 @@ pub fn combine(
         }
         // Linear history is checked before the fast-forward shortcut, so a
         // rebase landing never brings in a merge commit unchanged.
-        if shape.rebase {
-            if let Some(reason) = merges(root, &current, &theirs, deadline)? {
-                return Ok(Combination::NotRebased {
-                    branch: branch.clone(),
-                    reason,
-                    notes,
-                });
-            }
+        if shape.rebase
+            && let Some(reason) = merges(root, &current, &theirs, deadline)?
+        {
+            return Ok(Combination::NotRebased {
+                branch: branch.clone(),
+                reason,
+                notes,
+            });
         }
         if is_ancestor(root, &current, &theirs, deadline)? {
             current = theirs;
