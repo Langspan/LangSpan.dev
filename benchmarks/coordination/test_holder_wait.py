@@ -65,6 +65,27 @@ class HolderWaitStandin(unittest.TestCase):
         self.assertEqual(holder_wait.summarize(self.out)["langspan_wait"]["runs"], 2)
 
 
+class CoordinatorLifetime(unittest.TestCase):
+    def test_an_interrupt_while_the_coordinator_starts_stops_it(self):
+        """Issue #239: until the constructor returns, no caller holds the
+        coordinator to stop it. A stand-in `langspan` whose `daemon` runs
+        until killed and whose `status` interrupts this test process makes
+        the constructor raise; the daemon must not outlive it."""
+        with tempfile.TemporaryDirectory() as temp:
+            pid_file = Path(temp, "daemon.pid")
+            fake = Path(temp, "langspan")
+            fake.write_text("#!/bin/sh\n"
+                            "if [ \"$1\" = daemon ]; then echo $$ > '%s'; exec sleep 600; fi\n"
+                            "while [ ! -s '%s' ]; do sleep 0.05; done\n"
+                            "kill -INT $PPID; sleep 5\n" % (pid_file, pid_file))
+            fake.chmod(0o700)
+            with self.assertRaises(KeyboardInterrupt):
+                driver.Coordinator(str(fake), Path(temp, "state"), Path(temp, "daemon.log"))
+            pid = int(pid_file.read_text())
+            with self.assertRaises(ProcessLookupError, msg="daemon %d outlived the interrupt" % pid):
+                os.kill(pid, 0)
+
+
 class CoordinatorSocketPath(unittest.TestCase):
     def test_a_long_state_folder_is_refused_naming_the_socket_path_length(self):
         with tempfile.TemporaryDirectory() as temp:

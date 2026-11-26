@@ -113,6 +113,19 @@ coordinating local edits. Each machine runs its own daemon; remote sharing is a
 separate setup below. The daemon requires owner-only permissions and does not
 change workspace files.
 
+The daemon checks its state directory every second and exits if the directory
+was removed, was replaced by another folder at the same path, or is no longer
+owner-only. It logs a `daemon_stopping` line naming the reason
+(`state_directory_removed`, `state_directory_replaced` or
+`state_directory_not_private`). The next hook or `langspan mcp` call starts a
+coordinator for the folder now at that path, as it would after any stop; a
+folder that others can open is refused at start.
+
+A debug build of the daemon also exits after five minutes with no client
+(reason `idle`), so a coordinator left by a test that was killed ends by
+itself. The test-only variable `LANGSPAN_TEST_IDLE_EXIT_MS` changes that limit
+(`0` turns it off). A release build has no idle exit and ignores the variable.
+
 ## Connect a native agent
 
 ### All repositories for this user

@@ -42,6 +42,12 @@ identities, and observable recovery. The owner has authorized implementation.
 - Use owner-only Unix sockets, a bounded versioned JSON-line protocol, and the
   official Rust MCP SDK. Both interfaces call the same daemon operations. No
   network listener, account, credential access, telemetry or UI is required.
+- A daemon serves only the state directory it started with. Its state owner
+  checks it every second, between requests, and exits with a logged reason
+  once the directory is removed, replaced at the same path, or no longer
+  owner-only (issue #239). A debug build also exits after an idle period, so
+  a coordinator a killed test left behind ends; a release build has no idle
+  exit.
 
 ## Guarantee and failure behavior
 

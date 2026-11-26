@@ -54,6 +54,50 @@ pub fn in_home<'a>(
         .env_remove("CLAUDE_PROJECT_DIR")
 }
 
+/// A child process a test started, such as a coordinator, killed and reaped
+/// when this is dropped: on success, a failed assertion or any other panic
+/// (issue #239). `std::process::Child` alone does neither, so a test that
+/// keeps a bare `Child` past a statement that can panic leaves the process
+/// running.
+#[allow(dead_code)] // Not every test that includes this module starts a process.
+pub struct Owned(Option<std::process::Child>);
+#[allow(dead_code)]
+impl Owned {
+    /// Starts `command` and owns the process from the moment it exists.
+    pub fn spawn(command: &mut std::process::Command) -> Self {
+        Self(Some(command.spawn().expect("start the child process")))
+    }
+    pub fn child(&mut self) -> &mut std::process::Child {
+        self.0
+            .as_mut()
+            .expect("the child process was already stopped")
+    }
+    pub fn id(&self) -> u32 {
+        self.0.as_ref().map_or(0, std::process::Child::id)
+    }
+    /// Kills and reaps the process now. Stopping one that is already gone
+    /// does nothing.
+    pub fn stop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+    /// Gives up ownership, for a test that waits for the process itself.
+    pub fn wait_with_output(mut self) -> std::process::Output {
+        self.0
+            .take()
+            .expect("the child process was already stopped")
+            .wait_with_output()
+            .expect("wait for the child process")
+    }
+}
+impl Drop for Owned {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 #[allow(dead_code)] // Not every test that includes this module checks a process.
 pub fn alive(pid: i32) -> bool {
     rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
