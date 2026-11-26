@@ -48,8 +48,9 @@ pub use recent::{
     RECENT_WINDOW_MS, RecentChanges, RecentInterfaceChange,
 };
 pub use report::{
-    OTHER_HOST, REPORT_SESSIONS, Report, ReportCounts, ReportHost, ReportQuery, ReportSession,
-    host_kind, open_intents, report, session_workspaces,
+    OTHER_HOST, REPORT_HISTORY_EVENTS, REPORT_SESSIONS, Report, ReportCounts, ReportHost,
+    ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
+    session_workspaces,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,

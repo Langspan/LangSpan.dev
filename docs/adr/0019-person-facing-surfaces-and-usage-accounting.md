@@ -252,7 +252,16 @@ acknowledgement. Four choices were needed:
   it counts as left open, even when it was set before the events read: the
   store folds the older intent events, found through a partial index, into
   the set of sessions holding one where the read starts. Removing a
-  workspace ends the intents in it there, as it does in the state. At most
+  workspace ends the intents in it there, as it does in the state. That
+  fold starts from the newest compaction snapshot and reads at most the
+  newest 10,000 intent, registration and workspace-removal events before
+  the events read (review 4705125393), so a report's cost, and so the time
+  it holds the store worker and the admissions queued behind it, stays
+  bounded however long the log grows. When more such events exist, the
+  snapshot is not used and only the sessions those 10,000 events name are
+  known: an event in the window whose session's workspace, or whose
+  session's open intent at its end, rested on an older event is in no
+  count, and the report says `partial`. At most
   16 sessions are listed, earliest first;
   host totals include every session. The MCP text, labelled as data, is at
   most 2,400 bytes, dropping session rows last first.

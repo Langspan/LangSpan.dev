@@ -627,3 +627,129 @@ async fn the_mcp_answer_stays_within_a_briefing_with_forty_sessions() {
     client.cancel().await.unwrap();
     w.stop();
 }
+
+/// Review 4705125393: a report on a long history with no compaction
+/// snapshot holds the store worker for a bounded time only, so an edit
+/// admission sent while a report runs completes within `ADMISSION_LIMIT`.
+/// Real daemon process and real SQLite: 800,000 intent events are written
+/// into the log before the daemon starts, as a long-lived store holds them.
+/// Folding all of them took 2.6 s on a cloud Linux runner (debug build),
+/// the bounded fold 0.2 s: the limit is far from both.
+#[test]
+fn an_admission_completes_promptly_while_reports_read_a_long_history() {
+    const HISTORY_PAIRS: i64 = 400_000;
+    const ADMISSION_LIMIT: Duration = Duration::from_secs(1);
+    let mut w = World::new();
+    w.start();
+    let state = w.state();
+    call(
+        &state,
+        "w",
+        Command::WorkspaceRegister {
+            workspace_id: "demo".into(),
+            root: w.work().to_string_lossy().into_owned(),
+        },
+    );
+    for session in ["claude-code.alice", "codex.bob"] {
+        call(
+            &state,
+            &format!("s-{session}"),
+            Command::SessionRegister {
+                session_id: session.into(),
+                workspace_id: "demo".into(),
+                parent: None,
+                headless: false,
+            },
+        );
+    }
+    call(
+        &state,
+        "i",
+        Command::IntentSet {
+            session_id: "codex.bob".into(),
+            paths: vec!["src/api.rs".into()],
+            summary: "filler".into(),
+        },
+    );
+    call(
+        &state,
+        "e",
+        Command::IntentEnd {
+            session_id: "codex.bob".into(),
+        },
+    );
+    w.stop();
+    {
+        let connection = rusqlite::Connection::open(state.join("state.sqlite3")).unwrap();
+        let newest = |kind: &str| -> String {
+            connection
+                .query_row(
+                    "SELECT event_json FROM events WHERE json_extract(event_json, '$.type') = ?1
+                     ORDER BY seq DESC LIMIT 1",
+                    [kind],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        let (set, ended) = (newest("intent_set"), newest("intent_ended"));
+        connection
+            .execute(
+                "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < ?1 * 2)
+                 INSERT INTO events(event_json, recorded_at_ms)
+                 SELECT CASE i % 2 WHEN 0 THEN ?2 ELSE ?3 END,
+                        (SELECT max(recorded_at_ms) FROM events)
+                 FROM n",
+                rusqlite::params![HISTORY_PAIRS, set, ended],
+            )
+            .unwrap();
+    }
+    w.start();
+    // A restart begins a generation: Alice registers again, as a hook would.
+    call(
+        &state,
+        "s-again",
+        Command::SessionRegister {
+            session_id: "claude-code.alice".into(),
+            workspace_id: "demo".into(),
+            parent: None,
+            headless: false,
+        },
+    );
+    let reporter = {
+        let state = state.clone();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let outcome = call(
+                &state,
+                "r",
+                Command::Report {
+                    workspace_id: "demo".into(),
+                    from_ms: 0,
+                },
+            );
+            assert!(matches!(outcome, Outcome::Report { .. }), "{outcome:?}");
+            started.elapsed()
+        })
+    };
+    // The report reaches the store worker first; the admission waits
+    // behind whatever of its work is left.
+    std::thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    let outcome = call(
+        &state,
+        "a",
+        Command::Admit {
+            session_id: "claude-code.alice".into(),
+            paths: vec!["src/lib.rs".into()],
+            ttl_ms: 60_000,
+        },
+    );
+    let admission = started.elapsed();
+    assert!(matches!(outcome, Outcome::Admitted { .. }), "{outcome:?}");
+    let report = reporter.join().unwrap();
+    eprintln!("admission {admission:?}; report {report:?}");
+    assert!(
+        admission < ADMISSION_LIMIT,
+        "an admission took {admission:?} while a report ran ({report:?})"
+    );
+}

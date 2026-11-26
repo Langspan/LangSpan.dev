@@ -1149,11 +1149,15 @@ listed, earliest first; the host totals include every session, and the rest
 are counted in `omitted_sessions`. `--json` carries `window`, `hosts` (each
 with `sessions`, `counts` and `not_reported`), `sessions` (`session_id`,
 `host`, `counts`), `truncated` and, when there are any, `omitted_sessions`,
-`covered_from_ms` and `undated`. A window with more than 50,000 events is
+`covered_from_ms`, `undated` and `partial`. A window with more than 50,000 events is
 counted from the newest 50,000 and says `truncated: true`, with
 `covered_from_ms`, the wall time those events start at. So does a window
 that starts before the newest retention cutoff, with `covered_from_ms` no
-earlier than that cutoff. The MCP tool
+earlier than that cutoff. Each session's workspace and open intent where
+those events start come from at most the newest 10,000 intent and
+registration events before them; when an event in the window needed an
+older one, it is left out of every count and the report says
+`partial: true` ("Partial: ..." in the text). The MCP tool
 `langspan_report` (`workspace_id`, and `since`, optional) returns the same
 text, labelled as data, within 2,400 bytes: session rows are left out, last
 first, until it fits, and the host totals keep them. It is a read: it

@@ -16,7 +16,7 @@ use crate::dashboard::host_and_prefix;
 use crate::today::{Placement, event_facts};
 use crate::{
     CLAUDE_CODE_HOST, CODEX_HOST, CURSOR_HOST, ClockAnchor, Event, GEMINI_HOST, LeaseRelation,
-    RecordedEvent, SHELL_TOOL, SourceOrigin, TodayWindow, ToolResult, is_zero,
+    RecordedEvent, SHELL_TOOL, SourceOrigin, TodayWindow, ToolResult, is_false, is_zero,
 };
 
 /// Session rows one report lists, earliest first; the rest are in the host
@@ -126,6 +126,12 @@ pub struct Report {
     /// anchored). They are in no count.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub undated: u32,
+    /// The store folded only the newest `REPORT_HISTORY_EVENTS` intent and
+    /// registration events before those read, so some sessions' workspace
+    /// or intent there was unknown, and an event in the window needed it:
+    /// that event is in no count, and the counts may be low.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub partial: bool,
 }
 
 /// What a report is asked to cover.
@@ -153,6 +159,47 @@ pub struct ReportQuery<'a> {
     /// workspace of its own counts for the workspace its session belonged
     /// to when it was recorded, not the one it belongs to now.
     pub session_workspaces: &'a BTreeMap<String, String>,
+    /// `None` when the two maps above folded every older event (from a
+    /// compaction snapshot or the start of the log). Otherwise the store
+    /// folded only the newest `REPORT_HISTORY_EVENTS` of them, and only
+    /// the sessions these name are known; `known_sessions` folds it.
+    pub known: Option<&'a ReportKnown>,
+}
+
+/// The most intent and registration events before those a report reads
+/// that the store folds for it. A report's cost is then bounded whatever
+/// the history: at most `TODAY_EVENTS` events read and this many folded.
+/// These events are a few per session, so this reaches back thousands of
+/// sessions, far more than are active across the start of the events read.
+pub const REPORT_HISTORY_EVENTS: usize = 10_000;
+
+/// When the store folded only part of the older history: the sessions
+/// whose intent (`intents`) or workspace (`workspaces`) an event folded
+/// set, so it is known. Any other session's is unknown.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReportKnown {
+    pub intents: BTreeSet<String>,
+    pub workspaces: BTreeSet<String>,
+}
+
+/// Fold one event into what is known, beside `open_intents` and
+/// `session_workspaces`: an intent's setting or ending, or the end of its
+/// session, makes it known; a registration makes the session's workspace
+/// known. Removing a workspace unbinds only the sessions known to be in
+/// it, which those two folds already did, so it changes nothing here.
+pub fn known_sessions(known: &mut ReportKnown, event: &Event) {
+    match event {
+        Event::IntentSet { intent } => {
+            known.intents.insert(intent.session_id.clone());
+        }
+        Event::IntentEnded { session_id } | Event::SessionEnded { session_id } => {
+            known.intents.insert(session_id.clone());
+        }
+        Event::SessionRegistered { session } => {
+            known.workspaces.insert(session.session_id.clone());
+        }
+        _ => {}
+    }
 }
 
 /// Fold one event into each session's workspace (session to workspace), as
@@ -179,6 +226,15 @@ fn event_workspace<'a>(
     event: &'a Event,
     session: Option<&str>,
 ) -> Option<&'a str> {
+    named_workspace(event).or_else(|| {
+        session
+            .and_then(|session| members.get(session))
+            .map(String::as_str)
+    })
+}
+
+/// The workspace an event names itself, if any.
+fn named_workspace(event: &Event) -> Option<&str> {
     match event {
         Event::SessionRegistered { session } => Some(&session.workspace_id),
         Event::WriteRefused { workspace_id, .. } | Event::TurnReleased { workspace_id, .. } => {
@@ -188,9 +244,7 @@ fn event_workspace<'a>(
         Event::OperationObserved { observation } => Some(&observation.workspace_id),
         Event::LeaseGranted { lease } => Some(&lease.workspace_id),
         Event::IntentSet { intent } => Some(&intent.workspace_id),
-        _ => session
-            .and_then(|session| members.get(session))
-            .map(String::as_str),
+        _ => None,
     }
 }
 
@@ -261,6 +315,9 @@ pub fn report(query: &ReportQuery<'_>) -> Report {
     let mut members: BTreeMap<String, String> = query.session_workspaces.clone();
     // Refused calls in the window not yet admitted: (session, input digest).
     let mut refused: BTreeSet<(String, String)> = BTreeSet::new();
+    // What is known of the older history, when the store folded only part.
+    let mut known: Option<ReportKnown> = query.known.cloned();
+    let mut partial = false;
     let mut undated = 0u32;
     for recorded in query.events {
         let event = &recorded.event;
@@ -268,15 +325,38 @@ pub fn report(query: &ReportQuery<'_>) -> Report {
         let session = event_session(event);
         let in_window = wall.is_some_and(|wall| wall >= window.from_ms && wall <= window.to_ms);
         let ours = event_workspace(&members, event, session) == Some(query.workspace_id);
+        // Whether `ours` and `was_open` rest on a session's unknown history.
+        let unknown = |set: fn(&ReportKnown) -> &BTreeSet<String>| {
+            known
+                .as_ref()
+                .zip(session)
+                .is_some_and(|(known, session)| !set(known).contains(session))
+        };
+        let workspace_unknown =
+            named_workspace(event).is_none() && unknown(|known| &known.workspaces);
+        let intent_unknown =
+            matches!(event, Event::SessionEnded { .. }) && unknown(|known| &known.intents);
         session_workspaces(&mut members, event);
         let was_open = session.is_some_and(|session| open.contains_key(session));
         open_intents(&mut open, event);
+        if let Some(known) = known.as_mut() {
+            known_sessions(known, event);
+        }
         if wall.is_none() && !matches!(event, Event::Booted { .. }) {
             undated = undated.saturating_add(1);
+        }
+        let counted = wall.is_some() && session.is_some() && in_window;
+        if counted && workspace_unknown {
+            // Whose workspace this counts for is unknown: count it nowhere.
+            partial = true;
+            continue;
         }
         let (Some(wall), Some(session), true, true) = (wall, session, in_window, ours) else {
             continue;
         };
+        if intent_unknown {
+            partial = true;
+        }
         let tally = sessions.entry(session.into()).or_insert_with(|| Tally {
             first_ms: wall,
             ..Tally::default()
@@ -316,7 +396,9 @@ pub fn report(query: &ReportQuery<'_>) -> Report {
             } => one(&mut counts.reads_reported),
             Event::IntentSet { .. } => one(&mut counts.intents_set),
             Event::IntentEnded { .. } => one(&mut counts.intents_ended),
-            Event::SessionEnded { .. } if was_open => one(&mut counts.intents_left_open),
+            Event::SessionEnded { .. } if was_open && !intent_unknown => {
+                one(&mut counts.intents_left_open);
+            }
             Event::WriteRefused {
                 kind, input_digest, ..
             } => {
@@ -376,6 +458,7 @@ pub fn report(query: &ReportQuery<'_>) -> Report {
             .then(|| placement.covered_from(query.retained_from_ms))
             .flatten(),
         undated,
+        partial,
     }
 }
 

@@ -86,15 +86,21 @@ const INTENT_EVENT_INDEX: &str = concat!(
 );
 
 /// Before the events a report reads: sessions holding an intent, each with
-/// its intent's workspace, and each session's workspace.
-type ReportHistory = (BTreeMap<String, String>, BTreeMap<String, String>);
+/// its intent's workspace, each session's workspace, and what of these is
+/// known when only part of the older history was folded (`None`: all).
+type ReportHistory = (
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+    Option<langspan_core::ReportKnown>,
+);
 
-/// The intent and membership events after the first sequence number and
-/// before the second, oldest first. Read through the partial index.
+/// The newest intent and membership events after the first sequence number
+/// and before the second, newest first, at most the third parameter. Read
+/// through the partial index, so it visits no more index entries than that.
 const INTENT_EVENTS_BEFORE: &str = concat!(
     "SELECT event_json FROM events WHERE seq > ?1 AND seq < ?2 AND ",
     intent_event!(),
-    " ORDER BY seq"
+    " ORDER BY seq DESC LIMIT ?3"
 );
 
 /// A `write_refused` row, and the index the monthly count reads them by.
@@ -1418,32 +1424,59 @@ impl Store {
     /// each with its intent's workspace, and each session's workspace, from
     /// the newest snapshot (a compaction removed the events before it) and
     /// the intent events, session registrations and workspace removals
-    /// after it and before `seq`.
+    /// after it and before `seq`. At most `REPORT_HISTORY_EVENTS` of those
+    /// are read, the newest: when more exist, the snapshot is not used and
+    /// the third value says which sessions the events read made known, so a
+    /// report's cost stays bounded however long the log grows.
     fn report_history_before(&self, seq: u64) -> StoreResult<ReportHistory> {
-        let (snapshot, from) = if self.snapshot_seq > 0 {
-            retention::snapshot(&self.connection)?
-        } else {
-            (State::default(), 0)
-        };
-        let mut open: BTreeMap<String, String> = snapshot
-            .intents
-            .iter()
-            .map(|(session, intent)| (session.clone(), intent.workspace_id.clone()))
-            .collect();
-        let mut members: BTreeMap<String, String> = snapshot
-            .sessions
-            .iter()
-            .map(|(id, session)| (id.clone(), session.workspace_id.clone()))
-            .collect();
-        let mut statement = self.connection.prepare(INTENT_EVENTS_BEFORE)?;
-        let mut rows = statement.query([i64::try_from(from)?, i64::try_from(seq)?])?;
+        let from = self.snapshot_seq;
+        let budget = langspan_core::REPORT_HISTORY_EVENTS;
+        let mut statement = self.connection.prepare_cached(INTENT_EVENTS_BEFORE)?;
+        let mut rows = statement.query(params![
+            i64::try_from(from)?,
+            i64::try_from(seq)?,
+            i64::try_from(budget + 1)?
+        ])?;
+        let mut newest_first = Vec::new();
         while let Some(row) = rows.next()? {
             let json: String = row.get(0)?;
-            let event = serde_json::from_str(&json)?;
+            newest_first.push(json);
+        }
+        let complete = newest_first.len() <= budget;
+        newest_first.truncate(budget);
+        let (mut open, mut members, mut known) = if !complete {
+            (
+                BTreeMap::new(),
+                BTreeMap::new(),
+                Some(langspan_core::ReportKnown::default()),
+            )
+        } else if self.snapshot_seq > 0 {
+            let (snapshot, _) = retention::snapshot(&self.connection)?;
+            (
+                snapshot
+                    .intents
+                    .iter()
+                    .map(|(session, intent)| (session.clone(), intent.workspace_id.clone()))
+                    .collect(),
+                snapshot
+                    .sessions
+                    .iter()
+                    .map(|(id, session)| (id.clone(), session.workspace_id.clone()))
+                    .collect(),
+                None,
+            )
+        } else {
+            (BTreeMap::new(), BTreeMap::new(), None)
+        };
+        for json in newest_first.iter().rev() {
+            let event = serde_json::from_str(json)?;
             langspan_core::open_intents(&mut open, &event);
             langspan_core::session_workspaces(&mut members, &event);
+            if let Some(known) = known.as_mut() {
+                langspan_core::known_sessions(known, &event);
+            }
         }
-        Ok((open, members))
+        Ok((open, members, known))
     }
 
     /// The coordination report (roadmap H8): the newest `TODAY_EVENTS`
@@ -1456,7 +1489,7 @@ impl Store {
         }
         let (events, anchor, earlier) = self.newest_events()?;
         let retained_from_ms = retention::since_ms(&self.connection)?;
-        let (open_intents, session_workspaces) =
+        let (open_intents, session_workspaces, known) =
             self.report_history_before(events.first().map_or(0, |first| first.seq))?;
         let mut report = langspan_core::report(&ReportQuery {
             workspace_id,
@@ -1470,6 +1503,7 @@ impl Store {
             retained_from_ms,
             open_intents: &open_intents,
             session_workspaces: &session_workspaces,
+            known: known.as_ref(),
         });
         report.shrink_until(|report| {
             serde_json::to_vec(report).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
@@ -2511,6 +2545,94 @@ mod tests {
         alice.counts.intents_left_open
     }
 
+    /// Review 4705125393: with no compaction snapshot, a report folds at
+    /// most the newest `REPORT_HISTORY_EVENTS` intent and registration
+    /// events before those it reads, however long the log, and says
+    /// `partial` when an event it counts needed an older one. Real SQLite
+    /// with 200,000 intent events: Alice registered before all of them and
+    /// prompts inside the window. Reading every older event would find her
+    /// workspace and count her; the bounded fold cannot, and says so.
+    #[test]
+    fn a_report_on_a_long_history_folds_at_most_the_budget_and_says_partial() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-report-budget-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let run = |store: &mut Store, id: &str, command: Command| {
+            let now = crate::clock::now_ms();
+            store.execute(id, &command, &command, now).unwrap();
+        };
+        run(
+            &mut store,
+            "w",
+            Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: "/repos/work".into(),
+            },
+        );
+        for session in ["claude-code.alice", "claude-code.filler"] {
+            run(
+                &mut store,
+                &format!("s-{session}"),
+                Command::SessionRegister {
+                    session_id: session.into(),
+                    workspace_id: "work".into(),
+                    parent: None,
+                    headless: false,
+                },
+            );
+        }
+        let generation = store.state.generation;
+        let history: Vec<Event> = (0..200_000)
+            .map(|index| {
+                if index % 2 == 0 {
+                    Event::IntentSet {
+                        intent: langspan_core::Intent {
+                            session_id: "claude-code.filler".into(),
+                            workspace_id: "work".into(),
+                            paths: vec!["src/lib.rs".into()],
+                            summary: "filler".into(),
+                            generation,
+                        },
+                    }
+                } else {
+                    Event::IntentEnded {
+                        session_id: "claude-code.filler".into(),
+                    }
+                }
+            })
+            .collect();
+        store.commit(&history, None).unwrap();
+        let from_ms = wall_now_ms();
+        run(
+            &mut store,
+            "p",
+            Command::SessionPrompt {
+                session_id: "claude-code.alice".into(),
+                summary: "carry on".into(),
+                line_digests: Vec::new(),
+            },
+        );
+        let outcome = store.report("work", from_ms, wall_now_ms() + 1).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let Outcome::Report { report } = outcome else {
+            panic!("{outcome:?}");
+        };
+        // Through JSON, so the check reads what a client is sent.
+        let report = serde_json::to_value(&report).unwrap();
+        assert_eq!(report["partial"], serde_json::json!(true), "{report:#}");
+        let rows = report["sessions"].as_array().unwrap();
+        assert!(
+            rows.iter()
+                .all(|row| row["session_id"] != "claude-code.alice"),
+            "{report:#}"
+        );
+    }
+
     /// The intent lookup reads only intent events, not the rest of the log.
     #[test]
     fn the_intent_lookup_reads_only_intent_events() {
@@ -2525,7 +2647,7 @@ mod tests {
             .connection
             .prepare(&format!("EXPLAIN QUERY PLAN {INTENT_EVENTS_BEFORE}"))
             .unwrap()
-            .query_map([0i64, 1_000_000i64], |row| row.get::<_, String>(3))
+            .query_map([0i64, 1_000_000i64, 10i64], |row| row.get::<_, String>(3))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();

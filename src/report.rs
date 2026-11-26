@@ -5,7 +5,7 @@
 //! Every share is shown as a count beside the count it is out of
 //! (`9 of 41`), never as a bare rate.
 
-use langspan_core::{Report, ReportCounts, TODAY_EVENTS};
+use langspan_core::{REPORT_HISTORY_EVENTS, Report, ReportCounts, TODAY_EVENTS};
 
 use crate::today::{cut_line, utc};
 
@@ -172,6 +172,11 @@ pub fn lines(report: &Report) -> Vec<String> {
             None => format!("Truncated: counted from the newest {TODAY_EVENTS} events only."),
         });
     }
+    if report.partial {
+        lines.push(format!(
+            "Partial: only the newest {REPORT_HISTORY_EVENTS} intent and registration events before those counted were read, so events of sessions whose workspace or intent was unknown there are not counted."
+        ));
+    }
     if report.undated > 0 {
         lines.push(format!(
             "{} event(s) recorded by an earlier build have no time and are not counted.",
@@ -270,6 +275,7 @@ mod tests {
             truncated: false,
             covered_from_ms: None,
             undated: 0,
+            partial: false,
         }
     }
 

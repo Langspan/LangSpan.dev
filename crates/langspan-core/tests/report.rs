@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 
 use langspan_core::{
     ClockAnchor, Command, Event, FileKind, FileState, ObservedFile, Outcome, REPORT_SESSIONS,
-    RecordedEvent, RefusalKind, Report, ReportCounts, ReportQuery, SourceOrigin, State,
-    TodayWindow, ToolIdentity, apply, decide, open_intents, report, session_workspaces,
+    RecordedEvent, RefusalKind, Report, ReportCounts, ReportKnown, ReportQuery, SourceOrigin,
+    State, TodayWindow, ToolIdentity, apply, decide, known_sessions, open_intents, report,
+    session_workspaces,
 };
 
 /// 2026-11-25T00:00:00Z, the wall time the daemon's clock reads `START` at.
@@ -174,6 +175,7 @@ impl Log {
             retained_from_ms: None,
             open_intents: &BTreeMap::new(),
             session_workspaces: &BTreeMap::new(),
+            known: None,
         })
     }
 }
@@ -358,6 +360,7 @@ fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
         retained_from_ms: None,
         open_intents: &before,
         session_workspaces: &members_before(&log.events[..start]),
+        known: None,
     });
     assert!(!cut.truncated, "{cut:#?}");
     let a = row(&cut, alice);
@@ -426,6 +429,7 @@ fn a_removed_workspace_ends_its_intents_for_the_report() {
         retained_from_ms: None,
         open_intents: &BTreeMap::new(),
         session_workspaces: &BTreeMap::new(),
+        known: None,
     });
     assert_eq!(row(&whole, alice).intents_left_open, 0, "{whole:#?}");
     // Read from the first prompt on: the removal is in the older events.
@@ -448,6 +452,7 @@ fn a_removed_workspace_ends_its_intents_for_the_report() {
         retained_from_ms: None,
         open_intents: &before,
         session_workspaces: &members_before(&log.events[..start]),
+        known: None,
     });
     assert_eq!(row(&cut, alice).intents_left_open, 0, "{cut:#?}");
 }
@@ -693,6 +698,7 @@ fn the_window_leaves_out_older_events_and_says_what_it_covered() {
         retained_from_ms: None,
         open_intents: &BTreeMap::new(),
         session_workspaces: &members_before(&log.events[..start]),
+        known: None,
     });
     assert!(cut.truncated, "{cut:#?}");
     assert_eq!(cut.covered_from_ms, Some(WALL));
@@ -781,6 +787,7 @@ fn a_session_registered_again_elsewhere_keeps_its_earlier_events_in_its_old_work
             retained_from_ms: None,
             open_intents: &none,
             session_workspaces: &members,
+            known: None,
         };
         let work = report(&query("work"));
         let old = row(&work, alice);
@@ -831,6 +838,7 @@ fn a_window_before_the_retention_cutoff_is_truncated_though_every_event_left_was
         retained_from_ms: Some(cutoff),
         open_intents: &none,
         session_workspaces: &none,
+        known: None,
     };
     let before = report(&query(WALL + 10 * MINUTE));
     assert!(before.truncated, "{before:#?}");
@@ -883,6 +891,7 @@ fn the_report_and_the_refusal_count_read_the_retention_cutoff_alike() {
             retained_from_ms: Some(cutoff),
             open_intents: &none,
             session_workspaces: &none,
+            known: None,
         });
         let count = langspan_core::count_refusals(
             &langspan_core::CountQuery {
@@ -907,4 +916,82 @@ fn the_report_and_the_refusal_count_read_the_retention_cutoff_alike() {
             "from {from_ms}"
         );
     }
+}
+
+/// Review 4705125393: when the store folded only part of the older history,
+/// an event whose session's workspace or intent was not among it is in no
+/// count and the report says `partial`; a session registered among the
+/// events read is counted as usual. Folding the same older events with
+/// what they make known gives the full answer and is not partial.
+#[test]
+fn a_session_unknown_to_a_partial_history_is_not_counted_and_the_report_is_partial() {
+    let (alice, bob) = ("claude-code.alice", "codex.bob");
+    let mut log = Log::ready(&[alice]);
+    log.run(
+        "i-a",
+        Command::IntentSet {
+            session_id: alice.into(),
+            paths: vec!["src/lib.rs".into()],
+            summary: "rework the parser".into(),
+        },
+        START + MINUTE,
+    );
+    log.prompt(alice, START + 5 * MINUTE);
+    log.register(bob, "work");
+    log.prompt(bob, START + 20 * MINUTE);
+    log.prompt(alice, START + 30 * MINUTE);
+    log.run(
+        "e-a",
+        Command::SessionEnd {
+            session_id: alice.into(),
+        },
+        START + 30 * MINUTE,
+    );
+    let start = log
+        .events
+        .iter()
+        .position(|recorded| matches!(recorded.event, Event::SessionPrompted { .. }))
+        .unwrap();
+    let cut = |open: &BTreeMap<String, String>,
+               members: &BTreeMap<String, String>,
+               known: Option<&ReportKnown>| {
+        report(&ReportQuery {
+            workspace_id: "work",
+            window: TodayWindow {
+                from_ms: WALL + 10 * MINUTE,
+                to_ms: WALL + 600 * MINUTE,
+            },
+            events: &log.events[start..],
+            anchor: Some(ClockAnchor {
+                generation: 1,
+                clock_ms: START,
+                wall_ms: WALL,
+            }),
+            earlier: true,
+            retained_from_ms: None,
+            open_intents: open,
+            session_workspaces: members,
+            known,
+        })
+    };
+    // Nothing of the older history folded.
+    let none = BTreeMap::new();
+    let partial = cut(&none, &none, Some(&ReportKnown::default()));
+    assert!(partial.partial, "{partial:#?}");
+    assert!(
+        partial.sessions.iter().all(|row| row.session_id != alice),
+        "{partial:#?}"
+    );
+    assert_eq!(row(&partial, bob), &ReportCounts::default(), "{partial:#?}");
+    // The same older events folded, with what they make known.
+    let (mut open, mut known) = (BTreeMap::new(), ReportKnown::default());
+    for recorded in &log.events[..start] {
+        open_intents(&mut open, &recorded.event);
+        known_sessions(&mut known, &recorded.event);
+    }
+    let members = members_before(&log.events[..start]);
+    let full = cut(&open, &members, Some(&known));
+    assert!(!full.partial, "{full:#?}");
+    assert_eq!(row(&full, alice).intents_left_open, 1, "{full:#?}");
+    assert_eq!(full, cut(&open, &members, None));
 }
