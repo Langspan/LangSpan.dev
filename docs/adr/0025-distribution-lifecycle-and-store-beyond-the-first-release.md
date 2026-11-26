@@ -234,7 +234,7 @@ be retained.
 Built 26 November 2026
 ([issue #84](https://github.com/Langspan/LangSpan.dev/issues/84)). Nothing
 downloads, replaces or rolls back the binary; the owner upgrades through
-Homebrew (`brew upgrade langspan`) or a release archive checked with
+Homebrew (`brew upgrade langspan`, once the tap is published) or a release archive checked with
 `gh attestation verify` ([ADR 0031](0031-releases.md)), and rolls back the
 same way or by keeping the previous archive.
 
