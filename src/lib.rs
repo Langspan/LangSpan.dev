@@ -3,6 +3,7 @@
 pub mod adopt;
 pub mod auto_check;
 pub mod autostart;
+pub mod binary_version;
 mod break_calls;
 pub mod breaks;
 pub mod claude_code;

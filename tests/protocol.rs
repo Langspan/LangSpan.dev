@@ -315,6 +315,33 @@ fn v3_code_context_request_and_response_match_the_committed_golden_vectors() {
 }
 
 #[test]
+fn v4_version_request_and_answer_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/version-request-v4.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(request.command, Command::Version);
+    assert_eq!(encode(&request).unwrap(), wire);
+    // A unit request, strict as `status` is: no field is accepted.
+    assert!(
+        serde_json::from_str::<Request>(
+            r#"{"version":4,"request_id":"read","command":{"op":"version","check":true}}"#
+        )
+        .is_err()
+    );
+
+    let wire = include_bytes!("../fixtures/version-response-v4.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        response.outcome,
+        langspan_core::Outcome::Version {
+            version: "0.4.0".into(),
+            pid: 4242
+        }
+    );
+    assert_eq!(response.lease_valid, None, "a read grants nothing");
+    assert_eq!(encode(&response).unwrap(), wire);
+}
+
+#[test]
 fn v3_compaction_request_and_reports_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/compact-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
