@@ -53,7 +53,8 @@ pub struct KeptTests {
 }
 
 /// Writes `first..=last` of a workspace's write count, all by one session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct WriteRun {
     pub session_id: String,
     pub first: u64,

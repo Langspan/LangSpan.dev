@@ -10,8 +10,8 @@
 
 use super::{Store, StoreResult, redact_event};
 use langspan_core::{
-    ClockAnchor, CompactionReport, Event, LeaseStatus, MAX_RETENTION_DAYS, MIN_RETENTION_DAYS,
-    Outcome, RecentRefusal, State, apply,
+    ClockAnchor, CompactionReport, Event, KeptTests, LeaseStatus, MAX_RETENTION_DAYS,
+    MIN_RETENTION_DAYS, Outcome, RecentRefusal, State, WriteRun, apply,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,16 @@ struct SnapshotRecord {
     refusals: Vec<RecentRefusal>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workspace_revisions: BTreeMap<String, u32>,
+    /// The test results kept per workspace and check, for classifying a
+    /// later run's failures (ADR 0030).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    kept_tests: BTreeMap<String, BTreeMap<String, KeptTests>>,
+    /// Each session's write count before its first write (ADR 0030).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    first_writes: BTreeMap<String, u64>,
+    /// Each workspace's runs of consecutive writes (ADR 0030).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    write_runs: BTreeMap<String, Vec<WriteRun>>,
 }
 
 impl SnapshotRecord {
@@ -43,6 +53,9 @@ impl SnapshotRecord {
             clock_anchor: state.clock_anchor,
             refusals: state.refusals.clone(),
             workspace_revisions: state.workspace_revisions.clone(),
+            kept_tests: state.kept_tests.clone(),
+            first_writes: state.first_writes.clone(),
+            write_runs: state.write_runs.clone(),
         }
     }
     fn into_state(self) -> State {
@@ -50,6 +63,9 @@ impl SnapshotRecord {
         state.clock_anchor = self.clock_anchor;
         state.refusals = self.refusals;
         state.workspace_revisions = self.workspace_revisions;
+        state.kept_tests = self.kept_tests;
+        state.first_writes = self.first_writes;
+        state.write_runs = self.write_runs;
         state
     }
 }
