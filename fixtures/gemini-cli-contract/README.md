@@ -31,26 +31,33 @@ Sources, at tag `v0.70.0` of `github.com/google-gemini/gemini-cli`:
 
 ## Capturing real events
 
-Once `gemini -p` can sign in on the owner's machine, replace these with real
-events in `fixtures/gemini-cli-0.70.0/`. In a throwaway Git repository with a
-running daemon:
+Once Gemini CLI can sign in on the owner's machine, replace these with real
+events in `fixtures/gemini-cli-<version>/`. With a release build and a
+running daemon, a person runs, at a terminal:
 
 ```sh
-langspan hooks install gemini-cli --workspace capture --root "$PWD" --apply
-mkdir -p /private/tmp/gemini-capture/events
-cat > policy.toml <<'EOF'
-[[rule]]
-toolName = "run_shell_command"
-commandPrefix = "ls"
-decision = "allow"
-priority = 500
-EOF
-LANGSPAN_CAPTURE_DIR=/private/tmp/gemini-capture/events \
-  gemini --skip-trust --approval-mode auto_edit --policy ./policy.toml -p \
-  'Read notes.txt with read_file, change the line beta to BETA with replace, then run ls.'
+GEMINI_CLI_HOME=DIR bash scripts/capture-gemini.sh OUT
 ```
 
-`--approval-mode auto_edit` approves edit tools only; the policy file allows
-`ls` and nothing else. The hook writes each event it receives to
-`LANGSPAN_CAPTURE_DIR` (owner-only files). Replace home paths, the transcript
-path and any text beyond the test prompt before committing them.
+`DIR` is a Gemini CLI home kept for captures, already signed in by running
+`gemini` there. The script stops, writing nothing, unless Gemini CLI answers a
+one-word prompt from that home. It then makes a throwaway repository under
+`OUT` with LangSpan's project hooks and `LANGSPAN_CAPTURE_DIR` set, and starts
+Gemini CLI there interactively with `--approval-mode default`. It prints four
+prompts to type and the steps to run in a second terminal between them: a
+`BeforeAgent` briefing, a `replace` denied while a CLI session holds the file,
+a `read_file`, a peer's write, and a `replace` refused once as stale whose
+retry goes through and is completed by its `AfterTool`. The hook writes each
+event it receives to `OUT/capture` (owner-only files); `langspan status` and
+`events` are saved beside it. Replace home paths, the transcript path and any
+text beyond the prompts before committing them.
+
+The capture uses no automatic approval: no `--approval-mode auto_edit` or
+`yolo`, no policy file that allows a tool, and no `--skip-trust`. The person
+approves each edit with "Allow once" and trusts the folder and its hooks
+themselves. An earlier version of this recipe used `auto_edit` and an allow
+policy. That captures a different path: Gemini CLI skips its confirmation, so
+the capture would not show where LangSpan's `BeforeTool` decision falls
+relative to the person's approval, nor how a denial reads in an ordinary
+session. It would also have the script approve edits on the person's behalf,
+which LangSpan does not do for any host.
