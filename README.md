@@ -6,43 +6,55 @@
 
 # Your agents. On the same page.
 
-**Coordinate the coding agents you already run.** Share work in progress, catch overlapping edits and check combined changes across sessions and worktrees.
+**For developers who run several coding agents on one repository, where each agent sees only its own part of the work.** LangSpan brings each agent's related work into the others' sessions, refuses supported overlapping or stale edits, and checks combined changes against the exact Git tree. Keep your tools. Connect their work.
 
 [![Latest stable release](https://img.shields.io/github/v/release/Langspan/LangSpan.dev?style=flat-square&labelColor=151513&display_name=tag&sort=date&color=A34A34)](https://github.com/Langspan/LangSpan.dev/releases/latest) [![Rust checks on main](https://github.com/Langspan/LangSpan.dev/actions/workflows/check.yml/badge.svg?branch=main&event=push)](https://github.com/Langspan/LangSpan.dev/actions/workflows/check.yml) [![Core license](https://img.shields.io/github/license/Langspan/LangSpan.dev?style=flat-square&labelColor=151513&color=3F3E44)](https://github.com/Langspan/LangSpan.dev/blob/main/LICENSE) [![Supported release platforms: macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-3F3E44?style=flat-square&labelColor=151513)](https://langspan.dev/#start) [![Project website](https://img.shields.io/badge/website-langspan.dev-3F3E44?style=flat-square&labelColor=151513)](https://langspan.dev/)
 
-Claude Code holds `src/gate.rs`. Codex tries to edit the same function. LangSpan tells Codex about the hold, then refuses the overlap:
+Claude Code holds `src/gate.rs`. A real Codex session tries to edit the same function. LangSpan tells Codex about the hold, then refuses the overlap:
 
 ```text
-editing now: "src/gate.rs"
-Command blocked by PreToolUse hook: LangSpan coordination conflict.
+- claude-code session a990eb45 in this checkout on branch "main": editing now: "src/gate.rs"; …
+Command blocked by PreToolUse hook: LangSpan coordination conflict. … ["src/gate.rs"] held by session claude-code.a990eb45-… : "src/gate.rs" symbol "name"; Choose other work or retry this edit later.
 ```
 
-Codex can choose other work or retry when the hold ends. [Actual Codex session, November 25, 2026](docs/evidence/codex-real-host/README.md#2-a-conflicting-edit).
+Codex can choose other work or retry when the hold ends. Shortened from the [recorded Codex session of 25 November 2026](docs/evidence/codex-real-host/README.md#2-a-conflicting-edit).
 
-**[Get LangSpan](#get-started)** · [Try the product](https://langspan.dev/) · [LangSpan Live](https://langspan.dev/#langspan-live)
+## Quickstart
 
-## Get started
+1. [Download the archive](https://github.com/Langspan/LangSpan.dev/releases/latest) for macOS or Linux, then [verify and extract it](docs/install.md).
+2. Close Claude Code. From the extracted folder, install the binary and run setup:
 
-### Install
+   ```sh
+   mkdir -p "$HOME/.local/bin"
+   install -m 0755 langspan "$HOME/.local/bin/langspan"
+   export PATH="$HOME/.local/bin:$PATH"
+   langspan setup
+   ```
 
-[Download your binary](https://langspan.dev/#start) for macOS or Linux. Verify and extract the archive ([installation guide](docs/install.md)), then close Claude Code and run from the extracted folder:
+   Setup shows one plan and asks once. It connects the agent hosts it finds, starts the coordinator as a login service, and runs `langspan doctor`. In Codex, review and trust the hooks with `/hooks`.
 
-```sh
-mkdir -p "$HOME/.local/bin"
-install -m 0755 langspan "$HOME/.local/bin/langspan"
-export PATH="$HOME/.local/bin:$PATH"
-langspan setup
-```
+3. See coordination happen. In one Git repository, open two agent sessions, such as Claude Code and Codex, or two Claude Code sessions.
+   1. Ask the first session to change a function, and leave its edit waiting at the permission prompt.
+   2. Ask the second session to change the same function. LangSpan names the first session's work in the second session's context and refuses the overlapping edit, as in the example earlier.
+   3. After the first edit completes or its reply ends, the hold is released and the second session can retry.
+4. Watch both sessions in LangSpan Live, the read-only dashboard:
 
-Confirm the setup plan. LangSpan connects your supported agent hosts and starts the coordinator. In Codex, review and trust hooks with `/hooks`.
+   ```sh
+   langspan dashboard --open
+   ```
 
-### Run
+   To see the page before you run any agents, use `langspan dashboard --demo`, which shows labeled, simulated data.
 
-Open your agents normally in a Git repository. To see what they’re doing:
+[Installation options](docs/install.md): verify a download, build from source, or set up a single project.
 
-```sh
-langspan dashboard --open
-```
+<a id="get-started"></a>
+<a id="verify-the-binary"></a>
+<a id="verify-a-download"></a>
+<a id="build-from-source"></a>
+<a id="connect-a-native-agent"></a>
+<a id="one-project"></a>
+
+## What you get
 
 <a href="https://langspan.dev/#edit-coordination">
   <picture>
@@ -54,35 +66,46 @@ langspan dashboard --open
   </picture>
 </a>
 
-*[Try the interactive coordination example](https://langspan.dev/#edit-coordination) or view the [static version](https://langspan.dev/assets/product/langspan-card-light-still.svg).*
+*An authored illustration of the same flow. [Try the interactive example](https://langspan.dev/#edit-coordination) or view the [static version](https://langspan.dev/assets/product/langspan-card-light-still.svg).*
 
-## What you get
+- **Briefings.** At session start and at each new prompt, an agent gets a short summary of related work: other sessions' tasks, the files they're editing and their recent edits, including uncommitted work and linked worktrees.
+- **Edit coordination.** In a shared checkout, the hook refuses a supported edit that overlaps another session's hold on a file or symbol, or that starts from a stale read. The agent can reread, retry or choose other work. A workspace can instead [wait briefly for an active hold](docs/usage.md#coordination-policies); this is off by default.
+- **Interface notices.** A local source index notices changed signatures, renames and removals in Rust, Python, TypeScript and JavaScript, Go, Java and C#, and tells related sessions. It matches names, not resolved types.
+- **Checks on the combined tree.** Record a check against an exact Git tree, test combined branches, and land only on a matching pass.
+- **Commits in a shared checkout.** `langspan commit --mine` commits only the session's own files and hunks.
+- **Teammates on other machines.** Opt-in sharing through your Git remote publishes work metadata, not source contents. Remote activity informs agents and never blocks a local edit.
+- **CLI and MCP.** Agents and people reach the same operations through hooks, the `langspan` CLI and an MCP server.
 
-- **Shared awareness.** Briefings about related tasks, files and interface changes.
-- **Edit coordination.** Refuse supported overlapping or stale edits in a shared checkout. A workspace can instead wait briefly for an active hold and then revalidate the file ([coordination policies](docs/usage.md#coordination-policies)); this is off by default and is not an edit queue.
-- **Semantic notices.** See changed signatures and renamed functions that affect related code, including linked worktrees.
-- **Verified integration.** Attribute edits to sessions and check the combined Git tree.
-- **LangSpan Live.** Inspect sessions, shared paths, holds and coordination events.
+## Supported agents
 
-## Local by default
+| Host | Status |
+| --- | --- |
+| Claude Code | Recorded on a real host: edits, reads and briefings |
+| Codex | Recorded on a real host: edits, stale-source refusal, linked worktrees and `commit --mine` |
+| Cursor | Built from documentation; not yet verified on a real host |
+| Antigravity | Corrected against a first real run; a repeat run is pending |
 
-Edit holds cover supported operations within a checkout. Interface notices are advisory. Across machines, opt-in Git sharing publishes work metadata rather than source contents. Your agent permissions and review still apply.
+Setup connects Claude Code, Codex and Cursor when it finds them. To add Antigravity, name it with `--hosts` ([Antigravity setup](docs/usage.md#antigravity)). [Host evidence and versions](docs/reference-overview.md#current-availability) list what each run covered.
 
-## Current availability
+## Limits
 
-Native Claude Code and Codex coordination has recorded host evidence. For all adapters, platform requirements and unverified behavior, see [implementation status](docs/IMPLEMENTATION_STATUS.md).
+- LangSpan runs on macOS and Linux. Linux needs glibc 2.35 or later. The macOS binary isn't signed with an Apple Developer ID. An install script and a Homebrew formula aren't published yet.
+- Coordination is cooperative. It covers edits that go through the supported hooks; writes outside the hooks, and edits a host approves after a hold ends, can bypass it. Your agent host's permissions and your review still apply.
+- A hold doesn't establish that changes in different files are compatible. Interface notices are advisory.
+- The goal is compatible parallel work with less repair and manual relay. That outcome isn't measured yet; the [coordination benchmark](benchmarks/coordination/README.md) has no published result.
+
+## How it works
+
+One Rust executable runs the local coordinator, the hooks, the CLI and a stdio MCP server, with history in a local SQLite database. You start your agents as usual; their hooks ask the coordinator before supported edits and receive briefings at session start and on each prompt. No account or hosted service is required. [ADR 0001](docs/adr/0001-local-coordination.md) and the [architecture overview](docs/architecture.md) explain the design.
 
 ## Documentation
 
-[Install and verify](docs/install.md) · [Usage](docs/usage.md) · [MCP](docs/usage.md#mcp) · [Architecture](docs/adr/0001-local-coordination.md) · [Evidence and compatibility](docs/reference-overview.md) · [Benchmarks](benchmarks/coordination/README.md)
-
-<a id="verify-the-binary"></a>
-<a id="verify-a-download"></a>
-<a id="build-from-source"></a>
-<a id="connect-a-native-agent"></a>
-<a id="one-project"></a>
-
-[Binary verification, source builds and setup options](docs/install.md)
+- [Install and verify](docs/install.md)
+- [Usage guide](docs/usage.md): setup, hooks, CLI, [MCP](docs/usage.md#mcp) and configuration
+- [Detailed product reference](docs/reference-overview.md): what agents see, and evidence per feature
+- [Implementation status](docs/IMPLEMENTATION_STATUS.md)
+- [Security model](docs/security/threat-model.md)
+- [Coordination benchmark](benchmarks/coordination/README.md)
 
 ## Contributing
 
@@ -90,4 +113,4 @@ Native Claude Code and Codex coordination has recorded host evidence. For all ad
 
 <sub>Dependency badges track the pins on main.</sub>
 
-[Contributing](CONTRIBUTING.md) · [Engineering guide](docs/engineering.md) · [Security](SECURITY.md) · [Apache-2.0](LICENSE)
+[Contributing](CONTRIBUTING.md) · [Engineering guide](docs/engineering.md) · [Agent context](AGENTS.md) · [Security](SECURITY.md) · [Apache-2.0](LICENSE)
