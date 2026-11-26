@@ -134,6 +134,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  [--depth N]: 1 to 3 levels, each the files that
                                  mention an export of the level before
                                  All three match by name and report index coverage
+  graph path WORKSPACE FROM TO [--max-hops N]
+                                 The shortest chains of calls from FROM to TO, at
+                                 most 5, each N (1 to 6, default 4) calls at most;
+                                 found by name and by import path, not type-checked
+  graph map WORKSPACE [--depth D]
+                                 Areas at depth D (1 to 3): files, exports and
+                                 languages, and the imports and calls between them
   graph blind-spots WORKSPACE [--limit N]
                                  Files the index cannot answer for: partial, never
                                  parsed cleanly, waiting, too large, left out of the
@@ -3064,6 +3071,117 @@ fn print_impact_levels(
     }
 }
 
+/// The closing line of a `graph path` or `graph map` answer when the index
+/// cannot vouch for it: no complete scan, or files it cannot read in full.
+fn print_index_caveat(coverage: &langspan_core::GraphCoverage) {
+    if !coverage.scanned {
+        println!("Nothing is indexed for this workspace yet; an empty answer means nothing.");
+    } else if coverage.blind_in_scope > 0 || coverage.current_files < coverage.indexable_files {
+        println!(
+            "Index: {} of {} supported files at their current content; `langspan graph blind-spots` names the rest.",
+            coverage.current_files, coverage.indexable_files
+        );
+    }
+}
+
+/// `graph path`: each chain one step per line, path quoted because it is
+/// repository text, then how its steps were found (roadmap D3).
+fn print_paths(
+    (from, to, max_hops): (&str, &str, u32),
+    paths: &[langspan_core::SymbolPath],
+    coverage: &langspan_core::GraphCoverage,
+    truncated: bool,
+) {
+    if paths.is_empty() && coverage.scanned {
+        println!(
+            "No chain of calls from {from} to {to} within {max_hops} calls was found by name or import path."
+        );
+    }
+    for (index, chain) in paths.iter().enumerate() {
+        if paths.len() > 1 {
+            println!("Chain {} of {}:", index + 1, paths.len());
+        }
+        for (number, step) in chain.steps.iter().enumerate() {
+            let what = match &step.callee {
+                Some(callee) => format!("{} calls {callee}", step.name),
+                None => format!("{} (defined)", step.name),
+            };
+            println!(
+                "{}. {:?}:{} {what}{}",
+                number + 1,
+                step.path,
+                step.line,
+                if step.ambiguous {
+                    " (ambiguous: the name has other definitions)"
+                } else {
+                    ""
+                }
+            );
+        }
+        let by_path = chain
+            .steps
+            .iter()
+            .filter(|step| step.resolution == "path")
+            .count();
+        let by_name = chain.steps.len() - by_path;
+        let steps = |n: usize| {
+            if n == 1 {
+                "1 step".to_owned()
+            } else {
+                format!("{n} steps")
+            }
+        };
+        if by_path == 0 {
+            println!("Found by name ({}); not type-checked.", steps(by_name));
+        } else {
+            println!(
+                "Found by name ({}) and by import path ({}); not type-checked.",
+                steps(by_name),
+                steps(by_path)
+            );
+        }
+    }
+    if truncated {
+        println!("The search stopped at a bound; a chain may still exist.");
+    }
+    print_index_caveat(coverage);
+}
+
+/// `graph map`: one line per area, then one per edge, paths quoted
+/// (roadmap D3).
+fn print_map(
+    depth: u32,
+    areas: &[langspan_core::MapArea],
+    edges: &[langspan_core::MapEdge],
+    coverage: &langspan_core::GraphCoverage,
+    truncated: bool,
+) {
+    for area in areas {
+        println!(
+            "{:?}: {} files, {} exported, {}",
+            area.path,
+            area.files,
+            area.exported,
+            area.languages.join(", ")
+        );
+    }
+    for edge in edges {
+        println!(
+            "{:?} -> {:?}: {} {} (by {})",
+            edge.from, edge.to, edge.count, edge.kind, edge.resolution
+        );
+    }
+    if coverage.scanned {
+        println!(
+            "Areas at depth {depth}. Imports are resolved by path; calls are counted by name, only for a name with one definition; not type-checked."
+        );
+    }
+    if truncated {
+        println!("Some areas or edges are left out by a bound.");
+    }
+    print_index_caveat(coverage);
+}
+
 /// `graph blind-spots`: one line per non-empty list, paths quoted, with the
 /// full count in parentheses.
 fn print_blind_spots(
@@ -4603,6 +4721,23 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             ["graph", "inflight", workspace] => Command::GraphInflight {
                 workspace_id: (*workspace).into(),
             },
+            // The daemon checks both ranges, so every client is told the same.
+            ["graph", "path", workspace, from, to] => Command::GraphPath {
+                workspace_id: (*workspace).into(),
+                from: (*from).into(),
+                to: (*to).into(),
+                max_hops: u32::try_from(number(
+                    &mut options,
+                    "--max-hops",
+                    langspan_core::DEFAULT_PATH_HOPS.into(),
+                )?)
+                .map_err(|_| "--max-hops must be between 1 and 6")?,
+            },
+            ["graph", "map", workspace] => Command::GraphMap {
+                workspace_id: (*workspace).into(),
+                depth: u32::try_from(number(&mut options, "--depth", 1)?)
+                    .map_err(|_| "--depth must be between 1 and 3")?,
+            },
             ["graph", "export", workspace] => Command::GraphExport {
                 workspace_id: (*workspace).into(),
                 path: absolute_option(&mut options, "--out")?,
@@ -4781,6 +4916,8 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphReferences { .. }
                 | Command::GraphImpact { .. }
                 | Command::GraphBlindSpots { .. }
+                | Command::GraphPath { .. }
+                | Command::GraphMap { .. }
                 | Command::GraphInflight { .. }
                 | Command::GraphExport { .. }
                 | Command::GraphImport { .. }
@@ -4976,7 +5113,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
             | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" | "--keep-days"
             | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools"
-            | "--wait-ms" | "--mode" => {
+            | "--wait-ms" | "--max-hops" | "--mode" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -5795,6 +5932,22 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 println!("Matches are by name, not resolved.");
             }
         }
+        Outcome::GraphPath {
+            from,
+            to,
+            max_hops,
+            paths,
+            coverage,
+            truncated,
+            ..
+        } => print_paths((from, to, *max_hops), paths, coverage, *truncated),
+        Outcome::GraphMap {
+            depth,
+            areas,
+            edges,
+            coverage,
+            truncated,
+        } => print_map(*depth, areas, edges, coverage, *truncated),
         Outcome::GraphExported {
             workspace_id,
             files,
