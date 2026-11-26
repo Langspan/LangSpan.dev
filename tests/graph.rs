@@ -3002,6 +3002,43 @@ fn a_symbol_lookup_with_renamed_follows_a_rename_to_the_new_name() {
     assert_eq!(gate["symbols"][0]["name"], "gate", "{gate:#}");
 }
 
+/// Roadmap D7: once a new file defines the old name again, `graph symbol
+/// OLD --renamed` answers with that definition. A file's first indexing
+/// tells no addition, so the lookup checks the index, not only notices.
+#[test]
+fn a_symbol_lookup_with_renamed_answers_an_old_name_a_new_file_defines_again() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &original.replace("pub fn upload(", "pub fn send("),
+    );
+    history(&w, "upload", 1);
+    w.edits(
+        "bob",
+        "b2",
+        "src/again.rs",
+        "pub fn upload(path: &str) -> bool {\n    path.len() > 2\n}\n",
+    );
+    w.wait_for("the new file", "symbol", "upload", |outcome| {
+        upload_function(outcome).is_some_and(|symbol| symbol["path"] == "src/again.rs")
+    });
+    let (code, text) = w.cli(&["graph", "symbol", "app", "upload", "--renamed", "--json"]);
+    assert_eq!(code, 0, "{text}");
+    let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+    assert!(outcome.get("renamed").is_none(), "{outcome:#}");
+    assert_eq!(
+        upload_function(&outcome).map(|symbol| &symbol["path"]),
+        Some(&json!("src/again.rs")),
+        "{outcome:#}"
+    );
+}
+
 /// Roadmap D7: after `git mv src/upload.rs src/transfer.rs`, the file's
 /// notes and its definitions' history are found under the new path.
 #[test]

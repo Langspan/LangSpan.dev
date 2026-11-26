@@ -1427,7 +1427,9 @@ The answer's `renamed` lists the recorded renames followed, oldest first
 (`name`, `after_name`, `kind`, `path`, `evidence`, `after`), at most 8, and
 `symbols` are the last new name's definitions. A name never renamed, or
 defined again since, gets the answer it gets without the flag, with no
-`renamed`. The daemon keeps the 256 newest renames per workspace, rebuilt
+`renamed`. Defined again means the index holds an exported definition of the
+old name with the renamed one's kind, in any file, including one indexed for
+the first time; a chain stops at the first old name defined again. The daemon keeps the 256 newest renames per workspace, rebuilt
 from the event log when it starts; an older rename, or one whose event a
 compaction removed, is not followed.
 

@@ -569,7 +569,7 @@ mod unix {
         let detail = matches!(command, Command::GraphSymbol { detail: true, .. });
         // Roadmap D7: an old name asked for with `--renamed` is looked up
         // under the newest name its recorded renames lead to.
-        let renamed = match command {
+        let mut renamed = match command {
             Command::GraphSymbol {
                 name,
                 renamed: true,
@@ -581,6 +581,10 @@ mod unix {
         let ((mut symbols, mut references, levels), coverage) = graph
             .with_coverage(&of, |graph| match command {
                 Command::GraphSymbol { name, .. } => {
+                    if let Some(hops) = renamed.as_mut() {
+                        defined_again(graph, workspace_id, hops)?;
+                    }
+                    renamed = renamed.take().filter(|hops| !hops.is_empty());
                     let name = renamed
                         .as_ref()
                         .and_then(|hops| hops.last())
@@ -672,6 +676,28 @@ mod unix {
                 cut = true;
             }
         }
+    }
+
+    /// Cut `hops` at the first rename whose old name the index defines
+    /// again, exported and of the same kind (roadmap D7). A file's first
+    /// indexing tells no addition, so a name a new file brings back is
+    /// found here, not from the notices.
+    fn defined_again(
+        graph: &crate::graph::Index,
+        workspace_id: &str,
+        hops: &mut Vec<langspan_core::Rename>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for (at, hop) in hops.iter().enumerate() {
+            let defined = graph
+                .symbol(workspace_id, &hop.name, crate::graph::MAX_RESULTS)?
+                .iter()
+                .any(|symbol| symbol.exported && symbol.kind == hop.kind);
+            if defined {
+                hops.truncate(at);
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// What the coordinator, not the index, knows about each definition's
