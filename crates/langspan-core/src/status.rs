@@ -42,6 +42,11 @@ pub struct StatusSummary {
     /// field name. Every record is still readable with `status --all`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub omitted: Vec<String>,
+    /// How long ago each shown session's last recorded hook run reached the
+    /// daemon, in this generation (roadmap J12). Absent for a session with
+    /// none; its process probe is in the view's `session_liveness`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_hook_age_ms: BTreeMap<String, u64>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -110,7 +115,9 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
                 liveness.status == LivenessStatus::Alive && liveness.generation == *generation
             })
             || match activity.get(id) {
-                Some(activity) => activity.last_ms.saturating_add(STATUS_RECENT_MS) >= now_ms,
+                Some(activity) => {
+                    activity.last_seen_ms().saturating_add(STATUS_RECENT_MS) >= now_ms
+                }
                 None => session.generation == *generation,
             }
     };
@@ -121,6 +128,13 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         .collect();
     summary.omitted_sessions = (sessions.len() - shown_sessions.len()) as u64;
     let of_shown = |id: &String| shown_sessions.contains_key(id);
+    summary.last_hook_age_ms = activity
+        .iter()
+        .filter(|(id, activity)| {
+            of_shown(id) && activity.generation == *generation && activity.last_hook_ms > 0
+        })
+        .map(|(id, activity)| (id.clone(), now_ms.saturating_sub(activity.last_hook_ms)))
+        .collect();
     let view = State {
         generation: *generation,
         workspaces: workspaces.clone(),
@@ -296,7 +310,10 @@ pub fn shrink_status(
         .keys()
         .filter(|id| !holding.contains(*id))
         .map(|id| {
-            let last = view.activity.get(id).map_or(0, |activity| activity.last_ms);
+            let last = view
+                .activity
+                .get(id)
+                .map_or(0, SessionActivity::last_seen_ms);
             (last, id.clone())
         })
         .collect();
@@ -313,6 +330,7 @@ pub fn shrink_status(
             view.session_liveness.remove(&id);
             view.activity.remove(&id);
             view.check_notices.remove(&id);
+            summary.last_hook_age_ms.remove(&id);
             summary.omitted_sessions += 1;
         }
     }

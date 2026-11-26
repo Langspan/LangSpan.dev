@@ -1267,7 +1267,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_intent_end` | End advisory work independently of admission |
 | `langspan_admit` | Request an entire file set or inspect conflicts |
 | `langspan_complete` | Complete a currently valid held admission |
-| `langspan_status` | Inspect open admissions, live or recent sessions and liveness observations; `all` and `after` page through every record |
+| `langspan_status` | Inspect open admissions, live or recent sessions, liveness observations and each session's last hook run (`summary.last_hook_age_ms`); `all` and `after` page through every record |
 | `langspan_events` | Read an ordered page of persisted events |
 | `langspan_changes` | Read file and local-branch observations with scan freshness |
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
@@ -1326,6 +1326,18 @@ A daemon restart advances the generation and invalidates outstanding grants.
 Sessions and intents remain visible as stale. Reattach with a new registration
 request ID, then explicitly refresh intent. Process liveness observations never
 renew an admission or replace this recovery step.
+
+A session counts as current for peers' briefings, the status line and the
+dashboard while it is in this generation, not ended, not known to have exited,
+and its newest edit, prompt or hook run is at most 30 minutes old. Any hook run
+that reaches the daemon counts, reads, failed tool calls, tool batches, stops
+and shell commands included; the daemon records one `session_seen` event per
+session at most every 30 seconds. `langspan status` prints each session's last
+hook run and process observation, and its `--json` form and `langspan_status`
+give them as `summary.last_hook_age_ms` and `state.session_liveness`. Process
+observations are made on Linux and macOS for Claude Code and Codex hosts; a
+probe that fails, or of another user's process, records `unknown`, which does
+not drop a session.
 
 CLI exit codes: `0` successful result, `1` error/unavailable coordination or a
 failed check, `2` conflict or refused push, `3` an inactive historical admission,

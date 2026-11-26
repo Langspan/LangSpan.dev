@@ -474,7 +474,7 @@ fn agents(state: &State, now_ms: u64) -> (Vec<AgentRow>, Vec<Touch>) {
                     .collect()
             })
             .unwrap_or_default();
-        let active_age_ms = in_run.map(|activity| now_ms.saturating_sub(activity.last_ms));
+        let active_age_ms = in_run.map(|activity| now_ms.saturating_sub(activity.last_seen_ms()));
         let ended = activity.is_some_and(|activity| activity.ended);
         let state_now = if !current(session.generation) {
             AgentState::EarlierRun

@@ -477,6 +477,11 @@ pub struct SessionActivity {
     pub session_id: String,
     pub generation: u64,
     pub last_ms: u64,
+    /// The last recorded hook run of any kind that reached the daemon for
+    /// this session (a read, a failed call, a batch, a stop): at most one
+    /// `SessionSeen` per `SESSION_SEEN_INTERVAL_MS`. Zero when none was.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub last_hook_ms: u64,
     /// The owner's own words for the current task, capped by the adapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -511,6 +516,68 @@ pub struct SessionActivity {
     /// started from one template apart (issue #114). Never the words.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub line_digests: Vec<String>,
+}
+
+impl SessionActivity {
+    /// When the session was last known to be working: its newest edit,
+    /// prompt or recorded hook run. Whether it is current compares this, not
+    /// `last_ms` alone, with `BRIEF_HORIZON_MS` (roadmap J12).
+    pub fn last_seen_ms(&self) -> u64 {
+        self.last_ms.max(self.last_hook_ms)
+    }
+}
+
+/// A hook run is recorded as `SessionSeen` at most this often per session,
+/// so a burst of tool calls writes one event, not one per call.
+pub const SESSION_SEEN_INTERVAL_MS: u64 = 30 * 1000;
+
+/// The session a request is made on behalf of, when it is that session at
+/// work: every request a hook run sends for it, and the same requests from
+/// the CLI or MCP. A look from outside (`Brief` without `deliver`, a status
+/// read) and the end of a session are not. The daemon records a
+/// `SessionSeen` after each such request (roadmap J12).
+pub fn acting_session(command: &Command) -> Option<&str> {
+    match command {
+        Command::SessionRegister { session_id, .. }
+        | Command::ObserveSessionLiveness { session_id, .. }
+        | Command::IntentSet { session_id, .. }
+        | Command::IntentEnd { session_id }
+        | Command::Admit { session_id, .. }
+        | Command::AdmitTool { session_id, .. }
+        | Command::ObserveSource { session_id, .. }
+        | Command::AckMessage { session_id, .. }
+        | Command::Handoff { session_id, .. }
+        | Command::RecordRefusal { session_id, .. }
+        | Command::CheckCalls { session_id, .. }
+        | Command::Complete { session_id, .. }
+        | Command::Observe { session_id, .. }
+        | Command::ObserveTool { session_id, .. }
+        | Command::SessionPrompt { session_id, .. }
+        | Command::SetPromptTargets { session_id, .. }
+        | Command::SessionStop { session_id, .. }
+        | Command::ObserveToolBatch { session_id, .. }
+        | Command::Brief {
+            session_id,
+            deliver: true,
+            ..
+        } => Some(session_id),
+        _ => None,
+    }
+}
+
+/// Whether a hook run of `session_id` at `now_ms` is recorded: the session
+/// is current and its last record is at least `SESSION_SEEN_INTERVAL_MS`
+/// old, or there is none in this generation.
+pub fn session_seen_due(state: &State, session_id: &str, now_ms: u64) -> bool {
+    if current_session(state, session_id).is_err() {
+        return false;
+    }
+    let last = state
+        .activity
+        .get(session_id)
+        .filter(|activity| activity.generation == state.generation)
+        .map_or(0, |activity| activity.last_hook_ms);
+    last == 0 || now_ms.saturating_sub(last) >= SESSION_SEEN_INTERVAL_MS
 }
 
 /// At most this many leading prompt lines are compared by digest.
@@ -1698,6 +1765,13 @@ pub enum Event {
     SessionLivenessObserved {
         liveness: SessionLiveness,
     },
+    /// A hook run of the session reached the daemon (roadmap J12). Evidence
+    /// that it is working; it grants, renews and releases nothing.
+    SessionSeen {
+        session_id: String,
+        at_ms: u64,
+        generation: u64,
+    },
     IntentSet {
         intent: Intent,
     },
@@ -2035,6 +2109,11 @@ pub enum Command {
         session_id: String,
         process: ProcessIdentity,
         status: LivenessStatus,
+    },
+    /// A hook run of the session reached the daemon. Recorded only when the
+    /// last record is `SESSION_SEEN_INTERVAL_MS` old (roadmap J12).
+    SessionSeen {
+        session_id: String,
     },
     IntentSet {
         session_id: String,
@@ -2550,6 +2629,11 @@ enum CommandWire {
         process: ProcessIdentity,
         status: LivenessStatus,
     },
+    /// A hook run of the session reached the daemon. Recorded only when the
+    /// last record is `SESSION_SEEN_INTERVAL_MS` old (roadmap J12).
+    SessionSeen {
+        session_id: String,
+    },
     IntentSet {
         session_id: String,
         paths: Vec<String>,
@@ -3046,6 +3130,12 @@ pub enum Outcome {
     SessionLiveness {
         liveness: SessionLiveness,
     },
+    /// The session's last recorded hook run, this one or one less than
+    /// `SESSION_SEEN_INTERVAL_MS` earlier.
+    SessionSeen {
+        session_id: String,
+        last_hook_ms: u64,
+    },
     Intent {
         intent: Intent,
     },
@@ -3463,6 +3553,31 @@ fn decide_checked(
             Ok(Decision {
                 events,
                 outcome: Outcome::SessionLiveness { liveness },
+            })
+        }
+        Command::SessionSeen { session_id } => {
+            current_session(state, session_id)?;
+            let due = session_seen_due(state, session_id, now_ms);
+            let last = state
+                .activity
+                .get(session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map_or(0, |activity| activity.last_hook_ms);
+            let events = if due {
+                vec![Event::SessionSeen {
+                    session_id: session_id.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::SessionSeen {
+                    session_id: session_id.clone(),
+                    last_hook_ms: if due { now_ms } else { last },
+                },
             })
         }
         Command::IntentSet {
@@ -5511,7 +5626,9 @@ fn recap(state: &State, workspace_id: &str, now_ms: u64) -> Recap {
                 .take(RECAP_ITEMS)
                 .collect();
             (
-                in_generation.map(|activity| activity.last_ms).unwrap_or(0),
+                in_generation
+                    .map(SessionActivity::last_seen_ms)
+                    .unwrap_or(0),
                 RecapSession {
                     session_id: session.session_id.clone(),
                     current: session.generation == state.generation,
@@ -6200,7 +6317,7 @@ fn publication(state: &State, link: &RemoteLink, now_ms: u64) -> (Publication, S
             .filter(|activity| {
                 link.share_task
                     && !activity.ended
-                    && now_ms.saturating_sub(activity.last_ms) <= BRIEF_HORIZON_MS
+                    && now_ms.saturating_sub(activity.last_seen_ms()) <= BRIEF_HORIZON_MS
             })
             .and_then(|activity| activity.summary.clone());
         if editing.is_empty() && recent.is_empty() && (summary.is_none() || ended) {
@@ -6464,7 +6581,7 @@ fn brief(
         // A session that only received briefings has shown no work of its own.
         let fresh = activity.is_some_and(|activity| {
             (activity.summary.is_some() || !activity.touched.is_empty())
-                && now_ms.saturating_sub(activity.last_ms) <= BRIEF_HORIZON_MS
+                && now_ms.saturating_sub(activity.last_seen_ms()) <= BRIEF_HORIZON_MS
         });
         let intent = state
             .intents
@@ -6491,7 +6608,7 @@ fn brief(
             .collect();
         editing.truncate(BRIEF_PATHS);
         recent.truncate(BRIEF_PATHS);
-        let last_ms = activity.map(|activity| activity.last_ms).unwrap_or(0);
+        let last_ms = activity.map(SessionActivity::last_seen_ms).unwrap_or(0);
         let relation = relation(me, peer);
         // A subagent's task is the asking parent's own request: its files
         // are news to the parent, its task line and declared intent are not.
@@ -7427,6 +7544,21 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             state
                 .session_liveness
                 .insert(liveness.session_id.clone(), liveness.clone());
+        }
+        Event::SessionSeen {
+            session_id,
+            at_ms,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            if *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A hook-run record must belong to the current daemon generation",
+                ));
+            }
+            let activity = activity_mut(state, session_id);
+            activity.last_hook_ms = activity.last_hook_ms.max(*at_ms);
         }
         Event::IntentSet { intent } => {
             let session = current_session(state, &intent.session_id)?;

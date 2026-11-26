@@ -278,6 +278,7 @@ pub fn execute(operation: Operation, config: &Config, deadline: Instant) -> Repl
         parent: operation.parent.as_deref(),
         headless: headless_host(&identity.source),
         unreachable: Default::default(),
+        reached: Default::default(),
     };
     // The line journal (ADR 0026): the files an edit starts from, and what
     // it changed in them. Kept on this machine whatever the daemon answers.
@@ -505,6 +506,7 @@ fn resend(config: &Config, until: Instant, entry: &crate::spool::Entry) -> crate
         parent: entry.parent.as_deref(),
         headless: headless_host(&entry.source),
         unreachable: Default::default(),
+        reached: Default::default(),
     };
     match &entry.report {
         crate::spool::Report::Post {
@@ -1068,6 +1070,7 @@ fn lifecycle(
         parent: None,
         headless: headless_host(source),
         unreachable: Default::default(),
+        reached: Default::default(),
     };
     let failed = |failure| {
         let mut reply = failure_reply(failure);
@@ -1294,6 +1297,7 @@ fn turn_event(event: LifecycleEvent, source: &str, config: &Config, deadline: In
         parent: parent.as_deref(),
         headless: headless_host(source),
         unreachable: Default::default(),
+        reached: Default::default(),
     };
     match kind {
         TurnKind::Batch { calls, total } => session.batch(&own, &calls, total),
@@ -2467,6 +2471,9 @@ struct Session<'a> {
     /// A call did not reach the daemon, or its answer did not arrive in
     /// time: what this run reported may not be recorded.
     unreachable: std::cell::Cell<bool>,
+    /// A call of this run was answered: the daemon has noted the session's
+    /// hook run from it (roadmap J12).
+    reached: std::cell::Cell<bool>,
 }
 
 enum Failure {
@@ -2500,7 +2507,10 @@ impl Session<'_> {
             Outcome::Error { code, message } => {
                 Err(Failure::Rejected(format!("{code}: {message}")))
             }
-            _ => Ok(response),
+            _ => {
+                self.reached.set(true);
+                Ok(response)
+            }
         }
     }
 
@@ -2532,16 +2542,35 @@ impl Session<'_> {
         if Instant::now() >= self.deadline {
             return;
         }
-        if let Some(process) = crate::process::host_parent(self.source)
-            && let Err(failure) = self.call(
+        let reported = match crate::process::host_parent(self.source) {
+            Some(process) => self.call(
                 wire_id("liveness", &[self.source, &ids.operation_id]),
                 Command::ObserveSessionLiveness {
                     session_id: ids.session_id.clone(),
                     process,
                     status: langspan_core::LivenessStatus::Alive,
                 },
-            )
-        {
+            ),
+            // A run that told the daemon nothing else (a shell command that
+            // writes no file by its parse, say) is still a sign of work. A
+            // session the daemon does not know is not registered for it.
+            None if !self.reached.get() => match self.call(
+                wire_id("seen", &[self.source, &ids.operation_id]),
+                Command::SessionSeen {
+                    session_id: ids.session_id.clone(),
+                },
+            ) {
+                Err(Failure::Rejected(message))
+                    if message.starts_with("session_not_found")
+                        || message.starts_with("stale_session") =>
+                {
+                    return;
+                }
+                other => other,
+            },
+            None => return,
+        };
+        if let Err(failure) = reported {
             let diagnostic = failure_reply(failure);
             eprintln!(
                 "{}",

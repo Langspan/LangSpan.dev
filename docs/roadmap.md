@@ -160,7 +160,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [J9: A hash-chained event log with replay](https://github.com/Langspan/LangSpan.dev/issues/91): a person cannot show what LangSpan told an agent at a moment, or that the record is unchanged.
 - [J10: Token accounting from host transcripts](https://github.com/Langspan/LangSpan.dev/issues/92): token spending per session cannot be seen or related to refusals and rework.
 - [J11: Telling peers that a session ran out of quota](https://github.com/Langspan/LangSpan.dev/issues/93): a session stopped by its usage limit still looks active to peers and the person.
-- [J12: Liveness from recent hook runs](https://github.com/Langspan/LangSpan.dev/issues/94): on macOS, busy read-only sessions drop out of briefings and closed ones linger.
 
 ## Not building: hosted-service features
 
