@@ -803,10 +803,45 @@ the stop rate, retries and elapsed time per arm with sample sizes.
 
 Session-start and prompt hooks register the session and deliver relevant peer
 work through the host's `additionalContext`. The briefing includes current
-admissions, declared intent, recent successful edits and a task line. A prompt
-receives another briefing only when its content has changed; session start can
-restore context in a new or resumed session. Briefings also name files the
-session read before a peer reported editing them in the same checkout.
+admissions, declared intent, recent successful edits and a task line. Session
+start gives the full view, which also restores context in a new, resumed or
+compacted session. After that, a prompt or a completed tool call gets a
+briefing only when something changed, and it carries only what changed since
+the session was last told: a peer's new file, its new task line, a new notice.
+Briefings also name files the session read before a peer reported editing them
+in the same checkout.
+
+A briefing of changes only opens with "What changed since your last
+briefing" and ends with one line that counts what it left out:
+
+```text
+(4 unchanged item(s) from earlier briefings not repeated; the langspan_brief tool or `langspan brief claude-code.SESSION --request-id NEW_ID` shows the full view.)
+```
+
+Three items are told again after they were told, once each time the session
+reads or edits one of their files: another session's hold on a file in this
+checkout that the session works on, an interface change to a name its files
+use, and a file it read that a peer has since edited. Refusals are never left
+out: admission refuses each attempt and says why. An item the hook's text had
+no room for (counted as "more session(s) not shown" or "more notice(s) not
+shown", a path past a line's cut, or where a peer looks) is not told, and the
+next briefing names it. [ADR 0004](adr/0004-automatic-peer-briefing.md) lists
+what each item is and what repeats.
+
+`langspan status` shows, for each session, the context LangSpan's hooks added
+to it in this daemon run: briefings, the code section, mid-turn briefings, and
+the alerts and notices a hook adds at a tool call. It counts bytes over its
+turns, bytes and estimated tokens per turn, and the largest turn. Tokens are
+estimated at four bytes each:
+
+```text
+  Added context: 2054 bytes over 13 turn(s), 158 bytes (about 40 tokens) per turn; the largest turn 722 bytes (about 181 tokens). Tokens are estimated at 4 bytes each.
+```
+
+`status --json` has the same counts in each session's `activity.context`
+(`turns`, `bytes`, `largest_turn_bytes`, and `turn_bytes` for the current
+turn). The budget is 256 bytes, about 64 tokens, per turn for a typical
+session; a test holds a stand-in session to it.
 
 By default, one line of the latest user prompt becomes a bounded task line
 shared with relevant local sessions:
@@ -932,8 +967,10 @@ Inspect a registered session's briefing from the terminal:
 ./target/release/langspan brief bob --max-peers 8 --request-id bob-brief-1
 ```
 
-This terminal view does not mark the briefing as delivered to Bob or suppress
-his next hook briefing. It still requires a request ID in the current CLI;
+This terminal view is always the full view. It does not mark the briefing as
+delivered to Bob or suppress his next hook briefing. The MCP tool
+`langspan_brief` also gives the full view, and does mark it delivered. The
+terminal view still requires a request ID in the current CLI;
 use a fresh ID for a new observation, or retry the identical ID and arguments
 if the outcome is unknown.
 
@@ -1755,7 +1792,73 @@ Level 2: "src/server.rs" via "router" from "src/api.rs", "tests/api.rs" via "rou
 Found by name, not resolved; each level adds false positives. Index: 120 of 120 supported files at their current content.
 ```
 
-These queries
+`path` follows calls from one name to another (MCP: `langspan_path`). It
+returns the shortest chains of calls from a function, method or type named
+`FROM` to one named `TO`. It lists at most 5 chains, each at most
+`--max-hops N` calls long (1 to 6, default 4; MCP: `max_hops`). A value
+outside 1 to 6 is refused with that range:
+
+```sh
+./target/release/langspan graph path PROJECT handle_upload save --max-hops 4 --json
+```
+
+```text
+$ langspan graph path PROJECT handle_upload save
+1. "src/api.rs":31 handle_upload calls store_file
+2. "src/service.rs":12 store_file calls save
+3. "src/store.rs":40 save (defined)
+Found by name (2 steps) and by import path (1 step); not type-checked.
+```
+
+Each step has the file, the call's line (the definition's line on the last
+step), the name and its `callee`. A step's `resolution` says how the step's
+definition was found:
+
+- `path`: the calling file imports the file that defines the name. Relative
+  imports in TypeScript and JavaScript (`./store` is `src/store.ts`,
+  `src/store/index.ts` or the `.ts` file a `./store.js` is built from), Python
+  modules, and Rust `crate::`, `super::` and `self::` paths are resolved.
+- `name`: every function, method or type of the name. Go, Java and C# imports
+  name packages and namespaces, not files, so their steps are always found
+  by name.
+
+A step is `ambiguous` when more than one definition matched, and every chain
+through it is told; the program may take none of them. Nothing is
+type-checked: a method call reaches every method of its name, whatever the
+receiver's type. The search reads at most 10,000 edges (`edges_visited`) and
+stops after 500 ms. A search that a bound or the time budget cut returns the
+chains it found with `truncated: true`, and an empty answer then is no claim
+that no chain exists.
+
+`map` gives a compact view of how the workspace's modules relate (MCP:
+`langspan_map`):
+
+```sh
+./target/release/langspan graph map PROJECT --depth 1 --json
+```
+
+```text
+$ langspan graph map PROJECT --depth 1
+"src/api": 3 files, 12 exported, typescript
+"src/store": 2 files, 5 exported, typescript
+"src/api" -> "src/store": 4 calls (by name)
+"src/api" -> "src/store": 2 imports (by path)
+Areas at depth 1. Imports are resolved by path; calls are counted by name, only for a name with one definition; not type-checked.
+```
+
+An area is a file's module path cut to its first `--depth D` + 1 parts (D is
+1 to 3, default 1). The module path is the file's path without its last
+extension (`.d.ts` for a declaration file), or its directory for a Go file,
+`mod.rs`, `lib.rs`, `main.rs`, `index.*` and `__init__.py`. So `src/api.ts`,
+`src/api/index.ts` and `src/api/handler.ts` are all in `src/api` at depth 1,
+while `src/api.v1.ts` and `src/api.v2.ts` are two areas. Each area has its file count, its `exported`
+definitions and its languages. Edges between two areas are counted per kind:
+`imports` resolved by path, and `calls` of a name with exactly one function,
+method or type definition. The map lists at most 64 areas in path order and
+256 edges, most first. It reads at most 200,000 import rows and as many call
+rows; past any of these bounds it is `truncated`.
+
+The other queries
 match names without resolving scopes, types, modules or imports. Common names
 can produce unrelated matches; dynamic uses can be missed.
 
@@ -2613,6 +2716,8 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check; with `rank` and `session_id`, in the code briefing's order with each one's ranked dependents; with `renamed`, under the newest name a recorded rename leads to |
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
+| `langspan_path` | Find the shortest chains of calls from one name to another, each step found by import path or by name |
+| `langspan_map` | Map the workspace's areas, with their files, exports and languages, and the imports and calls between them |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
 | `langspan_history` | A definition's recorded interface changes, newest first, with the last reported editor, its task line, nearby notes and messages, and changes back to an earlier signature; at most 50 |
 | `langspan_check_write` | Before a write on a host without hooks: per path, its holder, other sessions' recent lines and whether it is stale; per symbol, a peer's recent signature change, removal or body lines, matched by name; records nothing |
@@ -2775,18 +2880,19 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol is version 6 and the SQLite schema marker version 4
-(retention). The daemon also answers version 5 clients, without the
-`rebased` and `adapted` that version 6 added to a landing; version 4
+The current wire protocol is version 7 and the SQLite schema marker version 4
+(retention). The daemon also answers version 6 clients, without the briefing
+memory and context counts version 7 added; version 5 clients, also without
+the `rebased` and `adapted` that version 6 added to a landing; version 4
 clients, also without the `refusal_outcomes` that version 5 added to a
 report's counts and the `interface_notice_ids` it added to a briefing; and
-version 3 clients, also without the rename fields
-version 4 added. A client asks a daemon of an earlier build again in the
-version that daemon names. A `--rebase` or `--adapt-renames` landing that
-an earlier daemon could not record stops before it pushes, with nothing
-pushed: restart the daemon after upgrading. Upgrade the daemon and clients
-together. Earlier persisted
-records remain readable; a build older than the marker refuses the file.
+version 3 clients, also without the rename fields version 4 added. A client
+asks a daemon of an earlier build again in the version that daemon names. A
+`--rebase` or `--adapt-renames` landing that a daemon of version 5 or
+earlier could not record stops before it pushes, with nothing pushed:
+restart the daemon after upgrading. Upgrade the daemon and clients
+together. Earlier persisted records remain readable; a build older than the
+marker refuses the file.
 
 ### Mixed versions after an upgrade
 

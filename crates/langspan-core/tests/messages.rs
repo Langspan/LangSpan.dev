@@ -73,6 +73,7 @@ fn brief(session: &str, deliver: bool, mid_turn: bool) -> Command {
         recent: false,
         recent_window_ms: None,
         mcp: false,
+        changes_only: false,
     }
 }
 
@@ -572,6 +573,7 @@ mod headless_handoffs {
                 recent: false,
                 recent_window_ms: None,
                 mcp: false,
+                changes_only: false,
             },
             "look",
             0,

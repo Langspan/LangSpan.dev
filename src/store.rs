@@ -806,6 +806,7 @@ impl Store {
             commands.push(Command::ObserveUncoordinated {
                 workspace_id: workspace_id.into(),
                 files: content_changes,
+                scanned_from_ms: snapshot.scanned_from_ms,
             });
         }
         // Worktrees of one repository share a Git common directory. Only its
@@ -1012,14 +1013,11 @@ impl Store {
                 }
                 outcome => outcome,
             },
-            Command::StatusRecords { after, page_bytes } => self.status_records(
-                after.as_deref(),
-                page_bytes.map_or(PAGE_BUDGET_BYTES, |bytes| {
-                    usize::try_from(bytes)
-                        .unwrap_or(PAGE_BUDGET_BYTES)
-                        .clamp(MIN_PAGE_BYTES, PAGE_BUDGET_BYTES)
-                }),
-            ),
+            Command::StatusRecords { after, page_bytes } => {
+                self.status_page(after.as_deref(), *page_bytes, |record| {
+                    serde_json::to_string(record).map_err(|error| error.to_string())
+                })
+            }
             // A read: decided by the core, never recorded.
             Command::RemoteOutbox { .. }
             | Command::CheckStatus { .. }
@@ -1285,7 +1283,32 @@ impl Store {
     /// that does not (an entry at its limits can be larger than a frame) is
     /// given as parts of its JSON, so that every valid state can be read. A
     /// page holds at least one record or part when any remain.
-    fn status_records(&self, after: Option<&str>, budget: usize) -> Outcome {
+    ///
+    /// `encode` gives each record's JSON, the text a part is cut from: the
+    /// daemon gives a client of an earlier protocol version the records in
+    /// that version's shape (`protocol::encode_record_for`), since a part
+    /// cannot be reshaped once cut. A record that fits is given whole and
+    /// reshaped with the rest of the reply.
+    pub fn status_page(
+        &self,
+        after: Option<&str>,
+        page_bytes: Option<u32>,
+        encode: impl Fn(&StatusRecord) -> Result<String, String>,
+    ) -> Outcome {
+        let budget = page_bytes.map_or(PAGE_BUDGET_BYTES, |bytes| {
+            usize::try_from(bytes)
+                .unwrap_or(PAGE_BUDGET_BYTES)
+                .clamp(MIN_PAGE_BYTES, PAGE_BUDGET_BYTES)
+        });
+        self.status_records(after, budget, encode)
+    }
+
+    fn status_records(
+        &self,
+        after: Option<&str>,
+        budget: usize,
+        encode: impl Fn(&StatusRecord) -> Result<String, String>,
+    ) -> Outcome {
         let (mut resume, records) = match status_records(&self.state, after) {
             Ok(read) => read,
             Err(error) => {
@@ -1299,7 +1322,7 @@ impl Store {
         let mut bytes = 0;
         let mut next = None;
         for (position, record) in records {
-            let text = match serde_json::to_string(&record) {
+            let text = match encode(&record) {
                 Ok(text) => text,
                 Err(error) => {
                     return Outcome::Error {

@@ -89,6 +89,7 @@ fn notes_for(state: &mut State, session: &str, id: &str) -> Vec<String> {
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         50,
     ) {
