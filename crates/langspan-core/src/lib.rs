@@ -1572,8 +1572,11 @@ pub const INFLIGHT_BYTES: usize = 600;
 pub const INFLIGHT_CANDIDATES: usize = 32;
 /// The asking side's files named for one in-flight symbol, at most.
 pub const INFLIGHT_MENTIONS: usize = 4;
-/// In-flight signatures remembered as told per session.
-pub const MAX_INFLIGHT_TOLD: usize = 128;
+/// In-flight signatures remembered as told per session. The daemon's
+/// briefing window reads every in-flight row in turn, so this bounds how
+/// many signatures still in flight a session hears once each; past it the
+/// oldest is forgotten and told again.
+pub const MAX_INFLIGHT_TOLD: usize = 1024;
 
 /// An exported symbol that another worktree of the repository added, or
 /// whose signature it changed, in a file that differs from that worktree's

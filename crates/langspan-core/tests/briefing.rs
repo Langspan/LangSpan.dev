@@ -1735,6 +1735,97 @@ fn in_flight_lines_are_at_most_three_within_their_share_and_the_rest_counted() {
     assert!(matches!(refused, Outcome::Error { .. }), "{refused:?}");
 }
 
+/// `count` in-flight signatures of one worktree, each a name of its own.
+fn many_inflight(count: usize) -> Vec<langspan_core::InflightSymbol> {
+    (0..count)
+        .map(|n| langspan_core::InflightSymbol {
+            name: format!("quota_{n:04}"),
+            ..quota("tree", "pub fn q() -> u64", &["src/routes.rs"])
+        })
+        .collect()
+}
+
+/// Brief `session` as the daemon does, offering at most
+/// `INFLIGHT_CANDIDATES` of `all` it was not told, until it was told every
+/// one. Returns the names told, in order, and the clock after.
+fn tell_every(
+    state: &mut State,
+    session: &str,
+    all: &[langspan_core::InflightSymbol],
+    mut now: u64,
+) -> (Vec<String>, u64) {
+    let mut told = Vec::new();
+    while told.len() < all.len() {
+        let offered: Vec<_> = all
+            .iter()
+            .filter(|item| !langspan_core::inflight_told(state, session, item))
+            .take(langspan_core::INFLIGHT_CANDIDATES)
+            .cloned()
+            .collect();
+        if offered.is_empty() {
+            break;
+        }
+        now += 1;
+        let briefing = brief_with(state, session, &format!("t{now}"), now, offered);
+        assert!(!briefing.inflight.is_empty(), "nothing told at {now}");
+        told.extend(briefing.inflight.into_iter().map(|notice| notice.name));
+    }
+    (told, now)
+}
+
+/// Offer every one of `all` again, unfiltered, as a briefing window that
+/// came round to them would, and return the names told again.
+fn told_again(
+    state: &mut State,
+    session: &str,
+    all: &[langspan_core::InflightSymbol],
+    mut now: u64,
+) -> Vec<String> {
+    let mut again = Vec::new();
+    for chunk in all.chunks(langspan_core::INFLIGHT_CANDIDATES) {
+        now += 1;
+        let briefing = brief_with(state, session, &format!("r{now}"), now, chunk.to_vec());
+        again.extend(briefing.inflight.into_iter().map(|notice| notice.name));
+    }
+    again
+}
+
+/// What a session was told is remembered for as many signatures as it can
+/// be offered in turn (review comment 4704678374): the daemon's briefing
+/// window now rotates over every in-flight row, so a memory smaller than
+/// the rows would tell the oldest again. At the limit nothing is told
+/// twice; one past it, every signature is still told once, and only one of
+/// the oldest is forgotten.
+#[test]
+fn a_session_is_told_each_in_flight_signature_once_up_to_its_memory() {
+    let limit = langspan_core::MAX_INFLIGHT_TOLD;
+    assert!(limit >= 1024, "a session remembers only {limit}");
+    let mut state = ready();
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    let all = many_inflight(limit);
+    let (told, now) = tell_every(&mut state, "alice", &all, 2_000);
+    let names: Vec<String> = all.iter().map(|item| item.name.clone()).collect();
+    assert_eq!(told, names, "each told once, in order");
+    assert_eq!(
+        told_again(&mut state, "alice", &all, now),
+        Vec::<String>::new()
+    );
+
+    let mut state = ready();
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    let all = many_inflight(limit + 1);
+    let (told, now) = tell_every(&mut state, "alice", &all, 2_000);
+    let names: Vec<String> = all.iter().map(|item| item.name.clone()).collect();
+    assert_eq!(told, names, "each told once, none starved");
+    // One of the first briefing's lines, which were told together.
+    let again = told_again(&mut state, "alice", &all, now);
+    assert_eq!(again.len(), 1, "only the oldest is forgotten: {again:?}");
+    assert!(
+        names[..langspan_core::INFLIGHT_LINES].contains(&again[0]),
+        "{again:?}"
+    );
+}
+
 /// Presence (roadmap A13) and in-flight signatures (roadmap C7) share one
 /// briefing signature: each is news on its own, and neither repeats the
 /// other once told.

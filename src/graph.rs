@@ -734,13 +734,7 @@ impl Index {
         path: &str,
         head: &FileGraph,
     ) -> Result<Vec<Symbol>, Failure> {
-        let language = crate::reformat::language(path);
-        let compared = |signature: &str| -> Vec<Vec<u8>> {
-            crate::reformat::tokens(signature.as_bytes(), language)
-                .into_iter()
-                .map(<[u8]>::to_vec)
-                .collect()
-        };
+        let compared = |signature: &str| signature_tokens(path, signature);
         let before: BTreeSet<(&str, SymbolKind, Vec<Vec<u8>>)> = head
             .symbols
             .iter()
@@ -786,21 +780,32 @@ impl Index {
             .collect())
     }
 
-    /// The workspace's in-flight symbols, in path and name order, at most
-    /// `limit`: `(path, name, kind, signature)`.
-    pub fn inflight(
+    /// The workspace's in-flight symbols, in path, name, kind and signature
+    /// order, at most `limit`: `(path, name, kind, signature)`.
+    pub fn inflight(&self, workspace_id: &str, limit: usize) -> Result<Vec<InflightRow>, Failure> {
+        self.inflight_after(workspace_id, None, limit)
+    }
+
+    /// As `inflight`, from the first row after `after` in that order.
+    pub fn inflight_after(
         &self,
         workspace_id: &str,
+        after: Option<&InflightRow>,
         limit: usize,
-    ) -> Result<Vec<(String, String, String, String)>, Failure> {
+    ) -> Result<Vec<InflightRow>, Failure> {
         let mut statement = self.connection.prepare_cached(
             "SELECT path, name, kind, signature FROM inflight WHERE workspace_id = ?1
-             ORDER BY path, name, signature LIMIT ?2",
+                AND (?2 IS NULL OR (path, name, kind, signature) > (?2, ?3, ?4, ?5))
+             ORDER BY path, name, kind, signature LIMIT ?6",
         )?;
+        let (path, name, kind, signature) = after.map_or((None, None, None, None), |row| {
+            (Some(&row.0), Some(&row.1), Some(&row.2), Some(&row.3))
+        });
         let rows = statement
-            .query_map(params![workspace_id, limit as i64], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })?
+            .query_map(
+                params![workspace_id, path, name, kind, signature, limit as i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -1484,6 +1489,33 @@ fn head_graph(
     let graph = langspan_graph::extract(language, &bytes).ok();
     Ok(graph.filter(|graph| !graph.partial))
 }
+
+/// A signature of `path`'s language as `added_or_changed` compares it: its
+/// tokens, as a reformat is (`crate::reformat::tokens`), so spacing between
+/// two tokens never counts and never joins them. Every indexed language
+/// is split into words: Go and Java by the TypeScript and JavaScript rules
+/// (words, quoted and backtick literals, `//` and `/* */` comments), as
+/// the rules for other files drop all whitespace, and `chan int` would
+/// then equal `chanint` (review comment 4704678366).
+fn signature_tokens(path: &str, signature: &str) -> Vec<Vec<u8>> {
+    use crate::reformat::Language as Tokens;
+    let language = match Language::for_path(path) {
+        Some(Language::Rust) => Tokens::Rust,
+        Some(Language::Python) => Tokens::Python,
+        Some(Language::TypeScript | Language::Tsx | Language::Go | Language::Java) => {
+            Tokens::Script
+        }
+        None => crate::reformat::language(path),
+    };
+    crate::reformat::tokens(signature.as_bytes(), language)
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// One in-flight symbol as the index holds it: `(path, name, kind,
+/// signature)`.
+pub type InflightRow = (String, String, String, String);
 
 /// Git did not give `head_graph` the blob: it timed out, failed or the
 /// object is missing. Unlike a version that parses partially, this may
@@ -2210,6 +2242,225 @@ mod review_regressions {
             .unwrap();
         assert_eq!(after[1].files.len(), 2);
         assert_eq!(coverage.indexable_files, 4);
+    }
+
+    /// A file of each indexed language, for `signature_tokens`.
+    fn language_path(language: langspan_graph::Language) -> &'static str {
+        match language {
+            langspan_graph::Language::Rust => "src/a.rs",
+            langspan_graph::Language::Python => "src/a.py",
+            langspan_graph::Language::TypeScript => "src/a.ts",
+            langspan_graph::Language::Tsx => "src/a.tsx",
+            langspan_graph::Language::Go => "src/a.go",
+            langspan_graph::Language::Java => "src/A.java",
+        }
+    }
+
+    /// Whitespace between two words is never dropped from a signature
+    /// comparison, in any indexed language: `chan int` and `chanint` are
+    /// different Go types (review comment 4704678366), as `impl Trait` and
+    /// `implTrait` are different Rust ones. Words meet next to keywords,
+    /// inside generics and after pointer, reference and channel markers.
+    #[test]
+    fn signature_comparison_never_joins_two_words_in_any_indexed_language() {
+        const WORDS: &[&str] = &[
+            "fn",
+            "impl",
+            "dyn",
+            "mut",
+            "const",
+            "unsafe",
+            "chan",
+            "func",
+            "map",
+            "interface",
+            "struct",
+            "final",
+            "extends",
+            "super",
+            "typeof",
+            "keyof",
+            "readonly",
+            "lambda",
+            "async",
+            "def",
+            "int",
+            "string",
+            "T",
+            "x",
+        ];
+        const PLACES: &[&str] = &[
+            "{a} {b}",
+            "f({a} {b})",
+            "f<{a} {b}>",
+            "f[{a} {b}]",
+            "f(x *{a} {b})",
+            "f(x <-{a} {b})",
+            "f(x: &{a} {b})",
+            "f(x: Vec<Box<{a} {b}>>)",
+        ];
+        for language in langspan_graph::Language::ALL {
+            let path = language_path(language);
+            for place in PLACES {
+                for a in WORDS {
+                    for b in WORDS {
+                        let spaced = place.replace("{a}", a).replace("{b}", b);
+                        let joined = place.replace("{a} {b}", &format!("{a}{b}"));
+                        let joined = joined.replace("{a}", a).replace("{b}", b);
+                        assert_ne!(
+                            signature_tokens(path, &spaced),
+                            signature_tokens(path, &joined),
+                            "{path}: {spaced:?} and {joined:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Each indexed language's own declarations: a change where two tokens
+    /// meet is a changed signature; spacing between tokens, and a line
+    /// break, are not; whitespace inside a string literal is part of it.
+    #[test]
+    fn signature_comparison_keeps_each_languages_token_boundaries() {
+        use langspan_graph::Language::*;
+        let changed: &[(langspan_graph::Language, &str, &str)] = &[
+            (Rust, "pub fn f(x: impl Trait)", "pub fn f(x: implTrait)"),
+            (Rust, "pub fn f(x: &dyn Fn())", "pub fn f(x: &dynFn())"),
+            (Rust, "pub fn f(x: *const u8)", "pub fn f(x: *constu8)"),
+            (Rust, "pub fn f<'a>(x: &'a str)", "pub fn f<'a>(x: &'astr)"),
+            (
+                Rust,
+                "pub fn f(x: Vec<Box<dyn Any>>)",
+                "pub fn f(x: Vec<Box<dynAny>>)",
+            ),
+            (
+                Rust,
+                "pub fn f(x: &str) -> &'static str",
+                "pub fn f(x: &str) -> &'staticstr",
+            ),
+            (
+                Rust,
+                r#"pub const A: &str = "a b""#,
+                r#"pub const A: &str = "ab""#,
+            ),
+            (Python, "def f(x=lambda y: y)", "def f(x=lambday: y)"),
+            (Python, "async def f(x)", "asyncdef f(x)"),
+            (Python, r#"def f(x="a b")"#, r#"def f(x="ab")"#),
+            (
+                TypeScript,
+                "export function f(x: typeof y)",
+                "export function f(x: typeofy)",
+            ),
+            (
+                TypeScript,
+                "export function f(x: keyof T)",
+                "export function f(x: keyofT)",
+            ),
+            (
+                TypeScript,
+                "export function f(x: readonly string[])",
+                "export function f(x: readonlystring[])",
+            ),
+            (
+                TypeScript,
+                "export function f<T extends U>(x: T)",
+                "export function f<TextendsU>(x: T)",
+            ),
+            (
+                TypeScript,
+                "export function f(x = 'a b')",
+                "export function f(x = 'ab')",
+            ),
+            (
+                Tsx,
+                "export function F(p: Props<keyof T>)",
+                "export function F(p: Props<keyofT>)",
+            ),
+            (Go, "func F(x chan int)", "func F(x chanint)"),
+            (Go, "func F(x <-chan int)", "func F(x <-chanint)"),
+            (Go, "func F(x *pkg.T)", "func F(x *pkgT)"),
+            (Go, "func F[T any](x T)", "func F[Tany](x T)"),
+            (
+                Go,
+                "func F(f func(x int) error)",
+                "func F(f func(xint) error)",
+            ),
+            (
+                Go,
+                "func (s *S) F(x struct{ A int })",
+                "func (s *S) F(x struct{ Aint })",
+            ),
+            (
+                Go,
+                r#"func F(x string) (y string, err error)"#,
+                r#"func F(x string) (ystring, err error)"#,
+            ),
+            (Go, r#"const A = "a b""#, r#"const A = "ab""#),
+            (Go, "const A = `a b`", "const A = `ab`"),
+            (
+                Java,
+                "public static int f(final Foo x)",
+                "public static int f(finalFoo x)",
+            ),
+            (
+                Java,
+                "public <T extends Comparable<T>> T max(List<? extends T> xs)",
+                "public <T extends Comparable<T>> T max(List<?extendsT> xs)",
+            ),
+            (
+                Java,
+                "public static void f(int[] x)",
+                "public staticvoid f(int[] x)",
+            ),
+            (
+                Java,
+                r#"@Named("a b") public void f()"#,
+                r#"@Named("ab") public void f()"#,
+            ),
+        ];
+        for (language, before, after) in changed {
+            let path = language_path(*language);
+            assert_ne!(
+                signature_tokens(path, before),
+                signature_tokens(path, after),
+                "{path}: {before:?} and {after:?}"
+            );
+        }
+        let respaced: &[(langspan_graph::Language, &str, &str)] = &[
+            (
+                Rust,
+                "pub fn f( x : Vec< u8 > ) -> u8",
+                "pub fn f(x: Vec<u8>) -> u8",
+            ),
+            (Python, "def f( x : int = 1 )", "def f(x: int = 1)"),
+            (
+                TypeScript,
+                "export function f( x : T )",
+                "export function f(x: T)",
+            ),
+            (
+                Tsx,
+                "export function F( p : Props )",
+                "export function F(p: Props)",
+            ),
+            (
+                Go,
+                "func F( x  * T ,\n\ty map[ string ]int )",
+                "func F(x *T, y map[string]int)",
+            ),
+            (Go, "func F(x <-chan int)", "func F(x <- chan int)"),
+            (Go, "func F(x chan<- int)", "func F(x chan <-int)"),
+            (Java, "public  int  f( int[]  x )", "public int f(int[] x)"),
+        ];
+        for (language, before, after) in respaced {
+            let path = language_path(*language);
+            assert_eq!(
+                signature_tokens(path, before),
+                signature_tokens(path, after),
+                "{path}: {before:?} and {after:?}"
+            );
+        }
     }
 
     #[test]

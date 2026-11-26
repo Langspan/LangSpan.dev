@@ -1999,6 +1999,155 @@ fn inflight_reports_truncation_when_one_worktree_has_more_than_its_candidate_lim
     assert_eq!(inflight_names(&cut).len(), 128, "{cut:#}");
 }
 
+/// The quoted name of each in-flight line of `context`.
+fn told_names(context: &str) -> Vec<String> {
+    inflight_lines(context)
+        .iter()
+        .map(|line| {
+            // `In flight in worktree "…" (…): function "NAME" in "…"`.
+            let name = line.split_once("): ").unwrap().1;
+            let name = name.split_once('"').unwrap().1;
+            name.split_once('"').unwrap().0.to_owned()
+        })
+        .collect()
+}
+
+/// Prompt `session` until every name in `wanted` was told, each once.
+/// Nothing outside `wanted` is told.
+fn tell_all(w: &World, session: &str, wanted: &[String]) {
+    let deadline = Instant::now() + WAIT * 4;
+    let mut told: Vec<String> = Vec::new();
+    let mut prompts = 0;
+    while told.len() < wanted.len() {
+        assert!(
+            Instant::now() < deadline,
+            "after {prompts} prompts, told {} of {}; missing {:?}",
+            told.len(),
+            wanted.len(),
+            wanted
+                .iter()
+                .filter(|name| !told.contains(name))
+                .collect::<Vec<_>>()
+        );
+        prompts += 1;
+        let Some(context) = w.prompt(session) else {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+        for name in told_names(&context) {
+            assert!(wanted.contains(&name), "{name} was not to be told");
+            assert!(!told.contains(&name), "{name} told twice");
+            told.push(name);
+        }
+    }
+}
+
+/// The briefing's candidate window moves on past what a session was told
+/// (review comment 4704678374): a worktree with exactly one window of
+/// mentioned signatures is told in full, once each, and so is the one
+/// signature past it; nothing is told again afterwards.
+#[test]
+fn every_inflight_signature_past_the_briefing_window_is_told_once() {
+    let w = World::new();
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let calls: String = (0..129)
+        .map(|n| format!("    let _ = many_{n:03}();\n"))
+        .collect();
+    w.edits(
+        "bob",
+        "b1",
+        "src/main.rs",
+        &format!("mod upload;\nfn main() {{\n{calls}}}\n"),
+    );
+    let names =
+        |count: usize| -> Vec<String> { (0..count).map(|n| format!("many_{n:03}")).collect() };
+    // The window is reached: 128, the per-worktree candidate limit.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a1",
+        "src/many.rs",
+        &definitions("many", 128),
+    );
+    w.wait_for_inflight("128 in flight", "app", |outcome| {
+        inflight_names(outcome).len() == 128
+    });
+    tell_all(&w, "bob", &names(128));
+    // One past it.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a2",
+        "src/many.rs",
+        &definitions("many", 129),
+    );
+    w.wait_for_inflight("129 in flight", "app", |outcome| {
+        outcome["truncated"] == true
+    });
+    tell_all(&w, "bob", &names(129)[128..]);
+    for _ in 0..5 {
+        assert!(not_told_inflight(w.prompt("bob")), "told again");
+    }
+}
+
+/// Signatures behind more unmentioned ones than a briefing reads, in one
+/// worktree and across worktrees, are still told, each once: the window
+/// rotates instead of reading the same first rows at every briefing.
+#[test]
+fn inflight_signatures_behind_unmentioned_ones_are_told_in_a_later_briefing() {
+    let w = World::new();
+    // Read in name order: `wa`, `wb`, then `wc`.
+    let a = w.linked_tree_named("wa", "feature-a");
+    let b = w.linked_tree_named("wb", "feature-b");
+    let c = w.linked_tree_named("wc", "feature-c");
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    w.edits(
+        "bob",
+        "b1",
+        "src/main.rs",
+        "mod upload;\nfn main() {\n    let _ = alpha_wanted();\n    let _ = wanted_000();\n}\n",
+    );
+    // 200 names nothing mentions, then the one bob calls.
+    let alpha = format!(
+        "{}pub fn alpha_wanted() -> u8 {{ 0 }}\n",
+        definitions("alpha", 200)
+    );
+    w.edits_in("wa", &a, "alice", "a1", "src/a.rs", &alpha);
+    w.edits_in(
+        "wb",
+        &b,
+        "carol",
+        "c1",
+        "src/b.rs",
+        &definitions("beta", 200),
+    );
+    w.edits_in(
+        "wc",
+        &c,
+        "dave",
+        "d1",
+        "src/c.rs",
+        &definitions("wanted", 1),
+    );
+    // Until each worktree is indexed, a prompt finds less: the wait is
+    // `tell_all`'s.
+    tell_all(
+        &w,
+        "bob",
+        &["alpha_wanted".to_owned(), "wanted_000".to_owned()],
+    );
+    for _ in 0..5 {
+        assert!(not_told_inflight(w.prompt("bob")), "told again");
+    }
+}
+
 /// Worktrees left out by the candidate limit across all worktrees make the
 /// answer partial even when nothing that was read is mentioned (review
 /// comment 4704149471).
@@ -2162,6 +2311,62 @@ fn a_rust_one_element_tuple_becoming_a_scalar_is_in_flight() {
     );
     w.wait_for_inflight("the tuple became a scalar", "app", |outcome| {
         inflight_names(outcome) == ["upload: pub fn upload(path: (&str)) -> bool"]
+    });
+}
+
+/// A Go parameter's `chan int` becoming `chanint` is a changed signature:
+/// `chanint` can be a type of its own (review comment 4704678366). Spacing
+/// between Go tokens still is not.
+#[test]
+fn a_go_channel_type_joined_into_one_name_is_in_flight() {
+    let w = World::new();
+    let work = w.work();
+    fs::write(
+        work.join("src/feed.go"),
+        "package app\n\nfunc Feed(x chan int) {\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        work.join("src/use.go"),
+        "package app\n\nfunc Use() {\n\tFeed(nil)\n}\n",
+    )
+    .unwrap();
+    git(&work, &["add", "src/feed.go", "src/use.go"]);
+    git(&work, &["commit", "--quiet", "-m", "feed"]);
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "Feed", |outcome| {
+        outcome["coverage"]["current_files"] == 5
+    });
+    // Only the spacing between tokens changes: not in flight.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a1",
+        "src/feed.go",
+        "package app\n\nfunc Feed( x   chan  int ) {\n}\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let outcome = w.inflight("app");
+        assert_eq!(
+            inflight_names(&outcome),
+            Vec::<String>::new(),
+            "{outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Two words become one: in flight.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a2",
+        "src/feed.go",
+        "package app\n\ntype chanint int\n\nfunc Feed(x chanint) {\n}\n",
+    );
+    w.wait_for_inflight("the joined channel type", "app", |outcome| {
+        inflight_names(outcome) == ["Feed: func Feed(x chanint)"]
     });
 }
 

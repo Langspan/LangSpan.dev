@@ -378,7 +378,9 @@ parses it like any file. The exported symbols of the working version that
 the `HEAD` version lacks, or exports with a different signature, are the
 file's in-flight set. Signatures are compared by their tokens as a reformat
 is ([ADR 0011](0011-shell-writes.md)): spacing between tokens aside, but a
-string literal's whitespace counts. A blob Git does not give (a timeout, a
+string literal's whitespace counts. Every indexed language is split into
+words, Go and Java by the TypeScript rules, so removing spacing never joins
+two tokens (`chan int` is not `chanint`). A blob Git does not give (a timeout, a
 missing object) leaves the file uncompared, and a later pass tries again. A
 file new since `HEAD` puts all its
 exports in it. The set lives in `graph.sqlite3` (`inflight` and
@@ -386,9 +388,15 @@ exports in it. The set lives in `graph.sqlite3` (`inflight` and
 computed at), added without a schema change, so an existing index computes
 it at its next pass. A file found clean again, or gone, has none. A partial
 parse at either version says nothing. When the daemon answers `Brief`, it
-reads the in-flight sets of the other worktrees of the asking workspace's
-repository, at most 128 symbols each and 256 in all, and compares them with
-the asking workspace's index. A symbol counts when one of the session's own
+reads at most 256 in-flight symbols of the other worktrees of the asking
+workspace's repository, in worktree, path and name order, and compares them
+with the asking workspace's index. Each briefing reads on from where the
+session's last one found nothing to offer, or from just before the first
+symbol it offered, and wraps to the first symbol after the last. So a
+symbol past the first 256 is reached once those before it are told or not
+mentioned, and no one is read again before the others have had their turn.
+The place is kept in the daemon's memory only; a restart starts again from
+the first symbol. A symbol counts when one of the session's own
 files (edited, held, declared or read) mentions its name, or imports a path
 whose last part is the name or the file's module name: the file name without
 its extension, or the directory for Go and for `mod.rs`, `lib.rs`, `main.rs`,
@@ -401,9 +409,12 @@ renders. It selects none for a briefing that carries a message, a withdrawal,
 an uncoordinated change or a check result: those take the briefing's room
 and are each delivered once, so the in-flight lines wait, counted. A
 delivered briefing records the keys of the signatures it told
-(`InflightDelivered`), at most 128 per session, so each signature is told
-once and a changed one again. `graph inflight WORKSPACE` answers the same
-comparison for any file of the workspace, read-only. Neither a worktree nor
+(`InflightDelivered`), at most 1,024 per session, so each signature is told
+once and a changed one again. A session told more than 1,024 signatures
+that are all still in flight forgets the oldest, which is told again when
+the window next reaches it. `graph inflight WORKSPACE` answers the same
+comparison for any file of the workspace, read-only, from the first 128
+symbols of each other worktree and 256 in all. Neither a worktree nor
 an asking workspace without a complete scan contributes anything; an empty
 answer still carries the asking workspace's coverage. Its answer keeps the
 leading items that fit one response frame and is marked `truncated` when any
@@ -412,6 +423,9 @@ are left out. Tests:
 `in_flight_lines_keep_to_their_share_and_the_rest_are_counted_and_told_later`,
 `an_empty_inflight_answer_still_reports_the_asking_workspaces_coverage`,
 `a_changed_string_default_is_in_flight_but_respacing_is_not`,
+`a_go_channel_type_joined_into_one_name_is_in_flight`,
+`every_inflight_signature_past_the_briefing_window_is_told_once`,
+`inflight_signatures_behind_unmentioned_ones_are_told_in_a_later_briefing`,
 `many_long_inflight_notices_are_trimmed_to_one_response_frame` and
 `a_head_version_that_could_not_be_read_is_compared_on_a_later_pass`
 in `tests/graph.rs`,
