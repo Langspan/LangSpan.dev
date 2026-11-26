@@ -349,7 +349,13 @@ mod unix {
                         of.workspace_id
                     )));
                 };
-                let file = fs::File::open(path)
+                // Opened nonblocking, so a FIFO with no writer (or a symlink
+                // to one) cannot hold the indexer before the type check;
+                // a regular file ignores the flag.
+                let file = fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                    .open(path)
                     .map_err(|error| refused(format!("cannot open {path}: {error}")))?;
                 let metadata = file
                     .metadata()

@@ -1534,3 +1534,54 @@ fn only_files_with_the_exported_content_are_imported_and_the_rest_are_indexed_fr
     }
     assert_eq!(second.interface_events(), 0);
 }
+
+/// Review finding 4703518719: an import path naming a FIFO with no writer,
+/// directly or through a symlink, is refused promptly, and the indexer
+/// still answers the next import instead of blocking on the open.
+#[test]
+fn an_import_from_a_fifo_is_refused_without_blocking_the_indexer() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let file = export(&w, "index.jsonl");
+    let fifo = w.base.join("pipe");
+    let status = Process::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(status.success());
+    let link = w.base.join("pipe-link");
+    std::os::unix::fs::symlink(&fifo, &link).unwrap();
+    for input in [&fifo, &link] {
+        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .arg("--state-dir")
+            .arg(w.base.join("state"))
+            .args(["graph", "import", "app", "--json", "--in"])
+            .arg(input)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("an import from {} blocked", input.display());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        assert_eq!(outcome["code"], "index_import_refused", "{outcome:#}");
+        assert!(
+            outcome["message"]
+                .as_str()
+                .unwrap()
+                .contains("not a regular file"),
+            "{outcome:#}"
+        );
+    }
+    // The indexer is free: a regular import is answered.
+    let (code, text) = w.cli(&["graph", "import", "app", "--in", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{text}");
+}
