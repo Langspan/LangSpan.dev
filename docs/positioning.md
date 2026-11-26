@@ -89,9 +89,10 @@ symbol publication is not a released capability. See
   see [B28: coordination policy](https://github.com/Langspan/LangSpan.dev/issues/171).
 - Native Claude Code and Codex observations, real two-machine briefing delivery,
   scripted coordinator tests, and authored illustrations are different kinds
-  of evidence. Cursor and Gemini CLI adapters have no retained live-host verification.
-  Antigravity was corrected against an initial real run; repeat validation is
-  pending. The 5+5 topology is illustrative, not a scale test.
+  of evidence. The Cursor adapter has no retained live-host verification.
+  Antigravity, the Google host, is verified on a real Antigravity CLI 1.5.14
+  run; its linked worktrees, subagents and mixed-host runs are not. Gemini CLI
+  support was removed. The 5+5 topology is illustrative, not a scale test.
 - The goal is compatible parallel work with less avoidable repair and manual
   relay, not a measured reduction. Track comparative results in
   [K1: coordination benchmark](https://github.com/Langspan/LangSpan.dev/issues/172).

@@ -2926,7 +2926,7 @@ pub const CODEX_HOST: &str = "codex";
 /// The host names that start the other hooked hosts' session IDs.
 pub const CLAUDE_CODE_HOST: &str = "claude-code";
 pub const CURSOR_HOST: &str = "cursor";
-pub const GEMINI_HOST: &str = "gemini";
+pub const ANTIGRAVITY_HOST: &str = "antigravity";
 /// The tool name of a shell call on every host, as the hooks record it.
 pub const SHELL_TOOL: &str = "Bash";
 
@@ -13500,7 +13500,7 @@ fn validate_branch_observation(
 }
 
 /// A host's command-line name: lower-case letters and hyphens, as the
-/// adapters name them (`claude-code`, `gemini-cli`).
+/// adapters name them (`claude-code`, `antigravity`).
 fn validate_host_name(host: &str) -> Result<(), CoreError> {
     if host.is_empty()
         || host.len() > 32

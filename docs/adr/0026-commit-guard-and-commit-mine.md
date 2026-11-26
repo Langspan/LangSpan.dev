@@ -6,11 +6,12 @@ the attribution of edits to sessions in ADR 0002, ADR 0004 and ADR 0011.
 Roadmap rows B6 and B7, the shared-index guard and `commit --mine`.
 Tested with the real daemon, Git, hook executable, CLI and MCP adapter
 (`tests/commit_guard.rs`), with each host's own edit and shell events for
-Claude Code, Codex, Cursor and Gemini CLI (issue #26). A real Codex session
+Claude Code, Codex, Cursor and Gemini CLI (issue #26; Gemini CLI support was
+later removed, [ADR 0033](0033-gemini-cli-adapter.md)). A real Codex session
 ran `commit --mine` from its shell
 ([Codex real-host evidence](../evidence/codex-real-host/README.md), section
-6); the Claude Code run is not yet retained as evidence, and Cursor and
-Gemini CLI have not run it on a real host.
+6); the Claude Code run is not yet retained as evidence, and Cursor has not
+run it on a real host.
 
 ## Context
 
@@ -167,8 +168,7 @@ which prints one row per run and fails past the default 1,500 ms budget).
 The guard runs the same way on every host's shell tool; the hold's text and
 coverage are the same, in each host's reply field. Tests with each host's
 events: `a_codex_commit_all_is_held_once_naming_the_claude_sessions_lines_and_then_commits`,
-`a_cursor_shell_add_all_is_held_naming_the_claude_sessions_lines`,
-`a_gemini_shell_commit_all_is_held_naming_the_claude_sessions_lines`, and
+`a_cursor_shell_add_all_is_held_naming_the_claude_sessions_lines`, and
 `adding_a_path_that_holds_only_the_sessions_own_lines_is_not_held`.
 
 When some hunk or whole file is another live session's, or holds lines only another live session wrote (a
@@ -264,14 +264,13 @@ uncommitted.
 
 Every host's shell tool reaches that marking through the same shell
 operation (`hook::shell_operation`): Claude Code `Bash`, Codex `Bash` (its
-`exec_command`), Cursor `Shell`, Gemini CLI `run_shell_command` and
-Antigravity's shell tool; the tests cover the first four. Their MCP registrations call the same
+`exec_command`), Cursor `Shell` and Antigravity's shell tool; the tests cover
+the first three. Their MCP registrations call the same
 `langspan_commit_mine`, whose result holds the CLI's `--json` fields plus
 `exit_code` and `request_id`. When anything is left or refused, the text
 output ends by pointing to `langspan status --mine`, which lists the lines
 still this session's (issue #26). Tests in `tests/commit_guard.rs`:
 `a_codex_shell_commit_mine_commits_only_its_hunk_of_a_file_both_changed`,
-`a_gemini_shell_commit_mine_without_a_session_finds_its_own`,
 `a_cursor_mcp_commit_mine_returns_the_cli_json_fields`,
 `each_failing_commit_hook_is_named_and_nothing_is_committed` and
 `commit_mine_text_lists_what_was_left_and_points_to_status_mine`.

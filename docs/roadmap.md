@@ -1,6 +1,6 @@
 # Roadmap
 
-Updated 25 November 2026. This is an index of what LangSpan still has to
+Updated 26 November 2026. This is an index of what LangSpan still has to
 build. Each capability is a GitHub issue labelled `roadmap`, and the issue is
 its specification: the problem it solves, what exists today, the behaviour to
 build, the acceptance criteria that make it done, an example, the outcome and
@@ -35,7 +35,9 @@ what would bring it forward), or *not building*.
 
 ## Launch bar
 
-The launch hosts are Claude Code, Codex, Gemini CLI and Cursor. Every track
+The launch hosts are Claude Code, Codex and Cursor, with Antigravity as the
+Google host ([ADR 0035](adr/0035-antigravity-adapter.md)). Gemini CLI support
+was removed (#246, [ADR 0033](adr/0033-gemini-cli-adapter.md)). Every track
 below is built and tested on `main`; what each still needs before it counts
 as done is in its row.
 
@@ -44,13 +46,13 @@ as done is in its row.
 | L1. Line protection without a recorded read: a per-session journal of written lines; a write that changes another live session's recent lines is refused unless that session read them since | B4 | Built ([ADR 0028](adr/0028-line-ownership.md)). Shell writes, `NotebookEdit` and Codex add, delete and move are not located. Not yet observed on a host |
 | L2. Codex reads, Stop and SessionEnd | A3 | Built: Stop and SessionEnd registered; Codex reports no reads, so a first patch records a `snapshot` version instead ([ADR 0027](adr/0027-turn-and-batch-events.md)). Observed on a real Codex on 26 November 2026 ([evidence](evidence/codex-turn-events/README.md)): Stop released the open admission, SessionEnd ended the session, and a stale patch after a peer's change was refused once and its retry admitted. A Codex subagent's tool event is not yet observed |
 | L3. Claude Code Stop, StopFailure, SubagentStop and PostToolBatch hooks | A2 | Done: observed on Claude Code 2.1.330 ([ADR 0027](adr/0027-turn-and-batch-events.md)). Quota and usage detection from StopFailure is J11 |
-| L4. Shared-checkout commit guard and commit of only this session's hunks | B6, B7 | Built ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)); observed with real Claude Code sessions, and `commit --mine` with a real Codex session ([evidence](evidence/codex-real-host/README.md)). The guard and `commit --mine` are tested with Codex, Cursor and Gemini CLI events; the guard is not yet observed on those hosts |
-| L5. Interface-break alerts at write time, with the lines to fix and the argument count | B9, B10 | Built for Claude Code, Codex and Gemini CLI writes and quoted-heredoc shell writes, for argument counts, renames and removals, including those made in another worktree of the repository, committed or not, until the commit reaches the writer's branch ([ADR 0029](adr/0029-break-alerts-at-write-time.md)); observed once on Claude Code. Not yet observed on Codex or Gemini CLI; Cursor waits for a captured write input |
+| L4. Shared-checkout commit guard and commit of only this session's hunks | B6, B7 | Built ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)); observed with real Claude Code sessions, and `commit --mine` with a real Codex session ([evidence](evidence/codex-real-host/README.md)). The guard and `commit --mine` are tested with Codex and Cursor events; the guard is not yet observed on those hosts |
+| L5. Interface-break alerts at write time, with the lines to fix and the argument count | B9, B10 | Built for Claude Code and Codex writes and quoted-heredoc shell writes, for argument counts, renames and removals, including those made in another worktree of the repository, committed or not, until the commit reaches the writer's branch ([ADR 0029](adr/0029-break-alerts-at-write-time.md)); observed once on Claude Code. Not yet observed on Codex; Cursor waits for a captured write input |
 | L6. Checks after write batches, run detached and reported in the next briefing | F1 | Built, off by default, with failures classified against each session's baseline ([ADR 0030](adr/0030-automatic-checks-after-write-batches.md)). Not yet observed on a host |
 | L7. Landing depth: a bounded queue for the push turn, hunk-level conflict reports, and following renames that landed | F5 | Built ([ADR 0007](adr/0007-check-evidence-integration-and-landing.md)). Not yet called by an agent on a host |
 | L8. Release pipeline: versioned releases with prebuilt binaries for the supported platforms | I6 | Built ([ADR 0031](adr/0031-releases.md)); no release has been produced yet |
 | L9. Cursor adapter: hooks and MCP registration | A4 | Built from documentation ([ADR 0032](adr/0032-cursor-adapter.md)); waits for a capture from a real Cursor (`scripts/capture-cursor.sh`) |
-| L10. Gemini CLI adapter: hooks and MCP registration | A6 | Built from documentation ([ADR 0033](adr/0033-gemini-cli-adapter.md)); no live Gemini CLI session yet |
+| L10. Gemini CLI adapter: hooks and MCP registration | A6 | Dropped: Gemini CLI support removed (#246, [ADR 0033](adr/0033-gemini-cli-adapter.md)) |
 
 Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md)).
 
@@ -59,7 +61,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [A3: Verify Codex end-of-reply events and the first-patch snapshot on a real Codex](https://github.com/Langspan/LangSpan.dev/issues/11): a real Codex has shown the end-of-reply release and the first-patch snapshot; a Codex subagent's tool event has not been captured.
 - [A4: Verify the Cursor adapter on a real Cursor](https://github.com/Langspan/LangSpan.dev/issues/12): the Cursor adapter rests on documentation alone, so Cursor cannot yet be relied on to be coordinated.
 - [A5: A plugin adapter for the Hermes agent](https://github.com/Langspan/LangSpan.dev/issues/13): a Hermes agent beside other hosts gets no admission or briefing, and its edits go unrecorded.
-- [A6: Gemini CLI verified on a real session, and guidance for rules-file hosts](https://github.com/Langspan/LangSpan.dev/issues/14): the Gemini CLI adapter has never run live, and editors without hooks get nothing at all.
+- [A6: Gemini CLI verified on a real session, and guidance for rules-file hosts](https://github.com/Langspan/LangSpan.dev/issues/14): dropped for Gemini CLI, whose support was removed (#246); the rules-file part is [ADR 0018](adr/0018-other-hosts-after-launch.md)'s.
 - [A11: Outline first for whole reads of large files](https://github.com/Langspan/LangSpan.dev/issues/16): whole reads of large files spend context to find one function; nothing offers the file's shape first.
 - [A12: Index answers next to a search result](https://github.com/Langspan/LangSpan.dev/issues/17): a search result does not say where a name is defined, what depends on it or whether a peer is changing it.
 - [A13: Show where peers are looking](https://github.com/Langspan/LangSpan.dev/issues/18): a session that has read and planned but not written yet is missing from peers' briefings. Built as presence; a real-host run remains.

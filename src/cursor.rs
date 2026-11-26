@@ -278,7 +278,6 @@ fn dispatch(event: HostEvent, config: &Config, deadline: Instant) -> Reply {
             // are checked for breaks only once a capture is in the
             // repository (ADR 0029).
             pre_tool_context: CAPTURED_WRITE.is_some(),
-            breaks_after: false,
         },
         &config,
         deadline,

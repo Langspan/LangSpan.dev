@@ -113,7 +113,7 @@ run the worktree's own install for the same event:
 | Claude Code | Both: the worktree's own project hooks and the main checkout's local settings | Claude Code 2.1.330, macOS 27.2 (launch validation, bug 3) | Steps aside (`deferred_to_worktree`) |
 | Codex | Only the main checkout's project hooks; the worktree's own never run | Codex 0.171.0, macOS (issue #2) | Decides, as the worktree's install would |
 | Cursor | Not known: no run in a linked worktree is retained | — | Decides, as the worktree's install would |
-| Gemini CLI | Not known: its source reads project settings from the directory it starts in (ADR 0033), but no run in a linked worktree is retained | — | Decides, as the worktree's install would |
+| Gemini CLI (removed, ADR 0033) | Not known: its source reads project settings from the directory it starts in (ADR 0033), but no run in a linked worktree is retained | — | Decides, as the worktree's install would |
 
 On Claude Code the inherited copy used to answer every event a second time,
 as `unknown` ("workspace root overlaps an existing physical workspace") at
@@ -148,7 +148,7 @@ Tests (real linked worktrees, a real daemon, constructed host events):
 (Claude Code),
 `codex_in_a_worktree_with_its_own_install_is_coordinated_by_the_main_checkouts_hook`,
 `an_unconfirmed_host_decides_in_a_worktree_with_its_own_install_rather_than_stepping_aside`
-(Gemini CLI and Cursor),
+(Cursor; Gemini CLI too, before its removal),
 `a_worktree_installs_prompt_opt_outs_hold_when_the_main_checkouts_hook_decides`
 (Codex and Cursor),
 `doctor_reports_a_worktree_install_the_host_will_not_run` and

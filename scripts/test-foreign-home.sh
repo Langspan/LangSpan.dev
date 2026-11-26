@@ -25,7 +25,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' INT TERM
 "${CARGO_TARGET_DIR:-target}/debug/langspan" install --home "$home" \
-  --hosts claude-code,codex,cursor,gemini-cli --state-dir "$home/elsewhere" \
+  --hosts claude-code,codex,cursor,antigravity --state-dir "$home/elsewhere" \
   --skill --apply >/dev/null
 chmod -R a-w "$home"
 

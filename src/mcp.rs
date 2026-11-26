@@ -73,8 +73,9 @@ pub const HIDDEN_WHEN_HOOKED: &[&str] = &[
     "langspan_workspace_register",
 ];
 
-/// Hosts whose hooks report reliably enough for `--tools hooked`. Gemini
-/// CLI and Cursor follow once their adapters are verified on a real host.
+/// Hosts whose hooks report reliably enough for `--tools hooked`. Cursor
+/// follows once its adapter is verified on a real host, and Antigravity
+/// once `--tools hooked` is checked there.
 pub const HOOKED_HOSTS: &[&str] = &["claude-code", "codex"];
 
 /// How long without a hook event from this host before the whole list is
