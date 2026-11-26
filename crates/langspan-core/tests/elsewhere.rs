@@ -2,8 +2,9 @@
 //! #194): a write check judges the change in the worktree that made it, and
 //! the notice keeps the other worktrees' files that mention the old name.
 use langspan_core::{
-    CallSite, Command, Event, IndexedNames, InterfaceChange, InterfaceNotice, NOTICE_DEPENDENTS,
-    Outcome, State, SymbolRef, WorktreeFile, apply, call_breaks, call_candidates, decide,
+    BRIEF_HORIZON_MS, CallSite, Command, Event, IndexedNames, InterfaceChange, InterfaceNotice,
+    NOTICE_DEPENDENTS, Outcome, Standing, StandingQuestion, Standings, State, SymbolRef,
+    WorktreeFile, apply, call_breaks, call_candidates, decide, standing_questions,
 };
 use std::collections::BTreeMap;
 
@@ -131,7 +132,7 @@ fn tree_index(complete: bool) -> BTreeMap<String, IndexedNames> {
 #[test]
 fn a_rename_in_another_worktree_is_judged_in_that_worktrees_index() {
     let state = renamed();
-    let candidates = call_candidates(&state, "bob", &[call()], 30).unwrap();
+    let candidates = call_candidates(&state, "bob", &[call()], &none(), 30).unwrap();
     assert_eq!(
         candidates
             .iter()
@@ -139,7 +140,7 @@ fn a_rename_in_another_worktree_is_judged_in_that_worktrees_index() {
             .collect::<Vec<(&str, Vec<String>)>>(),
         [("tree", vec!["load_config".into(), "parse_config".into()])]
     );
-    let breaks = call_breaks(&state, "bob", &[call()], &tree_index(true), 30).unwrap();
+    let breaks = call_breaks(&state, "bob", &[call()], &none(), &tree_index(true), 30).unwrap();
     assert_eq!(breaks.len(), 1, "{breaks:?}");
     assert_eq!(breaks[0].change, "renamed");
     assert_eq!(breaks[0].after_name.as_deref(), Some("load_config"));
@@ -149,23 +150,23 @@ fn a_rename_in_another_worktree_is_judged_in_that_worktrees_index() {
     // Without that worktree's index, or with a partial one, nothing is said:
     // the old name may only have moved.
     assert!(
-        call_breaks(&state, "bob", &[call()], &BTreeMap::new(), 30)
+        call_breaks(&state, "bob", &[call()], &none(), &BTreeMap::new(), 30)
             .unwrap()
             .is_empty()
     );
     assert!(
-        call_breaks(&state, "bob", &[call()], &tree_index(false), 30)
+        call_breaks(&state, "bob", &[call()], &none(), &tree_index(false), 30)
             .unwrap()
             .is_empty()
     );
     // Another repository's session is never told.
     assert!(
-        call_candidates(&state, "dave", &[call()], 30)
+        call_candidates(&state, "dave", &[call()], &none(), 30)
             .unwrap()
             .is_empty()
     );
     assert!(
-        call_breaks(&state, "dave", &[call()], &tree_index(true), 30)
+        call_breaks(&state, "dave", &[call()], &none(), &tree_index(true), 30)
             .unwrap()
             .is_empty()
     );
@@ -179,8 +180,114 @@ fn a_rename_in_another_worktree_is_judged_in_that_worktrees_index() {
     };
     let mut state = state;
     ok(run(&mut state, "s-carol", carol, 30));
-    let breaks = call_breaks(&state, "carol", &[call()], &tree_index(true), 30).unwrap();
+    let breaks = call_breaks(&state, "carol", &[call()], &none(), &tree_index(true), 30).unwrap();
     assert_eq!(breaks[0].worktree, None);
+}
+
+fn none() -> Standings {
+    Standings::new()
+}
+
+/// `tree`'s rename notice standing as `standing` for Bob's checkout.
+fn standing(state: &State, standing: Standing) -> Standings {
+    Standings::from([(
+        ("tree".to_owned(), notice(state).notice_id.clone()),
+        standing,
+    )])
+}
+
+fn bob_told(state: &State, standings: &Standings, now: u64) -> bool {
+    !call_candidates(state, "bob", &[call()], standings, now)
+        .unwrap()
+        .is_empty()
+        && !call_breaks(state, "bob", &[call()], standings, &tree_index(true), now)
+            .unwrap()
+            .is_empty()
+}
+
+/// Issue #217: a change committed on another worktree's branch and not in
+/// the asking checkout's `HEAD` is told whatever its age and whether or not
+/// its session has ended; one in that `HEAD` is not; an uncommitted change,
+/// or one Git did not answer for, keeps the earlier rules.
+#[test]
+fn a_committed_unmerged_change_is_told_until_the_peers_base_holds_it() {
+    let mut state = renamed();
+    let late = 20 + BRIEF_HORIZON_MS + 1;
+    // Git is asked about the notice even when only age or an ended session
+    // would leave it out, and never about Bob's own workspace's notices or
+    // another repository's.
+    let questions = standing_questions(&state, "bob", &[call()], late).unwrap();
+    assert_eq!(
+        questions,
+        [StandingQuestion {
+            workspace_id: "tree".into(),
+            notice_id: notice(&state).notice_id.clone(),
+            path: "src/config.rs".into(),
+        }]
+    );
+    assert!(
+        standing_questions(&state, "dave", &[call()], 30)
+            .unwrap()
+            .is_empty()
+    );
+    let other = CallSite {
+        name: "unrelated".into(),
+        ..call()
+    };
+    assert!(
+        standing_questions(&state, "bob", &[other], 30)
+            .unwrap()
+            .is_empty()
+    );
+    // A session in the notice's own worktree keeps the uncommitted rules:
+    // Git is not asked for it.
+    let carol = Command::SessionRegister {
+        session_id: "carol".into(),
+        workspace_id: "tree".into(),
+        parent: None,
+        headless: false,
+    };
+    ok(run(&mut state, "s-carol", carol, 30));
+    assert!(
+        standing_questions(&state, "carol", &[call()], 30)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Past the horizon: only the committed, unmerged change is told.
+    assert!(bob_told(
+        &state,
+        &standing(&state, Standing::Unmerged),
+        late
+    ));
+    for left in [
+        none(),
+        standing(&state, Standing::Uncommitted),
+        standing(&state, Standing::Merged),
+    ] {
+        assert!(!bob_told(&state, &left, late), "{left:?}");
+    }
+    // Within the horizon, merged is not told even with Alice live.
+    assert!(!bob_told(&state, &standing(&state, Standing::Merged), 30));
+    assert!(bob_told(
+        &state,
+        &standing(&state, Standing::Uncommitted),
+        30
+    ));
+
+    // Alice's session ends: committed and unmerged is still told; the
+    // uncommitted rules are not.
+    let end = Command::SessionEnd {
+        session_id: "alice".into(),
+    };
+    ok(run(&mut state, "end-alice", end, 30));
+    assert!(bob_told(&state, &standing(&state, Standing::Unmerged), 40));
+    assert!(!bob_told(
+        &state,
+        &standing(&state, Standing::Uncommitted),
+        40
+    ));
+    assert!(!bob_told(&state, &none(), 40));
 }
 
 fn found(paths: &[&str], from: &str, notice_id: &str) -> Command {

@@ -251,9 +251,44 @@ def apply_edits(session, ops):
     return edited
 
 
+def repair(plan):
+    """The repair round's stand-in, in the combined tree: every task's
+    informed edit, in session order, skipping a replacement whose result
+    is already there. It does not resolve Git's conflict markers, so a tree
+    with a refused merge stays broken."""
+    print(json.dumps({"type": "system", "subtype": "init", "session_id": str(uuid.uuid4()), "model": "standin",
+                      "tools": plan.get("allowed_tools", []), "mcp_servers": []}), flush=True)
+    edited = []
+    for task in plan["tasks"]:
+        for op in task["standin"]["follow"]:
+            for name in op.get("paths", [op.get("path")]):
+                path = Path(name)
+                if op["op"] == "write":
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(op["content"], encoding="utf-8")
+                else:
+                    before = path.read_text(encoding="utf-8") if path.is_file() else ""
+                    if op["old"] not in before or op["new"] in before:
+                        continue
+                    count = -1 if op.get("all") else 1
+                    path.write_text(before.replace(op["old"], op["new"], count), encoding="utf-8")
+                if name not in edited:
+                    edited.append(name)
+    print(json.dumps({
+        "type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+        "result": "Stand-in repair edit of %s." % (", ".join(edited) or "nothing"),
+        "session_id": str(uuid.uuid4()), "permission_denials": [],
+        "standin": {"mode": "repair", "edited": edited},
+    }))
+    return 0
+
+
 def main(argv):
+    if len(argv) == 3 and argv[2] == "repair":
+        return repair(json.loads(Path(argv[0]).read_text(encoding="utf-8")))
     if len(argv) != 3 or argv[2] not in ("ignore", "follow", "hedge", "workaround"):
-        print("usage: standin_agent.py PLAN SESSION ignore|follow|hedge|workaround", file=sys.stderr)
+        print("usage: standin_agent.py PLAN SESSION ignore|follow|hedge|workaround, or PLAN 0 repair",
+              file=sys.stderr)
         return 2
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, stop_on_signal)
