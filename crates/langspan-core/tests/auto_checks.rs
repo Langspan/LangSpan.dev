@@ -151,6 +151,7 @@ fn delivered(state: &mut State, session: &str, id: &str) -> Vec<String> {
             deliver: true,
             mid_turn: true,
             left: Vec::new(),
+            mcp: false,
         },
         20,
     ) {
@@ -296,6 +297,7 @@ fn a_reported_result_is_a_check_record_and_is_delivered_once_to_each_session() {
             deliver: false,
             mid_turn: false,
             left: Vec::new(),
+            mcp: false,
         },
         15,
     );

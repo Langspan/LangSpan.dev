@@ -93,6 +93,7 @@ impl Fixture {
                     deliver: false,
                     mid_turn: false,
                     left: Vec::new(),
+                    mcp: false,
                 },
             )
             .outcome

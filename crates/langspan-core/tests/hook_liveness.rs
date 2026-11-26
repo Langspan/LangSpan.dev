@@ -84,6 +84,7 @@ fn brief(state: &mut State, now: u64) -> Briefing {
             deliver: false,
             mid_turn: false,
             left: Vec::new(),
+            mcp: false,
         },
         now,
     )

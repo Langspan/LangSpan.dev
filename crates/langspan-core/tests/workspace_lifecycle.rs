@@ -567,6 +567,7 @@ fn a_removed_workspace_leaves_status_and_briefings_and_its_id_can_start_again() 
             deliver: true,
             mid_turn: false,
             left: Vec::new(),
+            mcp: false,
         },
         11,
     );
@@ -580,6 +581,7 @@ fn a_removed_workspace_leaves_status_and_briefings_and_its_id_can_start_again() 
             deliver: false,
             mid_turn: false,
             left: Vec::new(),
+            mcp: false,
         },
         11,
     ) else {
@@ -617,6 +619,7 @@ fn a_removed_workspace_forgets_its_message_history_and_withdrawal_notices() {
         deliver: true,
         mid_turn: false,
         left: Vec::new(),
+        mcp: false,
     };
     run(&mut state, "brief-bob", brief("bob"), 3);
     let Outcome::MessageRetracted { .. } = run(

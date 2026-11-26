@@ -105,6 +105,7 @@ fn brief(state: &mut State, session: &str, id: &str, now: u64) -> Briefing {
             deliver: true,
             mid_turn: false,
             left: Vec::new(),
+            mcp: false,
         },
         now,
     )) {

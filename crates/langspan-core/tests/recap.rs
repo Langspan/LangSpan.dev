@@ -86,6 +86,7 @@ fn notes_for(state: &mut State, session: &str, id: &str) -> Vec<String> {
             deliver: true,
             mid_turn: false,
             left: Vec::new(),
+            mcp: false,
         },
         50,
     ) {

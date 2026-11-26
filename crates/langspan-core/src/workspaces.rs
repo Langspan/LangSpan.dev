@@ -395,6 +395,7 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
     state.notes.remove(id);
     state.messages.remove(id);
     state.message_history.remove(id);
+    state.dropped_messages.remove(id);
     state.scan_failures.remove(id);
     state.scan_coverage.remove(id);
     state.checkouts.remove(id);

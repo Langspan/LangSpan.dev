@@ -557,6 +557,7 @@ impl Store {
                 | Command::RemoteOutbox { .. }
                 | Command::RemoteSent { .. }
                 | Command::ShowMessage { .. }
+                | Command::MessageStatus { .. }
                 | Command::CheckStatus { .. }
                 | Command::FlakyTests { .. }
                 | Command::LandingReadiness { .. }
@@ -742,6 +743,13 @@ impl Store {
                 workspace_id,
                 message_id,
             } => self.show_message(workspace_id, message_id)?,
+            Command::MessageStatus {
+                workspace_id,
+                from,
+                message_id,
+            } => {
+                self.message_status(workspace_id, from.as_deref(), message_id.as_deref(), now_ms)?
+            }
             Command::Changes {
                 workspace_id,
                 after,
@@ -1160,20 +1168,7 @@ impl Store {
                 message: error.message,
             });
         }
-        let stored: Option<(i64, String)> = self
-            .connection
-            .query_row(
-                r#"SELECT seq, event_json FROM events
-                 WHERE event_json LIKE '{"type":"message_sent",%'
-                   AND json_valid(event_json)
-                   AND json_extract(event_json, '$.type') = 'message_sent'
-                   AND json_extract(event_json, '$.message.workspace_id') = ?1
-                   AND json_extract(event_json, '$.message.message_id') = ?2
-                 ORDER BY seq DESC LIMIT 1"#,
-                params![workspace_id, message_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
+        let stored = self.sent_event(workspace_id, message_id)?;
         let Some((sent_seq, stored)) = stored else {
             // Retention deletes the oldest events. Once any were deleted, an
             // ID not found may be a message whose event went with them, and
@@ -1193,11 +1188,49 @@ impl Store {
                 ),
             });
         };
-        let Event::MessageSent { mut message } = serde_json::from_str(&stored)? else {
+        let Event::MessageSent { mut message, .. } = serde_json::from_str(&stored)? else {
             return Err("a message_sent row holds another event".into());
         };
-        // A withdrawal is its own later event; the sent one never changes.
-        message.retracted = self.connection.query_row(
+        message.retracted = self.retracted_after(sent_seq, workspace_id, message_id)?;
+        Ok(Outcome::MessageShown {
+            message: message.into(),
+        })
+    }
+
+    /// The newest `message_sent` event for the message: its sequence and
+    /// JSON. Messages are rare, so the scan reads few rows past the cheap
+    /// prefix test.
+    fn sent_event(
+        &self,
+        workspace_id: &str,
+        message_id: &str,
+    ) -> StoreResult<Option<(i64, String)>> {
+        Ok(self
+            .connection
+            .query_row(
+                r#"SELECT seq, event_json FROM events
+                 WHERE event_json LIKE '{"type":"message_sent",%'
+                   AND json_valid(event_json)
+                   AND json_extract(event_json, '$.type') = 'message_sent'
+                   AND json_extract(event_json, '$.message.workspace_id') = ?1
+                   AND json_extract(event_json, '$.message.message_id') = ?2
+                 ORDER BY seq DESC LIMIT 1"#,
+                params![workspace_id, message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// Whether a `message_retracted` event after sequence `after` withdrew
+    /// the message. A withdrawal is its own later event; the sent one never
+    /// changes.
+    fn retracted_after(
+        &self,
+        after: i64,
+        workspace_id: &str,
+        message_id: &str,
+    ) -> StoreResult<bool> {
+        Ok(self.connection.query_row(
             r#"SELECT EXISTS (SELECT 1 FROM events
                  WHERE seq > ?1
                    AND event_json LIKE '{"type":"message_retracted",%'
@@ -1205,12 +1238,128 @@ impl Store {
                    AND json_extract(event_json, '$.type') = 'message_retracted'
                    AND json_extract(event_json, '$.workspace_id') = ?2
                    AND json_extract(event_json, '$.message_id') = ?3)"#,
-            params![sent_seq, workspace_id, message_id],
+            params![after, workspace_id, message_id],
             |row| row.get(0),
+        )?)
+    }
+
+    /// Who was given a sent message (roadmap E12): the core reads its held
+    /// and history records with the `message_sent`, `message_acknowledged`
+    /// and `message_retracted` events the log still keeps. Read-only and
+    /// never recorded. At most `ACK_ROWS` acknowledgements are read (a
+    /// session acknowledges a message once), so the work is bounded; past
+    /// that the answer is `partial`.
+    fn message_status(
+        &self,
+        workspace_id: &str,
+        from: Option<&str>,
+        message_id: Option<&str>,
+        now_ms: u64,
+    ) -> StoreResult<Outcome> {
+        const ACK_ROWS: i64 = 4096;
+        let message_id = match langspan_core::status_message_id(
+            &self.state,
+            workspace_id,
+            from,
+            message_id,
+        ) {
+            Ok(id) => id,
+            Err(error) if error.code == "workspace_not_found" => {
+                return Ok(Outcome::Error {
+                    code: "unknown_workspace".into(),
+                    message: format!(
+                        "no workspace {workspace_id:?} is registered; `langspan status` lists them"
+                    ),
+                });
+            }
+            Err(error) => {
+                return Ok(Outcome::Error {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
+        };
+        let (after, sent) = match self.sent_event(workspace_id, &message_id)? {
+            Some((seq, json)) => {
+                let Event::MessageSent {
+                    message,
+                    at_ms,
+                    generation,
+                } = serde_json::from_str(&json)?
+                else {
+                    return Err("a message_sent row holds another event".into());
+                };
+                (
+                    seq,
+                    Some(langspan_core::SentRecord {
+                        message,
+                        at_ms,
+                        generation,
+                    }),
+                )
+            }
+            None => (0, None),
+        };
+        let mut statement = self.connection.prepare(
+            r#"SELECT event_json FROM events
+             WHERE seq > ?1
+               AND event_json LIKE '{"type":"message_acknowledged",%'
+               AND json_valid(event_json)
+               AND json_extract(event_json, '$.type') = 'message_acknowledged'
+               AND json_extract(event_json, '$.workspace_id') = ?2
+               AND json_extract(event_json, '$.message_id') = ?3
+             ORDER BY seq LIMIT ?4"#,
         )?;
-        Ok(Outcome::MessageShown {
-            message: message.into(),
-        })
+        let mut rows = statement.query(params![after, workspace_id, message_id, ACK_ROWS + 1])?;
+        let mut acks = Vec::new();
+        while let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            let Event::MessageAcknowledged {
+                session_id,
+                via,
+                at_ms,
+                generation,
+                ..
+            } = serde_json::from_str(&json)?
+            else {
+                return Err("a message_acknowledged row holds another event".into());
+            };
+            acks.push(langspan_core::AckRecord {
+                session_id,
+                via,
+                at_ms,
+                generation,
+            });
+        }
+        let cut = acks.len() as i64 > ACK_ROWS;
+        acks.truncate(ACK_ROWS as usize);
+        let retracted = self.retracted_after(after, workspace_id, &message_id)?;
+        match langspan_core::message_status(
+            &self.state,
+            workspace_id,
+            &message_id,
+            sent.as_ref(),
+            &acks,
+            retracted,
+            now_ms,
+        ) {
+            Some(mut status) => {
+                status.partial |= cut;
+                Ok(Outcome::MessageStatus { status })
+            }
+            None if self.first_kept_event()?.is_some() => Ok(Outcome::Error {
+                code: "message_not_kept".into(),
+                message: format!(
+                    "message {message_id:?} is neither held nor in the event log of workspace {workspace_id:?}; if it was sent before the log's oldest kept event, who received it is no longer kept"
+                ),
+            }),
+            None => Ok(Outcome::Error {
+                code: "unknown_message".into(),
+                message: format!(
+                    "no message {message_id:?} was sent in workspace {workspace_id:?}; `langspan recap {workspace_id}` lists the messages still pending"
+                ),
+            }),
+        }
     }
 
     /// `Some(N)` once events before sequence N have been deleted (by

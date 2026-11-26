@@ -539,6 +539,7 @@ fn after_a_restart_a_peer_edit_is_still_after_an_earlier_read() {
             deliver: true,
             mid_turn: false,
             left: Vec::new(),
+            mcp: false,
         },
         6_000,
     );
@@ -573,6 +574,7 @@ fn a_briefing_reports_files_read_before_a_peer_edited_them() {
             deliver: true,
             mid_turn: false,
             left: Vec::new(),
+            mcp: false,
         },
         now,
     ) {
