@@ -5752,9 +5752,11 @@ type Located = (
 /// session's ID, the lines the edit would change that other sessions wrote
 /// recently ([ADR 0028](../docs/adr/0028-line-ownership.md)), from the line
 /// journal's entries for these files only (ADR 0026). Each file
-/// is read once, so all three describe the same bytes. From `locate_until`
-/// on, or for a file that cannot be placed, there are no regions (it is held
-/// whole) and the edit may change any line.
+/// is read once, so all three describe the same bytes. For a file that
+/// cannot be placed there are no regions (it is held whole) and the edit may
+/// change any line. From `locate_until` on there are no regions and no
+/// written lines: with too little time left the lines go unchecked, and a
+/// check that cannot finish never refuses.
 fn located_files(
     root: &Path,
     keys: &[String],
@@ -5762,6 +5764,7 @@ fn located_files(
     locate_until: Instant,
     journal: Option<(&Path, &str)>,
 ) -> Located {
+    let journal = journal.filter(|_| Instant::now() < locate_until);
     let journal = journal.map(|(state_dir, session_id)| {
         (
             crate::journal::entries_for(state_dir, root, keys),
@@ -5780,17 +5783,18 @@ fn located_files(
             path: key.clone(),
             state: version_of(content.as_deref()),
         });
+        let in_time = Instant::now() < locate_until;
         let edit = edits
             .iter()
             .find(|(path, _)| path == key)
             .map(|(_, edit)| edit)
-            .filter(|_| Instant::now() < locate_until);
+            .filter(|_| in_time);
         if let (Some(bytes), Some(edit)) = (&content, edit)
             && let Some(located) = crate::regions::locate(key, bytes, edit)
         {
             regions.push(located);
         }
-        if let (Some(bytes), Some((entries, session_id))) = (&content, &journal) {
+        if let (Some(bytes), Some((entries, session_id)), true) = (&content, &journal, in_time) {
             let changed = edit
                 .and_then(|edit| crate::lines::changes(Some(bytes), edit))
                 .map(|changes| crate::lines::changed_ranges(&changes));
@@ -7264,14 +7268,42 @@ mod journal_lookup {
         assert!(overwrites.is_empty());
         assert_eq!(crate::journal::entry_reads(), 0);
         // A peer's file: its ten entries, no more.
-        located_files(
-            &root,
-            &others[..1],
-            &[],
-            Instant::now(),
-            Some((&state, "me")),
-        );
+        let later = Instant::now() + Duration::from_secs(60);
+        located_files(&root, &others[..1], &[], later, Some((&state, "me")));
         assert_eq!(crate::journal::entry_reads(), 10);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Less than half the hook budget left: the lines are not looked up, so
+    /// the admission is decided without them and never refused for them.
+    #[test]
+    fn past_the_locating_deadline_no_written_lines_are_sent() {
+        let base = std::env::temp_dir().join(format!("ls-hook-late-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (state, root) = (base.join("state"), base.join("root"));
+        fs::create_dir_all(&root).unwrap();
+        crate::local::private_directory(&state).unwrap();
+        let keys = ["a.txt".to_owned()];
+        fs::write(root.join("a.txt"), "old line\n").unwrap();
+        crate::journal::before_edit(&state, "op-1", &root, &keys);
+        fs::write(root.join("a.txt"), "peer's fresh line\n").unwrap();
+        crate::journal::record(
+            &state,
+            &root,
+            "peer",
+            &keys,
+            crate::journal::Origin::Edit {
+                operation_id: "op-1",
+            },
+        )
+        .unwrap();
+        let later = Instant::now() + Duration::from_secs(60);
+        let (_, _, overwrites) = located_files(&root, &keys, &[], later, Some((&state, "me")));
+        assert_eq!(overwrites.len(), 1, "in time, the peer's line is found");
+        let (files, _, overwrites) =
+            located_files(&root, &keys, &[], Instant::now(), Some((&state, "me")));
+        assert_eq!(files.len(), 1, "the version is still sent");
+        assert!(overwrites.is_empty(), "{overwrites:?}");
         let _ = fs::remove_dir_all(&base);
     }
 }

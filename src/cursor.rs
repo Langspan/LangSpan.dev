@@ -280,19 +280,23 @@ fn dispatch(event: HostEvent, config: &Config, deadline: Instant) -> Reply {
             paths: vec![key.clone()],
             input_fingerprint: hook::input_fingerprint(tool, input),
             // A Write states the whole new content and a Delete none: the
-            // file is held whole.
-            edits: Vec::new(),
+            // file is held whole. The content is compared with the file for
+            // the lines it changes, as Claude Code's `Write` is (ADR 0028),
+            // and checked for breaks.
+            edits: match (tool, input.get("content").and_then(Value::as_str)) {
+                ("Write", Some(content)) => {
+                    vec![(key.clone(), crate::regions::Edit::Write(content.to_owned()))]
+                }
+                _ => Vec::new(),
+            },
             phase,
             mid_turn_context: true,
             parent,
             // It reports its reads, so it gets no snapshot.
             snapshot_unknown: false,
             shell: None,
-            // A `Write`'s whole new content, for the break check.
-            contents: match (tool, input.get("content").and_then(Value::as_str)) {
-                ("Write", Some(content)) => vec![(key, content.to_owned())],
-                _ => Vec::new(),
-            },
+            // A `Write`'s content is in `edits`.
+            contents: Vec::new(),
             // Cursor documents `additional_context` on `preToolUse`, but its
             // `Write` input has not been seen from a real Cursor: its writes
             // are checked for breaks only once a capture is in the
