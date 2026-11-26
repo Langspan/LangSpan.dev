@@ -1836,3 +1836,58 @@ fn a_compaction_keeps_the_remembered_renames() {
     let store = wall.open(&path);
     assert_eq!(store.state().renames, before.renames, "renames was lost");
 }
+
+/// Review follow-up #253: the trails of ended sessions (roadmap C9) are in
+/// the snapshot, so a compaction keeps them and is not refused.
+#[test]
+fn a_compaction_keeps_the_trails_of_ended_sessions() {
+    let directory = Directory::new();
+    let path = directory.file("state.sqlite3");
+    let wall = Wall::at(START_MS);
+    let mut store = wall.open(&path);
+    run(
+        &mut store,
+        "workspace",
+        Command::WorkspaceRegister {
+            workspace_id: "w".into(),
+            root: "/retention-workspace".into(),
+        },
+        0,
+    );
+    run(
+        &mut store,
+        "register-alice",
+        Command::SessionRegister {
+            session_id: "alice".into(),
+            workspace_id: "w".into(),
+            parent: None,
+            headless: false,
+        },
+        0,
+    );
+    run(
+        &mut store,
+        "end-alice",
+        Command::SessionEnd {
+            session_id: "alice".into(),
+            trail: Some(langspan_core::TrailFacts {
+                edited: vec![langspan_core::TrailFile {
+                    path: "src/alice.rs".into(),
+                    lines: Vec::new(),
+                    more_lines: false,
+                }],
+                ..Default::default()
+            }),
+        },
+        100,
+    );
+    let before = store.state().clone();
+    assert!(!before.trails.is_empty(), "no trail was left");
+
+    wall.set(START_MS + 100 * DAY_MS);
+    let applied = report(store.compact(30, true).unwrap());
+    assert!(applied.applied && applied.events > 0, "{applied:?}");
+    drop(store);
+    let store = wall.open(&path);
+    assert_eq!(store.state().trails, before.trails, "trails were lost");
+}

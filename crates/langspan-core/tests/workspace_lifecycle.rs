@@ -908,3 +908,31 @@ fn the_wire_forms_are_strict() {
         assert_eq!(serde_json::from_str::<Command>(json).is_ok(), ok, "{json}");
     }
 }
+
+/// Review follow-up #253: a trail (roadmap C9) describes the removed
+/// checkout, so removal drops it and the ID registered again does not tell
+/// its next session of it.
+#[test]
+fn a_removed_workspace_forgets_its_trails() {
+    let mut state = ready();
+    let ended = run(
+        &mut state,
+        "end-alice",
+        Command::SessionEnd {
+            session_id: "alice".into(),
+            trail: Some(langspan_core::TrailFacts {
+                edited: vec![langspan_core::TrailFile {
+                    path: "src/upload.rs".into(),
+                    lines: Vec::new(),
+                    more_lines: false,
+                }],
+                ..Default::default()
+            }),
+        },
+        6,
+    );
+    assert!(matches!(ended, Outcome::SessionEnded { .. }), "{ended:?}");
+    assert!(state.trails.contains_key("work"), "no trail was left");
+    run(&mut state, "rm", remove(true), 10);
+    assert!(!state.trails.contains_key("work"), "{:?}", state.trails);
+}
