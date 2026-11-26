@@ -9,11 +9,13 @@ peers' `task` and `details`. In the LangSpan arm, LangSpan shares each
 session's `task` line, which is why that line names everything a peer
 needs to know: the interface or setting the task changes.
 
-The stand-in has two edit lists. `ignore` is what a session does knowing
+The stand-in has three edit lists. `ignore` is what a session does knowing
 nothing of its peers. `follow` is what the task's details ask for once the
 session knows of the peer work that `trigger` (a regular expression over
-the information its arm gave it) recognizes. A task without a trigger does
-the same either way.
+the information its arm gave it) recognizes. `hedge` is the edit that holds
+up whatever peers do, made without knowing: for a contradiction task, its
+value set locally and the shared default kept. A task without a trigger
+does the same in every mode.
 """
 
 import json
@@ -46,6 +48,7 @@ RENAME = {
         "follow": [{"op": "replace", "paths": list(CONFIG_USERS), "old": OLD_NAME, "new": NEW_NAME, "all": True}],
     },
 }
+RENAME["standin"]["hedge"] = RENAME["standin"]["ignore"]
 # Peer work that renames the parser: both names in one line of a peer's task.
 RENAME_TRIGGER = r"\b%s\b[^\n]*\b%s\b" % (OLD_NAME, NEW_NAME)
 
@@ -86,7 +89,11 @@ def feature_source(function, parameters, body, parser):
 
 
 def feature_task(module, function, parameters, returns, body, checks):
+    """A new caller of the parser. No edit holds up whatever a peer does,
+    since the oracle refuses any mention of the old name, so its hedge is
+    its uninformed edit."""
     path = "shelf/features/%s.py" % module
+    uninformed = [{"op": "write", "path": path, "content": feature_source(function, parameters, body, OLD_NAME)}]
     return {
         "id": "feature-" + module,
         "task": "Add a module `%s` with a function `%s(%s)` that returns %s." % (path, function, parameters, returns),
@@ -100,8 +107,11 @@ def feature_task(module, function, parameters, returns, body, checks):
         "function": function,
         "checks": checks,
         "trigger": RENAME_TRIGGER,
+        # LangSpan's notice of an interface change in another worktree.
+        "notice": r"In flight in worktree[^\n]*\b%s\b" % NEW_NAME,
         "standin": {
-            "ignore": [{"op": "write", "path": path, "content": feature_source(function, parameters, body, OLD_NAME)}],
+            "ignore": uninformed,
+            "hedge": uninformed,
             "follow": [{"op": "write", "path": path, "content": feature_source(function, parameters, body, NEW_NAME)}],
         },
     }
@@ -128,12 +138,15 @@ CONTRADICTIONS = (
 
 
 def contradiction_task(key, old, side):
-    """One side of a pair. The details define the reconciliation the oracle
+    """One side of a contradiction. The details define what the oracle
     checks: when a peer needs a different value of the same default, the
     shared default stays as it is and each function gets its own value in
-    its own module."""
+    its own module; when no peer does, the default changes. A run assigns
+    a key both its sides or only one, so a session must know its peers'
+    tasks to choose."""
     module, function, value, why = side
     path = "shelf/%s.py" % module
+    local = [{"op": "replace", "paths": [path], "old": "DEFAULTS[%s]" % json.dumps(key), "new": json.dumps(value)}]
     return {
         "id": "%s-%s" % (key, function),
         "pair": key,
@@ -156,8 +169,8 @@ def contradiction_task(key, old, side):
             "ignore": [{"op": "replace", "paths": ["shelf/settings.py"],
                         "old": "%s: %s," % (json.dumps(key), json.dumps(old)),
                         "new": "%s: %s," % (json.dumps(key), json.dumps(value))}],
-            "follow": [{"op": "replace", "paths": [path],
-                        "old": "DEFAULTS[%s]" % json.dumps(key), "new": json.dumps(value)}],
+            "follow": local,
+            "hedge": local,
         },
     }
 
@@ -179,7 +192,7 @@ CONTROL = {
             "    return re.sub(r\"[^a-z0-9]+\", \"-\", name.lower()).strip(\"-\")\n")}],
     },
 }
-CONTROL["standin"]["follow"] = CONTROL["standin"]["ignore"]
+CONTROL["standin"]["follow"] = CONTROL["standin"]["hedge"] = CONTROL["standin"]["ignore"]
 
 # What a successful combined result is, per family. Every prompt, in every
 # arm, states it, and the oracle checks exactly this. It is written in terms
@@ -194,19 +207,39 @@ SUCCESS = {
         "module included, calls it by that name and works; and the package's tests pass"
     ),
     "contradictory_defaults": (
-        "each function returns the value its task asked for, every shared default in "
-        "`shelf/settings.py` that two tasks wanted changed to different values is unchanged, and "
-        "the package's tests pass"
+        "each function returns the value its task asked for; every shared default in "
+        "`shelf/settings.py` that two tasks wanted changed to different values is unchanged; every "
+        "shared default only one task wanted changed holds that task's value; and the package's "
+        "tests pass"
     ),
 }
+
+
+def layouts(sessions):
+    """The ways to fill SESSIONS with contradiction pairs, keys only one
+    task wants (`alone`) and at most one control task, as (pairs, alone,
+    controls). Each key appears once per run. From N = 5 every layout has a
+    pair and a key alone, so neither fixed edit (always keep the default,
+    always change it) can pass."""
+    found = []
+    for pairs in range(sessions // 2 + 1):
+        for controls in (0, 1):
+            alone = sessions - 2 * pairs - controls
+            if alone < 0 or pairs + alone > len(CONTRADICTIONS):
+                continue
+            if sessions >= 5 and not (pairs and alone):
+                continue
+            found.append((pairs, alone, controls))
+    return found
 
 
 def assign(family, sessions, seed):
     """Return one task per session, in session order, chosen by ``seed``.
 
     The seed picks which features or contradictions run (when N is below
-    the pool size) and which session gets which task; the same arguments
-    always give the same assignment.
+    the pool size), which contradictions get both sides and which one, and
+    which session gets which task; the same arguments always give the same
+    assignment.
     """
     if family not in FAMILIES:
         raise ValueError("family must be one of " + ", ".join(FAMILIES))
@@ -217,11 +250,12 @@ def assign(family, sessions, seed):
         features = chooser.sample(FEATURES, sessions - 1)
         tasks = [dict(RENAME, role="rename")] + [dict(feature_task(*f), role="new_caller") for f in features]
     else:
+        pairs, alone, controls = chooser.choice(layouts(sessions))
+        chosen = chooser.sample(CONTRADICTIONS, pairs + alone)
         tasks = []
-        for key, old, a, b in chooser.sample(CONTRADICTIONS, sessions // 2):
-            tasks.append(dict(contradiction_task(key, old, a), role="contradiction"))
-            tasks.append(dict(contradiction_task(key, old, b), role="contradiction"))
-        if sessions % 2:
-            tasks.append(dict(CONTROL, role="control"))
+        for position, (key, old, a, b) in enumerate(chosen):
+            sides = (a, b) if position < pairs else (chooser.choice((a, b)),)
+            tasks.extend(dict(contradiction_task(key, old, side), role="contradiction") for side in sides)
+        tasks.extend(dict(CONTROL, role="control") for _ in range(controls))
     chooser.shuffle(tasks)
     return tasks

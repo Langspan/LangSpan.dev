@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """The dry-run stand-in for an agent session. It makes no model call.
 
-``standin_agent.py PLAN SESSION MODE`` applies one of the two edit lists
-its task defines (see tasks.py) in the current directory:
+``standin_agent.py PLAN SESSION MODE`` applies one of the edit lists its
+task defines (see tasks.py) in the current directory:
 
 - ``ignore`` makes the edit a session would make knowing nothing of its
   peers, whatever its arm told it.
+- ``hedge`` makes the edit that holds up whatever peers do, without
+  knowing: for a contradiction task, its value set locally and the shared
+  default kept, as the pilot's sessions did.
 - ``follow`` reads the information its arm gives about peers: in the
   awareness-only arm, the peer task text in its prompt; in the LangSpan arm,
   the briefings LangSpan's hooks return and ``langspan brief``. When that
@@ -14,18 +17,19 @@ its task defines (see tasks.py) in the current directory:
 
 Where Claude Code project hooks are installed (``.claude/settings.local.json``),
 it runs them as Claude Code would around each read and edit, so the
-LangSpan arm's dry run passes through LangSpan's real hooks, coordinators,
-event logs and Git-remote sharing. Unlike a host, it waits for each hook's
-decision past the hook's configured timeout (see HOOK_SECONDS), so the dry
-run's result does not depend on how loaded the machine is. When a hook
-returns, any process it left in its group is killed, and a signal that
-stops the stand-in first kills the hook it is running. A ``follow``
-session there first waits,
-within a bound, until LangSpan has told it every peer's task, and before it
-ends waits until every peer shows edits, so that no peer acts before it
+LangSpan arm's dry run passes through LangSpan's real hooks, coordinator and
+event log. Unlike a host, it waits for each hook's decision past the hook's
+configured timeout (see HOOK_SECONDS), so the dry run's result does not
+depend on how loaded the machine is. When a hook returns, any process it
+left in its group is killed, and a signal that stops the stand-in first
+kills the hook it is running. A ``follow`` session there first waits, within
+a bound, until LangSpan has told it every peer's task, and before it ends
+waits until every peer shows edits and LangSpan's interface notice its task
+expects (the task's ``notice``) has arrived, so that no peer acts before it
 could have been told of this one. A refused edit is read again and retried
 once, then skipped. It prints a short transcript in the shape of
-``claude -p --output-format stream-json``, ending in the result line.
+``claude -p --output-format stream-json``: a first line listing its tools,
+as Claude Code's does, and the result line last.
 """
 
 import json
@@ -163,36 +167,36 @@ class Session:
         return False
 
 
-def remote_peers(session):
-    """Peers on other machines in this session's `langspan brief`, by name:
-    the task line each was last heard with and whether it shows edits."""
+def briefed_peers(session):
+    """The peers in this session's `langspan brief`, by workspace: the task
+    line each was last heard with and whether it shows edits."""
     langspan = shutil.which("langspan")
     if not langspan or not os.environ.get("LANGSPAN_STATE_DIR"):
         return {}
     try:
         done = subprocess.run([langspan, "brief", "claude-code." + session.session_id, "--max-peers", str(MAX_PEERS),
                                "--json", "--request-id", "standin-brief-" + uuid.uuid4().hex],
-                              capture_output=True, text=True, timeout=BRIEF_SECONDS)
+                              capture_output=True, text=True, timeout=BRIEF_SECONDS, cwd=session.cwd)
         briefing = json.loads(done.stdout)["outcome"]["briefing"]
     except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
         return {}
     peers = {}
-    for peer in briefing.get("remote") or []:
-        work = peer.get("work") or {}
-        peers[str(peer.get("name"))] = {"task": work.get("summary"),
-                                         "edited": bool(work.get("editing") or work.get("recent"))}
+    for peer in briefing.get("peers") or []:
+        peers[str(peer.get("workspace_id"))] = {"task": peer.get("summary"),
+                                                 "edited": bool(peer.get("editing") or peer.get("recent"))}
     return peers
 
 
-def wait_for(session, peers_expected, ready):
-    """Poll LangSpan until READY holds for every expected peer, within the
-    bound. Each poll is a read of the task's own files, as an agent's
-    would be, so hook briefings arrive as well. Returns what was heard."""
+def wait_for(session, peers_expected, ready, also=lambda: True):
+    """Poll LangSpan until READY holds for every expected peer and ALSO
+    holds, within the bound. Each poll is a read of a file the task uses, as
+    an agent's would be, so hook briefings arrive as well. Returns what was
+    heard."""
     heard = {}
     deadline = time.monotonic() + WAIT_SECONDS
     while True:
-        heard.update(remote_peers(session))
-        if len([name for name, peer in heard.items() if ready(peer)]) >= peers_expected:
+        heard.update(briefed_peers(session))
+        if len([name for name, peer in heard.items() if ready(peer)]) >= peers_expected and also():
             return heard
         if time.monotonic() > deadline:
             return heard
@@ -201,8 +205,8 @@ def wait_for(session, peers_expected, ready):
 
 
 def main(argv):
-    if len(argv) != 3 or argv[2] not in ("ignore", "follow"):
-        print("usage: standin_agent.py PLAN SESSION ignore|follow", file=sys.stderr)
+    if len(argv) != 3 or argv[2] not in ("ignore", "follow", "hedge"):
+        print("usage: standin_agent.py PLAN SESSION ignore|follow|hedge", file=sys.stderr)
         return 2
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, stop_on_signal)
@@ -214,8 +218,13 @@ def main(argv):
     settings = json.loads(hooks_file.read_text(encoding="utf-8")) if hooks_file.is_file() else {}
     log_path = Path(os.environ.get("LANGSPAN_BENCH_RUN_DIR", ".")) / ("standin-s%d.jsonl" % index)
     edited, informed, heard = [], False, {}
+    session_id = str(uuid.uuid4())
+    # Claude Code's first event lists the session's tools; the tool guard checks it.
+    print(json.dumps({"type": "system", "subtype": "init", "session_id": session_id, "model": "standin",
+                      "tools": plan.get("allowed_tools", []), "mcp_servers": []}), flush=True)
     with open(log_path, "a", encoding="utf-8") as log:
         session = Session(settings, log)
+        session.session_id = session_id
         session.fire("SessionStart", source="startup")
         session.fire("UserPromptSubmit", prompt=prompt)
         sharing = bool(settings) and shutil.which("langspan") is not None
@@ -229,7 +238,8 @@ def main(argv):
             information = "\n".join(
                 [shared] + session.context + [peer["task"] for peer in heard.values() if peer["task"]])
             informed = "trigger" in task and re.search(task["trigger"], information) is not None
-        for op in task["standin"]["follow" if informed else "ignore"]:
+        edits = "follow" if informed else ("hedge" if mode == "hedge" else "ignore")
+        for op in task["standin"][edits]:
             for name in op.get("paths", [op.get("path")]):
                 path = Path(name)
                 if op["op"] == "write":
@@ -249,11 +259,13 @@ def main(argv):
                 if done:
                     edited.append(name)
         if mode == "follow" and sharing:
-            # A peer that shows edits has finished waiting for this one.
-            wait_for(session, plan["sessions"] - 1, lambda peer: peer["edited"])
+            # A peer that shows edits has finished waiting for this one. A
+            # notice the task expects arrives with a later briefing.
+            notice = task.get("notice")
+            wait_for(session, plan["sessions"] - 1, lambda peer: peer["edited"],
+                     lambda: not notice or any(re.search(notice, text) for text in session.context))
         session.fire("Stop", stop_hook_active=False)
         session.fire("SessionEnd", reason="other")
-    print(json.dumps({"type": "system", "subtype": "init", "session_id": session.session_id, "model": "standin"}))
     print(json.dumps({
         "type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
         "result": "Stand-in %s edit of %s." % (mode, ", ".join(edited) or "nothing"),

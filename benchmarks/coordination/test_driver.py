@@ -1,9 +1,10 @@
 """The benchmark driver, end to end in dry-run mode.
 
-Real temporary Git repositories and clones, real child processes, and in
-the LangSpan arm the real langspan binary with its SQLite store, Unix
-socket and Git-remote sharing. No model runs: the agent is
-standin_agent.py. Set LANGSPAN_BENCH_LANGSPAN to the binary (`cargo test`
+Real temporary Git repositories, clones and worktrees, real child
+processes, and in the LangSpan arm the real langspan binary with its SQLite
+store and Unix socket. No model runs: the agent is standin_agent.py, or a
+shell script standing in for the CLI where the tool guard is tested. Set
+LANGSPAN_BENCH_LANGSPAN to the binary (`cargo test`
 does, through tests/benchmark_harness.rs); without it the LangSpan-arm
 tests fail.
 """
@@ -59,31 +60,189 @@ class DriverUnitTests(Temporary):
             self.assertEqual(len(rename), n)
             self.assertEqual([t["role"] for t in rename].count("rename"), 1)
             self.assertEqual(len({t["id"] for t in rename}), n)
-            contradictory = tasks.assign("contradictory_defaults", n, 7)
-            self.assertEqual(len(contradictory), n)
-            pairs = [t["pair"] for t in contradictory if "pair" in t]
-            self.assertEqual(len(pairs), n // 2 * 2)
-            self.assertTrue(all(pairs.count(key) == 2 for key in pairs))
-            self.assertEqual([t["role"] for t in contradictory].count("control"), n % 2)
         self.assertNotEqual([t["id"] for t in tasks.assign("rename_vs_new_caller", 5, 1)],
                             [t["id"] for t in tasks.assign("rename_vs_new_caller", 5, 2)])
         with self.assertRaises(ValueError):
             tasks.assign("rename_vs_new_caller", 3, 1)
+
+    def test_contradiction_keys_come_paired_or_alone_so_neither_fixed_edit_always_wins(self):
+        """A key two tasks want at different values must stay unchanged; a key
+        only one task wants must change. Without knowing whether a partner
+        exists, neither edit is right in every cell."""
+        layouts = {n: set() for n in tasks.SESSION_COUNTS}
+        for seed in range(40):
+            for n in tasks.SESSION_COUNTS:
+                assigned = tasks.assign("contradictory_defaults", n, seed)
+                self.assertEqual(assigned, tasks.assign("contradictory_defaults", n, seed))
+                self.assertEqual(len(assigned), n)
+                self.assertEqual(len({t["id"] for t in assigned}), n)
+                keys = [t["pair"] for t in assigned if "pair" in t]
+                self.assertTrue(all(keys.count(key) in (1, 2) for key in keys))
+                for key in set(keys):
+                    sides = [t for t in assigned if t.get("pair") == key]
+                    self.assertEqual(len({t["value"] for t in sides}), len(sides), "a pair wants two values")
+                pairs = sum(keys.count(key) == 2 for key in set(keys))
+                alone = sum(keys.count(key) == 1 for key in set(keys))
+                controls = [t["role"] for t in assigned].count("control")
+                self.assertLessEqual(controls, 1)
+                if n >= 5:
+                    self.assertGreaterEqual(pairs, 1, (n, seed))
+                    self.assertGreaterEqual(alone, 1, (n, seed))
+                layouts[n].add((pairs, alone, controls))
+        # The seed varies the layout wherever the pool allows it.
+        self.assertGreater(len(layouts[2]), 1, layouts)
+        self.assertGreater(len(layouts[5]), 1, layouts)
+
+    def option(self, argv, flag):
+        """The values after FLAG, up to the next option."""
+        values = []
+        for value in argv[argv.index(flag) + 1:]:
+            if value.startswith("--"):
+                break
+            values.append(value)
+        return values
 
     def test_claude_command_streams_its_transcript_keeps_prompts_and_limits_tools(self):
         for arm in driver.ARMS:
             argv = driver.claude_argv("claude", "do the task", arm)
             self.assertEqual(argv[:3], ["claude", "-p", "do the task"])
             self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
+            # Nothing approves a permission prompt: anything that would ask is refused.
+            self.assertEqual(self.option(argv, "--permission-prompts"), ["none"])
             # The whole transcript, one JSON object per line: -p needs --verbose for it.
             self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
             self.assertIn("--verbose", argv)
             self.assertFalse(set(argv) & set(driver.FORBIDDEN_CLAUDE_FLAGS))
             self.assertFalse(any("bypass" in a.lower() or "acceptedits" in a.lower() for a in argv))
-            tools = argv[argv.index("--allowedTools") + 1:]
-            self.assertIn("Edit(./**)", tools)
-            self.assertNotIn("Bash", tools, "no unrestricted shell")
-            self.assertEqual(any(t.startswith("Bash(langspan") for t in tools), arm == "langspan")
+            allowed = self.option(argv, "--allowedTools")
+            self.assertIn("Edit(./**)", allowed)
+            self.assertNotIn("Bash", allowed, "no unrestricted shell")
+            self.assertEqual(any(t.startswith("Bash(langspan") for t in allowed), arm == "langspan")
+            # The built-in tools are exactly the arm's set: no cross-session tool.
+            self.assertEqual(self.option(argv, "--tools"), [",".join(driver.session_tools(arm))])
+            self.assertEqual("Skill" in driver.session_tools(arm), arm == "langspan")
+            # No MCP server or hosted connector from any configuration.
+            self.assertIn("--strict-mcp-config", argv)
+            self.assertEqual(json.loads(self.option(argv, "--mcp-config")[0]), {"mcpServers": {}})
+            denied = self.option(argv, "--disallowedTools")
+            for tool in ("ListAgents", "SendMessage", "ToolSearch", "WebSearch", "WebFetch", "Task", "Workflow"):
+                self.assertIn(tool, denied, arm)
+                self.assertNotIn(tool, driver.session_tools(arm))
+            # Every arm denies reading other sessions' branches, refs and stash.
+            for rule in ("Bash(git log *bench/*)", "Bash(git diff *bench/*)", "Bash(git log *--all*)",
+                         "Bash(git show *refs/*)", "Bash(git diff *--no-index*)", "Bash(git stash*)",
+                         "Bash(git worktree*)", "Bash(git branch*)", "Bash(git -C *)"):
+                self.assertIn(rule, denied, arm)
+            # Writing one's own work stays allowed: no rule names `git add` or `git commit`.
+            self.assertFalse([rule for rule in denied if rule.startswith(("Bash(git add", "Bash(git commit",
+                                                                          "Bash(git *"))], denied)
+        self.assertEqual(driver.claude_argv("claude", "x", "worktrees")[3:],
+                         driver.claude_argv("claude", "x", "awareness_only")[3:])
+        # Every file tool is denied the other sessions' checkouts and the run's repositories.
+        work = Path("/runs/k1/work")
+        paths = driver.peer_paths(work, 3, 2)
+        self.assertEqual(sorted(path.name for path in paths),
+                         ["integration", "repo", "s1", "s3", "shared", "skill-home"])
+        denied = self.option(driver.claude_argv("claude", "x", "langspan", denied_paths=paths), "--disallowedTools")
+        for rule in ("Read(//runs/k1/work/s1/**)", "Edit(//runs/k1/work/s3/**)", "Read(//runs/k1/work/repo/**)"):
+            self.assertIn(rule, denied)
+        self.assertFalse([rule for rule in denied if "/work/s2/" in rule], "a session keeps its own checkout")
+
+    def test_interface_notices_are_counted_per_session_from_the_event_log(self):
+        def registered(session_id, workspace):
+            return {"event": {"type": "session_registered",
+                              "session": {"session_id": session_id, "workspace_id": workspace}}}
+        events = [registered("claude-code.a", "bench-s1"), registered("claude-code.b", "bench-s2"),
+                  {"event": {"type": "inflight_delivered", "session_id": "claude-code.b", "keys": ["k1", "k2"]}},
+                  {"event": {"type": "interface_alerted", "session_id": "claude-code.b", "notice_ids": ["n1"]}},
+                  {"event": {"type": "inflight_delivered", "session_id": "claude-code.unknown", "keys": ["k3"]}},
+                  {"event": {"type": "briefing_delivered", "session_id": "claude-code.a", "signature": "x"}}]
+        self.assertEqual(driver.interface_notices(events), {2: 3})
+
+    def guard(self, script, arm="worktrees", timeout=30):
+        """Run SCRIPT as the session's agent through the tool guard, as
+        `driver.py session` does; returns its exit code and transcript."""
+        agent = self.root / "agent.sh"
+        agent.write_text("#!/bin/sh\n" + script)
+        agent.chmod(0o755)
+        transcript = self.root / "transcript.jsonl"
+        with open(transcript, "wb") as sink:
+            code = driver.guard_session([str(agent)], dict(os.environ), driver.session_tools(arm), sink,
+                                        stop_seconds=2)
+        return code, transcript.read_text()
+
+    def init_line(self, tools, servers=()):
+        return "printf '%%s\\n' %s\n" % shlex.quote(json.dumps(
+            {"type": "system", "subtype": "init", "tools": list(tools),
+             "mcp_servers": [{"name": name, "status": "connected"} for name in servers]}))
+
+    def test_the_tool_guard_passes_a_session_whose_tools_are_the_arms_own(self):
+        code, text = self.guard(self.init_line(driver.session_tools("worktrees"))
+                                + "printf '%s\\n' '{\"type\":\"result\",\"num_turns\":1}'\nexit 0\n")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(driver.tool_check(text), {"status": "passed", "unexpected": []})
+        self.assertEqual(driver.session_results(text)[0]["num_turns"], 1)
+
+    def test_the_tool_guard_stops_a_session_offered_a_cross_session_tool_or_a_connector(self):
+        """The preflight: the session's first event lists its tools, and a
+        session offered anything else is stopped before it can act."""
+        cases = {
+            "cross-session tool": (self.init_line(driver.session_tools("worktrees") + ("ListAgents", "SendMessage")),
+                                   ["ListAgents", "SendMessage"]),
+            "hosted connector tool": (self.init_line(driver.session_tools("langspan")
+                                                     + ("mcp__claude_ai_Gmail__send_message",)),
+                                      ["mcp__claude_ai_Gmail__send_message"]),
+            "MCP server": (self.init_line(driver.session_tools("worktrees"), ["claude.ai Slack"]),
+                           ["MCP server: claude.ai Slack"]),
+            "a later tool list": (self.init_line(driver.session_tools("worktrees"))
+                                  + self.init_line(driver.session_tools("worktrees"), ["claude.ai Docs"]),
+                                  ["MCP server: claude.ai Docs"]),
+            "a call to an unlisted tool": (self.init_line(driver.session_tools("worktrees")) + "printf '%s\\n' "
+                                           + shlex.quote(json.dumps({"type": "assistant", "message": {"content": [
+                                               {"type": "tool_use", "name": "SendMessage", "input": {}}]}})) + "\n",
+                                           ["SendMessage"]),
+        }
+        for name, (start, unexpected) in cases.items():
+            with self.subTest(name):
+                started = time.monotonic()
+                arm = "langspan" if "Skill" in start else "worktrees"
+                code, text = self.guard(start + "sleep 20\nprintf '%s\\n' '{\"type\":\"late\"}'\n", arm)
+                self.assertLess(time.monotonic() - started, 15, "the session was stopped, not waited for")
+                self.assertEqual(code, driver.TOOL_CHECK_EXIT, text)
+                self.assertNotIn('"late"', text)
+                self.assertEqual(driver.tool_check(text), {"status": "failed", "unexpected": unexpected})
+        # A session that never lists its tools cannot be checked, so it fails too.
+        code, text = self.guard("printf '%s\\n' '{\"type\":\"result\"}'\nexit 0\n")
+        self.assertEqual(code, driver.TOOL_CHECK_EXIT)
+        self.assertEqual(driver.tool_check(text)["status"], "failed")
+        # An agent that cannot start fails, with a verdict all the same.
+        with open(self.root / "missing.jsonl", "wb") as sink:
+            code = driver.guard_session([str(self.root / "no-such-agent")], dict(os.environ),
+                                        driver.session_tools("worktrees"), sink)
+        self.assertEqual(code, driver.TOOL_CHECK_EXIT)
+        self.assertEqual(driver.tool_check((self.root / "missing.jsonl").read_text())["status"], "failed")
+        # A transcript the guard never finished has no verdict.
+        self.assertEqual(driver.tool_check(""), {"status": "unknown", "unexpected": []})
+
+    def test_a_failed_tool_check_fails_the_trial_and_reaches_the_record(self):
+        plan = driver.make_plan("worktrees", "rename_vs_new_caller", 2, 1, agent="claude")
+        runner_dir = self.root / "runner"
+        (runner_dir / "r").mkdir(parents=True)
+        lines = [{"type": "system", "subtype": "init", "tools": ["Read", "SendMessage"], "mcp_servers": []},
+                 {"type": driver.TOOL_CHECK_TYPE, "status": "failed", "unexpected": ["SendMessage"]}]
+        (runner_dir / "r" / "agent-s1.stdout").write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+        (runner_dir / "r" / "agent-s2.stdout").write_text("")
+        final = {"run_id": "0" * 32, "status": "failed", "agent_phase_elapsed_ns": 1,
+                 "commands": [{"phase": "agent", "id": "s%d" % i, "status": "failed" if i == 1 else "succeeded",
+                               "stdout_path": "r/agent-s%d.stdout" % i} for i in (1, 2)]}
+        plan.update(run_id="0" * 32, output=str(self.root), plan_path=str(self.root / "plan.json"),
+                    work=str(self.root / "work"))
+        record = driver.build_record(plan, final, runner_dir, None, None, "t", 0.0)
+        driver.validate(record, driver.load_schema())
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["tool_check"], {"status": "failed", "failed_sessions": [1]})
+        self.assertEqual([t["tool_check"]["status"] for t in record["tasks"]], ["failed", "unknown"])
+        self.assertEqual(record["tasks"][0]["tool_check"]["unexpected"], ["SendMessage"])
 
     def test_each_task_line_names_what_its_peers_need_within_what_langspan_shares(self):
         """LangSpan shares one `Task:` line of at most 200 bytes. The peer
@@ -99,10 +258,13 @@ class DriverUnitTests(Temporary):
                         continue
                     peers = [line for other, line in enumerate(lines) if other != index]
                     hits = [line for line in peers if re.search(task["trigger"], line)]
-                    self.assertEqual(len(hits), 1, (task["id"], hits))
+                    partnered = family == "rename_vs_new_caller" or [t.get("pair") for t in assigned].count(
+                        task["pair"]) == 2
+                    # A key no other task wants sets off nothing.
+                    self.assertEqual(len(hits), 1 if partnered else 0, (task["id"], hits))
                     if family == "rename_vs_new_caller":
                         self.assertIn("load_config", hits[0])
-                    else:
+                    elif partnered:
                         self.assertIn(task["key"], hits[0])
 
     def test_only_the_awareness_arm_gives_peers_task_text_and_every_prompt_states_success(self):
@@ -219,14 +381,14 @@ class DriverUnitTests(Temporary):
         langspan.chmod(0o755)
         seen = self.root / "seen.txt"
         claude = self.root / "fake-claude"
-        claude.write_text('#!/bin/sh\nprintf "%%s\\n%%s\\n" "$LANGSPAN_STATE_DIR" "$(command -v langspan)" > %s\n'
-                          % seen)
+        claude.write_text('#!/bin/sh\nprintf "%%s\\n%%s\\n" "$LANGSPAN_STATE_DIR" "$(command -v langspan)" > %s\n%s'
+                          % (seen, self.init_line(driver.session_tools("langspan"))))
         claude.chmod(0o755)
         config = self.root / "claude-config"
         config.mkdir()
-        states = [str(self.root / "lsb-1"), str(self.root / "lsb-2")]
+        state = str(self.root / "lsb-1")
         plan = driver.make_plan("langspan", "rename_vs_new_caller", 2, 1, agent="claude")
-        plan.update(langspan=str(langspan), state_dirs=states)
+        plan.update(langspan=str(langspan), state_dir=state, work=str(self.root / "work"))
         plan_path = self.root / "plan.json"
         plan_path.write_text(json.dumps(plan))
         env = dict(os.environ, **{driver.CLAUDE_CONFIG_ENV: str(config), driver.CLAUDE_BIN_ENV: str(claude),
@@ -234,26 +396,36 @@ class DriverUnitTests(Temporary):
         done = subprocess.run([sys.executable, "-I", "-B", str(HERE / "driver.py"), "session", str(plan_path), "2"],
                               capture_output=True, text=True, timeout=30, env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(seen.read_text().splitlines(), [states[1], str(langspan)])
+        self.assertEqual(seen.read_text().splitlines(), [state, str(langspan)])
+        self.assertEqual(driver.tool_check(done.stdout)["status"], "passed", done.stdout)
 
-    def test_clones_share_nothing_but_what_the_arm_allows(self):
+    def test_each_arm_gets_its_checkout_kind_and_sessions_cannot_reach_peers_through_git_remotes(self):
         for arm in driver.ARMS:
             work = self.root / arm
             work.mkdir()
-            _, _, clones = driver.prepare_fixture(work, 2, arm)
-            (clones[1] / "shelf" / "report.py").write_text("# peer work\n")
-            driver.git("commit", "-qam", "peer-secret-commit", cwd=clones[1])
-            seen = driver.git("log", "--all", "--oneline", cwd=clones[0]).stdout
-            self.assertNotIn("peer-secret-commit", seen, arm)
-            refs = driver.git("for-each-ref", "--format=%(refname)", cwd=clones[0]).stdout.split()
-            self.assertFalse([ref for ref in refs if "bench/s2" in ref], (arm, refs))
-            common = [driver.git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=clone).stdout
-                      for clone in clones]
-            self.assertNotEqual(common[0], common[1])
-            remotes = driver.git("remote", cwd=clones[0]).stdout.split()
-            # Only the LangSpan arm keeps a remote: LangSpan's sharing goes
-            # through it, and no session can push a branch there.
-            self.assertEqual(remotes, ["origin"] if arm == "langspan" else [], arm)
+            repo, _, checkouts = driver.prepare_fixture(work, 2, arm)
+            (checkouts[1] / "shelf" / "report.py").write_text("# peer work\n")
+            driver.git("commit", "-qam", "peer-secret-commit", cwd=checkouts[1])
+            common = [driver.git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=path).stdout
+                      for path in checkouts]
+            self.assertEqual(driver.git("remote", cwd=checkouts[0]).stdout.split(), [], arm)
+            self.assertEqual([driver.git("branch", "--show-current", cwd=path).stdout.strip() for path in checkouts],
+                             ["bench/s1", "bench/s2"])
+            # The integration repository is never one of the sessions'.
+            self.assertNotIn(str(repo), common[0])
+            seen = driver.git("log", "--all", "--oneline", cwd=checkouts[0]).stdout
+            if arm == "langspan":
+                # Worktrees of one repository: what LangSpan supports for
+                # sharing interface notices. Git can show a peer's branch,
+                # which is why every arm's permission rules deny it.
+                self.assertEqual(common[0], common[1])
+                self.assertIn("peer-secret-commit", seen)
+            else:
+                self.assertNotEqual(common[0], common[1])
+                self.assertNotIn("peer-secret-commit", seen, arm)
+            # `.claude/` stays out of every branch.
+            self.assertEqual(driver.git("check-ignore", ".claude/settings.local.json", cwd=checkouts[0],
+                                        check=False).returncode, 0, arm)
 
     def test_duplicate_work_is_a_change_to_a_unit_another_task_owns(self):
         work = self.root / "work"
@@ -322,6 +494,19 @@ class DriverUnitTests(Temporary):
         self.assertEqual((code, verdict["integrated_tests"]), (0, "passed"), verdict)
         self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, True])
 
+        # A task whose key no other task wants: only changing the default is
+        # accepted. Keeping it and setting the value locally is the hedge a
+        # session makes without knowing whether a partner exists.
+        plan["tasks"], plan["integration"] = [first], [{"session": 1, "merged": True}]
+        code, verdict = tree(20, 100, None)
+        self.assertEqual([t["completed"] for t in verdict["tasks"]], [True])
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [False])
+        self.assertIn("no other task", verdict["tasks"][0]["detail"])
+        self.assertEqual((code, verdict["semantic_conflicts"]), (1, []))
+        code, verdict = tree(100, None, None)
+        self.assertEqual((code, verdict["integrated_tests"]), (0, "passed"), verdict)
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True])
+
     def test_the_rename_oracle_needs_the_new_caller_on_the_new_name(self):
         feature = dict(tasks.feature_task(*tasks.FEATURES[0]), role="new_caller")
         plan = {"family": "rename_vs_new_caller", "tasks": [dict(tasks.RENAME, role="rename"), feature],
@@ -351,25 +536,57 @@ class DriverUnitTests(Temporary):
         self.assertEqual((code, verdict["integrated_tests"]), (0, "passed"), verdict)
         self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, True])
 
-    def test_permission_denials_are_split_into_outside_the_clone_and_not_allowed(self):
-        root = self.root / "work" / "s1"
+    def test_permission_denials_are_split_by_kind(self):
+        """`peer_checkout`: aimed at another session's checkout, branch or
+        refs; `outside_clone`: Claude Code refused a path outside the
+        session's own checkout; `not_allowed`: anything else. A lone `/` in
+        a command's text (a heredoc of notes) is none of a peer's."""
+        work = self.root / "work"
+        root = work / "s1"
         root.mkdir(parents=True)
-        peer = str(self.root / "work" / "s2" / "shelf" / "config.py")
-        denials = [
-            {"tool_name": "Read", "tool_input": {"file_path": peer}},
-            {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "../s2"}},
-            {"tool_name": "Bash", "tool_input": {"command": "cat ../s2/shelf/ui.py"}},
-            {"tool_name": "Bash", "tool_input": {"command": "git -C %s log" % (self.root / "work" / "s2")}},
-            {"tool_name": "Bash", "tool_input": {"command": "sed -i s/a/b/ shelf/ui.py"}},
-            {"tool_name": "Bash", "tool_input": {"command": "langspan status 2>&1 | head"}},
-            {"tool_name": "Read", "tool_input": {"file_path": str(root / "shelf" / "ui.py")}},
-            {"tool_name": "Write", "tool_input": {}},
-            "not an object",
+        peer = str(work / "s2" / "shelf" / "config.py")
+        outside = {"decision_reason_type": "workingDir", "decision_reason": "Path is outside allowed working directories"}
+        compound = {"decision_reason_type": "other", "decision_reason": "This command requires approval"}
+        cases = [
+            ({"tool_name": "Read", "tool_input": {"file_path": peer}}, outside, "peer_checkout"),
+            ({"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "../s2"}}, outside, "peer_checkout"),
+            ({"tool_name": "Bash", "tool_input": {"command": "cat ../s2/shelf/ui.py"}}, compound, "peer_checkout"),
+            ({"tool_name": "Bash", "tool_input": {"command": "git -C %s log" % (work / "s2")}}, None, "peer_checkout"),
+            ({"tool_name": "Bash", "tool_input": {"command": "ls %s" % (work / "repo")}}, None, "peer_checkout"),
+            ({"tool_name": "Bash", "tool_input": {"command": "git log --oneline bench/s2"}}, compound, "peer_checkout"),
+            ({"tool_name": "Bash", "tool_input": {"command": "git log --all --oneline"}}, None, "peer_checkout"),
+            ({"tool_name": "Bash", "tool_input": {"command": "git diff HEAD..refs/heads/bench/s3"}}, None,
+             "peer_checkout"),
+            ({"tool_name": "Bash", "tool_input": {"command": "git stash list"}}, None, "peer_checkout"),
+            ({"tool_name": "Write", "tool_input": {"file_path": "/tmp/s1check/run.py"}}, outside, "outside_clone"),
+            ({"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}}, None, "outside_clone"),
+            ({"tool_name": "Bash", "tool_input": {"command": "mkdir -p /tmp/s1check && cp -r shelf /tmp/s1check"}},
+             outside, "outside_clone"),
+            ({"tool_name": "Bash", "tool_input": {"command": "cat > notes/s1.md <<'EOF'\n`timeout_s` / `retries`\nEOF"}},
+             compound, "not_allowed"),
+            ({"tool_name": "Bash", "tool_input": {"command": "mkdir -p /tmp/x"}}, None, "not_allowed"),
+            ({"tool_name": "Bash", "tool_input": {"command": "git log --oneline bench/s1"}}, compound, "not_allowed"),
+            ({"tool_name": "Bash", "tool_input": {"command": "git add --all && git commit -m 'stash refs/x'"}},
+             compound, "not_allowed"),
+            ({"tool_name": "Bash", "tool_input": {"command": "sed -i s/a/b/ shelf/ui.py"}}, compound, "not_allowed"),
+            ({"tool_name": "Read", "tool_input": {"file_path": str(root / "shelf" / "ui.py")}}, None, "not_allowed"),
+            ({"tool_name": "Write", "tool_input": {}}, None, "not_allowed"),
+            ("not an object", None, "not_allowed"),
         ]
-        kinds = [driver.classify_denial(denial, root) for denial in denials]
-        self.assertEqual(kinds, ["outside_clone"] * 4 + ["not_allowed"] * 5)
-        self.assertEqual(driver.denial_counts(denials, root), {"total": 9, "outside_clone": 4, "not_allowed": 5})
-        self.assertIsNone(driver.denial_counts(None, root))
+        for denial, event, kind in cases:
+            self.assertEqual(driver.classify_denial(denial, root, work, 1, event), kind, (denial, event))
+        denials = [denial for denial, _, _ in cases]
+        events = {}
+        for position, (denial, event, _) in enumerate(cases):
+            if isinstance(denial, dict) and event:
+                denial["tool_use_id"] = "call-%d" % position
+                events["call-%d" % position] = event
+        self.assertEqual(driver.denial_counts(denials, root, work, 1, events),
+                         {"total": 20, "peer_checkout": 9, "outside_clone": 3, "not_allowed": 8})
+        self.assertIsNone(driver.denial_counts(None, root, work, 1, {}))
+
+    def transcript(self, lines):
+        return "\n".join(json.dumps(line) for line in lines) + "\n"
 
     def test_a_session_transcript_gives_its_result_cost_duration_and_turns(self):
         lines = [
@@ -379,28 +596,86 @@ class DriverUnitTests(Temporary):
              "duration_ms": 41000, "total_cost_usd": 0.25, "permission_denials": [],
              "usage": {"input_tokens": 3, "output_tokens": 4}},
         ]
-        text = "\n".join(json.dumps(line) for line in lines) + "\n"
-        result = driver.session_result(text)
-        self.assertEqual(result["result"], "Done.")
-        self.assertEqual(driver.session_figures(result), {"cost_usd": 0.25, "duration_ms": 41000, "turns": 7})
-        self.assertEqual(driver.session_figures({"num_turns": -1, "total_cost_usd": "x"}),
-                         {"cost_usd": None, "duration_ms": None, "turns": None})
+        text = self.transcript(lines)
+        totals = driver.session_totals(driver.session_results(text))
+        self.assertEqual(totals["final"]["result"], "Done.")
+        self.assertEqual((totals["cost_usd"], totals["duration_ms"], totals["turns"], totals["results"]),
+                         (0.25, 41000, 7, 1))
+        self.assertEqual(totals["tokens"], {"input": 3, "output": 4, "cache_creation": 0, "cache_read": 0})
+        bad = driver.session_totals([{"type": "result", "num_turns": -1, "total_cost_usd": "x"}])
+        self.assertEqual((bad["cost_usd"], bad["duration_ms"], bad["turns"], bad["tokens"]), (None, None, None, None))
         # A transcript cut off before its result has none.
-        self.assertIsNone(driver.session_result("\n".join(json.dumps(line) for line in lines[:2])))
+        self.assertEqual(driver.session_results(self.transcript(lines[:2])), [])
+        self.assertIsNone(driver.session_totals([])["final"])
+
+    def test_the_record_sums_every_result_line_of_a_session(self):
+        """A session woken after its turn ended has a second result line. The
+        record's totals cover both, as the transcript does: turns, duration,
+        tokens and denials add up; the cost is already cumulative."""
+        lines = [
+            {"type": "system", "subtype": "init", "tools": list(driver.session_tools("worktrees")), "mcp_servers": []},
+            {"type": "system", "subtype": "permission_denied", "tool_name": "Write", "tool_use_id": "w1",
+             "decision_reason_type": "workingDir", "decision_reason": "Path is outside allowed working directories"},
+            {"type": "result", "subtype": "success", "is_error": False, "result": "First.", "num_turns": 14,
+             "duration_ms": 45287, "total_cost_usd": 0.3366,
+             "usage": {"input_tokens": 18, "cache_creation_input_tokens": 26323, "cache_read_input_tokens": 294343,
+                       "output_tokens": 3353},
+             "modelUsage": {"model-x": {}},
+             "permission_denials": [{"tool_name": "Write", "tool_use_id": "w1",
+                                     "tool_input": {"file_path": "/tmp/s1check/run.py"}},
+                                    {"tool_name": "Bash", "tool_use_id": "b1",
+                                     "tool_input": {"command": "sed -i s/a/b/ x"}}]},
+            {"type": "system", "subtype": "init", "tools": list(driver.session_tools("worktrees")), "mcp_servers": []},
+            {"type": "result", "subtype": "success", "is_error": False, "result": "Second?", "num_turns": 2,
+             "duration_ms": 8641, "total_cost_usd": 0.3704,
+             "usage": {"input_tokens": 4, "cache_creation_input_tokens": 1217, "cache_read_input_tokens": 80365,
+                       "output_tokens": 399},
+             "modelUsage": {"model-y": {}},
+             "permission_denials": [{"tool_name": "Bash", "tool_use_id": "b2",
+                                     "tool_input": {"command": "git log --all"}}]},
+            {"type": driver.TOOL_CHECK_TYPE, "status": "passed", "unexpected": []},
+        ]
+        runner_dir = self.root / "runner"
+        (runner_dir / "r").mkdir(parents=True)
+        (runner_dir / "r" / "agent-s1.stdout").write_text(self.transcript(lines))
+        (runner_dir / "r" / "agent-s2.stdout").write_text(self.transcript([lines[0], lines[4]]))
+        plan = driver.make_plan("worktrees", "rename_vs_new_caller", 2, 1, agent="claude")
+        work = self.root / "work"
+        plan.update(run_id="0" * 32, output=str(self.root), plan_path=str(self.root / "plan.json"), work=str(work))
+        final = {"run_id": "0" * 32, "status": "succeeded", "agent_phase_elapsed_ns": 1,
+                 "commands": [{"phase": "agent", "id": "s%d" % i, "status": "succeeded",
+                               "stdout_path": "r/agent-s%d.stdout" % i} for i in (1, 2)]}
+        record = driver.build_record(plan, final, runner_dir, None, None, "t", 0.0)
+        driver.validate(record, driver.load_schema())
+        first = record["tasks"][0]
+        self.assertEqual((first["results"], first["turns"], first["duration_ms"], first["cost_usd"]),
+                         (2, 16, 53928, 0.3704))
+        self.assertEqual(first["tokens"], {"input": 22, "output": 3752, "cache_creation": 27540, "cache_read": 374708})
+        self.assertEqual(first["permission_denials"],
+                         {"total": 3, "peer_checkout": 1, "outside_clone": 1, "not_allowed": 1})
+        # The final state is the last result's: it ends in a question.
+        self.assertEqual((first["stopped"], first["asked_question"]), (False, True))
+        self.assertEqual(record["versions"]["models"], ["model-x", "model-y"])
+        self.assertEqual(record["tasks"][1]["results"], 1)
+        self.assertEqual(record["turns"], 18)
+        self.assertEqual(record["permission_denials"],
+                         {"total": 4, "peer_checkout": 2, "outside_clone": 1, "not_allowed": 1})
+        self.assertEqual(record["tokens"]["total"]["output"], 3752 + 399)
+        # Session 2's transcript has no verdict of the guard.
+        self.assertEqual(record["tool_check"], {"status": "unknown", "failed_sessions": []})
 
     def test_coordinator_scan_failures_and_recoveries_reach_the_record(self):
-        events = {1: [{"seq": 3, "event": {"type": "scan_failed", "failure": {
-                      "workspace_id": "bench-s1", "detail": "Git repository metadata changed during observation",
+        events = [{"seq": 3, "event": {"type": "scan_failed", "failure": {
+                      "workspace_id": "bench-s2", "detail": "Git repository metadata changed during observation",
                       "at_ms": 1, "generation": 1}}},
-                      {"seq": 4, "event": {"type": "scan_recovered", "workspace_id": "bench-s1"}},
-                      {"seq": 5, "event": {"type": "lease_granted"}}],
-                  2: []}
+                  {"seq": 4, "event": {"type": "scan_recovered", "workspace_id": "bench-s2"}},
+                  {"seq": 5, "event": {"type": "lease_granted"}}]
         scans = driver.scan_summary(events, "langspan")
         self.assertEqual((scans["status"], scans["failed"], scans["recovered"]), ("reported", 1, 1))
         self.assertEqual(scans["items"], [
-            {"session": 1, "seq": 3, "type": "scan_failed",
+            {"session": 2, "seq": 3, "type": "scan_failed",
              "detail": "Git repository metadata changed during observation"},
-            {"session": 1, "seq": 4, "type": "scan_recovered", "detail": None}])
+            {"session": 2, "seq": 4, "type": "scan_recovered", "detail": None}])
         self.assertEqual(driver.scan_summary(None, "worktrees")["status"], "not_applicable")
         self.assertEqual(driver.scan_summary(None, "langspan")["status"], "unknown")
 
@@ -701,7 +976,11 @@ class DryRun(Temporary):
         self.assertEqual(record["tasks_total"], n)
         self.assertEqual(record["stops"], 0)
         self.assertEqual(record["questions"], 0)
-        self.assertEqual(record["permission_denials"], {"total": 0, "outside_clone": 0, "not_allowed": 0})
+        self.assertEqual(record["permission_denials"],
+                         {"total": 0, "peer_checkout": 0, "outside_clone": 0, "not_allowed": 0})
+        # Every session went through the tool guard and listed only its arm's tools.
+        self.assertEqual(record["tool_check"], {"status": "passed", "failed_sessions": []})
+        self.assertEqual(record["isolation"], "worktree" if arm == "langspan" else "clone")
         self.assertEqual(record["tokens"], {"status": "unknown", "total": None})
         self.assertIsNone(record["cost_usd"])
         self.assertEqual(record["ignored_options"], [])
@@ -712,12 +991,16 @@ class DryRun(Temporary):
         self.assertEqual([r["record_type"] for r in rows], ["run_started", "run_finished"])
         self.assertEqual([c["phase"] for c in rows[1]["commands"]], ["version"] * 2 + ["agent"] * n + ["check"])
         self.assertEqual(rows[1]["metrics"]["integrated_correctness"]["status"], record["integrated_tests"])
-        prompts = json.loads((output / "plan.json").read_text())["prompts"]
+        plan = json.loads((output / "plan.json").read_text())
+        prompts = plan["prompts"]
+        self.assertEqual(plan["driver_command"][2:4], ["--arm", arm], "the exact driver command is kept")
         work = output / "work"
         for index, task in enumerate(record["tasks"], 1):
-            self.assertEqual((task["turns"], task["cost_usd"]), (1, None))
+            self.assertEqual((task["turns"], task["cost_usd"], task["results"]), (1, None, 1))
+            self.assertEqual(task["tool_check"], {"status": "passed", "unexpected": []})
+            self.assertEqual(task["interface_notices"] is not None, arm == "langspan")
             transcript = output / task["transcript"]
-            self.assertEqual(driver.session_result(transcript.read_text())["type"], "result")
+            self.assertEqual(len(driver.session_results(transcript.read_text())), 1)
             clone = work / ("s%d" % index)
             settings = clone / ".claude" / "settings.local.json"
             skill = clone / ".claude" / "skills" / "langspan" / "SKILL.md"
@@ -735,7 +1018,8 @@ class DryRun(Temporary):
             self.assertEqual(refusals["sessions_registered"], n)
             self.assertGreaterEqual(refusals["admissions"], n)
             self.assertEqual(record["coordinator_scans"]["status"], "reported")
-            self.assertEqual(len(record["evidence"]["events"]), n)
+            # One coordinator for the repository whose worktrees the sessions use.
+            self.assertEqual(record["evidence"]["events"], ["events.jsonl"])
             self.assertTrue(all((output / path).is_file() for path in record["evidence"]["events"]))
             self.assertEqual([t["refusals"] for t in record["tasks"]], [0] * n)
         else:
@@ -766,24 +1050,52 @@ class DryRun(Temporary):
     def informed(self, output_record):
         return [t["standin_informed"] for t in output_record["tasks"]]
 
+    def layout(self, record):
+        """Per session: `pair`, `alone` or `control` for a contradictory run."""
+        assigned = tasks.assign(record["family"], record["sessions"], record["seed"])
+        keys = [task.get("pair") for task in assigned]
+        return ["control" if key is None else ("pair" if keys.count(key) == 2 else "alone") for key in keys]
+
     def check_uninformed(self, record, family, n):
-        """What sessions that know nothing of their peers produce."""
-        self.assertEqual(record["integrated_tests"], "failed")
+        """What sessions that know nothing of their peers produce: each
+        makes its task's uninformed edit. That fails wherever a task depends
+        on a peer's: always in the rename family, and wherever a key is
+        paired in the contradictory one."""
         self.assertEqual(record["duplicate_work"], 0)
         if family == "rename_vs_new_caller":
+            self.assertEqual(record["integrated_tests"], "failed")
             # Every new caller uses the old name, which the rename removed.
             self.assertEqual(record["merge_conflicts"], [])
             self.assertEqual(record["semantic_conflicts"], n - 1, record["semantic_conflict_details"])
             self.assertEqual(record["tasks_accepted"], 1)
             self.assertEqual([t["accepted"] for t in record["tasks"] if t["role"] == "rename"], [True])
         else:
-            # Both sides of each pair change the same default: Git refuses the second.
-            self.assertEqual(len(record["merge_conflicts"]), n // 2)
+            # Both sides of each pair change the same default: Git refuses the
+            # second. A task with no partner was right to change it.
+            layout = self.layout(record)
+            pairs = layout.count("pair") // 2
+            self.assertEqual(record["integrated_tests"], "failed" if pairs else "passed")
+            self.assertEqual(len(record["merge_conflicts"]), pairs)
             self.assertTrue(all(c["files"] == ["shelf/settings.py"] for c in record["merge_conflicts"]))
             self.assertEqual(record["semantic_conflicts"], 0)
-            # A pair whose first side merged is still not accepted: only the control task is.
-            self.assertEqual(record["tasks_accepted"], n % 2)
-            self.assertEqual(sum(bool(t["completed"]) for t in record["tasks"]), n // 2 + n % 2)
+            self.assertEqual([t["accepted"] for t in record["tasks"]], [kind != "pair" for kind in layout])
+            self.assertEqual(sum(bool(t["completed"]) for t in record["tasks"]), n - pairs)
+
+    def check_hedged(self, record, family, n):
+        """Sessions that keep every shared default and set their value
+        locally, whatever their arm told them: the hedge the pilot's
+        sessions made. Only the pairs' reconciliation is accepted."""
+        if family == "rename_vs_new_caller":
+            self.check_uninformed(record, family, n)
+            return
+        layout = self.layout(record)
+        self.assertIn("alone", layout, "every N = 5 layout has a task without a partner")
+        self.assertEqual(record["integrated_tests"], "failed")
+        self.assertEqual((record["merge_conflicts"], record["semantic_conflicts"]), ([], 0))
+        self.assertEqual([t["accepted"] for t in record["tasks"]], [kind != "alone" for kind in layout])
+        self.assertTrue(all(t["completed"] for t in record["tasks"]))
+        self.assertTrue(all("no other task" in t["detail"] for t, kind in zip(record["tasks"], layout)
+                            if kind == "alone"))
 
     def check_arm(self, arm, sizes, modes=("ignore", "follow")):
         informs = arm != "worktrees"
@@ -792,7 +1104,10 @@ class DryRun(Temporary):
                 for mode in modes:
                     with self.subTest(family=family, n=n, mode=mode):
                         record = self.run_driver(arm, family, n, mode)
-                        triggered = [t["role"] in ("new_caller", "contradiction") for t in record["tasks"]]
+                        if family == "rename_vs_new_caller":
+                            triggered = [t["role"] == "new_caller" for t in record["tasks"]]
+                        else:
+                            triggered = [kind == "pair" for kind in self.layout(record)]
                         if mode == "follow" and informs:
                             # The information its arm gave let every session reconcile.
                             self.assertEqual(self.informed(record), triggered)
@@ -800,12 +1115,33 @@ class DryRun(Temporary):
                             self.assertEqual((record["semantic_conflicts"], record["merge_conflicts"]), (0, []))
                             self.assertEqual(record["tasks_accepted"], n)
                             self.assertEqual(record["fixture_tests"], "passed")
+                        elif mode == "hedge":
+                            self.check_hedged(record, family, n)
                         else:
                             self.assertEqual(self.informed(record), [False] * n)
                             self.check_uninformed(record, family, n)
+                        if arm == "langspan" and mode == "follow" and family == "rename_vs_new_caller":
+                            # LangSpan's interface notice of the rename reached every
+                            # new caller's session, in the coordinator's own log.
+                            notices = [t["interface_notices"] for t in record["tasks"] if t["role"] == "new_caller"]
+                            self.assertTrue(all(count >= 1 for count in notices), notices)
+                            output = self.root / ("%s-%s-%d-%s" % (arm, family, n, mode))
+                            told = [(output / t["hook_log"]).read_text() for t in record["tasks"]
+                                    if t["role"] == "new_caller"]
+                            self.assertTrue(all("load_config" in log and "In flight" in log for log in told))
+                        if arm != "langspan":
+                            self.assertEqual([t["interface_notices"] for t in record["tasks"]], [None] * n)
 
     def test_dry_run_arm_worktrees(self):
         self.check_arm("worktrees", (2, 5))
+
+    def test_dry_run_hedging_fails_the_contradictory_family_in_every_arm(self):
+        """The pilot's sessions hedged with no peer information, and the old
+        oracle accepted it. Now a hedge fails wherever a task has no partner."""
+        for arm in driver.ARMS:
+            with self.subTest(arm=arm):
+                record = self.run_driver(arm, "contradictory_defaults", 5, "hedge")
+                self.check_hedged(record, "contradictory_defaults", 5)
 
     def test_dry_run_arm_awareness_only(self):
         self.check_arm("awareness_only", (2, 5))
@@ -815,10 +1151,7 @@ class DryRun(Temporary):
         self.check_arm("langspan", (2, 5, 10), modes=("ignore",))
 
     def test_dry_run_arm_langspan_follow(self):
-        # Not N = 10: a LangSpan briefing lists at most eight sessions from
-        # other clones, so a session with nine peers can miss the one it
-        # needs (README, "What each arm provides").
-        self.check_arm("langspan", (2, 5), modes=("follow",))
+        self.check_arm("langspan", (2, 5, 10), modes=("follow",))
 
     def test_a_dry_run_records_an_option_its_arm_ignores(self):
         output = self.root / "ignored"
