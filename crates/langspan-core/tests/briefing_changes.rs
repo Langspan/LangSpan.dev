@@ -607,3 +607,37 @@ fn a_briefing_of_changes_only_names_only_the_notices_it_keeps() {
     assert_eq!(next.interface_changes[0].path, "src/store.rs");
     assert_eq!(next.interface_notice_ids, ["n1"]);
 }
+
+/// Review follow-up #259: a read reported by a concurrent hook in the same
+/// millisecond as a briefing may have come after it. A peer's edit after
+/// that read makes the file stale again, and is told.
+#[test]
+fn a_stale_read_after_a_read_in_the_briefings_millisecond_is_told() {
+    use langspan_core::{FileState, ObservedFile, SourceOrigin};
+    let mut state = ready();
+    let read = |state: &mut State, now: u64| {
+        ok(run(
+            state,
+            &format!("read-{now}"),
+            Command::ObserveSource {
+                session_id: "alice".into(),
+                files: vec![ObservedFile {
+                    path: "src/a.rs".into(),
+                    state: FileState::Present {
+                        digest: "1".repeat(64),
+                        kind: Default::default(),
+                    },
+                }],
+                origin: SourceOrigin::Read,
+            },
+            now,
+        ));
+    };
+    read(&mut state, 500);
+    edited(&mut state, "bob", "src/a.rs", 1_000);
+    assert_eq!(prompt(&mut state, "alice", 2_000).stale_reads.len(), 1);
+    read(&mut state, 2_000);
+    edited(&mut state, "bob", "src/a.rs", 3_000);
+    let again = prompt(&mut state, "alice", 4_000);
+    assert_eq!(again.stale_reads.len(), 1, "{again:?}");
+}
