@@ -11,8 +11,11 @@ use langspan_core::{
 fn authority(state: &State) -> State {
     let mut state = state.clone();
     state.activity.clear();
-    // Counted writes mark automatic-check reruns; they grant nothing.
+    // Counted writes mark automatic-check reruns, and who wrote when marks
+    // a check's comparison with its baseline; they grant nothing.
     state.writes.clear();
+    state.first_writes.clear();
+    state.write_runs.clear();
     state
 }
 

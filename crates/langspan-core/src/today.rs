@@ -211,7 +211,7 @@ fn event_facts(event: &Event) -> (Option<&str>, Option<(u64, u64)>) {
         Event::IntentEnded { session_id } | Event::SessionEnded { session_id } => {
             (Some(session_id), None)
         }
-        Event::CheckRecorded { check } => (None, Some((check.recorded_ms, check.generation))),
+        Event::CheckRecorded { check, .. } => (None, Some((check.recorded_ms, check.generation))),
         // A landing on existing check evidence records nothing else first:
         // its release is placed at the time its turn was taken.
         Event::TurnTaken { turn } => (None, Some((turn.taken_ms, turn.generation))),
@@ -226,7 +226,7 @@ fn event_workspace<'a>(state: &'a State, event: &'a Event) -> Option<&'a str> {
         Event::WriteRefused { workspace_id, .. } | Event::TurnReleased { workspace_id, .. } => {
             Some(workspace_id)
         }
-        Event::CheckRecorded { check } => Some(&check.workspace_id),
+        Event::CheckRecorded { check, .. } => Some(&check.workspace_id),
         Event::OperationObserved { observation } => Some(&observation.workspace_id),
         _ => event_facts(event)
             .0
@@ -333,7 +333,7 @@ pub fn today(state: &State, query: &TodayQuery<'_>) -> Today {
                 let count = refusals.entry(kind.name().into()).or_default();
                 *count = count.saturating_add(1);
             }
-            Event::CheckRecorded { check } => {
+            Event::CheckRecorded { check, .. } => {
                 let count = match check.result {
                     CheckResult::Passed {} => &mut checks.passed,
                     CheckResult::Failed { .. } => &mut checks.failed,
