@@ -1231,6 +1231,8 @@ Coordination report for demo, since 2027-03-01T00:00:00Z
 host         sessions  edits  base_unknown  shell_after  reads  intents set/ended/open  refusals  retried_unchanged  briefings
 claude-code  6         88     0 of 88       5            61     12/11/1                 7         1 of 7             40
 codex        4         41     9 of 41       14           -      3/3/0                   5         3 of 5             22
+Refusals by kind: claude-code 5 conflict, 2 stale_base; codex 5 stale_base
+Refusal outcomes: claude-code 3 adapted, 2 waited, 1 abandoned; codex 2 adapted, 3 unknown_read
 ```
 
 Each row counts recorded events in the window:
@@ -1252,6 +1254,44 @@ Each row counts recorded events in the window:
   ID. A second delivery of the refused call itself is answered from its
   receipt and is not counted.
 - `briefings_delivered`.
+- `refusal_outcomes`: what the session did after its edit refusals
+  (roadmap H9), described in the next section.
+
+### What a session did after a refusal
+
+Each `conflict`, `stale_base` or `unread_lines` refusal in the window opens
+one outcome for its session, kind and path set; further refusals of the same
+set before it settles join it, so three refusals of one file are one
+outcome. The next relevant event of that session settles it, once:
+
+- `waited`: a conflict whose holder's admissions of the refused files ended
+  (completed or expired, its session ended, or the coordinator restarted),
+  after which the session
+  wrote one of them.
+- `adapted`: the session reported a read of a refused file and then wrote
+  one, or wrote one with a call that differs from every refused call.
+- `retried_unchanged`: the session wrote a refused file with a call
+  identical to a refused one (same input digest), or with a shell command,
+  and reported no read in between. A stale refusal lets the identical call
+  through once; a conflict keeps refusing it while the holder holds the
+  file.
+- `unknown_read`: as `retried_unchanged`, on a host that reports no reads
+  (Codex), so a read may have come first. A Codex call that differs from the
+  refused one is `adapted`.
+- `abandoned`: the session ended, or wrote none of the refused files within
+  30 minutes of the latest refusal.
+- `unknown`: the events cannot tell, because the refusal was recorded by a
+  build that kept no input digest and the later call differs, or because the
+  conflicting holder's admission is not among the events read.
+- `pending`: not settled yet. This is not an outcome.
+
+A write is a hook's admission of a tool call or a shell command seen
+changing the file. Outcomes are derived from recorded events each time the
+report runs, never from model text, and nothing is stored, held or sent to
+a model because of one. A held commit opens none. The window is checked
+against wall times placed as above: an admission carries no time of its own,
+so it is placed at the timed event before it, normally the session's
+previous hook event or prompt.
 
 A share is always shown beside the count it is out of (`9 of 41`); no field
 is a bare rate. A field a host cannot report is shown as `-` and listed under
@@ -1267,7 +1307,8 @@ listed, earliest first; the host totals include every session, and the rest
 are counted in `omitted_sessions`. `--json` carries `window`, `hosts` (each
 with `sessions`, `counts` and `not_reported`), `sessions` (`session_id`,
 `host`, `counts`), `truncated` and, when there are any, `omitted_sessions`,
-`covered_from_ms`, `undated` and `partial`. A window with more than 50,000 events is
+`covered_from_ms`, `undated` and `partial`. `counts` carries
+`refusal_outcomes` only when it holds an outcome. A window with more than 50,000 events is
 counted from the newest 50,000 and says `truncated: true`, with
 `covered_from_ms`, the wall time those events start at. So does a window
 that starts before the newest retention cutoff, with `covered_from_ms` no

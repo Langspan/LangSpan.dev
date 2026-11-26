@@ -30,7 +30,7 @@ such numbers to be measured.
 | J10 | Token and cost accounting from host transcripts | Not now | New trust boundary over private transcripts; would need a STRIDE review. Subscription sessions would store no dollars |
 | J11 | Detecting that an agent ran out of quota | Not now | Depends on J10. Claude Code's StopFailure event is hooked (below), but nothing reads it for quota or usage |
 | H8 | `compliance_report`: how often each person's and agent's writes were checked first, intents completed or abandoned, collisions, blocks and overrides (added by the second review) | Built 26 November 2026 ([issue #81](https://github.com/Langspan/LangSpan.dev/issues/81)): `langspan report` and MCP `langspan_report`, per session and host kind, from LangSpan's own events; see "Coordination report (H8)" below. Not yet run with both hosts on a shared task | First not now: on a hooked host every write is checked by construction, so the rate says little. Built when the rest was wanted counted from LangSpan's events; it gives counts, not a checked-first rate |
-| H9 | Block outcomes: each refusal settled as adapted, overrode, waited or abandoned (added by the second review) | Not now | Whether a refusal changed what the agent did is judged in retained runs for now (the launch validation, PR #56); a product figure would need the benchmark's definition first, as for H5 |
+| H9 | Block outcomes: each refusal settled as adapted, overrode, waited or abandoned (added by the second review) | Built 26 November 2026 ([issue #82](https://github.com/Langspan/LangSpan.dev/issues/82)): `refusal_outcomes` in `langspan report`, derived from the event log; see "Refusal outcomes (H9)" below. No retained real-host run holds a `write_refused` event to compare with yet | First not now: a product figure would need the benchmark's definition first, as for H5. Built as counts of recorded events per outcome, which claim no saving and give no rate |
 | H10 | Git trouble baseline: conflicts, rejected pushes and reverts seen in agents' shells, and 26 weeks of `git log` counts (added by the second review) | Not now | A new read of the owner's Git history for a figure nothing uses yet. A report built from the counts by a hosted service is out of scope ([ADR 0016](0016-hosted-service-features-out-of-scope.md)) |
 
 **StopFailure (row A2), amended 25 November 2026.** This record first left
@@ -273,6 +273,65 @@ it does not know ([ADR 0015](0015-version-tolerance.md)). Tests:
 and `tests/report.rs` (a real daemon, Git, hooks fed with recorded Claude Code
 and Codex events, and the MCP adapter with 40 sessions). A run of both real
 hosts over a shared task is still to be retained.
+
+**Refusal outcomes (H9), built 26 November 2026.** The coordination report's
+counts gain `refusal_outcomes`: for each session and host kind, how its edit
+refusals in the window were settled. Each `conflict`, `stale_base` or
+`unread_lines` refusal opens one pending outcome per session, workspace, kind
+and path set; a refusal of the same set before it settles joins it. The next
+relevant event of that session settles it once. A conflict whose holder's
+admissions of the refused paths ended before the session wrote one is
+`waited`. Otherwise, a reported read of a refused path followed by a write is
+`adapted`. A write identical to a refused call (same input digest) or a
+shell write is `retried_unchanged`, or `unknown_read` on Codex, which reports
+no reads. A write whose call differs from every refused one is `adapted`. No
+write within 30 minutes of the latest refusal, or the session's end, is
+`abandoned`. What the events cannot tell is `unknown`: a refusal without a
+digest followed by a different call, or a conflict whose holder's admission
+is not among the events read. An outcome not settled yet is counted as
+`pending`. Choices that differ from the issue's proposal:
+
+- *Derived, not stored.* The issue proposed a `refusal_settled` event
+  appended by the daemon. The outcomes are instead computed by the core, in
+  the report's one pass over the events it already reads (`Settler` in
+  `crates/langspan-core/src/refusal_outcome.rs`). No event, schema or wire
+  change is needed beyond the new count field. No pending state lives in the
+  daemon, so a restart settles nothing on its own and needs no `restart`
+  reason: a refusal before a restart is settled by the events after it,
+  placed in wall time by their generation's anchors. A restart ends every
+  admission of the earlier generation without a `lease_expired` event, so
+  a conflict's holder counts as released at `booted`. Outcomes therefore do
+  not appear in `langspan events`. A later rule change re-derives every
+  outcome from the same log, which a stored event would freeze.
+- *Precedence.* `waited` comes first, because a conflict keeps refusing the
+  identical call while the holder holds the file
+  ([ADR 0022](0022-a-conflicted-file-is-refused-once.md) is about stale
+  versions), so a write after the holder released it is no blind retry.
+  A reported read comes next, then the digest comparison.
+- *A changed call without a read is `adapted`.* After a stale refusal the
+  session has been told the new version, so an admitted changed call is
+  compared with it; the call's change is the recorded response. Whether the
+  change was correct is out of scope.
+- *Time.* An admission carries no time of its own; it is placed at the timed
+  event before it, as every event in the report is. A write that comes back
+  after 30 minutes with no timed event between can therefore still settle a
+  refusal. The 30 minutes are a constant (`REFUSAL_WINDOW_MS`), not a
+  setting; tests shorten it with an undocumented environment variable that
+  can only shorten it.
+- *Held commits* open no outcome: no write answers them.
+
+Nothing reaches a model, and nothing is held or refused because of an
+outcome. The cost is bounded by the events the report already reads. Tests:
+`crates/langspan-core/tests/report.rs` (the window's edge to the
+millisecond, shell writes on each host kind, a restart between a conflict
+and its retry, the unknown cases, a held
+commit, a refusal before the window) and `tests/refusal_outcomes.rs` (a real
+daemon and real Claude Code and Codex hook events for each acceptance
+criterion of issue #82). The only retained real-host run with a judged
+LangSpan refusal (Codex run 3c2 in
+[the Codex evidence](../evidence/codex-real-host/README.md)) predates
+`write_refused`, so its log holds no refusal to settle; comparing computed
+outcomes with judged ones waits for a new real run.
 
 **Status line (row H2), amended 25 November 2026.** H2 is built
 ([issue #76](https://github.com/Langspan/LangSpan.dev/issues/76)), for Claude

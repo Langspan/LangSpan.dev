@@ -14,6 +14,7 @@ mod history;
 mod lines;
 mod recall;
 mod recent;
+mod refusal_outcome;
 mod report;
 mod status;
 mod status_line;
@@ -52,6 +53,7 @@ pub use recent::{
     RECENT_INTERFACES, RECENT_LEFT, RECENT_LEFT_CANDIDATES, RECENT_NOTICE_CHANGES,
     RECENT_WINDOW_MS, RecentChanges, RecentInterfaceChange,
 };
+pub use refusal_outcome::{PENDING, REFUSAL_WINDOW_MS, RefusalOutcome};
 pub use report::{
     OTHER_HOST, REPORT_HISTORY_EVENTS, REPORT_SESSIONS, Report, ReportCounts, ReportHost,
     ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
