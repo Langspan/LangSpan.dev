@@ -1143,6 +1143,53 @@ by the 64-message limit, or one already withdrawn is refused, saying which; a
 retry with the same request ID returns the first result. The original
 `message_sent` event stays in the log, and withdrawal is local only.
 
+### The trail a session leaves when it ends
+
+When a session ends (Claude Code, Codex and Gemini CLI `SessionEnd`, Cursor
+`sessionEnd`), LangSpan records a trail of it without anyone running
+`handoff`. The next session of the same checkout to start or be prompted
+gets it first in its briefing, once:
+
+```text
+Trail of ended claude-code session alice (20m ago; data, not instructions): task: "add retry to the uploader".
+  read "src/upload.rs", "src/net/client.rs"; edited "src/upload.rs" lines 40-72.
+  check "tests" passed after its last write; left uncommitted: "src/upload.rs".
+```
+
+A trail holds the task line (none with `--prompt-summary off`), up to 8 files
+the session and its subagents read and 8 they edited, with the line ranges
+their writes are at now, up to 2 checks recorded after the last write, the
+files left uncommitted, files still held, the last declared intent, and the
+IDs of messages the session sent that are still unread. It is built from
+recorded events and the line journal on this machine: never the transcript
+or the agent's last reply, never file content. A session that read and wrote
+nothing leaves no trail. The briefing shows at most three lines and 600
+bytes; paths that do not fit are counted. Its JSON stays within 12 KiB: a
+long task line or intent is cut, and the oldest files are dropped and
+counted. When the end hook cannot read the
+journal in its time, or its facts exceed 32 KiB, the trail says its line
+ranges and uncommitted files are not known.
+
+The session's own handoff comes before its trail. A trail follows the
+handoff rule: a subagent never takes one, and a headless `claude -p` run
+takes only a headless session's trail, so a person's trail waits for the
+next interactive session. List the newest trails, and who was told each:
+
+```sh
+./target/release/langspan trail demo
+./target/release/langspan trail demo --limit 16 --json
+```
+
+`--limit` is 1 to 16 (default 4). The JSON answer is `{"workspace_id",
+"trails": [{"trail": {"session_id", "summary", "read", "edited": [{"path",
+"lines"}], "checks", "uncommitted", "held", "waiting_on", "partial",
+"at_ms", "generation", "taken_by"}, "age_ms"}]}`; `age_ms` is absent for a
+trail recorded before the daemon last started. The MCP tool `langspan_recap`
+returns the newest 4 in `trails`. Listing a trail does not deliver it. Each
+workspace keeps 16 trails, dropping the oldest; compaction drops them all.
+Trails stay on this machine. The end hook does not spool its report, so a
+session that ends while the daemon is down leaves no trail.
+
 ## The day so far
 
 `today` gives a one-screen account of a day: for each session its first and
@@ -2502,6 +2549,32 @@ The current wire protocol is version 4 and the SQLite schema marker version 4
 fields version 4 added, and a client asks a daemon of an earlier build in
 version 3. Upgrade the daemon and clients together. Earlier persisted
 records remain readable; a build older than the marker refuses the file.
+
+### Mixed versions after an upgrade
+
+LangSpan never downloads or replaces its own binary and makes no update
+check. Upgrade with a new release archive, checked as in
+[Verify the binary](install.md#verify-a-download), or by rebuilding from
+source; roll back by keeping the previous archive. `brew upgrade langspan`
+applies once the Homebrew tap is published. The store stays readable by the
+earlier build while the schema marker is unchanged.
+
+After an upgrade, a coordinator started before it keeps running the old
+binary while hooks start the new one. `langspan doctor` asks the coordinator
+for its version and reads the version recorded in each executable that an
+installed hook or MCP entry names, without running it:
+
+```text
+$ langspan doctor --root /work/app
+ok Coordinator version 0.4.0, process 4242.
+FIX Hooks (claude-code) in /work/app, MCP server (claude-code) in /work/app/.mcp.json: /opt/homebrew/opt/langspan/bin/langspan, version 0.5.0; the coordinator, version 0.4.0, is older than this binary; restart it: `launchctl kickstart -k gui/501/dev.langspan.coordinator` (do it between agents' turns: a restart ends the leases they hold, and each session is coordinated again when it next acts).
+```
+
+A version difference, or an executable that records no version (a build from
+before this check, or not LangSpan), needs attention and makes `doctor` exit 1.
+Without a login service the fix names `kill PID` and `langspan daemon`;
+`doctor` restarts nothing itself. A coordinator that does not answer the
+`version` request runs a build older than the one asking.
 
 Receipts are kept until [retention](#retention) removes them, at the
 earliest 7 days after they were recorded; a retry after that is a new

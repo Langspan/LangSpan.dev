@@ -164,6 +164,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   recap WORKSPACE                A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
                                  messages not yet acknowledged, then withdrawn ones
+  trail WORKSPACE [--limit N]    Trails ended sessions left, newest first (--limit 1
+                                 to 16, default 4): task line, files read and edited
+                                 with line ranges, checks after the last write, files
+                                 left uncommitted, and who was told. Reads only
   today [WORKSPACE] [--since RFC3339]
                                  What each session did since local midnight (or the
                                  time given), refusals by kind, checks, landings, and
@@ -241,7 +245,9 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Say what is and is not working: coordinator, scans,
                                  index, publication, the hooks installed in DIR, and
                                  the user-level install under the home, each with
-                                 whether the LangSpan skill is installed and current
+                                 whether the LangSpan skill is installed and current,
+                                 and whether the coordinator's version matches the
+                                 binary each hook names (read, never run)
   hosts [--home DIR]             List each agent host LangSpan knows (Claude Code,
                                  Codex, Cursor, Gemini CLI, Antigravity): whether its configuration
                                  directory exists, its user-level install (none,
@@ -3121,6 +3127,11 @@ fn doctor(
     );
     // Registered workspace roots and the hosts whose sessions work in them.
     let mut in_use: Option<InUse> = None;
+    // The running coordinator's build, when it says (roadmap I5).
+    let mut running: Option<(String, u32)> = None;
+    // Each executable an installed hook or MCP entry for this state
+    // directory names, with what names it, in the order found.
+    let mut binaries: Vec<(String, PathBuf)> = Vec::new();
     // What doctor judges a workspace by must be complete, even when the
     // bounded view leaves it out to fit a frame.
     match langspan::client::status_from(state_dir, &["workspace_git", "remote_peers"]) {
@@ -3151,6 +3162,30 @@ fn doctor(
                     state.generation
                 ),
             );
+            match ask(state_dir, "read".into(), Command::Version) {
+                Ok(Outcome::Version { version, pid }) => {
+                    note(
+                        true,
+                        format!("Coordinator version {version}, process {pid}."),
+                    );
+                    running = Some((version, pid));
+                }
+                // A coordinator from before `version` refuses it as a
+                // request it cannot parse.
+                answer => note(
+                    false,
+                    format!(
+                        "The coordinator does not report its version ({}), so it runs a build from before this one, {}; restart it: {}.",
+                        match answer {
+                            Ok(Outcome::Error { message, .. }) => message,
+                            Ok(other) => format!("unexpected answer {other:?}"),
+                            Err(error) => error.to_string(),
+                        },
+                        langspan::binary_version::VERSION,
+                        restart_hint(home, state_dir, None)
+                    ),
+                ),
+            }
             let stale = state
                 .sessions
                 .values()
@@ -3326,7 +3361,7 @@ fn doctor(
             {
                 continue;
             }
-            let Some(first) = managed.first() else {
+            if managed.is_empty() {
                 note(
                     false,
                     format!(
@@ -3338,9 +3373,21 @@ fn doctor(
                     ),
                 );
                 continue;
-            };
-            let points_here = install::same_directory(&first.state_dir, state_dir);
-            let exists = first.executable.is_file();
+            }
+            // Each event's registration is read on its own, so each may name
+            // its own executable and state directory: all of them count.
+            let points_here = managed
+                .iter()
+                .all(|hook| install::same_directory(&hook.state_dir, state_dir));
+            let exists = managed.iter().all(|hook| hook.executable.is_file());
+            for hook in &managed {
+                if install::same_directory(&hook.state_dir, state_dir) {
+                    binaries.push((
+                        format!("Hooks ({}) in {}", vendor.name(), root.display()),
+                        hook.executable.clone(),
+                    ));
+                }
+            }
             note(
                 points_here && exists && missing.is_empty() && stale.is_empty(),
                 format!(
@@ -3422,8 +3469,16 @@ fn doctor(
                         ),
                     ),
                     Ok(Some(Some(server))) => note(
-                        install::same_directory(&server.state_dir, state_dir)
-                            && server.executable.is_file(),
+                        {
+                            let here = install::same_directory(&server.state_dir, state_dir);
+                            if here {
+                                binaries.push((
+                                    format!("MCP server ({name}) in {}", mcp.display()),
+                                    server.executable.clone(),
+                                ));
+                            }
+                            here && server.executable.is_file()
+                        },
                         format!(
                             "{name}: MCP server `langspan` registered in {}, state directory {}.",
                             mcp.display(),
@@ -3453,7 +3508,19 @@ fn doctor(
             note(ok, text);
         }
     }
-    for (ok, text) in user_level_findings(state_dir, home, in_use.as_ref())? {
+    for (ok, text) in user_level_findings(state_dir, home, in_use.as_ref(), &mut binaries)? {
+        note(ok, text);
+    }
+    let restart = running
+        .as_ref()
+        .map(|(_, pid)| restart_hint(home, state_dir, Some(*pid)));
+    for (ok, text) in version_findings(
+        running
+            .as_ref()
+            .map(|(version, _)| version.as_str())
+            .zip(restart.as_deref()),
+        &binaries,
+    ) {
         note(ok, text);
     }
     let problems = findings.iter().filter(|(ok, _)| !ok).count();
@@ -3615,6 +3682,112 @@ fn main_install_problem(
 /// one this version writes (`install::stale_matchers`).
 const STALE_MATCHER: &str = "the matcher does not name the tools this version handles";
 
+/// How to restart the coordinator for `state_dir`: through the login
+/// service when `setup` installed one, otherwise by stopping process `pid`
+/// (when known) and starting it again. Never run by `doctor` itself.
+fn restart_hint(home: &UserHome, state_dir: &std::path::Path, pid: Option<u32>) -> String {
+    use langspan::service::{self, Manager};
+    let then = "do it between agents' turns: a restart ends the leases they hold, and each session is coordinated again when it next acts";
+    if service::installed_for(home, state_dir) {
+        match Manager::current() {
+            Some(Manager::Launchd) => {
+                return format!(
+                    "`launchctl kickstart -k gui/{}/{}` ({then})",
+                    rustix::process::getuid().as_raw(),
+                    service::LABEL
+                );
+            }
+            Some(Manager::Systemd) => {
+                return format!("`systemctl --user restart {}` ({then})", service::UNIT);
+            }
+            None => {}
+        }
+    }
+    format!(
+        "stop it ({}) and start it with `langspan daemon --state-dir {}` ({then})",
+        match pid {
+            Some(pid) => format!("`kill {pid}`"),
+            None => "the `langspan daemon` process".to_owned(),
+        },
+        state_dir.display()
+    )
+}
+
+/// What `doctor` says of each executable in `binaries` (what names it, and
+/// its path), against the coordinator's version and how to restart it in
+/// `running`, when it says. The version is read from the file
+/// (`binary_version::of_file`), never by running it: a project's
+/// configuration names it. One finding per executable, naming everything
+/// that runs it.
+fn version_findings(
+    running: Option<(&str, &str)>,
+    binaries: &[(String, PathBuf)],
+) -> Vec<(bool, String)> {
+    use langspan::binary_version;
+    use std::cmp::Ordering;
+    let mut grouped: Vec<(Vec<&str>, &std::path::Path)> = Vec::new();
+    for (label, path) in binaries {
+        match grouped.iter_mut().find(|(_, seen)| *seen == path.as_path()) {
+            // Each hook event of one install adds the same label.
+            Some((labels, _)) if labels.contains(&label.as_str()) => {}
+            Some((labels, _)) => labels.push(label),
+            None => grouped.push((vec![label], path)),
+        }
+    }
+    let mut findings = Vec::new();
+    for (labels, path) in grouped {
+        let labels = labels.join(", ");
+        let path_text = path.display();
+        let version = match binary_version::of_file(path) {
+            // A missing executable is already reported with its install.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                findings.push((
+                    false,
+                    format!("{labels}: {path_text} could not be read for its version: {error}."),
+                ));
+                continue;
+            }
+            Ok(version) => version,
+        };
+        let finding = match (version, running) {
+            (None, None) => (
+                true,
+                format!(
+                    "{labels}: {path_text} does not record its version: a LangSpan build from before versions were recorded, or not LangSpan."
+                ),
+            ),
+            (None, Some((coordinator, _))) => (
+                false,
+                format!(
+                    "{labels}: {path_text} does not record its version, so it is a LangSpan build from before versions were recorded, or not LangSpan; the coordinator runs version {coordinator}. Upgrade the binary at that path, or install these again from the coordinator's."
+                ),
+            ),
+            (Some(version), None) => (true, format!("{labels}: {path_text}, version {version}.")),
+            (Some(version), Some((coordinator, _))) if version == coordinator => (
+                true,
+                format!("{labels}: {path_text}, version {version}, as the coordinator's."),
+            ),
+            (Some(version), Some((coordinator, restart))) => (
+                false,
+                match binary_version::order(coordinator, &version) {
+                    Some(Ordering::Less) => format!(
+                        "{labels}: {path_text}, version {version}; the coordinator, version {coordinator}, is older than this binary; restart it: {restart}."
+                    ),
+                    Some(Ordering::Greater) => format!(
+                        "{labels}: {path_text}, version {version}; the coordinator, version {coordinator}, is newer than this binary. Upgrade the binary at that path, or install these again from the coordinator's."
+                    ),
+                    _ => format!(
+                        "{labels}: {path_text}, version {version}; the coordinator runs version {coordinator}. Run one version: upgrade the binary at that path, then restart the coordinator: {restart}."
+                    ),
+                },
+            ),
+        };
+        findings.push(finding);
+    }
+    findings
+}
+
 /// What `doctor` says about the user-level install of each host present
 /// under the home: hooks, MCP registration, the executable both run, and the
 /// state directory both point at.
@@ -3622,6 +3795,7 @@ fn user_level_findings(
     state_dir: &std::path::Path,
     home: &UserHome,
     in_use: Option<&InUse>,
+    binaries: &mut Vec<(String, PathBuf)>,
 ) -> Result<Vec<(bool, String)>, langspan::Error> {
     use langspan::{install, install::Vendor, user_install};
     let mut findings = Vec::new();
@@ -3740,6 +3914,23 @@ fn user_level_findings(
             ));
             continue;
         }
+        // Every event's registration, as for a project install.
+        for hook in &hooks {
+            if install::same_directory(&hook.state_dir, state_dir) {
+                binaries.push((
+                    format!("User-level hooks ({name})"),
+                    hook.executable.clone(),
+                ));
+            }
+        }
+        if let Some(server) = &server
+            && install::same_directory(&server.state_dir, state_dir)
+        {
+            binaries.push((
+                format!("User-level MCP server ({name})"),
+                server.executable.clone(),
+            ));
+        }
         match hooks.first() {
             Some(first) => {
                 let mut problems = String::new();
@@ -3755,7 +3946,12 @@ fn user_level_findings(
                         stale.join(", ")
                     ));
                 }
-                problems.push_str(&check(&first.executable, &first.state_dir));
+                for hook in &hooks {
+                    let problem = check(&hook.executable, &hook.state_dir);
+                    if !problems.contains(&problem) {
+                        problems.push_str(&problem);
+                    }
+                }
                 findings.push((
                     problems.is_empty(),
                     format!(
@@ -4274,6 +4470,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             ["recap", workspace] => Command::Recap {
                 workspace_id: (*workspace).into(),
             },
+            ["trail", workspace] => Command::Trails {
+                workspace_id: (*workspace).into(),
+                limit: Some(
+                    u32::try_from(number(&mut options, "--limit", 4)?)
+                        .map_err(|_| "--limit is too large")?,
+                ),
+            },
             // The words may come quoted as one argument or as several.
             ["recall", workspace, query @ ..] if !query.is_empty() => Command::Recall {
                 workspace_id: (*workspace).into(),
@@ -4414,6 +4617,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphImport { .. }
                 | Command::CheckWrite { .. }
                 | Command::Recap { .. }
+                | Command::Trails { .. }
                 | Command::ShowMessage { .. }
                 | Command::MessageStatus { .. }
                 | Command::Recall { .. }
@@ -5661,6 +5865,25 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::RefusalRecorded { session_id } => {
             println!("Refusal recorded for session {session_id}.")
         }
+        Outcome::Trails {
+            workspace_id,
+            trails,
+            omitted,
+        } => {
+            if trails.is_empty() {
+                println!("No trails recorded in workspace {workspace_id}.");
+            }
+            if *omitted > 0 {
+                println!("({omitted} older trail(s) left out: they did not fit in one reply.)");
+            }
+            for view in trails {
+                println!("{}", langspan::trail::text(view));
+                match &view.trail.taken_by {
+                    Some(session) => println!("  Told to session {session}."),
+                    None => println!("  Not told to any session yet."),
+                }
+            }
+        }
         Outcome::Policy { workspace_id, rows } => {
             println!("Coordination policies for workspace {workspace_id}:");
             for row in rows {
@@ -5970,6 +6193,9 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::Error { code, message } => println!("{code}: {}", serde_json::to_string(message)?),
         // The view is for the dashboard page; a terminal gets it as data.
         Outcome::Dashboard { dashboard } => println!("{}", serde_json::to_string(dashboard)?),
+        Outcome::Version { version, pid } => {
+            println!("Coordinator version {version}, process {pid}.")
+        }
         Outcome::Events { events } => {
             for event in events {
                 println!("{} {}", event.seq, serde_json::to_string(&event.event)?);

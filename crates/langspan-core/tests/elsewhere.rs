@@ -279,6 +279,7 @@ fn a_committed_unmerged_change_is_told_until_the_peers_base_holds_it() {
     // uncommitted rules are not.
     let end = Command::SessionEnd {
         session_id: "alice".into(),
+        trail: None,
     };
     ok(run(&mut state, "end-alice", end, 30));
     assert!(bob_told(&state, &standing(&state, Standing::Unmerged), 40));
