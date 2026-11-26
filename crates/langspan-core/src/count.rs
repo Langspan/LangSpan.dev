@@ -225,6 +225,6 @@ pub fn count_refusals<E>(
         repeats,
         truncated,
         undated,
-        retained_since_ms: query.retained_since_ms.filter(|since| *since > from_ms),
+        retained_since_ms: crate::today::retention_cut(query.retained_since_ms, from_ms),
     })
 }

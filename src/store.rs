@@ -6,11 +6,12 @@
 
 use langspan_core::{
     ClockAnchor, Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event,
-    HISTORY_EVENTS, HistoryQuery, LeaseStatus, Outcome, RecordedEvent, SentPublication, State,
-    StatusRecord, TODAY_EVENTS, TodayQuery, TodayWindow, apply, dashboard_denials, decide,
-    definition_history, expiry_events, shrink_status, status_records,
+    HISTORY_EVENTS, HistoryQuery, LeaseStatus, Outcome, RecordedEvent, ReportQuery,
+    SentPublication, State, StatusRecord, TODAY_EVENTS, TodayQuery, TodayWindow, apply,
+    dashboard_denials, decide, definition_history, expiry_events, shrink_status, status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -58,6 +59,48 @@ const ANCHOR_LOOKUP: &str = concat!(
     "SELECT event_json FROM events WHERE seq < ?1 AND ",
     generation_marker!(),
     " ORDER BY seq DESC LIMIT 1"
+);
+
+/// An event that sets or ends a session's intent, or binds or unbinds a
+/// session's workspace.
+macro_rules! intent_event {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         IN ('intent_set', 'intent_ended', 'session_ended', 'workspace_removed',
+             'session_registered')"
+    };
+}
+
+/// A partial index of the intent events, the workspace removals that end
+/// intents and the session registrations, so the report can find which
+/// sessions held an intent, and which workspace each session belonged to,
+/// before the events it reads without reading the rest of the older log.
+/// `events_intent` and `events_intent_state` were earlier forms of this
+/// index with fewer kinds; the new name replaces them in a database an
+/// earlier build opened.
+const INTENT_EVENT_INDEX: &str = concat!(
+    "DROP INDEX IF EXISTS events_intent; ",
+    "DROP INDEX IF EXISTS events_intent_state; ",
+    "CREATE INDEX IF NOT EXISTS events_report_state ON events(seq) WHERE ",
+    intent_event!()
+);
+
+/// Before the events a report reads: sessions holding an intent, each with
+/// its intent's workspace, each session's workspace, and what of these is
+/// known when only part of the older history was folded (`None`: all).
+type ReportHistory = (
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+    Option<langspan_core::ReportKnown>,
+);
+
+/// The newest intent and membership events after the first sequence number
+/// and before the second, newest first, at most the third parameter. Read
+/// through the partial index, so it visits no more index entries than that.
+const INTENT_EVENTS_BEFORE: &str = concat!(
+    "SELECT event_json FROM events WHERE seq > ?1 AND seq < ?2 AND ",
+    intent_event!(),
+    " ORDER BY seq DESC LIMIT ?3"
 );
 
 /// A `write_refused` row, and the index the monthly count reads them by.
@@ -421,6 +464,7 @@ impl Store {
         // when opened (one pass over the log), and a build without it
         // reads and writes the same rows.
         connection.execute_batch(GENERATION_MARKER_INDEX)?;
+        connection.execute_batch(INTENT_EVENT_INDEX)?;
         // The same for the monthly count (H5): two partial indexes.
         connection.execute_batch(COUNT_INDEXES)?;
         connection.execute_batch(HISTORY_INDEX)?;
@@ -464,11 +508,13 @@ impl Store {
             tap: None,
         };
         // The generation's clock against the wall clock, so times can be
-        // placed on a day (the status line and `today`).
+        // placed on a day (the status line and `today`). The same wall clock
+        // stamps records' ages, so a retention cutoff and a placed time are
+        // on one clock.
         let anchor = ClockAnchor {
             generation,
             clock_ms: crate::clock::now_ms(),
-            wall_ms: wall_now_ms(),
+            wall_ms: (store.wall_ms)(),
         };
         store.commit(
             &[
@@ -803,6 +849,7 @@ impl Store {
                 | Command::Recap { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
+                | Command::Report { .. }
                 | Command::Count { .. }
                 | Command::History { .. }
                 | Command::StatusLine { .. }
@@ -979,6 +1026,10 @@ impl Store {
                 workspace_id,
                 from_ms,
             } => self.today(workspace_id.as_deref(), *from_ms, wall_now_ms(), now_ms)?,
+            Command::Report {
+                workspace_id,
+                from_ms,
+            } => self.report(workspace_id, *from_ms, wall_now_ms())?,
             Command::Count { days } => self.count(days)?,
             Command::History {
                 workspace_id,
@@ -1278,20 +1329,58 @@ impl Store {
         wall_ms: u64,
         now_ms: u64,
     ) -> StoreResult<Outcome> {
+        if let Some(refused) = self.refused_window(workspace_id, from_ms, wall_ms) {
+            return Ok(refused);
+        }
+        let (events, anchor, earlier) = self.newest_events()?;
+        let retained_from_ms = retention::since_ms(&self.connection)?;
+        let mut today = langspan_core::today(
+            &self.state,
+            &TodayQuery {
+                workspace_id,
+                window: TodayWindow {
+                    from_ms,
+                    to_ms: wall_ms,
+                },
+                events: &events,
+                anchor,
+                earlier,
+                retained_from_ms,
+                now_ms,
+            },
+        );
+        today.shrink_until(|today| {
+            serde_json::to_vec(today).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+        });
+        Ok(Outcome::Today { today })
+    }
+
+    /// Why a window of the event log cannot be read: an unknown workspace,
+    /// or a start after now.
+    fn refused_window(
+        &self,
+        workspace_id: Option<&str>,
+        from_ms: u64,
+        wall_ms: u64,
+    ) -> Option<Outcome> {
         if let Some(workspace_id) = workspace_id
             && !self.state.workspaces.contains_key(workspace_id)
         {
-            return Ok(Outcome::Error {
+            return Some(Outcome::Error {
                 code: "unknown_workspace".into(),
                 message: "no workspace has this ID; `langspan status` lists them".into(),
             });
         }
-        if from_ms > wall_ms {
-            return Ok(Outcome::Error {
-                code: "invalid_window".into(),
-                message: "the window starts after now; give a --since time in the past".into(),
-            });
-        }
+        (from_ms > wall_ms).then(|| Outcome::Error {
+            code: "invalid_window".into(),
+            message: "the window starts after now; give a --since time in the past".into(),
+        })
+    }
+
+    /// The newest `TODAY_EVENTS` events, oldest first, with the anchor of
+    /// the generation the first belongs to (when it was anchored) and
+    /// whether older events exist. `today` and `report` read the same.
+    fn newest_events(&self) -> StoreResult<(Vec<RecordedEvent>, Option<ClockAnchor>, bool)> {
         let mut statement = self
             .connection
             .prepare("SELECT seq, event_json FROM events ORDER BY seq DESC LIMIT ?1")?;
@@ -1309,13 +1398,13 @@ impl Store {
         let first = events.first().map_or(0, |recorded| recorded.seq);
         let first = i64::try_from(first)?;
         // Older events exist when the log holds some before the first one
-        // read, or when retention removed some: those are gone, and the core
-        // marks the summary truncated if the window reaches before what is left.
+        // read. What retention removed is the caller's to pass separately,
+        // as its cutoff: the kept generation markers are older than it.
         let earlier: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1)",
             [first],
             |row| row.get(0),
-        )? || retention::since_ms(&self.connection)?.is_some();
+        )?;
         // The generation the first event read belongs to, if it was anchored.
         let before: Option<String> = self
             .connection
@@ -1328,24 +1417,98 @@ impl Store {
             Some(Event::ClockAnchored { anchor }) => Some(anchor),
             _ => None,
         };
-        let mut today = langspan_core::today(
-            &self.state,
-            &TodayQuery {
-                workspace_id,
-                window: TodayWindow {
-                    from_ms,
-                    to_ms: wall_ms,
-                },
-                events: &events,
-                anchor,
-                earlier,
-                now_ms,
+        Ok((events, anchor, earlier))
+    }
+
+    /// Just before sequence number `seq`: the sessions holding an intent,
+    /// each with its intent's workspace, and each session's workspace, from
+    /// the newest snapshot (a compaction removed the events before it) and
+    /// the intent events, session registrations and workspace removals
+    /// after it and before `seq`. At most `REPORT_HISTORY_EVENTS` of those
+    /// are read, the newest: when more exist, the snapshot is not used and
+    /// the third value says which sessions the events read made known, so a
+    /// report's cost stays bounded however long the log grows.
+    fn report_history_before(&self, seq: u64) -> StoreResult<ReportHistory> {
+        let from = self.snapshot_seq;
+        let budget = langspan_core::REPORT_HISTORY_EVENTS;
+        let mut statement = self.connection.prepare_cached(INTENT_EVENTS_BEFORE)?;
+        let mut rows = statement.query(params![
+            i64::try_from(from)?,
+            i64::try_from(seq)?,
+            i64::try_from(budget + 1)?
+        ])?;
+        let mut newest_first = Vec::new();
+        while let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            newest_first.push(json);
+        }
+        let complete = newest_first.len() <= budget;
+        newest_first.truncate(budget);
+        let (mut open, mut members, mut known) = if !complete {
+            (
+                BTreeMap::new(),
+                BTreeMap::new(),
+                Some(langspan_core::ReportKnown::default()),
+            )
+        } else if self.snapshot_seq > 0 {
+            let (snapshot, _) = retention::snapshot(&self.connection)?;
+            (
+                snapshot
+                    .intents
+                    .iter()
+                    .map(|(session, intent)| (session.clone(), intent.workspace_id.clone()))
+                    .collect(),
+                snapshot
+                    .sessions
+                    .iter()
+                    .map(|(id, session)| (id.clone(), session.workspace_id.clone()))
+                    .collect(),
+                None,
+            )
+        } else {
+            (BTreeMap::new(), BTreeMap::new(), None)
+        };
+        for json in newest_first.iter().rev() {
+            let event = serde_json::from_str(json)?;
+            langspan_core::open_intents(&mut open, &event);
+            langspan_core::session_workspaces(&mut members, &event);
+            if let Some(known) = known.as_mut() {
+                langspan_core::known_sessions(known, &event);
+            }
+        }
+        Ok((open, members, known))
+    }
+
+    /// The coordination report (roadmap H8): the newest `TODAY_EVENTS`
+    /// events at most, placed in wall time as `today` places them, counted
+    /// by the core. Reads only; it writes nothing and acknowledges no
+    /// message.
+    pub fn report(&self, workspace_id: &str, from_ms: u64, wall_ms: u64) -> StoreResult<Outcome> {
+        if let Some(refused) = self.refused_window(Some(workspace_id), from_ms, wall_ms) {
+            return Ok(refused);
+        }
+        let (events, anchor, earlier) = self.newest_events()?;
+        let retained_from_ms = retention::since_ms(&self.connection)?;
+        let (open_intents, session_workspaces, known) =
+            self.report_history_before(events.first().map_or(0, |first| first.seq))?;
+        let mut report = langspan_core::report(&ReportQuery {
+            workspace_id,
+            window: TodayWindow {
+                from_ms,
+                to_ms: wall_ms,
             },
-        );
-        today.shrink_until(|today| {
-            serde_json::to_vec(today).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+            events: &events,
+            anchor,
+            earlier,
+            retained_from_ms,
+            open_intents: &open_intents,
+            session_workspaces: &session_workspaces,
+            known: known.as_ref(),
         });
-        Ok(Outcome::Today { today })
+        report.shrink_until(|report| {
+            serde_json::to_vec(report).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+        });
+        Ok(Outcome::Report { report })
     }
 
     /// The refusal count (H5): the newest `COUNT_REFUSALS` refusals at
@@ -2129,6 +2292,373 @@ mod tests {
         assert!(
             plan.iter()
                 .any(|step| step.contains("events_generation_marker")),
+            "{plan:?}"
+        );
+    }
+
+    /// Review 4704154106: Alice registers in `work` before the newest
+    /// `TODAY_EVENTS` events; among them she reads a file, `work` is
+    /// removed and she registers the same session in `elsewhere`. The read
+    /// counts for `work` (registered again), the workspace she was in then,
+    /// and not for `elsewhere`. Real SQLite: her first registration is only in the
+    /// older part of the log.
+    #[test]
+    fn a_session_registered_again_elsewhere_keeps_its_earlier_read_in_its_old_workspace() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-report-members-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let run = |store: &mut Store, id: &str, command: Command| {
+            let now = crate::clock::now_ms();
+            let outcome = store.execute(id, &command, &command, now).unwrap().outcome;
+            assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+        };
+        let alice = "claude-code.alice";
+        for workspace in ["work", "elsewhere"] {
+            run(
+                &mut store,
+                &format!("w-{workspace}"),
+                Command::WorkspaceRegister {
+                    workspace_id: workspace.into(),
+                    root: format!("/repos/{workspace}"),
+                },
+            );
+        }
+        let register = |session: &str, workspace: &str| Command::SessionRegister {
+            session_id: session.into(),
+            workspace_id: workspace.into(),
+            parent: None,
+            headless: false,
+        };
+        run(&mut store, "s-alice", register(alice, "work"));
+        run(
+            &mut store,
+            "s-filler",
+            register("claude-code.filler", "elsewhere"),
+        );
+        let from_ms = wall_now_ms();
+        // Enough events after the registration that it is not among those
+        // read.
+        let generation = store.state.generation;
+        let filler: Vec<Event> = (0..TODAY_EVENTS)
+            .map(|_| Event::SessionSeen {
+                session_id: "claude-code.filler".into(),
+                at_ms: crate::clock::now_ms(),
+                generation,
+            })
+            .collect();
+        store.commit(&filler, None).unwrap();
+        // A prompt carries a time of its own, which places the read after it.
+        run(
+            &mut store,
+            "p",
+            Command::SessionPrompt {
+                session_id: alice.into(),
+                summary: "carry on".into(),
+                line_digests: Vec::new(),
+            },
+        );
+        run(
+            &mut store,
+            "read",
+            Command::ObserveSource {
+                session_id: alice.into(),
+                files: vec![langspan_core::ObservedFile {
+                    path: "src/lib.rs".into(),
+                    state: langspan_core::FileState::Missing,
+                }],
+                origin: langspan_core::SourceOrigin::Read,
+            },
+        );
+        run(
+            &mut store,
+            "r",
+            Command::WorkspaceRemove {
+                workspace_id: "work".into(),
+                apply: true,
+            },
+        );
+        run(&mut store, "s-again", register(alice, "elsewhere"));
+        // Registered again, so its report can be asked for.
+        run(
+            &mut store,
+            "w-work-again",
+            Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: "/repos/work".into(),
+            },
+        );
+        let to_ms = wall_now_ms() + 1;
+        let reads = |store: &Store, workspace: &str| {
+            let outcome = store.report(workspace, from_ms, to_ms).unwrap();
+            let Outcome::Report { report } = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert!(report.truncated, "{report:#?}");
+            report
+                .sessions
+                .iter()
+                .find(|row| row.session_id == alice)
+                .map(|row| row.counts.reads_reported)
+        };
+        let (work, elsewhere) = (reads(&store, "work"), reads(&store, "elsewhere"));
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(work, Some(1));
+        assert_eq!(elsewhere, Some(0));
+    }
+
+    /// Review 4703461855: an intent set before the newest `TODAY_EVENTS`
+    /// events, whose session ends inside the window, is counted as left
+    /// open. Real SQLite: the intent is only in the older part of the log.
+    #[test]
+    fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
+        assert_eq!(intents_left_open_after_older_log(false), 1);
+    }
+
+    /// Review 4703929181: removing the workspace ends the intent with it, so
+    /// the session registered again under the same ID and ended without a
+    /// new intent left none open, though the removal is in the older log.
+    #[test]
+    fn a_workspace_removed_before_the_events_read_ends_its_intents() {
+        assert_eq!(intents_left_open_after_older_log(true), 0);
+    }
+
+    /// Alice sets an intent, then (when `remove`) the workspace is removed
+    /// and registered again with her session, all before the newest
+    /// `TODAY_EVENTS` events; she ends her session inside the window. Her
+    /// `intents_left_open`.
+    fn intents_left_open_after_older_log(remove: bool) -> u32 {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-report-intent-{remove}-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let run = |store: &mut Store, id: &str, command: Command| {
+            let now = crate::clock::now_ms();
+            store.execute(id, &command, &command, now).unwrap();
+        };
+        run(
+            &mut store,
+            "w",
+            Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: "/repos/work".into(),
+            },
+        );
+        for session in ["claude-code.alice", "claude-code.filler"] {
+            run(
+                &mut store,
+                &format!("s-{session}"),
+                Command::SessionRegister {
+                    session_id: session.into(),
+                    workspace_id: "work".into(),
+                    parent: None,
+                    headless: false,
+                },
+            );
+        }
+        run(
+            &mut store,
+            "i",
+            Command::IntentSet {
+                session_id: "claude-code.alice".into(),
+                paths: vec!["src/lib.rs".into()],
+                summary: "rework the parser".into(),
+            },
+        );
+        if remove {
+            run(
+                &mut store,
+                "r",
+                Command::WorkspaceRemove {
+                    workspace_id: "work".into(),
+                    apply: true,
+                },
+            );
+            run(
+                &mut store,
+                "w2",
+                Command::WorkspaceRegister {
+                    workspace_id: "work".into(),
+                    root: "/repos/work".into(),
+                },
+            );
+            for session in ["claude-code.alice", "claude-code.filler"] {
+                run(
+                    &mut store,
+                    &format!("s2-{session}"),
+                    Command::SessionRegister {
+                        session_id: session.into(),
+                        workspace_id: "work".into(),
+                        parent: None,
+                        headless: false,
+                    },
+                );
+            }
+        }
+        let from_ms = wall_now_ms();
+        // Enough events after the intent that it is not among those read.
+        let generation = store.state.generation;
+        let filler: Vec<Event> = (0..TODAY_EVENTS)
+            .map(|_| Event::SessionSeen {
+                session_id: "claude-code.filler".into(),
+                at_ms: crate::clock::now_ms(),
+                generation,
+            })
+            .collect();
+        store.commit(&filler, None).unwrap();
+        // A prompt carries a time of its own, which places the end after it.
+        run(
+            &mut store,
+            "p",
+            Command::SessionPrompt {
+                session_id: "claude-code.alice".into(),
+                summary: "carry on".into(),
+                line_digests: Vec::new(),
+            },
+        );
+        run(
+            &mut store,
+            "e",
+            Command::SessionEnd {
+                session_id: "claude-code.alice".into(),
+            },
+        );
+        let outcome = store.report("work", from_ms, wall_now_ms() + 1).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let Outcome::Report { report } = outcome else {
+            panic!("{outcome:?}");
+        };
+        let alice = report
+            .sessions
+            .iter()
+            .find(|row| row.session_id == "claude-code.alice")
+            .unwrap_or_else(|| panic!("{report:#?}"));
+        assert_eq!(alice.counts.intents_set, 0, "{report:#?}");
+        alice.counts.intents_left_open
+    }
+
+    /// Review 4705125393: with no compaction snapshot, a report folds at
+    /// most the newest `REPORT_HISTORY_EVENTS` intent and registration
+    /// events before those it reads, however long the log, and says
+    /// `partial` when an event it counts needed an older one. Real SQLite
+    /// with 200,000 intent events: Alice registered before all of them and
+    /// prompts inside the window. Reading every older event would find her
+    /// workspace and count her; the bounded fold cannot, and says so.
+    #[test]
+    fn a_report_on_a_long_history_folds_at_most_the_budget_and_says_partial() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-report-budget-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let run = |store: &mut Store, id: &str, command: Command| {
+            let now = crate::clock::now_ms();
+            store.execute(id, &command, &command, now).unwrap();
+        };
+        run(
+            &mut store,
+            "w",
+            Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: "/repos/work".into(),
+            },
+        );
+        for session in ["claude-code.alice", "claude-code.filler"] {
+            run(
+                &mut store,
+                &format!("s-{session}"),
+                Command::SessionRegister {
+                    session_id: session.into(),
+                    workspace_id: "work".into(),
+                    parent: None,
+                    headless: false,
+                },
+            );
+        }
+        let generation = store.state.generation;
+        let history: Vec<Event> = (0..200_000)
+            .map(|index| {
+                if index % 2 == 0 {
+                    Event::IntentSet {
+                        intent: langspan_core::Intent {
+                            session_id: "claude-code.filler".into(),
+                            workspace_id: "work".into(),
+                            paths: vec!["src/lib.rs".into()],
+                            summary: "filler".into(),
+                            generation,
+                        },
+                    }
+                } else {
+                    Event::IntentEnded {
+                        session_id: "claude-code.filler".into(),
+                    }
+                }
+            })
+            .collect();
+        store.commit(&history, None).unwrap();
+        // The window starts now as the report places events: on the
+        // daemon's clock through this generation's anchor, which a long test
+        // may see drift from the wall clock.
+        let anchor = store.state.clock_anchor.unwrap();
+        let from_ms = anchor.wall_ms + (crate::clock::now_ms() - anchor.clock_ms);
+        run(
+            &mut store,
+            "p",
+            Command::SessionPrompt {
+                session_id: "claude-code.alice".into(),
+                summary: "carry on".into(),
+                line_digests: Vec::new(),
+            },
+        );
+        let outcome = store.report("work", from_ms, from_ms + 60_000).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let Outcome::Report { report } = outcome else {
+            panic!("{outcome:?}");
+        };
+        // Through JSON, so the check reads what a client is sent.
+        let report = serde_json::to_value(&report).unwrap();
+        assert_eq!(report["partial"], serde_json::json!(true), "{report:#}");
+        let rows = report["sessions"].as_array().unwrap();
+        assert!(
+            rows.iter()
+                .all(|row| row["session_id"] != "claude-code.alice"),
+            "{report:#}"
+        );
+    }
+
+    /// The intent lookup reads only intent events, not the rest of the log.
+    #[test]
+    fn the_intent_lookup_reads_only_intent_events() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-intent-plan-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let plan: Vec<String> = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {INTENT_EVENTS_BEFORE}"))
+            .unwrap()
+            .query_map([0i64, 1_000_000i64, 10i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            plan.iter().any(|step| step.contains("events_report_state")),
             "{plan:?}"
         );
     }

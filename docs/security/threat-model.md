@@ -659,6 +659,23 @@ the owner-only socket and read the zone file through `local_day` as `today` does
 | Denial of service | One count reads at most the newest 20,000 refusal rows and the clock anchors, through partial indexes, and at most 16 later admissions per refusal counted, through an index by session. A month's hundred offsets come from one read of the zone file; the local page finds them once per month per run. |
 | Elevation of privilege | It grants nothing and decides nothing; a failure is an error answer (exit 1). |
 
+## Coordination report
+
+`langspan report` and `langspan_report` (roadmap H8,
+[ADR 0019](../adr/0019-person-facing-surfaces-and-usage-accounting.md)) read
+the event log over the owner-only socket and count, per session and per host
+kind, what `today` already reads. They start no process. The one new stored
+field is the refused tool call's input digest on `write_refused`.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | A session's host kind is read from the prefix of its ID, which the hook sets from the adapter (`claude-code.`, `codex.`); a session registered by hand under such a prefix is counted as that host, which a same-user process could already do. |
+| Tampering (prompt injection) | The MCP answer places session IDs, written by hooks and other callers, in a model's context. It starts with a line saying they are coordination data, not instructions; each ID is cut to 48 characters, each line to 240 bytes and the whole to 2,400 bytes. No path, intent text, prompt or message is included. |
+| Repudiation | Reading leaves no trace: the command is answered from the store, records no event or receipt, refuses or holds nothing, and acknowledges no message. |
+| Information disclosure | The input digest is the SHA-256 the admission's receipt and lease already keep; it holds no file content. Nothing leaves the machine; the digest is not published to a remote. |
+| Denial of service | One answer reads at most the newest 50,000 events, as `today` does, and says `truncated` with the time it covered. The workspaces and intents in force before them are folded from at most the newest 10,000 intent, registration and workspace-removal events (after the newest snapshot), through a partial index, so the time one report holds the single store worker, and so delays admissions, does not grow with the log; a report that needed an older event says `partial`. Per-session state is bounded by the sessions in those events; the answer lists at most 16 sessions and fits one 48 KiB frame, dropping session rows and counting them. |
+| Elevation of privilege | It grants nothing and decides nothing; a failure is an error answer. |
+
 ## Region admission
 
 [ADR 0012](../adr/0012-region-admission.md): the hook reads and parses the file
