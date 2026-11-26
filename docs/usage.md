@@ -350,7 +350,7 @@ out of a commit. A Cursor `Write` states a whole file, so the file is held
 whole. Cursor also runs Claude Code's hooks; LangSpan's Claude Code hook does
 nothing on a Cursor event, so a call is coordinated once.
 [ADR 0032](adr/0032-cursor-adapter.md) lists the sources, what was not
-verifiable and how to capture a real run. Consult the [availability table](../README.md#current-availability)
+verifiable and how to capture a real run. Consult the [detailed availability table](reference-overview.md#current-availability)
 before treating an adapter as validated for your host version.
 
 Remove the managed entries with the matching vendor:
