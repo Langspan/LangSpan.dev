@@ -1030,6 +1030,135 @@ fn messages_a_joined_briefing_has_no_room_for_still_reach_the_model_later() {
     }
 }
 
+/// An in-flight signature (roadmap C7) that a later workspace folder's
+/// share of a joined briefing has no room for is not recorded as told: it
+/// reaches the model at a later call, once (review comment 4704149464).
+#[test]
+fn an_in_flight_line_a_joined_briefing_has_no_room_for_is_told_later() {
+    let f = Fixture::new();
+    let state = f.base.join("state");
+    // The second folder's file calls `quota`, which only an uncommitted file
+    // in a linked worktree of its repository defines.
+    let second = f.base.join("second");
+    fs::create_dir_all(second.join("src")).unwrap();
+    fs::write(
+        second.join("src/main.rs"),
+        "fn main() {\n    let _ = quota(\"bob\");\n}\n",
+    )
+    .unwrap();
+    git(&second, &["init", "--quiet", "-b", "main"]);
+    git(&second, &["add", "."]);
+    git(
+        &second,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "init",
+        ],
+    );
+    let tree = f.base.join("tree");
+    git(
+        &second,
+        &["worktree", "add", "--quiet", "-b", "feature"]
+            .into_iter()
+            .chain([tree.to_str().unwrap()])
+            .collect::<Vec<_>>(),
+    );
+    let second = fs::canonicalize(&second).unwrap();
+    let tree = fs::canonicalize(&tree).unwrap();
+    let folders = json!([f.root(), second]);
+    let with_folders = |name: &str, invocation: u64| {
+        let mut body = event(name, &f.root());
+        body["workspacePaths"] = folders.clone();
+        body["invocationNum"] = json!(invocation);
+        body
+    };
+    let (coverage, _) = user_hook(
+        &state,
+        "SessionStart",
+        &with_folders("session-start.json", 0),
+    );
+    assert!(!coverage.starts_with("unsupported:"), "{coverage}");
+    // The conversation reads the calling file in the second folder.
+    let mut read = event("post-view-file.json", &second);
+    read["workspacePaths"] = folders.clone();
+    read["toolCall"]["args"]["AbsolutePath"] = json!(second.join("src/main.rs"));
+    let (coverage, _) = user_hook(&state, "PostToolUse", &read);
+    assert!(coverage.starts_with("read_recorded:"), "{coverage}");
+
+    // Another conversation, open on the worktree, writes `quota` there.
+    let quota = tree.join("src/quota.rs");
+    let content = "pub fn quota(user: &str) -> u64 {\n    user.len() as u64\n}\n";
+    let mut write = event("pre-write-to-file.json", &tree);
+    write["conversationId"] = json!("00000000-0000-4000-8000-0000000000c4");
+    write["workspacePaths"] = json!([tree]);
+    write["toolCall"]["args"]["TargetFile"] = json!(quota);
+    write["toolCall"]["args"]["CodeContent"] = json!(content);
+    let (coverage, _) = user_hook(&state, "PreToolUse", &write);
+    assert!(coverage.starts_with("admitted:"), "{coverage}");
+    fs::write(&quota, content).unwrap();
+    write["error"] = json!("");
+    let (coverage, _) = user_hook(&state, "PostToolUse", &write);
+    assert!(coverage.starts_with("observed:"), "{coverage}");
+
+    let workspace = langspan::hook::user_workspace_id(&second);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let listed: Value = serde_json::from_str(&langspan(
+            &state,
+            &["graph", "inflight", &workspace, "--json"],
+        ))
+        .unwrap();
+        if listed["outcome"]["inflight"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "quota never in flight: {listed}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Messages in the first folder take almost all of the one limit, so the
+    // second folder's share has no room for the in-flight line.
+    let first = langspan::hook::user_workspace_id(&fs::canonicalize(f.root()).unwrap());
+    for n in 0..2 {
+        let text = format!("first-message-{n} {}", "\"".repeat(300));
+        langspan(
+            &state,
+            &["message", &first, &text, "--request-id", &format!("m{n}")],
+        );
+    }
+    let mut seen = String::new();
+    for invocation in 1..5 {
+        let (coverage, stdout) = user_hook(
+            &state,
+            "PreInvocation",
+            &with_folders("pre-invocation.json", invocation),
+        );
+        assert!(!coverage.starts_with("unsupported:"), "{coverage}");
+        let text = injected(&stdout);
+        assert!(
+            text.len() <= langspan::hook::BRIEFING_LIMIT,
+            "{}",
+            text.len()
+        );
+        seen.push_str(&text);
+        seen.push('\n');
+    }
+    assert!(seen.contains("first-message-1"), "{seen}");
+    let told = seen
+        .lines()
+        .filter(|line| line.starts_with("In flight in worktree") && line.contains("\"quota\""))
+        .count();
+    assert_eq!(told, 1, "the in-flight line was not told once: {seen}");
+}
+
 #[test]
 fn user_install_round_trips_the_global_files_and_doctor_reports_them() {
     let base = scratch("user");

@@ -1568,6 +1568,339 @@ fn a_declared_intent_replaces_the_prompt_summary_in_a_briefing() {
     );
 }
 
+fn quota(workspace: &str, signature: &str, mentioned_in: &[&str]) -> langspan_core::InflightSymbol {
+    langspan_core::InflightSymbol {
+        workspace_id: workspace.into(),
+        path: "src/quota.rs".into(),
+        name: "quota".into(),
+        kind: "function".into(),
+        signature: signature.into(),
+        mentioned_in: mentioned_in.iter().map(|path| (*path).into()).collect(),
+    }
+}
+
+fn brief_with(
+    state: &mut State,
+    session: &str,
+    id: &str,
+    now: u64,
+    inflight: Vec<langspan_core::InflightSymbol>,
+) -> Briefing {
+    match ok(run(
+        state,
+        id,
+        Command::BriefPrepared {
+            session_id: session.into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+            left: Vec::new(),
+            inflight,
+        },
+        now,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Roadmap C7, as the core decides it: what the daemon found in flight in
+/// another worktree is told to a session whose own files mention it, once
+/// per signature, and waits while a message takes the briefing.
+#[test]
+fn an_in_flight_signature_is_told_once_per_signature_and_only_from_another_worktree() {
+    let mut state = ready();
+    edited(&mut state, "carol", "src/quota.rs", 1_000);
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    let v1 = "pub fn quota(user: &User) -> u64";
+    let found = |signature: &str| {
+        vec![
+            quota("tree", signature, &["src/routes.rs", "src/other.rs"]),
+            // The asking session's own checkout, and another repository:
+            // never told through this channel.
+            quota("main", signature, &["src/routes.rs"]),
+            quota("other", signature, &["src/routes.rs"]),
+        ]
+    };
+    let told = brief_with(&mut state, "alice", "b1", 2_000, found(v1));
+    assert_eq!(told.inflight.len(), 1, "{told:?}");
+    let notice = &told.inflight[0];
+    assert_eq!(notice.worktree, "/repos/app-tree");
+    assert_eq!(notice.session.as_deref(), Some("carol"));
+    assert_eq!(notice.signature, v1);
+    // Only alice's own files are named.
+    assert_eq!(notice.mentioned_in, ["src/routes.rs"]);
+    assert!(told.changed);
+    // Bob's files mention nothing of it.
+    assert!(
+        brief_with(&mut state, "bob", "b2", 2_000, found(v1))
+            .inflight
+            .is_empty()
+    );
+    // Told once.
+    let again = brief_with(&mut state, "alice", "b3", 3_000, found(v1));
+    assert!(again.inflight.is_empty(), "{again:?}");
+    // A message waits for no one: the new signature waits for the next
+    // briefing, counted.
+    ok(run(
+        &mut state,
+        "m1",
+        Command::SendMessage {
+            workspace_id: "main".into(),
+            from: Some("bob".into()),
+            to: Some("alice".into()),
+            text: "hello".into(),
+            paths: Vec::new(),
+        },
+        3_500,
+    ));
+    let v2 = "pub fn quota(user: &User, limit: u64) -> u64";
+    let busy = brief_with(&mut state, "alice", "b4", 4_000, found(v2));
+    assert_eq!(busy.messages.len(), 1);
+    assert!(busy.inflight.is_empty());
+    assert_eq!(busy.omitted_inflight, 1);
+    let next = brief_with(&mut state, "alice", "b5", 5_000, found(v2));
+    assert_eq!(next.inflight.len(), 1);
+    assert_eq!(next.inflight[0].signature, v2);
+    assert!(
+        brief_with(&mut state, "alice", "b6", 6_000, found(v2))
+            .inflight
+            .is_empty()
+    );
+    // A look from outside shows it and records nothing.
+    let v3 = "pub fn quota() -> u64";
+    let look = match ok(run(
+        &mut state,
+        "b7",
+        Command::BriefPrepared {
+            session_id: "alice".into(),
+            max_peers: 8,
+            deliver: false,
+            mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+            left: Vec::new(),
+            inflight: found(v3),
+        },
+        7_000,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(look.inflight.len(), 1);
+    assert_eq!(
+        brief_with(&mut state, "alice", "b8", 8_000, found(v3))
+            .inflight
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn in_flight_lines_are_at_most_three_within_their_share_and_the_rest_counted() {
+    let mut state = ready();
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    let many: Vec<_> = (0..10)
+        .map(|n| langspan_core::InflightSymbol {
+            name: format!("quota_{n}"),
+            ..quota("tree", "pub fn q() -> u64", &["src/routes.rs"])
+        })
+        .collect();
+    let told = brief_with(&mut state, "alice", "b1", 2_000, many.clone());
+    assert!((1..=3).contains(&told.inflight.len()), "{told:?}");
+    assert!(
+        told.inflight
+            .iter()
+            .map(langspan_core::inflight_cost)
+            .sum::<usize>()
+            <= langspan_core::INFLIGHT_BYTES
+    );
+    assert_eq!(told.omitted_inflight as usize, 10 - told.inflight.len());
+    // More than the daemon may offer is refused.
+    let too_many: Vec<_> = (0..=langspan_core::INFLIGHT_CANDIDATES)
+        .map(|n| langspan_core::InflightSymbol {
+            name: format!("q{n}"),
+            ..quota("tree", "pub fn q() -> u64", &["src/routes.rs"])
+        })
+        .collect();
+    let refused = run(
+        &mut state,
+        "b2",
+        Command::BriefPrepared {
+            session_id: "alice".into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+            left: Vec::new(),
+            inflight: too_many,
+        },
+        3_000,
+    );
+    assert!(matches!(refused, Outcome::Error { .. }), "{refused:?}");
+}
+
+/// `count` in-flight signatures of one worktree, each a name of its own.
+fn many_inflight(count: usize) -> Vec<langspan_core::InflightSymbol> {
+    (0..count)
+        .map(|n| langspan_core::InflightSymbol {
+            name: format!("quota_{n:04}"),
+            ..quota("tree", "pub fn q() -> u64", &["src/routes.rs"])
+        })
+        .collect()
+}
+
+/// Brief `session` as the daemon does, offering at most
+/// `INFLIGHT_CANDIDATES` of `all` it was not told, until it was told every
+/// one. Returns the names told, in order, and the clock after.
+fn tell_every(
+    state: &mut State,
+    session: &str,
+    all: &[langspan_core::InflightSymbol],
+    mut now: u64,
+) -> (Vec<String>, u64) {
+    let mut told = Vec::new();
+    while told.len() < all.len() {
+        let offered: Vec<_> = all
+            .iter()
+            .filter(|item| !langspan_core::inflight_told(state, session, item))
+            .take(langspan_core::INFLIGHT_CANDIDATES)
+            .cloned()
+            .collect();
+        if offered.is_empty() {
+            break;
+        }
+        now += 1;
+        let briefing = brief_with(state, session, &format!("t{now}"), now, offered);
+        assert!(!briefing.inflight.is_empty(), "nothing told at {now}");
+        told.extend(briefing.inflight.into_iter().map(|notice| notice.name));
+    }
+    (told, now)
+}
+
+/// Offer every one of `all` again, unfiltered, as a briefing window that
+/// came round to them would, and return the names told again.
+fn told_again(
+    state: &mut State,
+    session: &str,
+    all: &[langspan_core::InflightSymbol],
+    mut now: u64,
+) -> Vec<String> {
+    let mut again = Vec::new();
+    for chunk in all.chunks(langspan_core::INFLIGHT_CANDIDATES) {
+        now += 1;
+        let briefing = brief_with(state, session, &format!("r{now}"), now, chunk.to_vec());
+        again.extend(briefing.inflight.into_iter().map(|notice| notice.name));
+    }
+    again
+}
+
+/// What a session was told is remembered for as many signatures as it can
+/// be offered in turn (review comment 4704678374): the daemon's briefing
+/// window now rotates over every in-flight row, so a memory smaller than
+/// the rows would tell the oldest again. At the limit nothing is told
+/// twice; one past it, every signature is still told once, and only one of
+/// the oldest is forgotten.
+#[test]
+fn a_session_is_told_each_in_flight_signature_once_up_to_its_memory() {
+    let limit = langspan_core::MAX_INFLIGHT_TOLD;
+    assert!(limit >= 1024, "a session remembers only {limit}");
+    let mut state = ready();
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    let all = many_inflight(limit);
+    let (told, now) = tell_every(&mut state, "alice", &all, 2_000);
+    let names: Vec<String> = all.iter().map(|item| item.name.clone()).collect();
+    assert_eq!(told, names, "each told once, in order");
+    assert_eq!(
+        told_again(&mut state, "alice", &all, now),
+        Vec::<String>::new()
+    );
+
+    let mut state = ready();
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    let all = many_inflight(limit + 1);
+    let (told, now) = tell_every(&mut state, "alice", &all, 2_000);
+    let names: Vec<String> = all.iter().map(|item| item.name.clone()).collect();
+    assert_eq!(told, names, "each told once, none starved");
+    // One of the first briefing's lines, which were told together.
+    let again = told_again(&mut state, "alice", &all, now);
+    assert_eq!(again.len(), 1, "only the oldest is forgotten: {again:?}");
+    assert!(
+        names[..langspan_core::INFLIGHT_LINES].contains(&again[0]),
+        "{again:?}"
+    );
+}
+
+/// Presence (roadmap A13) and in-flight signatures (roadmap C7) share one
+/// briefing signature: each is news on its own, and neither repeats the
+/// other once told.
+#[test]
+fn presence_and_an_in_flight_signature_are_each_news_once() {
+    let mut state = ready();
+    edited(&mut state, "carol", "src/quota.rs", 1_000);
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    read(&mut state, "bob", "src/auth.rs", 1_500);
+    let found = |signature: &str| vec![quota("tree", signature, &["src/routes.rs"])];
+    let v1 = "pub fn quota(user: &User) -> u64";
+    let both = brief_with(&mut state, "alice", "b1", 2_000, found(v1));
+    assert!(both.changed);
+    assert_eq!(both.inflight.len(), 1, "{both:?}");
+    assert_eq!(looking(&both, "bob"), [("src/auth.rs", PresenceKind::Read)]);
+    // Told once: the next briefings carry presence but not the signature,
+    // and once settled nothing new is news.
+    let next = brief_with(&mut state, "alice", "b2", 2_500, found(v1));
+    assert!(next.inflight.is_empty(), "{next:?}");
+    assert_eq!(looking(&next, "bob"), [("src/auth.rs", PresenceKind::Read)]);
+    let same = brief_with(&mut state, "alice", "b2b", 3_000, found(v1));
+    assert!(!same.changed, "{same:?}");
+    assert!(same.inflight.is_empty());
+    // Mid-turn, a new presence path is not news, with a signature carried.
+    read(&mut state, "bob", "src/session.rs", 3_200);
+    let mid = match ok(run(
+        &mut state,
+        "b2c",
+        Command::BriefPrepared {
+            session_id: "alice".into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: true,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+            left: Vec::new(),
+            inflight: found(v1),
+        },
+        3_500,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    };
+    assert!(!mid.changed, "{mid:?}");
+    assert!(mid.inflight.is_empty());
+    // At the next prompt it is news; the told signature stays told.
+    let looked = brief_with(&mut state, "alice", "b3", 4_000, found(v1));
+    assert!(looked.changed, "{looked:?}");
+    assert!(looked.inflight.is_empty());
+    assert_eq!(looking(&looked, "bob").len(), 2);
+    // A changed signature is news while presence is unchanged.
+    let v2 = "pub fn quota(user: &User, limit: u64) -> u64";
+    let changed = brief_with(&mut state, "alice", "b4", 5_000, found(v2));
+    assert!(changed.changed, "{changed:?}");
+    assert_eq!(changed.inflight.len(), 1);
+    assert_eq!(changed.inflight[0].signature, v2);
+    assert!(
+        brief_with(&mut state, "alice", "b5", 6_000, found(v2))
+            .inflight
+            .is_empty()
+    );
+}
+
 // Recent change at session start (roadmap C3, ADR 0023).
 
 const HOUR: u64 = 60 * MINUTE;

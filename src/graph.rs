@@ -77,6 +77,8 @@ impl Index {
                  DROP TABLE IF EXISTS refs; DROP TABLE IF EXISTS imports;
                  DROP TABLE IF EXISTS baselines; DROP TABLE IF EXISTS calls;
                  DROP TABLE IF EXISTS unread; DROP TABLE IF EXISTS scan_summary;
+                 DROP TABLE IF EXISTS inflight_files; DROP TABLE IF EXISTS inflight;
+                 DROP TABLE IF EXISTS retries; DROP TABLE IF EXISTS passes;
                  CREATE TABLE files (
                     workspace_id TEXT NOT NULL, path TEXT NOT NULL,
                     scan_digest TEXT NOT NULL, digest TEXT, partial INTEGER NOT NULL DEFAULT 0,
@@ -126,6 +128,33 @@ impl Index {
             "CREATE TABLE IF NOT EXISTS roots (
                 workspace_id TEXT NOT NULL PRIMARY KEY, root TEXT NOT NULL,
                 revision INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;",
+        )?;
+        // Each file's in-flight set (roadmap C7): the exported symbols its
+        // indexed content adds or changes against the worktree's `HEAD`,
+        // and the indexed digest and `HEAD` blob it was compared at. Added
+        // without a schema change: an index without them computes them at
+        // its next pass.
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS inflight_files (
+                workspace_id TEXT NOT NULL, path TEXT NOT NULL, digest TEXT NOT NULL,
+                head_object TEXT, PRIMARY KEY (workspace_id, path)) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS inflight (
+                workspace_id TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL,
+                kind TEXT NOT NULL, signature TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS inflight_by_path ON inflight(workspace_id, path);",
+        )?;
+        // Each file version whose read for the index or for the in-flight
+        // comparison failed in a way that may pass, with how often and the
+        // pass it may next be tried at (see `Retry`), and each workspace's
+        // count of passes. Added without a schema change: an index without
+        // them starts every such version afresh.
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS retries (
+                workspace_id TEXT NOT NULL, path TEXT NOT NULL, stage TEXT NOT NULL,
+                version TEXT NOT NULL, failures INTEGER NOT NULL, next_pass INTEGER NOT NULL,
+                PRIMARY KEY (workspace_id, path, stage)) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS passes (
+                workspace_id TEXT NOT NULL PRIMARY KEY, count INTEGER NOT NULL) WITHOUT ROWID;",
         )?;
         // The digest of each baseline function's body, which links a removal
         // and an addition as a rename (roadmap B10). Added without a schema
@@ -406,6 +435,10 @@ impl Index {
             "imports",
             "baselines",
             "calls",
+            "inflight_files",
+            "inflight",
+            "retries",
+            "passes",
         ] {
             transaction.execute(
                 &format!("DELETE FROM {table} WHERE workspace_id = ?1"),
@@ -489,7 +522,17 @@ impl Index {
         }
         let transaction = self.connection.transaction()?;
         for path in indexed.keys().filter(removed) {
-            for table in ["files", "symbols", "refs", "imports", "baselines", "calls"] {
+            for table in [
+                "files",
+                "symbols",
+                "refs",
+                "imports",
+                "baselines",
+                "calls",
+                "inflight_files",
+                "inflight",
+                "retries",
+            ] {
                 transaction.execute(
                     &format!("DELETE FROM {table} WHERE workspace_id = ?1 AND path = ?2"),
                     params![workspace_id, path],
@@ -506,26 +549,37 @@ impl Index {
         write_scan_blind(&transaction, workspace_id, &scan.blind)?;
         transaction.commit()?;
 
-        let pending: Vec<(&String, &String)> = files
-            .iter()
-            .filter(|(path, digest)| {
-                let (indexed, oversize) = indexed.get(*path).cloned().unwrap_or_default();
-                indexed.as_ref() != Some(digest) && oversize.as_ref() != Some(digest)
-            })
-            .take(self.files_per_pass)
-            .collect();
-        for (path, digest) in pending {
+        let pass = self.next_pass(workspace_id)?;
+        let retries = Retries::load(&self.connection, workspace_id, Retries::INDEX, pass)?;
+        // Versions not tried yet come first, then the ones whose retry is
+        // due, so files that keep failing never hold the pass from others.
+        let pending = retries.order(
+            files
+                .iter()
+                .filter(|(path, digest)| {
+                    let (indexed, oversize) = indexed.get(*path).cloned().unwrap_or_default();
+                    indexed.as_ref() != Some(digest) && oversize.as_ref() != Some(digest)
+                })
+                .map(|(path, digest)| ((path, digest), path.as_str(), digest.clone())),
+        );
+        for (failures, (path, digest)) in pending.into_iter().take(self.files_per_pass) {
             if Instant::now() >= deadline {
                 break;
             }
+            // No parser for it, or the parser gives no tree: that holds for
+            // this version on every later pass too.
             let Some(language) = Language::for_path(path) else {
+                retries.give_up(&self.connection, path, digest)?;
                 continue;
             };
-            // The file must still be exactly what the scan saw; otherwise
-            // the next scan brings its new digest. Read up to the scan's own
-            // bound, so a version the scan digested can be confirmed.
+            // The file must still be exactly what the scan saw. Read up to
+            // the scan's own bound, so a version the scan digested can be
+            // confirmed. Not read (removed, not a regular file any more, not
+            // readable, changed or grown since the scan): tried again with a
+            // bound, as the next scan usually brings its new state.
             let scanned = crate::observer::Limits::default().max_file_bytes;
             let Some(bytes) = read_exact_version(root, path, digest, scanned) else {
+                retries.failed(&self.connection, path, digest, failures)?;
                 continue;
             };
             // Too large to parse: remembered for this version, so it neither
@@ -537,11 +591,14 @@ impl Index {
                     "UPDATE files SET oversize_digest = ?3 WHERE workspace_id = ?1 AND path = ?2",
                     params![workspace_id, path, digest],
                 )?;
+                retries.clear(&self.connection, path)?;
                 continue;
             }
             let Ok(mut graph) = langspan_graph::extract(language, &bytes) else {
+                retries.give_up(&self.connection, path, digest)?;
                 continue;
             };
+            retries.clear(&self.connection, path)?;
             langspan_graph::digest_blocks(&mut graph, &bytes, |block| {
                 crate::sha256::hex(&crate::sha256::digest(block))
             });
@@ -642,7 +699,314 @@ impl Index {
                 )?);
             }
         }
+        self.update_inflight(workspace_id, root, scan, pass, deadline)?;
         Ok(notices)
+    }
+
+    /// Bring the workspace's in-flight set up to the scan (roadmap C7): for
+    /// each file that differs from `HEAD` and is indexed at its scanned
+    /// content, the exported symbols that `HEAD`'s version of the file
+    /// lacks or has with another signature. A file the scan found clean,
+    /// or no longer lists, has none. A file parsed partially, at either
+    /// version, says nothing. Reads at most `FILES_PER_PASS` blobs from Git
+    /// and stops at `deadline`; the rest wait for the next pass.
+    fn update_inflight(
+        &mut self,
+        workspace_id: &str,
+        root: &Path,
+        scan: &ScanView,
+        pass: i64,
+        deadline: Instant,
+    ) -> Result<(), Failure> {
+        type Compared = BTreeMap<String, (String, Option<String>)>;
+        let compared: Compared = self
+            .connection
+            .prepare_cached(
+                "SELECT path, digest, head_object FROM inflight_files WHERE workspace_id = ?1",
+            )?
+            .query_map([workspace_id], |row| {
+                Ok((row.get(0)?, (row.get(1)?, row.get(2)?)))
+            })?
+            .collect::<Result<_, _>>()?;
+        let retries = Retries::load(&self.connection, workspace_id, Retries::COMPARE, pass)?;
+        // Not read by this scan: what was said of it still holds.
+        let kept = |path: &String| scan.dirty.contains_key(path) || scan.unobserved.contains(path);
+        let transaction = self.connection.transaction()?;
+        for path in compared.keys().filter(|path| !kept(path)) {
+            for table in ["inflight_files", "inflight"] {
+                transaction.execute(
+                    &format!("DELETE FROM {table} WHERE workspace_id = ?1 AND path = ?2"),
+                    params![workspace_id, path],
+                )?;
+            }
+        }
+        for path in retries.paths().filter(|path| !kept(path)) {
+            transaction.execute(
+                "DELETE FROM retries WHERE workspace_id = ?1 AND path = ?2 AND stage = ?3",
+                params![workspace_id, path, Retries::COMPARE],
+            )?;
+        }
+        transaction.commit()?;
+        // The files to compare: each indexed at its scanned content (until
+        // then the index cannot say what it defines) and not yet compared
+        // at that content and `HEAD` blob.
+        let mut due = Vec::new();
+        for (path, head_object) in &scan.dirty {
+            let indexed: Option<(Option<String>, bool)> = self
+                .connection
+                .query_row(
+                    "SELECT digest, partial FROM files WHERE workspace_id = ?1 AND path = ?2",
+                    params![workspace_id, path],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((Some(digest), partial)) = indexed else {
+                continue;
+            };
+            if scan.files.get(path) != Some(&digest) {
+                continue;
+            }
+            if compared.get(path) == Some(&(digest.clone(), head_object.clone())) {
+                continue;
+            }
+            let version = format!("{digest} {}", head_object.as_deref().unwrap_or("-"));
+            due.push((
+                (path, head_object, digest, partial, version.clone()),
+                path.as_str(),
+                version,
+            ));
+        }
+        let mut reads = 0;
+        for (failures, (path, head_object, digest, partial, version)) in retries.order(due) {
+            if Instant::now() >= deadline || reads >= FILES_PER_PASS {
+                break;
+            }
+            let inflight = if partial {
+                Vec::new()
+            } else {
+                let head = match head_object {
+                    Some(object) => {
+                        reads += 1;
+                        match head_graph(root, path, object, deadline) {
+                            Ok(head) => head,
+                            // Not read (a timeout, a missing object): tried
+                            // again at a later pass, up to `Retries::ATTEMPTS`
+                            // times; after that nothing is said of this
+                            // version, as for one that cannot be parsed.
+                            Err(HeadUnread) => {
+                                if retries.failed(&self.connection, path, &version, failures)? {
+                                    None
+                                } else {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    None => Some(FileGraph::default()),
+                };
+                match head {
+                    Some(head) => self.added_or_changed(workspace_id, path, &head)?,
+                    None => Vec::new(),
+                }
+            };
+            let transaction = self.connection.transaction()?;
+            transaction.execute(
+                "DELETE FROM inflight WHERE workspace_id = ?1 AND path = ?2",
+                params![workspace_id, path],
+            )?;
+            for symbol in &inflight {
+                transaction.execute(
+                    "INSERT INTO inflight VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        workspace_id,
+                        path,
+                        symbol.name,
+                        symbol.kind.name(),
+                        symbol.signature
+                    ],
+                )?;
+            }
+            transaction.execute(
+                "INSERT INTO inflight_files VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(workspace_id, path) DO UPDATE SET digest = excluded.digest,
+                    head_object = excluded.head_object",
+                params![workspace_id, path, digest, head_object],
+            )?;
+            transaction.execute(
+                "DELETE FROM retries WHERE workspace_id = ?1 AND path = ?2 AND stage = ?3",
+                params![workspace_id, path, Retries::COMPARE],
+            )?;
+            transaction.commit()?;
+        }
+        Ok(())
+    }
+
+    /// Count one more indexing pass of the workspace and return its number,
+    /// the clock `Retries` waits by.
+    fn next_pass(&self, workspace_id: &str) -> Result<i64, Failure> {
+        Ok(self.connection.query_row(
+            "INSERT INTO passes(workspace_id, count) VALUES (?1, 1)
+             ON CONFLICT(workspace_id) DO UPDATE SET count = count + 1 RETURNING count",
+            [workspace_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The exported symbols indexed for `path` that `head` does not export
+    /// with the same name, kind and signature. Signatures are compared by
+    /// their tokens, as a reformat is (`crate::reformat::tokens`): spacing
+    /// between tokens aside, but not the whitespace in a string literal.
+    fn added_or_changed(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        head: &FileGraph,
+    ) -> Result<Vec<Symbol>, Failure> {
+        let compared = |signature: &str| signature_tokens(path, signature);
+        let before: BTreeSet<(&str, SymbolKind, Vec<Vec<u8>>)> = head
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.exported)
+            .map(|symbol| {
+                (
+                    symbol.name.as_str(),
+                    symbol.kind,
+                    compared(&symbol.signature),
+                )
+            })
+            .collect();
+        let mut statement = self.connection.prepare_cached(
+            "SELECT name, kind, signature FROM symbols
+             WHERE workspace_id = ?1 AND path = ?2 AND exported = 1 ORDER BY line",
+        )?;
+        let symbols = statement
+            .query_map(params![workspace_id, path], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(symbols
+            .into_iter()
+            .filter_map(|(name, kind, signature)| {
+                let kind = SymbolKind::parse(&kind)?;
+                if before.contains(&(name.as_str(), kind, compared(&signature))) {
+                    return None;
+                }
+                Some(Symbol {
+                    name,
+                    kind,
+                    line: 0,
+                    end_line: 0,
+                    signature,
+                    exported: true,
+                    bytes: 0..0,
+                    block: None,
+                    block_digest: None,
+                })
+            })
+            .collect())
+    }
+
+    /// The workspace's in-flight symbols, in path, name, kind and signature
+    /// order, at most `limit`: `(path, name, kind, signature)`.
+    pub fn inflight(&self, workspace_id: &str, limit: usize) -> Result<Vec<InflightRow>, Failure> {
+        self.inflight_after(workspace_id, None, limit)
+    }
+
+    /// As `inflight`, from the first row after `after` in that order.
+    pub fn inflight_after(
+        &self,
+        workspace_id: &str,
+        after: Option<&InflightRow>,
+        limit: usize,
+    ) -> Result<Vec<InflightRow>, Failure> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT path, name, kind, signature FROM inflight WHERE workspace_id = ?1
+                AND (?2 IS NULL OR (path, name, kind, signature) > (?2, ?3, ?4, ?5))
+             ORDER BY path, name, kind, signature LIMIT ?6",
+        )?;
+        let (path, name, kind, signature) = after.map_or((None, None, None, None), |row| {
+            (Some(&row.0), Some(&row.1), Some(&row.2), Some(&row.3))
+        });
+        let rows = statement
+            .query_map(
+                params![workspace_id, path, name, kind, signature, limit as i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The workspace's files that mention `name`, or that import (in
+    /// `imports`, from `imports_of`) a path whose last part is `name` or
+    /// the module of `path` (see `module_name`). Only files in `among` when
+    /// given. A name match, at most `limit`, in path order.
+    pub fn mentioning(
+        &self,
+        workspace_id: &str,
+        (path, name): (&str, &str),
+        imports: &[(String, String)],
+        among: Option<&BTreeSet<String>>,
+        limit: usize,
+    ) -> Result<Vec<String>, Failure> {
+        let module = module_name(path);
+        let mut found = BTreeSet::new();
+        let mut statement = self.connection.prepare_cached(
+            "SELECT DISTINCT path FROM refs WHERE workspace_id = ?1 AND name = ?2
+             ORDER BY path LIMIT 4096",
+        )?;
+        for row in
+            statement.query_map(params![workspace_id, name], |row| row.get::<_, String>(0))?
+        {
+            found.insert(row?);
+        }
+        for (file, target) in imports {
+            let last = import_tail(target);
+            if last.is_some_and(|last| last == name || Some(last) == module) {
+                found.insert(file.clone());
+            }
+        }
+        Ok(found
+            .into_iter()
+            .filter(|file| among.is_none_or(|among| among.contains(file)))
+            .take(limit)
+            .collect())
+    }
+
+    /// The import targets of the workspace's files in `among`, or of all of
+    /// them (the first 20,000), as `(path, target)`.
+    pub fn imports_of(
+        &self,
+        workspace_id: &str,
+        among: Option<&BTreeSet<String>>,
+    ) -> Result<Vec<(String, String)>, Failure> {
+        Ok(match among {
+            Some(among) => {
+                let mut statement = self.connection.prepare_cached(
+                    "SELECT path, target FROM imports WHERE workspace_id = ?1 AND path = ?2",
+                )?;
+                let mut imports = Vec::new();
+                for file in among {
+                    for row in statement.query_map(params![workspace_id, file], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })? {
+                        imports.push(row?);
+                    }
+                }
+                imports
+            }
+            None => self
+                .connection
+                .prepare_cached(
+                    "SELECT path, target FROM imports WHERE workspace_id = ?1
+                     ORDER BY path LIMIT 20000",
+                )?
+                .query_map([workspace_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()?,
+        })
     }
 
     /// Write what the index holds for `of` to `out` in the export format
@@ -1482,6 +1846,11 @@ fn load(
             params![workspace_id, path],
         )?;
     }
+    // Indexed now: no read of it waits for a retry.
+    transaction.execute(
+        "DELETE FROM retries WHERE workspace_id = ?1 AND path = ?2 AND stage = ?3",
+        params![workspace_id, path, Retries::INDEX],
+    )?;
     transaction.execute(
         "INSERT INTO files(workspace_id, path, scan_digest, digest, partial, baseline_digest,
             partial_since, oversize_digest)
@@ -1577,6 +1946,252 @@ fn read_exact_version(root: &Path, path: &str, digest: &str, max: usize) -> Opti
         .then_some(bytes)
 }
 
+/// The structure of `path`'s blob `object` at the worktree's `HEAD`, read
+/// raw from Git (never through filters), within the parse bound. `None`
+/// when it cannot be parsed completely, including a blob over the parse
+/// bound: that holds for this blob on every pass, so nothing is said of the
+/// file at this version (review comment 4705138339). `HeadUnread` when Git
+/// did not give the blob for another reason: then it is tried again.
+fn head_graph(
+    root: &Path,
+    path: &str,
+    object: &str,
+    deadline: Instant,
+) -> Result<Option<FileGraph>, HeadUnread> {
+    let Some(language) = Language::for_path(path) else {
+        return Ok(None);
+    };
+    if object.len() < 40 || object.len() > 64 || !object.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    let cat_file = |args: &[&str], limit| {
+        let mut command = vec![
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
+            "cat-file",
+        ];
+        command.extend(args);
+        crate::git::output(root, &command, deadline, limit)
+    };
+    let bytes = match cat_file(&["blob", object], MAX_SOURCE_BYTES) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            // Only Git's own word on the blob's size makes it terminal: a
+            // read that failed for another reason may pass later.
+            let size = cat_file(&["-s", object], 64).map_err(|_| HeadUnread)?;
+            let size = String::from_utf8_lossy(&size).trim().parse::<u64>();
+            return match size {
+                Ok(size) if size > MAX_SOURCE_BYTES as u64 => Ok(None),
+                _ => Err(HeadUnread),
+            };
+        }
+    };
+    let graph = langspan_graph::extract(language, &bytes).ok();
+    Ok(graph.filter(|graph| !graph.partial))
+}
+
+/// A signature of `path`'s language as `added_or_changed` compares it: its
+/// tokens, as a reformat is (`crate::reformat::tokens`), so spacing between
+/// two tokens never counts and never joins them. Every indexed language
+/// is split into words: Go and Java by the TypeScript and JavaScript rules
+/// (words, quoted and backtick literals, `//` and `/* */` comments), as
+/// the rules for other files drop all whitespace, and `chan int` would
+/// then equal `chanint` (review comment 4704678366).
+fn signature_tokens(path: &str, signature: &str) -> Vec<Vec<u8>> {
+    use crate::reformat::Language as Tokens;
+    let language = match Language::for_path(path) {
+        Some(Language::Rust) => Tokens::Rust,
+        Some(Language::Python) => Tokens::Python,
+        Some(Language::TypeScript | Language::Tsx | Language::Go | Language::Java) => {
+            Tokens::Script
+        }
+        None => crate::reformat::language(path),
+    };
+    crate::reformat::tokens(signature.as_bytes(), language)
+        .into_iter()
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// One in-flight symbol as the index holds it: `(path, name, kind,
+/// signature)`.
+pub type InflightRow = (String, String, String, String);
+
+/// Git did not give `head_graph` the blob: it timed out, failed or the
+/// object is missing. Unlike a version that parses partially, this may
+/// pass, so the comparison is tried again, within `Retries`' bound.
+struct HeadUnread;
+
+/// The file versions of one workspace whose read for one stage failed in
+/// a way that may pass. Every outcome of reading a file is either terminal
+/// for that version (indexed, parsed partially, too large, no parser: told
+/// or remembered, and not read again until the file or `HEAD` changes) or
+/// recorded here. A recorded version is tried again after a wait that
+/// doubles with each failure, counted in the workspace's passes, and given
+/// up after `ATTEMPTS` failures until it changes. Versions not tried yet go
+/// before every retry, so no set of failing files holds a pass's budget
+/// from the others (review comment 4705138339).
+struct Retries {
+    workspace_id: String,
+    stage: &'static str,
+    pass: i64,
+    /// Each path's failing version, its failures and the pass it may next
+    /// be tried at.
+    by_path: BTreeMap<String, (String, u32, i64)>,
+}
+
+impl Retries {
+    /// Reading the working file to index it.
+    const INDEX: &'static str = "index";
+    /// Reading the `HEAD` blob to compare it with the indexed version.
+    const COMPARE: &'static str = "compare";
+    /// Failures after which a version is given up on until it changes.
+    /// With the waits below, about 160 passes after the first failure.
+    const ATTEMPTS: u32 = 10;
+    /// The longest wait between two tries, in passes.
+    const MAX_WAIT: i64 = 32;
+
+    fn load(
+        connection: &Connection,
+        workspace_id: &str,
+        stage: &'static str,
+        pass: i64,
+    ) -> Result<Self, Failure> {
+        let by_path = connection
+            .prepare_cached(
+                "SELECT path, version, failures, next_pass FROM retries
+                 WHERE workspace_id = ?1 AND stage = ?2",
+            )?
+            .query_map(params![workspace_id, stage], |row| {
+                Ok((row.get(0)?, (row.get(1)?, row.get(2)?, row.get(3)?)))
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            workspace_id: workspace_id.into(),
+            stage,
+            pass,
+            by_path,
+        })
+    }
+
+    fn paths(&self) -> impl Iterator<Item = &String> {
+        self.by_path.keys()
+    }
+
+    /// The items to try at this pass, each with its version's failures so
+    /// far: first those never tried, in their given order, then the due
+    /// retries, fewest failures first. A version waiting or given up on is
+    /// left out; a path whose recorded version is another is new.
+    fn order<'a, T>(&self, items: impl IntoIterator<Item = (T, &'a str, String)>) -> Vec<(u32, T)> {
+        let mut due: Vec<(u32, T)> = items
+            .into_iter()
+            .filter_map(|(item, path, version)| match self.by_path.get(path) {
+                Some((failed, failures, next)) if *failed == version => {
+                    (*failures < Self::ATTEMPTS && *next <= self.pass).then_some((*failures, item))
+                }
+                _ => Some((0, item)),
+            })
+            .collect();
+        due.sort_by_key(|(failures, _)| *failures);
+        due
+    }
+
+    /// Record one more failure of `version`, which had `failures` before.
+    /// Returns whether that was the last try: the version is given up on.
+    fn failed(
+        &self,
+        connection: &Connection,
+        path: &str,
+        version: &str,
+        failures: u32,
+    ) -> Result<bool, Failure> {
+        let failures = failures.saturating_add(1);
+        let wait = (1_i64 << failures.min(16).saturating_sub(1)).min(Self::MAX_WAIT);
+        self.write(connection, path, version, failures, self.pass + wait)?;
+        Ok(failures >= Self::ATTEMPTS)
+    }
+
+    /// Remember `version` as not readable at all, until it changes.
+    fn give_up(&self, connection: &Connection, path: &str, version: &str) -> Result<(), Failure> {
+        self.write(connection, path, version, Self::ATTEMPTS, self.pass)
+    }
+
+    fn write(
+        &self,
+        connection: &Connection,
+        path: &str,
+        version: &str,
+        failures: u32,
+        next_pass: i64,
+    ) -> Result<(), Failure> {
+        connection.execute(
+            "INSERT INTO retries VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(workspace_id, path, stage) DO UPDATE SET version = excluded.version,
+                failures = excluded.failures, next_pass = excluded.next_pass",
+            params![
+                self.workspace_id,
+                path,
+                self.stage,
+                version,
+                failures,
+                next_pass
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The path was read: nothing of it waits for a retry.
+    fn clear(&self, connection: &Connection, path: &str) -> Result<(), Failure> {
+        if self.by_path.contains_key(path) {
+            connection.execute(
+                "DELETE FROM retries WHERE workspace_id = ?1 AND path = ?2 AND stage = ?3",
+                params![self.workspace_id, path, self.stage],
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The module name a file is imported by: its file name without the
+/// extension, or its directory's name for a Go file and for `mod.rs`,
+/// `lib.rs`, `main.rs`, `index.*` and `__init__.py`.
+fn module_name(path: &str) -> Option<&str> {
+    let mut parts = path.rsplit('/');
+    let file = parts.next()?;
+    let stem = file.split_once('.').map_or(file, |(stem, _)| stem);
+    let by_directory = matches!(stem, "mod" | "lib" | "main" | "index" | "__init__")
+        || Language::for_path(path) == Some(Language::Go);
+    if by_directory {
+        parts.next().filter(|directory| !directory.is_empty())
+    } else {
+        Some(stem).filter(|stem| !stem.is_empty())
+    }
+}
+
+/// The last part of an import target as written: `crate::quota`,
+/// `"./quota.js"`, `app.quota` and `"example.com/app/quota"` all end in
+/// `quota`.
+fn import_tail(target: &str) -> Option<&str> {
+    const SOURCE: &[&str] = &[
+        "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "py", "go", "rs",
+    ];
+    let target = target.trim().trim_matches(['"', '\'', '`']);
+    let parts: Vec<&str> = target
+        .split(['/', ':', '.', '\\'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    match parts.as_slice() {
+        [.., last, extension]
+            if SOURCE.contains(extension) && target.ends_with(&format!(".{extension}")) =>
+        {
+            Some(last)
+        }
+        [.., last] => Some(last),
+        [] => None,
+    }
+}
+
 /// The indexable part of a complete scan: regular files in a supported
 /// language, with the digest the scan recorded.
 pub fn indexable(snapshot: &crate::observer::Snapshot) -> BTreeMap<String, String> {
@@ -1622,6 +2237,9 @@ pub struct ScanView {
     pub files: BTreeMap<String, String>,
     pub unobserved: BTreeSet<String>,
     pub blind: ScanBlind,
+    /// The indexable files that differ from the worktree's `HEAD`, each with
+    /// its blob at `HEAD` when `HEAD` holds it (roadmap C7).
+    pub dirty: BTreeMap<String, Option<String>>,
 }
 
 impl ScanView {
@@ -1656,10 +2274,18 @@ impl ScanView {
                 *blind.languages.entry(format!(".{extension}")).or_default() += 1;
             }
         }
+        let files = indexable(snapshot);
+        let dirty = snapshot
+            .files
+            .iter()
+            .filter(|(path, version)| version.dirty && files.contains_key(*path))
+            .map(|(path, _)| (path.clone(), snapshot.head_objects.get(path).cloned()))
+            .collect();
         Self {
-            files: indexable(snapshot),
+            files,
             unobserved: snapshot.unobserved.clone(),
             blind,
+            dirty,
         }
     }
 }
@@ -2249,6 +2875,225 @@ mod review_regressions {
         assert_eq!(coverage.indexable_files, 4);
     }
 
+    /// A file of each indexed language, for `signature_tokens`.
+    fn language_path(language: langspan_graph::Language) -> &'static str {
+        match language {
+            langspan_graph::Language::Rust => "src/a.rs",
+            langspan_graph::Language::Python => "src/a.py",
+            langspan_graph::Language::TypeScript => "src/a.ts",
+            langspan_graph::Language::Tsx => "src/a.tsx",
+            langspan_graph::Language::Go => "src/a.go",
+            langspan_graph::Language::Java => "src/A.java",
+        }
+    }
+
+    /// Whitespace between two words is never dropped from a signature
+    /// comparison, in any indexed language: `chan int` and `chanint` are
+    /// different Go types (review comment 4704678366), as `impl Trait` and
+    /// `implTrait` are different Rust ones. Words meet next to keywords,
+    /// inside generics and after pointer, reference and channel markers.
+    #[test]
+    fn signature_comparison_never_joins_two_words_in_any_indexed_language() {
+        const WORDS: &[&str] = &[
+            "fn",
+            "impl",
+            "dyn",
+            "mut",
+            "const",
+            "unsafe",
+            "chan",
+            "func",
+            "map",
+            "interface",
+            "struct",
+            "final",
+            "extends",
+            "super",
+            "typeof",
+            "keyof",
+            "readonly",
+            "lambda",
+            "async",
+            "def",
+            "int",
+            "string",
+            "T",
+            "x",
+        ];
+        const PLACES: &[&str] = &[
+            "{a} {b}",
+            "f({a} {b})",
+            "f<{a} {b}>",
+            "f[{a} {b}]",
+            "f(x *{a} {b})",
+            "f(x <-{a} {b})",
+            "f(x: &{a} {b})",
+            "f(x: Vec<Box<{a} {b}>>)",
+        ];
+        for language in langspan_graph::Language::ALL {
+            let path = language_path(language);
+            for place in PLACES {
+                for a in WORDS {
+                    for b in WORDS {
+                        let spaced = place.replace("{a}", a).replace("{b}", b);
+                        let joined = place.replace("{a} {b}", &format!("{a}{b}"));
+                        let joined = joined.replace("{a}", a).replace("{b}", b);
+                        assert_ne!(
+                            signature_tokens(path, &spaced),
+                            signature_tokens(path, &joined),
+                            "{path}: {spaced:?} and {joined:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Each indexed language's own declarations: a change where two tokens
+    /// meet is a changed signature; spacing between tokens, and a line
+    /// break, are not; whitespace inside a string literal is part of it.
+    #[test]
+    fn signature_comparison_keeps_each_languages_token_boundaries() {
+        use langspan_graph::Language::*;
+        let changed: &[(langspan_graph::Language, &str, &str)] = &[
+            (Rust, "pub fn f(x: impl Trait)", "pub fn f(x: implTrait)"),
+            (Rust, "pub fn f(x: &dyn Fn())", "pub fn f(x: &dynFn())"),
+            (Rust, "pub fn f(x: *const u8)", "pub fn f(x: *constu8)"),
+            (Rust, "pub fn f<'a>(x: &'a str)", "pub fn f<'a>(x: &'astr)"),
+            (
+                Rust,
+                "pub fn f(x: Vec<Box<dyn Any>>)",
+                "pub fn f(x: Vec<Box<dynAny>>)",
+            ),
+            (
+                Rust,
+                "pub fn f(x: &str) -> &'static str",
+                "pub fn f(x: &str) -> &'staticstr",
+            ),
+            (
+                Rust,
+                r#"pub const A: &str = "a b""#,
+                r#"pub const A: &str = "ab""#,
+            ),
+            (Python, "def f(x=lambda y: y)", "def f(x=lambday: y)"),
+            (Python, "async def f(x)", "asyncdef f(x)"),
+            (Python, r#"def f(x="a b")"#, r#"def f(x="ab")"#),
+            (
+                TypeScript,
+                "export function f(x: typeof y)",
+                "export function f(x: typeofy)",
+            ),
+            (
+                TypeScript,
+                "export function f(x: keyof T)",
+                "export function f(x: keyofT)",
+            ),
+            (
+                TypeScript,
+                "export function f(x: readonly string[])",
+                "export function f(x: readonlystring[])",
+            ),
+            (
+                TypeScript,
+                "export function f<T extends U>(x: T)",
+                "export function f<TextendsU>(x: T)",
+            ),
+            (
+                TypeScript,
+                "export function f(x = 'a b')",
+                "export function f(x = 'ab')",
+            ),
+            (
+                Tsx,
+                "export function F(p: Props<keyof T>)",
+                "export function F(p: Props<keyofT>)",
+            ),
+            (Go, "func F(x chan int)", "func F(x chanint)"),
+            (Go, "func F(x <-chan int)", "func F(x <-chanint)"),
+            (Go, "func F(x *pkg.T)", "func F(x *pkgT)"),
+            (Go, "func F[T any](x T)", "func F[Tany](x T)"),
+            (
+                Go,
+                "func F(f func(x int) error)",
+                "func F(f func(xint) error)",
+            ),
+            (
+                Go,
+                "func (s *S) F(x struct{ A int })",
+                "func (s *S) F(x struct{ Aint })",
+            ),
+            (
+                Go,
+                r#"func F(x string) (y string, err error)"#,
+                r#"func F(x string) (ystring, err error)"#,
+            ),
+            (Go, r#"const A = "a b""#, r#"const A = "ab""#),
+            (Go, "const A = `a b`", "const A = `ab`"),
+            (
+                Java,
+                "public static int f(final Foo x)",
+                "public static int f(finalFoo x)",
+            ),
+            (
+                Java,
+                "public <T extends Comparable<T>> T max(List<? extends T> xs)",
+                "public <T extends Comparable<T>> T max(List<?extendsT> xs)",
+            ),
+            (
+                Java,
+                "public static void f(int[] x)",
+                "public staticvoid f(int[] x)",
+            ),
+            (
+                Java,
+                r#"@Named("a b") public void f()"#,
+                r#"@Named("ab") public void f()"#,
+            ),
+        ];
+        for (language, before, after) in changed {
+            let path = language_path(*language);
+            assert_ne!(
+                signature_tokens(path, before),
+                signature_tokens(path, after),
+                "{path}: {before:?} and {after:?}"
+            );
+        }
+        let respaced: &[(langspan_graph::Language, &str, &str)] = &[
+            (
+                Rust,
+                "pub fn f( x : Vec< u8 > ) -> u8",
+                "pub fn f(x: Vec<u8>) -> u8",
+            ),
+            (Python, "def f( x : int = 1 )", "def f(x: int = 1)"),
+            (
+                TypeScript,
+                "export function f( x : T )",
+                "export function f(x: T)",
+            ),
+            (
+                Tsx,
+                "export function F( p : Props )",
+                "export function F(p: Props)",
+            ),
+            (
+                Go,
+                "func F( x  * T ,\n\ty map[ string ]int )",
+                "func F(x *T, y map[string]int)",
+            ),
+            (Go, "func F(x <-chan int)", "func F(x <- chan int)"),
+            (Go, "func F(x chan<- int)", "func F(x chan <-int)"),
+            (Java, "public  int  f( int[]  x )", "public int f(int[] x)"),
+        ];
+        for (language, before, after) in respaced {
+            let path = language_path(*language);
+            assert_eq!(
+                signature_tokens(path, before),
+                signature_tokens(path, after),
+                "{path}: {before:?} and {after:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_rename_with_an_unchanged_body_is_one_renamed_change_for_the_old_names_dependents() {
         let (dir, mut index) = setup("rename");
@@ -2539,6 +3384,373 @@ mod review_regressions {
             again[0].changes[0].before.as_deref(),
             Some("pub fn upload(x: u16)")
         );
+    }
+
+    // Every outcome of reading a file for the in-flight comparison is
+    // terminal for that version or retried with a bound, and failing files
+    // never hold a pass from the others (review comment 4705138339).
+
+    /// Run Git in `dir` and return its trimmed standard output.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// A Git repository whose `HEAD` holds `committed`.
+    fn repo(name: &str, committed: &[(&str, &[u8])]) -> (Dir, Index) {
+        let (dir, index) = setup(name);
+        git(&dir.0, &["init", "--quiet"]);
+        for (key, value) in [
+            ("user.name", "LangSpan test"),
+            ("user.email", "test@example.invalid"),
+            ("commit.gpgsign", "false"),
+            ("gc.auto", "0"),
+        ] {
+            git(&dir.0, &["config", key, value]);
+        }
+        fs::write(dir.0.join(".gitignore"), "graph.sqlite3*\n").unwrap();
+        for (path, bytes) in committed {
+            fs::write(dir.0.join(path), bytes).unwrap();
+        }
+        git(&dir.0, &["add", "--all"]);
+        git(&dir.0, &["commit", "--quiet", "-m", "base"]);
+        (dir, index)
+    }
+
+    /// What a scan of `paths` would hand the index now: each file's digest
+    /// and, as every one of them is taken to differ from `HEAD`, its blob
+    /// there if `HEAD` has one.
+    fn head_scan(dir: &Dir, paths: &[String]) -> ScanView {
+        let listing = git(&dir.0, &["ls-tree", "-r", "HEAD"]);
+        let at_head: BTreeMap<&str, &str> = listing
+            .lines()
+            .filter_map(|line| {
+                let (meta, path) = line.split_once('\t')?;
+                Some((path, meta.split(' ').nth(2)?))
+            })
+            .collect();
+        let mut scan = ScanView::default();
+        for path in paths {
+            let bytes = fs::read(dir.0.join(path)).unwrap();
+            let digest = crate::sha256::hex(&crate::sha256::digest(&bytes));
+            scan.files.insert(path.clone(), digest);
+            let head = at_head
+                .get(path.as_str())
+                .map(|object| (*object).to_owned());
+            scan.dirty.insert(path.clone(), head);
+        }
+        scan
+    }
+
+    fn update(dir: &Dir, index: &mut Index, scan: &ScanView) {
+        let far = Instant::now() + Duration::from_secs(30);
+        index.update("w", &dir.0, 0, scan, NOW, far).unwrap();
+    }
+
+    /// The in-flight set, as `path: name`.
+    fn in_flight(index: &Index) -> Vec<String> {
+        index
+            .connection
+            .prepare("SELECT path || ': ' || name FROM inflight ORDER BY 1")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// Whether the comparison of `path` is recorded: it is not read again
+    /// until the file or its `HEAD` blob changes.
+    fn compared(index: &Index, path: &str) -> bool {
+        index
+            .connection
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM inflight_files WHERE path = ?1",
+                [path],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Whether `path` is indexed at the scanned version.
+    fn indexed(index: &Index, path: &str) -> bool {
+        index
+            .connection
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM files WHERE path = ?1 AND digest IS scan_digest",
+                [path],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// The failures recorded for `path` at `stage`.
+    fn failures(index: &Index, stage: &str, path: &str) -> Option<u32> {
+        index
+            .connection
+            .query_row(
+                "SELECT failures FROM retries WHERE path = ?1 AND stage = ?2",
+                [path, stage],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    /// Move `path`'s `HEAD` blob out of the object store; returns where it
+    /// was and where it is now.
+    fn hide_head_blob(dir: &Dir, path: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let object = git(&dir.0, &["rev-parse", &format!("HEAD:{path}")]);
+        let loose = dir
+            .0
+            .join(".git/objects")
+            .join(&object[..2])
+            .join(&object[2..]);
+        let aside = dir.0.join(format!("aside-{object}"));
+        fs::rename(&loose, &aside).unwrap();
+        (loose, aside)
+    }
+
+    const GATE: &str = "pub fn upload() {}\npub fn gate(role: &str) -> bool { role.is_empty() }\n";
+
+    fn oversized() -> Vec<u8> {
+        format!(
+            "// {}\npub fn upload() {{}}\n",
+            "x".repeat(MAX_SOURCE_BYTES)
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn an_oversized_head_blob_is_remembered_for_that_version_and_not_read_again() {
+        let big = oversized();
+        let (dir, mut index) = repo("head-oversize", &[("src/api.rs", &big)]);
+        fs::write(dir.0.join("src/api.rs"), GATE).unwrap();
+        let scan = head_scan(&dir, &["src/api.rs".into()]);
+        update(&dir, &mut index, &scan);
+        assert!(indexed(&index, "src/api.rs"));
+        // Uncomparable: nothing is said of it, and that is remembered.
+        assert!(compared(&index, "src/api.rs"), "left pending");
+        assert_eq!(in_flight(&index), Vec::<String>::new());
+        assert_eq!(failures(&index, Retries::COMPARE, "src/api.rs"), None);
+        // A new HEAD blob is a new version: compared again.
+        git(&dir.0, &["commit", "--quiet", "--all", "-m", "small"]);
+        fs::write(
+            dir.0.join("src/api.rs"),
+            format!("{GATE}pub fn quota() {{}}\n"),
+        )
+        .unwrap();
+        update(&dir, &mut index, &head_scan(&dir, &["src/api.rs".into()]));
+        assert_eq!(in_flight(&index), ["src/api.rs: quota"]);
+    }
+
+    #[test]
+    fn a_binary_head_blob_is_remembered_for_that_version() {
+        let binary: &[u8] = b"\x00\xff\xfe pub fn \x00 {{{ \x01\x02";
+        let (dir, mut index) = repo("head-binary", &[("src/api.rs", binary)]);
+        fs::write(dir.0.join("src/api.rs"), GATE).unwrap();
+        update(&dir, &mut index, &head_scan(&dir, &["src/api.rs".into()]));
+        assert!(compared(&index, "src/api.rs"), "left pending");
+        assert_eq!(failures(&index, Retries::COMPARE, "src/api.rs"), None);
+    }
+
+    #[test]
+    fn a_binary_working_file_is_indexed_partially_and_says_nothing_in_flight() {
+        let (dir, mut index) = repo("work-binary", &[("src/api.rs", b"pub fn upload() {}\n")]);
+        fs::write(
+            dir.0.join("src/api.rs"),
+            b"\x00\xff\xfe pub fn \x00 {{{ \x01",
+        )
+        .unwrap();
+        update(&dir, &mut index, &head_scan(&dir, &["src/api.rs".into()]));
+        assert!(indexed(&index, "src/api.rs"), "left pending");
+        assert!(compared(&index, "src/api.rs"), "left pending");
+        assert_eq!(in_flight(&index), Vec::<String>::new());
+        assert_eq!(failures(&index, Retries::INDEX, "src/api.rs"), None);
+    }
+
+    #[test]
+    fn a_missing_head_blob_is_compared_once_it_is_back() {
+        let (dir, mut index) = repo("head-missing", &[("src/api.rs", b"pub fn upload() {}\n")]);
+        let (loose, aside) = hide_head_blob(&dir, "src/api.rs");
+        fs::write(dir.0.join("src/api.rs"), GATE).unwrap();
+        let scan = head_scan(&dir, &["src/api.rs".into()]);
+        update(&dir, &mut index, &scan);
+        assert!(
+            !compared(&index, "src/api.rs"),
+            "an unread blob is not compared"
+        );
+        assert_eq!(failures(&index, Retries::COMPARE, "src/api.rs"), Some(1));
+        fs::rename(&aside, &loose).unwrap();
+        update(&dir, &mut index, &scan);
+        assert_eq!(in_flight(&index), ["src/api.rs: gate"]);
+        assert_eq!(failures(&index, Retries::COMPARE, "src/api.rs"), None);
+    }
+
+    #[test]
+    fn a_head_blob_that_stays_unreadable_is_tried_a_bounded_number_of_times() {
+        let (dir, mut index) = repo("head-bound", &[("src/api.rs", b"pub fn upload() {}\n")]);
+        let (loose, aside) = hide_head_blob(&dir, "src/api.rs");
+        fs::write(dir.0.join("src/api.rs"), GATE).unwrap();
+        let scan = head_scan(&dir, &["src/api.rs".into()]);
+        let mut passes = 0;
+        while !compared(&index, "src/api.rs") {
+            update(&dir, &mut index, &scan);
+            passes += 1;
+            assert!(passes <= 200, "still retried after {passes} passes");
+        }
+        // Waits double: far fewer tries than passes.
+        assert!(passes > 100, "given up after only {passes} passes");
+        assert_eq!(in_flight(&index), Vec::<String>::new());
+        assert_eq!(failures(&index, Retries::COMPARE, "src/api.rs"), None);
+        // Given up on for this version: back or not, it is not read again.
+        fs::rename(&aside, &loose).unwrap();
+        update(&dir, &mut index, &scan);
+        assert_eq!(in_flight(&index), Vec::<String>::new());
+        // A new version of the file is compared afresh.
+        fs::write(
+            dir.0.join("src/api.rs"),
+            format!("{GATE}pub fn quota() {{}}\n"),
+        )
+        .unwrap();
+        update(&dir, &mut index, &head_scan(&dir, &["src/api.rs".into()]));
+        assert_eq!(in_flight(&index), ["src/api.rs: gate", "src/api.rs: quota"]);
+    }
+
+    /// A working file that cannot be read for indexing (`break_it` makes it
+    /// so after the scan) is tried again with a bound, then given up on
+    /// for that version; a new version is indexed and compared.
+    fn unreadable_working_file_is_bounded(name: &str, break_it: impl Fn(&Path)) {
+        let (dir, mut index) = repo(name, &[("src/api.rs", b"pub fn upload() {}\n")]);
+        let full = dir.0.join("src/api.rs");
+        fs::write(&full, GATE).unwrap();
+        let scan = head_scan(&dir, &["src/api.rs".into()]);
+        break_it(&full);
+        update(&dir, &mut index, &scan);
+        assert_eq!(failures(&index, Retries::INDEX, "src/api.rs"), Some(1));
+        let mut passes = 1;
+        while failures(&index, Retries::INDEX, "src/api.rs") < Some(Retries::ATTEMPTS) {
+            update(&dir, &mut index, &scan);
+            passes += 1;
+            assert!(passes <= 200, "still retried after {passes} passes");
+        }
+        assert!(!indexed(&index, "src/api.rs") && !compared(&index, "src/api.rs"));
+        // Readable again at a new version: indexed and compared.
+        let _ = fs::remove_dir_all(&full);
+        let _ = fs::remove_file(&full);
+        fs::write(&full, format!("{GATE}pub fn quota() {{}}\n")).unwrap();
+        update(&dir, &mut index, &head_scan(&dir, &["src/api.rs".into()]));
+        assert_eq!(in_flight(&index), ["src/api.rs: gate", "src/api.rs: quota"]);
+        assert_eq!(failures(&index, Retries::INDEX, "src/api.rs"), None);
+    }
+
+    #[test]
+    fn a_working_file_deleted_after_the_scan_is_retried_with_a_bound() {
+        unreadable_working_file_is_bounded("work-deleted", |full| fs::remove_file(full).unwrap());
+    }
+
+    #[test]
+    fn a_working_file_that_is_no_longer_a_regular_file_is_retried_with_a_bound() {
+        unreadable_working_file_is_bounded("work-not-file", |full| {
+            fs::remove_file(full).unwrap();
+            fs::create_dir(full).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_working_file_changed_after_the_scan_is_retried_with_a_bound() {
+        unreadable_working_file_is_bounded("work-changed", |full| {
+            fs::write(full, "pub fn other() {}\n").unwrap();
+        });
+    }
+
+    #[test]
+    fn a_working_file_without_read_permission_is_retried_with_a_bound() {
+        // The superuser reads any file: the denial cannot be made.
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        unreadable_working_file_is_bounded("work-denied", |full| {
+            fs::set_permissions(full, fs::Permissions::from_mode(0o000)).unwrap();
+        });
+    }
+
+    /// More files than one pass reads whose `HEAD` blobs fail, some
+    /// terminally (too large) and some for now (missing), sort before a
+    /// good file: it still gets its in-flight entry.
+    #[test]
+    fn failing_head_blobs_beyond_the_pass_budget_do_not_starve_a_later_file() {
+        let paths: Vec<String> = (0..=FILES_PER_PASS)
+            .map(|n| format!("src/a{n:03}.rs"))
+            .chain(["src/zz.rs".into()])
+            .collect();
+        let last = paths.len() - 1;
+        // Every other failing file's blob too large, the rest to be hidden;
+        // each blob distinct, so hiding one hides no other file's.
+        let versions: Vec<Vec<u8>> = (0..paths.len())
+            .map(|n| {
+                let mut bytes = if n % 2 == 0 && n != last {
+                    oversized()
+                } else {
+                    Vec::new()
+                };
+                bytes.extend(format!("pub fn upload() {{}}\n// {n}\n").bytes());
+                bytes
+            })
+            .collect();
+        let committed: Vec<(&str, &[u8])> = paths
+            .iter()
+            .zip(&versions)
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+            .collect();
+        let (dir, mut index) = repo("head-starve", &committed);
+        for (n, path) in paths.iter().enumerate() {
+            if n % 2 == 1 && n != last {
+                hide_head_blob(&dir, path);
+            }
+            fs::write(dir.0.join(path), GATE).unwrap();
+        }
+        let scan = head_scan(&dir, &paths);
+        for _ in 0..4 {
+            update(&dir, &mut index, &scan);
+        }
+        assert!(
+            in_flight(&index).contains(&"src/zz.rs: gate".to_owned()),
+            "starved"
+        );
+    }
+
+    /// More working files than one pass reads that cannot be read sort
+    /// before a good file: it is still indexed and gets its entry.
+    #[test]
+    fn unreadable_working_files_beyond_the_pass_budget_do_not_starve_a_later_file() {
+        let paths: Vec<String> = (0..=FILES_PER_PASS)
+            .map(|n| format!("src/a{n:03}.rs"))
+            .chain(["src/zz.rs".into()])
+            .collect();
+        let committed: Vec<(&str, &[u8])> = paths
+            .iter()
+            .map(|path| (path.as_str(), b"pub fn upload() {}\n".as_slice()))
+            .collect();
+        let (dir, mut index) = repo("work-starve", &committed);
+        for path in &paths {
+            fs::write(dir.0.join(path), GATE).unwrap();
+        }
+        let scan = head_scan(&dir, &paths);
+        for path in paths.iter().filter(|path| *path != "src/zz.rs") {
+            fs::remove_file(dir.0.join(path)).unwrap();
+        }
+        for _ in 0..4 {
+            update(&dir, &mut index, &scan);
+        }
+        assert_eq!(in_flight(&index), ["src/zz.rs: gate"], "starved");
     }
 
     fn scan_of(files: &[(&str, &str)]) -> ScanView {
