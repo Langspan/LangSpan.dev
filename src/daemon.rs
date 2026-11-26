@@ -80,6 +80,9 @@ mod unix {
         /// How long a workspace's sessions must stop writing before its
         /// automatic check starts, so one burst of batches runs one check.
         auto_check_debounce_ms: u64,
+        /// When set, the daemon compacts the event log once a day, keeping
+        /// this many days (ADR 0025, J7). Unset: nothing is ever deleted.
+        retention_days: Option<u32>,
         /// A failing automatic check that took at most this long is run once
         /// more on the same tree, to learn which tests flip; 0 turns it off.
         flaky_rerun_max_s: u64,
@@ -108,6 +111,7 @@ mod unix {
                 max_clients: 32,
                 remote_pass_ms: 5000,
                 auto_check_debounce_ms: 2000,
+                retention_days: None,
                 flaky_rerun_max_s: 30,
                 notify: false,
                 notify_sound: false,
@@ -152,9 +156,13 @@ mod unix {
                 || !(100..=86_400_000).contains(&result.host_check_ms)
                 || !(langspan_core::MIN_RECENT_WINDOW_MS..=langspan_core::MAX_RECENT_WINDOW_MS)
                     .contains(&result.recent_window_ms)
+                || result.retention_days.is_some_and(|days| {
+                    !(langspan_core::MIN_RETENTION_DAYS..=langspan_core::MAX_RETENTION_DAYS)
+                        .contains(&days)
+                })
             {
                 return Err(
-                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000, recent_window_ms 60000..86400000"
+                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000, recent_window_ms 60000..86400000, retention_days 7..3650"
                         .into(),
                 );
             }
@@ -704,6 +712,41 @@ mod unix {
         })
     }
 
+    /// How often the daemon compacts when `retention_days` is set.
+    const COMPACTION_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// `LANGSPAN_TEST_COMPACT_PAUSE_MS`, at most 10 s: how long a compaction
+    /// holds its transaction open before committing, so that a test can
+    /// kill the daemon mid-compaction. Unset in normal use.
+    fn compaction_pause() -> Option<Duration> {
+        std::env::var("LANGSPAN_TEST_COMPACT_PAUSE_MS")
+            .ok()?
+            .parse::<u64>()
+            .ok()
+            .map(|ms| Duration::from_millis(ms.min(10_000)))
+    }
+
+    /// The daily compaction. Its outcome is a log line; a failure leaves the
+    /// log as it was and is tried again the next day.
+    fn compact_daily(store: &mut Store, days: u32) {
+        let line = match store.compact(days, true) {
+            Ok(Outcome::Compaction { report }) => {
+                if report.events == 0 && report.receipts == 0 {
+                    return;
+                }
+                serde_json::json!({"level":"info","event":"compacted","report":report})
+            }
+            Ok(Outcome::Error { code, message }) => {
+                serde_json::json!({"level":"error","event":"compaction_failed","code":code,"detail":message})
+            }
+            Ok(_) => return,
+            Err(error) => {
+                serde_json::json!({"level":"error","event":"compaction_failed","detail":error.to_string()})
+            }
+        };
+        eprintln!("{line}");
+    }
+
     /// A scan of the registration the workspace had when it was asked for.
     struct ScanResult {
         of: Registration,
@@ -726,6 +769,8 @@ mod unix {
         }
         let mut store = Store::open(&directory.join("state.sqlite3"))
             .map_err(|e| format!("open coordination store: {e}"))?;
+        store.set_compaction_pause(compaction_pause());
+        let retention_days = config.retention_days;
         let generation = store.state().generation;
         let socket = directory.join("daemon.sock");
         match fs::symlink_metadata(&socket) {
@@ -833,6 +878,9 @@ mod unix {
                 let mut last_maintenance_error: Option<String> = None;
                 let mut urgent = std::collections::VecDeque::<String>::new();
                 let mut last_scanned = std::collections::HashMap::<String, Instant>::new();
+                // The first compaction runs as the writer starts, then one a
+                // day.
+                let mut next_compaction = Instant::now();
                 loop {
                     match receiver.recv_timeout(Duration::from_millis(100)) {
                         Ok(job) => {
@@ -926,6 +974,12 @@ mod unix {
                                 }
                             }
                         }
+                    }
+                    if let Some(days) = retention_days
+                        && Instant::now() >= next_compaction
+                    {
+                        next_compaction = Instant::now() + COMPACTION_EVERY;
+                        compact_daily(&mut store, days);
                     }
                     if Instant::now() >= next_liveness {
                         observe_processes(&mut store, &mut previous_session, now);
