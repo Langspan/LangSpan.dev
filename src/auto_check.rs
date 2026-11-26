@@ -832,7 +832,7 @@ mod tests {
         Registration {
             workspace_id: "work".into(),
             root: std::path::PathBuf::new(),
-            removals: 0,
+            revision: 0,
         }
     }
 

@@ -97,14 +97,15 @@ impl Index {
             )?;
             transaction.commit()?;
         }
-        // The root each workspace was last indexed at, and how many times
-        // its ID had been removed by then (roadmap G6). Added without a
-        // schema change: an index without it is kept, and each workspace in
-        // it starts again at its next pass (see `start_again_at`).
+        // The root each workspace was last indexed at, and its registration
+        // revision then: how many times its ID had been moved or removed
+        // (roadmap G6). Added without a schema change: an index without it
+        // is kept, and each workspace in it starts again at its next pass
+        // (see `start_again_at`).
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS roots (
                 workspace_id TEXT NOT NULL PRIMARY KEY, root TEXT NOT NULL,
-                removals INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;",
+                revision INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;",
         )?;
         Ok(Self { connection })
     }
@@ -280,9 +281,10 @@ impl Index {
     /// A workspace now at another root than it was indexed at (`workspace
     /// move`) is another checkout: what was indexed for the old one is
     /// forgotten, so differences between the two checkouts are not reported
-    /// as interface changes. So is a workspace removed and registered again
-    /// (`removals` differs), even at the same root: what changed while it
-    /// was unregistered is not news from its earlier lifetime. A workspace
+    /// as interface changes. So is a workspace in a later registration
+    /// revision, even at the same root: removed and registered again, or
+    /// switched away and back. What changed while that root was not this
+    /// registration's is not news from the earlier one. A workspace
     /// with no root record (indexed by a build before roots were kept) is of
     /// an unknown checkout: what it holds is forgotten too, so its first
     /// pass after the upgrade is a baseline that reports nothing.
@@ -290,9 +292,9 @@ impl Index {
         &mut self,
         workspace_id: &str,
         root: &Path,
-        removals: u32,
+        revision: u32,
     ) -> Result<(), Failure> {
-        if self.indexed_as(workspace_id, root, removals)? {
+        if self.indexed_as(workspace_id, root, revision)? {
             return Ok(());
         }
         let root = root.to_string_lossy();
@@ -313,28 +315,30 @@ impl Index {
             )?;
         }
         transaction.execute(
-            "INSERT INTO roots(workspace_id, root, removals) VALUES (?1, ?2, ?3)
+            "INSERT INTO roots(workspace_id, root, revision) VALUES (?1, ?2, ?3)
              ON CONFLICT(workspace_id) DO UPDATE SET root = excluded.root,
-                removals = excluded.removals",
-            params![workspace_id, root, removals],
+                revision = excluded.revision",
+            params![workspace_id, root, revision],
         )?;
         transaction.commit()?;
         Ok(())
     }
 
     /// Whether what the index holds for the workspace was indexed at this
-    /// root and removal count: of this registration, not an earlier one.
-    fn indexed_as(&self, workspace_id: &str, root: &Path, removals: u32) -> Result<bool, Failure> {
+    /// root and registration revision: of this registration, not an
+    /// earlier one.
+    fn indexed_as(&self, workspace_id: &str, root: &Path, revision: u32) -> Result<bool, Failure> {
         let indexed: Option<(String, u32)> = self
             .connection
             .query_row(
-                "SELECT root, removals FROM roots WHERE workspace_id = ?1",
+                "SELECT root, revision FROM roots WHERE workspace_id = ?1",
                 [workspace_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        Ok(indexed
-            .is_some_and(|(at, count)| at == root.to_string_lossy().as_ref() && count == removals))
+        Ok(indexed.is_some_and(|(at, indexed_revision)| {
+            at == root.to_string_lossy().as_ref() && indexed_revision == revision
+        }))
     }
 
     /// Bring one workspace's index up to `scan.files`, the indexable paths
@@ -344,19 +348,19 @@ impl Index {
     /// already holds for it and is not treated as removed. Parses at most
     /// `FILES_PER_PASS` files and stops at `deadline`; what is left is picked
     /// up by the next call. `now_ms` (wall clock) dates a file that becomes
-    /// partial. `removals` is how many times the workspace ID had been
-    /// removed when the scan was taken. Returns the interface changes it
-    /// found.
+    /// partial. `revision` is the workspace's registration revision when
+    /// the scan was taken (`daemon::Registration`). Returns the interface
+    /// changes it found.
     pub fn update(
         &mut self,
         workspace_id: &str,
         root: &Path,
-        removals: u32,
+        revision: u32,
         scan: &ScanView,
         now_ms: u64,
         deadline: Instant,
     ) -> Result<Vec<Notice>, Failure> {
-        self.start_again_at(workspace_id, root, removals)?;
+        self.start_again_at(workspace_id, root, revision)?;
         let (files, unobserved) = (&scan.files, &scan.unobserved);
         // Each path's indexed digest, and the scanned digest at which it was
         // found too large to parse: that version is not tried again.
@@ -557,7 +561,7 @@ impl Index {
         // its first read, until it ends. It only reads, so ending it on an
         // error by dropping it (a rollback) loses nothing.
         let snapshot = self.connection.unchecked_transaction()?;
-        if !self.indexed_as(&of.workspace_id, &of.root, of.removals)? {
+        if !self.indexed_as(&of.workspace_id, &of.root, of.revision)? {
             snapshot.commit()?;
             return Ok((T::default(), GraphCoverage::default()));
         }
@@ -1294,12 +1298,12 @@ mod review_regressions {
             .unwrap()
     }
 
-    /// Workspace `w` at `root`, never removed: what `pass` indexes.
+    /// Workspace `w` at `root`, never moved or removed: what `pass` indexes.
     fn of(root: &Path) -> crate::daemon::Registration {
         crate::daemon::Registration {
             workspace_id: "w".into(),
             root: root.to_path_buf(),
-            removals: 0,
+            revision: 0,
         }
     }
 
@@ -1324,8 +1328,9 @@ mod review_regressions {
             root: dir.0.join("elsewhere"),
             ..of(&dir.0)
         };
+        // Removed and registered again, or switched away and back.
         let removed = crate::daemon::Registration {
-            removals: 1,
+            revision: 1,
             ..of(&dir.0)
         };
         for other in [moved, removed] {

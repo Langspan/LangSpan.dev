@@ -3,17 +3,18 @@
 #[cfg(not(unix))]
 use std::path::PathBuf;
 
-/// One lifetime of a workspace registration: its ID, its root and how many
-/// times the ID had been removed (roadmap G6). A `workspace move` changes
-/// the root; `workspace remove` ends the lifetime even if the ID is
-/// registered again at the same root. What a daemon worker learned during
-/// one lifetime (a scan, an index pass, an automatic check) carries it, and
-/// the state owner records it only while the workspace still has it.
+/// One lifetime of a workspace registration: its ID, its root and its
+/// revision, how many times the ID had been moved or removed (roadmap G6).
+/// A `workspace move` and a `workspace remove` each end the lifetime, even
+/// when the ID comes back to the same root (switched back, or registered
+/// again). What a daemon worker learned during one lifetime (a scan, an
+/// index pass, an automatic check) carries it, and the state owner records
+/// it only while the workspace still has it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registration {
     pub workspace_id: String,
     pub root: std::path::PathBuf,
-    pub removals: u32,
+    pub revision: u32,
 }
 
 impl Registration {
@@ -23,8 +24,8 @@ impl Registration {
         Some(Self {
             workspace_id: workspace_id.to_owned(),
             root: workspace.root.clone().into(),
-            removals: state
-                .workspace_removals
+            revision: state
+                .workspace_revisions
                 .get(workspace_id)
                 .copied()
                 .unwrap_or(0),
@@ -171,8 +172,8 @@ mod unix {
     }
 
     struct IndexJob {
-        /// The registration the scan was of. A root or removal count other
-        /// than the one last indexed starts the index again.
+        /// The registration the scan was of. A root or registration revision
+        /// other than the one last indexed starts the index again.
         of: Registration,
         /// Its unobserved paths are kept in the index as they were, never
         /// treated as removed.
@@ -211,7 +212,7 @@ mod unix {
             match index.update(
                 &of.workspace_id,
                 &of.root,
-                of.removals,
+                of.revision,
                 &job.scan,
                 now_ms(),
                 deadline,
@@ -235,7 +236,7 @@ mod unix {
                                 &[
                                     &of.workspace_id,
                                     &of.root.to_string_lossy(),
-                                    &of.removals.to_string(),
+                                    &of.revision.to_string(),
                                     &notice.path,
                                     &notice.before_digest,
                                     &notice.digest,
@@ -2859,6 +2860,44 @@ mod unix {
                 refused(&store, &first),
                 Some(Outcome::Error { code, .. }) if code == "workspace_changed"
             ));
+            let switched = Registration::of(store.state(), "work").unwrap();
+            assert!(refused(&store, &switched).is_none());
+            // Switched back to the first checkout: a report from before
+            // both switches is of an earlier registration all the same.
+            run(
+                &mut store,
+                Command::WorkspaceMove {
+                    workspace_id: "work".into(),
+                    root: "/work".into(),
+                    switch: true,
+                },
+                Command::WorkspaceMoveVerified {
+                    workspace_id: "work".into(),
+                    root: "/work".into(),
+                    verified_overlaps: Vec::new(),
+                },
+            );
+            let back = Registration::of(store.state(), "work").unwrap();
+            assert_eq!(back.root, first.root);
+            assert_ne!(back, first);
+            assert!(matches!(
+                refused(&store, &first),
+                Some(Outcome::Error { code, .. }) if code == "workspace_changed"
+            ));
+            assert!(refused(&store, &switched).is_some());
+            run(
+                &mut store,
+                Command::WorkspaceMove {
+                    workspace_id: "work".into(),
+                    root: "/other".into(),
+                    switch: true,
+                },
+                Command::WorkspaceMoveVerified {
+                    workspace_id: "work".into(),
+                    root: "/other".into(),
+                    verified_overlaps: Vec::new(),
+                },
+            );
             let moved = Registration::of(store.state(), "work").unwrap();
             assert!(refused(&store, &moved).is_none());
             // Removed: no registration is current.

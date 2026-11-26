@@ -295,6 +295,8 @@ pub(crate) fn apply_moved(
     state.scan_failures.remove(id);
     state.scan_coverage.remove(id);
     state.checkouts.remove(id);
+    // A switch back to an earlier root is still a new registration.
+    next_revision(state, id);
     Ok(())
 }
 
@@ -349,8 +351,8 @@ pub(crate) fn decide_remove(
 /// Everything derived for the workspace and its sessions leaves the state.
 /// A disabled publication's link stays, already withdrawn, so that the ID
 /// registered and published again continues its sequence for teammates.
-/// The removal is counted, so a later registration under the same ID and
-/// root is still a new lifetime to the source index.
+/// The removal advances the registration revision, so a later registration
+/// under the same ID and root is still a new lifetime to the source index.
 pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(), CoreError> {
     registered(state, workspace_id)?;
     let id = workspace_id;
@@ -365,7 +367,14 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
         state.session_liveness.remove(session);
         state.activity.remove(session);
         state.check_notices.remove(session);
+        state.retracted_notices.remove(session);
     }
+    // A withdrawal names its workspace; one owed to a session of another
+    // workspace goes too, so it cannot outlive the messages it withdraws.
+    state.retracted_notices.retain(|_, notices| {
+        notices.retain(|notice| notice.workspace_id != id);
+        !notices.is_empty()
+    });
     state.intents.retain(|_, intent| intent.workspace_id != id);
     state.leases.retain(|_, lease| lease.workspace_id != id);
     state.turns.retain(|_, turn| turn.workspace_id != id);
@@ -380,6 +389,7 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
     state.interface_notices.remove(id);
     state.notes.remove(id);
     state.messages.remove(id);
+    state.message_history.remove(id);
     state.scan_failures.remove(id);
     state.scan_coverage.remove(id);
     state.checkouts.remove(id);
@@ -387,7 +397,15 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
     state.test_learning.remove(id);
     // `writes` is kept: it is a generation that never goes back, so a run
     // taken before the removal cannot match a count after it.
-    let removals = state.workspace_removals.entry(id.to_owned()).or_default();
-    *removals = removals.saturating_add(1);
+    next_revision(state, id);
     Ok(())
+}
+
+/// A move or a removal starts a new registration revision for the ID.
+fn next_revision(state: &mut State, workspace_id: &str) {
+    let revision = state
+        .workspace_revisions
+        .entry(workspace_id.to_owned())
+        .or_default();
+    *revision = revision.saturating_add(1);
 }

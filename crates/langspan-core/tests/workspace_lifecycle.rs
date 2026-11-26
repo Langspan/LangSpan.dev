@@ -602,6 +602,73 @@ fn a_removed_workspace_leaves_status_and_briefings_and_its_id_can_start_again() 
     assert!(!state.notes.contains_key("work"));
 }
 
+/// A withdrawn message is in the workspace's message history and, until
+/// delivered, in each reader's withdrawal notices. Removal clears both, so
+/// the dashboard and recap stop showing it, and the ID or a session ID
+/// registered again does not bring the old withdrawal back.
+#[test]
+fn a_removed_workspace_forgets_its_message_history_and_withdrawal_notices() {
+    let mut state = ready();
+    let brief = |session: &str| Command::Brief {
+        session_id: session.into(),
+        max_peers: 8,
+        deliver: true,
+        mid_turn: false,
+    };
+    run(&mut state, "brief-bob", brief("bob"), 3);
+    let Outcome::MessageRetracted { .. } = run(
+        &mut state,
+        "retract",
+        Command::RetractMessage {
+            workspace_id: "work".into(),
+            from: Some("alice".into()),
+            message_id: Some("message".into()),
+        },
+        4,
+    ) else {
+        panic!("the message is withdrawn")
+    };
+    assert!(state.message_history.contains_key("work"));
+    assert!(state.retracted_notices.contains_key("bob"));
+    run(&mut state, "rm", remove(true), 10);
+    assert!(!state.message_history.contains_key("work"));
+    assert!(
+        state
+            .retracted_notices
+            .values()
+            .flatten()
+            .all(|notice| notice.workspace_id != "work"),
+        "{:?}",
+        state.retracted_notices
+    );
+    // The same IDs registered again start with no withdrawal to deliver.
+    run(
+        &mut state,
+        "w-again",
+        Command::WorkspaceRegister {
+            workspace_id: "work".into(),
+            root: "/repos/work".into(),
+        },
+        11,
+    );
+    run(
+        &mut state,
+        "s-bob-again",
+        Command::SessionRegister {
+            session_id: "bob".into(),
+            workspace_id: "work".into(),
+            parent: None,
+            headless: false,
+        },
+        11,
+    );
+    let Outcome::Briefing { briefing } = run(&mut state, "brief-bob-2", brief("bob"), 12) else {
+        panic!("bob is briefed")
+    };
+    let text = serde_json::to_string(&briefing).unwrap();
+    assert!(!text.contains("I am changing upload"), "{text}");
+}
+
 #[test]
 fn replaying_the_log_reproduces_moves_and_removals() {
     let mut state = State::default();

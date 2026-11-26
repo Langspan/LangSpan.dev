@@ -1675,12 +1675,14 @@ pub struct State {
     /// line (roadmap H2). Derived on replay; not part of the status reply.
     #[serde(skip)]
     pub refusals: Vec<RecentRefusal>,
-    /// How many times each workspace ID has been removed. With the root it
-    /// names one registration's lifetime, so what was derived outside the
-    /// log during an earlier one (the source index) is started again.
-    /// Derived on replay; not part of the status reply.
+    /// How many times each workspace ID has been moved or removed: its
+    /// registration revision. With the root it names one registration, so
+    /// what was derived outside the log during an earlier one (the source
+    /// index, a worker's report) is started again or refused, even after a
+    /// switch back to an earlier root. Derived on replay; not part of the
+    /// status reply.
     #[serde(skip)]
-    pub workspace_removals: BTreeMap<String, u32>,
+    pub workspace_revisions: BTreeMap<String, u32>,
     /// Writes recorded per workspace since the event log was replayed: the
     /// write generation a check run takes before its tree and carries with
     /// its test results (`record_check.writes_before`). Derived on replay;

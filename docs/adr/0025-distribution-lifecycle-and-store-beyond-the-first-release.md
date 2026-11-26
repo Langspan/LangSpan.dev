@@ -106,27 +106,32 @@ against, so it stays an owner command, as with `remote enable`.
   its sessions with their intents, admissions, activity, liveness and
   undelivered check results, and its checks, landings, notes, messages,
   interface notices, scan records, automatic check, what its tests taught
-  about flipping tests, and teammates' received publications leave the state, so `status`, `recap`, briefings and the
-  dashboard no longer show it. Its Git snapshot is deleted with the event.
-  The state counts each ID's removals (derived on replay, not in the status
-  reply). The ID, its root and that count name one registration, and what a
+  about flipping tests, teammates' received publications, its message
+  history and the withdrawal notices its sessions were still owed leave the
+  state, so `status`, `recap`, briefings and the dashboard no longer show
+  it, and a session ID registered again is not told of an old withdrawal.
+  Its Git snapshot is deleted with the event.
+  The state counts each ID's moves and removals, its registration revision
+  (derived on replay, not in the status reply). The ID, its root and that
+  revision name one registration, so a switch to another checkout and back
+  is a new registration too, and what a
   daemon worker learns from a registration carries it back to the state
   owner, which handles it only while the workspace still has that
   registration and otherwise refuses it (`workspace_changed`) unrecorded: a
   scan's result, each interface notice of an index pass, and an automatic
   check's reads of its setting and its check record. The source index keeps
-  the count beside the root and forgets the workspace's entries and
+  the revision beside the root and forgets the workspace's entries and
   baselines when either differs, or when it has no root record (an index
   written before roots were kept), so that workspace's first pass after the
   upgrade is a baseline. So an ID removed, changed while unregistered and
-  registered again at the same root, or switched to another checkout while
-  an index pass of the old one was queued or running, starts a new index
-  baseline instead of reporting interface changes from its earlier
-  registration. An interface notice's request ID includes the root and the
-  removal count, so the same change of the same file in a later
+  registered again at the same root, switched to another checkout and back,
+  or switched while an index pass of the old one was queued or running,
+  starts a new index baseline instead of reporting interface changes from
+  its earlier registration. An interface notice's request ID includes the
+  root and the revision, so the same change of the same file in a later
   registration is a new notice, not a replay of the earlier one's receipt.
   Index answers (`graph`, code context, call breaks, the dashboard's
-  coverage) read the index only when its root and count match the
+  coverage) read the index only when its root and revision match the
   workspace's current registration. Until the indexer starts that
   registration's index, or for good at a root it cannot scan, the answer is
   empty with `scanned: false`, never the earlier registration's symbols.
