@@ -16,8 +16,10 @@ pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 pub const MAX_SYMBOLS: usize = 2_000;
 pub const MAX_REFERENCES: usize = 20_000;
 pub const MAX_IMPORTS: usize = 500;
-const SIGNATURE_BYTES: usize = 240;
-const NAME_BYTES: usize = 128;
+/// Signatures and import targets longer than this are cut and end with `…`.
+pub const SIGNATURE_BYTES: usize = 240;
+/// Longer names are not recorded.
+pub const NAME_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Language {
@@ -645,6 +647,11 @@ fn visit(
         )
     {
         let name_text = text(name, source);
+        // The same bound as every other definition, so an export of this
+        // file stays importable.
+        if name_text.is_empty() || name_text.len() > NAME_BYTES {
+            return Some(name.id());
+        }
         let end = value
             .child_by_field_name("body")
             .map(|body| body.start_byte())

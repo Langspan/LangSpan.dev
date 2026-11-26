@@ -3371,6 +3371,23 @@ pub enum Command {
         names: Vec<String>,
         limit: u32,
     },
+    /// Owner-only, CLI-only: write the workspace's source index to the
+    /// absolute path `path` as JSON Lines, created owner-only and never over
+    /// an existing file (roadmap D5). Not recorded.
+    GraphExport {
+        workspace_id: String,
+        path: String,
+    },
+    /// Owner-only, CLI-only: read an exported index from the absolute path
+    /// `path`. Only files whose content here has the exported digest, and
+    /// that the index does not hold already, are loaded, and only with
+    /// `apply`; without it nothing changes. Not recorded (roadmap D5).
+    GraphImport {
+        workspace_id: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        apply: bool,
+    },
     /// Answered by the daemon with its source index: the calls among
     /// `calls` whose argument count does not fit a signature another live
     /// session changed, from notices not yet alerted to this session. The
@@ -4011,6 +4028,16 @@ enum CommandWire {
         names: Vec<String>,
         limit: u32,
     },
+    GraphExport {
+        workspace_id: String,
+        path: String,
+    },
+    GraphImport {
+        workspace_id: String,
+        path: String,
+        #[serde(default)]
+        apply: bool,
+    },
     /// Answered by the daemon with its source index: the calls among
     /// `calls` whose argument count does not fit a signature another live
     /// session changed, from notices not yet alerted to this session. The
@@ -4508,6 +4535,30 @@ pub enum Outcome {
     GraphContext {
         matches: Vec<NameContext>,
         coverage: GraphCoverage,
+    },
+    /// The source index was written to a file (roadmap D5).
+    GraphExported {
+        workspace_id: String,
+        files: u32,
+        partial_files: u32,
+        bytes: u64,
+    },
+    /// What an index import found, by file line (roadmap D5). Only
+    /// `loaded` files were written, and only when `applied`.
+    GraphImported {
+        workspace_id: String,
+        applied: bool,
+        /// Same content here, and not yet indexed here: loaded, or would be.
+        loaded: u32,
+        /// Content here differs, or the file is missing or not in the last
+        /// scan: left to the indexer.
+        different: u32,
+        /// Already indexed here: the local rows are kept.
+        kept: u32,
+        /// Over a parse bound (symbols, references, imports, calls, line size).
+        over_limits: u32,
+        /// Not a valid file record, or a path seen earlier in the file.
+        malformed: u32,
     },
     /// `ready` is false when the index has no complete scan of the
     /// workspace: nothing was checked.
@@ -6719,6 +6770,8 @@ fn decide_checked(
         | Command::GraphImpact { .. }
         | Command::GraphBlindSpots { .. }
         | Command::GraphContext { .. }
+        | Command::GraphExport { .. }
+        | Command::GraphImport { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
             "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores",
