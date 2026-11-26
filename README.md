@@ -158,11 +158,16 @@ to an agent.
 
 ### See agent activity in one place
 
-`langspan dashboard` serves a read-only page that refreshes every two seconds.
-It shows local sessions and published teammate activity, files held now,
-files several agents touched, recorded denials, checks, waiting messages and
-workspace health. The view includes up to 50 agents and 20 entries in each
-other list, with counts for entries left out.
+`langspan dashboard` serves LangSpan Live, a read-only page that refreshes
+every two seconds. A row of counts leads: active sessions, shared paths, held
+files, refusals, interface notices, checks and landings. Below it, a traffic
+scope puts sessions in rows and file paths in columns, so held files, refused
+edits, shared paths, interface notices and published teammate work show where
+they meet. Beside it are the coordination evidence and an inspector for the
+selected path, session or record, then workspace health. The view includes up
+to 50 agents and 20 entries in each other list, with counts for entries left
+out. `langspan dashboard --demo` shows the same page with labeled, simulated
+data.
 
 ```sh
 langspan dashboard --open

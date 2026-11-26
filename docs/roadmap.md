@@ -93,7 +93,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 - [C2: Rank the code briefing and name each definition's dependents](https://github.com/Langspan/LangSpan.dev/issues/41): code briefings list definitions in path order and do not mark the files that will break.
 - [C5: Learn which briefed files agents use](https://github.com/Langspan/LangSpan.dev/issues/43): briefing relevance never adjusts to what agents in a repository actually use.
-- [C7: Tell dependents about another worktree's new or changed signatures before they are pushed](https://github.com/Langspan/LangSpan.dev/issues/44): a session cannot see a function another worktree just added, so it duplicates or stalls.
 - [C8: Tell two sessions their tasks point at the same code before either writes](https://github.com/Langspan/LangSpan.dev/issues/45): two tasks aimed at the same function are not flagged before either session edits. Built as prompt targets; a real-host run remains.
 - [C9: Leave a trail and a handoff when a session ends](https://github.com/Langspan/LangSpan.dev/issues/46): what a finished session learned is lost unless someone ran `handoff` by hand.
 - [C10: Brief the owner's next session on what happened since the last one](https://github.com/Langspan/LangSpan.dev/issues/47): overnight landings, failed checks and unread messages are scattered across several commands.

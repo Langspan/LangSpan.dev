@@ -24,13 +24,15 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  --tools hooked leaves the four tools the hooks call
                                  out of the list while that host's hooks report here;
                                  each still answers when called
-  dashboard [--listen 127.0.0.1:7311] [--open] [--allow-network]
+  dashboard [--listen 127.0.0.1:7311] [--open] [--allow-network] [--demo]
                                  Serve a live, read-only page of every agent on this
                                  machine and every teammate heard from, on loopback.
                                  Prints the URL with this run's access token; --open
                                  also opens it in the browser. A non-loopback address
                                  is refused without --allow-network; from a phone, use
-                                 an SSH tunnel or a VPN to this machine instead
+                                 an SSH tunnel or a VPN to this machine instead.
+                                 --demo serves the same page with fictional, labeled
+                                 simulated data and reads nothing from the coordinator
   workspace add ID ROOT          Register a physical workspace
   workspace list [--after ID]    Every workspace: root and whether it exists, current
                                  sessions, notes, pending messages, check records,
@@ -123,6 +125,9 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Files the index cannot answer for: partial, never
                                  parsed cleanly, waiting, too large, left out of the
                                  scan, and other languages by extension
+  graph inflight WORKSPACE       Exported names other worktrees of the repository
+                                 added or changed and not committed, that this
+                                 workspace's files mention or import
   graph export WORKSPACE --out FILE
                                  Write the source index to a new owner-only FILE
                                  (JSON Lines); it never replaces an existing file
@@ -3809,11 +3814,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         };
         let open = options.remove("--open").is_some();
         let allow_network = options.remove("--allow-network").is_some();
+        let demo = options.remove("--demo").is_some();
         no_unused_options(&options)?;
         let options = langspan::dashboard::Options {
             listen,
             open,
             allow_network,
+            demo,
         };
         if json {
             return Err(
@@ -3986,6 +3993,9 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                     },
                 }
             }
+            ["graph", "inflight", workspace] => Command::GraphInflight {
+                workspace_id: (*workspace).into(),
+            },
             ["graph", "export", workspace] => Command::GraphExport {
                 workspace_id: (*workspace).into(),
                 path: absolute_option(&mut options, "--out")?,
@@ -4113,6 +4123,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphReferences { .. }
                 | Command::GraphImpact { .. }
                 | Command::GraphBlindSpots { .. }
+                | Command::GraphInflight { .. }
                 | Command::GraphExport { .. }
                 | Command::GraphImport { .. }
                 | Command::Recap { .. }
@@ -4256,12 +4267,13 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             "--json" => json = true,
             "--apply" => apply = true,
             // Flags, kept with the options so that only the commands that take
-            // them accept them (`dashboard`: `--open`, `--allow-network`;
+            // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
             // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
             // `graph symbol`: `--detail`; `brief`: `--recent`).
             "--open"
             | "--allow-network"
+            | "--demo"
             | "--check-again"
             | "--publish-as-branch"
             | "--mine"
@@ -4899,6 +4911,41 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 "Matches are by name, not resolved. Index: {} of {} supported files at their current content.",
                 coverage.current_files, coverage.indexable_files
             );
+        }
+        Outcome::GraphInflight {
+            inflight,
+            coverage,
+            truncated,
+        } => {
+            if !coverage.scanned {
+                println!("The index has no complete scan of this workspace yet.");
+            } else if inflight.is_empty() {
+                println!(
+                    "No other worktree of this repository has an uncommitted signature that this workspace mentions."
+                );
+            }
+            for item in inflight {
+                let session = item
+                    .session
+                    .as_deref()
+                    .map(|session| format!(", session {session}"))
+                    .unwrap_or_default();
+                println!(
+                    "{} {} in {} (worktree {}{session}, not committed): {} — mentioned in {}",
+                    item.kind,
+                    item.name,
+                    item.path,
+                    item.worktree,
+                    item.signature,
+                    item.mentioned_in.join(", ")
+                );
+            }
+            if *truncated {
+                println!("More results exist than the limit allows.");
+            }
+            if !inflight.is_empty() {
+                println!("Matches are by name, not resolved.");
+            }
         }
         Outcome::GraphExported {
             workspace_id,
