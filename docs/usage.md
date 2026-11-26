@@ -2016,9 +2016,16 @@ such lines in 600 bytes, within its 2,400-byte cap. A briefing that carries a
 message, a withdrawal, an uncoordinated change or a check result holds none.
 The lines that do not fit are counted with the other notices left out, and
 they come with a later briefing. Only the signature line, at most 240 bytes as
-indexed, is relayed: no other file content. Nothing is held or refused. A
-worktree without a complete scan says nothing, and with the daemon down the
-hook prints nothing.
+indexed, is relayed: no other file content. Nothing is held or refused.
+While the index has not finished a first scan of the session's worktree or of
+another worktree of the repository, a briefing given for another reason says
+so in one line instead of listing nothing:
+
+```text
+The source index has not finished scanning every worktree of this repository yet, so work in flight in another worktree may be missing here.
+```
+
+With the daemon down the hook prints nothing.
 
 List what other worktrees have in flight that any file of a workspace
 mentions:
@@ -2834,9 +2841,11 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol is version 7 and the SQLite schema marker version 4
-(retention). The daemon also answers version 6 clients, without the briefing
-memory and context counts version 7 added; version 5 clients, also without
+The current wire protocol is version 8 and the SQLite schema marker version 4
+(retention). The daemon also answers version 7 clients, without the
+`inflight_partial` that version 8 added to a briefing; version 6 clients,
+also without the briefing memory and context counts version 7 added;
+version 5 clients, also without
 the `rebased` and `adapted` that version 6 added to a landing; version 4
 clients, also without the `refusal_outcomes` that version 5 added to a
 report's counts and the `interface_notice_ids` it added to a briefing; and
