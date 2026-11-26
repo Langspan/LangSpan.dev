@@ -1178,6 +1178,56 @@ fn a_linked_worktree_of_a_checkout_moved_behind_a_link_registers() {
     assert_eq!(home.workspaces().len(), 3);
 }
 
+/// Review finding: after a checkout moves behind a link, its registered
+/// root stays the link while a linked worktree registers at its resolved
+/// place inside. The parent must still refuse that worktree's files, so the
+/// two workspaces never admit one physical file under different IDs.
+#[test]
+fn a_parent_behind_a_link_refuses_its_registered_worktree_files() {
+    let mut home = Home::new();
+    home.start();
+    let old = home.repo("disk1/app");
+    home.ok(&["workspace", "add", "a", text(&old), "--request-id", "add-a"]);
+    fs::create_dir(home.base.join("disk2")).unwrap();
+    let new = home.base.join("disk2/app");
+    fs::rename(&old, &new).unwrap();
+    std::os::unix::fs::symlink(&new, &old).unwrap();
+    git(&new, &["worktree", "add", "--quiet", ".worktrees/child"]);
+    let child = new.join(".worktrees/child");
+    home.ok(&[
+        "workspace",
+        "add",
+        "child",
+        text(&child),
+        "--request-id",
+        "add-child",
+    ]);
+    fs::write(child.join("file"), "x\n").unwrap();
+    // Without its `.git` file, only the registration marks the worktree,
+    // so the nested-checkout check cannot refuse its files instead.
+    fs::remove_file(child.join(".git")).unwrap();
+    home.ok(&["session", "start", "s1", "a", "--request-id", "s1"]);
+    let refused = home.json(&[
+        "admit",
+        "s1",
+        ".worktrees/child/file",
+        "--ttl-ms",
+        "60000",
+        "--request-id",
+        "admit-child-file",
+    ]);
+    assert!(
+        refused["outcome"]["lease"]["lease_id"].is_null(),
+        "{refused}"
+    );
+    assert!(
+        refused
+            .to_string()
+            .contains("registered descendant workspace"),
+        "{refused}"
+    );
+}
+
 fn head(root: &Path) -> String {
     let output = Process::new("git")
         .args(["rev-parse", "HEAD"])

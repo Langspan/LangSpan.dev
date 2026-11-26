@@ -2509,15 +2509,28 @@ mod unix {
         {
             return Err("workspace root identity changed; use a new workspace registration".into());
         }
+        // Other registered roots, resolved like this one, so a root behind
+        // a link still bounds its own files. A root that no longer resolves
+        // keeps its stored form.
+        let others: Vec<std::path::PathBuf> = state
+            .workspaces
+            .iter()
+            .filter(|(id, _)| **id != session.workspace_id)
+            .map(|(_, workspace)| {
+                let stored = Path::new(&workspace.root);
+                fs::canonicalize(stored).unwrap_or_else(|_| stored.to_path_buf())
+            })
+            .collect();
         let mut keys = paths
             .iter()
             .map(|path| -> Result<String, crate::Error> {
                 // Resolved paths are compared with the resolved root.
                 let key = file_key(&current_root, path)?;
-                let full = root.join(&key);
-                if state.workspaces.values().any(|workspace| {
-                    let descendant = Path::new(&workspace.root);
-                    descendant != root && descendant.starts_with(root) && full.starts_with(descendant)
+                let full = current_root.join(&key);
+                if others.iter().any(|descendant| {
+                    *descendant != current_root
+                        && descendant.starts_with(&current_root)
+                        && full.starts_with(descendant)
                 }) {
                     return Err("file belongs to a registered descendant workspace; attach that physical root separately".into());
                 }

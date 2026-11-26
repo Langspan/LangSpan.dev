@@ -609,6 +609,8 @@ registration after checking distinct Git toplevels and their common directory.
 The wire command cannot assert that verification. An active parent lease over
 child files blocks a new child registration. Once registered, descendant paths
 remain excluded from parent admissions even if the `.git` marker disappears.
+The daemon compares the resolved roots, so the exclusion still holds when the
+parent's registered root is a link to its checkout.
 Separate worktrees share repository lineage, not writable file identity.
 
 **Process observations.** Linux PID, boot identity and process start metadata
