@@ -91,6 +91,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         message_history: _,
         retracted_notices: _,
         presence,
+        adoptions,
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
@@ -168,6 +169,12 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         retracted_notices: BTreeMap::new(),
         message_history: BTreeMap::new(),
         presence: keep(presence, of_shown),
+        // An adoption is shown with either of its sessions.
+        adoptions: adoptions
+            .iter()
+            .filter(|(from, adoption)| of_shown(from) || of_shown(&adoption.session_id))
+            .map(|(from, adoption)| (from.clone(), adoption.clone()))
+            .collect(),
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),

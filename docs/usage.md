@@ -1288,6 +1288,51 @@ private index, no commit, and Git reads run with `--no-optional-locks`. The
 MCP tool `langspan_my_changes` does the same. Other worktrees and machines
 are not included.
 
+### Take over an ended session's uncommitted work
+
+A session that ends before it commits (its process crashed or was killed, the
+disk filled) leaves its edits in the checkout, credited to it. A session that
+carries on the same task takes them over:
+
+```sh
+langspan adopt SESSION [--session ID] [--root DIR] [--request-id ID] [--json]
+```
+
+```text
+Session claude-code.… adopted the uncommitted work of ended session claude-code.…. Reason: both sessions have the same task line. Its lines in 2 file(s) are now this session's: a.txt, b.txt. …
+```
+
+The coordinator checks that `SESSION` has ended (the host reported its end,
+or its process is known to have exited) and worked in the same workspace,
+and records the transfer as a `session_adopted` event naming both sessions.
+Then the journal entries of `SESSION` and its subagents are credited to the
+adopting session, keeping their age, so `status --mine` and `commit --mine`
+treat those lines as its own. Lines another session also wrote stay shared,
+exactly as before, and other sessions' lines stay theirs.
+
+The adoption is refused, and nothing changes, for a session that has not
+ended (`session_live`: a killed session whose process LangSpan never observed
+counts as live), for one of another workspace (`other_workspace`), and for one
+another session already adopted (`already_adopted`). Running it again is safe:
+the coordinator answers `already_adopted` with nothing new recorded, and any
+lines still credited to the ended session are credited then. The reason shown
+is a message the ended session sent the adopter (addressed to it, or a
+handoff it took) or a `Task:` line both share; neither is required, so the
+person or agent decides. The adopting session is found as for
+`commit --mine`. The MCP tool `langspan_adopt` does the same. `recap` names
+the transfer under both sessions, as do `status` and the dashboard.
+
+When a session starts in a checkout where an ended session's journaled lines
+are still uncommitted and nobody adopted them, its briefing says so once,
+with that session's task line, and suggests the command:
+
+```text
+Session claude-code.… ended and left uncommitted work in this checkout (its task: "Fix the upload handler"). If you are continuing that task, run `langspan adopt -- claude-code.…` to take its lines over as yours; otherwise leave them.
+```
+
+At most four such sessions are named, and at most 32 files are compared with
+`HEAD` to find them, within half the start hook's time.
+
 A formatter or other workspace-wide command (`cargo fmt --all`) does not
 change who wrote a line it only reformats. Where the command kept a line's
 tokens in order and changed only whitespace and line breaks (re-indented,
@@ -1395,6 +1440,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_retract_message` | Withdraw a message this session sent, by ID or `"last"`; its readers are told to disregard it |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |
 | `langspan_my_changes` | List this session's own uncommitted files and hunks in a shared checkout, as `langspan_commit_mine` would split them; changes nothing |
+| `langspan_adopt` | Take over an ended session's uncommitted lines in the same workspace; refused for a live session or another workspace's |
 
 Every mutation tool requires a caller-owned `request_id` (for
 `langspan_land_cancel`, it names the waiting landing). Conflicts are normal

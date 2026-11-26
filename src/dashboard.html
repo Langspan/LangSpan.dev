@@ -159,6 +159,10 @@ function agent(row) {
   add(left, head);
   if (row.task) add(left, el('div', 'task', 'Task: ' + quoted(row.task)));
   if (row.intent) add(left, el('div', 'task', 'Intent: ' + quoted(row.intent)));
+  if (row.adopted_by) add(left, el('div', 'muted', 'Uncommitted work adopted by ' + row.adopted_by));
+  if (row.adopted && row.adopted.length > 0) {
+    add(left, el('div', 'muted', 'Adopted the uncommitted work of ' + row.adopted.join(', ')));
+  }
   add(left, files('editing now', row.editing));
   if (row.recent.length > 0) {
     const line = el('div', 'line files');

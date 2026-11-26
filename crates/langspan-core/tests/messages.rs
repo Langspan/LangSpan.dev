@@ -69,6 +69,7 @@ fn brief(session: &str, deliver: bool, mid_turn: bool) -> Command {
         max_peers: 4,
         deliver,
         mid_turn,
+        left: Vec::new(),
     }
 }
 
@@ -554,6 +555,7 @@ mod headless_handoffs {
                 max_peers: 4,
                 deliver: false,
                 mid_turn: false,
+                left: Vec::new(),
             },
             "look",
             0,

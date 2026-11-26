@@ -111,6 +111,55 @@ fn v2_changes_response_matches_the_committed_golden_vector() {
 }
 
 #[test]
+fn v3_adoption_request_outcome_and_left_work_briefing_request_match_the_golden_vectors() {
+    use langspan_core::{AdoptReason, Adoption, Outcome};
+    let wire = include_bytes!("../fixtures/adopt-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::Adopt {
+            session_id: "claude-code.bob".into(),
+            from: "claude-code.alice".into(),
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    let unknown = String::from_utf8_lossy(wire).replace(r#""from""#, r#""paths":["a.txt"],"from""#);
+    assert!(serde_json::from_str::<Request>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/adopted-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        response.outcome,
+        Outcome::Adopted {
+            adoption: Adoption {
+                from: "claude-code.alice".into(),
+                session_id: "claude-code.bob".into(),
+                workspace_id: "work".into(),
+                reason: Some(AdoptReason::SameTask {}),
+                at_ms: 5000,
+                generation: 2,
+            },
+            root: "/repos/work".into(),
+            recorded: true,
+        }
+    );
+    assert_eq!(encode(&response).unwrap(), wire);
+
+    // A briefing request names the sessions that left work; one without
+    // the field (every earlier request) names none.
+    let wire = include_bytes!("../fixtures/left-work-brief-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::Brief { left, .. } if left == &["claude-code.alice".to_owned()]
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+    let older: Request =
+        serde_json::from_slice(include_bytes!("../fixtures/brief-request-v3.json")).unwrap();
+    assert!(matches!(&older.command, Command::Brief { left, .. } if left.is_empty()));
+}
+
+#[test]
 fn v3_briefing_request_and_response_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/brief-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();

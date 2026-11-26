@@ -83,6 +83,7 @@ fn brief(state: &mut State, now: u64) -> Briefing {
             max_peers: 8,
             deliver: false,
             mid_turn: false,
+            left: Vec::new(),
         },
         now,
     )

@@ -1188,6 +1188,16 @@ fn lifecycle(
             );
         }
     }
+    // At a start, the sessions whose journaled lines are still uncommitted
+    // here: the coordinator names the ended ones nobody adopted (issue
+    // #161). Half the time left at most, so the briefing still has its own.
+    let left = if starting {
+        let now = Instant::now();
+        let until = now + deadline.saturating_duration_since(now) / 2;
+        crate::adopt::left_sessions(&config.state_dir, &config.root, &ids.session_id, until)
+    } else {
+        Vec::new()
+    };
     let briefing = match step(
         "brief",
         Command::Brief {
@@ -1195,6 +1205,7 @@ fn lifecycle(
             max_peers: BRIEF_PEERS,
             deliver: true,
             mid_turn: false,
+            left,
         },
     ) {
         Ok(Response {
@@ -1630,6 +1641,27 @@ fn render_checks(checks: &[langspan_core::CheckNotice]) -> String {
     text
 }
 
+/// Bytes of an ended session's task line quoted in its left-work line.
+const LEFT_TASK_LIMIT: usize = 160;
+
+/// The line naming an ended session that left uncommitted work in this
+/// checkout, with its task line (data from that session) and the command
+/// that takes the work over. The session ID is a validated identifier;
+/// `--` ends option parsing, since a valid ID can begin with a hyphen.
+fn left_work_line(work: &langspan_core::LeftWork) -> String {
+    let session = clean(&work.session_id, 128);
+    let task = match &work.summary {
+        Some(summary) => format!(" (its task: {:?})", clean(summary, LEFT_TASK_LIMIT)),
+        None => " (no task line recorded)".into(),
+    };
+    truncate(
+        &format!(
+            "Session {session} ended and left uncommitted work in this checkout{task}. If you are continuing that task, run `langspan adopt -- {session}` to take its lines over as yours; otherwise leave them."
+        ),
+        PEER_LINE_LIMIT,
+    )
+}
+
 /// The line telling a session to disregard a message it received and that
 /// was since withdrawn. The quoted text is the message's first bytes.
 fn retracted_line(retracted: &langspan_core::RetractedMessage) -> String {
@@ -1887,6 +1919,18 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
             text.push_str(heading);
             text.push_str(&shown);
             text.push_str(&reader);
+        }
+    }
+    // Ended sessions' uncommitted work, at a session start (issue #161).
+    // After the messages, whose room the core reserves; like the notices
+    // below, a line that does not fit is counted.
+    for work in &briefing.left_work {
+        let line = left_work_line(work);
+        if text.len() + line.len() + 1 + footer.len() + 96 > limit {
+            skipped += 1;
+        } else {
+            text.push_str(&line);
+            text.push('\n');
         }
     }
     if !briefing.stale_reads.is_empty() {
@@ -2974,6 +3018,7 @@ fn has_peer_content(briefing: &langspan_core::Briefing) -> bool {
         || !briefing.retracted.is_empty()
         || !briefing.checkout_changes.is_empty()
         || !briefing.uncoordinated.is_empty()
+        || !briefing.left_work.is_empty()
 }
 
 impl Session<'_> {
@@ -2991,6 +3036,7 @@ impl Session<'_> {
                     max_peers: BRIEF_PEERS,
                     deliver: true,
                     mid_turn: true,
+                    left: Vec::new(),
                 },
             )
             .ok()?;
@@ -4311,6 +4357,7 @@ mod briefing_text {
             checkout_changes: Vec::new(),
             uncoordinated: Vec::new(),
             checks: Vec::new(),
+            left_work: Vec::new(),
         }
     }
 
@@ -5258,6 +5305,7 @@ mod code_briefing_text {
             checkout_changes: Vec::new(),
             uncoordinated: Vec::new(),
             checks: Vec::new(),
+            left_work: Vec::new(),
         }
     }
 
