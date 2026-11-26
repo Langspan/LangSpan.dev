@@ -523,6 +523,45 @@ Nothing is recorded with `--prompt-summary off` or `--code-briefing off`, or
 while the source index has no complete scan. `langspan status --json` shows
 each session's `prompt_targets` under its activity.
 
+A session that has read and searched but not written yet is still shown: its
+peer line ends with where it is looking, for example
+`task: "Rework token refresh"; looking at "src/auth.rs", "src/session.rs";`.
+This presence comes from Claude Code `Read` and `Grep`, Cursor `Read` and
+`Grep`, Gemini CLI `read_file`, and on every host the files a shell command
+reads: each operand of `cat`, `head`, `tail`, `less`, `more`, `wc`, `nl`,
+`ls`, `stat`, `file`, `diff`, `tree` or `du`, and the operands after the
+pattern of a `grep`, `egrep`, `fgrep` or `rg` whose options are all flags
+that program takes without a value (any other option, such as `rg -E` or
+`grep -e`, records nothing for that command). After `cd`, `pushd`, `popd`,
+`source`, `.` or `eval`, only absolute paths are taken. Only paths that exist inside the checkout are kept, at most 4
+per command. A search records only the path it was scoped to (its `path`
+input, else its working directory, never the whole checkout); its pattern,
+glob and type, and a shell command's text, are never recorded. Codex reports
+no reads, so a Codex session is shown only through its shell commands.
+
+At most 4 paths are shown per peer, newest first, within the 700-byte peer line
+and the 2,400-byte briefing, and only paths looked at in the last 10 minutes
+that the peer is not editing and has not edited. A peer known only by where it
+looked is listed after every peer with work. When the briefing is full, the
+clause is the first thing left out: every peer's line, local and remote, is
+placed without it, and it is added only where room is left. A peer seen
+reading a path it had not been shown reading is news at a session start or
+prompt, never mid-turn after a tool call; paths ageing out, or read again,
+are not news. Presence never
+holds, refuses or delays a read, search or shell call, and it is not published
+through the remote setup. The briefing JSON (`langspan brief --json`,
+`langspan_brief`) gives each peer a `looking` list of
+`{"path": "src/auth.rs", "kind": "read"|"search"|"shell", "age_s": 42}`, and
+`langspan status --json` (`langspan_status`) each session's `looking` with the
+times it was recorded.
+
+To keep a session's reads, searches and shell paths from peers, install with
+`--presence off` (for `install` and `hooks install`). Its reads are still
+recorded as versions for its own stale checks; nothing looked at while it is
+off is shown later. `--presence-minutes N` (1 to 30, default 10) sets how old a
+peer's presence that session is shown. When the coordinator is down, nothing
+is recorded and the host's call is unchanged.
+
 Relevant peers share the same checkout or a Git repository identified by the
 observer. Linked worktrees can share briefings while keeping separate physical
 admission domains. Another worktree's file is reported as a logical overlap,
@@ -1515,7 +1554,8 @@ landing report, is replaced by the error `reply_too_large`, which keeps the
 operation's `exit_code` and outcome; the CLI's `--json` gives the whole
 answer. The CLI's answers are unchanged. File admission accepts up to 64 distinct normalized keys, 512 bytes
 per key, with a TTL of 1–60000 ms. Intents have a 2048-byte summary limit
-and prompt summaries a 512-byte one. Summaries are redacted on receipt, and
+and prompt summaries a 512-byte one. A presence record names 1 to 4 paths, and
+each session keeps its 16 most recent looked-at paths. Summaries are redacted on receipt, and
 redaction never makes one longer than its limit: a summary that would outgrow
 it keeps its longest redacted prefix that fits, cut at a character boundary
 and ending in `[redacted]`, so a summary within its limit is never refused
