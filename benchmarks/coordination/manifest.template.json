@@ -6,14 +6,14 @@
       "id": "stale-write-after-release",
       "description": "Owner-configured stale-read/released-lease scenario; preserve the native decision ordering and final integrated check.",
       "arms": {
-        "no_tool": {
+        "worktrees": {
           "versions": [
             {
               "id": "host-versions",
               "argv": [
                 "<owner-provided version capture command>"
               ],
-              "cwd": "<absolute checkout for no_tool>",
+              "cwd": "<absolute checkout for worktrees>",
               "timeout_seconds": 10
             }
           ],
@@ -25,7 +25,7 @@
                 "<native agent executable>",
                 "<owner-provided task arguments>"
               ],
-              "cwd": "<absolute checkout for no_tool>",
+              "cwd": "<absolute checkout for worktrees>",
               "timeout_seconds": 600
             },
             {
@@ -34,7 +34,7 @@
                 "<native agent executable>",
                 "<owner-provided task arguments>"
               ],
-              "cwd": "<absolute checkout for no_tool>",
+              "cwd": "<absolute checkout for worktrees>",
               "timeout_seconds": 600
             }
           ],
@@ -44,21 +44,21 @@
               "argv": [
                 "<task-specific integrated-result verifier>"
               ],
-              "cwd": "<absolute checkout for no_tool>",
+              "cwd": "<absolute checkout for worktrees>",
               "timeout_seconds": 120,
               "assesses": "integrated_correctness"
             }
           ],
           "evidence_file": "assessment.json"
         },
-        "coarse_claims": {
+        "awareness_only": {
           "versions": [
             {
               "id": "host-versions",
               "argv": [
                 "<owner-provided version capture command>"
               ],
-              "cwd": "<absolute checkout for coarse_claims>",
+              "cwd": "<absolute checkout for awareness_only>",
               "timeout_seconds": 10
             }
           ],
@@ -70,7 +70,7 @@
                 "<native agent executable>",
                 "<owner-provided task arguments>"
               ],
-              "cwd": "<absolute checkout for coarse_claims>",
+              "cwd": "<absolute checkout for awareness_only>",
               "timeout_seconds": 600
             },
             {
@@ -79,7 +79,7 @@
                 "<native agent executable>",
                 "<owner-provided task arguments>"
               ],
-              "cwd": "<absolute checkout for coarse_claims>",
+              "cwd": "<absolute checkout for awareness_only>",
               "timeout_seconds": 600
             }
           ],
@@ -89,7 +89,7 @@
               "argv": [
                 "<task-specific integrated-result verifier>"
               ],
-              "cwd": "<absolute checkout for coarse_claims>",
+              "cwd": "<absolute checkout for awareness_only>",
               "timeout_seconds": 120,
               "assesses": "integrated_correctness"
             }

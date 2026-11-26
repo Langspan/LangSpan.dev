@@ -150,6 +150,55 @@ version 3; the command, outcome, events and optional fields are additions with
 golden vectors in `fixtures/`. The sender is named with `--from` as for
 `message`: it is not recorded from the running session.
 
+**Delivery status** (26 November 2026, [issue #67](https://github.com/Langspan/LangSpan.dev/issues/67), roadmap E12).
+`MessageStatus` (`langspan messages status WORKSPACE MESSAGE|last [--from
+SESSION] [--json]`, MCP `langspan_message_status`) tells a sender which
+sessions were given a message. It is a read: nothing is recorded, delivered or
+added to a briefing. `last` is the newest message in the history that `--from`
+(or the owner, without it) sent, as for withdrawal. The answer is
+`{message_id, from, to, sent_age_ms, state, recipients, more_recipients,
+partial, delivered_means}`:
+
+- `state` is `retracted` once withdrawn, `pending` while held, `done` once
+  every session owed it was given it, and `dropped` when newer messages pushed
+  it out of the 64 held before that.
+- `recipients` are at most 64 (`more_recipients` counts the rest): delivered
+  sessions first, in delivery order, each with `age_ms` and `via`
+  (`briefing` at a start or prompt, `mid_turn` after a tool call, `mcp_brief`
+  for the session's own `langspan_brief`, `ack` for `langspan ack`); then the
+  others by ID, `pending`, or `ended` when the session ended before it was
+  given it. A message to one session lists that session. A message to everyone
+  lists every session of the workspace registered in the current daemon
+  generation except its sender, while it is not yet done; once done, only the
+  sessions given it, since a later session was never owed it. A handoff lists
+  the session that took it, and none while it waits.
+- `delivered_means` says that delivered means placed in the session's
+  context, not that the model read or acted on it. No "seen" state is claimed.
+
+Ages come from the records themselves. `MessageSent` gained optional `at_ms`
+and `generation`, and `MessageAcknowledged` optional `via`, `at_ms` and
+`generation`; `Brief` gained an optional `mcp` flag, set only by the MCP
+adapter. An age is given only for a record from the current daemon generation,
+since the clock is compared only within one; records written before this
+change read as before, with no age or `via`. A terminal `langspan brief` is a
+peek: it emits no acknowledgement, so the recipient stays `pending`.
+
+To tell a drop from a completion once a message has left both the held list
+and the history, the state keeps the IDs of the latest 64 messages per
+workspace that the cap pushed out unread (`dropped_messages`, derived on replay
+like the history, and not part of the status reply). The history outlasts
+every drop, so a message still in it and no longer held is done. A message to
+one session or a handoff that left both is done when its log shows an
+acknowledgement, and dropped otherwise. A message to everyone that left both
+and is not among the recorded drops is done; past 64 drops that cannot be told,
+and the answer says `partial: true`. `partial` is also set when retention
+removed the message's `message_sent` event while the state still holds it (no
+`sent_age_ms`), and when more than 4,096 acknowledgements would have to be
+read. A message neither held nor in the log is `unknown_message`, or
+`message_not_kept` once retention has deleted events. Wire protocol stays
+version 3: the command, outcome, event fields and the flag are additions, with
+golden vectors in `fixtures/`.
+
 ## Consequences and limits
 
 - **Local only.** Messages are not published to teammates on other machines;
@@ -167,7 +216,8 @@ golden vectors in `fixtures/`. The sender is named with `--from` as for
   and rendered under the same header as peer text. A host model can still be
   persuaded by it.
 - **Delivered is not read.** Acknowledgement means the text was placed in the
-  host's context, not that the model acted on it.
+  host's context, not that the model acted on it. `messages status` reports
+  delivery only and says so in every answer.
 - **`codex exec` is not recognised as headless,** and a future Claude Code
   that stops setting `CLAUDE_CODE_SESSION_ATTENDED` is not either: both then
   behave as before this rule. A headless session started by hand
