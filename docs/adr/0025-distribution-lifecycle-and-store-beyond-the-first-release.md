@@ -1,7 +1,8 @@
 # ADR 0025: Distribution, lifecycle and store features beyond the first release
 
 **Status:** Decided 25 November 2026. Each row is "not now" or
-"not building", as stated, except G6 and J12, built and amended below.
+"not building", as stated, except G6 and J12, built and amended below, and
+I5's version check, built below.
 
 ## Context
 
@@ -17,7 +18,7 @@ below as Missing or Partial.
 
 | Row | Capability | LangSpan today | Decision and reason |
 | --- | --- | --- | --- |
-| I5 | Signed self-update and rollback | None | Not building. Updates come through the release and the package manager. A binary that replaces itself would make a network call the docs do not otherwise need |
+| I5 | Signed self-update and rollback | `doctor` compares the coordinator's version with each hook's binary | Self-update not building. Updates come through the release and the package manager. A binary that replaces itself would make a network call the docs do not otherwise need. The version check is built ([issue #84](https://github.com/Langspan/LangSpan.dev/issues/84)); see below |
 | I6 (rest) | Windows, `npx`, plugin marketplaces | Source build; Unix sockets only | Not now. Windows needs a named-pipe transport and a process probe; marketplaces follow a first release |
 | I10 | Setup and hook installation through MCP tools | CLI only | Not building. Installation changes the owner's host configuration, so it stays an owner command, as with `remote enable` ([ADR 0006](0006-remote-awareness-through-git-refs.md)) |
 | G6 | Move and remove workspaces | `workspace add`, `list`, `move [--switch]`, `remove [--apply]` | Built 25 November 2026 ([issue #75](https://github.com/Langspan/LangSpan.dev/issues/75)), ahead of the condition below; see the amendment. Not yet run on a host |
@@ -228,6 +229,56 @@ be retained.
 - Event logs grow without a bound unless the owner compacts them or sets
   `retention_days`; with it unset nothing is ever deleted.
 
+## I5: mixed versions, as built
+
+Built 26 November 2026
+([issue #84](https://github.com/Langspan/LangSpan.dev/issues/84)). Nothing
+downloads, replaces or rolls back the binary; the owner upgrades through
+Homebrew (`brew upgrade langspan`) or a release archive checked with
+`gh attestation verify` ([ADR 0031](0031-releases.md)), and rolls back the
+same way or by keeping the previous archive.
+
+- **The coordinator says its version.** A new read-only request, `version`,
+  answers with the version the running daemon was built as and its process
+  ID. It is answered by the daemon, never recorded and never replayed. It is
+  an addition to wire protocol version 4; a daemon from before it answers
+  with an error, which `doctor` reports as a build older than its own.
+- **A binary's version is read, never run.** Every build carries one marker,
+  `NUL langspan-binary-version=VERSION NUL`, in its read-only data.
+  `doctor` reads each executable that an installed hook or MCP entry for its
+  state directory names (project and user level), at most 1 GiB in 1 MiB
+  pieces, and takes the version only when the file holds exactly one
+  well-formed marker. A project's own configuration can name that
+  executable, so `doctor` does not run it: running `--version` would execute
+  whatever a repository's settings point at. A file that holds no marker, or
+  two different ones, has no version: a build from before this one, or not
+  LangSpan.
+- **What `doctor` reports.** One finding per executable, naming every hook
+  and MCP entry that runs it: its path and version. When the coordinator
+  reports a version and the executable's differs or is unknown, the finding
+  needs attention and `doctor` exits 1. The text says which side is older and
+  what to do: restart the coordinator through the login service (`launchctl
+  kickstart -k` or `systemctl --user restart`) when `setup` installed one,
+  otherwise `kill PID` and `langspan daemon`; or upgrade the binary the
+  hooks name, or install them again from the coordinator's. A restart ends
+  the leases sessions hold, so the text says to restart between agents'
+  turns. `doctor` restarts nothing itself.
+- **Homebrew.** Hooks and MCP entries name the stable
+  `$(brew --prefix)/opt/langspan/bin/langspan`, so after `brew upgrade` they
+  run the new keg while a coordinator started before the upgrade keeps the
+  old one; `doctor` then names both versions until the coordinator restarts.
+
+Tests: `tests/binary_versions.rs`, with a real daemon and a second binary,
+a copy of this build whose marker is rewritten to a newer, then an older,
+version (the copy is never run, so its broken code signature on macOS does
+not matter); the same file without its marker; `binary_version` unit tests
+for a marker split across every read boundary, two markers, malformed
+markers and version order; and the `version` golden vectors
+(`tests/protocol.rs`). Breaking the overlap between reads made the boundary
+test fail. Still to retain: a real `brew upgrade` on macOS once the tap
+exists, and the issue's test that runs every command with networking
+blocked.
+
 ## J7: retention, as built
 
 Decided and built 25 November 2026.
@@ -291,4 +342,4 @@ Decided and built 25 November 2026.
 
 These rows are on the public roadmap. They are worked on in the open after the first
 release of `Langspan/LangSpan.dev`, by many agent sessions developing LangSpan with
-LangSpan itself; the release does not wait for them. What would change it: Windows follows demand and a named-pipe transport design; G6, J7 and J12 are built, as recorded above; J9 follows a threat that a chain would answer. I5 and I10 are not planned. A real-host Claude Code run after moving a checkout is still to be retained.
+LangSpan itself; the release does not wait for them. What would change it: Windows follows demand and a named-pipe transport design; G6, J7 and J12 are built, as recorded above; J9 follows a threat that a chain would answer. Self-update (I5) and I10 are not planned; I5's version check is built, as recorded above. A real-host Claude Code run after moving a checkout is still to be retained.
