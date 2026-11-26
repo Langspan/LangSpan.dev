@@ -1,7 +1,7 @@
 import datetime
 import unittest
 
-from shelf import cli, export, report, restock, ui
+from shelf import cli, export, orders, report, restock, ui
 from shelf.settings import DEFAULTS
 
 SAMPLE = """\
@@ -40,6 +40,14 @@ class SettingsUsers(unittest.TestCase):
     def test_every_default_is_set(self):
         self.assertEqual(
             sorted(DEFAULTS), ["currency", "date_format", "page_size", "retries", "timeout_s"])
+
+
+class DateUsers(unittest.TestCase):
+    def test_late_orders_are_past_their_due_date(self):
+        today = datetime.date.today()
+        due = [("flour", today - datetime.timedelta(days=1)), ("salt", today),
+               ("sugar", today + datetime.timedelta(days=2))]
+        self.assertEqual(orders.late_orders(due), ["flour"])
 
 
 if __name__ == "__main__":

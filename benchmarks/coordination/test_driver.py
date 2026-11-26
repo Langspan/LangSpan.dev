@@ -258,8 +258,12 @@ class DriverUnitTests(Temporary):
                         continue
                     peers = [line for other, line in enumerate(lines) if other != index]
                     hits = [line for line in peers if re.search(task["trigger"], line)]
-                    partnered = family == "rename_vs_new_caller" or [t.get("pair") for t in assigned].count(
-                        task["pair"]) == 2
+                    if family == "discovered_change":
+                        # No task line tells of the change: only the work does.
+                        partnered = False
+                    else:
+                        partnered = family == "rename_vs_new_caller" or [t.get("pair") for t in assigned].count(
+                            task["pair"]) == 2
                     # A key no other task wants sets off nothing.
                     self.assertEqual(len(hits), 1 if partnered else 0, (task["id"], hits))
                     if family == "rename_vs_new_caller":
@@ -535,6 +539,164 @@ class DriverUnitTests(Temporary):
         code, verdict = tree("load_config")
         self.assertEqual((code, verdict["integrated_tests"]), (0, "passed"), verdict)
         self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, True])
+
+    def test_no_task_text_of_the_discovered_change_family_names_the_change(self):
+        """The changer's need is found in the code, so sharing task text
+        cannot tell a dependent what changes: no prompt, in any arm and
+        the awareness arm's peer list included, holds the changed
+        signature or anything a dependent's trigger matches."""
+        for n in tasks.SESSION_COUNTS:
+            for seed in range(5):
+                assigned = tasks.assign("discovered_change", n, seed)
+                self.assertEqual(assigned, tasks.assign("discovered_change", n, seed))
+                self.assertEqual([t["role"] for t in assigned].count("changer"), 1)
+                self.assertEqual([t["role"] for t in assigned].count("dependent"), n - 1)
+                self.assertEqual(len({t["id"] for t in assigned}), n)
+                self.assertEqual(tasks.leader(assigned), [t["role"] for t in assigned].index("changer") + 1)
+                for arm in driver.ARMS:
+                    for index in range(1, n + 1):
+                        prompt = driver.prompt_for(arm, "discovered_change", assigned, index)
+                        self.assertNotIn("today)", prompt.replace("expired(items, today)", ""), (arm, index))
+                        for task in assigned:
+                            if "trigger" in task:
+                                self.assertIsNone(re.search(task["trigger"], prompt), (arm, index, task["id"]))
+        self.assertIsNone(tasks.leader(tasks.assign("contradictory_defaults", 5, 1)))
+        self.assertEqual(tasks.assign("rename_vs_new_caller", 5, 1)[tasks.leader(
+            tasks.assign("rename_vs_new_caller", 5, 1)) - 1]["role"], "rename")
+
+    def apply(self, checkout, ops):
+        """A stand-in edit list applied to CHECKOUT, without hooks."""
+        for op in ops:
+            for name in op.get("paths", [op.get("path")]):
+                path = checkout / name
+                if op["op"] == "write":
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(op["content"])
+                else:
+                    path.write_text(path.read_text().replace(op["old"], op["new"]))
+
+    def test_the_discovered_change_oracle_needs_the_change_and_every_dependent_on_it(self):
+        changer = dict(tasks.CHANGER, role="changer")
+        dependent = dict(tasks.dependent_task(*tasks.DATED_FEATURES[1]), role="dependent")
+        plan = {"family": "discovered_change", "tasks": [changer, dependent], "config_users": [],
+                "integration": [{"session": 1, "merged": True}, {"session": 2, "merged": True}]}
+        path = dependent["owns"][0]
+
+        def tree(changer_mode, dependent_mode=None, content=None):
+            checkout = self.root / "checkout"
+            shutil.rmtree(checkout, ignore_errors=True)
+            shutil.copytree(HERE / "fixture", checkout)
+            self.apply(checkout, changer["standin"][changer_mode] if changer_mode else [])
+            if dependent_mode:
+                self.apply(checkout, dependent["standin"][dependent_mode])
+            if content is not None:
+                (checkout / path).write_text(content)
+            return self.oracle(plan, checkout)
+
+        # The change, and a dependent on the changed form: accepted.
+        code, verdict = tree("follow", "follow")
+        self.assertEqual((code, verdict["integrated_tests"]), (0, "passed"), verdict)
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, True])
+        # A dependent on the old form breaks the merged tree, which Git merged cleanly.
+        code, verdict = tree("follow", "ignore")
+        self.assertEqual((code, verdict["integrated_tests"]), (1, "failed"))
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, False])
+        self.assertEqual(len(verdict["semantic_conflicts"]), 1, verdict)
+        self.assertIn(path, verdict["semantic_conflicts"][0])
+        # A dependent that counts the days itself works whatever the changer
+        # does: a hedge, not the task.
+        code, verdict = tree("follow", "hedge")
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, False])
+        self.assertIn("days_left", verdict["tasks"][1]["detail"])
+        # A dependent that tries the new form and falls back to the old one hedges too.
+        guarded = ("import datetime\n\nfrom shelf.dates import days_left\n\n\ndef expiring_soon(items, within):\n"
+                   "    today = datetime.date.today()\n\n    def left(day):\n        try:\n"
+                   "            return days_left(day, today)\n        except TypeError:\n"
+                   "            return days_left(day)\n"
+                   "    return [name for name, day in items if 0 <= left(day) <= within]\n")
+        code, verdict = tree("follow", content=guarded)
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [True, False])
+        # A changer that keeps old calls working with a default hedges; so
+        # its dependent's old call fits, and is still not the changed form.
+        code, verdict = tree("hedge", "ignore")
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [False, False])
+        self.assertIn("default", verdict["tasks"][0]["detail"])
+        self.assertEqual(verdict["semantic_conflicts"], [])
+        # Without the change the clock decides, and the changer's own function is wrong.
+        code, verdict = tree(None, "ignore")
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [False, False])
+        # A changer that leaves the package's caller on the old form breaks it.
+        tree("follow", "follow")
+        orders = self.root / "checkout" / "shelf" / "orders.py"
+        orders.write_text((HERE / "fixture" / "shelf" / "orders.py").read_text())
+        code, verdict = self.oracle(plan, self.root / "checkout")
+        self.assertEqual([t["accepted"] for t in verdict["tasks"]], [False, True])
+        self.assertIn("shelf/orders.py", verdict["tasks"][0]["detail"])
+        self.assertEqual(verdict["fixture_tests"], "failed")
+
+    def test_every_claude_session_has_auto_memory_off_and_a_shared_directory_is_refused(self):
+        """Claude Code keys auto memory by repository, so the worktrees of
+        the LangSpan arm would share one directory: a channel between
+        sessions the other arms lack. Every session turns it off with the
+        CLI's own setting, and the preflight refuses a trial whose sessions
+        would share one."""
+        for arm in driver.ARMS:
+            argv = driver.claude_argv("claude", "x", arm)
+            self.assertEqual(json.loads(self.option(argv, "--settings")[0]), {"autoMemoryEnabled": False})
+            self.assertFalse(driver.auto_memory_on(argv, {}))
+            self.assertEqual(driver.shared_memory(arm, self.root / "work", [argv] * 3, [{}] * 3), [])
+        on = [a for a in driver.claude_argv("claude", "x", "langspan") if "autoMemoryEnabled" not in a]
+        on.remove("--settings")
+        self.assertTrue(driver.auto_memory_on(on, {}))
+        self.assertFalse(driver.auto_memory_on(on, {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}))
+        # Worktrees of one repository share the directory; clones do not.
+        self.assertEqual(driver.shared_memory("langspan", self.root / "work", [on] * 3, [{}] * 3), [1, 2, 3])
+        self.assertEqual(driver.shared_memory("worktrees", self.root / "work", [on] * 3, [{}] * 3), [])
+        # The session's environment holds the CLI's own switch as well.
+        plan = driver.make_plan("langspan", "rename_vs_new_caller", 2, 1, agent="claude")
+        self.assertEqual(driver.session_env(plan, {"PATH": "/bin"}, "/config")["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
+        self.assertEqual(plan["auto_memory"], "off")
+        self.assertEqual(driver.make_plan("langspan", "rename_vs_new_caller", 2, 1)["auto_memory"], "not_applicable")
+        # The preflight's check refuses sessions that would keep auto memory
+        # in one directory, and passes the commands the driver builds.
+        plan.update(work=str(self.root / "work"))
+        with self.assertRaisesRegex(driver.Refused, "sessions 1, 2 would share one Claude Code auto-memory"):
+            driver.refuse_shared_memory(plan, [on] * 2, [{}] * 2)
+        driver.refuse_shared_memory(plan, [driver.claude_argv("claude", "x", "langspan")] * 2, [{}] * 2)
+        config = self.root / "claude-config"
+        config.mkdir()
+        args = type("Args", (), {"agent": "claude", "langspan": None})()
+        saved = os.environ.get(driver.CLAUDE_CONFIG_ENV)
+        os.environ[driver.CLAUDE_CONFIG_ENV] = str(config)
+        try:
+            # Past the memory check, the LangSpan arm's next one refuses.
+            with self.assertRaisesRegex(driver.Refused, "--langspan"):
+                driver.preflight(args, plan)
+        finally:
+            if saved is None:
+                os.environ.pop(driver.CLAUDE_CONFIG_ENV, None)
+            else:
+                os.environ[driver.CLAUDE_CONFIG_ENV] = saved
+
+    def test_stagger_starts_the_changing_session_first_and_needs_one(self):
+        plan = driver.make_plan("langspan", "discovered_change", 5, 1, stagger=20)
+        self.assertEqual(plan["stagger_s"], 20)
+        lead = tasks.leader(plan["tasks"])
+        self.assertEqual([driver.start_delay(plan, i) for i in range(1, 6)],
+                         [0 if i == lead else 20 for i in range(1, 6)])
+        self.assertEqual(driver.make_plan("langspan", "discovered_change", 5, 1)["stagger_s"], 0)
+        self.assertEqual(driver.start_delay(driver.make_plan("langspan", "discovered_change", 5, 1), 2), 0)
+        for bad in (-1, driver.MAX_STAGGER + 1, True, "5"):
+            with self.assertRaises(ValueError, msg=bad):
+                driver.make_plan("langspan", "discovered_change", 5, 1, stagger=bad)
+        with self.assertRaises(ValueError):
+            driver.make_plan("langspan", "contradictory_defaults", 5, 1, stagger=10)
+        # A delayed session's time limit starts when it does.
+        plan.update(plan_path="/p/plan.json")
+        agents = driver.manifest_for(plan, [Path("/w/s%d" % i) for i in range(1, 6)], Path("/w/repo"))[
+            "items"][0]["arms"]["langspan"]["agents"]
+        self.assertEqual([a["timeout_seconds"] for a in agents],
+                         [plan["time_limit_s"] + driver.start_delay(plan, i) for i in range(1, 6)])
 
     def test_permission_denials_are_split_by_kind(self):
         """`peer_checkout`: aimed at another session's checkout, branch or
@@ -950,11 +1112,13 @@ class RefusalCollection(Temporary):
 class DryRun(Temporary):
     """The whole pipeline for each arm, family and stand-in mode."""
 
-    def run_driver(self, arm, family, n, mode, seed=11):
+    def run_driver(self, arm, family, n, mode, seed=11, stagger=None):
         output = self.root / ("%s-%s-%d-%s" % (arm, family, n, mode))
         argv = [sys.executable, "-B", str(HERE / "driver.py"), "--arm", arm, "--family", family,
                 "--sessions", str(n), "--seed", str(seed), "--standin-mode", mode, "--time-limit", "180",
                 "--run", "--output", str(output)]
+        if stagger is not None:
+            argv += ["--stagger", str(stagger)]
         if arm == "langspan":
             argv += ["--langspan", str(langspan_binary())]
         done = subprocess.run(argv, capture_output=True, text=True, timeout=900)
@@ -1062,13 +1226,13 @@ class DryRun(Temporary):
         on a peer's: always in the rename family, and wherever a key is
         paired in the contradictory one."""
         self.assertEqual(record["duplicate_work"], 0)
-        if family == "rename_vs_new_caller":
+        if family in ("rename_vs_new_caller", "discovered_change"):
             self.assertEqual(record["integrated_tests"], "failed")
-            # Every new caller uses the old name, which the rename removed.
+            # Every new caller uses the old form, which the changing task removed.
             self.assertEqual(record["merge_conflicts"], [])
             self.assertEqual(record["semantic_conflicts"], n - 1, record["semantic_conflict_details"])
             self.assertEqual(record["tasks_accepted"], 1)
-            self.assertEqual([t["accepted"] for t in record["tasks"] if t["role"] == "rename"], [True])
+            self.assertEqual([t["accepted"] for t in record["tasks"] if t["role"] in ("rename", "changer")], [True])
         else:
             # Both sides of each pair change the same default: Git refuses the
             # second. A task with no partner was right to change it.
@@ -1088,6 +1252,15 @@ class DryRun(Temporary):
         if family == "rename_vs_new_caller":
             self.check_uninformed(record, family, n)
             return
+        if family == "discovered_change":
+            # The changer keeps old calls working with a default, and each
+            # dependent counts the days itself: the tree works, and no task
+            # is what it asked for.
+            self.assertEqual(record["integrated_tests"], "failed")
+            self.assertEqual((record["merge_conflicts"], record["semantic_conflicts"]), ([], 0))
+            self.assertEqual(record["fixture_tests"], "passed")
+            self.assertEqual([t["accepted"] for t in record["tasks"]], [False] * n)
+            return
         layout = self.layout(record)
         self.assertIn("alone", layout, "every N = 5 layout has a task without a partner")
         self.assertEqual(record["integrated_tests"], "failed")
@@ -1098,16 +1271,24 @@ class DryRun(Temporary):
                             if kind == "alone"))
 
     def check_arm(self, arm, sizes, modes=("ignore", "follow")):
-        informs = arm != "worktrees"
         for family in tasks.FAMILIES:
+            # Peer task text informs the awareness arm, except where no task
+            # text names the change: there only LangSpan's notices can.
+            informs = arm == "langspan" or (arm == "awareness_only" and family != "discovered_change")
             for n in sizes:
                 for mode in modes:
                     with self.subTest(family=family, n=n, mode=mode):
                         record = self.run_driver(arm, family, n, mode)
                         if family == "rename_vs_new_caller":
                             triggered = [t["role"] == "new_caller" for t in record["tasks"]]
+                        elif family == "discovered_change":
+                            triggered = [t["role"] == "dependent" for t in record["tasks"]]
                         else:
                             triggered = [kind == "pair" for kind in self.layout(record)]
+                        # Measured only for a task that expects a notice, in the LangSpan arm.
+                        for task in record["tasks"]:
+                            measured = arm == "langspan" and task["role"] in ("new_caller", "dependent")
+                            self.assertEqual(task["notice_before_write"] is not None, measured, task)
                         if mode == "follow" and informs:
                             # The information its arm gave let every session reconcile.
                             self.assertEqual(self.informed(record), triggered)
@@ -1129,19 +1310,59 @@ class DryRun(Temporary):
                             told = [(output / t["hook_log"]).read_text() for t in record["tasks"]
                                     if t["role"] == "new_caller"]
                             self.assertTrue(all("load_config" in log and "In flight" in log for log in told))
+                        if arm == "langspan" and mode == "follow" and family == "discovered_change":
+                            # Only LangSpan's notice of the changed signature told each dependent.
+                            output = self.root / ("%s-%s-%d-%s" % (arm, family, n, mode))
+                            dependents = [t for t in record["tasks"] if t["role"] == "dependent"]
+                            self.assertTrue(all(t["interface_notices"] >= 1 for t in dependents), dependents)
+                            told = [(output / t["hook_log"]).read_text() for t in dependents]
+                            self.assertTrue(all("def days_left(day, today)" in log for log in told))
                         if arm != "langspan":
                             self.assertEqual([t["interface_notices"] for t in record["tasks"]], [None] * n)
 
     def test_dry_run_arm_worktrees(self):
         self.check_arm("worktrees", (2, 5))
 
-    def test_dry_run_hedging_fails_the_contradictory_family_in_every_arm(self):
+    def test_dry_run_hedging_fails_in_every_arm(self):
         """The pilot's sessions hedged with no peer information, and the old
-        oracle accepted it. Now a hedge fails wherever a task has no partner."""
-        for arm in driver.ARMS:
-            with self.subTest(arm=arm):
-                record = self.run_driver(arm, "contradictory_defaults", 5, "hedge")
-                self.check_hedged(record, "contradictory_defaults", 5)
+        oracle accepted it. Now a hedge fails wherever a task has no partner,
+        and a change kept callable the old way fails as well."""
+        for family in ("contradictory_defaults", "discovered_change"):
+            for arm in driver.ARMS:
+                with self.subTest(family=family, arm=arm):
+                    record = self.run_driver(arm, family, 5, "hedge")
+                    self.check_hedged(record, family, 5)
+
+    def test_dry_run_with_stagger_tells_every_dependent_before_its_first_write(self):
+        """Issue #194's third criterion: the changing session starts first,
+        so LangSpan's notice of the changed signature reaches each dependent
+        before it writes its call, and its first write is the informed one."""
+        record = self.run_driver("langspan", "discovered_change", 5, "follow", stagger=15)
+        self.assertEqual(record["stagger_s"], 15)
+        self.assertEqual(record["integrated_tests"], "passed", record)
+        dependents = [t for t in record["tasks"] if t["role"] == "dependent"]
+        output = self.root / "langspan-discovered_change-5-follow"
+
+        def order(task):
+            """Each hook call of TASK's session: event, tool, path, and whether it told of days_left."""
+            return [(entry["at"], entry["event"], entry["tool"], (entry.get("file_path") or "")[-30:],
+                     "days_left" in entry["stdout"])
+                    for entry in map(json.loads, (output / task["hook_log"]).read_text().splitlines())]
+        self.assertEqual([t["notice_before_write"] for t in dependents], [True] * 4,
+                         "\n".join("%s: %s" % (t["session"], order(t)) for t in dependents))
+        self.assertEqual([t["standin_informed"] for t in dependents], [True] * 4)
+        self.assertEqual([t["notice_before_write"] for t in record["tasks"] if t["role"] == "changer"], [None])
+        # The changer started first: its edit of the helper came before any dependent began.
+        changer = next(t for t in record["tasks"] if t["role"] == "changer")
+        changed_at = min(at for at, event, tool, path, _ in order(changer)
+                         if event == "PreToolUse" and tool == "Edit" and path.endswith("shelf/dates.py"))
+        self.assertTrue(all(order(t)[0][1] == "SessionStart" and order(t)[0][0] > changed_at for t in dependents),
+                        (changed_at, [order(t)[0] for t in dependents]))
+        # Each dependent wrote its module once: informed from the start, never revised.
+        for task in dependents:
+            log = [json.loads(line) for line in (output / task["hook_log"]).read_text().splitlines()]
+            writes = [entry for entry in log if entry["event"] == "PreToolUse" and entry["tool"] == "Write"]
+            self.assertEqual(len(writes), 1, writes)
 
     def test_dry_run_arm_awareness_only(self):
         self.check_arm("awareness_only", (2, 5))

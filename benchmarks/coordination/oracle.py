@@ -8,8 +8,10 @@ integrated result is accepted. The task definitions come from PLAN, written
 by the driver; nothing is imported from this directory.
 """
 
+import ast
 import datetime
 import importlib
+import inspect
 import json
 from pathlib import Path
 import re
@@ -44,8 +46,93 @@ def expected(function, value):
     return value
 
 
+def references(text, name):
+    """Each place TEXT names NAME (as `name` or `module.name`), in source
+    order: the call's argument count, or None for a reference that is not a
+    plain call (a call with `*args` or `**kwargs`, or the name passed or
+    kept as a value). None when TEXT does not parse."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+
+    def names(node):
+        return (isinstance(node, ast.Name) and node.id == name) or (isinstance(node, ast.Attribute) and node.attr == name)
+
+    counts = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and names(node.func):
+            spread = any(isinstance(arg, ast.Starred) for arg in node.args) or any(k.arg is None for k in node.keywords)
+            counts[id(node.func)] = None if spread else len(node.args) + len(node.keywords)
+    found = [(node.lineno, node.col_offset, counts.get(id(node))) for node in ast.walk(tree) if names(node)]
+    return [count for _, _, count in sorted(found, key=lambda item: item[:2])]
+
+
+def arity(function):
+    """The (fewest, most) arguments FUNCTION takes; most is None when it
+    takes any number."""
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return None
+    variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    fewest = sum(p.default is inspect.Parameter.empty and p.kind not in variadic for p in parameters)
+    most = None if any(p.kind in variadic for p in parameters) else len(parameters)
+    return fewest, most
+
+
+def source_of(checkout, path):
+    file = checkout / path
+    return file.read_text(encoding="utf-8", errors="replace") if file.is_file() else None
+
+
+def changed_form(task, checkout):
+    """Whether TASK's code calls the changed interface only in its changed
+    form: at least once, and every reference a call with at least the
+    arguments the change requires. A fallback to the old form, a call with
+    spread arguments, or code that counts without the helper is a hedge."""
+    interface = task["interface"]
+    own = task["module"].replace(".", "/") + ".py"
+    for path in task.get("callers") or [own]:
+        text = source_of(checkout, path)
+        if text is None:
+            return False, "%s is missing" % path
+        found = references(text, interface["name"])
+        if found is None:
+            return False, "%s does not parse" % path
+        if not found and path == own:
+            return False, "%s does not call %s, so it does not use the shared helper" % (path, interface["name"])
+        old = [count for count in found if count is None or count < interface["arity"]]
+        if old:
+            return False, "%s calls %s in its old form or through a fallback (%s)" % (
+                path, interface["name"], ", ".join("not a plain call" if c is None else "%d argument(s)" % c for c in old))
+    return True, None
+
+
+def dated(task, arguments):
+    """A check's arguments with each item's day offset made a date: from
+    today for a dependent, which uses the clock, and from DAY for the
+    changer, whose function is also given DAY."""
+    base = DAY if task["dates"] == "fixed" else datetime.date.today()
+    items = [(name, base + datetime.timedelta(days=offset)) for name, offset in arguments[0]]
+    return [items, *arguments[1:]] + ([DAY] if task["dates"] == "fixed" else [])
+
+
 def run_checks(task, checkout):
     """Import the task's module from the integrated tree and check it."""
+    if task["role"] == "changer":
+        interface = task["interface"]
+        helper = getattr(load(interface["module"]), interface["name"], None)
+        taken = arity(helper) if callable(helper) else None
+        if taken is None:
+            return False, "%s is not defined in %s" % (interface["name"], interface["module"])
+        if taken[0] < interface["arity"]:
+            return False, ("%s still accepts %d argument(s): a default or the old signature keeps its old calls "
+                           "working" % (interface["name"], taken[0]))
+    if task["role"] in ("changer", "dependent"):
+        ok, why = changed_form(task, checkout)
+        if not ok:
+            return False, why
     if task["role"] == "new_caller":
         # The new caller must use the new name, not reach the parser through
         # an alias or a wrapper the rename was told not to keep.
@@ -57,6 +144,8 @@ def run_checks(task, checkout):
     call = getattr(module, task["function"])
     if "checks" in task:
         for arguments, result in task["checks"]:
+            if "dates" in task:
+                arguments = dated(task, arguments)
             got = call(*arguments)
             if got != result:
                 return False, "%s%r returned %r, expected %r" % (task["function"], tuple(arguments), got, result)
@@ -119,6 +208,25 @@ def judge(plan, checkout):
             for name in ("parse_config", "load_config"):
                 if name not in defined and re.search(r"\b%s\b" % name, text):
                     conflicts.append("%s calls %s, which the integrated shelf/config.py does not define" % (path, name))
+        for entry in tasks:
+            entry["accepted"] = entry["completed"]
+    elif plan["family"] == "discovered_change":
+        # A call that does not fit the integrated helper breaks the tree,
+        # whichever branch wrote it.
+        interface = next(task["interface"] for task in plan["tasks"] if "interface" in task)
+        helper = getattr(load(interface["module"]), interface["name"], None)
+        taken = arity(helper) if callable(helper) else None
+        for path, text in python_sources(checkout).items():
+            counts = [count for count in references(text, interface["name"]) or [] if count is not None]
+            if counts and taken is None:
+                conflicts.append("%s calls %s, which the integrated tree does not define" % (path, interface["name"]))
+            elif taken is not None:
+                unfit = sorted({count for count in counts
+                                if count < taken[0] or (taken[1] is not None and count > taken[1])})
+                if unfit:
+                    conflicts.append("%s calls %s with %s argument(s); the integrated %s takes %d to %s" % (
+                        path, interface["name"], " or ".join(map(str, unfit)), interface["module"], taken[0],
+                        "any number" if taken[1] is None else taken[1]))
         for entry in tasks:
             entry["accepted"] = entry["completed"]
     else:
