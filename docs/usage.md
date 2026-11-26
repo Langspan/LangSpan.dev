@@ -351,25 +351,35 @@ these limits.
 
 ### Antigravity
 
-The Antigravity adapter is built from Antigravity's documentation; it has not
-yet run on a real Antigravity. `hooks install antigravity` writes
+The Antigravity adapter is built from Antigravity's documentation and
+corrected against the events of a real Antigravity 1.5.14 run; a repeat run
+with these corrections is pending. `hooks install antigravity` writes
 `.agents/hooks.json` and registers `langspan mcp` in `.agents/mcp_config.json`;
 `install --hosts antigravity` writes `~/.gemini/config/hooks.json` and
-`~/.gemini/config/mcp_config.json`. Antigravity's App, CLI and IDE all read
-these files. Its `hooks.json` maps hook names to definitions, so LangSpan's
-entries are the definition named `langspan`, beside your own. An Antigravity
-event does not say which event it is, so each installed command names it with
+`~/.gemini/config/mcp_config.json`. An empty `mcp_config.json`, which
+Antigravity leaves at both levels, is taken as an empty configuration.
+Antigravity's App, CLI and IDE all read these files. Its `hooks.json` maps
+hook names to definitions, so LangSpan's entries are the definition named
+`langspan`, beside your own. Each installed command names its event with
 `--event`. Each has a 5-second timeout:
 
 | Event | Matcher | What LangSpan does |
 | --- | --- | --- |
-| `PreToolUse` | `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` | Admission; a conflict or stale source is `{"decision":"deny"}` with a labelled reason |
-| `PostToolUse` | the same, and `view_file` | Records the result, the version read, or the shell command's changes |
+| `PreToolUse` | `edit_file`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` | Admission; a conflict or stale source is `{"decision":"deny"}` with a labelled reason, anything else `{"decision":"allow"}` |
+| `PostToolUse` | the same, and `read_file` and `view_file` | Records the result, the version read, or the shell command's changes |
 | `SessionStart` | none | Registers the session and adds the briefing as a system message in `injectSteps` |
 | `PreInvocation` | none | Before each model call: news from peers since the session was last told, as a system message; at the first call of an execution, the prompt summary and code briefing too |
 
-Every other answer is `{}`: the hook never answers `allow`, `auto_approve` or
-`ask`, so Antigravity's own permission policy decides. A conversation is one
+Antigravity 1.5.14 edits with `edit_file` and reads with `read_file`; the
+other tool names are the documented ones, kept in case another version uses
+them. If `doctor` reports that a matcher does not name the tools this version
+handles, an earlier install wrote it: run the install command again.
+
+On `PreToolUse`, Antigravity 1.5.14 reads `{}` as a refusal, so the hook
+answers `{"decision":"allow"}` whenever it does not deny, including when it
+cannot decide. `allow` passes the call on to the next hook or Antigravity's
+own permission policy; the hook never answers `auto_approve` or `ask`. Every
+other event's answer, other than a briefing, is `{}`. A conversation is one
 session in each workspace it works in, appearing as
 `antigravity.<conversationId>.w<digest of the workspace>`; with several
 workspace folders, each is registered and briefed at `SessionStart` and
@@ -377,8 +387,9 @@ workspace folders, each is registered and briefed at `SessionStart` and
 hook steps aside for the workspace's `.agents/hooks.json` only while that
 file's `langspan` definition is not `"enabled": false`.
 Antigravity has no session-end event, and its `Stop` requires a decision, so
-neither is registered. A `replace_file_content` holds the region it replaces;
-`write_to_file` and `multi_replace_file_content` hold the whole file.
+neither is registered. An `edit_file` or `replace_file_content` holds the
+region it replaces; `write_to_file` and `multi_replace_file_content` hold the
+whole file.
 [ADR 0035](adr/0035-antigravity-adapter.md) lists the sources and what the
 documentation leaves unverified.
 
