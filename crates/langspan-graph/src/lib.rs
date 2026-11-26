@@ -414,8 +414,10 @@ fn java_text(declaration: Node, start: usize, end: usize, source: &[u8]) -> Stri
 }
 
 /// A Java definition's signature: the declaration up to its body, without
-/// annotations. A constant's is its modifiers, type and name, without the
-/// value; an enum constant's is its name.
+/// annotations. A constant's is its modifiers, type, name and any array
+/// dimensions after the name, without the value; an enum constant's is its
+/// name. An annotation element's ends before its `default` value, which a
+/// caller does not write.
 fn java_signature(node: Node, source: &[u8]) -> String {
     match node.kind() {
         "enum_constant" => node
@@ -432,13 +434,27 @@ fn java_signature(node: Node, source: &[u8]) -> String {
             let name = node
                 .child_by_field_name("name")
                 .map_or("", |name| text(name, source));
+            // `int IDS[][]`: the brackets after one declarator's name are
+            // part of its type.
+            let dimensions = node
+                .child_by_field_name("dimensions")
+                .map_or(String::new(), |dimensions| {
+                    one_line(text(dimensions, source), SIGNATURE_BYTES).replace(' ', "")
+                });
             let prefix = java_text(field, java_start(field).start_byte(), end, source);
-            one_line(&format!("{prefix} {name}"), SIGNATURE_BYTES)
+            one_line(&format!("{prefix} {name}{dimensions}"), SIGNATURE_BYTES)
         }
         _ => {
+            let mut cursor = node.walk();
+            let default = node
+                .children(&mut cursor)
+                .find(|child| child.kind() == "default")
+                .map(|keyword| keyword.start_byte());
             let end = node
                 .child_by_field_name("body")
-                .map_or(node.end_byte(), |body| body.start_byte());
+                .map(|body| body.start_byte())
+                .or(default)
+                .unwrap_or(node.end_byte());
             java_text(node, java_start(node).start_byte(), end, source)
         }
     }
@@ -474,7 +490,12 @@ fn definition_kind(language: Language, kind: &str, in_type: bool) -> Option<Symb
         (Language::Go, "method_declaration") => Method,
         (Language::Go, "type_spec" | "type_alias") => Type,
         (Language::Go, "const_spec") => Constant,
-        (Language::Java, "method_declaration" | "constructor_declaration") => Method,
+        (
+            Language::Java,
+            "method_declaration"
+            | "constructor_declaration"
+            | "annotation_type_element_declaration",
+        ) => Method,
         (Language::Java, "class_declaration" | "record_declaration" | "enum_declaration") => Type,
         (Language::Java, "interface_declaration" | "annotation_type_declaration") => Interface,
         (Language::Java, "enum_constant") => Constant,

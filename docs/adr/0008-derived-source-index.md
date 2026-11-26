@@ -24,7 +24,8 @@ parsed and marked partial.
 **Java** (`.java`, added 25 November 2026 for roadmap D6,
 [issue #55](https://github.com/Langspan/LangSpan.dev/issues/55)). Classes,
 records and enums are types; interfaces and annotation types are interfaces;
-methods and constructors are methods, since Java has no free functions; enum
+methods, constructors and annotation elements are methods, since Java has no
+free functions; enum
 constants and `static final` fields (every interface field) are constants, one
 per declarator; a `module-info.java` module is a module. Packages are not
 symbols. The export rule is what another package can reach: `public` or
@@ -35,7 +36,9 @@ Each declaration is judged alone, so a `public` method of a package-private
 class is exported, as a `pub fn` in a private Rust module is. A definition
 starts after the annotations and comments that lead its modifiers, and its
 signature leaves those annotations out: adding `@Override` or `@Deprecated`
-changes no caller. A constant's signature is its modifiers, type and name. An
+changes no caller. A constant's signature is its modifiers, type, name and
+any array dimensions after the name (`int IDS[][]`). An annotation element's
+signature ends before its `default` value. An
 import is recorded as written after `import` or `import static`, with any
 `.*`. References are identifiers and type names. Calls are method calls,
 member calls (`a.f(x)`, `this.f()`, `super.f()`) and constructor calls

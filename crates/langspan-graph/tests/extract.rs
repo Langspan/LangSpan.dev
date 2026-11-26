@@ -252,6 +252,7 @@ fn java_definitions_of_each_kind_with_lines_signatures_references_and_imports() 
             ("place", Method, 54, 54, "Order place(Cart cart)"),
             ("secret", Method, 56, 56, "private void secret()"),
             ("Audited", Interface, 59, 61, "public @interface Audited"),
+            ("value", Method, 60, 60, "String value()"),
         ]
     );
     // A definition's bytes start after its annotations and doc comment.
@@ -319,6 +320,7 @@ fn java_exports_what_another_package_can_reach() {
     assert!(exported("OPEN", 34) && exported("CLOSED", 35));
     assert!(exported("MAX", 52) && exported("place", 54));
     assert!(!exported("secret", 56));
+    assert!(exported("value", 60), "an annotation element is public");
     // A method of an anonymous class is no one's interface.
     assert!(!exported("tick", 46));
 }
@@ -366,6 +368,83 @@ fn a_java_rewrap_or_annotation_is_not_a_signature_change_and_a_type_change_is() 
     let body = "public class Orders {\n    public Order place(Cart cart) { return cart.order(); }\n    private void hidden(int a) {}\n}\n";
     let body_after = "public class Orders {\n    public Order place(Cart cart) { return null; }\n    private void hidden(long a) {}\n}\n";
     assert_eq!(changed(body, body_after), []);
+}
+
+#[test]
+fn a_java_constant_array_dimension_after_its_name_is_part_of_its_signature() {
+    let signatures = |source: &str| -> Vec<(String, String)> {
+        extract(Language::Java, source.as_bytes())
+            .unwrap()
+            .symbols
+            .into_iter()
+            .map(|symbol| (symbol.name, symbol.signature))
+            .collect()
+    };
+    let pair = |name: &str, signature: &str| (name.to_owned(), signature.to_owned());
+    let before = "public class Ids {\n    public static final int IDS[] = null;\n}\n";
+    let after = "public class Ids {\n    public static final int IDS[][] = null;\n}\n";
+    assert_eq!(
+        signatures(before)[1],
+        pair("IDS", "public static final int IDS[]")
+    );
+    let changes = diff(
+        &extract(Language::Java, before.as_bytes()).unwrap(),
+        &extract(Language::Java, after.as_bytes()).unwrap(),
+    );
+    assert_eq!(
+        changes,
+        [langspan_graph::SymbolChange {
+            name: "IDS".into(),
+            kind: SymbolKind::Constant,
+            change: Change::SignatureChanged {
+                before: "public static final int IDS[]".into(),
+                after: "public static final int IDS[][]".into(),
+            },
+        }]
+    );
+    // One field, differently dimensioned constants.
+    let mixed =
+        "public class Ids {\n    public static final int A = 1, B[] = null, C[][] = null;\n}\n";
+    assert_eq!(
+        signatures(mixed)[1..],
+        [
+            pair("A", "public static final int A"),
+            pair("B", "public static final int B[]"),
+            pair("C", "public static final int C[][]"),
+        ]
+    );
+}
+
+#[test]
+fn a_java_annotation_element_change_or_removal_is_an_interface_change() {
+    let graph = |source: &str| extract(Language::Java, source.as_bytes()).unwrap();
+    let before =
+        graph("public @interface Audited {\n    String value();\n    int level() default 1;\n}\n");
+    let level = before.symbols.iter().find(|s| s.name == "level").unwrap();
+    assert_eq!(
+        (level.kind, level.exported, level.signature.as_str()),
+        (SymbolKind::Method, true, "int level()"),
+        "the default value is not what a caller writes"
+    );
+    let retyped = graph(
+        "public @interface Audited {\n    String[] value();\n    int level() default 1;\n}\n",
+    );
+    assert_eq!(
+        diff(&before, &retyped),
+        [langspan_graph::SymbolChange {
+            name: "value".into(),
+            kind: SymbolKind::Method,
+            change: Change::SignatureChanged {
+                before: "String value()".into(),
+                after: "String[] value()".into(),
+            },
+        }]
+    );
+    let removed = graph("public @interface Audited {\n    int level() default 1;\n}\n");
+    let changes = diff(&before, &removed);
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].name, "value");
+    assert!(matches!(changes[0].change, Change::Removed), "{changes:?}");
 }
 
 /// `langspan doctor` lists `Language::ALL`: each entry is chosen by its
