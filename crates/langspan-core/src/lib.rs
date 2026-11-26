@@ -40,9 +40,9 @@ pub use flaky::{
     MAX_TEST_RESULT_BYTES, TestFailure, TestHistory, TestLearning, TestResults,
 };
 pub use history::{
-    HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_NAME_BYTES, HISTORY_RELATED,
-    HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote, HistoryQuery,
-    history as definition_history,
+    HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_MOVES, HISTORY_NAME_BYTES,
+    HISTORY_RELATED, HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote,
+    HistoryQuery, history as definition_history,
 };
 pub use rank::{
     Dependent, QUALIFIER_BYTES, RANK_CANDIDATES, RankInputs, RankReason, is_qualifier,
@@ -1158,7 +1158,8 @@ pub struct CheckNotice {
     /// absent when it was inconclusive or is no wider check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface_grade: Option<InterfaceGrade>,
-    /// The interface change a wider check ran for.
+    /// The interface change a wider check ran for. Boxed: it holds a whole
+    /// `InterfaceChange`, and most notices have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface: Option<Box<InterfaceCause>>,
     /// See [`CheckReport::index_incomplete`].
@@ -1501,11 +1502,13 @@ pub struct InterfaceChange {
     /// signature in `after`: kept in the log for a definition's history
     /// (roadmap D4), never held for briefings. A removal recorded since
     /// then carries the removed signature in `before`. `renamed` means the
-    /// only definition of `name` went and one with the same body and the
-    /// same signature but for the name came as `after_name`. The last two mean only the number of
-    /// definitions sharing the name and kind changed: `after` (added) or
-    /// `before` (removed) holds the signatures that came or went, and the
-    /// counts say how many there were and are.
+    /// only definition of `name` went and one with the same signature but
+    /// for the name came as `after_name`, with the evidence `evidence`
+    /// names; with `file_moved`, the definition kept its name and moved with
+    /// its whole file from `before_path` to the notice's path. The last two
+    /// mean only the number of definitions sharing the name and kind
+    /// changed: `after` (added) or `before` (removed) holds the signatures
+    /// that came or went, and the counts say how many there were and are.
     pub change: String,
     pub before: Option<String>,
     pub after: Option<String>,
@@ -1513,6 +1516,29 @@ pub struct InterfaceChange {
     /// recorded before renames were told apart from removals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_name: Option<String>,
+    /// The old name, for `renamed` only: always `name` (roadmap D7). Absent
+    /// from notices recorded before it was kept. This field, `evidence`,
+    /// `before_path` and `private` are left out of replies to protocol
+    /// version 3 clients, and so is a change with `private` set
+    /// (`protocol::encode_for` in the daemon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_name: Option<String>,
+    /// What links the two, for `renamed` only (roadmap D7): `same_body`
+    /// (the same body digest), `same_signature` (a changed body at the same
+    /// first and last line) or `file_moved` (the whole file moved, with
+    /// exactly the same content). Absent from renames recorded before it
+    /// was kept, which were all `same_body`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// Where the file was before, for `file_moved` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_path: Option<String>,
+    /// A definition that is not exported, for `file_moved` only: what the
+    /// notice of a file with no exports lists, so that the file's notes and
+    /// history follow it (roadmap D7). History only, like `added`: never
+    /// held for briefings, recaps, break alerts or the dashboard.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub private: bool,
     /// Parameter counts of `before` and `after`, when each is exactly one
     /// function's signature (ADR 0029). Absent from notices recorded
     /// before they were kept.
@@ -1526,6 +1552,51 @@ pub struct InterfaceChange {
     pub before_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_count: Option<u32>,
+}
+
+/// One recorded rename of an exported definition (roadmap D7): `name` went
+/// from `path` and `after_name` came, linked by `evidence` (absent for a
+/// rename recorded before it was kept).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Rename {
+    pub name: String,
+    pub after_name: String,
+    pub kind: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// The rename's new signature.
+    pub after: String,
+}
+
+/// Renames remembered per workspace for `graph symbol --renamed`.
+pub const MAX_RENAMES: usize = 256;
+/// Renames one lookup follows at most, old name to newest.
+pub const MAX_RENAME_HOPS: usize = 8;
+
+/// The renames that took `name` to its newest name in `workspace_id`, in
+/// order, at most `MAX_RENAME_HOPS`; `None` when no rename of it is
+/// recorded. Each hop after the first is of the first one's kind, so an
+/// unrelated definition's rename never continues the chain. A hop back to a
+/// name already passed ends the chain.
+pub fn renamed_to(state: &State, workspace_id: &str, name: &str) -> Option<Vec<Rename>> {
+    let renames = state.renames.get(workspace_id)?;
+    let mut hops: Vec<Rename> = Vec::new();
+    let mut current = name;
+    while hops.len() < MAX_RENAME_HOPS {
+        let Some(hop) = renames.iter().find(|rename| {
+            rename.name == current && hops.first().is_none_or(|first| first.kind == rename.kind)
+        }) else {
+            break;
+        };
+        if hop.after_name == name || hops.iter().any(|seen| seen.name == hop.after_name) {
+            break;
+        }
+        hops.push(hop.clone());
+        current = &hop.after_name;
+    }
+    (!hops.is_empty()).then_some(hops)
 }
 
 /// Definitions sharing one name and kind that a notice counts at most.
@@ -1683,6 +1754,11 @@ pub struct InflightSymbol {
     pub kind: String,
     pub signature: String,
     pub mentioned_in: Vec<String>,
+    /// The name `HEAD` gave this symbol, when the worktree renamed it
+    /// (roadmap D7): files that mention either name are told. Left out of
+    /// replies to protocol version 3 clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
 }
 
 /// An in-flight symbol as a briefing or `graph inflight` tells it.
@@ -1700,6 +1776,9 @@ pub struct InflightNotice {
     pub signature: String,
     /// The asking side's files that mention it.
     pub mentioned_in: Vec<String>,
+    /// See [`InflightSymbol::renamed_from`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
 }
 
 /// What a symbol's in-flight line costs of `INFLIGHT_BYTES`: at least what
@@ -1718,6 +1797,8 @@ pub fn inflight_cost(notice: &InflightNotice) -> usize {
     .map(|text| quoted(text))
     .sum::<usize>()
         + notice.session.as_deref().map_or(0, quoted)
+        // ` (renamed from "…")`.
+        + notice.renamed_from.as_deref().map_or(0, |from| quoted(from) + 16)
         + notice
             .mentioned_in
             .iter()
@@ -1774,6 +1855,7 @@ pub fn inflight_notice(state: &State, item: &InflightSymbol) -> Option<InflightN
         kind: item.kind.clone(),
         signature: item.signature.clone(),
         mentioned_in: item.mentioned_in.clone(),
+        renamed_from: item.renamed_from.clone(),
     })
 }
 
@@ -2533,6 +2615,11 @@ pub struct State {
     /// the ended session's ID (issue #161). One adoption per ended session.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adoptions: BTreeMap<String, Adoption>,
+    /// Recorded renames per workspace, newest first, at most `MAX_RENAMES`
+    /// (roadmap D7): what `graph symbol --renamed` follows. A name defined
+    /// again is dropped. Derived on replay; not part of the status reply.
+    #[serde(skip)]
+    pub renames: BTreeMap<String, Vec<Rename>>,
     /// The current generation's clock anchor, once recorded. Derived from
     /// the events on replay; not part of the status reply.
     #[serde(skip)]
@@ -3696,6 +3783,10 @@ pub enum Command {
         /// The asking session, whose own files rank first.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        /// Follow recorded renames of `name` to its newest name and look
+        /// that up instead (roadmap D7); the answer's `renamed` says which.
+        #[serde(default, skip_serializing_if = "is_false")]
+        renamed: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
@@ -4434,6 +4525,10 @@ enum CommandWire {
         /// The asking session, whose own files rank first.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        /// Follow recorded renames of `name` to its newest name and look
+        /// that up instead (roadmap D7); the answer's `renamed` says which.
+        #[serde(default, skip_serializing_if = "is_false")]
+        renamed: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
@@ -5032,6 +5127,11 @@ pub enum Outcome {
         /// the same index snapshot as `coverage`. Absent otherwise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         levels: Option<Vec<ImpactLevel>>,
+        /// `graph symbol --renamed` of a name with a recorded rename: the
+        /// renames followed, in order; `symbols` are the last new name's.
+        /// Absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        renamed: Option<Vec<Rename>>,
     },
     /// Only names with at least one definition, in the order asked.
     GraphContext {
@@ -7871,6 +7971,7 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
             change.after.as_ref(),
             change.after_name.as_ref(),
         ];
+        validate_rename_record(notice, change)?;
         let counts = match (change.before_count, change.after_count) {
             (Some(before), Some(after)) => Some((before, after)),
             (None, None) => None,
@@ -7880,9 +7981,13 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         // signatures. A count change names its counts, in the direction it
         // says, and carries the signatures that came or went; nothing else
         // has counts.
+        // A definition moved with its file keeps its name (roadmap D7).
         let renamed = change.change == "renamed";
+        let moved = change.evidence.as_deref() == Some(FILE_MOVED);
         let named = match &change.after_name {
-            Some(to) => renamed && !to.is_empty() && to.len() <= 128 && *to != change.name,
+            Some(to) => {
+                renamed && !to.is_empty() && to.len() <= 128 && ((*to == change.name) == moved)
+            }
             None => !renamed,
         };
         let shaped = named
@@ -7926,6 +8031,118 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
                 "An interface change has a name, a kind, `added`, `removed`, `signature_changed`, `renamed` with a different `after_name` of at most 128 bytes, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
             ));
         }
+    }
+    Ok(())
+}
+
+/// What a notice's renames and moves change in the state (roadmap D7). A
+/// rename is remembered under its old name and kind, replacing an earlier
+/// rename of that name and kind; a name that comes back as the
+/// same kind (added, or the new name of another rename) is forgotten as
+/// renamed. A file moved
+/// whole takes its notes along: each note about the old path is about the
+/// new one instead.
+fn follow_renames(state: &mut State, notice: &InterfaceNotice) {
+    for change in &notice.changes {
+        let moved = change.evidence.as_deref() == Some(FILE_MOVED);
+        let renames = state
+            .renames
+            .entry(notice.workspace_id.clone())
+            .or_default();
+        let back = match (change.change.as_str(), &change.after_name) {
+            ("added", _) => Some(&change.name),
+            ("renamed", Some(to)) if !moved => Some(to),
+            _ => None,
+        };
+        if let Some(back) = back {
+            // Only a definition of the renamed one's kind takes its name
+            // back, as the lookup's own check does.
+            renames.retain(|rename| rename.name != *back || rename.kind != change.kind);
+        }
+        if let ("renamed", Some(to), false) = (change.change.as_str(), &change.after_name, moved) {
+            renames.retain(|rename| rename.name != change.name || rename.kind != change.kind);
+            renames.insert(
+                0,
+                Rename {
+                    name: change.name.clone(),
+                    after_name: to.clone(),
+                    kind: change.kind.clone(),
+                    path: notice.path.clone(),
+                    evidence: change.evidence.clone(),
+                    after: change.after.clone().unwrap_or_default(),
+                },
+            );
+            renames.truncate(MAX_RENAMES);
+        }
+        if renames.is_empty() {
+            state.renames.remove(&notice.workspace_id);
+        }
+        let Some(from) = change.before_path.as_ref().filter(|_| moved) else {
+            continue;
+        };
+        for note in state
+            .notes
+            .get_mut(&notice.workspace_id)
+            .into_iter()
+            .flatten()
+        {
+            // Sorted and once each, as a note's paths are recorded.
+            if let Some(at) = note.paths.iter().position(|path| path == from) {
+                note.paths[at].clone_from(&notice.path);
+                note.paths.sort();
+                note.paths.dedup();
+            }
+        }
+    }
+}
+
+/// What links a rename's two names (roadmap D7).
+pub const RENAME_EVIDENCE: [&str; 3] = ["same_body", "same_signature", FILE_MOVED];
+/// The evidence of a definition that moved with its whole file.
+pub const FILE_MOVED: &str = "file_moved";
+
+/// A rename's evidence in words, as a notice ends its rename: ` (same
+/// body)`, ` (same signature)`, or nothing for a rename recorded before its
+/// evidence was kept and for a moved file, whose text says so itself.
+pub fn rename_evidence_words(evidence: Option<&str>) -> &'static str {
+    match evidence {
+        Some("same_body") => " (same body)",
+        Some("same_signature") => " (same signature)",
+        _ => "",
+    }
+}
+
+/// A rename's old name, evidence and old path (roadmap D7): each only on a
+/// rename, the old name always `name`, and an old path exactly when the
+/// file moved, other than the notice's path. A rename without them was
+/// recorded before they were kept and is read as it was.
+fn validate_rename_record(
+    notice: &InterfaceNotice,
+    change: &InterfaceChange,
+) -> Result<(), CoreError> {
+    let renamed = change.change == "renamed";
+    let moved = change.evidence.as_deref() == Some(FILE_MOVED);
+    let shaped = change
+        .before_name
+        .as_ref()
+        .is_none_or(|name| renamed && *name == change.name)
+        && change
+            .evidence
+            .as_deref()
+            .is_none_or(|evidence| renamed && RENAME_EVIDENCE.contains(&evidence))
+        && match &change.before_path {
+            Some(path) => moved && *path != notice.path,
+            None => !moved,
+        }
+        && (!change.private || moved);
+    if !shaped {
+        return Err(error(
+            "invalid_notice",
+            "A rename's `before_name` is its name, its `evidence` is `same_body`, `same_signature` or `file_moved`, and only `file_moved` has a `before_path`, another file than the notice's, or is `private`",
+        ));
+    }
+    if let Some(path) = &change.before_path {
+        validate_relative_path(path)?;
     }
     Ok(())
 }
@@ -11205,8 +11422,11 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             // news to no dependent, so it is not held for briefings, recaps,
             // break alerts or the dashboard, and an addition alone does not
             // replace the file's held notice or open a workspace's entry.
+            // A private definition moved with its file is history only too.
+            follow_renames(state, notice);
             let mut held = notice.clone();
-            held.changes.retain(|change| change.change != "added");
+            held.changes
+                .retain(|change| change.change != "added" && !change.private);
             if !held.changes.is_empty() {
                 let notices = state
                     .interface_notices
@@ -11787,16 +12007,92 @@ pub fn validate_calls(calls: &[CallSite]) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Changes to functions that another live session made in this session's
+/// Where a notice of another worktree stands against the asking session's
+/// checkout, as Git answers it (issue #217).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// The notice's file differs from its worktree's `HEAD`: not committed.
+    Uncommitted,
+    /// Committed on its worktree's branch, in a commit the asking
+    /// checkout's `HEAD` does not contain.
+    Unmerged,
+    /// The asking checkout's `HEAD` contains the commit.
+    Merged,
+}
+
+/// Standings by `(workspace ID, notice ID)`. A notice missing from it, such
+/// as one Git could not answer for in time, keeps the uncommitted rules.
+pub type Standings = BTreeMap<(String, String), Standing>;
+
+/// Notices of other worktrees whose standing one write check asks Git for,
+/// at most.
+pub const MAX_STANDING_QUESTIONS: usize = 8;
+
+/// A notice of another worktree whose standing a write check asks Git for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandingQuestion {
+    pub workspace_id: String,
+    pub notice_id: String,
+    /// The notice's file, relative to that worktree's root.
+    pub path: String,
+}
+
+/// The notices of other worktrees that `calls` could be alerted to if they
+/// were committed and not merged: those the uncommitted rules would also
+/// keep, and those they leave out only because the change is older than the
+/// briefing horizon or its session has ended. At most
+/// `MAX_STANDING_QUESTIONS`, each workspace's newest first. Usually none, and
+/// then Git is not asked.
+pub fn standing_questions(
+    state: &State,
+    session_id: &str,
+    calls: &[CallSite],
+    now_ms: u64,
+) -> Result<Vec<StandingQuestion>, CoreError> {
+    validate_calls(calls)?;
+    let own = &current_session(state, session_id)?.workspace_id;
+    let mut questions: Vec<StandingQuestion> = Vec::new();
+    for (notice, change, _) in alertable(state, session_id, now_ms, None)? {
+        let asked = questions.iter().any(|question| {
+            question.workspace_id == notice.workspace_id && question.notice_id == notice.notice_id
+        });
+        if notice.workspace_id == *own
+            || asked
+            || !calls.iter().any(|call| call.name == change.name)
+        {
+            continue;
+        }
+        if questions.len() == MAX_STANDING_QUESTIONS {
+            break;
+        }
+        questions.push(StandingQuestion {
+            workspace_id: notice.workspace_id.clone(),
+            notice_id: notice.notice_id.clone(),
+            path: notice.path.clone(),
+        });
+    }
+    Ok(questions)
+}
+
+/// Changes to functions that another session made in this session's
 /// workspace or in another worktree of its repository (issue #194), in this
-/// generation and within the briefing horizon, that this session has not
-/// been alerted to: `(notice, change, the peer)`. A signature change counts
-/// only with the new parameter count; a rename and a removal always count.
-/// The session's own workspace first, each workspace's newest notice first.
+/// generation, that this session has not been alerted to: `(notice, change,
+/// the peer)`. A signature change counts only with the new parameter count;
+/// a rename and a removal always count. The session's own workspace first,
+/// each workspace's newest notice first.
+///
+/// An uncommitted change counts within the briefing horizon while its
+/// session is live. Another worktree's change that `standings` says is
+/// committed and not merged into this session's checkout counts whatever
+/// its age and whether or not its session has ended, and one it says is
+/// merged never counts (issue #217). With `standings` `None` (asking which
+/// notices Git should answer for), every other worktree's change counts
+/// as if committed and not merged.
 fn alertable<'a>(
     state: &'a State,
     session_id: &str,
     now_ms: u64,
+    standings: Option<&Standings>,
 ) -> Result<Vec<(&'a InterfaceNotice, &'a InterfaceChange, &'a str)>, CoreError> {
     let me = current_session(state, session_id)?;
     let alerted = state
@@ -11833,11 +12129,26 @@ fn alertable<'a>(
         let Some(peer) = notice.by_session.as_deref() else {
             continue;
         };
+        let standing = if notice.workspace_id == me.workspace_id {
+            Some(Standing::Uncommitted)
+        } else {
+            match standings {
+                None => Some(Standing::Unmerged),
+                Some(standings) => standings
+                    .get(&(notice.workspace_id.clone(), notice.notice_id.clone()))
+                    .copied(),
+            }
+        };
+        let committed = match standing {
+            Some(Standing::Merged) => continue,
+            Some(Standing::Unmerged) => true,
+            Some(Standing::Uncommitted) | None => false,
+        };
         if notice.generation != state.generation
-            || now_ms.saturating_sub(notice.at_ms) > BRIEF_HORIZON_MS
             || peer == session_id
             || alerted.contains(&notice.notice_id)
-            || !live(peer)
+            || (!committed
+                && (now_ms.saturating_sub(notice.at_ms) > BRIEF_HORIZON_MS || !live(peer)))
         {
             continue;
         }
@@ -11858,17 +12169,19 @@ fn alertable<'a>(
 
 /// The names among `calls` that a write check must look up in the index,
 /// by the workspace whose index holds the change: those of a change it
-/// could alert to, and a renamed function's new name. Usually none, and
-/// then nothing is looked up.
+/// could alert to, and a renamed function's new name. `standings` holds
+/// Git's answers for `standing_questions`. Usually none, and then nothing
+/// is looked up.
 pub fn call_candidates(
     state: &State,
     session_id: &str,
     calls: &[CallSite],
+    standings: &Standings,
     now_ms: u64,
 ) -> Result<BTreeMap<String, BTreeSet<String>>, CoreError> {
     validate_calls(calls)?;
     let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (notice, change, _) in alertable(state, session_id, now_ms)? {
+    for (notice, change, _) in alertable(state, session_id, now_ms, Some(standings))? {
         if calls.iter().any(|call| call.name == change.name) {
             candidates
                 .entry(notice.workspace_id.clone())
@@ -11919,18 +12232,20 @@ pub struct IndexedNames {
 ///
 /// A same-count change is not alerted: calls are matched by name, and
 /// without the argument types at a call site nothing tells a right call
-/// from a wrong one (ADR 0029). Pure; the caller records the alert.
+/// from a wrong one (ADR 0029). `standings` is as for `call_candidates`.
+/// Pure; the caller records the alert.
 pub fn call_breaks(
     state: &State,
     session_id: &str,
     calls: &[CallSite],
+    standings: &Standings,
     current: &BTreeMap<String, IndexedNames>,
     now_ms: u64,
 ) -> Result<Vec<CallBreak>, CoreError> {
     validate_calls(calls)?;
     let own_workspace = &current_session(state, session_id)?.workspace_id;
     let mut breaks = Vec::new();
-    for (notice, change, peer) in alertable(state, session_id, now_ms)? {
+    for (notice, change, peer) in alertable(state, session_id, now_ms, Some(standings))? {
         let Some(indexed) = current.get(&notice.workspace_id) else {
             continue;
         };

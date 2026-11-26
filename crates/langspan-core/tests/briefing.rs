@@ -1576,6 +1576,7 @@ fn quota(workspace: &str, signature: &str, mentioned_in: &[&str]) -> langspan_co
         kind: "function".into(),
         signature: signature.into(),
         mentioned_in: mentioned_in.iter().map(|path| (*path).into()).collect(),
+        renamed_from: None,
     }
 }
 
@@ -1987,6 +1988,10 @@ fn signature_change(name: &str, before: &str, after: &str) -> InterfaceChange {
         before: Some(before.into()),
         after: Some(after.into()),
         after_name: None,
+        before_name: None,
+        evidence: None,
+        before_path: None,
+        private: false,
         before_arity: None,
         after_arity: None,
         before_count: None,

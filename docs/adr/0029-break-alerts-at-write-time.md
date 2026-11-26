@@ -111,6 +111,8 @@ any parameter shape not listed has no count, and its notice cannot alert.
 - the session that last reported editing the file (the notice's `by_session`,
   a correlation as in ADR 0008) is another session, registered in this
   generation, not reported exited or ended;
+- for another worktree's notice, Git decides the two rules above instead
+  (added later, issue #217; see "Committed, unmerged changes" below);
 - the session has not already been alerted to this notice;
 - the change is to a function or method: a signature change with a count, a
   rename or a removal;
@@ -137,6 +139,47 @@ line names the worktree after the file, for example
 Without this, a session in another worktree learned of the change only from a
 later prompt briefing, after it had written the call (issue #194).
 
+**Committed, unmerged changes (added later, issue #217).** Once the changing
+session commits on its own branch, the change is still on its way to every
+other worktree of the repository: it reaches a peer only when the peer's
+branch takes the commit. A session that ends after committing, as a session
+that finishes its task does, leaves the change exactly as much in flight. So
+for a notice of another worktree, the daemon asks Git where the change
+stands against the asking session's checkout:
+
+- **Uncommitted**: the notice's file differs from its worktree's `HEAD`
+  (staged counts as uncommitted). The rules above apply unchanged: within the
+  horizon, while the session is live.
+- **Unmerged**: the file equals its worktree's `HEAD`, and the newest commit
+  of that `HEAD` touching the file (`rev-list -1 HEAD -- PATH`) is not an
+  ancestor of the asking checkout's `HEAD` (`merge-base --is-ancestor`). The
+  change counts at any age and after its session has ended, still within this
+  daemon generation and once per notice per session.
+- **Merged**: that commit is an ancestor of the asking checkout's `HEAD`. The
+  notice is retired for that session: it is never alerted to, whatever the
+  other rules say.
+
+The core decides from these answers; it never runs Git. Before looking up any
+name, the daemon asks `standing_questions` for the notices of other worktrees
+that the write's calls name and that could count if committed, at most 8 per
+write, each workspace's newest first, and gives Git at most 250 ms for them
+all, at most five read-only processes per notice under
+`--no-optional-locks`. The working file is hashed as raw bytes
+(`hash-object --no-filters`), so no repository-configured filter runs; a
+symbolic link or other non-regular file is not hashed. When that hash differs
+from the `HEAD` blob and the file holds CRLF line endings, LangSpan reads at
+most 1 MiB of the file and the blob (`cat-file blob`) and compares them with
+CRLF turned into LF, the normalization Git applies under `core.autocrlf` or a
+`text`/`eol=crlf` attribute. A file that differs from its commit only in line
+endings therefore counts as committed. A notice Git does not answer for (a timeout, a failure, a file
+that never was in a commit) keeps the uncommitted rules, and the failure is
+logged at info level. Notices of the session's own workspace are never asked
+about. Using the newest commit that touches the file means a later commit of
+that file, not yet merged, keeps an earlier merged change counting: it errs
+toward telling. A squash or rebase merge writes new commits, so a change
+merged that way is not seen as merged and counts until the generation ends.
+The prompt briefings of ADR 0008 and the `elsewhere` list are unchanged.
+
 For a signature change, a call to that name whose count does not fit is a
 break. A call through a receiver fits the count without the receiver; any
 other call may write the receiver out (`Store::put(&s, x)`), so either count
@@ -153,7 +196,12 @@ definition's bytes after its signature, compared by SHA-256 digest
 index keeps each baseline function's digest in a column of its own. When two
 candidates on either side have the same shape, nothing is linked. Any other
 change made in the same transition (a new body, a parameter, a return type)
-leaves it a removal and an addition, as before. The notice is `renamed`, under
+leaves it a removal and an addition, as before. Roadmap D7 (26 November 2026)
+also links a new body at the same first and last line, with `evidence:
+"same_signature"`, and records `same_body` for the rule above; a pair is
+linked only when each is the other's one candidate (ADR 0008). A file moved
+whole is `renamed` with `file_moved` and the same name: the name is not gone,
+so no call of it alerts. The notice is `renamed`, under
 the old name (the one the calls still use, so the dependents are the files
 that mention it), with the new name in `after_name` and both signatures. A
 removal's notice now also keeps the signature it had, in `before`.
@@ -222,12 +270,13 @@ Any failure is a note in the diagnostic, never a decision.
   time; it remains in the prompt briefing. Keyword arguments are counted as
   arguments, not matched to names. See "Not now" below for the same-count
   case.
-- A rename is linked only when nothing but the name changed, in one file. A
-  rename across files is a removal from one and an addition to the other,
-  and its removal does not alert while the new file defines the old name.
-  A recursive function's body names the function, so renaming it changes the
-  body and it is a removal. A function without a body (a Rust trait method
-  declaration) is never linked. Calls to a removed name may reach a library
+- A rename is linked only when the signature apart from the name is
+  unchanged and the body or the lines are too, in one file. A rename across
+  files is a removal from one and an addition to the other, and its removal
+  does not alert while the new file defines the old name. A recursive
+  function's body names the function, so renaming it changes the body: it is
+  a rename only while its lines stay the same (D7). A function without a body
+  (a Rust trait method declaration) is linked only by its lines. Calls to a removed name may reach a library
   function of the same name that the index does not hold; such a call is
   alerted to once per notice, like any other name match.
 - A rename is told under the old name in the prompt briefing too (`function
@@ -243,7 +292,9 @@ Any failure is a note in the diagnostic, never a decision.
   `a_second_same_named_definition_coming_or_going_is_not_a_changed_signature_at_the_write`
   in `tests/break_alerts.rs`).
 - A notice attributed to no session (the file was changed outside any
-  reported edit), or to a session that ended, does not alert.
+  reported edit) does not alert, nor does an uncommitted one whose session
+  ended. A committed, unmerged change of another worktree alerts after its
+  session ended (issue #217).
 - Calls already in the file are checked only for `Write` and `Add File`,
   which rewrite every line.
 - A notice is recorded in one physical workspace, as in ADR 0008. Its write
@@ -325,16 +376,18 @@ For roadmap B10, `tests/break_alerts.rs` also has a Python rename recorded as
 `renamed` with its new name, whose old-name call gets one line naming the new
 name and file while a call of the new name gets nothing, once per session
 (`a_call_to_a_peers_renamed_function_is_told_the_new_name_once`); a Rust rename
-with a new body recorded as a removal, whose call gets one "removed" line,
-once (`a_rename_with_a_changed_body_is_a_removal_and_a_call_to_it_is_told_once`);
+with a new body over other lines recorded as a removal, whose call gets one
+"removed" line, once
+(`a_rename_with_a_changed_body_is_a_removal_and_a_call_to_it_is_told_once`);
 a Go function moved to another file, not told as removed
 (`a_removed_name_still_defined_elsewhere_is_not_told`); and a TypeScript type
 change that keeps the count, not told
 (`a_signature_change_that_keeps_the_count_is_not_told_at_the_write`).
 `crates/langspan-graph/tests/renames.rs` covers rename detection in the four
-languages, a renamed method and arrow function, a changed body, parameter or
-return type staying a removal and an addition, and ambiguous, undigested,
-type and bodiless pairs never linked; `crates/langspan-core/tests/renames.rs`
+languages, a renamed method and arrow function, a changed body at the same
+lines as `same_signature`, a changed body over other lines, parameter or
+return type staying a removal and an addition, and ambiguous, undigested and
+type pairs never linked; `crates/langspan-core/tests/renames.rs`
 the shape of a `renamed` change; `src/graph.rs` a rename through a real index
 pass and an index from before body digests; and `src/breaks.rs` the rename and
 removal lines and their bounds.

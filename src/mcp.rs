@@ -353,6 +353,10 @@ struct GraphSymbolArgs {
     /// the session's own.
     #[serde(default)]
     session_id: Option<String>,
+    /// When `name` was renamed, look up its newest name instead; the
+    /// answer's `renamed` lists the recorded renames followed.
+    #[serde(default)]
+    renamed: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1522,6 +1526,7 @@ impl McpAdapter {
                 blind_in_scope: true,
                 rank: args.rank,
                 session_id: args.session_id,
+                renamed: args.renamed,
             },
         )
         .await

@@ -241,6 +241,63 @@ in `after_name`, told as "function "scale" was renamed to "zoom": …"
 A removal now also carries the signature it had. A first indexing reports nothing, and a
 version that parsed only partly is not trusted to say a symbol is gone.
 
+Rename tracking (added 26 November 2026, roadmap D7) widens the link and
+records why it was made. A rename's `evidence` is `same_body` (the rule
+above), `same_signature` (a changed body, but the same signature apart from
+the name and the same first and last line; each baseline definition now keeps
+its lines in two nullable columns, so an index from before stays and tells
+its next such change as a removal and an addition) or `file_moved`. A
+removed definition's candidates are the added ones of its kind with the same
+signature apart from the name and its body digest or its lines; a pair is
+linked only when each is the other's one candidate. The notice says the
+evidence: "function "fetch_user" was renamed to "load_user" (same body)".
+A file moved whole is found as Git finds an exact rename: in one scan, a
+removed path whose indexed content parsed cleanly and a path new to the index
+with exactly that content and the same language, neither content shared by
+another removed or new path. Its rows move to the new path and are not parsed
+again, and one notice at the new path lists each export as `renamed` with
+`file_moved`, the same name and its old path in `before_path`. A file with no
+exports lists its private definitions instead, marked `private`: history only,
+told to no dependent and never held, so that the file's notes and history
+follow it too. A file with no definitions at all, such as an import-only
+module, is listed as itself: one private change of kind `file`, named by its
+file name. A file changed
+as well as moved stays a removal and a first indexing: similarity is not
+scored. The coordinator moves notes on the old path to the new one, and
+`graph history --path NEW` includes what was recorded under earlier paths,
+each only while the file was there: the moves are followed in event order, so
+a later file at a path this one left is never part of its history. The store
+reads the newest 1,000 moves through a partial index, whatever a page's
+cursor, so every page follows the same lineage.
+A notice's request ID includes the index pass that found it, so a move or
+content change that repeats an earlier one (`a → b → a → b`) is recorded
+again, and a redelivery of one notice is still a replay.
+`graph symbol OLD --renamed` follows recorded renames of one kind to the
+newest name. A
+rename across files other than such a move is never inferred.
+Earlier builds read interface changes and history entries with
+`deny_unknown_fields`, and status, briefings, recaps, history and the
+dashboard all carry them, so a per-command flag like `blind_in_scope` would
+not cover every answer. The wire protocol is version 4 instead: version 3
+with `before_name`, `evidence`, `before_path` and `private` in interface
+changes and `after_name`, `evidence` and `before_path` in history entries.
+Requests are the same in both. The daemon answers a version 3 request in
+version 3, without those fields and without private changes. The shape is
+chosen in one place, the protocol adapter, as the reply is encoded, so the
+pure core keeps one serialized form. A client of this build sends
+version 4, and when a daemon of an earlier build refuses it with
+`unsupported_version`, which that build does before reading the command, it
+sends the same request once in version 3. Tests:
+`a_protocol_3_client_reads_answers_after_a_rename_and_a_file_move`
+(`tests/graph.rs`) reads status, a briefing, two histories, a recap and the
+dashboard over the daemon's socket with strict copies of the earlier
+structures (it failed before the change);
+`v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors`
+and `a_version_3_reply_leaves_out_rename_fields_and_private_changes`
+(`tests/protocol.rs`); and
+`a_daemon_of_an_earlier_build_is_asked_again_in_its_version`
+(`src/client.rs`).
+
 Signatures are compared in a normalised form and shown as written (added 24
 November 2026, backlog item 15). The comparison removes whitespace next to
 punctuation and drops a trailing comma before a closing bracket or at the end,
@@ -451,7 +508,11 @@ file new since `HEAD` puts all its
 exports in it. The set lives in `graph.sqlite3` (`inflight` and
 `inflight_files`, the latter with the indexed digest and `HEAD` blob it was
 computed at), added without a schema change, so an existing index computes
-it at its next pass. A file found clean again, or gone, has none. A partial
+it at its next pass. An in-flight symbol that the interface diff from the
+`HEAD` version finds renamed (roadmap D7) keeps its old name
+(`inflight.renamed_from`, added the same way). Files that mention either
+name are told, and the line names both, so a peer still calling the old
+name learns of the rename before its next write as well as at it. A file found clean again, or gone, has none. A partial
 parse at either version says nothing. When the daemon answers `Brief`, it
 reads at most 256 in-flight symbols of the other worktrees of the asking
 workspace's repository, in worktree, path and name order, and compares them
@@ -523,7 +584,11 @@ the protocol stays at version 3. Tests:
 `tests/graph.rs`, and
 `another_worktrees_files_are_added_to_a_held_notice_once_each_up_to_the_cap`
 and `files_found_for_a_replaced_notice_change_nothing_when_replayed` in
-`crates/langspan-core/tests/elsewhere.rs`.
+`crates/langspan-core/tests/elsewhere.rs`. A file written after the change
+was committed on its worktree's branch is listed the same way (issue #217,
+`a_caller_written_after_a_committed_rename_is_listed_on_its_notice`); how
+long such a change alerts at write time is in
+[ADR 0029](0029-break-alerts-at-write-time.md).
 
 **Export and import (added later, roadmap D5).** `langspan graph export
 WORKSPACE --out FILE` writes what the index holds for the workspace's

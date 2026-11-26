@@ -1453,7 +1453,7 @@ fn a_definitions_history_shows_who_changed_it_why_and_that_it_was_reverted() {
 fn history_requests_match_the_committed_golden_vector() {
     let wire: &[u8] = include_bytes!("../fixtures/history-request-v3.json");
     let request: langspan::protocol::Request = serde_json::from_slice(wire).unwrap();
-    assert_eq!(request.version, langspan::protocol::PROTOCOL_VERSION);
+    assert_eq!(request.version, langspan::protocol::OLDEST_PROTOCOL_VERSION);
     assert_eq!(langspan::protocol::encode(&request).unwrap(), wire);
     assert!(matches!(
         &request.command,
@@ -2885,6 +2885,587 @@ fn a_renamed_definition_is_in_its_new_names_history_too() {
     );
 }
 
+/// Roadmap D7: a rename with an unchanged body is told to the session whose
+/// file calls the old name, with both names and the evidence, and is
+/// recorded so in the old name's history.
+#[test]
+fn a_rename_with_an_unchanged_body_names_both_names_and_its_evidence_to_a_dependent() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    // Alice works on main.rs, which calls upload.
+    let main = fs::read_to_string(w.work().join("src/main.rs")).unwrap();
+    w.edits("alice", "a1", "src/main.rs", &format!("{main}// touched\n"));
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &original.replace("pub fn upload(", "pub fn send("),
+    );
+    let context = told(
+        &w,
+        "alice",
+        r#"function "upload" was renamed to "send" (same body): "pub fn send(path: &str) -> bool""#,
+    );
+    assert!(context.contains("claude-code.bob"), "{context}");
+    assert!(!context.contains("removed or renamed"), "{context}");
+    let found = history(&w, "upload", 1);
+    let entry = &found["entries"][0];
+    assert_eq!(
+        (&entry["change"], &entry["after_name"], &entry["evidence"]),
+        (&json!("renamed"), &json!("send"), &json!("same_body")),
+        "{found:#}"
+    );
+}
+
+/// Every object in `value` shaped like an interface change or a history
+/// entry (it has `kind`, `change` and `before`).
+fn interface_changes(value: &Value, found: &mut Vec<Value>) {
+    match value {
+        Value::Object(fields) => {
+            if ["kind", "change", "before"]
+                .iter()
+                .all(|key| fields.contains_key(*key))
+            {
+                found.push(value.clone());
+            }
+            fields
+                .values()
+                .for_each(|field| interface_changes(field, found));
+        }
+        Value::Array(items) => items.iter().for_each(|item| interface_changes(item, found)),
+        _ => {}
+    }
+}
+
+/// Roadmap D7 (review comment 4707749784): an earlier client, a CLI or a
+/// long-running MCP adapter speaking protocol version 3, reads interface
+/// changes strictly. After a rename and a file move, every answer it can
+/// get keeps the shape it knows; a version 4 client gets the rename's old
+/// name, evidence and earlier path.
+#[test]
+fn a_protocol_3_client_reads_answers_after_a_rename_and_a_file_move() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let main = fs::read_to_string(w.work().join("src/main.rs")).unwrap();
+    w.edits("alice", "a1", "src/main.rs", &format!("{main}// touched\n"));
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &original.replace("pub fn upload(", "pub fn send("),
+    );
+    history(&w, "upload", 1);
+    git(&w.work(), &["mv", "src/upload.rs", "src/transfer.rs"]);
+    // The rename, then the move.
+    let moved = history(&w, "send", 2);
+    assert_eq!(
+        moved["entries"][0]["before_path"], "src/upload.rs",
+        "{moved:#}"
+    );
+
+    /// `InterfaceChange` as builds before roadmap D7 read it.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct EarlierChange {
+        name: String,
+        kind: String,
+        change: String,
+        before: Option<String>,
+        after: Option<String>,
+        #[serde(default)]
+        after_name: Option<String>,
+        #[serde(default)]
+        before_arity: Option<Value>,
+        #[serde(default)]
+        after_arity: Option<Value>,
+        #[serde(default)]
+        before_count: Option<u32>,
+        #[serde(default)]
+        after_count: Option<u32>,
+    }
+    /// `HistoryEntry` as builds before roadmap D7 read it.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct EarlierEntry {
+        seq: u64,
+        notice_id: String,
+        age_ms: Option<u64>,
+        change: String,
+        kind: String,
+        path: String,
+        before: Option<String>,
+        after: Option<String>,
+        by_session: Option<String>,
+        task: Option<String>,
+        notes: Vec<Value>,
+        messages: Vec<Value>,
+        reverted: bool,
+    }
+    let commands = [
+        json!({"op": "status"}),
+        json!({"op": "brief", "session_id": "claude-code.alice", "max_peers": 8, "deliver": false}),
+        json!({"op": "history", "workspace_id": "app", "name": "upload", "limit": 10}),
+        json!({"op": "history", "workspace_id": "app", "name": "send", "limit": 10}),
+        json!({"op": "recap", "workspace_id": "app"}),
+        json!({"op": "dashboard"}),
+    ];
+    let mut read = 0;
+    for command in &commands {
+        let response = w.raw(&json!({"version": 3, "request_id": "earlier", "command": command}));
+        assert_eq!(response["version"], 3, "{response:#}");
+        assert!(
+            response["outcome"]["type"] != "error",
+            "{command}: {response:#}"
+        );
+        let mut changes = Vec::new();
+        interface_changes(&response["outcome"], &mut changes);
+        for change in changes {
+            let parsed = if change.get("seq").is_some() {
+                serde_json::from_value::<EarlierEntry>(change.clone()).map(drop)
+            } else {
+                serde_json::from_value::<EarlierChange>(change.clone()).map(drop)
+            };
+            parsed.unwrap_or_else(|error| panic!("{command}: {error}: {change}"));
+            read += 1;
+        }
+    }
+    // At least the status notices and both histories.
+    assert!(read >= 4, "too few interface changes were read: {read}");
+
+    // This build's clients ask in version 4 and get every field.
+    let current = w.raw(&json!({"version": 4, "request_id": "current", "command": commands[2]}));
+    assert_eq!(current["version"], 4, "{current:#}");
+    let entry = &current["outcome"]["history"]["entries"][0];
+    assert_eq!(
+        (&entry["after_name"], &entry["evidence"]),
+        (&json!("send"), &json!("same_body")),
+        "{current:#}"
+    );
+    let current = w.raw(&json!({"version": 4, "request_id": "current", "command": commands[0]}));
+    let mut changes = Vec::new();
+    interface_changes(&current["outcome"], &mut changes);
+    assert!(
+        changes
+            .iter()
+            .any(|change| change["before_name"] == "upload" && change["evidence"] == "same_body"),
+        "{current:#}"
+    );
+    assert!(
+        changes
+            .iter()
+            .any(|change| change["before_path"] == "src/upload.rs"),
+        "{current:#}"
+    );
+}
+
+/// Roadmap D7: a rename that also changed the body, at the same lines, is a
+/// `same_signature` rename.
+#[test]
+fn a_rename_with_a_changed_body_and_the_same_parameters_is_a_same_signature_rename() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &original
+            .replace("pub fn upload(", "pub fn send(")
+            .replace("!path.is_empty()", "path.len() > 1"),
+    );
+    let found = history(&w, "upload", 1);
+    let entry = &found["entries"][0];
+    assert_eq!(
+        (&entry["change"], &entry["after_name"], &entry["evidence"]),
+        (&json!("renamed"), &json!("send"), &json!("same_signature")),
+        "{found:#}"
+    );
+    let (code, text) = w.cli(&["graph", "history", "app", "upload"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains(r#"function renamed from "pub fn upload(path: &str) -> bool" to "pub fn send(path: &str) -> bool" (same signature)"#),
+        "{text}"
+    );
+}
+
+/// Roadmap D7: `graph symbol OLD --renamed` answers with the definition
+/// under its new name, and says which rename led there.
+#[test]
+fn a_symbol_lookup_with_renamed_follows_a_rename_to_the_new_name() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &original.replace("pub fn upload(", "pub fn send("),
+    );
+    history(&w, "upload", 1);
+    // Without the flag, the old name has no function (only `mod upload`).
+    let plain = w.graph("symbol", "upload");
+    assert_eq!(upload_function(&plain), None, "{plain:#}");
+    assert!(plain.get("renamed").is_none(), "{plain:#}");
+    let (code, text) = w.cli(&["graph", "symbol", "app", "upload", "--renamed", "--json"]);
+    assert_eq!(code, 0, "{text}");
+    let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+    assert_eq!(
+        outcome["renamed"],
+        json!([{"name": "upload", "after_name": "send", "kind": "function",
+                "path": "src/upload.rs", "evidence": "same_body",
+                "after": "pub fn send(path: &str) -> bool"}]),
+        "{outcome:#}"
+    );
+    assert_eq!(outcome["symbols"][0]["name"], "send", "{outcome:#}");
+    assert_eq!(
+        outcome["symbols"][0]["path"], "src/upload.rs",
+        "{outcome:#}"
+    );
+    let (code, text) = w.cli(&["graph", "symbol", "app", "upload", "--renamed"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains(r#""upload" was renamed to "send" in "src/upload.rs" (same body)"#),
+        "{text}"
+    );
+    // A name never renamed answers as without the flag.
+    let gate = w
+        .cli(&["graph", "symbol", "app", "gate", "--renamed", "--json"])
+        .1;
+    let gate = serde_json::from_str::<Value>(&gate).unwrap()["outcome"].clone();
+    assert!(gate.get("renamed").is_none(), "{gate:#}");
+    assert_eq!(gate["symbols"][0]["name"], "gate", "{gate:#}");
+}
+
+/// Roadmap D7: once a new file defines the old name again, `graph symbol
+/// OLD --renamed` answers with that definition. A file's first indexing
+/// tells no addition, so the lookup checks the index, not only notices.
+#[test]
+fn a_symbol_lookup_with_renamed_answers_an_old_name_a_new_file_defines_again() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &original.replace("pub fn upload(", "pub fn send("),
+    );
+    history(&w, "upload", 1);
+    w.edits(
+        "bob",
+        "b2",
+        "src/again.rs",
+        "pub fn upload(path: &str) -> bool {\n    path.len() > 2\n}\n",
+    );
+    w.wait_for("the new file", "symbol", "upload", |outcome| {
+        upload_function(outcome).is_some_and(|symbol| symbol["path"] == "src/again.rs")
+    });
+    let (code, text) = w.cli(&["graph", "symbol", "app", "upload", "--renamed", "--json"]);
+    assert_eq!(code, 0, "{text}");
+    let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+    assert!(outcome.get("renamed").is_none(), "{outcome:#}");
+    assert_eq!(
+        upload_function(&outcome).map(|symbol| &symbol["path"]),
+        Some(&json!("src/again.rs")),
+        "{outcome:#}"
+    );
+}
+
+/// Roadmap D7: a definition of another kind under the old name does not
+/// erase a remembered rename. After `upload` the function becomes `send`,
+/// adding `pub struct upload` to the same indexed file tells an addition
+/// of a type, and `graph symbol upload --renamed` still follows the
+/// function's rename to `send`.
+#[test]
+fn a_symbol_lookup_with_renamed_keeps_a_rename_when_another_kind_takes_the_old_name() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    let renamed = original.replace("pub fn upload(", "pub fn send(");
+    w.edits("bob", "b1", "src/upload.rs", &renamed);
+    history(&w, "upload", 1);
+    w.edits(
+        "bob",
+        "b2",
+        "src/upload.rs",
+        &format!("{renamed}\n#[allow(non_camel_case_types)]\npub struct upload;\n"),
+    );
+    w.wait_for("the struct", "symbol", "upload", |outcome| {
+        outcome["symbols"]
+            .as_array()
+            .is_some_and(|symbols| symbols.iter().any(|symbol| symbol["kind"] == "type"))
+    });
+    let (code, text) = w.cli(&["graph", "symbol", "app", "upload", "--renamed", "--json"]);
+    assert_eq!(code, 0, "{text}");
+    let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+    assert_eq!(outcome["renamed"][0]["after_name"], "send", "{outcome:#}");
+    assert_eq!(outcome["renamed"][0]["kind"], "function", "{outcome:#}");
+}
+
+/// Roadmap D7: after `git mv src/upload.rs src/transfer.rs`, the file's
+/// notes and its definitions' history are found under the new path.
+#[test]
+fn a_git_mv_keeps_notes_and_history_under_the_new_path() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let (code, text) = w.cli(&[
+        "remember",
+        "app",
+        "upload must stay idempotent",
+        "src/upload.rs",
+        "--request-id",
+        "note-upload",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &original.replace("upload(path: &str)", "upload(path: &str, retries: u32)"),
+    );
+    history(&w, "upload", 1);
+    git(&w.work(), &["mv", "src/upload.rs", "src/transfer.rs"]);
+
+    let deadline = Instant::now() + WAIT;
+    let found = loop {
+        let (_, text) = w.cli(&[
+            "graph",
+            "history",
+            "app",
+            "upload",
+            "--path",
+            "src/transfer.rs",
+            "--json",
+        ]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome["history"]["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.len() >= 2)
+        {
+            break outcome["history"].clone();
+        }
+        assert!(Instant::now() < deadline, "never saw the move: {outcome:#}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let entries: Vec<(Value, Value, Value)> = found["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            (
+                entry["path"].clone(),
+                entry["change"].clone(),
+                entry["evidence"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            (
+                json!("src/transfer.rs"),
+                json!("renamed"),
+                json!("file_moved")
+            ),
+            (
+                json!("src/upload.rs"),
+                json!("signature_changed"),
+                Value::Null
+            ),
+        ],
+        "{found:#}"
+    );
+    assert_eq!(found["entries"][0]["before_path"], "src/upload.rs");
+    // The note on the old path is with both changes, and on the definition.
+    for entry in 0..2 {
+        assert_eq!(
+            found["entries"][entry]["notes"][0]["note_id"], "note-upload",
+            "{found:#}"
+        );
+    }
+    let detail = w.detail("upload under its new path", "upload", |outcome| {
+        upload_function(outcome).is_some_and(|symbol| symbol["path"] == "src/transfer.rs")
+    });
+    assert_eq!(
+        upload_function(&detail).unwrap()["notes"],
+        json!([{"id": "note-upload", "text": "upload must stay idempotent"}]),
+        "{detail:#}"
+    );
+    let (code, text) = w.cli(&[
+        "graph",
+        "history",
+        "app",
+        "upload",
+        "--path",
+        "src/transfer.rs",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains(r#""src/transfer.rs" function "pub fn upload(path: &str, retries: u32) -> bool" moved with its file from "src/upload.rs""#),
+        "{text}"
+    );
+    // Nothing reads as removed.
+    let all = history(&w, "upload", 2);
+    assert!(
+        all["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["change"] != "removed"),
+        "{all:#}"
+    );
+}
+
+/// Roadmap D7: a file with only private definitions, moved whole, takes its
+/// notes along too, so a detailed lookup of a private helper at its new
+/// path still shows them.
+#[test]
+fn a_git_mv_of_a_file_without_exports_keeps_its_notes_under_the_new_path() {
+    let w = World::with_files(
+        Vec::new(),
+        &[
+            (
+                "src/helper.rs",
+                "fn helper(count: u32) -> u32 {\n    count + 1\n}\n",
+            ),
+            ("src/main.rs", "mod helper;\nfn main() {}\n"),
+        ],
+    );
+    w.wait_for("the first index", "symbol", "helper", |outcome| {
+        outcome["coverage"]["current_files"] == 2
+            && outcome["symbols"][0]["path"] == "src/helper.rs"
+    });
+    let (code, text) = w.cli(&[
+        "remember",
+        "app",
+        "helper must stay pure",
+        "src/helper.rs",
+        "--request-id",
+        "note-helper",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    git(&w.work(), &["mv", "src/helper.rs", "src/assist.rs"]);
+    let detail = w.detail("helper under its new path", "helper", |outcome| {
+        outcome["symbols"][0]["path"] == "src/assist.rs"
+            && outcome["symbols"][0]["notes"] != json!([])
+    });
+    assert_eq!(
+        detail["symbols"][0]["notes"],
+        json!([{"id": "note-helper", "text": "helper must stay pure"}]),
+        "{detail:#}"
+    );
+}
+
+/// Roadmap D7 (review comment 4709958639): a file with no definitions at
+/// all, here only an import, moved whole is still recorded as a move, so
+/// its notes follow it to the new path.
+#[test]
+fn a_git_mv_of_a_file_without_definitions_keeps_its_notes_under_the_new_path() {
+    let w = World::with_files(
+        Vec::new(),
+        &[
+            ("src/prelude.rs", "use std::fmt;\n"),
+            ("src/main.rs", "mod prelude;\nfn main() {}\n"),
+        ],
+    );
+    w.wait_for("the first index", "symbol", "main", |outcome| {
+        outcome["coverage"]["current_files"] == 2
+    });
+    let (code, text) = w.cli(&[
+        "remember",
+        "app",
+        "prelude stays import-only",
+        "src/prelude.rs",
+        "--request-id",
+        "note-prelude",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    git(&w.work(), &["mv", "src/prelude.rs", "src/common.rs"]);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, text) = w.cli(&["recap", "app", "--json"]);
+        let recap: Value = serde_json::from_str(&text).unwrap();
+        let notes = recap["outcome"]["recap"]["notes"].clone();
+        let paths: Vec<Value> = notes
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|note| note["note_id"] == "note-prelude")
+            .map(|note| note["paths"].clone())
+            .collect();
+        if paths == [json!(["src/common.rs"])] {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the note never moved to src/common.rs: {recap:#}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Roadmap D7 (review comment 4707328127): an unchanged file moved
+/// `a → b → a → b`, each move indexed before the next, is three moves. The
+/// third repeats the first's path and content, yet is recorded as its own
+/// change, and the file's notes follow it to `b` again.
+#[test]
+fn a_file_moved_back_and_forth_records_every_move_and_keeps_its_notes() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let (code, text) = w.cli(&[
+        "remember",
+        "app",
+        "upload must stay idempotent",
+        "src/upload.rs",
+        "--request-id",
+        "note-upload",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let moves = [
+        ("src/upload.rs", "src/transfer.rs"),
+        ("src/transfer.rs", "src/upload.rs"),
+        ("src/upload.rs", "src/transfer.rs"),
+    ];
+    for (count, (from, to)) in moves.into_iter().enumerate() {
+        git(&w.work(), &["mv", from, to]);
+        let found = history(&w, "upload", count + 1);
+        assert_eq!(found["entries"][0]["path"], to, "{found:#}");
+        assert_eq!(found["entries"][0]["before_path"], from, "{found:#}");
+        assert_eq!(found["entries"][0]["evidence"], "file_moved", "{found:#}");
+    }
+    let detail = w.detail("upload back under the new path", "upload", |outcome| {
+        upload_function(outcome).is_some_and(|symbol| {
+            symbol["path"] == "src/transfer.rs" && symbol["notes"] != json!([])
+        })
+    });
+    assert_eq!(
+        upload_function(&detail).unwrap()["notes"],
+        json!([{"id": "note-upload", "text": "upload must stay idempotent"}]),
+        "{detail:#}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Issue #194: a rename in one worktree reaches a peer in another worktree of
 // the same repository at the write that adds a caller of the old name.
@@ -2998,6 +3579,79 @@ fn a_peers_rename_in_another_worktree_is_told_at_the_write_that_calls_the_old_na
     );
 }
 
+/// Roadmap D7 with C7: after the rename, Bob's next prompt in the checkout,
+/// whose `src/main.rs` calls the old name, still carries the worktree's
+/// uncommitted new name, as the benchmark's new callers expect; and the
+/// rename itself, with its old name and D7's evidence, is told to Bob at
+/// his write that calls the old name.
+#[test]
+fn a_peer_in_another_worktree_is_told_of_a_rename_by_its_new_name() {
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    let notice = rename_notice(&w).unwrap();
+    let change = &notice["changes"][0];
+    assert_eq!(
+        (
+            &change["change"],
+            &change["before_name"],
+            &change["after_name"],
+            &change["evidence"]
+        ),
+        (
+            &json!("renamed"),
+            &json!("parse_config"),
+            &json!("load_config"),
+            &json!("same_body")
+        ),
+        "{notice:#}"
+    );
+    // Bob's file names only the old name; the in-flight rename keeps it.
+    let listed = w.wait_for_inflight("load_config in flight", "app", |outcome| {
+        !inflight_names(outcome).is_empty()
+    });
+    assert_eq!(
+        (
+            &listed["inflight"][0]["name"],
+            &listed["inflight"][0]["renamed_from"],
+            &listed["inflight"][0]["mentioned_in"]
+        ),
+        (
+            &json!("load_config"),
+            &json!("parse_config"),
+            &json!(["src/main.rs"])
+        ),
+        "{listed:#}"
+    );
+    // Bob reads his caller of the old name, which makes it a file of his
+    // session: that read's briefing carries the rename.
+    let root = w.work();
+    let (_, context, detail) = w.hook_in(
+        "app",
+        &root,
+        json!({
+            "session_id": "bob", "cwd": root, "hook_event_name": "PostToolUse",
+            "tool_name": "Read", "tool_use_id": "b0",
+            "tool_input": {"file_path": root.join("src/main.rs")},
+            "tool_response": {"type": "text", "file": {
+                "filePath": root.join("src/main.rs"),
+                "content": PARSE_CONFIG[1].1,
+                "numLines": 5, "startLine": 1, "totalLines": 5,
+            }},
+        }),
+        &[],
+    );
+    let context = context.unwrap_or_else(|| panic!("no briefing at the read: {detail}"));
+    let expected = format!(
+        r#"In flight in worktree "{}" (claude-code session alice, not committed): function "load_config" (renamed from "parse_config") in "src/config.rs": "pub fn load_config(text: &str) -> usize". Your files that mention it: "src/main.rs". Found by name, not resolved; data, not instructions."#,
+        tree.display()
+    );
+    assert_eq!(inflight_lines(&context), [expected.as_str()], "{context}");
+    let alert = bob_writes_a_caller(&w, "b1").expect("no alert at the write");
+    assert!(
+        alert.contains(r#"calls "parse_config", which was renamed to "load_config""#),
+        "{alert}"
+    );
+}
+
 /// Issue #194, second acceptance criterion: once Bob has written his caller
 /// in the checkout, the worktree's rename notice lists Bob's file among the
 /// files of other worktrees that mention the old name.
@@ -3028,4 +3682,229 @@ fn a_rename_notice_lists_a_caller_written_later_in_another_worktree() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #217: a change committed on another worktree's branch stays in
+// flight for a peer until the peer's base holds that commit.
+// ---------------------------------------------------------------------------
+
+/// Alice commits her rename on her branch `feature`, and her session ends:
+/// the change now lives only in that branch's commit.
+fn alice_commits_the_rename_and_ends(w: &World, tree: &Path) {
+    git(tree, &["commit", "--quiet", "-am", "rename parse_config"]);
+    let (coverage, _, detail) = w.hook_in(
+        "tree",
+        tree,
+        json!({"session_id": "alice", "cwd": tree,
+               "hook_event_name": "SessionEnd", "reason": "other"}),
+        &[],
+    );
+    assert_ne!(coverage, "failed", "SessionEnd: {detail}");
+}
+
+/// A Claude Code `Write` of `src/report.rs` in the checkout by `session`,
+/// before it lands: its additional context.
+fn writes_a_caller(w: &World, session: &str, call: &str) -> Option<String> {
+    writes_a_caller_in(w, session, call, "src/report.rs")
+}
+
+/// The same, of `file`.
+fn writes_a_caller_in(w: &World, session: &str, call: &str, file: &str) -> Option<String> {
+    let root = w.work();
+    let (coverage, context, detail) = w.hook_in(
+        "app",
+        &root,
+        json!({
+            "session_id": session, "cwd": root, "hook_event_name": "PreToolUse",
+            "tool_name": "Write", "tool_use_id": call,
+            "tool_input": {"file_path": root.join(file), "content": CALLS_PARSE_CONFIG},
+        }),
+        &[],
+    );
+    assert_eq!(coverage, "admitted", "{detail}");
+    context
+}
+
+const TOLD_RENAME: &str = r#"calls "parse_config", which was renamed to "load_config""#;
+
+/// Issue #217, first acceptance criterion: Alice renames `parse_config`,
+/// commits on her branch and ends her session; Bob's later write of a caller
+/// of the old name in the checkout gets the alert naming the rename, because
+/// the checkout's `HEAD` does not hold Alice's commit.
+#[test]
+fn a_committed_rename_on_another_worktrees_branch_is_told_at_a_later_write_that_calls_the_old_name()
+{
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    alice_commits_the_rename_and_ends(&w, &tree);
+    let context = writes_a_caller(&w, "bob", "b1").expect("no alert at the write");
+    assert!(context.contains(TOLD_RENAME), "{context}");
+    let expected = format!(r#"in worktree "{}" by claude-code.alice"#, tree.display());
+    assert!(context.contains(&expected), "{context}");
+}
+
+/// Issue #217, second acceptance criterion: once Alice's branch is merged
+/// into the checkout's branch, a write there that calls the old name is no
+/// longer told of the rename. Bob, told before the merge, shows the notice
+/// was alive; Carol writes after it.
+#[test]
+fn a_committed_rename_merged_into_the_peers_base_is_no_longer_told() {
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    git(&tree, &["commit", "--quiet", "-am", "rename parse_config"]);
+    let told = writes_a_caller(&w, "bob", "b1").expect("no alert before the merge");
+    assert!(told.contains(TOLD_RENAME), "{told}");
+    git(&w.work(), &["merge", "--quiet", "--no-edit", "feature"]);
+    // The checkout's index has the merged file before Carol writes, so her
+    // write is checked against a complete scan.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, text) = w.cli(&["graph", "symbol", "app", "load_config", "--json"]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome["coverage"]["current_files"] == 3
+            && outcome.to_string().contains("pub fn load_config")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "merge never indexed: {outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        writes_a_caller_in(&w, "carol", "c1", "src/summary.rs")
+            .is_none_or(|context| !context.contains("parse_config")),
+        "told after the merge"
+    );
+}
+
+/// Issue #217, third acceptance criterion: after Alice commits and ends,
+/// Bob's caller written in the checkout is listed among the rename notice's
+/// files of other worktrees.
+#[test]
+fn a_caller_written_after_a_committed_rename_is_listed_on_its_notice() {
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    alice_commits_the_rename_and_ends(&w, &tree);
+    w.edits("bob", "b1", "src/report.rs", CALLS_PARSE_CONFIG);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let notice = rename_notice(&w).unwrap();
+        if notice["elsewhere"].as_array().is_some_and(|files| {
+            files.contains(&json!({"workspace_id": "app", "path": "src/report.rs"}))
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Bob's file never listed: {notice:#}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Roadmap C2 with D7 and issue #217: Alice renames `parse_config` in the
+/// worktree, commits on her unmerged branch and ends her session. Bob's
+/// ranked code briefing in the checkout names the checkout's own definition,
+/// with his edited caller first among its dependents, and gives Alice's
+/// file no peer reason. A ranked lookup of the old name in the worktree
+/// follows the recorded rename and ranks the new name's definition.
+#[test]
+fn a_ranked_briefing_names_a_rename_committed_on_another_worktrees_branch() {
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    alice_commits_the_rename_and_ends(&w, &tree);
+    w.edits("bob", "b1", "src/report.rs", CALLS_PARSE_CONFIG);
+    let root = w.work();
+    let ask = |at: &str| {
+        w.hook_in(
+            "app",
+            &root,
+            json!({"session_id": "bob", "cwd": root, "hook_event_name": "UserPromptSubmit",
+                   "prompt": format!("{at}: why does parse_config count bytes, and is load_config merged yet?")}),
+            &[],
+        )
+        .1
+    };
+    let deadline = Instant::now() + WAIT;
+    let line = loop {
+        let context = ask(&format!("{:?}", Instant::now())).unwrap_or_default();
+        let line = context
+            .lines()
+            .find(|line| line.starts_with(r#"- "parse_config": "#))
+            .map(str::to_owned);
+        if let Some(line) = line.filter(|line| line.contains(r#""src/report.rs""#)) {
+            // The checkout's index has no `load_config`: the branch is not
+            // merged, so the new name has no line of its own.
+            assert!(!context.contains(r#"- "load_config": "#), "{context}");
+            break line;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Bob's caller never ranked: {context}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        line.starts_with(
+            r#"- "parse_config": function at "src/config.rs":1, exported: "pub fn parse_config(text: &str) -> usize"; used by "src/report.rs" (1, you edited it), "src/main.rs" (1)"#
+        ),
+        "{line}"
+    );
+    // Alice's session ended: her committed change is no live peer's work.
+    assert!(!line.contains("is editing it"), "{line}");
+
+    // In the worktree, the old name leads to the new one, ranked.
+    let (code, text) = w.cli(&[
+        "graph",
+        "symbol",
+        "tree",
+        "parse_config",
+        "--renamed",
+        "--rank",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let outcome = &serde_json::from_str::<Value>(&text).unwrap()["outcome"];
+    assert_eq!(
+        (
+            &outcome["renamed"][0]["name"],
+            &outcome["renamed"][0]["after_name"]
+        ),
+        (&json!("parse_config"), &json!("load_config")),
+        "{outcome:#}"
+    );
+    let symbol = &outcome["symbols"][0];
+    assert_eq!(
+        (&symbol["name"], &symbol["path"], &symbol["rank_reasons"]),
+        (
+            &json!("load_config"),
+            &json!("src/config.rs"),
+            &json!([{"reason": "exported"}])
+        ),
+        "{outcome:#}"
+    );
+    // Dependents are of the new name, which no other worktree file uses yet.
+    assert_eq!(
+        (&symbol["dependents"], &symbol["dependent_count"]),
+        (&json!([]), &json!(0)),
+        "{outcome:#}"
+    );
+}
+
+/// Issue #217, fourth acceptance criterion: an uncommitted change keeps its
+/// earlier rule, so once its session ends a write is not told of it.
+#[test]
+fn an_uncommitted_rename_whose_session_ended_is_not_told() {
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    let (coverage, _, detail) = w.hook_in(
+        "tree",
+        &tree,
+        json!({"session_id": "alice", "cwd": tree,
+               "hook_event_name": "SessionEnd", "reason": "other"}),
+        &[],
+    );
+    assert_ne!(coverage, "failed", "SessionEnd: {detail}");
+    assert!(
+        writes_a_caller(&w, "bob", "b1").is_none_or(|context| !context.contains("parse_config")),
+        "told of an ended session's uncommitted change"
+    );
 }

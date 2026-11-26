@@ -333,7 +333,7 @@ fn recall_requests_match_the_committed_golden_vectors() {
     ];
     for wire in vectors {
         let request: Request = serde_json::from_slice(wire).unwrap();
-        assert_eq!(request.version, PROTOCOL_VERSION);
+        assert_eq!(request.version, langspan::protocol::OLDEST_PROTOCOL_VERSION);
         assert_eq!(langspan::protocol::encode(&request).unwrap(), *wire);
     }
     let request: Request = serde_json::from_slice(vectors[0]).unwrap();
