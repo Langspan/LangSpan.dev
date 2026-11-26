@@ -375,15 +375,19 @@ impl Index {
             path: path.into(),
             before_digest,
             digest,
-            dependents: self.dependents(workspace_id, path, &names)?,
+            dependents: self.dependents(workspace_id, Some(path), &names)?,
             changes,
         }))
     }
 
-    fn dependents(
+    /// The files of `workspace_id` that mention any of `names`, other than
+    /// `except`, in path order, at most `NOTICE_DEPENDENTS`: an interface
+    /// notice's dependents in its own workspace, and in another worktree of
+    /// the repository (issue #194).
+    pub fn dependents(
         &self,
         workspace_id: &str,
-        path: &str,
+        except: Option<&str>,
         names: &[&str],
     ) -> Result<Vec<String>, Failure> {
         let mut found = std::collections::BTreeSet::new();
@@ -391,9 +395,11 @@ impl Index {
             "SELECT DISTINCT path FROM refs
              WHERE workspace_id = ?1 AND name = ?2 AND path != ?3 ORDER BY path LIMIT ?4",
         )?;
+        // No indexed path is empty, so `""` excludes nothing.
+        let except = except.unwrap_or("");
         for name in names {
             let limit = langspan_core::NOTICE_DEPENDENTS as i64;
-            for row in statement.query_map(params![workspace_id, name, path, limit], |row| {
+            for row in statement.query_map(params![workspace_id, name, except, limit], |row| {
                 row.get::<_, String>(0)
             })? {
                 found.insert(row?);

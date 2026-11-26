@@ -4802,6 +4802,9 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             notice.changes.len(),
             notice.dependents.len()
         ),
+        Outcome::InterfaceDependentsObserved { notice_id, added } => {
+            println!("Interface notice {notice_id}: {added} file(s) of another worktree added.")
+        }
         Outcome::CallBreaks { ready: false, .. } => {
             println!("Not checked: the source index has no complete scan of this workspace yet.")
         }
