@@ -221,7 +221,7 @@ def main(argv):
     session_id = str(uuid.uuid4())
     # Claude Code's first event lists the session's tools; the tool guard checks it.
     print(json.dumps({"type": "system", "subtype": "init", "session_id": session_id, "model": "standin",
-                      "tools": plan["allowed_tools"], "mcp_servers": []}), flush=True)
+                      "tools": plan.get("allowed_tools", []), "mcp_servers": []}), flush=True)
     with open(log_path, "a", encoding="utf-8") as log:
         session = Session(settings, log)
         session.session_id = session_id
