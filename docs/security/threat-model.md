@@ -463,6 +463,8 @@ A message is text one session or the owner addresses to another session of the s
 | Denial of service | 64 unacknowledged messages per workspace, oldest dropped: a sender can push others' messages out before they are read. At most four messages, within 1,500 rendered bytes (796 beside an uncoordinated-change notice), per briefing; the rest wait. A message for everyone is held until every session of the current daemon generation has it, or until dropped. |
 | Elevation of privilege | A message grants nothing: no lease, intent or admission changes, and a handoff transfers no lease. Acknowledgement only stops delivery. |
 
+Asking who was given a message (`langspan messages status`, `langspan_message_status`, issue #67) adds no boundary: it reads, through the same owner-only socket, the acknowledgements that `events` and `status --all` already expose, and returns session IDs, states and ages, never message text. Its answer is bounded to 64 recipients and reads at most 4,096 acknowledgement rows. The daemon sets `via` from the command that delivered the message. A local process that can reach the socket can make a message look delivered, as it could before, by acknowledging it or by sending a delivering `brief` with the `mcp` flag; the socket's owner-only mode remains the boundary.
+
 Withdrawing a message (`langspan messages retract`, `langspan_retract_message`, issue #66) adds no boundary: it uses the same socket and the same session labels.
 
 | Concern | Behavior and remaining boundary |
