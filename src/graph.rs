@@ -1593,28 +1593,44 @@ impl Index {
     }
 
     /// Definitions named `name` to rank (roadmap C2): the first
-    /// `RANK_CANDIDATES` in path order and every one in `paths`, with how
-    /// many definitions the name has in all.
+    /// `RANK_CANDIDATES` in path order, and the first `RANK_CANDIDATES` in
+    /// the asking session's and its peers' files in rank order (its own
+    /// files, then its peers', then exported ones, then path order), with
+    /// how many definitions the name has in all. Path order alone would let
+    /// a file of many definitions crowd out a later-sorting own file
+    /// (review comment 4709803063).
     pub fn rank_candidates(
         &self,
         workspace_id: &str,
         name: &str,
-        paths: &[String],
+        inputs: &langspan_core::RankInputs,
     ) -> Result<(Vec<SymbolRef>, u32), Failure> {
         let mut found = self.symbol(
             workspace_id,
             name,
             langspan_core::RANK_CANDIDATES.saturating_sub(1),
         )?;
-        // One bound value carries both the name and the listed paths.
-        let asked = serde_json::json!({"name": name, "paths": paths}).to_string();
-        let more = self.symbols_where(
-            "s.name = json_extract(?2, '$.name')
-             AND s.path IN (SELECT value FROM json_each(?2, '$.paths'))",
-            workspace_id,
-            &asked,
-            langspan_core::RANK_CANDIDATES,
+        // One bound value carries the name and both lists of paths.
+        let own: Vec<&String> = inputs.own.keys().collect();
+        let peers: Vec<&String> = inputs.peers.keys().collect();
+        let asked = serde_json::json!({"name": name, "own": own, "peers": peers}).to_string();
+        let mut statement = self.connection.prepare_cached(
+            "SELECT s.path, s.name, s.kind, s.line, s.end_line, s.signature, s.exported, f.digest
+             FROM symbols s JOIN files f ON f.workspace_id = s.workspace_id AND f.path = s.path
+             WHERE s.workspace_id = ?1 AND s.name = json_extract(?2, '$.name')
+             AND (s.path IN (SELECT value FROM json_each(?2, '$.own'))
+                  OR s.path IN (SELECT value FROM json_each(?2, '$.peers')))
+             ORDER BY s.path IN (SELECT value FROM json_each(?2, '$.own')) DESC,
+                      s.path IN (SELECT value FROM json_each(?2, '$.peers')) DESC,
+                      s.exported DESC, s.path, s.line
+             LIMIT ?3",
         )?;
+        let more = statement
+            .query_map(
+                params![workspace_id, asked, langspan_core::RANK_CANDIDATES],
+                symbol_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
         // A definition read by both queries is one row twice: drop the copy.
         found.extend(more);
         let key = |s: &SymbolRef| {

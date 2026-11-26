@@ -19,8 +19,9 @@ use crate::{
 };
 
 /// Definitions, and mentioning files, read in path or count order before
-/// ranking, besides every one in the session's own and its peers' files.
-/// One past this further along the path order is counted, not ranked.
+/// ranking, besides as many definitions in the session's own and its
+/// peers' files, taken in rank order, and every such mentioning file. One
+/// past these is counted, not ranked.
 pub const RANK_CANDIDATES: u32 = 256;
 /// The longest path or qualifier a prompt may name for ranking.
 pub const QUALIFIER_BYTES: usize = 128;
@@ -67,7 +68,7 @@ pub struct RankInputs {
 
 impl RankInputs {
     /// Every path that ranks by ownership: the index reads these besides
-    /// its first `RANK_CANDIDATES`.
+    /// its first `RANK_CANDIDATES` mentioning files.
     pub fn paths(&self) -> Vec<String> {
         let paths: BTreeSet<&String> = self.own.keys().chain(self.peers.keys()).collect();
         paths.into_iter().cloned().collect()

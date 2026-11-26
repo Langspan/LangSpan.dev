@@ -868,3 +868,124 @@ fn a_ranked_code_section_stays_within_its_share_and_counts_what_it_left_out() {
         assert!(line.len() <= 500, "{}: {line}", line.len());
     }
 }
+
+#[test]
+fn the_sessions_own_definition_ranks_first_past_a_peers_file_of_many_same_name_definitions() {
+    // Review comment 4709803063: peer bob's early-sorting generated file
+    // holds more `upload` definitions than the ranking reads in path order.
+    let generated = "def upload():\n    pass\n".repeat(300);
+    let own = "pub fn upload(z: u64) -> u64 {\n    z\n}\n";
+    let w = World::with(&[("a/gen.py", &generated), ("z/upload.rs", own)]);
+    w.wait_for_index();
+    w.writes_content("bob", "edit-gen", "a/gen.py", &generated);
+    w.writes_content("alice", "edit-z", "z/upload.rs", own);
+    w.wait_for_index();
+    let outcome = w.ask(json!({"op": "graph_context", "workspace_id": "app",
+        "names": ["upload"], "limit": 3, "rank": true, "session_id": "claude-code.alice"}));
+    let matched = &outcome["outcome"]["matches"][0];
+    let paths: Vec<&str> = matched["definitions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{outcome:#}"))
+        .iter()
+        .map(|definition| definition["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        ["z/upload.rs", "a/gen.py", "a/gen.py"],
+        "own, then the peer's: {outcome:#}"
+    );
+    assert_eq!(matched["definition_count"], 303, "{outcome:#}");
+    // The same for `graph symbol --rank`, and for the prompt's code section.
+    let (code, text) = w.cli(&[
+        "graph",
+        "symbol",
+        "app",
+        "upload",
+        "--rank",
+        "--session",
+        "claude-code.alice",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let outcome = &serde_json::from_str::<Value>(&text).unwrap()["outcome"];
+    assert_eq!(outcome["symbols"][0]["path"], "z/upload.rs", "{outcome:#}");
+    let run = w.prompt("claude-code", "alice", ASK, &[]);
+    let line = name_line(&run.context.unwrap(), "upload");
+    assert!(
+        line.starts_with(
+            r#"- "upload": function at "z/upload.rs":1, exported (you edited this file)"#
+        ),
+        "{line}"
+    );
+}
+
+#[test]
+fn an_exported_definition_past_many_private_ones_in_the_sessions_own_file_ranks_first() {
+    // The same cutoff within one file: 300 private `upload`s, then the
+    // exported one, all in a file alice edited.
+    let own = format!("{}pub fn upload() {{}}\n", "fn upload() {}\n".repeat(300));
+    let w = World::with(&[("a/gen.rs", &own)]);
+    w.wait_for_index();
+    w.writes_content("alice", "edit-gen", "a/gen.rs", &own);
+    w.wait_for_index();
+    let outcome = w.ask(json!({"op": "graph_context", "workspace_id": "app",
+        "names": ["upload"], "limit": 1, "rank": true, "session_id": "claude-code.alice"}));
+    let first = &outcome["outcome"]["matches"][0]["definitions"][0];
+    assert_eq!(first["path"], "a/gen.rs", "{outcome:#}");
+    assert_eq!(first["line"], 301, "{outcome:#}");
+    assert_eq!(
+        first["rank_reasons"],
+        json!([{"reason": "own_file", "edited": true}, {"reason": "exported"}])
+    );
+}
+
+#[test]
+fn a_code_context_with_long_dependent_paths_fits_one_frame_and_counts_the_rest() {
+    // Review comment 4709803050: twelve names, three definitions each, five
+    // callers each, every path about 400 bytes. Five dependents under every
+    // definition exceed one 64 KiB frame.
+    let deep = format!("{}/{}", "d".repeat(190), "e".repeat(190));
+    let mut files: Vec<(String, String)> = Vec::new();
+    for n in 0..12 {
+        for d in 0..3 {
+            files.push((
+                format!("defs/{deep}/n{n}_{d}.rs"),
+                format!("pub fn name_{n}() {{}}\n"),
+            ));
+        }
+    }
+    for c in 0..5 {
+        let calls: String = (0..12).map(|n| format!("    name_{n}();\n")).collect();
+        files.push((
+            format!("callers/{deep}/c{c}.rs"),
+            format!("fn c{c}() {{\n{calls}}}\n"),
+        ));
+    }
+    let extra: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, content)| (path.as_str(), content.as_str()))
+        .collect();
+    let w = World::with(&extra);
+    w.wait_for_index();
+    let names: Vec<String> = (0..12).map(|n| format!("name_{n}")).collect();
+    for rank in [true, false] {
+        let outcome = w.ask(json!({"op": "graph_context", "workspace_id": "app",
+            "names": names, "limit": 3, "rank": rank}));
+        assert_eq!(outcome["outcome"]["type"], "graph_context", "{outcome:#}");
+        let matches = outcome["outcome"]["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 12, "every name kept: {outcome:#}");
+        for matched in matches {
+            let definitions = matched["definitions"].as_array().unwrap();
+            assert!(!definitions.is_empty(), "{matched:#}");
+            if rank {
+                assert_eq!(matched["definition_count"], 3, "{matched:#}");
+                for definition in definitions {
+                    assert_eq!(definition["dependent_count"], 5, "{definition:#}");
+                }
+            }
+        }
+    }
+    let run = w.prompt("claude-code", "alice", &names.join(" "), &[]);
+    let context = run.context.expect("a code section");
+    name_line(&context, "name_0");
+}

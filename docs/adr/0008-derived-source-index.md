@@ -402,9 +402,16 @@ Each definition in the answer carries `rank_reasons` (`own_file` with
 that mention its name, each with its count of `mentions`, ranked by rules 1,
 2 and 4, then by most mentions, then by path. `dependent_count` and the
 name's `definition_count` count what was left out. The daemon ranks among
-the first 256 definitions in path order and every definition in a file the
-session or a peer works on, and the 256 most-mentioning files and every file
-they work on; past that a definition or file is counted, never ranked. The
+the first 256 definitions in path order and the first 256 in the files the
+session or a peer works on, taken by rules 1 to 3 and then path order, so a
+peer's file of many same-name definitions never crowds out the session's
+own; and among the 256 most-mentioning files and every file they work on.
+Past that a definition or file is counted, never ranked. A code-context
+answer that would exceed one 64 KiB frame is cut until it fits: first each
+definition's dependents, one fewer at a time, then each name's mentioning
+files, then each name's lowest-ranked definitions down to one, then the last
+names. `dependent_count` and `definition_count` keep their values, and a name
+that loses a definition or a file is `truncated`. The
 section puts the top definition first with a short reason, such as `(you
 edited this file)`, and `used by` with its ranked dependents and their
 counts; later definitions follow as `also`. A line is built from whole parts
