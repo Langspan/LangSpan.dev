@@ -349,6 +349,9 @@ impl Store {
                 })?;
         let scan_id = format!("scan-{}-{sequence}", self.state.generation);
         let mut commands = Vec::new();
+        // Files whose content changed since a complete earlier scan, at their
+        // new versions: the core keeps those no session reported (issue #129).
+        let mut content_changes = Vec::new();
         // Several changed files back at their committed version at once,
         // with HEAD where it was: a reset, stash or checkout of files.
         let restored = changes
@@ -390,11 +393,20 @@ impl Store {
             } else {
                 None
             };
+            let after = observed_file_state(change.after.as_ref())?;
+            if before.as_ref().is_some_and(|before| *before != after)
+                && content_changes.len() < langspan_core::MAX_UNCOORDINATED_OBSERVED
+            {
+                content_changes.push(langspan_core::ObservedFile {
+                    path: change.path.clone(),
+                    state: after.clone(),
+                });
+            }
             commands.push(Command::ObserveDisk {
                 workspace_id: workspace_id.into(),
                 path: change.path,
                 before,
-                after: observed_file_state(change.after.as_ref())?,
+                after,
                 related_operation_ids: Vec::new(),
             });
         }
@@ -419,6 +431,7 @@ impl Store {
             }
         }
         let facts = commands.len();
+        let mut checkout_changed = false;
         // The checkout changed under the sessions in it: another branch, a
         // HEAD that moved with files no session put there, or a bulk
         // restore. A commit moves HEAD without changing any file, or with
@@ -439,7 +452,16 @@ impl Store {
                     to_head: snapshot.head.clone(),
                     files: file_changes,
                 });
+                checkout_changed = true;
             }
+        }
+        // Changed files no checkout change accounts for. Which of them no
+        // session reported, and whom to name, is the core's decision.
+        if !checkout_changed && !content_changes.is_empty() {
+            commands.push(Command::ObserveUncoordinated {
+                workspace_id: workspace_id.into(),
+                files: content_changes,
+            });
         }
         // Worktrees of one repository share a Git common directory. Only its
         // digest is recorded; it groups workspaces without merging them.
