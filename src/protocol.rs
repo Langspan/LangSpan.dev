@@ -1,4 +1,4 @@
-//! Version 6 of the local IPC contract. One bounded JSON line per connection.
+//! Version 7 of the local IPC contract. One bounded JSON line per connection.
 
 use langspan_core::{
     Command, ContextUse, Event, Outcome, RecordedEvent, SessionActivity, StatusRecord,
@@ -6,17 +6,21 @@ use langspan_core::{
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader, Read};
 
-/// Version 6 is version 5 with issue #222's briefing memory and context
+/// Version 7 is version 6 with issue #222's briefing memory and context
 /// measurement: a session activity's `told`, `told_at_ms` and `context`, a
 /// briefing's `unchanged`, a briefing delivery's `told` and `told_at_ms`,
 /// and the `context_added` and `told_forgotten` events (with the
-/// `forget_told` request that records the second). Version 5 is version 4
-/// with roadmap H9's `refusal_outcomes` in a report's counts and issue
-/// #214's `interface_notice_ids` in a briefing. Version 4 is version 3 with
+/// `forget_told` request that records the second). Version 6 is version 5
+/// with roadmap F5's `rebased` and `adapted` in a landing and in the
+/// request that records one (`fits`). Version 5 is version 4 with roadmap
+/// H9's `refusal_outcomes` in a report's counts and issue #214's
+/// `interface_notice_ids` in a briefing. Version 4 is version 3 with
 /// roadmap D7's rename fields in interface changes, history entries and
-/// in-flight symbols. Requests of an earlier version are requests of this
-/// one.
-pub const PROTOCOL_VERSION: u16 = 6;
+/// in-flight symbols. Apart from recording a rebased or adapted landing,
+/// requests of an earlier version are requests of this one.
+pub const PROTOCOL_VERSION: u16 = 7;
+/// Roadmap F5's version, answered in its own shape.
+pub const PROTOCOL_VERSION_6: u16 = 6;
 /// The version of roadmap H9 and issue #214, answered in its own shape.
 pub const PROTOCOL_VERSION_5: u16 = 5;
 /// Roadmap D7's version, answered in its own shape.
@@ -35,15 +39,15 @@ pub fn answers(version: u16) -> bool {
 /// earlier version read the objects later versions extended with
 /// `deny_unknown_fields`, so an answer carrying a field they lack would fail
 /// to read as a whole: theirs is encoded without what later versions added
-/// (`protocol_5_outcome`, then `protocol_4_shape`, then `protocol_3_shape`).
-/// A state record given in parts is encoded by `encode_record_for` before
-/// it is cut.
+/// (`protocol_6_outcome`, then `protocol_5_shape`, `protocol_4_shape` and
+/// `protocol_3_shape`). A state record given in parts is encoded by
+/// `encode_record_for` before it is cut.
 pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::Error> {
     if version >= PROTOCOL_VERSION {
         return encode(response);
     }
     let mut earlier = response.clone();
-    protocol_5_outcome(&mut earlier.outcome);
+    protocol_6_outcome(&mut earlier.outcome);
     let mut value = serde_json::to_value(&earlier)?;
     earlier_shape(version, &mut value);
     encode(&value)
@@ -59,7 +63,7 @@ pub fn encode_record_for(version: u16, record: &StatusRecord) -> Result<String, 
     }
     let mut earlier = record.clone();
     if let StatusRecord::Activity { activity, .. } = &mut earlier {
-        protocol_5_activity(activity);
+        protocol_6_activity(activity);
     }
     let mut value = serde_json::to_value(&earlier)?;
     earlier_shape(version, &mut value);
@@ -67,8 +71,11 @@ pub fn encode_record_for(version: u16, record: &StatusRecord) -> Result<String, 
 }
 
 /// `value` without the fields versions after `version` added to it, up to
-/// version 5.
+/// version 6.
 fn earlier_shape(version: u16, value: &mut serde_json::Value) {
+    if version < PROTOCOL_VERSION_6 {
+        protocol_5_shape(value);
+    }
     if version < PROTOCOL_VERSION_5 {
         protocol_4_shape(value);
     }
@@ -77,20 +84,20 @@ fn earlier_shape(version: u16, value: &mut serde_json::Value) {
     }
 }
 
-/// `activity` without what version 6 added. Every such field is skipped
+/// `activity` without what version 7 added. Every such field is skipped
 /// when empty, so emptying it leaves it out.
-fn protocol_5_activity(activity: &mut SessionActivity) {
+fn protocol_6_activity(activity: &mut SessionActivity) {
     activity.told = Vec::new();
     activity.told_at_ms = 0;
     activity.context = ContextUse::default();
 }
 
-/// `outcome` without what version 6 (issue #222) added. Every field it
+/// `outcome` without what version 7 (issue #222) added. Every field it
 /// added is skipped when empty, so emptying it leaves it out; the
-/// `context_added` and `told_forgotten` events, which version 5 has no
+/// `context_added` and `told_forgotten` events, which version 6 has no
 /// variant for, are left out of an event page.
-fn protocol_5_outcome(outcome: &mut Outcome) {
-    let activity = protocol_5_activity;
+fn protocol_6_outcome(outcome: &mut Outcome) {
+    let activity = protocol_6_activity;
     fn events(events: &mut Vec<RecordedEvent>) {
         events.retain(|recorded| {
             !matches!(
@@ -119,6 +126,50 @@ fn protocol_5_outcome(outcome: &mut Outcome) {
         }
         Outcome::Briefing { briefing } => briefing.unchanged = 0,
         Outcome::Events { events: page } | Outcome::Changes { events: page, .. } => events(page),
+        _ => {}
+    }
+}
+
+/// The first version that can record a rebased or adapted landing.
+const REWRITES_SINCE: u16 = PROTOCOL_VERSION_6;
+
+/// Whether a daemon answering `version` reads `command` as it is. An
+/// earlier daemon refuses a request to record a landing with `rebased` or
+/// `adapted` commits as unreadable, which is too late once the push is
+/// done, so a landing asks this before it pushes (roadmap F5).
+pub fn fits(version: u16, command: &Command) -> bool {
+    match command {
+        Command::RecordLanding {
+            rebased, adapted, ..
+        } => version >= REWRITES_SINCE || (rebased.is_empty() && adapted.is_empty()),
+        _ => true,
+    }
+}
+
+/// Why a request that does not fit a daemon of `version` is not sent.
+pub fn older_daemon(version: u16) -> String {
+    format!(
+        "the running daemon speaks protocol version {version}, which cannot record a rebased or adapted landing; restart the daemon after upgrading LangSpan"
+    )
+}
+
+/// The fields version 6 added to a landing (`Landing`: the only objects of
+/// the protocol with both `landing_id` and `check_id`).
+const LANDING_FIELDS_SINCE_6: [&str; 2] = ["rebased", "adapted"];
+
+/// `value` without the fields version 6 added.
+fn protocol_5_shape(value: &mut serde_json::Value) {
+    use serde_json::Value;
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(protocol_5_shape),
+        Value::Object(fields) => {
+            if fields.contains_key("landing_id") && fields.contains_key("check_id") {
+                for key in LANDING_FIELDS_SINCE_6 {
+                    fields.shift_remove(key);
+                }
+            }
+            fields.values_mut().for_each(protocol_5_shape);
+        }
         _ => {}
     }
 }

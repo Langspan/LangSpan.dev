@@ -96,11 +96,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
        -- COMMAND...
                                  Combine branches onto the remote's BRANCH without
                                  touching your checkout, run the command on that exact
-                                 result, and record it. Reports conflicts instead.
+                                 result, and record it. Reports conflicts instead,
+                                 and functions BRANCH renamed that a branch still
+                                 calls. [--rebase] [--adapt-renames]: as for land.
                                  --symbols also names definitions the branches changed
                                  in ways that disagree (advisory; never the result)
   land WORKSPACE --onto BRANCH --name NAME BRANCH... [--apply] [--session ID]
-       [--wait-s N] [--check-again -- COMMAND...]
+       [--wait-s N] [--rebase] [--adapt-renames] [--check-again -- COMMAND...]
                                  Push that combined result, only if check NAME passed
                                  on exactly its tree. Never forced. Dry run unless --apply.
                                  --apply takes the push turn for BRANCH first; if another
@@ -112,6 +114,11 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  tree lands only with its own passing check;
                                  --check-again runs COMMAND on it to get one. Conflicts
                                  are shown as hunks; renames that landed are followed.
+                                 --rebase replays the branch's commits onto BRANCH
+                                 instead of merging (linear history). --adapt-renames
+                                 rewrites the branch's uses of names BRANCH renamed in
+                                 one new commit on top of it, only when that is
+                                 certain. Your branches are never changed.
                                  Optional --remote (default origin), --request-id
   land-queue WORKSPACE --onto BRANCH
                                  Who holds BRANCH's push turn and who waits for it
@@ -2439,6 +2446,10 @@ fn integrate(
         )
     });
     let check_again = options.remove("--check-again").is_some();
+    let shape = langspan::integrate::Shape {
+        rebase: options.remove("--rebase").is_some(),
+        adapt_renames: options.remove("--adapt-renames").is_some(),
+    };
     let symbols = options.remove("--symbols").is_some();
     if landing.is_some() && symbols {
         return Err("--symbols is valid only for `integrate check`".into());
@@ -2454,6 +2465,7 @@ fn integrate(
         onto: onto.clone(),
         name: name.clone(),
         branches: branches.iter().map(|branch| (*branch).to_owned()).collect(),
+        shape,
     };
     let check = Check {
         argv: command.to_vec(),
@@ -2475,10 +2487,26 @@ fn integrate(
         match &report {
             Integrated::NotCombinable {
                 branch,
+                commit,
                 paths,
                 conflicts,
                 ..
-            } => print_conflict(branch, paths, conflicts, &onto, &remote),
+            } => {
+                print_replay_conflict(commit.as_deref());
+                print_conflict(branch, paths, conflicts, &onto, &remote)
+            }
+            Integrated::NotAdapted {
+                branch,
+                reason,
+                notes,
+                ..
+            } => print_not_rewritten(false, branch, reason, notes),
+            Integrated::NotRebased {
+                branch,
+                reason,
+                notes,
+                ..
+            } => print_not_rewritten(true, branch, reason, notes),
             Integrated::Checked {
                 target_oid,
                 combined,
@@ -2589,16 +2617,40 @@ fn integrate(
         }
         Landed::NotCombinable {
             branch,
+            commit,
             paths,
             conflicts,
             attempts: tried,
             ..
         } => {
             attempts(tried);
+            print_replay_conflict(commit.as_deref());
             print_conflict(branch, paths, conflicts, &onto, &remote)
         }
+        Landed::NotAdapted {
+            branch,
+            reason,
+            notes,
+            attempts: tried,
+            ..
+        } => {
+            attempts(tried);
+            print_not_rewritten(false, branch, reason, notes);
+        }
+        Landed::NotRebased {
+            branch,
+            reason,
+            notes,
+            attempts: tried,
+            ..
+        } => {
+            attempts(tried);
+            print_not_rewritten(true, branch, reason, notes);
+        }
         Landed::NothingToLand { .. } => {
-            println!("Nothing to land: {remote}/{onto} already contains these branches.")
+            println!(
+                "Nothing to land: {remote}/{onto} already contains these branches, or their changes."
+            )
         }
         Landed::NotReady {
             target_oid,
@@ -2606,6 +2658,7 @@ fn integrate(
             reason,
             moved,
             attempts: tried,
+            ..
         } => {
             attempts(tried);
             print_combined(&target, target_oid, combined);
@@ -2626,8 +2679,10 @@ fn integrate(
             check,
             inconclusive,
             attempts: tried,
+            notes,
         } => {
             attempts(tried);
+            print_notes(notes);
             println!(
                 "Not landed: {name} {} on the combined tree {}.",
                 match check.result {
@@ -2644,6 +2699,7 @@ fn integrate(
             target_oid,
             combined,
             check,
+            ..
         } => {
             print_combined(&target, target_oid, combined);
             println!(
@@ -2659,6 +2715,7 @@ fn integrate(
             landing,
             attempts: tried,
             renames,
+            notes,
             waited_ms,
             replayed,
             unfinished_push,
@@ -2668,6 +2725,7 @@ fn integrate(
                 println!("Waited {} s in line for the push turn.", waited_ms / 1000);
             }
             print_renames(renames);
+            print_notes(notes);
             if *replayed {
                 println!("This request had already landed.");
             }
@@ -2904,6 +2962,57 @@ fn print_combined(
         merged.tree
     );
     print_renames(&merged.renames);
+    print_notes(&merged.notes);
+}
+
+/// Identifier renames, adapted and rebased commits. Names and paths are
+/// repository text, shown quoted.
+fn print_notes(notes: &langspan::rewrite::Notes) {
+    for rename in &notes.identifier_renames {
+        let uses: Vec<String> = rename
+            .uses
+            .iter()
+            .map(|at| format!("{}:{}", at.path, at.line))
+            .collect();
+        println!(
+            "The target renamed {:?} to {:?} in {:?}; {} still uses the old name at {}.",
+            rename.from,
+            rename.to,
+            rename.path,
+            rename.branch,
+            uses.join(", ")
+        );
+        if let Some(why) = &rename.uncertain {
+            println!("  --adapt-renames would not rewrite these: {why}.");
+        }
+    }
+    if let Some(why) = &notes.identifier_renames_incomplete {
+        println!("Identifier renames may be missing: {why}.");
+    }
+    for adapted in &notes.adapted {
+        println!(
+            "Adapted {} to the new names in commit {} on top of it; your branch was not changed (fetch that commit to keep it).",
+            adapted.branch, adapted.commit
+        );
+    }
+    for rewritten in &notes.rebased {
+        println!("Rebased {} as {}.", rewritten.from, rewritten.to);
+    }
+}
+
+fn print_replay_conflict(commit: Option<&str>) {
+    if let Some(commit) = commit {
+        println!("The rebase stopped at commit {commit}: replaying it onto the target conflicts.");
+    }
+}
+
+/// `--adapt-renames` or `--rebase` stopped before anything ran or was pushed.
+fn print_not_rewritten(rebase: bool, branch: &str, reason: &str, notes: &langspan::rewrite::Notes) {
+    print_notes(notes);
+    println!(
+        "Not {} {branch}: {reason}.",
+        if rebase { "rebasing" } else { "adapting" }
+    );
 }
 
 /// `graph impact --depth N`: one line per level, paths and names quoted
@@ -4808,7 +4917,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             "--apply" => apply = true,
             // Flags, kept with the options so that only the commands that take
             // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
-            // `land`: `--check-again`; `integrate check`: `--symbols`;
+            // `land`: `--check-again`; `land` and `integrate check`:
+            // `--rebase`, `--adapt-renames`; `integrate check`: `--symbols`;
             // `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
             // `graph symbol`: `--detail`, `--rank`, `--renamed`; `brief`: `--recent`;
@@ -4817,6 +4927,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--allow-network"
             | "--demo"
             | "--check-again"
+            | "--rebase"
+            | "--adapt-renames"
             | "--symbols"
             | "--publish-as-branch"
             | "--mine"

@@ -209,24 +209,26 @@ of changes only, and 338 bytes per turn (4,397 bytes) with the full view on
 every change; one run each. The skill is in every turn's context too: its test
 keeps every form at most 90% of each host's documented limit.
 
-**Protocol version 6 (added 26 November 2026, review comments 4711375982
-and 4712860167).** A client of version 5 (roadmap H9's build, ADR 0019) or
+**Protocol version 7 (added 26 November 2026, review comments 4711375982
+and 4712860167).** A client of version 6 (roadmap F5's build, ADR 0007) or
 earlier reads session activity, briefings and events with
 `deny_unknown_fields`, so a status answer carrying `told`, `told_at_ms` or
 `context`, a briefing with `unchanged`, or an event page with the new events
 would fail to read as a whole once a newer hook had recorded them. Version 5
-already meant H9's `refusal_outcomes`, so these fields take version 6. To a
-version 5, 4 or 3 client, the daemon answers without them: activity without
-`told`, `told_at_ms` and `context`, a briefing without `unchanged`, a
-`briefing_delivered` event without its keys and time, and an event page
-without `context_added` and `told_forgotten` events. A version 5 reply keeps
-`refusal_outcomes`; version 4 and 3 replies leave out what versions 5 and 4
-added (ADR 0019, ADR 0008). A state record too large for one status page
-comes as parts of its JSON, which cannot be reshaped once cut, so the daemon
-cuts an earlier client's parts from the record in that client's version
-(`protocol::encode_record_for`). Requests of earlier versions are requests
-of version 6, so a version 6 client that a daemon of an earlier build
-refuses asks again once in the version that daemon names.
+already meant H9's `refusal_outcomes` and version 6 F5's landing fields, so
+these fields take version 7. To a version 6, 5, 4 or 3 client, the daemon
+answers without them: activity without `told`, `told_at_ms` and `context`, a
+briefing without `unchanged`, a `briefing_delivered` event without its keys
+and time, and an event page without `context_added` and `told_forgotten`
+events. A version 6 reply keeps a landing's `rebased` and `adapted`; version
+5, 4 and 3 replies also leave out what versions 6, 5 and 4 added (ADR 0007,
+ADR 0019, ADR 0008). A state record too large for one status page comes as
+parts of its JSON, which cannot be reshaped once cut, so the daemon cuts an
+earlier client's parts from the record in that client's version
+(`protocol::encode_record_for`). Apart from recording a rebased or adapted
+landing (ADR 0007), requests of earlier versions are requests of version 7,
+so a version 7 client that a daemon of an earlier build refuses asks again
+once in the version that daemon names.
 
 **Prompt targets (added later, roadmap C8).** A prompt's code briefing finds
 where the prompt's names are defined (at most 12 names, 3 definitions each).
