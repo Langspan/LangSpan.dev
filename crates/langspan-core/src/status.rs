@@ -6,8 +6,8 @@
 use crate::{
     AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CoreError, Intent, InterfaceNotice,
     Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, RemoteLink, RemotePeer,
-    ScanCoverage, ScanFailure, Session, SessionActivity, SessionLiveness, State, TestLearning,
-    Turn, TurnWaiter, UninstalledHost, Workspace, WorkspaceGit, error,
+    RetractedMessage, ScanCoverage, ScanFailure, Session, SessionActivity, SessionLiveness, State,
+    TestLearning, Turn, TurnWaiter, UninstalledHost, Workspace, WorkspaceGit, error,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -79,6 +79,10 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         check_notices,
         test_learning,
         uninstalled_hosts,
+        // Recap, the dashboard and briefings show withdrawn messages; the
+        // bounded view shows what is held, and `status --all` has these.
+        message_history: _,
+        retracted_notices: _,
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
@@ -141,6 +145,8 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         check_notices: keep(check_notices, of_shown),
         test_learning: test_learning.clone(),
         uninstalled_hosts: uninstalled_hosts.clone(),
+        retracted_notices: BTreeMap::new(),
+        message_history: BTreeMap::new(),
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),
@@ -424,6 +430,16 @@ pub enum StatusRecord {
         key: String,
         host: UninstalledHost,
     },
+    /// One of the latest messages sent in workspace `key`, with its readers.
+    SentMessage {
+        key: String,
+        message: Message,
+    },
+    /// A withdrawal session `key` has not yet been told about.
+    RetractedNotice {
+        key: String,
+        notice: RetractedMessage,
+    },
     /// Part of one record too large for a page: `text` is its JSON from
     /// byte `offset`. The parts of a record come in order, the last with
     /// `last`, and joined they are that record's JSON. A part at offset 0
@@ -436,7 +452,7 @@ pub enum StatusRecord {
 }
 
 /// Record kinds in page order. The cursor names one of these.
-const KINDS: [&str; 23] = [
+const KINDS: [&str; 25] = [
     "workspace",
     "session",
     "intent",
@@ -460,6 +476,8 @@ const KINDS: [&str; 23] = [
     "check_notice",
     "test_learning",
     "uninstalled_host",
+    "sent_message",
+    "retracted_notice",
 ];
 
 impl StatusRecord {
@@ -505,6 +523,12 @@ impl StatusRecord {
             }
             Self::TestLearning { key, learning } => drop(state.test_learning.insert(key, learning)),
             Self::UninstalledHost { key, host } => drop(state.uninstalled_hosts.insert(key, host)),
+            Self::SentMessage { key, message } => {
+                state.message_history.entry(key).or_default().push(message)
+            }
+            Self::RetractedNotice { key, notice } => {
+                state.retracted_notices.entry(key).or_default().push(notice)
+            }
         }
         Ok(())
     }
@@ -691,7 +715,7 @@ pub fn status_records<'a>(
         .as_ref()
         .and_then(|after| Some((after.position.clone(), after.within?)));
     let after = after.as_ref();
-    let pages: [Page<'a>; 23] = [
+    let pages: [Page<'a>; 25] = [
         entries(0, &state.workspaces, after, |key, workspace| {
             StatusRecord::Workspace { key, workspace }
         }),
@@ -764,6 +788,12 @@ pub fn status_records<'a>(
         }),
         entries(22, &state.uninstalled_hosts, after, |key, host| {
             StatusRecord::UninstalledHost { key, host }
+        }),
+        lists(23, &state.message_history, after, |key, message| {
+            StatusRecord::SentMessage { key, message }
+        }),
+        lists(24, &state.retracted_notices, after, |key, notice| {
+            StatusRecord::RetractedNotice { key, notice }
         }),
     ];
     Ok((resume, pages.into_iter().flatten()))

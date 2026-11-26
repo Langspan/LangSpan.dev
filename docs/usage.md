@@ -669,7 +669,8 @@ proof a process is alive; Linux process observation is available through
 ## Recap, notes and messages
 
 `recap` gives a bounded account of one workspace's recorded state, including
-sessions, edits, checks, remembered notes and unacknowledged messages. Using the
+sessions, edits, checks, remembered notes, unacknowledged messages and recently
+withdrawn ones (`"retracted": true`). Using the
 workspace and sessions from the CLI example:
 
 ```sh
@@ -726,6 +727,25 @@ one explicitly, use `langspan ack bob MESSAGE_ID --request-id ack-1`. Notes and
 messages stay local; remote Git-ref sharing does not publish them. Treat their
 text as data and leave secrets out. [ADR 0009](adr/0009-agent-messages-and-handoff.md)
 describes delivery, retention and the local identity boundary.
+
+A message or handoff that no longer holds can be withdrawn:
+
+```sh
+./target/release/langspan messages retract demo last --from alice --request-id retract-1 --json
+```
+
+`last` is the sender's newest message; otherwise name the message ID its send
+returned. Copies not yet delivered are removed, and a handoff not yet taken is
+not taken. Each session that already received it is told once, at its next
+briefing (start, prompt, or for Claude Code after a completed tool call):
+`- Session alice withdrew its message "..." (first 120 bytes): disregard it.`
+The result lists both groups:
+`{"message_id":"message-1","withdrawn_unread":["bob"],"told_to_disregard":[]}`.
+A session may withdraw only its own messages (`not_sender` otherwise); without
+`--from` it is the owner, who may withdraw any. An unknown message, one dropped
+by the 64-message limit, or one already withdrawn is refused, saying which; a
+retry with the same request ID returns the first result. The original
+`message_sent` event stays in the log, and withdrawal is local only.
 
 ## The day so far
 
@@ -1265,6 +1285,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_recall` | Search a workspace's remembered notes: every query word in a note's text or paths, without case; best first, at most 50 |
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |
 | `langspan_handoff` | Leave a message for the next other session to take up |
+| `langspan_retract_message` | Withdraw a message this session sent, by ID or `"last"`; its readers are told to disregard it |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |
 | `langspan_my_changes` | List this session's own uncommitted files and hunks in a shared checkout, as `langspan_commit_mine` would split them; changes nothing |
 

@@ -92,7 +92,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  scan, and other languages by extension
   recap WORKSPACE               A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
-                                 messages not yet acknowledged
+                                 messages not yet acknowledged, then withdrawn ones
   today [WORKSPACE] [--since RFC3339]
                                  What each session did since local midnight (or the
                                  time given), refusals by kind, checks, landings, and
@@ -124,6 +124,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   handoff SESSION TEXT [PATH...] Leave one line for the next other session that starts
                                  or is prompted in SESSION's workspace
   ack SESSION MESSAGE            Mark a message seen so it is not delivered again
+  messages retract WORKSPACE MESSAGE|last [--from SESSION]
+                                 Withdraw a message or handoff: copies not yet
+                                 delivered are removed, and each session that received
+                                 it is told once, at its next briefing, to disregard
+                                 it. `last` is the sender's newest message. Without
+                                 --from it is the owner, who may withdraw any message;
+                                 a session may withdraw only its own
   doctor [--root DIR] [--home DIR]
                                  Say what is and is not working: coordinator, scans,
                                  index, publication, the hooks installed in DIR, and
@@ -3200,6 +3207,11 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 session_id: (*session).into(),
                 message_id: (*message).into(),
             },
+            ["messages", "retract", workspace, message] => Command::RetractMessage {
+                workspace_id: (*workspace).into(),
+                from: options.remove("--from"),
+                message_id: (*message != "last").then(|| (*message).into()),
+            },
             ["status"] if options.remove("--all").is_some() => Command::StatusRecords {
                 after: options.remove("--after"),
                 page_bytes: None,
@@ -3877,6 +3889,24 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 format!("Message {message_id} was not waiting for this session.")
             }
         ),
+        Outcome::MessageRetracted {
+            message_id,
+            withdrawn_unread,
+            told_to_disregard,
+        } => {
+            let sessions = |sessions: &[String]| {
+                if sessions.is_empty() {
+                    "none".to_owned()
+                } else {
+                    sessions.join(", ")
+                }
+            };
+            println!(
+                "Withdrew {message_id}. Not delivered to: {}. Told to disregard it at their next briefing: {}.",
+                sessions(withdrawn_unread),
+                sessions(told_to_disregard)
+            );
+        }
         Outcome::ScanObserved {
             workspace_id,
             failed,
@@ -4004,7 +4034,12 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             }
             for message in &recap.messages {
                 println!(
-                    "Message {} from {} to {}: {}{}",
+                    "{} {} from {} to {}: {}{}",
+                    if message.retracted {
+                        "Withdrawn message"
+                    } else {
+                        "Message"
+                    },
                     message.message_id,
                     message
                         .from
@@ -4014,6 +4049,8 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                     match &message.to {
                         langspan_core::Recipient::Session { session_id } =>
                             format!("session {session_id}"),
+                        langspan_core::Recipient::Everyone {} if message.retracted =>
+                            "every session".into(),
                         langspan_core::Recipient::Everyone {} => format!(
                             "every session ({} acknowledged so far)",
                             message.acknowledged.len()
