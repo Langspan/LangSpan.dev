@@ -48,7 +48,7 @@ are not published yet ([ADR 0035](adr/0035-one-command-setup.md)).
 
 ## Install a release
 
-[v0.2.0](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.2.0) provides
+The [latest stable release](https://github.com/Langspan/LangSpan.dev/releases/latest) provides
 macOS and Linux binaries. Follow the [platform downloads, verification and
 installation instructions](../README.md#install) before starting the coordinator.
 A source build is optional.

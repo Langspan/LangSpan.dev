@@ -110,6 +110,6 @@ Link the existing local edit animation to
 [its matching scene](https://langspan.dev/#edit-coordination).
 
 Start adoption with the
-[v0.2.0 release](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.2.0)
+[latest stable release](https://github.com/Langspan/LangSpan.dev/releases/latest)
 for macOS and Linux, or the source build instructions in the README.
 Update the availability statement only after checking the release assets.
