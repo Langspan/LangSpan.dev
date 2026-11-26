@@ -2018,6 +2018,11 @@ fn many_long_inflight_notices_are_trimmed_to_one_response_frame() {
         )
         .unwrap();
     }
+    // Every caller must be indexed before the definitions change, or a
+    // notice can list fewer than the four files that mention it.
+    w.wait_for("the callers indexed", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 7
+    });
     let parameters: String = (0..12)
         .map(|n| format!("parameter_with_a_long_name_{n}: u64, "))
         .collect();
@@ -2034,6 +2039,7 @@ fn many_long_inflight_notices_are_trimmed_to_one_response_frame() {
         !inflight_names(outcome).is_empty()
     });
     assert_eq!(outcome["truncated"], true, "{outcome:#}");
+    assert_eq!(outcome["coverage"]["current_files"], 7, "{outcome:#}");
     let listed = inflight_names(&outcome).len();
     assert!((1..128).contains(&listed), "{listed} listed");
     assert_eq!(
