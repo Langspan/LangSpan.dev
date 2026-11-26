@@ -234,6 +234,8 @@ fn a_landing_is_recorded_only_against_a_passing_check_of_exactly_that_tree() {
                 tree_oid: oid(tree),
                 inputs: vec![oid('1')],
                 check_id: check.into(),
+                rebased: Vec::new(),
+                adapted: Vec::new(),
             },
             40,
         )

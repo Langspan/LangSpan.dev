@@ -508,6 +508,22 @@ shown to whoever ran the check, who could already read the branch. Findings
 are advisory: they never change a check's result or what `land` requires, so a
 branch cannot use them to pass or block a landing.
 
+### Rename adaptation and rebase landings (roadmap F5)
+
+`--adapt-renames` and `--rebase` (MCP `adapt_renames`, `rebase`) widen the
+landing boundary: LangSpan now writes code it did not receive from the owner
+(the adapted commit), and new commits under the owner's identity (replayed
+commits), both from repository text.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | A replayed commit keeps its original author, date and message, read from Git's own commit object; the committer is the owner's Git identity, as for a merge commit, so a rebase landing does not claim the owner wrote the change. A signature on the original is not carried over. |
+| Tampering | A rename is detected from Git objects parsed by the source index's extractor (ADR 0008), never from text an agent supplies. Repository text decides what is rewritten, so a branch or target author can shape the rename the landing finds; the rewrite is bounded to whole-word replacements of the detected name on the listed added lines of the branch, and is refused unless ADR 0007's certainty rules hold. The rewritten tree, like every landed tree, needs its own passing check, so a wrong rewrite that the check catches is never pushed; one the check does not catch would be, as for any code the check passes. Every new object is written through a private index in a private (`0700`) temporary directory; nothing is checked out, no filter or hook runs, no ref is written, and the owner's branch, index, `HEAD` and configuration are untouched. No push is forced; a rewritten result reaches the remote only as a fast-forward of the target it was combined onto. |
+| Repudiation | The `landed` event records the rebased commit pairs (`rebased`) and the adapted commits (`adapted`), so the log says which pushed commits LangSpan made. |
+| Information disclosure | `identifier_renames` carries names, paths and line numbers from the repository, as data; the reason a rewrite was refused names a path and line, never file content. The adapted commit's message lists only the names and counts. |
+| Denial of service | Rename detection compares at most 64 changed source files of at most 1 MiB each, reads a branch diff of at most 8 MiB, parses at most 16 further files to look for another definition, and lists at most 16 renames of 32 uses; past a bound it says the list is incomplete instead of reading more. A rebase replays at most 64 commits, each of at most 1 MiB. All of it runs within the landing's 120 s Git deadline. |
+| Elevation of privilege | Nothing runs that a landing did not already run: the check command is still the only program executed, and the push still uses the owner's credentials and pre-push hooks. An agent that calls `langspan_land` with `apply` and `adapt_renames` can publish a mechanical rewrite of its branch without asking; the host's permission prompt for the tool remains the gate, as for any landing. |
+
 ## Automatic checks after a session's writes
 
 [ADR 0030](../adr/0030-automatic-checks-after-write-batches.md) makes the

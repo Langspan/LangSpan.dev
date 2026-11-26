@@ -72,3 +72,4 @@ pub mod graph;
 pub mod index_file;
 pub mod integrate;
 pub mod landing;
+pub mod rewrite;

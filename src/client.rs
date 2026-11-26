@@ -36,13 +36,17 @@ mod unix {
         crate::hook::redact_command(&mut request.command);
         let mut response = exchange(state_dir, &request, deadline)?;
         // A daemon of an earlier build refuses this version before it reads
-        // the command, and answers in its own (version 4 or 3), so the same
-        // request in the version it names cannot take effect twice.
-        // Requests are the same in every version it answers.
+        // the command, and answers in its own (version 5, 4 or 3), so the
+        // same request in the version it names cannot take effect twice.
+        // Requests are the same in every version it answers, except the one
+        // version 6 changed (`protocol::fits`), which is not sent at all.
         if request.version == PROTOCOL_VERSION
             && (OLDEST_PROTOCOL_VERSION..PROTOCOL_VERSION).contains(&response.version)
             && matches!(&response.outcome, Outcome::Error { code, .. } if code == "unsupported_version")
         {
+            if !crate::protocol::fits(response.version, &request.command) {
+                return Err(crate::protocol::older_daemon(response.version).into());
+            }
             request.version = response.version;
             response = exchange(state_dir, &request, deadline)?;
         }
@@ -308,9 +312,67 @@ mod unix {
         /// version, with the same request, and reads that answer.
         #[test]
         fn a_daemon_of_an_earlier_build_is_asked_again_in_its_version() {
-            for earlier in [4u16, 3] {
+            for earlier in [5u16, 4, 3] {
                 asked_again_in(earlier);
             }
+        }
+
+        /// Review comment 4712442596: a request to record a rebased landing
+        /// is not sent again to a daemon of version 5 or earlier, which
+        /// could not read it; the error says to restart the daemon.
+        #[test]
+        fn a_rebased_landing_is_not_sent_again_to_an_earlier_daemon() {
+            use std::io::{BufRead, BufReader};
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("ls-unfit-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(dir.join("daemon.sock")).unwrap();
+            std::fs::set_permissions(
+                dir.join("daemon.sock"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            let peer = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let reply = serde_json::json!({"version": 5, "request_id": request["request_id"],
+                    "replayed": false, "generation": 1, "lease_valid": null,
+                    "outcome": {"type": "error", "code": "unsupported_version", "message": "older"}});
+                writeln!(&stream, "{reply}").unwrap();
+                // A second request would be accepted here; none may come.
+                listener.set_nonblocking(true).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                listener.accept().is_ok()
+            });
+            let request = crate::protocol::Request {
+                version: crate::protocol::PROTOCOL_VERSION,
+                request_id: "land".into(),
+                command: langspan_core::Command::RecordLanding {
+                    workspace_id: "app".into(),
+                    onto: "main".into(),
+                    commit_oid: "c".repeat(40),
+                    tree_oid: "d".repeat(40),
+                    inputs: vec!["e".repeat(40)],
+                    check_id: "check".into(),
+                    rebased: vec![langspan_core::Rewritten {
+                        from: "e".repeat(40),
+                        to: "c".repeat(40),
+                    }],
+                    adapted: Vec::new(),
+                },
+            };
+            let error = call(&dir, &request).unwrap_err().to_string();
+            let asked_again = peer.join().unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert!(!asked_again, "sent again in version 5");
+            assert!(
+                error.contains("protocol version 5") && error.contains("restart the daemon"),
+                "{error}"
+            );
         }
 
         fn asked_again_in(earlier: u16) {
@@ -360,7 +422,10 @@ mod unix {
                     .iter()
                     .map(|r| r["version"].clone())
                     .collect::<Vec<_>>(),
-                [serde_json::json!(5), serde_json::json!(earlier)]
+                [
+                    serde_json::json!(crate::protocol::PROTOCOL_VERSION),
+                    serde_json::json!(earlier)
+                ]
             );
             assert_eq!(asked[0]["command"], asked[1]["command"]);
             assert_eq!(asked[1]["request_id"], "read");

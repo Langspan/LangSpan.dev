@@ -604,6 +604,8 @@ fn a_retried_landing_is_recognised_when_status_leaves_landings_out() {
             tree_oid: "b".repeat(40),
             inputs: vec!["c".repeat(40)],
             check_id: "check-done".into(),
+            rebased: Vec::new(),
+            adapted: Vec::new(),
         },
     };
     Connection::open(&path)
