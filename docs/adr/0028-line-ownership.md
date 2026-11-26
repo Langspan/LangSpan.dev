@@ -86,7 +86,73 @@ decision (test
 `a_redelivered_pre_tool_event_after_a_refusal_for_unread_lines_is_refused_again`).
 A replayed conflict is still no decision (ADR 0003): its holder may be gone.
 
+**Taking over an ended session's lines** (added 25 November 2026, issue
+#161). A session that ends before it commits leaves its journaled lines
+credited to it, and nothing else can take them: `status --mine` and
+`commit --mine` of the session that continues the task show none of them.
+`langspan adopt SESSION` and the MCP tool `langspan_adopt` move them,
+explicitly:
+
+- The core decides. `Adopt { session_id, from }` is refused unless `from`
+  is a registered session of the adopter's workspace that has ended (an
+  end report, or its process known to have exited; the same test as "not
+  ended and not known to have exited" above), is not the adopter, and was
+  not adopted by another session. It records one `session_adopted` event
+  with both sessions, the workspace, the time and the reason, and the state
+  keeps one adoption per ended session (`State::adoptions`). An adoption the
+  adopter already made is answered again without a new event. The answer
+  names `from`'s registered subagents that have not ended (`live`, at most
+  64, else `session_live`): ending a session records its end alone, so a
+  subagent can still be writing.
+- A retry of an adoption's request ID is decided again rather than answered
+  from its receipt, because the adapter rewrites the journal from the
+  answer. If `from` has resumed since, the retry is refused with
+  `session_live`; otherwise it carries the current `live` list.
+- The adapter then credits the journal entries of `from` and its ended
+  subagents to the adopter, in place, skipping those of a `live` subagent
+  and its own subagents: each entry keeps its file name and
+  modification time, so it expires when it would have and a retry finds
+  nothing left to move. The journal stays the one record of who wrote which
+  line; the event records the transfer. A replay after a restart gives the
+  same adoption, and the journal on disk already holds the new owner.
+- An adopter that ends after its adoption is recorded, but before the
+  adapter credits the lines, leaves them under the session it adopted, which
+  cannot be adopted again. So the answer also names `earlier`: every
+  session whose adoptions lead to `from`, of the same workspace, at most 64
+  (`adoption_chain` refuses more). The adapter credits their entries too,
+  and `live` covers their subagents as well. A session in that chain that
+  has resumed since its adoption is left out, along with the sessions its
+  own adoptions lead to: what it writes again is its own.
+- A subagent of `from` (or of a session in `earlier`) that another session
+  adopted is that session's to credit, even when its adapter stopped before
+  rewriting the journal. The answer names those subagents (`kept`, at most
+  64, else `adoption_chain`), and the adapter skips their entries and their
+  own subagents' entries, as for `live`. The other session's retry then
+  credits them. An adoption the adopter itself made of such a subagent is
+  not in `kept`: its entries move with the rest.
+- Entries are rewritten whole, so a line both `from` and a third session
+  wrote is the adopter's and that session's: a `mixed` file stays mixed, and
+  the third session's lines stay its own.
+- The reason is shown, never required: a message `from` sent the adopter
+  (addressed to it, or a handoff it took), else the same task line. The
+  person or agent decides.
+- At a session start, the hook names to the coordinator the sessions whose
+  journaled lines are still among the checkout's changes from `HEAD`
+  (`adopt::left_sessions`, at most 32 files compared, within half the hook's
+  time). The briefing names the ended, unadopted ones of the workspace, at
+  most four, with their task lines, and suggests `langspan adopt`. Only the
+  start hook names them, so a session is told once per start.
+
 ## Consequences and limits
+
+- **An adoption cannot be undone or passed on while the adopter is live.**
+  Another session can adopt the adopter's work once the adopter has ended.
+  A session whose death LangSpan never observed (no end report, no process
+  observation) counts as live and cannot be adopted; its owner can end it
+  with the host, or commit the files by path.
+- **A write the ended session's hook journaled after the adoption** stays
+  credited to it. An ended session writes nothing, so this needs a host that
+  reports an end and then keeps writing; `langspan adopt` again moves it.
 
 - **Lines are known by content, as the journal keys them.**
   - Identical lines cannot be told apart: a changed line counts as another
@@ -126,7 +192,16 @@ A replayed conflict is still no decision (ADR 0003): its holder may be gone.
 - **Protocol.** It stays at version 3, which is unreleased. `admit_tool`
   gains an optional `overwrites`, and there is one new outcome,
   `unread_lines`. Golden vectors: `fixtures/admit-overwrites-request-v3.json`
-  and `fixtures/unread-lines-response-v3.json`.
+  and `fixtures/unread-lines-response-v3.json`. Adoption adds the `adopt`
+  request, the `adopted` outcome, the `session_adopted` event, an optional
+  `left` on `brief` and an optional `left_work` on the briefing, all at
+  version 3 (`fixtures/adopt-request-v3.json`,
+  `fixtures/adopted-response-v3.json`,
+  `fixtures/left-work-brief-request-v3.json`).
+- **The start hook reads the whole workspace journal** to find ended
+  sessions' work, as the commit guard does for a commit: at most the
+  journal's 4,096 entries, then at most 32 files compared with `HEAD` within
+  half the hook's time.
 - **Latency.** The comparison and the journal read run in the hook. The
   journal keeps each workspace's entries in one directory per path, and the
   hook reads only the directories of the files the call writes, so its cost
@@ -148,3 +223,6 @@ Tests:
 - `tests/line_ownership.rs`: real daemon and hook executables.
 - `crates/langspan-core/tests/line_ownership.rs`: the rule and its bounds.
 - `src/lines.rs`: the changed lines and the journal lookup.
+- `tests/adopt.rs` and `crates/langspan-core/tests/adoption.rs`: adoption,
+  with a killed session's host, a third session's lines, a daemon restart and
+  the MCP tool; `src/journal.rs`: crediting entries in place.

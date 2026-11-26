@@ -320,7 +320,7 @@ const TAP_LIMIT: usize = 64;
 /// hold a command line as typed. It is redacted wherever it is read back:
 /// into state, into an event page and from a receipt.
 fn redact_event(event: &mut Event) {
-    if let Event::CheckRecorded { check } = event {
+    if let Event::CheckRecorded { check, .. } = event {
         crate::hook::redact_check(check);
     }
 }
@@ -860,6 +860,35 @@ impl Store {
         };
         if let Outcome::CheckRecorded { check } = &mut outcome {
             crate::hook::redact_check(check);
+        }
+        // A retried adoption rewrites the line journal from its answer, so it
+        // is decided again: the ended session may have resumed since, or a
+        // subagent may have started, and the cached answer would hand their
+        // new lines over. Only an answer that records nothing new is used.
+        if let Outcome::Adopted { recorded, .. } = outcome {
+            let decision = decide(&self.state, original, request_id, now_ms);
+            outcome = match decision.outcome {
+                Outcome::Adopted {
+                    adoption,
+                    root,
+                    live,
+                    earlier,
+                    kept,
+                    ..
+                } if decision.events.is_empty() => Outcome::Adopted {
+                    adoption,
+                    root,
+                    recorded,
+                    live,
+                    earlier,
+                    kept,
+                },
+                refused @ Outcome::Error { .. } => refused,
+                _ => Outcome::Error {
+                    code: "adoption_changed".into(),
+                    message: "this adoption's record no longer matches the coordinator's state; run `langspan adopt` again with a new request ID".into(),
+                },
+            };
         }
         Ok(Some(self.execution(outcome, true, now_ms)))
     }

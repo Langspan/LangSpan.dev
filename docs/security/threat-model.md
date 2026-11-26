@@ -32,7 +32,7 @@ repository instructions.
 | Process metadata → session evidence | Same-user process incarnation, alive/exited/unknown, explicit time and generation; no effect on admission authority. |
 | Persisted JSON → replay and read views | Versioned schema, validated replay, preserved historical records, one owner and atomic event/receipt or event/snapshot commits. An event that does not parse stops the store opening; a receipt that does not parse is skipped and its request refused on retry ([ADR 0015](../adr/0015-version-tolerance.md)). |
 | Hook settings → disk | Dry run first, explicit apply, recognized owned entries only, preservation of unrelated settings and refusal of settings-file symlinks. |
-| Daemon → automatic check | Off by default; the owner's own command, set through the CLI only, run without a shell in its own process group within its time limit, outside any agent host's sandbox. Its output's redacted, bounded end reaches the event log and the triggering sessions' context as labelled data ([ADR 0030](../adr/0030-automatic-checks-after-write-batches.md)). |
+| Daemon → automatic check | Off by default; the owner's own command, set through the CLI only, run without a shell in its own process group within its time limit, outside any agent host's sandbox. Its output's redacted, bounded end reaches the event log and the triggering sessions' context as labelled data ([ADR 0030](../adr/0030-automatic-checks-after-write-batches.md)). The comparison with a session's baseline (issue #69) adds no input: it uses test names already parsed and redacted, and the IDs of other sessions in the same workspace that wrote, which are cooperative labels from the owner-only socket, cleaned and capped like every session ID in a briefing. A same-user process that records a false check result or a false write can make a failure read as new or already failing; it cannot change the record, its result or what `land` accepts. |
 | Daemon → desktop notifier | Off by default; `osascript` or `notify-send` from the daemon's `PATH`, with a title and a body of at most 200 bytes (workspace, session, paths) as arguments, in its own process group, killed at 2 seconds, on a thread of its own ([Desktop notices](#desktop-notices)). |
 | Browser → dashboard (TCP) | Loopback by default, a per-run 256-bit token, a `Host` check against the arrival address, `GET` only, bounded heads and deadlines, read-only through the socket client ([ADR 0013](../adr/0013-dashboard.md)). |
 
@@ -335,6 +335,22 @@ line content, and is labelled as data in the MCP tool's description.
 | Denial of service | Commands over 64 KiB are not read. The guard reads at most 16 MiB of diff and 1,024 untracked files, inside two thirds of the hook's remaining budget, and gives no decision past a bound. Journal entries are capped at 4,096 per workspace and kept file versions at 4,096, both expiring after a week. A forged entry can hold a command once. |
 | Elevation of privilege | The only new decision is `deny`, once per command and foreign change set; the same command again proceeds, so the capability stays with the agent. A parse it cannot be sure of, an unreachable coordinator or a failed listing gives no decision. `commit --mine` runs as the owner with the owner's Git configuration and hooks (none is skipped), and never pushes. |
 | Isolation claim | The guard is cooperative and reads only commands in the `Bash` tool's text: Git run by scripts, aliases or other programs is not seen. Line ownership is by content; see the ADR's "Never covered". |
+
+**Adopting an ended session's work** (issue #161,
+[ADR 0028](../adr/0028-line-ownership.md)): `langspan adopt SESSION` and
+`langspan_adopt` change which session the journal credits with lines. They
+widen no boundary: the caller already reaches the socket and owns the
+journal, and the coordinator decides who may adopt what.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | The adopter is the `--session` claim, the MCP tool's `session_id`, or the session whose running shell record ran the command, as for `commit --mine`. A same-user process can claim to be any session, and could already forge journal entries to the same effect. |
+| Tampering | The core accepts an adoption only from a registered session, of an ended session (an end report, or its process observed to have exited) in the same workspace, that no other session adopted; a live session, another workspace's session, the adopter itself and an already adopted session are refused before anything is written, and a retry of the same request ID is decided again, so a session that resumed after the first answer is refused then. The adapter rewrites only entries of the ended session and its ended subagents (a subagent that has not ended keeps its own), in the workspace's own journal directory, owner-only and with no-follow opens, keeping their names and modification times. Another session's entries are never rewritten, so a line both wrote stays shared. |
+| Repudiation | Every adoption is a `session_adopted` event naming both sessions, the workspace, the time and the reason; `recap`, `status` and the dashboard show it, and it survives restarts. |
+| Information disclosure | The briefing line names the ended session's ID and its task line (the owner's own words, capped at 160 bytes, cleaned and labelled as coordination data), never file content. The ended session's journal entries stay on this machine. |
+| Denial of service | A start hook compares at most 32 journaled files with `HEAD`, within half its time, and names at most 64 sessions to the coordinator, which names at most four. An adoption rewrites at most the journal's 4,096 entries. |
+| Elevation of privilege | An adoption changes only attribution: what `status --mine` and `commit --mine` treat as the adopter's, and whose recent lines the unread-lines rule protects. It writes no working-tree file, index or commit. |
+| Isolation claim | Ending is what LangSpan observed: a session killed before any process observation counts as live and cannot be adopted. |
 
 **The formatter notice** (issue #126, [ADR 0011](../adr/0011-shell-writes.md)):
 before a `Bash` command that runs a recognised formatter, the pre-tool hook

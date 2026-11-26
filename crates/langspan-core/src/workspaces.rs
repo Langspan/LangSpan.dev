@@ -371,6 +371,7 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
         state.check_notices.remove(session);
         state.retracted_notices.remove(session);
         state.presence.remove(session);
+        state.first_writes.remove(session);
     }
     // A withdrawal names its workspace; one owed to a session of another
     // workspace goes too, so it cannot outlive the messages it withdraws.
@@ -379,6 +380,9 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
         !notices.is_empty()
     });
     state.intents.retain(|_, intent| intent.workspace_id != id);
+    state
+        .adoptions
+        .retain(|_, adoption| adoption.workspace_id != id);
     state.leases.retain(|_, lease| lease.workspace_id != id);
     state.turns.retain(|_, turn| turn.workspace_id != id);
     state
@@ -401,6 +405,8 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
     state.uncoordinated.remove(id);
     state.auto_checks.remove(id);
     state.test_learning.remove(id);
+    state.kept_tests.remove(id);
+    state.write_runs.remove(id);
     // `writes` is kept: it is a generation that never goes back, so a run
     // taken before the removal cannot match a count after it.
     next_revision(state, id);
