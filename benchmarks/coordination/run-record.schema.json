@@ -1,22 +1,23 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "LangSpan coordination benchmark run record v3",
-  "description": "One record per driver run: one arm, task family, session count and seed, including a run the preflight check refused. A value the run did not measure is null, never zero. The runner's raw journal (runner/runs.jsonl) holds the per-command detail. v2: isolated clones, tasks_accepted in place of tasks_completed, no contradictions_reported (notes are evidence, not a verdict), split permission denials, session cost, duration and turns, coordinator scans, the requested model, ignored options and the refused status. v3: worktrees of one repository and one coordinator in the langspan arm (isolation), the tool guard's verdict (tool_check), figures summed over every result line of a session (results, turns), peer_checkout denials, interface notices per session, and the hedge stand-in mode.",
+  "title": "LangSpan coordination benchmark run record v4",
+  "description": "One record per driver run: one arm, task family, session count and seed, including a run the preflight check refused. A value the run did not measure is null, never zero. The runner's raw journal (runner/runs.jsonl) holds the per-command detail. v2: isolated clones, tasks_accepted in place of tasks_completed, no contradictions_reported (notes are evidence, not a verdict), split permission denials, session cost, duration and turns, coordinator scans, the requested model, ignored options and the refused status. v3: worktrees of one repository and one coordinator in the langspan arm (isolation), the tool guard's verdict (tool_check), figures summed over every result line of a session (results, turns), peer_checkout denials, interface notices per session, and the hedge stand-in mode. v4: the discovered_change family (roles changer and dependent), the stagger (stagger_s), auto memory (auto_memory) and, per task, whether an interface notice came before the session's first write (notice_before_write).",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version", "record_type", "run_id", "arm", "family", "sessions", "seed", "agent",
     "dry_run", "status", "started_at", "elapsed_s", "total_elapsed_s", "time_limit_s",
-    "ignored_options", "isolation", "tool_check", "versions", "tasks", "tasks_total", "tasks_accepted",
+    "ignored_options", "isolation", "stagger_s", "auto_memory", "tool_check", "versions", "tasks", "tasks_total",
+    "tasks_accepted",
     "integrated_tests", "merge_conflicts", "semantic_conflicts", "duplicate_work", "stops", "questions",
     "permission_denials", "cost_usd", "turns", "refusals", "coordinator_scans", "tokens", "evidence"
   ],
   "properties": {
-    "schema_version": {"const": 3},
+    "schema_version": {"const": 4},
     "record_type": {"const": "coordination_run"},
     "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
     "arm": {"enum": ["worktrees", "awareness_only", "langspan"]},
-    "family": {"enum": ["rename_vs_new_caller", "contradictory_defaults"]},
+    "family": {"enum": ["rename_vs_new_caller", "contradictory_defaults", "discovered_change"]},
     "sessions": {"enum": [2, 5, 10]},
     "seed": {"type": "integer", "minimum": 0},
     "agent": {"enum": ["standin", "claude-code"]},
@@ -29,6 +30,14 @@
     "time_limit_s": {"type": "number", "minimum": 0},
     "ignored_options": {"type": "array", "items": {"type": "string"}},
     "isolation": {"enum": ["clone", "worktree"]},
+    "stagger_s": {
+      "description": "Seconds the sessions other than the one whose task changes an interface waited to start; 0 when all started at once.",
+      "type": "number", "minimum": 0
+    },
+    "auto_memory": {
+      "description": "off: every Claude Code session ran with auto memory turned off; not_applicable: the stand-in, which has none.",
+      "enum": ["off", "not_applicable"]
+    },
     "tool_check": {
       "description": "The tool guard over every session: failed when any session was offered or called a tool outside its arm's set; passed only when every session passed.",
       "type": "object",
@@ -62,12 +71,12 @@
           "session", "task_id", "role", "branch", "process_status", "merged", "completed",
           "accepted", "detail", "stopped", "asked_question", "results", "tool_check", "permission_denials",
           "tokens", "cost_usd", "duration_ms", "turns", "refusals", "interface_notices", "transcript", "hook_log",
-          "standin_informed"
+          "standin_informed", "notice_before_write"
         ],
         "properties": {
           "session": {"type": "integer", "minimum": 1},
           "task_id": {"type": "string"},
-          "role": {"enum": ["rename", "new_caller", "contradiction", "control"]},
+          "role": {"enum": ["rename", "new_caller", "contradiction", "control", "changer", "dependent"]},
           "branch": {"type": "string"},
           "process_status": {"type": ["string", "null"]},
           "merged": {"type": "boolean"},
@@ -95,7 +104,11 @@
           "interface_notices": {"type": ["integer", "null"], "minimum": 0},
           "transcript": {"type": ["string", "null"]},
           "hook_log": {"type": ["string", "null"]},
-          "standin_informed": {"type": ["boolean", "null"]}
+          "standin_informed": {"type": ["boolean", "null"]},
+          "notice_before_write": {
+            "description": "LangSpan arm, a task that expects an interface notice: whether the hook log shows one in the session's context before its first Write, Edit or MultiEdit of a file its task owns. null when not measured: another arm, a task that expects none, or no such write.",
+            "type": ["boolean", "null"]
+          }
         }
       }
     },

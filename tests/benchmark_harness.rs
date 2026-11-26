@@ -73,10 +73,15 @@ fn dry_run_langspan_arm_following_briefings() {
 }
 
 #[test]
-fn dry_run_hedging_fails_the_contradictory_family() {
+fn dry_run_hedging_fails_in_every_arm() {
+    python_suite("test_driver.py", Some("dry_run_hedging_fails_in_every_arm"));
+}
+
+#[test]
+fn dry_run_with_stagger_tells_dependents_before_their_first_write() {
     python_suite(
         "test_driver.py",
-        Some("dry_run_hedging_fails_the_contradictory_family_in_every_arm"),
+        Some("dry_run_with_stagger_tells_every_dependent_before_its_first_write"),
     );
 }
 

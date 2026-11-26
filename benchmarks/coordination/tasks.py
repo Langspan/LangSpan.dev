@@ -16,12 +16,20 @@ the information its arm gave it) recognizes. `hedge` is the edit that holds
 up whatever peers do, made without knowing: for a contradiction task, its
 value set locally and the shared default kept. A task without a trigger
 does the same in every mode.
+
+A task that `leads` changes an interface its peers use: under `--stagger`
+it starts first. A task's `reads` are files the stand-in reads before it
+chooses its edit, as an agent reads a helper before calling it. When the
+information its arm gives matches the trigger only after its edit, a
+following stand-in makes the informed edit then, as an agent told of a
+break fixes its call.
 """
 
 import json
 import random
+import re
 
-FAMILIES = ("rename_vs_new_caller", "contradictory_defaults")
+FAMILIES = ("rename_vs_new_caller", "contradictory_defaults", "discovered_change")
 SESSION_COUNTS = (2, 5, 10)
 
 # A configuration every feature check parses: three items, one owner.
@@ -43,6 +51,7 @@ RENAME = {
              "every caller in the `shelf` package to use the new name."),
     "details": "Remove the old name completely: do not keep `parse_config` as an alias or a wrapper.",
     "owns": ["shelf/config.py::parse_config", "shelf/config.py::load_config"],
+    "leads": True,
     "standin": {
         "ignore": [{"op": "replace", "paths": list(CONFIG_USERS), "old": OLD_NAME, "new": NEW_NAME, "all": True}],
         "follow": [{"op": "replace", "paths": list(CONFIG_USERS), "old": OLD_NAME, "new": NEW_NAME, "all": True}],
@@ -194,6 +203,154 @@ CONTROL = {
 }
 CONTROL["standin"]["follow"] = CONTROL["standin"]["hedge"] = CONTROL["standin"]["ignore"]
 
+# discovered_change: no task text names the interface change. The changer's
+# task needs `days_left` in `shelf/dates.py` to count from a given day, which
+# it cannot: it reads the clock. The changer finds that while working and
+# must give it a second, required parameter. Each dependent's task calls
+# `days_left` as it is today, so only information from the work itself (an
+# interface notice or a break alert) can tell it of the change.
+CHANGED = "days_left"
+CHANGED_ARITY = 2
+DATES = "shelf/dates.py"
+# A date-labelled sample: each item's best-before date is the given number of
+# days after the day the oracle checks against.
+DATED_SAMPLE = [["milk", 2], ["bread", -1], ["jam", 30], ["eggs", 0]]
+ITEMS_ARE = ("`items` is a list of pairs of an item's name and its best-before date, a `datetime.date`")
+# What the oracle checks: the function, and the number of arguments its
+# changed form requires.
+INTERFACE = {"module": "shelf.dates", "name": CHANGED, "arity": CHANGED_ARITY}
+
+EXPIRY_SOURCE = (
+    "from shelf.dates import days_left\n\n\n"
+    "def expired(items, today):\n"
+    "    return [name for name, day in items if days_left(day, today) < 0]\n"
+)
+CHANGER = {
+    "id": "changer-expired",
+    "task": ("Add a module `shelf/expiry.py` with a function `expired(items, today)` that returns the names of "
+             "the items whose best-before date is before `today`, in the order given."),
+    "details": (
+        "%s; `today` is a `datetime.date`. Count the days with `days_left` in `shelf/dates.py`; do not write a "
+        "second date helper. Add a unit test for it in `tests/test_expiry.py` that passes whatever day it runs."
+        % ITEMS_ARE
+    ),
+    "owns": ["shelf/dates.py::days_left", "shelf/expiry.py"],
+    "module": "shelf.expiry",
+    "function": "expired",
+    "dates": "fixed",
+    "checks": [([DATED_SAMPLE], ["bread"]), ([[["tea", -3], ["rice", 1]]], ["tea"])],
+    # The files whose calls of `days_left` the change must update: the
+    # package's caller, and the changer's own module.
+    "callers": ["shelf/orders.py", "shelf/expiry.py"],
+    "interface": INTERFACE,
+    "reads": [DATES],
+    "leads": True,
+}
+_CHANGE = [
+    {"op": "replace", "paths": [DATES], "old": "def days_left(day):", "new": "def days_left(day, today):"},
+    {"op": "replace", "paths": [DATES], "old": "from today until", "new": "from ``today`` until"},
+    {"op": "replace", "paths": [DATES], "old": "(day - datetime.date.today()).days", "new": "(day - today).days"},
+    {"op": "replace", "paths": ["shelf/orders.py"], "old": "from shelf.dates import days_left\n",
+     "new": "import datetime\n\nfrom shelf.dates import days_left\n"},
+    {"op": "replace", "paths": ["shelf/orders.py"], "old": "days_left(due)", "new": "days_left(due, datetime.date.today())"},
+    {"op": "write", "path": "shelf/expiry.py", "content": EXPIRY_SOURCE},
+]
+CHANGER["standin"] = {
+    "ignore": _CHANGE,
+    "follow": _CHANGE,
+    # A default for the new parameter keeps every old call working, so the
+    # peers need not know: the hedge the success definition rules out.
+    "hedge": [
+        {"op": "replace", "paths": [DATES], "old": "def days_left(day):", "new": "def days_left(day, today=None):"},
+        {"op": "replace", "paths": [DATES], "old": "(day - datetime.date.today()).days",
+         "new": "(day - (today or datetime.date.today())).days"},
+        {"op": "write", "path": "shelf/expiry.py", "content": EXPIRY_SOURCE},
+    ],
+}
+
+# (module, function, parameters, what it returns, body with LEFT(day) where
+# it counts the days left, checks over DATED_SAMPLE-like items)
+DATED_FEATURES = (
+    ("fresh", "fresh_items", "items",
+     "the names of the items with at least 3 days left before their best-before date, in the order given",
+     "[name for name, day in items if LEFT(day) >= 3]", [([DATED_SAMPLE], ["jam"]), ([[]], [])]),
+    ("soon", "expiring_soon", "items, within",
+     "the names of the items whose best-before date is from today to `within` days away, in the order given",
+     "[name for name, day in items if 0 <= LEFT(day) <= within]",
+     [([DATED_SAMPLE, 2], ["milk", "eggs"]), ([DATED_SAMPLE, 0], ["eggs"])]),
+    ("first", "first_to_expire", "items",
+     "the name of the item with the fewest days left (the first one on a tie), or None when there are none",
+     "min(items, key=lambda item: LEFT(item[1]))[0] if items else None", [([DATED_SAMPLE], "bread"), ([[]], None)]),
+    ("gone", "count_expired", "items", "how many of the items are past their best-before date",
+     "sum(1 for name, day in items if LEFT(day) < 0)", [([DATED_SAMPLE], 1), ([[]], 0)]),
+    ("left", "days_by_name", "items", "a dictionary from each item's name to the days left before its best-before date",
+     "{name: LEFT(day) for name, day in items}", [([DATED_SAMPLE], {"milk": 2, "bread": -1, "jam": 30, "eggs": 0})]),
+    ("urgent", "by_urgency", "items",
+     "the item names sorted by the days left before their best-before date, fewest first, ties in the order given",
+     "[name for name, day in sorted(items, key=lambda item: LEFT(item[1]))]",
+     [([DATED_SAMPLE], ["bread", "eggs", "milk", "jam"])]),
+    ("last", "last_to_expire", "items",
+     "the name of the item with the most days left (the first one on a tie), or None when there are none",
+     "max(items, key=lambda item: LEFT(item[1]))[0] if items else None", [([DATED_SAMPLE], "jam"), ([[]], None)]),
+    ("today", "expires_today", "items",
+     "the names of the items whose best-before date is today, in the order given",
+     "[name for name, day in items if LEFT(day) == 0]", [([DATED_SAMPLE], ["eggs"])]),
+    ("total", "total_days_left", "items",
+     "the days left before the best-before date, summed over the items that have not expired",
+     "sum(max(LEFT(day), 0) for name, day in items)", [([DATED_SAMPLE], 32)]),
+)
+
+
+def dated_source(function, parameters, body, form):
+    """A dependent's module. `old` calls `days_left` as the fixture defines
+    it; `new` passes today's date as the changed form's second argument;
+    `own` counts the days itself, a hedge that works whatever the changer
+    does."""
+    imports = {"old": "from shelf.dates import days_left\n",
+               "new": "import datetime\n\nfrom shelf.dates import days_left\n",
+               "own": "import datetime\n"}[form]
+    setup = "" if form == "old" else "    today = datetime.date.today()\n"
+    call = {"old": "days_left(%s)", "new": "days_left(%s, today)", "own": "(%s - today).days"}[form]
+    code = re.sub(r"LEFT\(([^()]*)\)", lambda match: call % match.group(1), body)
+    return "%s\n\ndef %s(%s):\n%s    return %s\n" % (imports, function, parameters, setup, code)
+
+
+def dependent_task(module, function, parameters, returns, body, checks):
+    """A new caller of `days_left`. Its text says to call the helper in its
+    new form if another session changes it, as the rename family's does,
+    and names no change."""
+    path = "shelf/features/%s.py" % module
+    return {
+        "id": "dependent-" + module,
+        "task": "Add a module `%s` with a function `%s(%s)` that returns %s." % (path, function, parameters, returns),
+        "details": (
+            "%s. Count the days with `days_left` in `shelf/dates.py`; do not write a second date helper. If "
+            "another session changes how `days_left` is called, call it the new way. Add a unit test for it in "
+            "`tests/test_%s.py`." % (ITEMS_ARE, module)
+        ),
+        "owns": [path],
+        "module": "shelf.features." + module,
+        "function": function,
+        "dates": "today",
+        "checks": checks,
+        "interface": INTERFACE,
+        # The helper and the package's caller of it, as an agent reads how
+        # a helper is called before calling it. LangSpan tells of another
+        # worktree's change at a file that calls or imports the name; the
+        # file defining it does not count.
+        "reads": [DATES, "shelf/orders.py"],
+        # The changed signature, as LangSpan quotes it in an interface notice
+        # or a break alert. No task text holds it.
+        "trigger": r"\bdef %s\(day, today\)" % CHANGED,
+        # Any LangSpan notice or alert naming the helper.
+        "notice": r"(In flight in worktree|calls)[^\n]*\"%s\"" % CHANGED,
+        "standin": {
+            "ignore": [{"op": "write", "path": path, "content": dated_source(function, parameters, body, "old")}],
+            "follow": [{"op": "write", "path": path, "content": dated_source(function, parameters, body, "new")}],
+            "hedge": [{"op": "write", "path": path, "content": dated_source(function, parameters, body, "own")}],
+        },
+    }
+
 # What a successful combined result is, per family. Every prompt, in every
 # arm, states it, and the oracle checks exactly this. It is written in terms
 # of the tasks, never of what a peer task changes: naming the renamed
@@ -210,6 +367,12 @@ SUCCESS = {
         "each function returns the value its task asked for; every shared default in "
         "`shelf/settings.py` that two tasks wanted changed to different values is unchanged; every "
         "shared default only one task wanted changed holds that task's value; and the package's "
+        "tests pass"
+    ),
+    "discovered_change": (
+        "every task's function returns what its task asked for; every shared function a task had to change "
+        "exists only in its changed form, with no default, alias or wrapper that keeps its old calls working; "
+        "every call in the package, every new module included, uses the changed form; and the package's "
         "tests pass"
     ),
 }
@@ -249,6 +412,9 @@ def assign(family, sessions, seed):
     if family == "rename_vs_new_caller":
         features = chooser.sample(FEATURES, sessions - 1)
         tasks = [dict(RENAME, role="rename")] + [dict(feature_task(*f), role="new_caller") for f in features]
+    elif family == "discovered_change":
+        features = chooser.sample(DATED_FEATURES, sessions - 1)
+        tasks = [dict(CHANGER, role="changer")] + [dict(dependent_task(*f), role="dependent") for f in features]
     else:
         pairs, alone, controls = chooser.choice(layouts(sessions))
         chosen = chooser.sample(CONTRADICTIONS, pairs + alone)
@@ -259,3 +425,9 @@ def assign(family, sessions, seed):
         tasks.extend(dict(CONTROL, role="control") for _ in range(controls))
     chooser.shuffle(tasks)
     return tasks
+
+
+def leader(assigned):
+    """The session, counted from 1, whose task changes an interface its
+    peers use, or None in a family without one."""
+    return next((index for index, task in enumerate(assigned, 1) if task.get("leads")), None)
