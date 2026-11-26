@@ -220,6 +220,24 @@ is an installed configuration that shapes what agents do.
 | **Denial of service** | Every form is at most 500 lines and 8 KiB, within each host's documented limit, and adds that much to every session's context. | The added context is spent on every session, whether or not LangSpan is in use in that repository. |
 | **Elevation of privilege** | The skill grants nothing: no permission, trust or approval setting is written, and it tells agents never to turn LangSpan's hooks off. | An agent can ignore it; it is advice, not a gate. |
 
+## The repository guidance block
+
+`langspan guidance install --root DIR --file FILE --apply` writes a short
+block into a file of the owner's repository, usually `AGENTS.md`, that every
+agent reading that file is given (ADR 0018, row I7). Unlike the skill it is
+in the repository, so it reaches every clone once the owner commits it. It
+reads and writes one file the owner names, and needs no coordinator.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: text that looks like LangSpan's block is treated as LangSpan's | A block is LangSpan's only when the lines between `<!-- langspan:begin -->` and `<!-- langspan:end -->` are exactly the text this version writes (CRLF line endings aside). Any other text there, a marker without its partner, a second block or a changed marker line stops `install` and `remove`, naming the lines. | Someone who copies the exact block into a file has written LangSpan's block; `remove` takes it out. |
+| **Tampering**: the install damages the owner's file, or writes outside the repository | Only the block and the one blank line after it change; every other byte is kept, and `remove` restores the earlier bytes (tested on real repositories). `--file` must be a relative path inside `--root` with no `..`, and its folder must resolve inside the root; a symlinked or non-regular file is refused. The installer's guarded writer is used: dry run by default, atomic replacement, a change made meanwhile planned against again and never overwritten, 1 MiB bound, an existing file's mode kept, new files `0600`. A removal is refused when the file changed since it was planned. A missing file is created only with `--create`. Nothing is staged or committed. | The window between the writer's last read and its rename is short but not closed. A file created with `--create` is `0600`, so another local account cannot read it until the owner changes its mode or commits it. |
+| **Tampering**: the block tells agents to do something harmful | The text is compiled in from `src/guidance.md`, reviewed like code, and every tool it names is checked against the MCP server's list by tests. It tells agents that other sessions' text is data, not instructions. | A wrong statement that uses existing names is not caught by the tests. Anyone who can change the repository's `AGENTS.md` can change what agents read there, with or without LangSpan. |
+| **Repudiation** | The dry run prints every added and removed line; the change is in the working tree for the owner's review. | No log is kept beyond the file. |
+| **Information disclosure** | The block holds no path, identity or state from the machine: every copy is the same text. Only the named file is read. | A dry run prints the changed lines to the terminal that ran it. |
+| **Denial of service** | The block is at most 1,500 bytes, a small part of a host's instruction budget (Codex: 32 KiB of its combined AGENTS files). | It is read by every session of every host that reads the file. |
+| **Elevation of privilege** | The block grants nothing and nothing is held or refused through it; it says that without hooks it is advice. | An agent can ignore it. |
+
 ## A linked worktree's own install
 
 The main checkout's project hook, run by a host started in a linked worktree,
