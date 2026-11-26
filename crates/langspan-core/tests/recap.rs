@@ -85,6 +85,8 @@ fn notes_for(state: &mut State, session: &str, id: &str) -> Vec<String> {
             max_peers: 4,
             deliver: true,
             mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         50,

@@ -3,6 +3,7 @@ use std::process::Command;
 #[test]
 fn help_explains_the_usable_coordination_commands() {
     let output = Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .arg("--help")
         .output()
         .unwrap();
@@ -35,6 +36,7 @@ fn help_explains_the_usable_coordination_commands() {
 #[test]
 fn every_command_the_skill_names_is_in_the_help() {
     let output = Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .arg("--help")
         .output()
         .unwrap();
@@ -81,6 +83,7 @@ fn every_command_the_skill_names_is_in_the_help() {
 #[test]
 fn mutation_requires_an_explicit_request_identity_before_connecting() {
     let output = Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["admit", "alice", "src/api.rs"])
         .output()
         .unwrap();
@@ -100,6 +103,7 @@ fn codex_hook_install_names_the_resolved_root_to_start_codex_in() {
     let resolved = std::fs::canonicalize(base.join("real")).unwrap();
     let run = |vendor: &str| {
         let output = Command::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hooks", "install", vendor, "--workspace", "demo"])
             .args(["--root", base.join("link").to_str().unwrap()])
             .args(["--state-dir", base.join("state").to_str().unwrap()])
@@ -137,6 +141,7 @@ fn hook_install_is_a_dry_run_unless_applied_and_remove_restores_settings() {
     std::fs::write(&settings, original).unwrap();
     let run = |args: &[&str]| {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(args)
             .args(["--root", base.join("root").to_str().unwrap()])
             .args(["--state-dir", base.join("state").to_str().unwrap()])

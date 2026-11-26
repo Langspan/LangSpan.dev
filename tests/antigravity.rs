@@ -897,6 +897,64 @@ fn a_linked_worktree_inside_the_repository_is_its_own_workspace_folder() {
     assert!(stdout.contains("antigravity"), "{stdout}");
 }
 
+/// Both sides of a merge: a joined briefing, whose second workspace is
+/// previewed within the room the first leaves, still carries what changed
+/// recently in each repository at a session's start.
+#[test]
+fn a_starting_conversation_hears_what_changed_recently_in_each_workspace_folder() {
+    let f = Fixture::new();
+    let state = f.base.join("state");
+    let second = f.base.join("second");
+    repository(&second);
+    let folders = json!([f.root(), second]);
+    let body = |name: &str, root: &Path, conversation: &str, step: u64| {
+        let mut body = event(name, root);
+        body["workspacePaths"] = folders.clone();
+        body["conversationId"] = json!(conversation);
+        body["stepIdx"] = json!(step);
+        body
+    };
+    // Another conversation edits a file in each folder.
+    let editor = "00000000-0000-4000-8000-0000000000c4";
+    for (step, root) in [(40, f.root()), (41, second.clone())] {
+        let (coverage, _) = user_hook(
+            &state,
+            "PreToolUse",
+            &body("pre-replace.json", &root, editor, step),
+        );
+        assert!(coverage.starts_with("admitted:"), "{coverage}");
+        fs::write(root.join("a.txt"), "goodbye\n").unwrap();
+        let (coverage, _) = user_hook(
+            &state,
+            "PostToolUse",
+            &body("post-replace.json", &root, editor, step),
+        );
+        assert!(coverage.starts_with("observed:"), "{coverage}");
+    }
+    let (coverage, stdout) = user_hook(
+        &state,
+        "SessionStart",
+        &body(
+            "session-start.json",
+            &f.root(),
+            "00000000-0000-4000-8000-0000000000c5",
+            0,
+        ),
+    );
+    assert!(!coverage.starts_with("unsupported:"), "{coverage}");
+    let text = injected(&stdout);
+    assert_eq!(
+        text.matches(langspan::recent::HEADING).count(),
+        2,
+        "{coverage}: {text}"
+    );
+    assert!(
+        text.len() <= langspan::hook::BRIEFING_LIMIT,
+        "{}",
+        text.len()
+    );
+}
+
 /// The text an Antigravity answer places in the model's context.
 fn injected(stdout: &str) -> String {
     let reply: Value = serde_json::from_str(stdout).unwrap_or(Value::Null);
