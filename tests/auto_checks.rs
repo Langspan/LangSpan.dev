@@ -9,7 +9,9 @@ use langspan::{
     client,
     protocol::{PROTOCOL_VERSION, Request},
 };
-use langspan_core::{CheckRecord, CheckResult, Command, Outcome, State};
+use langspan_core::{
+    CheckRecord, CheckResult, Command, DiskObservation, Event, Outcome, RecordedEvent, State,
+};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -240,9 +242,79 @@ impl Fixture {
             took,
         }
     }
+    /// The workspace's write generation (`State::writes`).
+    fn writes(&self) -> u64 {
+        self.state().writes.get("work").copied().unwrap_or(0)
+    }
     /// One Claude Code Write of `a.txt`, then the batch that ends with it.
     fn write_batch(&self, call: &str, content: &str) -> Run {
         let (file, input, post) = self.write(call, content);
+        self.end_batch(call, &file, input, post)
+    }
+    /// As `write_batch`, but the batch ends only once the Git observer has
+    /// recorded the file at the version the session wrote. The observer
+    /// scans every 2 s. A changed file it records adds one to the write
+    /// generation, so a record that lands after a check has taken the
+    /// generation means nothing is learned from that check (ADR 0030). A
+    /// test that expects a flip waits for the record first.
+    fn write_batch_scanned(&self, call: &str, content: &str) -> Run {
+        // Only a record made after the write starts counts, even when an
+        // earlier one has the same version.
+        let mut cursor = 0;
+        while let Some(last) = self.changes(cursor).last() {
+            cursor = last.seq;
+        }
+        let (file, input, post) = self.write(call, content);
+        let written = self
+            .state()
+            .activity
+            .values()
+            .flat_map(|activity| &activity.known)
+            .find(|version| version.path == "a.txt")
+            .map(|version| version.state.clone())
+            .expect("the write recorded a.txt's version");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let observed: Vec<DiskObservation> = self
+                .changes(cursor)
+                .into_iter()
+                .filter_map(|record| match record.event {
+                    Event::DiskObserved { observation } => Some(observation),
+                    _ => None,
+                })
+                .collect();
+            if observed
+                .iter()
+                .any(|observation| observation.path == "a.txt" && observation.after == written)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the observer never recorded a.txt as written by {call} ({written:?}); recorded since: {observed:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.end_batch(call, &file, input, post)
+    }
+    /// A page of the workspace's change events after sequence `after`.
+    fn changes(&self, after: u64) -> Vec<RecordedEvent> {
+        let request = Request {
+            version: PROTOCOL_VERSION,
+            request_id: "changes".into(),
+            command: Command::Changes {
+                workspace_id: "work".into(),
+                after,
+                limit: 1000,
+            },
+        };
+        match client::call(&self.state_dir(), &request).unwrap().outcome {
+            Outcome::Changes { events, .. } => events,
+            other => panic!("{other:?}"),
+        }
+    }
+    /// The batch that ends with the Write `call` of `file`.
+    fn end_batch(&self, call: &str, file: &Path, input: Value, post: Run) -> Run {
         let batch = self.run(
             "claude-code",
             json!({"session_id": ALICE, "cwd": self.root(), "hook_event_name": "PostToolBatch",
@@ -799,14 +871,25 @@ fn after_two_flips_the_briefing_labels_the_failure_which_stays_failed_until_forg
     let f = Fixture::with_config(json!({"auto_check_debounce_ms": 100, "flaky_rerun_max_s": 30}));
     // Each batch's run fails and its rerun passes.
     f.enable(60, &scheduled(&[0, 2, 4], &[]));
-    f.write_batch("call-1", "one\n");
+    // Each write is observed before its batch ends, so neither run of a
+    // check overlaps the observer recording that write.
+    f.write_batch_scanned("call-1", "one\n");
     f.wait_for_checks(1);
-    assert!(f.prompt("p1").context().is_some());
-    f.write_batch("call-2", "two\n");
+    let first = f.prompt("p1").context();
+    assert!(first.is_some(), "no briefing after the first check");
+    f.write_batch_scanned("call-2", "two\n");
     let checks = f.wait_for_checks(2);
-    assert_eq!(f.log_lines().len(), 4);
-    assert_eq!(learned(&f, "net::times_out"), Some((2, 2)));
-    let context = f.prompt("p2").context().expect("delivered");
+    // Read before the assertions, so that a failure shows what the session
+    // was told.
+    let context = f.prompt("p2").context();
+    let seen = format!(
+        "runs: {:?}; write generation: {}; first briefing: {first:?}; second briefing: {context:?}",
+        f.log_lines(),
+        f.writes()
+    );
+    assert_eq!(f.log_lines().len(), 4, "{seen}");
+    assert_eq!(learned(&f, "net::times_out"), Some((2, 2)), "{seen}");
+    let context = context.expect("delivered");
     assert!(
         context.contains("tests failed (exit 101)")
             && context.contains(
