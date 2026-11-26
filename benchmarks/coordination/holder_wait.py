@@ -30,6 +30,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -249,10 +250,12 @@ def one_run(plan, index):
     started, clock = utc_now(), time.monotonic()
     record = {"schema_version": SCHEMA_VERSION, "item": "same-file-current-holder", "arm": plan["arm"],
               "agent": plan["agent"], "run": index, "started_at": started, "status": "error", "error": None}
-    coordinator = None
+    coordinator, state_dir = None, None
     try:
         checkout = prepare(run_dir)
-        state_dir = run_dir / "state"
+        # A Unix socket path holds about 100 bytes, and --out can be deep (a
+        # temporary folder on macOS is): keep the state folder short.
+        state_dir = Path(tempfile.mkdtemp(prefix="lsb-", dir="/tmp"))
         coordinator = driver.Coordinator(plan["langspan"], state_dir, run_dir / "daemon.log")
         record["policy"] = set_policy(plan["langspan"], state_dir, plan["arm"], checkout, plan["wait_ms"])
         if plan["agent"] == "standin":
@@ -272,6 +275,8 @@ def one_run(plan, index):
     finally:
         if coordinator is not None:
             coordinator.stop()
+        if state_dir is not None:
+            shutil.rmtree(state_dir, ignore_errors=True)
     record["elapsed_s"] = round(time.monotonic() - clock, 3)
     record["ended_at"] = utc_now()
     with open(Path(plan["out"]) / "runs.jsonl", "a", encoding="utf-8") as journal:

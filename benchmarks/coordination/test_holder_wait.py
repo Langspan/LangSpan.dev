@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import driver
 import holder_wait
 
 
@@ -62,6 +63,20 @@ class HolderWaitStandin(unittest.TestCase):
         # A second invocation adds runs; it never replaces a kept one.
         holder_wait.main(["--arm", "langspan_wait", "--out", str(self.out), "--langspan", langspan()])
         self.assertEqual(holder_wait.summarize(self.out)["langspan_wait"]["runs"], 2)
+
+
+class CoordinatorSocketPath(unittest.TestCase):
+    def test_a_long_state_folder_is_refused_naming_the_socket_path_length(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp, "x" * 120, "state")
+            length = len(os.fsencode(os.path.join(os.path.realpath(state), "daemon.sock")))
+            with self.assertRaises(RuntimeError) as caught:
+                driver.Coordinator("langspan-not-run", state, Path(temp, "daemon.log"))
+            message = str(caught.exception)
+            self.assertIn("socket path is %d bytes" % length, message)
+            self.assertIn("over the %d" % driver.MAX_SOCKET_PATH, message)
+            self.assertNotIn("did not start", message)
+            self.assertFalse(Path(temp, "daemon.log").exists())
 
 
 class HolderWaitSummary(unittest.TestCase):

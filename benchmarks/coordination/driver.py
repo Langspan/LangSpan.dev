@@ -38,6 +38,7 @@ ARMS = ("worktrees", "awareness_only", "langspan")
 AGENTS = ("standin", "claude")
 STANDIN_MODES = ("follow", "ignore", "hedge", "workaround")
 SCHEMA_VERSION = 5
+MAX_SOCKET_PATH = 100
 GIT_IDENTITY = ["-c", "user.name=Benchmark", "-c", "user.email=benchmark@example.invalid",
                 "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
 MAX_TIME_LIMIT = 3600
@@ -479,6 +480,14 @@ class Coordinator:
     """One LangSpan daemon, in its own process group."""
 
     def __init__(self, langspan, state_dir, log_path):
+        # The daemon refuses a socket path longer than this many bytes once
+        # links are resolved (src/local.rs); macOS allows 104 with the
+        # terminator. Say so here rather than "did not start".
+        socket = os.fsencode(os.path.join(os.path.realpath(state_dir), "daemon.sock"))
+        if len(socket) > MAX_SOCKET_PATH:
+            raise RuntimeError("the LangSpan coordinator's socket path is %d bytes, over the %d a Unix socket "
+                               "allows: %s; choose a shorter state folder" % (len(socket), MAX_SOCKET_PATH,
+                                                                            os.fsdecode(socket)))
         self.langspan, self.state_dir = langspan, state_dir
         self.log = open(log_path, "ab")
         self.process = subprocess.Popen([str(langspan), "daemon", "--state-dir", str(state_dir)],
