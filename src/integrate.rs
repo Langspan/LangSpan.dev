@@ -352,9 +352,9 @@ const COMBINE_CONFIG: [&str; 8] = [
 /// Combine `branches` onto `onto` in order, entirely inside the object
 /// database. A branch already contained is skipped, a branch that contains
 /// the result so far fast-forwards, anything else is a true merge, with
-/// renames followed (see `COMBINE_CONFIG`); a merge that would change
-/// nothing is not made. With `shape.rebase`, a branch is replayed instead
-/// of merged (see `replay`). Identifier renames the target made since a
+/// renames followed (see `COMBINE_CONFIG`); a merge that changes nothing
+/// is kept only under a later change, for its history. With
+/// `shape.rebase`, a branch is replayed instead of merged (see `replay`). Identifier renames the target made since a
 /// branch started are looked for in every diverged branch (see
 /// `rewrite::find`), and with `shape.adapt_renames` its uses are rewritten
 /// in one new commit on top of the branch, or the combination stops.
@@ -373,6 +373,9 @@ pub fn combine(
     let mut inputs = vec![current.clone()];
     let mut renames = Vec::new();
     let mut notes = rewrite::Notes::default();
+    // The result up to its last change, and how many adapted commits it
+    // holds: a merge that changes nothing moves `current` only.
+    let mut kept = (current.clone(), 0);
     for branch in branches {
         let named = commit(root, branch, deadline)?;
         inputs.push(named.clone());
@@ -443,6 +446,7 @@ pub fn combine(
         }
         if is_ancestor(root, &current, &theirs, deadline)? {
             current = theirs;
+            kept = (current.clone(), notes.adapted.len());
             continue;
         }
         if shape.rebase {
@@ -453,6 +457,7 @@ pub fn combine(
                 Replayed::Done { tip, rewritten } => {
                     current = tip;
                     notes.rebased.extend(rewritten);
+                    kept = (current.clone(), notes.adapted.len());
                 }
                 Replayed::Conflict {
                     commit,
@@ -479,11 +484,15 @@ pub fn combine(
         match merge_tree(root, &current, &theirs, None, deadline)? {
             Merge::Clean(tree) => {
                 // A branch whose changes are all on the target already, as
-                // after a rebase landing of it: nothing to merge.
-                if tree == tree_of(root, &current, deadline)? {
-                    continue;
+                // after a rebase landing of it, changes nothing. Its merge
+                // is still made: a later branch stacked on it must merge
+                // from its history, not from an older base that would undo
+                // its own changes. It is left out below if nothing after
+                // it changes the result.
+                let changes = tree != tree_of(root, &current, deadline)?;
+                if changes {
+                    renames.extend(renames_followed(root, &current, &theirs, branch, deadline)?);
                 }
-                renames.extend(renames_followed(root, &current, &theirs, branch, deadline)?);
                 let message = format!("Merge {branch} (langspan integrate)");
                 current = oid(text(
                     root,
@@ -502,6 +511,9 @@ pub fn combine(
                 .map_err(|e| {
                     format!("{e}; a merge commit needs your Git user.name and user.email")
                 })?)?;
+                if changes {
+                    kept = (current.clone(), notes.adapted.len());
+                }
             }
             Merge::Conflict { paths, files } => {
                 return Ok(Combination::Conflict {
@@ -513,6 +525,11 @@ pub fn combine(
             }
         }
     }
+    // Merges after the last change are left out, with the commits adapted
+    // for their branches, so a landing never pushes merges that change
+    // nothing and a combination of such merges alone is the target itself.
+    let (current, adapted) = kept;
+    notes.adapted.truncate(adapted);
     Ok(Combination::Clean(Merged {
         tree: tree_of(root, &current, deadline)?,
         commit: current,

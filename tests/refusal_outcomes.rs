@@ -418,7 +418,11 @@ fn clients_of_protocol_4_and_3_get_reports_without_refusal_outcomes() {
     let f = Fixture::new();
     stale_refusal(&f);
     let current = f.report_in(langspan::protocol::PROTOCOL_VERSION);
-    assert_eq!(current["version"], 5, "{current:#}");
+    assert_eq!(
+        current["version"],
+        langspan::protocol::PROTOCOL_VERSION,
+        "{current:#}"
+    );
     let with = every_counts(&current);
     assert!(
         with.iter()

@@ -1214,8 +1214,9 @@ fn attempt(
     ttl_ms: u64,
     attempts: &mut Vec<LandingAttempt>,
 ) -> Result<Landed, crate::Error> {
-    // Still holding the turn, for another `ttl_ms`; refuse to go on without it.
-    let renew = |step: String| -> Result<(), crate::Error> {
+    // Still holding the turn, for another `ttl_ms`; refuse to go on without
+    // it. The answer's version is the daemon's.
+    let renew = |step: String| -> Result<u16, crate::Error> {
         ask(
             state_dir,
             fresh_id(request_id, "renew", &[&step]),
@@ -1228,7 +1229,7 @@ fn attempt(
                 queue: None,
             },
         )
-        .map(|_| ())
+        .map(|response| response.version)
     };
     let mut moved = false;
     for number in 1..=MAX_LANDING_ATTEMPTS {
@@ -1293,7 +1294,31 @@ fn attempt(
                 });
             }
         };
-        renew(format!("{number}-push"))?;
+        let record_landing = Command::RecordLanding {
+            workspace_id: target.workspace_id.clone(),
+            onto: target.onto.clone(),
+            commit_oid: merged.commit.clone(),
+            tree_oid: merged.tree.clone(),
+            inputs: merged.inputs.clone(),
+            check_id: check.check_id.clone(),
+            rebased: merged.notes.rebased.clone(),
+            adapted: merged
+                .notes
+                .adapted
+                .iter()
+                .map(|adapted| adapted.commit.clone())
+                .collect(),
+        };
+        // A daemon that could not record this landing is found out now,
+        // while nothing is pushed, not after.
+        let version = renew(format!("{number}-push"))?;
+        if !crate::protocol::fits(version, &record_landing) {
+            return Err(format!(
+                "{}; nothing was pushed",
+                crate::protocol::older_daemon(version)
+            )
+            .into());
+        }
         // From here on the remote may change: no failure is an error that
         // could be read as "nothing was pushed".
         let verify = format!(
@@ -1358,32 +1383,14 @@ fn attempt(
         };
         if pushed {
             record(attempts, &tip, commit, AttemptResult::Landed {});
-            let recorded = ask(
-                state_dir,
-                request_id.into(),
-                Command::RecordLanding {
-                    workspace_id: target.workspace_id.clone(),
-                    onto: target.onto.clone(),
-                    commit_oid: merged.commit.clone(),
-                    tree_oid: merged.tree.clone(),
-                    inputs: merged.inputs.clone(),
-                    check_id: check.check_id.clone(),
-                    rebased: merged.notes.rebased.clone(),
-                    adapted: merged
-                        .notes
-                        .adapted
-                        .iter()
-                        .map(|adapted| adapted.commit.clone())
-                        .collect(),
-                },
-            )
-            .map_err(|error| error.to_string())
-            .and_then(|response| match response.outcome {
-                Outcome::Landed { landing } => Ok(landing),
-                other => Err(format!(
-                    "unexpected reply to recording the landing: {other:?}"
-                )),
-            });
+            let recorded = ask(state_dir, request_id.into(), record_landing)
+                .map_err(|error| error.to_string())
+                .and_then(|response| match response.outcome {
+                    Outcome::Landed { landing } => Ok(landing),
+                    other => Err(format!(
+                        "unexpected reply to recording the landing: {other:?}"
+                    )),
+                });
             return Ok(match recorded {
                 Ok(landing) => Landed::Landed {
                     landing,

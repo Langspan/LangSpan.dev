@@ -2675,6 +2675,280 @@ fn a_rebase_landing_bounds_the_rewritten_commits_of_all_its_branches_together() 
     assert_eq!(report["result"], "landed", "{report}");
 }
 
+impl World {
+    /// A state folder whose socket answers as a daemon of protocol version
+    /// 5 would, the build before rebase landings: it refuses version 6
+    /// requests in version 5, refuses a request to record a landing with
+    /// `rebased` or `adapted` as unreadable, and passes every other request
+    /// to the real daemon. The flag says whether such a request arrived.
+    fn version_5_daemon(&self) -> (PathBuf, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let older = self.base.join("older");
+        fs::create_dir(&older).unwrap();
+        fs::set_permissions(&older, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = older.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let real = self.base.join("state/daemon.sock");
+        let unreadable = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = unreadable.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let (real, seen) = (real.clone(), seen.clone());
+                std::thread::spawn(move || {
+                    let mut line = String::new();
+                    BufReader::new(&stream).read_line(&mut line).unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let refuse = |code: &str| {
+                        let reply = serde_json::json!({
+                            "version": 5, "request_id": request["request_id"],
+                            "replayed": false, "generation": 0, "lease_valid": null,
+                            "outcome": {"type": "error", "code": code, "message": "older"},
+                        });
+                        format!("{reply}\n")
+                    };
+                    let command = &request["command"];
+                    let reply = if request["version"].as_u64() != Some(5) {
+                        refuse("unsupported_version")
+                    } else if command["op"] == "record_landing"
+                        && (command.get("rebased").is_some() || command.get("adapted").is_some())
+                    {
+                        seen.store(true, Ordering::SeqCst);
+                        refuse("invalid_request")
+                    } else {
+                        let mut daemon = UnixStream::connect(&real).unwrap();
+                        daemon.write_all(line.as_bytes()).unwrap();
+                        let mut reply = String::new();
+                        BufReader::new(&daemon).read_line(&mut reply).unwrap();
+                        reply
+                    };
+                    stream.write_all(reply.as_bytes()).unwrap();
+                });
+            }
+        });
+        (older, unreadable)
+    }
+    fn cli_in(&self, state: &Path, args: &[&str]) -> (i32, String) {
+        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
+            .arg("--state-dir")
+            .arg(state)
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            output.status.code().unwrap(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+    }
+}
+
+/// Review comment 4712442596: a CLI of this build used with a daemon of
+/// the build before must not push a rebased or adapted landing that daemon
+/// cannot record. It finds the daemon's version while holding the turn,
+/// before the push, and stops with nothing pushed and nothing recorded.
+#[test]
+fn a_rebased_or_adapted_landing_is_not_pushed_through_a_daemon_that_cannot_record_it() {
+    for adapt in [false, true] {
+        let w = World::new();
+        let (older, unreadable) = w.version_5_daemon();
+        let (branch, flag) = if adapt {
+            w.renamed_target();
+            ("calls", "--adapt-renames")
+        } else {
+            w.diverged();
+            ("linear", "--rebase")
+        };
+        let original = w.hub_main();
+        let (code, text) = w.cli_in(
+            &older,
+            &land_args(branch, &[flag, "--check-again", "--", "true"]),
+        );
+        assert_ne!(code, 0, "{flag}: {text}");
+        assert!(
+            text.contains("protocol version 5")
+                && text.contains("restart the daemon")
+                && text.contains("nothing was pushed"),
+            "{flag}: {text}"
+        );
+        assert_eq!(w.hub_main(), original, "{flag}: nothing was pushed");
+        assert!(
+            !unreadable.load(Ordering::SeqCst),
+            "{flag}: no unreadable request was sent"
+        );
+        assert!(
+            !w.events().iter().any(|event| event["type"] == "landed"),
+            "{flag}: nothing was recorded"
+        );
+        // The turn was released: the same landing through the current
+        // daemon lands at once.
+        let (code, text) = w.cli(&land_args(
+            branch,
+            &[flag, "--wait-s", "0", "--check-again", "--", "true"],
+        ));
+        assert_eq!(code, 0, "{flag}: {text}");
+        assert_ne!(w.hub_main(), original, "{flag}");
+
+        // A version 5 client is told about that landing without the fields
+        // version 6 added, in events and in status alike.
+        for view in [
+            &["events", "--limit", "1000", "--json"][..],
+            &["status", "--json"],
+        ] {
+            let (code, text) = w.cli_in(&older, view);
+            assert_eq!(code, 0, "{view:?}: {text}");
+            assert!(text.contains("landing_id"), "{view:?}: {text}");
+            assert!(
+                !text.contains("\"rebased\"") && !text.contains("\"adapted\""),
+                "{view:?}: {text}"
+            );
+        }
+        let (_, current) = w.cli(&["events", "--limit", "1000", "--json"]);
+        assert!(
+            current.contains(if adapt { "\"adapted\"" } else { "\"rebased\"" }),
+            "{current}"
+        );
+    }
+}
+
+impl World {
+    /// Review comment 4712442606: `stacked-a` adds `feature.txt`,
+    /// `stacked-b` descends from it and deletes it, and the target adds the
+    /// identical file on its own, so merging `stacked-a` changes nothing.
+    /// `unrelated` adds another file. The target is pushed.
+    fn stacked_no_op(&self) {
+        let work = self.work();
+        self.commit_on("stacked-a", "main", &[("feature.txt", "feature\n".into())]);
+        git(
+            &work,
+            &["checkout", "--quiet", "-B", "stacked-b", "stacked-a"],
+        );
+        git(&work, &["rm", "--quiet", "feature.txt"]);
+        git(&work, &["commit", "--quiet", "-m", "remove feature"]);
+        git(&work, &["checkout", "--quiet", "main"]);
+        self.commit_on("unrelated", "main", &[("other.txt", "other\n".into())]);
+        self.commit_on(
+            "main",
+            "main",
+            &[
+                ("feature.txt", "feature\n".into()),
+                ("main.txt", "main\n".into()),
+            ],
+        );
+        git(&work, &["push", "--quiet", "origin", "main"]);
+    }
+    fn land_branches(&self, branches: &[&str], verify: &str) -> (i32, serde_json::Value) {
+        self.json(
+            &[
+                &["land", "app", "--onto", "main", "--name", "unit"][..],
+                branches,
+                &[
+                    "--apply",
+                    "--json",
+                    "--check-again",
+                    "--",
+                    "sh",
+                    "-c",
+                    verify,
+                ],
+            ]
+            .concat(),
+        )
+    }
+    fn is_ancestor(&self, ancestor: &str, of: &str) -> bool {
+        Process::new("git")
+            .arg("-C")
+            .arg(self.hub())
+            .args(["merge-base", "--is-ancestor", ancestor, of])
+            .status()
+            .unwrap()
+            .success()
+    }
+}
+
+/// A merge that changes nothing still carries its branch's history to the
+/// branches after it: `stacked-b`'s deletion is applied, not lost.
+#[test]
+fn a_branch_stacked_on_a_no_op_merge_still_applies_its_own_change() {
+    let w = World::new();
+    w.stacked_no_op();
+    let original = w.hub_main();
+    let (code, report) = w.land_branches(&["stacked-a", "stacked-b"], "test ! -e feature.txt");
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+    let landed = w.hub_main();
+    assert_ne!(landed, original);
+    assert_eq!(
+        git(&w.hub(), &["ls-tree", "--name-only", &landed]),
+        "a.txt\nb.txt\nmain.txt",
+        "the deletion landed"
+    );
+    let b = git(&w.work(), &["rev-parse", "stacked-b"]);
+    assert!(
+        w.is_ancestor(&b, &landed),
+        "stacked-b is part of the target"
+    );
+}
+
+/// A no-op merge stays only where a later branch needs its history: as the
+/// last merge, or the only one, it is left out.
+#[test]
+fn a_no_op_merge_is_left_out_when_nothing_after_it_changes_the_result() {
+    let w = World::new();
+    w.stacked_no_op();
+    let original = w.hub_main();
+    let (code, report) = w.land_branches(&["stacked-a"], "true");
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "nothing_to_land", "{report}");
+    assert_eq!(w.hub_main(), original);
+
+    // Before an unrelated branch, its history is kept, under that merge.
+    let a = git(&w.work(), &["rev-parse", "stacked-a"]);
+    let (code, report) = w.land_branches(&["stacked-a", "unrelated"], "test -f other.txt");
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+    let landed = w.hub_main();
+    assert!(w.is_ancestor(&a, &landed), "{report}");
+
+    // After one, it is left out: the landing is that branch's merge alone.
+    let w = World::new();
+    w.stacked_no_op();
+    let original = w.hub_main();
+    let (code, report) = w.land_branches(&["unrelated", "stacked-a"], "test -f other.txt");
+    assert_eq!(code, 0, "{report}");
+    let landed = w.hub_main();
+    assert_eq!(
+        git(&w.hub(), &["rev-parse", &format!("{landed}^1")]),
+        original,
+        "one merge on top of the target: {report}"
+    );
+    assert!(!w.is_ancestor(&a, &landed), "{report}");
+}
+
+/// A landing that rewrote nothing records the same through either daemon.
+#[test]
+fn a_merge_landing_still_lands_through_a_daemon_of_the_build_before() {
+    let w = World::new();
+    let (older, unreadable) = w.version_5_daemon();
+    w.diverged();
+    let original = w.hub_main();
+    let (code, text) = w.cli_in(
+        &older,
+        &land_args("linear", &["--json", "--check-again", "--", "true"]),
+    );
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("\"result\":\"landed\""), "{text}");
+    assert_ne!(w.hub_main(), original);
+    assert!(!unreadable.load(Ordering::SeqCst));
+    assert!(w.events().iter().any(|event| event["type"] == "landed"));
+}
+
 #[test]
 fn a_changed_file_that_does_not_parse_makes_rename_detection_say_so() {
     let w = World::new();

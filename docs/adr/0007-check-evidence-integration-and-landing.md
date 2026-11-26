@@ -258,7 +258,13 @@ is checked; the intermediate commits are trees that were never checked, which
 the result says by listing them in `rebased` (`from`, `to`) and the landing
 record keeps. The push is a fast-forward of the target, never forced. A
 later landing of the same branch finds every patch already on the target and
-reports `nothing_to_land`, with or without `--rebase`. Tests:
+reports `nothing_to_land`, with or without `--rebase`. Without `--rebase`, a
+merge that changes nothing is still made while later branches are combined,
+so a branch stacked on it merges from its history and keeps its own changes
+(a deletion is not undone from an older base); merges after the last change
+are left out of the result, so such merges alone are `nothing_to_land`.
+Tests: `a_branch_stacked_on_a_no_op_merge_still_applies_its_own_change`,
+`a_no_op_merge_is_left_out_when_nothing_after_it_changes_the_result`,
 `a_rebase_landing_pushes_linear_history_whose_tree_is_the_checked_tree`,
 `a_rebase_that_conflicts_in_an_intermediate_commit_names_it_and_pushes_nothing`,
 `a_branch_with_a_merge_commit_is_not_rebased_and_nothing_is_pushed`.
@@ -274,6 +280,26 @@ stays where it was. The MCP tools take `rebase` and `adapt_renames`; a landing
 through MCP checks the rewritten tree first with `langspan_integrate_check`
 and the same values. Verified with real Git, a real daemon and local file
 remotes only; no agent has called these on a host yet.
+
+**Wire protocol version 6.** A landing's `rebased` and `adapted`, and the
+request that records them, are what version 6 adds to version 5. A daemon of
+an earlier build reads that request with `deny_unknown_fields` and would
+refuse it after the push, leaving the landing `pushed_not_recorded`. So the
+landing learns the daemon's version from its last renewal of the push turn,
+before it pushes: a rebased or adapted landing that daemon could not record
+stops with an error naming the daemon's version and saying nothing was
+pushed, and the turn is released (`protocol::fits` owns the rule). The
+client never sends that request in an earlier version. A landing that
+rewrote nothing is the same request in every version and still lands through
+an earlier daemon. To a client of version 5, 4 or 3 the daemon gives every
+landing, in a landed answer, the status view and the journal, without
+`rebased` and `adapted` (`protocol_5_shape`). Tests:
+`a_rebased_or_adapted_landing_is_not_pushed_through_a_daemon_that_cannot_record_it`,
+`a_merge_landing_still_lands_through_a_daemon_of_the_build_before`
+(`tests/landing.rs`, through a socket that answers as a version 5 daemon),
+`v6_landed_response_and_its_earlier_forms_match_the_golden_vectors`,
+`recording_a_rebased_or_adapted_landing_fits_only_version_6`
+(`tests/protocol.rs`).
 
 **One implementation, two interfaces.** `integrate check` and `land` are
 application operations in `src/landing.rs`. The CLI and the MCP tools
