@@ -56,16 +56,18 @@ impl Fixture {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !base.join("state/daemon.sock").exists() {
-            assert!(Instant::now() < deadline, "daemon did not become ready");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        Self {
+        // Owned before anything can panic, so `Drop` stops it (issue #239).
+        let fixture = Self {
             base,
             child: Some(child),
             calls: AtomicU64::new(0),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !fixture.base.join("state/daemon.sock").exists() {
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            std::thread::sleep(Duration::from_millis(10));
         }
+        fixture
     }
     fn path(&self) -> PathBuf {
         self.base.join("work/a.txt")
