@@ -51,7 +51,12 @@ Setup creates that log owner-only before the manager opens it.
 Each file carries a marker line. A file at that path without it stops setup
 before anything is written, and `uninstall` leaves it in place. The unit
 refuses paths with whitespace, quotes, a backslash, `%` or `$`, which systemd
-would split or expand. Every manager command is bounded to 10 seconds. Linux
+would split or expand. Both files set `PATH` to the directories of the `PATH`
+setup ran with, so an automatic check finds the tools the user's shell finds
+(`cargo` under `~/.cargo/bin`, for example) rather than the manager's default.
+A relative directory, or one holding a control character, a quote, a
+backslash, `%` or `$`, is left out; with none left, the file sets no `PATH`.
+Every manager command is bounded to 10 seconds. Linux
 without a reachable user manager (`systemctl --user show` fails), another
 platform, or `--home` (a home that is not the login user's) gets no service;
 setup says so and starts a coordinator on demand instead.
@@ -81,8 +86,14 @@ directory, starts `langspan daemon --state-dir DIR` itself:
   error appends to `daemon.log`; the working directory is `/`. Its
   environment keeps only `HOME`, `PATH`, the locale, `TMPDIR`, `XDG_*`,
   `USER`, `LOGNAME`, `SHELL`, `HOSTNAME`, `SSH_AUTH_SOCK`, `GIT_SSH`,
-  `GIT_SSH_COMMAND`, the desktop session variables notices need, and
-  `LANGSPAN_STATE_DIR`: a host's API keys and tokens are not passed on.
+  `GIT_SSH_COMMAND`, the desktop session variables notices need,
+  `LANGSPAN_STATE_DIR`, and the host configuration directories
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME`, so the
+  coordinator's host checks read the directories the host uses. A host's API
+  keys and tokens are not passed on. Setup with `--home DIR` starts it with
+  `HOME` set to `DIR` and without those directory overrides, `XDG_STATE_HOME`,
+  `XDG_CONFIG_HOME` or `LANGSPAN_STATE_DIR`, as `--home` ignores them, so its
+  host checks read `DIR`.
 - **Logged.** The caller writes one structured line to its stderr
   (`coordinator_started` with the process ID, or `coordinator_not_started`
   with the reason), and one line to `daemon.log`. A `daemon.log` over 8 MiB

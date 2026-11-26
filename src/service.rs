@@ -62,11 +62,19 @@ impl Manager {
     }
 
     /// The service file's text for `executable` and `state_dir`, both
-    /// absolute.
-    pub fn render(self, executable: &Path, state_dir: &Path) -> Result<String, crate::Error> {
+    /// absolute. `search_path` is the `PATH` setup runs with: the service
+    /// keeps its usable directories (see `service_path`), so a check the
+    /// coordinator runs finds the same tools as one run from that shell.
+    pub fn render(
+        self,
+        executable: &Path,
+        state_dir: &Path,
+        search_path: Option<&str>,
+    ) -> Result<String, crate::Error> {
+        let search_path = search_path.and_then(service_path);
         match self {
-            Manager::Launchd => launch_agent(executable, state_dir),
-            Manager::Systemd => systemd_unit(executable, state_dir),
+            Manager::Launchd => launch_agent(executable, state_dir, search_path.as_deref()),
+            Manager::Systemd => systemd_unit(executable, state_dir, search_path.as_deref()),
         }
     }
 
@@ -93,10 +101,22 @@ impl Manager {
 
 /// A LaunchAgent: started at login (`RunAtLoad`), started again when it
 /// exits with a failure (`KeepAlive` / `SuccessfulExit` false).
-fn launch_agent(executable: &Path, state_dir: &Path) -> Result<String, crate::Error> {
+fn launch_agent(
+    executable: &Path,
+    state_dir: &Path,
+    search_path: Option<&str>,
+) -> Result<String, crate::Error> {
     let exe = xml_escape(text_of(executable)?);
     let dir = xml_escape(text_of(state_dir)?);
     let log = xml_escape(text_of(&state_dir.join(crate::autostart::LOG))?);
+    let environment = search_path
+        .map(|path| {
+            format!(
+                "\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>{}</string>\n\t</dict>\n",
+                xml_escape(path)
+            )
+        })
+        .unwrap_or_default();
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -121,7 +141,7 @@ fn launch_agent(executable: &Path, state_dir: &Path) -> Result<String, crate::Er
 	</dict>
 	<key>ProcessType</key>
 	<string>Background</string>
-	<key>StandardOutPath</key>
+{environment}	<key>StandardOutPath</key>
 	<string>{log}</string>
 	<key>StandardErrorPath</key>
 	<string>{log}</string>
@@ -133,11 +153,18 @@ fn launch_agent(executable: &Path, state_dir: &Path) -> Result<String, crate::Er
 
 /// A `systemd --user` unit, wanted by `default.target` so it starts at
 /// login, restarted five seconds after a failure.
-fn systemd_unit(executable: &Path, state_dir: &Path) -> Result<String, crate::Error> {
+fn systemd_unit(
+    executable: &Path,
+    state_dir: &Path,
+    search_path: Option<&str>,
+) -> Result<String, crate::Error> {
     let exe = unit_word(executable)?;
     let dir = unit_word(state_dir)?;
     let log_path = state_dir.join(crate::autostart::LOG);
     let log = unit_word(&log_path)?;
+    let environment = search_path
+        .map(|path| format!("Environment=\"PATH={path}\"\n"))
+        .unwrap_or_default();
     Ok(format!(
         "# {MARKER}
 [Unit]
@@ -147,7 +174,7 @@ Documentation=https://langspan.dev
 [Service]
 Type=simple
 ExecStart=\"{exe}\" daemon --state-dir \"{dir}\"
-Restart=on-failure
+{environment}Restart=on-failure
 RestartSec=5
 StandardOutput=append:{log}
 StandardError=append:{log}
@@ -156,6 +183,23 @@ StandardError=append:{log}
 WantedBy=default.target
 "
     ))
+}
+
+/// The directories of `search_path` a service can name unchanged, joined
+/// with `:`, or `None` when none is left. A relative directory, which the
+/// manager would resolve against `/`, is left out, as is one holding a
+/// control character, a quote, `\`, `%` or `$`, which systemd would expand.
+fn service_path(search_path: &str) -> Option<String> {
+    let kept: Vec<&str> = search_path
+        .split(':')
+        .filter(|dir| {
+            dir.starts_with('/')
+                && !dir
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, '"' | '\'' | '\\' | '%' | '$'))
+        })
+        .collect();
+    (!kept.is_empty()).then(|| kept.join(":"))
 }
 
 fn text_of(path: &Path) -> Result<&str, crate::Error> {
@@ -407,6 +451,7 @@ mod tests {
             .render(
                 Path::new("/opt/bin/langspan"),
                 Path::new("/srv/a & b/.local/state/langspan"),
+                None,
             )
             .unwrap();
         let expected = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -449,7 +494,7 @@ mod tests {
     #[test]
     fn launch_agent_escapes_markup_in_paths() {
         let text = Manager::Launchd
-            .render(Path::new("/x/<y>/langspan"), Path::new("/s/'q\""))
+            .render(Path::new("/x/<y>/langspan"), Path::new("/s/'q\""), None)
             .unwrap();
         assert!(text.contains("<string>/x/&lt;y&gt;/langspan</string>"));
         assert!(text.contains("<string>/s/&apos;q&quot;</string>"));
@@ -465,6 +510,7 @@ mod tests {
             .render(
                 Path::new("/opt/bin/langspan"),
                 Path::new("/home/u/.local/state/langspan"),
+                None,
             )
             .unwrap();
         assert!(text.starts_with("# Written by `langspan setup`"));
@@ -484,7 +530,7 @@ mod tests {
     fn systemd_unit_refuses_paths_systemd_would_change() {
         for dir in ["/a b", "/a%h", "/a$HOME", "/a\"b", "/a\\b", "/a\nb"] {
             let error = Manager::Systemd
-                .render(Path::new("/opt/langspan"), Path::new(dir))
+                .render(Path::new("/opt/langspan"), Path::new(dir), None)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -494,9 +540,43 @@ mod tests {
         }
         assert!(
             Manager::Systemd
-                .render(Path::new("relative/langspan"), Path::new("/s"))
+                .render(Path::new("relative/langspan"), Path::new("/s"), None)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn both_services_keep_the_tool_search_path_setup_ran_with() {
+        let search = "/home/u/.cargo/bin:relative/bin:/opt/a b/bin:/x/%h:/y/$HOME:/usr/bin";
+        let launchd = Manager::Launchd
+            .render(Path::new("/opt/langspan"), Path::new("/s"), Some(search))
+            .unwrap();
+        assert!(
+            launchd.contains(
+                "\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>/home/u/.cargo/bin:/opt/a b/bin:/usr/bin</string>\n\t</dict>\n"
+            ),
+            "{launchd}"
+        );
+        let systemd = Manager::Systemd
+            .render(Path::new("/opt/langspan"), Path::new("/s"), Some(search))
+            .unwrap();
+        assert!(
+            systemd.contains("Environment=\"PATH=/home/u/.cargo/bin:/opt/a b/bin:/usr/bin\"\n"),
+            "{systemd}"
+        );
+        assert_eq!(
+            Manager::Systemd.state_dir_of(&systemd),
+            Some(PathBuf::from("/s"))
+        );
+        // No usable directory: no entry, and the manager's own default.
+        for manager in [Manager::Launchd, Manager::Systemd] {
+            for search in [None, Some(""), Some("relative:/a\"b")] {
+                let text = manager
+                    .render(Path::new("/opt/langspan"), Path::new("/s"), search)
+                    .unwrap();
+                assert!(!text.contains("PATH"), "{search:?}: {text}");
+            }
+        }
     }
 
     #[test]

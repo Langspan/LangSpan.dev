@@ -509,3 +509,60 @@ fn the_on_demand_start_can_be_turned_off() {
     assert!(!state_dir.exists());
     assert!(daemons_for(&base.0).is_empty());
 }
+
+/// `setup --home DIR` from a process whose `HOME` is another directory: the
+/// coordinator it starts checks hosts in `DIR`, not in `HOME`.
+#[test]
+fn setup_with_an_explicit_home_starts_a_coordinator_that_checks_that_home() {
+    use langspan::protocol::{PROTOCOL_VERSION, Request};
+    use langspan_core::{Command, Outcome};
+    let base = Base::new();
+    let other = base.0.join("other");
+    fs::create_dir(&other).unwrap();
+    let home = base.home();
+    let state_dir = home.join(".local/state/langspan");
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let config = state_dir.join("config.json");
+    fs::write(&config, r#"{"host_check_ms": 200}"#).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
+    support::in_home(&mut command, &other)
+        .args(["setup", "--home"])
+        .arg(&home)
+        .arg("--yes")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove(langspan::autostart::ENV)
+        .stdin(Stdio::null());
+    let output = command.output().unwrap();
+    let shown = text(&output);
+    assert!(
+        shown.contains("Started a coordinator in the background"),
+        "{shown}"
+    );
+    // A host that appears in the explicit home after setup.
+    fs::create_dir(home.join(".cursor")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let response = client::call(
+            &state_dir,
+            &Request {
+                version: PROTOCOL_VERSION,
+                request_id: "read".into(),
+                command: Command::Status,
+            },
+        );
+        if let Ok(response) = response
+            && let Outcome::Status { state, .. } = response.outcome
+            && state.uninstalled_hosts.contains_key("cursor")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the coordinator never saw Cursor in {}",
+            home.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

@@ -14,6 +14,7 @@
 
 use crate::local;
 use std::{
+    ffi::OsString,
     fs,
     io::{Read, Seek, Write},
     path::{Path, PathBuf},
@@ -33,8 +34,13 @@ pub const RETRY_AFTER_MS: u64 = 30_000;
 const LOG_LIMIT: u64 = 8 << 20;
 /// The variables the started coordinator keeps from its caller's
 /// environment. Everything else, such as a host's API keys, is dropped.
-const KEPT_ENV: [&str; 17] = [
+const KEPT_ENV: [&str; 20] = [
     "HOME",
+    // Where the hosts keep their configuration: the coordinator's host
+    // checks read the same directories as the session that started it.
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "GEMINI_CLI_HOME",
     "PATH",
     "USER",
     "LOGNAME",
@@ -52,6 +58,40 @@ const KEPT_ENV: [&str; 17] = [
     "DBUS_SESSION_BUS_ADDRESS",
     "LANGSPAN_STATE_DIR",
 ];
+/// The variables `UserHome` reads to find directories in a home. An
+/// explicit home ignores them, so a coordinator started for one gets none.
+const HOME_OVERRIDES: [&str; 6] = [
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "GEMINI_CLI_HOME",
+    "LANGSPAN_STATE_DIR",
+    "XDG_STATE_HOME",
+    "XDG_CONFIG_HOME",
+];
+
+/// The environment the started coordinator gets from `vars`, its caller's:
+/// the variables in `KEPT_ENV` and every `XDG_*` and `LC_*`. With
+/// `home`, an explicit `--home`, `HOME` is that directory and the variables
+/// in `HOME_OVERRIDES` are dropped, so the coordinator's
+/// `UserHome::new(None)` finds the same directories as `UserHome::new(home)`.
+pub fn child_environment(
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+    home: Option<&Path>,
+) -> Vec<(OsString, OsString)> {
+    let mut kept: Vec<(OsString, OsString)> = vars
+        .into_iter()
+        .filter(|(name, _)| {
+            name.to_str().is_some_and(|name| {
+                (KEPT_ENV.contains(&name) || name.starts_with("XDG_") || name.starts_with("LC_"))
+                    && !(home.is_some() && (name == "HOME" || HOME_OVERRIDES.contains(&name)))
+            })
+        })
+        .collect();
+    if let Some(home) = home {
+        kept.push(("HOME".into(), home.as_os_str().to_owned()));
+    }
+    kept
+}
 
 /// What `ensure` found or did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,10 +146,13 @@ pub fn disabled() -> bool {
 /// Makes sure a coordinator runs for `state_dir`, starting one if none
 /// accepts connections and `service_installed` is false. Waits at most until
 /// `deadline`, and returns at once when another caller holds the start lock
-/// past it. `executable` is the `langspan` binary to start.
+/// past it. `executable` is the `langspan` binary to start; `home` is an
+/// explicit `--home`, which the coordinator's host checks then read instead
+/// of `HOME`.
 pub fn ensure(
     state_dir: &Path,
     executable: &Path,
+    home: Option<&Path>,
     service_installed: bool,
     deadline: Instant,
 ) -> Outcome {
@@ -125,7 +168,7 @@ pub fn ensure(
     if service_installed {
         return Outcome::Skipped("service_installed");
     }
-    match start(state_dir, executable, deadline) {
+    match start(state_dir, executable, home, deadline) {
         Ok(outcome) => outcome,
         Err(error) => Outcome::Failed(error.to_string()),
     }
@@ -136,7 +179,12 @@ fn probe_deadline(deadline: Instant) -> Instant {
     deadline.min(Instant::now() + Duration::from_millis(100))
 }
 
-fn start(state_dir: &Path, executable: &Path, deadline: Instant) -> Result<Outcome, crate::Error> {
+fn start(
+    state_dir: &Path,
+    executable: &Path,
+    home: Option<&Path>,
+    deadline: Instant,
+) -> Result<Outcome, crate::Error> {
     // A coordinator started here would exit at once.
     local::check_socket_fits(state_dir)?;
     local::private_directory(state_dir)?;
@@ -182,11 +230,7 @@ fn start(state_dir: &Path, executable: &Path, deadline: Instant) -> Result<Outco
         .arg("--state-dir")
         .arg(&directory)
         .env_clear()
-        .envs(std::env::vars_os().filter(|(name, _)| {
-            name.to_str().is_some_and(|name| {
-                KEPT_ENV.contains(&name) || name.starts_with("XDG_") || name.starts_with("LC_")
-            })
-        }))
+        .envs(child_environment(std::env::vars_os(), home))
         .current_dir("/")
         .stdin(Stdio::null())
         // Never the hook's stdout: the host reads it until every writer
@@ -258,4 +302,57 @@ pub fn prepare_state_dir(state_dir: &Path) -> Result<(), crate::Error> {
 /// The coordinator's log for `state_dir`.
 pub fn log_path(state_dir: &Path) -> PathBuf {
     state_dir.join(LOG)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caller() -> Vec<(OsString, OsString)> {
+        [
+            ("HOME", "/home/u"),
+            ("PATH", "/home/u/.cargo/bin:/usr/bin"),
+            ("CLAUDE_CONFIG_DIR", "/cfg/claude"),
+            ("CODEX_HOME", "/cfg/codex"),
+            ("GEMINI_CLI_HOME", "/cfg/gemini"),
+            ("XDG_STATE_HOME", "/home/u/state"),
+            ("XDG_RUNTIME_DIR", "/run/user/1"),
+            ("ANTHROPIC_API_KEY", "secret"),
+            ("OPENAI_API_KEY", "secret"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.into(), value.into()))
+        .collect()
+    }
+
+    fn value<'a>(env: &'a [(OsString, OsString)], name: &str) -> Option<&'a str> {
+        env.iter()
+            .find(|(key, _)| key == name)
+            .and_then(|(_, value)| value.to_str())
+    }
+
+    #[test]
+    fn the_coordinator_keeps_host_configuration_directories_and_drops_keys() {
+        let env = child_environment(caller(), None);
+        assert_eq!(value(&env, "HOME"), Some("/home/u"));
+        assert_eq!(value(&env, "CLAUDE_CONFIG_DIR"), Some("/cfg/claude"));
+        assert_eq!(value(&env, "CODEX_HOME"), Some("/cfg/codex"));
+        assert_eq!(value(&env, "GEMINI_CLI_HOME"), Some("/cfg/gemini"));
+        assert_eq!(value(&env, "XDG_STATE_HOME"), Some("/home/u/state"));
+        assert_eq!(value(&env, "ANTHROPIC_API_KEY"), None);
+        assert_eq!(value(&env, "OPENAI_API_KEY"), None);
+    }
+
+    #[test]
+    fn an_explicit_home_replaces_home_and_drops_its_overrides() {
+        let env = child_environment(caller(), Some(Path::new("/spare")));
+        assert_eq!(value(&env, "HOME"), Some("/spare"));
+        assert_eq!(env.iter().filter(|(key, _)| key == "HOME").count(), 1);
+        for name in HOME_OVERRIDES {
+            assert_eq!(value(&env, name), None, "{name}");
+        }
+        assert_eq!(value(&env, "PATH"), Some("/home/u/.cargo/bin:/usr/bin"));
+        assert_eq!(value(&env, "XDG_RUNTIME_DIR"), Some("/run/user/1"));
+        assert_eq!(value(&env, "ANTHROPIC_API_KEY"), None);
+    }
 }

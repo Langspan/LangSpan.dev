@@ -1166,7 +1166,7 @@ fn start_coordinator(state_dir: &std::path::Path, until: std::time::Instant) {
         Ok(executable) => {
             let service = UserHome::new(None)
                 .is_ok_and(|home| langspan::service::installed_for(&home, &state_dir));
-            langspan::autostart::ensure(&state_dir, &executable, service, until)
+            langspan::autostart::ensure(&state_dir, &executable, None, service, until)
         }
         Err(error) => {
             langspan::autostart::Outcome::Failed(format!("cannot find this executable: {error}"))
@@ -1222,7 +1222,7 @@ fn plan_service(
     if let Err(reason) = service::manager_available(manager) {
         return Ok(ServicePlan::None(reason));
     }
-    let text = manager.render(executable, state_dir)?;
+    let text = manager.render(executable, state_dir, std::env::var("PATH").ok().as_deref())?;
     if existing.as_deref() == Some(text.as_str()) && service::running(manager) {
         return Ok(ServicePlan::Unchanged(path));
     }
@@ -1343,6 +1343,7 @@ fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langs
             let outcome = langspan::autostart::ensure(
                 &state_dir,
                 &executable,
+                home.explicit().then_some(home.home.as_path()),
                 false,
                 std::time::Instant::now() + std::time::Duration::from_secs(5),
             );
