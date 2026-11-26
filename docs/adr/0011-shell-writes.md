@@ -350,7 +350,7 @@ capped like a refusal's. It is given once per session for each set of
 session and file pairs (the commit guard's "told" record): the same files are
 not named again whichever formatter runs, and a new file in the reach makes a
 new notice. Only hosts that show pre-tool context to the model get it
-(Claude Code and Codex); for Cursor and Gemini CLI nothing is computed, so a
+(Claude Code and Codex); for Cursor (and Gemini CLI, removed in ADR 0033) nothing is computed, so a
 notice is not spent unread. Claude Code shows the context next to the tool
 result ([ADR 0029](0029-break-alerts-at-write-time.md)), so the model reads it
 after the formatter ran: it says whom to tell and how to format only one's

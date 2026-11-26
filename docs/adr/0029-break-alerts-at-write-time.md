@@ -4,9 +4,11 @@
 [roadmap](../roadmap.md), 25 November 2026. Extends
 [ADR 0008](0008-derived-source-index.md) (interface notices) and uses the edit
 placement of [ADR 0012](0012-region-admission.md). Tested with the real daemon,
-indexer and hook executables; not yet observed on a host. Gemini CLI, Cursor
+indexer and hook executables; not yet observed on a host. Cursor
 (behind a captured fixture) and quoted-heredoc shell writes are built
-(roadmap B9, issue #28); `NotebookEdit` and real-host runs remain planned.
+(roadmap B9, issue #28). Gemini CLI writes were built too; Gemini CLI support
+was removed on 26 November 2026 ([ADR 0033](0033-gemini-cli-adapter.md)), and
+the Gemini CLI parts below record the decision as it was made; `NotebookEdit` and real-host runs remain planned.
 A call to a function a peer renamed or removed is told at the write too
 (roadmap B10, issue #29); a change that keeps the argument count still is not
 (see "Not now" below).
@@ -31,7 +33,7 @@ use up its notice. The other two launch hosts, and shell writes, were added
 later (roadmap B9, issue #28); they are built and tested with constructed
 events, not yet observed on a host:
 
-- **Gemini CLI** reads no context on `BeforeTool` but adds `AfterTool`
+- **Gemini CLI** (removed, ADR 0033) reads no context on `BeforeTool` but adds `AfterTool`
   context to the tool's result ([ADR 0033](0033-gemini-cli-adapter.md)).
   At `BeforeTool` of an admitted `replace` or `write_file`, the hook finds
   the write's calls against the file as it is then and keeps them
@@ -315,8 +317,7 @@ Any failure is a note in the diagnostic, never a decision.
   `after_name`, the change label `renamed`, and `change` and `after_name` on
   each break of the `check_calls` answer, whose `after_arity` is now optional.
   The protocol stays at version 3.
-- Not observed on a host: the alert reaching a real Codex, Gemini CLI or
-  Cursor model, or a model changing its call because of it. A Claude Code
+- Not observed on a host: the alert reaching a real Codex or Cursor model, or a model changing its call because of it. A Claude Code
   alert reaching the model has been seen once and is not yet in the
   repository's evidence.
 - On Gemini CLI the calls are found against the file before the write and
@@ -404,7 +405,6 @@ naming the rename and the worktree, once
 own worktree's index: no alert without that index or with a partial one,
 none for a session of another repository, and no worktree named for a
 session of the worktree that made it.
-`src/shell.rs` covers the heredoc forms read and refused, `src/break_calls.rs`
-the kept calls (owner-only, read once, a malformed file is nothing), and
+`src/shell.rs` covers the heredoc forms read and refused, and
 `src/cursor.rs` that a captured Cursor `Write` fixture is named by
 `CAPTURED_WRITE`.

@@ -73,6 +73,7 @@ fn stop(state: &mut State, id: &str, session: &str, failure: Option<&str>, now: 
         Command::SessionStop {
             session_id: session.into(),
             failure: failure.map(str::to_owned),
+            prompt_id: None,
         },
         now,
     )
@@ -116,6 +117,7 @@ fn a_stop_releases_only_the_sessions_own_open_tool_admissions() {
         Command::SessionStop {
             session_id: "alice".into(),
             failure: None,
+            prompt_id: None,
         },
         20,
     );
@@ -141,6 +143,7 @@ fn a_stop_releases_only_the_sessions_own_open_tool_admissions() {
                 failure: None,
                 at_ms: 20,
                 generation: 1,
+                prompt_id: None,
             },
         ]
     );
@@ -184,6 +187,7 @@ fn a_failed_stop_records_its_error_type_and_refuses_free_text() {
         Command::SessionStop {
             session_id: "alice".into(),
             failure: Some("rate_limit".into()),
+            prompt_id: None,
         },
         2,
     );

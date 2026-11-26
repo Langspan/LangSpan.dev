@@ -1125,7 +1125,9 @@ impl Store {
             } => self.changes(workspace_id, *after, *limit)?,
             // A hook run inside the interval writes nothing, not even a
             // receipt, so a burst of them costs no storage (roadmap J12).
-            Command::SessionSeen { .. } => {
+            // Nor does a between-step watcher's ask with nothing to tell,
+            // made about once a second while a turn runs (issue #214).
+            Command::SessionSeen { .. } | Command::BetweenSteps { .. } => {
                 let decision = decide(&self.state, prepared, request_id, now_ms);
                 if !decision.events.is_empty() {
                     self.commit(

@@ -148,6 +148,14 @@ class DriverUnitTests(Temporary):
             self.assertIn(rule, denied)
         self.assertFalse([rule for rule in denied if "/work/s2/" in rule], "a session keeps its own checkout")
 
+    def test_the_stand_in_runs_foreground_hooks_only(self):
+        settings = {"hooks": {"UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": "prompt", "timeout": 5},
+            {"type": "command", "command": "watch", "asyncRewake": True, "timeout": 1260},
+            {"type": "command", "command": "later", "async": True}]}]}}
+        self.assertEqual(list(standin_agent.hook_commands(settings, "UserPromptSubmit", None)),
+                         [("prompt", 5)])
+
     def test_interface_notices_are_counted_per_session_from_the_event_log(self):
         def registered(session_id, workspace):
             return {"event": {"type": "session_registered",
@@ -156,8 +164,14 @@ class DriverUnitTests(Temporary):
                   {"event": {"type": "inflight_delivered", "session_id": "claude-code.b", "keys": ["k1", "k2"]}},
                   {"event": {"type": "interface_alerted", "session_id": "claude-code.b", "notice_ids": ["n1"]}},
                   {"event": {"type": "inflight_delivered", "session_id": "claude-code.unknown", "keys": ["k3"]}},
-                  {"event": {"type": "briefing_delivered", "session_id": "claude-code.a", "signature": "x"}}]
-        self.assertEqual(driver.interface_notices(events), {2: 3})
+                  {"event": {"type": "briefing_delivered", "session_id": "claude-code.a", "signature": "x"}},
+                  # Between steps counts; a briefing's own record does not,
+                  # as briefings were not counted before it existed.
+                  {"event": {"type": "interface_notices_told", "session_id": "claude-code.a",
+                             "notice_ids": ["n2", "n3"], "via": "between_steps"}},
+                  {"event": {"type": "interface_notices_told", "session_id": "claude-code.a",
+                             "notice_ids": ["n4"], "via": "briefing"}}]
+        self.assertEqual(driver.interface_notices(events), {1: 2, 2: 3})
 
     def context_record(self, arm, state, sessions=2):
         plan = driver.make_plan(arm, "rename_vs_new_caller", sessions, 1, agent="claude")

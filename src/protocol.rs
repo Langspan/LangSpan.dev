@@ -11,12 +11,13 @@ use std::io::{self, BufRead, BufReader, Read};
 /// briefing's `unchanged`, a briefing delivery's `told` and `told_at_ms`,
 /// and the `context_added` and `told_forgotten` events (with the
 /// `forget_told` request that records the second). Version 5 is version 4
-/// with roadmap H9's `refusal_outcomes` in a report's counts. Version 4 is
-/// version 3 with roadmap D7's rename fields in interface changes, history
-/// entries and in-flight symbols. Requests of an earlier version are
-/// requests of this one.
+/// with roadmap H9's `refusal_outcomes` in a report's counts and issue
+/// #214's `interface_notice_ids` in a briefing. Version 4 is version 3 with
+/// roadmap D7's rename fields in interface changes, history entries and
+/// in-flight symbols. Requests of an earlier version are requests of this
+/// one.
 pub const PROTOCOL_VERSION: u16 = 6;
-/// Roadmap H9's version, answered in its own shape.
+/// The version of roadmap H9 and issue #214, answered in its own shape.
 pub const PROTOCOL_VERSION_5: u16 = 5;
 /// Roadmap D7's version, answered in its own shape.
 pub const PROTOCOL_VERSION_4: u16 = 4;
@@ -126,8 +127,12 @@ fn protocol_5_outcome(outcome: &mut Outcome) {
 /// (`ReportCounts`: the only objects of the protocol with both
 /// `edits_admitted` and `retried_unchanged`).
 const COUNTS_FIELD_SINCE_5: &str = "refusal_outcomes";
+/// The field version 5 added to a briefing (`Briefing`, the only object
+/// with `changed` and `omitted_peers`): its interface notices' IDs, which
+/// a hook reports back once shown (issue #214).
+const BRIEFING_FIELD_SINCE_5: &str = "interface_notice_ids";
 
-/// `value` without the field version 5 added.
+/// `value` without the fields version 5 added.
 fn protocol_4_shape(value: &mut serde_json::Value) {
     use serde_json::Value;
     match value {
@@ -135,6 +140,9 @@ fn protocol_4_shape(value: &mut serde_json::Value) {
         Value::Object(fields) => {
             if fields.contains_key("edits_admitted") && fields.contains_key("retried_unchanged") {
                 fields.shift_remove(COUNTS_FIELD_SINCE_5);
+            }
+            if fields.contains_key("changed") && fields.contains_key("omitted_peers") {
+                fields.shift_remove(BRIEFING_FIELD_SINCE_5);
             }
             fields.values_mut().for_each(protocol_4_shape);
         }

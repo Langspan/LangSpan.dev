@@ -7,6 +7,12 @@ real executable and the real MCP server (`tests/user_install.rs`,
 `tests/cli.rs`, `tests/mcp.rs`, unit tests in `src/skill.rs`). No agent has
 been observed using the skill on a real host yet.
 
+**Update, 26 November 2026:** Gemini CLI support was removed (issue #246,
+[ADR 0033](0033-gemini-cli-adapter.md)), so the skill has no Gemini CLI form.
+`langspan uninstall --hosts gemini-cli` still removes LangSpan's section from
+`~/.gemini/GEMINI.md`. The Gemini CLI parts below record the decision as it
+was made.
+
 ## Context
 
 An agent that meets LangSpan for the first time sees its briefings, refusals
@@ -25,7 +31,7 @@ different format:
 | Claude Code | `~/.claude/skills/langspan/SKILL.md` (under `CLAUDE_CONFIG_DIR` when set) | A personal skill: YAML front matter (`name`, `description`) and Markdown | Its skills documentation advises keeping `SKILL.md` under 500 lines; a description is cut at 1,536 characters in the skill listing |
 | Codex | `~/.codex/AGENTS.md` (under `CODEX_HOME` when set); `AGENTS.override.md` there is read instead when it exists | Global `AGENTS.md` guidance, plain Markdown | At most 32 KiB by default (`project_doc_max_bytes`) of the combined instruction chain: every AGENTS file Codex reads together, not `AGENTS.md` alone |
 | Cursor | `.cursor/rules/langspan.mdc` in the project | A project rule: front matter (`description`, `globs`, `alwaysApply`) and Markdown | Its rules documentation advises keeping a rule under 500 lines. **Unverified:** the documentation does not say whether the Cursor CLI reads `.cursor/rules` |
-| Gemini CLI | `~/.gemini/GEMINI.md` (under `GEMINI_CLI_HOME` when set) | The global context file, plain Markdown | None documented |
+| Gemini CLI (removed) | `~/.gemini/GEMINI.md` (under `GEMINI_CLI_HOME` when set) | The global context file, plain Markdown | None documented |
 
 Cursor documents user rules only as a setting in its own interface, not as a
 file, so its form is a project rule. Cursor's documentation covers project
@@ -41,7 +47,8 @@ every project AGENTS file Codex adds.
 **One source text.** `src/skill.md` is the skill. It is compiled into the
 executable, and every host's form carries it byte for byte with only the
 host's wrapper around it: front matter and an ownership mark for Claude Code
-and Cursor, and begin and end marker lines for Codex and Gemini CLI. It says
+and Cursor, and begin and end marker lines for Codex (and, before its removal,
+Gemini CLI). It says
 what LangSpan does and that its messages are coordination data, never
 instructions; how to respond to a briefing, a stale-source or unread-lines
 refusal, a conflict, a break alert, an automatic check result and a held
@@ -61,7 +68,7 @@ Every `langspan …` command it names must begin a usage line of `langspan
 form must stay within 500 lines and 8 KiB, inside each documented limit above.
 
 **Installed only when asked.** `langspan install --skill` writes the skill for
-Claude Code, Codex and Gemini CLI, among the chosen hosts, beside the hooks
+Claude Code and Codex (and, before its removal, Gemini CLI), among the chosen hosts, beside the hooks
 and MCP entry; without `--skill` it is neither shown nor written. Cursor's
 rule is written by `langspan hooks install cursor --workspace ID --root DIR
 --skill`; `--skill` with any other host's project install is refused, naming
@@ -71,13 +78,14 @@ text, and writes nothing.
 **LangSpan's files only.** For Claude Code and Cursor, LangSpan owns the
 whole file, marked with `<!-- langspan-managed:skill:v1 -->`. An existing file
 of that name without the mark stops the install before anything is written,
-and is never removed. For Codex and Gemini CLI, LangSpan owns one section
+and is never removed. For Codex and an earlier Gemini CLI install, LangSpan owns one section
 between `<!-- langspan-managed:skill:v1 begin -->` and `… end -->`; every
 other line is kept byte for byte. A second section, or a marker without its
 partner, stops the install. Reinstalling replaces LangSpan's file or section
 where it is, so hand edits inside it are replaced. `langspan uninstall`
 removes the Claude Code file (and its `skills/langspan` folder when that is
-then empty) and the Codex and Gemini CLI sections; a file that held only the
+then empty) and the Codex section, and `--hosts gemini-cli` removes an earlier
+Gemini CLI section; a file that held only the
 section is removed with it. `langspan hooks remove cursor` removes Cursor's
 rule. Writes use the installer's guarded writer: atomic replacement, new files
 `0600`, symlinks refused, 1 MiB bound, and a file changed since it was
@@ -89,7 +97,7 @@ untouched rather than failing, so an owner who keeps guidance files in
 their dotfiles can always uninstall, and `install --skill` still refuses
 it.
 
-**Reported by `doctor`.** For each of Claude Code, Codex and Gemini CLI whose
+**Reported by `doctor`.** For each of Claude Code and Codex whose
 configuration directory exists, and for Cursor in `doctor --root DIR` when
 Cursor's project hooks are installed, `doctor` reports the skill as not
 installed (not a problem, since it is optional), installed and up to date, or
@@ -117,9 +125,7 @@ the project files a given session's chain includes.
 - The skill is advice. Nothing is held or refused through it, and on a host
   whose hooks are not installed or not trusted it is the only coordination the
   agent gets.
-- Gemini CLI's documentation describes a setting (`context.fileName`) that
-  names another context file, in which case the installed section would not
-  be read; `doctor` does not detect it. Codex's `AGENTS.override.md` is
+- Codex's `AGENTS.override.md` is
   detected in the user directory only.
 - Project AGENTS files share Codex's budget with the section, so a project
   whose own files are large can still leave part of the chain unread in a

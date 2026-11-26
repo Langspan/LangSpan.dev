@@ -1847,7 +1847,6 @@ fn a_hunk_with_a_line_no_session_wrote_next_to_another_sessions_is_still_refused
 // ---------------------------------------------------------------------------
 
 const CODEX: &str = "00000000-0000-4000-8000-000000000001";
-const GEMINI: &str = "00000000-0000-4000-8000-0000000000e1";
 const CURSOR: &str = "00000000-0000-4000-8000-0000000000c1";
 
 /// A host's run of the hook: its coverage, its detail and, for a deny, the
@@ -1887,12 +1886,10 @@ impl Fixture {
         assert_eq!(output.status.code(), Some(0), "{stderr}");
         let diagnostic: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
         let reply: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
-        // Codex reads Claude Code's field, Cursor `agent_message` and Gemini
-        // CLI `reason`.
+        // Codex reads Claude Code's field, and Cursor `agent_message`.
         let reason = [
             &reply["hookSpecificOutput"]["permissionDecisionReason"],
             &reply["agent_message"],
-            &reply["reason"],
         ]
         .into_iter()
         .find_map(|field| field.as_str().map(str::to_owned));
@@ -2047,63 +2044,6 @@ fn commit_mine_text_lists_what_was_left_and_points_to_status_mine() {
         "{stdout}"
     );
     assert!(stdout.contains("langspan status --mine"), "{stdout}");
-}
-
-/// Acceptance: a Gemini CLI `run_shell_command` call to `langspan commit
-/// --mine` without --session finds its session.
-#[test]
-fn a_gemini_shell_commit_mine_without_a_session_finds_its_own() {
-    let f = Fixture::new();
-    f.edit(BOB, "bob-1", "shared.txt", "line 2\n", "line 2, by Bob\n");
-    let path = f.work().join("shared.txt");
-    let input = json!({
-        "file_path": path, "instruction": "Change line 18.",
-        "old_string": "line 18\n", "new_string": "line 18, by Gemini\n",
-    });
-    let replace = |phase: &str| {
-        let mut event = json!({
-            "session_id": GEMINI, "transcript_path": "/dev/null", "cwd": f.work(),
-            "hook_event_name": phase, "timestamp": "2026-11-24T23:15:02.000Z",
-            "tool_name": "replace", "tool_input": input,
-        });
-        if phase == "AfterTool" {
-            event["tool_response"] = json!({"llmContent": "Successfully modified file."});
-        }
-        event
-    };
-    let before = f.host("gemini-cli", &replace("BeforeTool"));
-    assert_eq!(before.coverage, "admitted", "{before:?}");
-    let content = f.read("shared.txt");
-    fs::write(
-        &path,
-        content.replacen("line 18\n", "line 18, by Gemini\n", 1),
-    )
-    .unwrap();
-    let after = f.host("gemini-cli", &replace("AfterTool"));
-    assert_eq!(after.coverage, "observed", "{after:?}");
-    let (only_gemini, both) = line_2_and_18("Bob", "Gemini");
-
-    let command = f.commit_mine_json("Gemini: line 18");
-    let shell = |pre: bool| {
-        let mut event = json!({
-            "session_id": GEMINI, "transcript_path": "/dev/null", "cwd": f.work(),
-            "hook_event_name": if pre { "BeforeTool" } else { "AfterTool" },
-            "timestamp": "2026-11-24T23:15:04.000Z", "tool_name": "run_shell_command",
-            "tool_input": {"command": command, "description": "Commit my changes."},
-        });
-        if !pre {
-            event["tool_response"] = json!({"llmContent": "Output: done", "returnDisplay": "done"});
-        }
-        event
-    };
-    let ran = f.host_shell("gemini-cli", shell, &command);
-    assert!(ran.status.success(), "{}", said(&ran));
-    let report: Value = serde_json::from_str(&stdout_of(&ran)).unwrap();
-    assert_eq!(report["result"], "committed", "{report}");
-    assert_eq!(report["session_id"], format!("gemini.{GEMINI}"), "{report}");
-    assert_eq!(git(&f.work(), &["show", "HEAD:shared.txt"]), only_gemini);
-    assert_eq!(f.read("shared.txt"), both);
-    assert_eq!(f.status(), " M shared.txt\n");
 }
 
 impl Fixture {
@@ -2537,20 +2477,6 @@ impl Fixture {
         git(&self.work(), &["commit", "-q", "-m", "files"]);
     }
 
-    /// A Gemini CLI `run_shell_command` event of `command`.
-    fn gemini_shell_event(&self, pre: bool, command: &str) -> Value {
-        let mut event = json!({
-            "session_id": GEMINI, "transcript_path": "/dev/null", "cwd": self.work(),
-            "hook_event_name": if pre { "BeforeTool" } else { "AfterTool" },
-            "timestamp": "2026-11-26T10:00:00.000Z", "tool_name": "run_shell_command",
-            "tool_input": {"command": command, "description": "Commit."},
-        });
-        if !pre {
-            event["tool_response"] = json!({"llmContent": "Output: done", "returnDisplay": "done"});
-        }
-        event
-    }
-
     /// A Claude Code hook run with `budget_ms` as its budget.
     fn hook_with_budget(&self, event: Value, budget_ms: u64) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
@@ -2672,27 +2598,6 @@ fn a_cursor_shell_add_all_is_held_naming_the_claude_sessions_lines() {
     );
     assert_names_alices_lines(&held);
     assert_eq!(git(&f.work(), &["diff", "--cached", "--name-only"]), "");
-}
-
-/// Acceptance: a Gemini CLI `run_shell_command` event running `git commit
-/// -a` is held the same way.
-#[test]
-fn a_gemini_shell_commit_all_is_held_naming_the_claude_sessions_lines() {
-    let f = Fixture::new();
-    f.commit_files(&["src/a.rs"]);
-    f.edit(
-        ALICE,
-        "alice-1",
-        "src/a.rs",
-        "line 2\n",
-        "line 2, by Alice\n",
-    );
-    let held = f.host(
-        "gemini-cli",
-        &f.gemini_shell_event(true, "git commit -a -m 'Gemini'"),
-    );
-    assert_names_alices_lines(&held);
-    assert_eq!(f.subjects(), "files\nstart\n");
 }
 
 /// Acceptance: `git add src/b.rs`, where `src/b.rs` holds only the

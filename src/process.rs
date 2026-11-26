@@ -338,8 +338,9 @@ pub fn probe_all(processes: &[ProcessIdentity]) -> Vec<LivenessStatus> {
     }
 }
 
-/// Whether a process name is the named host's. Cursor and Gemini CLI are
-/// added once their process names are seen on a real host (roadmap J12).
+/// Whether a process name is the named host's. Cursor and Antigravity are
+/// added once their process names are recorded from a real host (roadmap
+/// J12).
 fn is_host(source: &str, name: &str) -> bool {
     match source {
         "codex" => name == "codex" || name.starts_with("codex-"),

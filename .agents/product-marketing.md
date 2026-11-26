@@ -40,7 +40,8 @@ outcome. Keep rename-aware and cross-worktree symbol alerts on the roadmap.
   and task text requires its own opt-in.
 - Is it proven across the team? Retained native Claude Code and Codex evidence,
   and two-machine briefing delivery exist. A measured reduction in repair or
-  relay has not been established. Cursor/Gemini live acceptance remains open.
+  relay has not been established. Antigravity is verified on a real host;
+  Cursor live acceptance remains open. Gemini CLI support was removed.
 
 ## Voice
 Concrete verbs, short sentences, mechanism before hype. Keep the established

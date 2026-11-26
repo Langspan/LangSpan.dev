@@ -1160,6 +1160,88 @@ fn v4_trail_requests_and_listing_match_the_committed_golden_vectors() {
     assert_eq!(encode(&response).unwrap(), wire);
 }
 
+/// Issue #214: a between-step watcher's ask and the answer that tells it a
+/// notice. `stops` is absent from a first ask.
+#[test]
+fn v4_between_steps_request_and_outcome_match_the_committed_golden_vectors() {
+    use langspan_core::Outcome;
+    let wire = include_bytes!("../fixtures/between-steps-request-v4.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::BetweenSteps {
+            session_id: "claude-code.alice".into(),
+            stops: Some(3),
+            prompt_id: Some("38ca4096-2385-4d27-97e1-59b74594c136".into()),
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    let first: Request = serde_json::from_str(
+        r#"{"version":4,"request_id":"w","command":{"op":"between_steps","session_id":"claude-code.alice"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        first.command,
+        Command::BetweenSteps {
+            stops: None,
+            prompt_id: None,
+            ..
+        }
+    ));
+    // The hook's report of the notices its briefing showed.
+    let shown = r#"{"version":4,"request_id":"s","command":{"op":"interface_shown","session_id":"claude-code.alice","notice_ids":["n1","n2"]}}"#;
+    let request: Request = serde_json::from_str(shown).unwrap();
+    assert_eq!(
+        request.command,
+        Command::InterfaceShown {
+            session_id: "claude-code.alice".into(),
+            notice_ids: vec!["n1".into(), "n2".into()],
+        }
+    );
+    assert_eq!(
+        String::from_utf8(encode(&request).unwrap())
+            .unwrap()
+            .trim_end(),
+        shown
+    );
+    // A stop names its prompt; one from an older hook names none.
+    let stop: Request = serde_json::from_str(
+        r#"{"version":4,"request_id":"t","command":{"op":"session_stop","session_id":"claude-code.alice","prompt_id":"p1"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        stop.command,
+        Command::SessionStop { prompt_id: Some(ref id), .. } if id == "p1"
+    ));
+    let older: Request = serde_json::from_str(
+        r#"{"version":4,"request_id":"t","command":{"op":"session_stop","session_id":"claude-code.alice"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        older.command,
+        Command::SessionStop {
+            prompt_id: None,
+            ..
+        }
+    ));
+
+    let wire = include_bytes!("../fixtures/between-steps-response-v4.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let Outcome::BetweenSteps {
+        open,
+        stops,
+        interface_changes,
+        ..
+    } = &response.outcome
+    else {
+        panic!("{response:?}");
+    };
+    assert!(*open);
+    assert_eq!(*stops, 3);
+    assert_eq!(interface_changes[0].affected, ["src/main.rs"]);
+    assert_eq!(encode(&response).unwrap(), wire);
+}
+
 /// Roadmap C9: a version 3 client reads briefings and recaps with
 /// `deny_unknown_fields`, so its answer carries no trail.
 #[test]
@@ -1176,6 +1258,8 @@ fn a_version_3_reply_leaves_out_trails() {
     }))
     .unwrap();
     briefing.trail = Some(trail.clone());
+    // Issue #214: notice IDs are version 5.
+    briefing.interface_notice_ids = vec!["n1".into()];
     let response = Response {
         version: OLDEST_PROTOCOL_VERSION,
         request_id: "r".into(),
@@ -1192,11 +1276,31 @@ fn a_version_3_reply_leaves_out_trails() {
         earlier["outcome"]["briefing"].get("trail").is_none(),
         "{earlier:#}"
     );
+    assert!(
+        earlier["outcome"]["briefing"]
+            .get("interface_notice_ids")
+            .is_none(),
+        "{earlier:#}"
+    );
     assert_eq!(earlier["outcome"]["briefing"]["session_id"], "codex.bob");
+    // A version 4 client, which also reads a briefing with
+    // `deny_unknown_fields`, keeps the trail and gets no notice IDs.
+    let four: serde_json::Value =
+        serde_json::from_slice(&encode_for(4, &response).unwrap()).unwrap();
+    assert!(
+        four["outcome"]["briefing"]
+            .get("interface_notice_ids")
+            .is_none(),
+        "{four:#}"
+    );
+    assert!(
+        four["outcome"]["briefing"].get("trail").is_some(),
+        "{four:#}"
+    );
     let current: Response =
         serde_json::from_slice(&encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
     assert!(
-        matches!(&current.outcome, Outcome::Briefing { briefing: read } if read.trail == Some(trail))
+        matches!(&current.outcome, Outcome::Briefing { briefing: read } if read.trail == Some(trail) && read.interface_notice_ids == ["n1"])
     );
 }
 

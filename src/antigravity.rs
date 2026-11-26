@@ -30,7 +30,10 @@ use std::{
 };
 
 /// The session namespace: a conversation is `antigravity.<conversationId>`.
-pub const SOURCE: &str = "antigravity";
+pub const SOURCE: &str = langspan_core::ANTIGRAVITY_HOST;
+/// What `install`, `hooks install` and `doctor` say was verified, and its
+/// limits: the real-host run on issue #110 (ADR 0035, "Evidence").
+pub const VERIFIED: &str = "verified on a real host, Antigravity CLI (agy) 1.5.14 (ADR 0035): admission, conflict and stale-source refusals, and an allowed harmless command. A resumed conversation sends no SessionStart; its first prompt registers it.";
 /// Tools admitted before they run. `edit_file` is what 1.5.14 sends; the
 /// other three are the documented names, kept in case another version uses
 /// them. `write_to_file` states the whole file; `edit_file` and the replace
@@ -452,8 +455,6 @@ fn tool_call(
             // `PreToolUse` takes no context either, so a break alert there
             // would never reach the model (ADR 0029).
             pre_tool_context: false,
-            // Nor does `PostToolUse`, so no calls are kept for after it.
-            breaks_after: false,
         },
         config,
     ))

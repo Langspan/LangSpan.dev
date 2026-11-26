@@ -325,17 +325,7 @@ impl Index {
     ) -> Result<Option<Notice>, Failure> {
         // Parameter counts for the write-time break check (ADR 0029).
         let counts = |signature: &Option<String>| {
-            let language = Language::for_path(path)?;
-            let arity = langspan_graph::arity(language, signature.as_deref()?)?;
-            Some(langspan_core::Arity {
-                min: arity.min,
-                max: arity.max,
-                receiver: arity.receiver,
-            })
-            .filter(|arity| {
-                arity.min <= langspan_core::MAX_ARITY
-                    && arity.max.is_none_or(|max| max <= langspan_core::MAX_ARITY)
-            })
+            crate::definitions::arity(Language::for_path(path)?, signature.as_deref()?)
         };
         let changes: Vec<InterfaceChange> = langspan_graph::diff(&before, after)
             .into_iter()

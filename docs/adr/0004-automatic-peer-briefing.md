@@ -253,8 +253,8 @@ defined in several files points at each of them.
 
 **Presence (added later, roadmap A13).** Where a session is looking is shown
 to its peers before it writes. Reads come from the existing `source_observed`
-records with origin `read` (Claude Code `Read`, Cursor `Read`, Gemini CLI
-`read_file`). Searches and shell commands are recorded by a new command,
+records with origin `read` (Claude Code `Read`, Cursor `Read`; Gemini CLI
+`read_file` before its removal, ADR 0033). Searches and shell commands are recorded by a new command,
 `observe_presence` (event `presence_observed`): the session, `kind` `search` or
 `shell`, 1 to 4 sorted relative paths and the time, never a pattern or command
 text. The issue proposed a `search_observed` event; one event with a kind
@@ -388,6 +388,16 @@ core does with an eight-hour gap.
 - The briefing reaches the model at session start, at each prompt and, for
   Claude Code, after each completed tool call when it changed. A Codex
   session learns of mid-turn work at its next prompt.
+- On Claude Code an interface notice can also reach a session between its
+  steps, with no hook call of its own ([ADR 0002](0002-claude-code-adapter.md),
+  issue #214). A briefing placed in context records the interface notices it
+  showed (`interface_notices_told`, `via: briefing`): a hook reports the ones
+  its capped text holds (`interface_shown`), so a notice the cap left out is
+  still told between steps, and `langspan_brief` records all it returns. One
+  told between steps
+  is left out of every later briefing, so no notice is told twice through the
+  two paths. A notice a briefing told can still appear in a later briefing
+  that is delivered because something else in it changed, as before.
 - A new workspace has no repository record until its first complete scan
   (nominally within N × 2 s for N workspaces). Until then a worktree peer is not
   briefed. A workspace whose scan cannot complete is never grouped.
