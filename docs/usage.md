@@ -761,7 +761,8 @@ that places that run's times on the wall clock; events recorded by a build
 before this one have no such anchor and are counted only as `undated`. A
 landing is placed at the time it took its turn to land. A
 window with more than 50,000 events is summarised from the newest 50,000 and
-says `truncated: true`; when the oldest of those carries no time of its own,
+says `truncated: true`, as does a window that reaches before events retention
+removed; when the oldest of those carries no time of its own,
 the first that does decides whether the window may reach past them. With the
 daemon down it exits 1 with "coordination unavailable".
 

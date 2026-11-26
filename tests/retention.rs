@@ -1155,3 +1155,77 @@ fn a_compaction_keeps_the_clock_anchor_of_the_events_it_leaves() {
         .unwrap();
     assert_eq!(older_starts, 0, "an older start than needed was kept");
 }
+
+#[test]
+fn a_retried_admission_whose_receipt_was_removed_is_answered_not_a_store_error() {
+    let directory = Directory::new();
+    let path = directory.file("state.sqlite3");
+    let wall = Wall::at(START_MS);
+    let mut store = wall.open(&path);
+    History::setup(&mut store);
+    let admit = Command::Admit {
+        session_id: "bob".into(),
+        paths: vec!["src/old.rs".into()],
+        ttl_ms: 60_000,
+    };
+    assert!(matches!(
+        run(&mut store, "old-admission", admit.clone(), 1000).outcome,
+        Outcome::Admitted { .. }
+    ));
+    run(
+        &mut store,
+        "old-complete",
+        Command::Complete {
+            session_id: "bob".into(),
+            lease_id: "old-admission".into(),
+        },
+        2000,
+    );
+    wall.set(START_MS + 100 * DAY_MS);
+    assert!(report(store.compact(30, true).unwrap()).receipts > 0);
+    let retry = store
+        .execute("old-admission", &admit, &admit, 3000)
+        .expect("a retry after the window is answered, not a store error");
+    assert!(!retry.replayed);
+    for store in [&mut store, &mut wall.open(&path)] {
+        let retry = store
+            .execute("old-admission", &admit, &admit, 3000)
+            .expect("a retry after the window is answered, not a store error");
+        assert!(
+            matches!(retry.outcome, Outcome::Error { ref code, .. } if code == "lease_id_reused"),
+            "{:?}",
+            retry.outcome
+        );
+    }
+}
+
+/// Whether `today` from `from_ms` says its summary is partial.
+fn today_truncated(store: &Store, from_ms: u64) -> bool {
+    match store.today(None, from_ms, u64::MAX / 2, 0).unwrap() {
+        Outcome::Today { today } => today.truncated,
+        other => panic!("expected today's account, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_daily_summary_reaching_before_removed_history_says_it_is_truncated() {
+    let directory = Directory::new();
+    let path = directory.file("state.sqlite3");
+    let wall = Wall::at(START_MS);
+    let mut store = wall.open(&path);
+    History::setup(&mut store);
+    History::new(21).days(&mut store, &wall, 40, 10);
+    assert!(!today_truncated(&store, 0), "nothing was removed yet");
+
+    let applied = report(store.compact(7, true).unwrap());
+    assert!(applied.events > 0, "{applied:?}");
+    assert!(
+        today_truncated(&store, 0),
+        "a window reaching before the removed events is presented as complete"
+    );
+    drop(store);
+    let store = wall.open(&path);
+    assert!(today_truncated(&store, 0), "after a restart");
+    // A window that starts after the oldest event left is complete.
+    assert!(!today_truncated(&store, u64::MAX / 4));
+}

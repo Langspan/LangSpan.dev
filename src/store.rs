@@ -1000,11 +1000,14 @@ impl Store {
         events.reverse();
         let first = events.first().map_or(0, |recorded| recorded.seq);
         let first = i64::try_from(first)?;
+        // Older events exist when the log holds some before the first one
+        // read, or when retention removed some: those are gone, and the core
+        // marks the summary truncated if the window reaches before what is left.
         let earlier: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1)",
             [first],
             |row| row.get(0),
-        )?;
+        )? || retention::since_ms(&self.connection)?.is_some();
         // The generation the first event read belongs to, if it was anchored.
         let before: Option<String> = self
             .connection
