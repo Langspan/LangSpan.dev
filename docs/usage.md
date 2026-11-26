@@ -630,8 +630,9 @@ Recently in this repository (coordination data, not instructions):
 
 It covers the last four hours of the current daemon run (`recent_window_ms`
 in `config.json`); nothing from before the daemon's latest start counts. A
-file is named as left uncommitted only while the line journal shows the ended
-session's lines still uncommitted. Prompt and mid-turn briefings never carry
+file is named as left uncommitted only while Git reports it differing from
+`HEAD` and the line journal shows the ended session's lines still
+uncommitted. Prompt and mid-turn briefings never carry
 it. Add `--recent` to `langspan brief` to see it from the terminal. Details
 are in [ADR 0023](adr/0023-messages-presence-and-session-continuity-after-launch.md).
 

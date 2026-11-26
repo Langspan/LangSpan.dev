@@ -63,10 +63,18 @@ omitted}`.
 - `contested_paths`: up to 4 files with a refused write in the window, or
   edited by two or more sessions, with both counts.
 - `left_uncommitted`: up to 4 ended or exited sessions of this checkout
-  with their files. The core proposes up to 8; the hook keeps a file only
-  while the line journal shows that session's lines still among the file's
-  changes from `HEAD` (the same test as the formatter notice), so committed
-  work is not named. `langspan brief --recent` confirms the same way.
+  with their files. The core proposes up to 8 with every file each edited;
+  the hook keeps a file only while Git reports it differing from `HEAD` and
+  the line journal shows that session's lines still among those changes
+  (the same test as the formatter notice), so committed work is not named,
+  and a file whose state Git cannot report in time is left out. Only then
+  is each session cut to 8 files, so newer committed files never hide an
+  older uncommitted one. `langspan brief --recent` confirms the same way.
+
+The section's JSON stays within 12 KiB, every string counted as encoded
+with its escapes; what does not fit is counted in `omitted`, before any
+delivery is recorded. Peers' work in the same briefing is also counted
+as encoded, to keep the whole reply within one 64 KiB protocol frame.
 
 The asking session, its subagents and the session that started it are not
 news to it. A session's edits are those its activity holds: its 32 most

@@ -40,6 +40,10 @@ pub const RECENT_LEFT: usize = 4;
 pub const RECENT_LEFT_CANDIDATES: usize = 8;
 /// Changes listed per interface notice, at most.
 pub const RECENT_NOTICE_CHANGES: usize = 4;
+/// The most bytes the section takes in a JSON reply, every string escaped,
+/// so a briefing carrying it stays within one protocol frame beside the
+/// peers' own budget. Items that do not fit are counted in `omitted`.
+pub const RECENT_BYTES: usize = 12 * 1024;
 /// Refusals with their paths kept for this section, newest first.
 pub const MAX_PATH_REFUSALS: usize = 64;
 
@@ -118,7 +122,9 @@ pub struct ContestedPath {
 #[serde(deny_unknown_fields)]
 pub struct LeftUncommitted {
     pub session_id: String,
-    /// Files it edited within the window, newest first.
+    /// Files it edited within the window, newest first: from the core every
+    /// retained edit that fits `RECENT_BYTES`; once the caller confirms
+    /// them, the uncommitted ones, at most `BRIEF_PATHS`.
     pub paths: Vec<String>,
     /// Age of its newest edit.
     pub age_ms: u64,
@@ -223,11 +229,10 @@ pub(crate) fn recent(state: &State, me: &Session, window_ms: u64, now_ms: u64) -
         if here && (activity.ended || exited) && !touched.is_empty() {
             left.push(LeftUncommitted {
                 session_id: session.session_id.clone(),
-                paths: touched
-                    .iter()
-                    .take(BRIEF_PATHS)
-                    .map(|touch| touch.path.clone())
-                    .collect(),
+                // Every retained edit: the caller confirms them against
+                // the journal first and only then keeps `BRIEF_PATHS`, so
+                // newer committed files never hide an older uncommitted one.
+                paths: touched.iter().map(|touch| touch.path.clone()).collect(),
                 age_ms: now_ms.saturating_sub(touched[0].at_ms),
             });
         }
@@ -331,7 +336,7 @@ pub(crate) fn recent(state: &State, me: &Session, window_ms: u64, now_ms: u64) -
     let contested_cap = keep(contested.len(), RECENT_CONTESTED);
     let interfaces_cap = keep(interfaces.len(), RECENT_INTERFACES);
     let left_cap = keep(left.len(), RECENT_LEFT_CANDIDATES);
-    RecentChanges {
+    let mut recent = RecentChanges {
         window_ms,
         root: state
             .workspaces
@@ -350,6 +355,182 @@ pub(crate) fn recent(state: &State, me: &Session, window_ms: u64, now_ms: u64) -
             .map(|(path, _)| path)
             .collect(),
         left_uncommitted: left.into_iter().take(left_cap).collect(),
-        omitted: count(omitted),
+        omitted: 0,
+    };
+    omitted += within_bytes(&mut recent, RECENT_BYTES);
+    recent.omitted = count(omitted);
+    recent
+}
+
+/// The length of `value` as a JSON string, quotes and escapes included, as
+/// the protocol encodes it.
+pub(crate) fn json_len(value: &str) -> usize {
+    2 + value
+        .chars()
+        .map(|c| match c {
+            '"' | '\\' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' => 2,
+            c if c < ' ' => 6,
+            c => c.len_utf8(),
+        })
+        .sum::<usize>()
+}
+
+/// Room for a JSON object's field names, punctuation and numbers, beyond
+/// its strings: more than any of these objects uses.
+const OBJECT_ROOM: usize = 160;
+const INTERFACE_CHANGE_ROOM: usize = 320;
+
+fn interface_len(change: &RecentInterfaceChange) -> usize {
+    OBJECT_ROOM
+        + json_len(&change.path)
+        + change.by_session.as_deref().map_or(0, json_len)
+        + change
+            .changes
+            .iter()
+            .map(|change| {
+                INTERFACE_CHANGE_ROOM
+                    + [&change.name, &change.kind, &change.change]
+                        .into_iter()
+                        .chain(change.before.as_ref())
+                        .chain(change.after.as_ref())
+                        .map(|text| json_len(text))
+                        .sum::<usize>()
+            })
+            .sum::<usize>()
+        + change
+            .dependents
+            .iter()
+            .map(|path| json_len(path) + 1)
+            .sum::<usize>()
+}
+
+/// Keep the section within `budget` encoded bytes, in its own order, and
+/// return how many items did not fit. An ended session keeps the files
+/// that fit, newest first, and is counted only when none do.
+fn within_bytes(recent: &mut RecentChanges, budget: usize) -> usize {
+    let mut used = OBJECT_ROOM + json_len(&recent.root);
+    let mut omitted = 0;
+    let mut fits = |cost: usize| {
+        if used + cost > budget {
+            omitted += 1;
+            false
+        } else {
+            used += cost;
+            true
+        }
+    };
+    recent
+        .changed_paths
+        .retain(|path| fits(OBJECT_ROOM + json_len(&path.path)));
+    recent
+        .interface_changes
+        .retain(|change| fits(interface_len(change)));
+    recent
+        .contested_paths
+        .retain(|path| fits(OBJECT_ROOM + json_len(&path.path)));
+    let mut omitted_sessions = 0;
+    recent.left_uncommitted.retain_mut(|left| {
+        let session = OBJECT_ROOM + json_len(&left.session_id);
+        if used + session > budget {
+            omitted_sessions += 1;
+            return false;
+        }
+        let mut cost = session;
+        left.paths.retain(|path| {
+            let next = json_len(path) + 1;
+            if used + cost + next > budget {
+                return false;
+            }
+            cost += next;
+            true
+        });
+        if left.paths.is_empty() {
+            omitted_sessions += 1;
+            return false;
+        }
+        used += cost;
+        true
+    });
+    omitted + omitted_sessions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn awkward(n: usize) -> String {
+        format!("{n}/\"\\\n\u{1}\u{7f}é{}", "\"".repeat(n % 300))
+    }
+
+    #[test]
+    fn the_byte_budget_bounds_the_encoded_section_and_counts_the_rest() {
+        let changes = |n: usize| InterfaceChange {
+            name: awkward(n),
+            kind: "function".into(),
+            change: "signature_changed".into(),
+            before: Some(awkward(n + 1)),
+            after: Some(awkward(n + 2)),
+            before_arity: Some(crate::Arity {
+                min: u32::MAX,
+                max: Some(u32::MAX),
+                receiver: true,
+            }),
+            after_arity: Some(crate::Arity {
+                min: u32::MAX,
+                max: Some(u32::MAX),
+                receiver: true,
+            }),
+            before_count: Some(u32::MAX),
+            after_count: Some(u32::MAX),
+        };
+        let mut recent = RecentChanges {
+            window_ms: u64::MAX,
+            root: awkward(500),
+            changed_paths: (0..RECENT_CHANGED)
+                .map(|n| ChangedPath {
+                    path: awkward(n * 37),
+                    sessions: u32::MAX,
+                    age_ms: u64::MAX,
+                    elsewhere: true,
+                })
+                .collect(),
+            interface_changes: (0..RECENT_INTERFACES)
+                .map(|n| RecentInterfaceChange {
+                    path: awkward(n),
+                    by_session: Some(awkward(n + 3)),
+                    changes: (0..RECENT_NOTICE_CHANGES).map(changes).collect(),
+                    dependents: (0..BRIEF_PATHS).map(awkward).collect(),
+                    age_ms: u64::MAX,
+                })
+                .collect(),
+            contested_paths: (0..RECENT_CONTESTED)
+                .map(|n| ContestedPath {
+                    path: awkward(n + 11),
+                    refusals: u32::MAX,
+                    sessions: u32::MAX,
+                })
+                .collect(),
+            left_uncommitted: (0..RECENT_LEFT_CANDIDATES)
+                .map(|n| LeftUncommitted {
+                    session_id: awkward(n),
+                    paths: (0..crate::MAX_TOUCHED).map(|p| awkward(p * 13)).collect(),
+                    age_ms: u64::MAX,
+                })
+                .collect(),
+            omitted: u32::MAX,
+        };
+        let before = serde_json::to_vec(&recent).unwrap().len();
+        assert!(before > RECENT_BYTES, "{before}");
+        let sessions = recent.left_uncommitted.len();
+        let omitted = within_bytes(&mut recent, RECENT_BYTES);
+        let after = serde_json::to_vec(&recent).unwrap().len();
+        assert!(after <= RECENT_BYTES, "{after} bytes");
+        assert!(omitted > 0);
+        assert!(!recent.changed_paths.is_empty());
+        assert!(recent.left_uncommitted.len() < sessions);
+        // Each estimate is at least what the encoding takes.
+        for text in [awkward(0), awkward(299), String::new()] {
+            assert!(json_len(&text) >= serde_json::to_string(&text).unwrap().len());
+        }
     }
 }

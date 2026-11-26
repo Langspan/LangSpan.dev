@@ -31,9 +31,9 @@ pub use recall::{
 };
 pub use recent::{
     ChangedPath, ContestedPath, LeftUncommitted, MAX_PATH_REFUSALS, MAX_RECENT_WINDOW_MS,
-    MIN_RECENT_WINDOW_MS, PathRefusal, RECENT_CHANGED, RECENT_CONTESTED, RECENT_INTERFACES,
-    RECENT_LEFT, RECENT_LEFT_CANDIDATES, RECENT_NOTICE_CHANGES, RECENT_WINDOW_MS, RecentChanges,
-    RecentInterfaceChange,
+    MIN_RECENT_WINDOW_MS, PathRefusal, RECENT_BYTES, RECENT_CHANGED, RECENT_CONTESTED,
+    RECENT_INTERFACES, RECENT_LEFT, RECENT_LEFT_CANDIDATES, RECENT_NOTICE_CHANGES,
+    RECENT_WINDOW_MS, RecentChanges, RecentInterfaceChange,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
@@ -7275,12 +7275,14 @@ fn brief(
         .map(|(_, peer)| peer)
         .take(max_peers as usize)
         .take_while(|peer| {
+            // Counted as encoded, escapes included, so quoted or control
+            // characters cannot push the reply past its frame.
             let cost = 256
-                + peer.workspace_root.len()
+                + recent::json_len(&peer.workspace_root)
                 + [&peer.summary, &peer.intent, &peer.branch_ref]
                     .into_iter()
                     .flatten()
-                    .map(String::len)
+                    .map(|text| recent::json_len(text))
                     .sum::<usize>()
                 + peer
                     .editing
@@ -7288,7 +7290,7 @@ fn brief(
                     .chain(&peer.overlap)
                     .chain(&peer.target_overlap)
                     .chain(peer.recent.iter().map(|recent| &recent.path))
-                    .map(|path| path.len() + 32)
+                    .map(|path| recent::json_len(path) + 32)
                     .sum::<usize>();
             bytes += cost;
             if bytes > BRIEF_BYTES {
@@ -7304,7 +7306,7 @@ fn brief(
         let presence: usize = peer
             .looking
             .iter()
-            .map(|looked| looked.path.len() + 32)
+            .map(|looked| recent::json_len(&looked.path) + 32)
             .sum();
         if bytes + presence <= BRIEF_BYTES {
             bytes += presence;

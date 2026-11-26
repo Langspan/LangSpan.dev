@@ -10,7 +10,7 @@
 //! what does not fit counted.
 
 use crate::hook::{age, clean, interface_change_text, quoted, truncate};
-use langspan_core::{RECENT_LEFT, RecentChanges};
+use langspan_core::{BRIEF_PATHS, RECENT_LEFT, RecentChanges};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -26,8 +26,9 @@ const COUNT_ROOM: usize = 40;
 /// A line shortened to fit keeps at least this much room, or is counted.
 const LINE_MINIMUM: usize = 100;
 
-/// Keep, of the ended sessions the core proposed, the files whose journaled
-/// lines are still uncommitted, at most `RECENT_LEFT` sessions; the rest are
+/// Keep, of the ended sessions the core proposed, the files that differ
+/// from `HEAD` and whose journaled lines are still uncommitted, at most
+/// `BRIEF_PATHS` per session and `RECENT_LEFT` sessions; extra sessions are
 /// counted. An error when `deadline` passes first: then what Git or the
 /// journal could not answer in time is not known, and the caller leaves the
 /// whole section out.
@@ -50,6 +51,7 @@ pub fn confirm_left(
         .collect();
     let entries = crate::journal::entries_for(state_dir, root, &paths);
     let mut changes = BTreeMap::new();
+    let mut differs = BTreeMap::new();
     let mut kept = Vec::new();
     for mut left in std::mem::take(&mut recent.left_uncommitted) {
         if Instant::now() >= deadline {
@@ -59,6 +61,13 @@ pub fn confirm_left(
             entries
                 .iter()
                 .any(|entry| entry.path == *path && entry.session_id == left.session_id)
+                // The journal's test reads a file it cannot compare, or an
+                // edit with unknown lines, as still changed; this section
+                // says the work is left, so the file must differ from
+                // `HEAD`, and one Git cannot answer for is left out.
+                && *differs
+                    .entry(path.clone())
+                    .or_insert_with(|| differs_from_head(root, path, deadline))
                 && crate::formatter::still_changed(
                     me,
                     &left.session_id,
@@ -72,6 +81,9 @@ pub fn confirm_left(
                         .as_ref(),
                 )
         });
+        // Capped only now, so newer committed files never hide an older
+        // uncommitted one.
+        left.paths.truncate(BRIEF_PATHS);
         if !left.paths.is_empty() {
             kept.push(left);
         }
@@ -88,6 +100,29 @@ pub fn confirm_left(
         .saturating_add(u32::try_from(extra).unwrap_or(u32::MAX));
     recent.left_uncommitted = kept;
     Ok(())
+}
+
+/// Whether Git reports `path` as differing from `HEAD` in the worktree at
+/// `root`, untracked included. `false` when Git cannot say in time: then
+/// the file's state is not established and it is not named.
+fn differs_from_head(root: &Path, path: &str, deadline: Instant) -> bool {
+    let pathspec = format!(":(literal){path}");
+    crate::git::output(
+        root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+            "--no-renames",
+            "--",
+            &pathspec,
+        ],
+        deadline,
+        4096,
+    )
+    .is_ok_and(|listing| !listing.is_empty())
 }
 
 /// An age to the minute, or to the hour from one hour on.

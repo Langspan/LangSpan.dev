@@ -1385,6 +1385,120 @@ fn brief_recent_shows_the_section_without_delivering_and_uses_the_configured_win
     assert!(again.context.unwrap().contains(RECENT));
 }
 
+/// `langspan brief SESSION --recent --json`, parsed.
+fn brief_recent_json(f: &Fixture, session: &str) -> Value {
+    let id = format!("recent-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    serde_json::from_str(&cli(
+        f,
+        &["brief", session, "--recent", "--json", "--request-id", &id],
+    ))
+    .unwrap()
+}
+
+/// The paths of `left_uncommitted` in a `brief --recent --json` reply.
+fn left_paths(reply: &Value) -> Vec<String> {
+    reply["outcome"]["briefing"]["recent"]["left_uncommitted"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{reply}"))
+        .iter()
+        .flat_map(|left| left["paths"].as_array().unwrap().clone())
+        .map(|path| path.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_file_too_large_for_the_journal_is_left_uncommitted_only_while_it_differs_from_head() {
+    // Review 4703451488: a file over the journal's bound has no recorded
+    // lines, which read as "still changed" even once committed.
+    let mut f = Fixture::new();
+    f.start();
+    let large = "x\n".repeat(300 * 1024);
+    claude_writes(&f, ALICE, "alice-1", "big-committed.txt", &large);
+    claude_writes(&f, ALICE, "alice-2", "big-left.txt", &large);
+    git(&f.root(), &["add", "big-committed.txt"]);
+    git(&f.root(), &["commit", "--quiet", "-m", "big"]);
+    assert_eq!(
+        f.lifecycle("claude-code", "SessionEnd", ALICE, &f.root())
+            .coverage,
+        "session_ended"
+    );
+    f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    let reply = brief_recent_json(&f, &format!("claude-code.{CAROL}"));
+    let left = left_paths(&reply);
+    assert_eq!(left, vec!["big-left.txt".to_owned()], "{reply}");
+}
+
+#[test]
+fn an_older_uncommitted_edit_is_kept_when_the_newest_edits_were_committed() {
+    // Review 4703451495: the path cap ran before confirmation, so eight
+    // newer committed files hid an older uncommitted one.
+    let mut f = Fixture::new();
+    f.start();
+    claude_writes(&f, ALICE, "alice-old", "old.txt", "left\n");
+    for n in 0..8 {
+        let file = format!("new-{n}.txt");
+        claude_writes(&f, ALICE, &format!("alice-{n}"), &file, "done\n");
+        git(&f.root(), &["add", &file]);
+    }
+    git(&f.root(), &["commit", "--quiet", "-m", "new"]);
+    assert_eq!(
+        f.lifecycle("claude-code", "SessionEnd", ALICE, &f.root())
+            .coverage,
+        "session_ended"
+    );
+    f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    let reply = brief_recent_json(&f, &format!("claude-code.{CAROL}"));
+    assert_eq!(left_paths(&reply), vec!["old.txt".to_owned()], "{reply}");
+    let start = f.lifecycle("claude-code", "SessionStart", DAVE, &f.root());
+    let section = recent_section(&start.context.unwrap());
+    assert!(
+        section.contains(r#"- Left uncommitted by ended claude-code session 00000000 "#)
+            && section.contains(r#""old.txt""#),
+        "{section}"
+    );
+}
+
+#[test]
+fn many_long_escaped_paths_keep_the_recent_section_within_its_wire_budget() {
+    // Review 4703920148: eight ended sessions with eight long, quoted paths
+    // each made a briefing larger than one protocol frame.
+    let mut f = Fixture::new();
+    f.start();
+    let quotes = "\"".repeat(150);
+    let directory = format!("{quotes}/{quotes}/{quotes}");
+    fs::create_dir_all(f.root().join(&directory)).unwrap();
+    let sessions: Vec<String> = (0..8)
+        .map(|n| format!("00000000-0000-4000-8000-0000000001{n:02}"))
+        .collect();
+    for (s, session) in sessions.iter().enumerate() {
+        for n in 0..8 {
+            let file = format!("{directory}/{s}{n}-{}", "\"".repeat(40));
+            assert!(file.len() <= 512, "{}", file.len());
+            claude_writes(&f, session, &format!("w-{s}-{n}"), &file, "x\n");
+        }
+        assert_eq!(
+            f.lifecycle("claude-code", "SessionEnd", session, &f.root())
+                .coverage,
+            "session_ended"
+        );
+    }
+    f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    let reply = brief_recent_json(&f, &format!("claude-code.{CAROL}"));
+    let recent = &reply["outcome"]["briefing"]["recent"];
+    assert!(recent.is_object(), "{reply}");
+    let bytes = serde_json::to_vec(recent).unwrap().len();
+    assert!(
+        bytes <= langspan_core::RECENT_BYTES,
+        "{bytes} bytes of recent changes"
+    );
+    assert!(recent["omitted"].as_u64().unwrap() > 0, "{recent}");
+    assert!(!left_paths(&reply).is_empty(), "{reply}");
+    // A delivering start fits its frame too and is still briefed.
+    let start = f.lifecycle("claude-code", "SessionStart", DAVE, &f.root());
+    assert_eq!(start.coverage, "briefed", "{}", start.stdout);
+    assert!(start.context.unwrap().contains(RECENT));
+}
+
 // Presence (roadmap A13): where peers are looking, from recorded Read and
 // Grep events and shell calls, through the real hook binary and daemon.
 
