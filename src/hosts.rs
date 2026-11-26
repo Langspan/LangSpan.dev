@@ -38,6 +38,12 @@ impl UserHome {
         self.explicit
     }
 
+    /// A path from the environment variable `name`, unless the home was
+    /// named with `--home` or the variable is empty.
+    pub fn env_path(&self, name: &str) -> Option<PathBuf> {
+        self.env(name)
+    }
+
     fn env(&self, name: &str) -> Option<PathBuf> {
         (!self.explicit)
             .then(|| std::env::var_os(name))
