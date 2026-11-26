@@ -429,3 +429,57 @@ fn a_retry_differing_only_in_the_finish_age_is_the_same_request() {
         "the duration counts"
     );
 }
+
+/// A workspace rebound to another checkout starts its checkout history
+/// again: a run from the old checkout explains nothing in the new one, even
+/// a restore within the grace period at the branch and HEAD it left there.
+#[test]
+fn a_run_from_before_a_move_does_not_explain_a_change_in_the_new_checkout() {
+    let mut state = ready();
+    merged(&mut state, "alice", 'b', 300, 1_000);
+    let outcome = run(
+        &mut state,
+        "move",
+        Command::WorkspaceMove {
+            workspace_id: "work".into(),
+            root: "/repos/elsewhere".into(),
+            switch: false,
+        },
+        1_500,
+    );
+    assert!(
+        matches!(outcome, Outcome::WorkspaceMoved { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(state.checkout_runs.get("work"), None);
+    restored(&mut state, "c1", 'b', 3_000);
+    let alice = notices(&mut state, "alice", 3_100);
+    assert_eq!(alice.len(), 1, "{alice:?}");
+    assert_eq!(alice[0].by_session, None);
+    let bob = notices(&mut state, "bob", 3_100);
+    assert_eq!(bob.len(), 1, "{bob:?}");
+    assert_eq!(bob[0].by_session, None);
+}
+
+/// A removed workspace takes its checkout runs with it, so a later
+/// registration under the same ID does not inherit them.
+#[test]
+fn a_removed_workspace_leaves_no_checkout_runs() {
+    let mut state = ready();
+    merged(&mut state, "alice", 'b', 300, 1_000);
+    assert!(state.checkout_runs.contains_key("work"));
+    let outcome = run(
+        &mut state,
+        "remove",
+        Command::WorkspaceRemove {
+            workspace_id: "work".into(),
+            apply: true,
+        },
+        1_500,
+    );
+    assert!(
+        matches!(outcome, Outcome::WorkspaceRemoval { applied: true, .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(state.checkout_runs.get("work"), None);
+}
