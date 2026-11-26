@@ -50,6 +50,13 @@ documentation, and add three facts it does not state: `prompt_id` and
 carries its `agent_id`; and a parent's `Stop` arrives while a background
 subagent it started is still running (`background_tasks` lists it).
 
+The real Codex events (`fixtures/codex-2026-11-26`) differ from the
+documentation in one field: `Stop` carries no `turn_id`. Nothing here reads
+it. They add three facts: Codex sends no `PostToolUse` for an `apply_patch`
+whose context does not apply; `codex exec` sends `SessionEnd` at the end of
+every run, milliseconds after `Stop`; and `codex exec resume` sends
+`SessionStart` with `source: "resume"` and the same session ID.
+
 ## Decision
 
 **Stop releases the reply's open admissions.** `Stop` and `StopFailure` (Claude
@@ -185,13 +192,55 @@ host shows what those events carry.
   ([evidence](../evidence/turn-events/README.md)): an `Edit` refused at the
   permission check left an open admission, and `Stop` released it; batch
   boundaries, the subagent's stop and its session's end were recorded.
-- **Codex: no hook ran.** `codex exec` 0.171.0 in a new throwaway repository
-  reported "Untrusted project-local configuration is disabled" and loaded no
-  project hooks. Trusting the project (`codex exec --trust`) would write the
-  owner's user-level Codex configuration, and no bypass flag was used, so
-  Codex `Stop` and `SessionEnd` are tested only in their documented shape.
-  Whether Codex accepts the empty output of a `Stop` hook, and how it treats
-  a 3-second `SessionEnd` timeout, are not observed.
+- **Codex, first attempt: no hook ran.** `codex exec` 0.171.0 in a new
+  throwaway repository reported "Untrusted project-local configuration is
+  disabled" and loaded no project hooks. Trusting the project
+  (`codex exec --trust`) would write the owner's user-level Codex
+  configuration, and no bypass flag was used.
+- **Codex, captured on 26 November 2026** by `scripts/capture-codex.sh` on a
+  real signed-in Codex (model `gpt-6.2-sol`; the Codex version was not
+  recorded), with the project and its hooks trusted by the owner in Codex's
+  `/hooks` screen ([evidence](../evidence/codex-turn-events/README.md),
+  [fixtures](../../fixtures/codex-2026-11-26/README.md)). Observed:
+  - A failed first `apply_patch` was admitted with the base unknown and its
+    version recorded as a `snapshot`. Codex sent no `PostToolUse` for it;
+    `Stop` completed the admission and named it in `session_stopped`, 28.8
+    seconds before its TTL, and `status` showed the file free.
+  - `Stop`'s empty output started no continuation: each turn sent one `Stop`
+    with `stop_hook_active: false`, then `SessionEnd`.
+  - `SessionEnd` arrived 11 to 22 ms after `Stop`, and `session_ended` was
+    recorded less than a second after `session_stopped`, inside the
+    3-second limit; `status` showed the session ended.
+  - After a Claude Code peer changed the snapshotted file, the resumed
+    session's patch was refused once as stale, naming the peer; Codex reread
+    the file and sent the identical patch, which was admitted.
+  - A new session's patch of a file a CLI session held was refused for the
+    conflict, naming the holder; its `Stop` released nothing.
+  `tests/turn_events.rs` replays the captured events through the real hook
+  executable and daemon, and the replay's admissions, versions, refusals,
+  stops and ends match the real run's record.
+- Not observed on Codex: a subagent's tool event (the run started none, so
+  its refusal is tested with a constructed event only); how Codex treats a
+  `SessionEnd` hook that runs past 3 seconds; the hook's diagnostic and
+  refusal text as Codex received them (the capture keeps hook input only;
+  replaying the same input prints them).
+- **Taking a Codex capture.** The owner runs
+  `CODEX_HOME=DIR bash scripts/capture-codex.sh OUT` with a Codex home kept
+  for captures. It stops, writing nothing, unless `codex login status`
+  reports a signed-in account (`tests/capture_codex.rs`). It creates a
+  throwaway repository under `OUT`, installs the project hooks with
+  `LANGSPAN_CAPTURE_DIR` set, and waits while the owner trusts the project
+  and the hooks in Codex's own `/hooks` review; it passes no trust, approval
+  or bypass option itself. Its turns are: a shell read and a first patch that
+  does not apply, then the end of the reply; a Claude Code peer's `Write`
+  through `langspan hook claude-code`; the same Codex session resumed to
+  patch the peer's file, which is refused once and then retried; and a new
+  session patching a file a CLI session holds. It saves `langspan status`
+  after each turn and, at the end, every coordinator event the run recorded:
+  it reads the last sequence before writing anything and pages through
+  `langspan events --after` from there, so older events in a long-running
+  coordinator neither crowd out nor join the run's own
+  (`tests/capture_codex.rs`). It also saves `codex --version`, which the hook
+  events do not carry.
 - Not observed on a host: `PostToolBatch` delivering a briefing to the model,
-  a `StopFailure` other than `model_not_found`, a resumed subagent, and the
-  Codex snapshot on a real Codex session.
+  a `StopFailure` other than `model_not_found`, and a resumed subagent.

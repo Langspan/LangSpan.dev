@@ -1849,6 +1849,99 @@ impl Index {
         Ok(rows)
     }
 
+    /// Definitions named `name` to rank (roadmap C2): the first
+    /// `RANK_CANDIDATES` in path order, and the first `RANK_CANDIDATES` in
+    /// the asking session's and its peers' files in rank order (its own
+    /// files, then its peers', then exported ones, then path order), with
+    /// how many definitions the name has in all. Path order alone would let
+    /// a file of many definitions crowd out a later-sorting own file
+    /// (review comment 4709803063).
+    pub fn rank_candidates(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        inputs: &langspan_core::RankInputs,
+    ) -> Result<(Vec<SymbolRef>, u32), Failure> {
+        let mut found = self.symbol(
+            workspace_id,
+            name,
+            langspan_core::RANK_CANDIDATES.saturating_sub(1),
+        )?;
+        // One bound value carries the name and both lists of paths.
+        let own: Vec<&String> = inputs.own.keys().collect();
+        let peers: Vec<&String> = inputs.peers.keys().collect();
+        let asked = serde_json::json!({"name": name, "own": own, "peers": peers}).to_string();
+        let mut statement = self.connection.prepare_cached(
+            "SELECT s.path, s.name, s.kind, s.line, s.end_line, s.signature, s.exported, f.digest
+             FROM symbols s JOIN files f ON f.workspace_id = s.workspace_id AND f.path = s.path
+             WHERE s.workspace_id = ?1 AND s.name = json_extract(?2, '$.name')
+             AND (s.path IN (SELECT value FROM json_each(?2, '$.own'))
+                  OR s.path IN (SELECT value FROM json_each(?2, '$.peers')))
+             ORDER BY s.path IN (SELECT value FROM json_each(?2, '$.own')) DESC,
+                      s.path IN (SELECT value FROM json_each(?2, '$.peers')) DESC,
+                      s.exported DESC, s.path, s.line
+             LIMIT ?3",
+        )?;
+        let more = statement
+            .query_map(
+                params![workspace_id, asked, langspan_core::RANK_CANDIDATES],
+                symbol_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        // A definition read by both queries is one row twice: drop the copy.
+        found.extend(more);
+        let key = |s: &SymbolRef| {
+            let (path, kind, signature) = (s.path.clone(), s.kind.clone(), s.signature.clone());
+            (path, s.line, s.end_line, kind, signature)
+        };
+        found.sort_by_key(key);
+        found.dedup();
+        let total = self
+            .connection
+            .prepare_cached("SELECT count(*) FROM symbols WHERE workspace_id = ?1 AND name = ?2")?;
+        let total = { total }.query_row(params![workspace_id, name], |row| row.get(0))?;
+        Ok((found, total))
+    }
+
+    /// Files that mention `name`, each with its count of mentions: the
+    /// `RANK_CANDIDATES` with the most (then in path order) and every one
+    /// in `paths`, with how many files mention it in all (roadmap C2).
+    pub fn mention_counts(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        paths: &[String],
+    ) -> Result<(Vec<(String, u32)>, u32), Failure> {
+        let listed = serde_json::to_string(paths)?;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT path, count(*) AS mentions FROM refs WHERE workspace_id = ?1 AND name = ?2
+             GROUP BY path ORDER BY mentions DESC, path LIMIT ?3",
+        )?;
+        let mut files: BTreeMap<String, u32> = statement
+            .query_map(
+                params![workspace_id, name, langspan_core::RANK_CANDIDATES],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+            .collect::<Result<_, _>>()?;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT path, count(*) FROM refs WHERE workspace_id = ?1 AND name = ?2
+             AND path IN (SELECT value FROM json_each(?3)) GROUP BY path",
+        )?;
+        let listed = statement
+            .query_map(params![workspace_id, name, listed], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<(String, u32)>, _>>()?;
+        files.extend(listed);
+        let total = self
+            .connection
+            .prepare_cached(
+                "SELECT count(DISTINCT path) FROM refs WHERE workspace_id = ?1 AND name = ?2",
+            )?
+            .query_row(params![workspace_id, name], |row| row.get(0))?;
+        Ok((files.into_iter().collect(), total))
+    }
+
     /// What `path` exports, and where else those names are mentioned.
     pub fn impact(
         &self,
@@ -2292,7 +2385,7 @@ fn head_graph(
 /// A signature of `path`'s language as `added_or_changed` compares it: its
 /// tokens, as a reformat is (`crate::reformat::tokens`), so spacing between
 /// two tokens never counts and never joins them. Every indexed language
-/// is split into words: Go and Java by the TypeScript and JavaScript rules
+/// is split into words: Go, Java and C# by the TypeScript and JavaScript rules
 /// (words, quoted and backtick literals, `//` and `/* */` comments), as
 /// the rules for other files drop all whitespace, and `chan int` would
 /// then equal `chanint` (review comment 4704678366).
@@ -2301,9 +2394,9 @@ fn signature_tokens(path: &str, signature: &str) -> Vec<Vec<u8>> {
     let language = match Language::for_path(path) {
         Some(Language::Rust) => Tokens::Rust,
         Some(Language::Python) => Tokens::Python,
-        Some(Language::TypeScript | Language::Tsx | Language::Go | Language::Java) => {
-            Tokens::Script
-        }
+        Some(
+            Language::TypeScript | Language::Tsx | Language::Go | Language::Java | Language::CSharp,
+        ) => Tokens::Script,
         None => crate::reformat::language(path),
     };
     crate::reformat::tokens(signature.as_bytes(), language)
@@ -2510,7 +2603,7 @@ pub const MAX_UNREAD: usize = 4096;
 /// Extensions of source languages the index has no grammar for. Other
 /// files (documentation, data, images) are not counted.
 const OTHER_SOURCE: &[&str] = &[
-    "c", "cc", "clj", "cljs", "cpp", "cs", "cxx", "dart", "elm", "erl", "ex", "exs", "fs", "fsx",
+    "c", "cc", "clj", "cljs", "cpp", "cxx", "dart", "elm", "erl", "ex", "exs", "fs", "fsx",
     "groovy", "h", "hh", "hpp", "hrl", "hs", "jl", "kt", "kts", "lua", "m", "ml", "mli", "mm",
     "nim", "php", "pl", "pm", "r", "rb", "scala", "svelte", "swift", "vue", "zig",
 ];
@@ -2992,6 +3085,10 @@ mod review_regressions {
             Language::for_path("src/main/java/shop/Orders.java"),
             Some(Language::Java)
         );
+        assert_eq!(
+            Language::for_path("src/Shop/Orders.cs"),
+            Some(Language::CSharp)
+        );
     }
 
     const NOW: u64 = 1_700_000_000_000;
@@ -3182,6 +3279,7 @@ mod review_regressions {
             langspan_graph::Language::Tsx => "src/a.tsx",
             langspan_graph::Language::Go => "src/a.go",
             langspan_graph::Language::Java => "src/A.java",
+            langspan_graph::Language::CSharp => "src/A.cs",
         }
     }
 
@@ -3347,6 +3445,21 @@ mod review_regressions {
                 r#"@Named("a b") public void f()"#,
                 r#"@Named("ab") public void f()"#,
             ),
+            (
+                CSharp,
+                "public static int F(ref Foo x)",
+                "public static int F(refFoo x)",
+            ),
+            (
+                CSharp,
+                "public async Task<T> F<T>(T x) where T : class",
+                "public asyncTask<T> F<T>(T x) where T : class",
+            ),
+            (
+                CSharp,
+                r#"public string F(string x = @"a b")"#,
+                r#"public string F(string x = @"ab")"#,
+            ),
         ];
         for (language, before, after) in changed {
             let path = language_path(*language);
@@ -3381,6 +3494,11 @@ mod review_regressions {
             (Go, "func F(x <-chan int)", "func F(x <- chan int)"),
             (Go, "func F(x chan<- int)", "func F(x chan <-int)"),
             (Java, "public  int  f( int[]  x )", "public int f(int[] x)"),
+            (
+                CSharp,
+                "public  int  F( int[]  x ,  ref  T  y )",
+                "public int F(int[] x, ref T y)",
+            ),
         ];
         for (language, before, after) in respaced {
             let path = language_path(*language);

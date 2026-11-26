@@ -890,6 +890,120 @@ fn a_java_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_sess
     assert!(!context.contains("Report.java"), "{context}");
 }
 
+/// Roadmap D6, C#: an SDK-style project is indexed, looked up and counted,
+/// and the issue's example notice, in C#, reaches the session whose file
+/// calls the changed method.
+#[test]
+fn a_csharp_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_session() {
+    let orders = "namespace Shop;\n\npublic class Orders\n{\n    [Obsolete]\n    public Order Place(Cart cart)\n    {\n        return new Order(cart);\n    }\n\n    private void Audit() { }\n}\n";
+    let checkout = "using System;\n\nnamespace Shop;\n\npublic class Checkout\n{\n    public Order Submit(Orders orders, Cart cart)\n    {\n        return orders.Place(cart);\n    }\n}\n";
+    let w = World::with_files(
+        Vec::new(),
+        &[
+            ("src/Shop/Orders.cs", orders),
+            ("src/Shop/Checkout.cs", checkout),
+            (
+                "src/Shop/Report.cs",
+                "namespace Shop;\n\ninternal class Report\n{\n    int Total() => 0;\n}\n",
+            ),
+            (
+                "src/Shop/Shop.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\" />\n",
+            ),
+        ],
+    );
+    let found = w.wait_for("the definition of Place", "symbol", "Place", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    assert_eq!(found["coverage"]["indexable_files"], 3, "{found:#}");
+    let symbol = &found["symbols"][0];
+    assert_eq!(symbol["path"], "src/Shop/Orders.cs");
+    assert_eq!(
+        (symbol["line"].as_u64(), symbol["kind"].as_str()),
+        (Some(6), Some("method"))
+    );
+    assert_eq!(symbol["signature"], "public Order Place(Cart cart)");
+    assert_eq!(symbol["exported"], true);
+    assert_eq!(
+        paths(&w.graph("references", "Place")["references"]),
+        ["src/Shop/Checkout.cs:9"]
+    );
+    let impact = w.graph("impact", "src/Shop/Orders.cs");
+    assert!(
+        paths(&impact["references"])
+            .iter()
+            .any(|path| path.starts_with("src/Shop/Checkout.cs")),
+        "{impact:#}"
+    );
+    // C# is indexed, so it is not reported as another language.
+    let (_, text) = w.cli(&["graph", "blind-spots", "app", "--json"]);
+    let spots: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        spots["outcome"]["blind_spots"]["unsupported_languages"],
+        json!([]),
+        "{spots:#}"
+    );
+
+    // Bob works on Checkout.cs; Alice changes Orders.Place.
+    w.edits(
+        "bob",
+        "b1",
+        "src/Shop/Checkout.cs",
+        &format!("{checkout}// touched\n"),
+    );
+    w.wait_for("bob's edit indexed", "references", "Place", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    // A private method's change is not an interface change.
+    w.edits(
+        "alice",
+        "a1",
+        "src/Shop/Orders.cs",
+        &orders.replace("Audit()", "Audit(int level)"),
+    );
+    w.wait_for("the private change indexed", "symbol", "Audit", |outcome| {
+        outcome["symbols"][0]["signature"] == "private void Audit(int level)"
+    });
+    assert!(
+        w.prompt("bob")
+            .is_none_or(|context| !context.contains("Interface change")),
+        "a private method is no one's interface"
+    );
+    w.edits(
+        "alice",
+        "a2",
+        "src/Shop/Orders.cs",
+        &orders
+            .replace("Audit()", "Audit(int level)")
+            .replace("Place(Cart cart)", "Place(Cart cart, Coupon coupon)"),
+    );
+    let deadline = Instant::now() + WAIT;
+    let context = loop {
+        if let Some(context) = w
+            .prompt("bob")
+            .filter(|context| context.contains("Interface change"))
+        {
+            break context;
+        }
+        assert!(Instant::now() < deadline, "bob was never told");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        context.contains(r#"Interface change in "src/Shop/Orders.cs""#),
+        "{context}"
+    );
+    assert!(context.contains("claude-code.alice"), "{context}");
+    assert!(
+        context.contains(r#"method "Place" changed from "public Order Place(Cart cart)" to "public Order Place(Cart cart, Coupon coupon)""#),
+        "{context}"
+    );
+    assert!(context.contains(r#""src/Shop/Checkout.cs""#), "{context}");
+    assert!(
+        !context.contains("Report.cs"),
+        "a file that shares only the namespace is not told: {context}"
+    );
+}
+
 /// A workspace removed, changed while unregistered, and registered again
 /// under the same ID and root is a new start: its next scan is a baseline,
 /// not a comparison with what was indexed before the removal.
@@ -3490,12 +3604,26 @@ const CALLS_PARSE_CONFIG: &str =
 /// work in the checkout; Alice, in the worktree, renames `parse_config` to
 /// `load_config` and saves. Returns once the coordinator holds the rename.
 fn parse_config_renamed_in_another_worktree() -> (World, PathBuf) {
-    let w = World::with_files(Vec::new(), PARSE_CONFIG);
+    renamed_in_another_worktree(
+        PARSE_CONFIG,
+        ("src/config.rs", LOAD_CONFIG),
+        ("parse_config", "load_config"),
+    )
+}
+
+/// The same with `files`, where Alice writes `renamed` to `path` and so
+/// renames `old` to `new`.
+fn renamed_in_another_worktree(
+    files: &[(&str, &str)],
+    (path, renamed): (&str, &str),
+    (old, new): (&str, &str),
+) -> (World, PathBuf) {
+    let w = World::with_files(Vec::new(), files);
     let tree = w.linked_tree();
     for workspace in ["app", "tree"] {
         let deadline = Instant::now() + WAIT;
         loop {
-            let (_, text) = w.cli(&["graph", "symbol", workspace, "parse_config", "--json"]);
+            let (_, text) = w.cli(&["graph", "symbol", workspace, old, "--json"]);
             let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
             if outcome["coverage"]["current_files"] == 3 {
                 break;
@@ -3507,13 +3635,10 @@ fn parse_config_renamed_in_another_worktree() -> (World, PathBuf) {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
-    assert!(
-        w.prompt("bob")
-            .is_none_or(|context| !context.contains("parse_config"))
-    );
-    w.edits_in("tree", &tree, "alice", "a1", "src/config.rs", LOAD_CONFIG);
+    assert!(w.prompt("bob").is_none_or(|context| !context.contains(old)));
+    w.edits_in("tree", &tree, "alice", "a1", path, renamed);
     let deadline = Instant::now() + WAIT;
-    while !rename_notice(&w).is_some_and(|notice| notice.to_string().contains("load_config")) {
+    while !notice_for(&w, path).is_some_and(|notice| notice.to_string().contains(new)) {
         assert!(Instant::now() < deadline, "no rename notice");
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -3522,12 +3647,17 @@ fn parse_config_renamed_in_another_worktree() -> (World, PathBuf) {
 
 /// The worktree's interface notice for `src/config.rs`.
 fn rename_notice(w: &World) -> Option<Value> {
+    notice_for(w, "src/config.rs")
+}
+
+/// The worktree's interface notice for `path`.
+fn notice_for(w: &World, path: &str) -> Option<Value> {
     let (_, status) = w.cli(&["status", "--json"]);
     let status: Value = serde_json::from_str(&status).unwrap();
     status["outcome"]["state"]["interface_notices"]["tree"]
         .as_array()?
         .iter()
-        .find(|notice| notice["path"] == "src/config.rs")
+        .find(|notice| notice["path"] == path)
         .cloned()
 }
 
@@ -3800,6 +3930,193 @@ fn a_caller_written_after_a_committed_rename_is_listed_on_its_notice() {
         );
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// Roadmap D6 with D7, B10 and issue #217, in C#: Alice renames a public
+/// method in her worktree, commits on her branch and ends her session. The
+/// notice names the rename with its evidence, Bob's later write of a caller
+/// of the old name in the checkout is told of it, and once the branch is
+/// merged into the checkout's, Carol's write is not.
+#[test]
+fn a_committed_csharp_rename_in_another_worktree_is_told_until_it_is_merged() {
+    const CONFIG: &str = "namespace App;\n\npublic static class Config\n{\n    public static int ParseConfig(string text)\n    {\n        return text.Length;\n    }\n}\n";
+    const CALLER: &str = "namespace App;\n\npublic static class Report\n{\n    public static int Run() => Config.ParseConfig(\"b\");\n}\n";
+    let files = [
+        ("src/Config.cs", CONFIG),
+        (
+            "src/Program.cs",
+            "namespace App;\n\nstatic class Program\n{\n    static void Main() => Config.ParseConfig(\"a\");\n}\n",
+        ),
+        (
+            "src/Report.cs",
+            "namespace App;\n\npublic static class Report\n{\n    public static int Run() => 0;\n}\n",
+        ),
+    ];
+    let (w, tree) = renamed_in_another_worktree(
+        &files,
+        (
+            "src/Config.cs",
+            &CONFIG.replace("ParseConfig", "LoadConfig"),
+        ),
+        ("ParseConfig", "LoadConfig"),
+    );
+    let notice = notice_for(&w, "src/Config.cs").unwrap();
+    let change = &notice["changes"][0];
+    assert_eq!(
+        (
+            &change["change"],
+            &change["before_name"],
+            &change["after_name"],
+            &change["evidence"]
+        ),
+        (
+            &json!("renamed"),
+            &json!("ParseConfig"),
+            &json!("LoadConfig"),
+            &json!("same_body")
+        ),
+        "{notice:#}"
+    );
+    assert_eq!(
+        notice["dependents"],
+        json!(["src/Program.cs"]),
+        "{notice:#}"
+    );
+    alice_commits_the_rename_and_ends(&w, &tree);
+    let root = w.work();
+    let writes = |session: &str, call: &str, file: &str| {
+        let (coverage, context, detail) = w.hook_in(
+            "app",
+            &root,
+            json!({
+                "session_id": session, "cwd": root, "hook_event_name": "PreToolUse",
+                "tool_name": "Write", "tool_use_id": call,
+                "tool_input": {"file_path": root.join(file), "content": CALLER},
+            }),
+            &[],
+        );
+        assert_eq!(coverage, "admitted", "{detail}");
+        context
+    };
+    let context = writes("bob", "b1", "src/Report.cs").expect("no alert at the write");
+    let expected = format!(
+        r#""src/Report.cs":5 calls "ParseConfig", which was renamed to "LoadConfig" in "src/Config.cs" in worktree "{}" by claude-code.alice"#,
+        tree.display()
+    );
+    assert!(context.contains(&expected), "{context}");
+    assert!(
+        context.contains(r#""public static int LoadConfig(string text)""#),
+        "{context}"
+    );
+    git(&root, &["merge", "--quiet", "--no-edit", "feature"]);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, text) = w.cli(&["graph", "symbol", "app", "LoadConfig", "--json"]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome["coverage"]["current_files"] == 3
+            && outcome["symbols"][0]["name"] == "LoadConfig"
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "merge never indexed: {outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        writes("carol", "c1", "src/Summary.cs")
+            .is_none_or(|context| !context.contains("ParseConfig")),
+        "told after the merge"
+    );
+}
+
+/// Roadmap C2 with D7 and issue #217: Alice renames `parse_config` in the
+/// worktree, commits on her unmerged branch and ends her session. Bob's
+/// ranked code briefing in the checkout names the checkout's own definition,
+/// with his edited caller first among its dependents, and gives Alice's
+/// file no peer reason. A ranked lookup of the old name in the worktree
+/// follows the recorded rename and ranks the new name's definition.
+#[test]
+fn a_ranked_briefing_names_a_rename_committed_on_another_worktrees_branch() {
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    alice_commits_the_rename_and_ends(&w, &tree);
+    w.edits("bob", "b1", "src/report.rs", CALLS_PARSE_CONFIG);
+    let root = w.work();
+    let ask = |at: &str| {
+        w.hook_in(
+            "app",
+            &root,
+            json!({"session_id": "bob", "cwd": root, "hook_event_name": "UserPromptSubmit",
+                   "prompt": format!("{at}: why does parse_config count bytes, and is load_config merged yet?")}),
+            &[],
+        )
+        .1
+    };
+    let deadline = Instant::now() + WAIT;
+    let line = loop {
+        let context = ask(&format!("{:?}", Instant::now())).unwrap_or_default();
+        let line = context
+            .lines()
+            .find(|line| line.starts_with(r#"- "parse_config": "#))
+            .map(str::to_owned);
+        if let Some(line) = line.filter(|line| line.contains(r#""src/report.rs""#)) {
+            // The checkout's index has no `load_config`: the branch is not
+            // merged, so the new name has no line of its own.
+            assert!(!context.contains(r#"- "load_config": "#), "{context}");
+            break line;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Bob's caller never ranked: {context}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(
+        line.starts_with(
+            r#"- "parse_config": function at "src/config.rs":1, exported: "pub fn parse_config(text: &str) -> usize"; used by "src/report.rs" (1, you edited it), "src/main.rs" (1)"#
+        ),
+        "{line}"
+    );
+    // Alice's session ended: her committed change is no live peer's work.
+    assert!(!line.contains("is editing it"), "{line}");
+
+    // In the worktree, the old name leads to the new one, ranked.
+    let (code, text) = w.cli(&[
+        "graph",
+        "symbol",
+        "tree",
+        "parse_config",
+        "--renamed",
+        "--rank",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let outcome = &serde_json::from_str::<Value>(&text).unwrap()["outcome"];
+    assert_eq!(
+        (
+            &outcome["renamed"][0]["name"],
+            &outcome["renamed"][0]["after_name"]
+        ),
+        (&json!("parse_config"), &json!("load_config")),
+        "{outcome:#}"
+    );
+    let symbol = &outcome["symbols"][0];
+    assert_eq!(
+        (&symbol["name"], &symbol["path"], &symbol["rank_reasons"]),
+        (
+            &json!("load_config"),
+            &json!("src/config.rs"),
+            &json!([{"reason": "exported"}])
+        ),
+        "{outcome:#}"
+    );
+    // Dependents are of the new name, which no other worktree file uses yet.
+    assert_eq!(
+        (&symbol["dependents"], &symbol["dependent_count"]),
+        (&json!([]), &json!(0)),
+        "{outcome:#}"
+    );
 }
 
 /// Issue #217, fourth acceptance criterion: an uncommitted change keeps its

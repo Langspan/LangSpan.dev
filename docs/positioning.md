@@ -40,7 +40,7 @@ recovery is an illustration, not an observed outcome.
 
 The coordination layer uses source relationships as well as file activity.
 The v0.2.0 local Tree-sitter index extracts definitions, name mentions,
-imports and signatures from Rust, Python, TypeScript/JavaScript, Go and Java.
+imports and signatures from Rust, Python, TypeScript/JavaScript, Go, Java and C#.
 It matches names, not resolved scopes, types or imports. Interface notices
 can cross linked worktrees on the same machine, including relevant
 uncommitted exported signatures. Related sessions can receive a notice at
@@ -83,8 +83,10 @@ symbol publication is not a released capability. See
   authoritative. A hold does not establish cross-file semantic compatibility.
 - Refusals for stale source, active overlaps and unsafe commit requests have
   different purposes. An agent can reread, retry or choose another task.
-  Do not promise automatic waiting on active edit holds; see
-  [B28: coordination policy](https://github.com/Langspan/LangSpan.dev/issues/171).
+  Waiting on an active edit hold is an opt-in workspace policy, off by
+  default: a wait lasts at most part of one hook call and admits only an
+  unchanged file. Do not promise an edit queue or that waiting reduces stops;
+  see [B28: coordination policy](https://github.com/Langspan/LangSpan.dev/issues/171).
 - Native Claude Code and Codex observations, real two-machine briefing delivery,
   scripted coordinator tests, and authored illustrations are different kinds
   of evidence. Cursor and Gemini CLI adapters have no retained live-host verification.

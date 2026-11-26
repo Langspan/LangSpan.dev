@@ -4,9 +4,11 @@
 //! Codex session is given of a file it first patches, through the real hook
 //! executable and a real daemon. Claude Code events are the ones captured
 //! from Claude Code 2.1.330 (`fixtures/claude-code-2.1.330`), with paths and
-//! session IDs rewritten for each test. Codex Stop and SessionEnd are in the
-//! documented shape only: no Codex hook ran in the capture
-//! (`fixtures/claude-code-2.1.330/README.md`).
+//! session IDs rewritten for each test. Codex events are the ones a real
+//! Codex sent in the capture of `scripts/capture-codex.sh`
+//! (`fixtures/codex-2026-11-26`), replayed in their order with this
+//! fixture's checkout put in; the coordinator record of that run is
+//! `docs/evidence/codex-turn-events/langspan-events.txt`.
 
 use langspan::{
     client,
@@ -67,6 +69,8 @@ impl Fixture {
             fs::write(base.join("work").join(file), "hello\n").unwrap();
         }
         fs::write(base.join("work/src/lib.rs"), "fn greet() {}\n").unwrap();
+        // The capture's repository held this one file.
+        fs::write(base.join("work/notes.txt"), "alpha\nbeta\n").unwrap();
         let child = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .env("LANGSPAN_AUTOSTART", "off")
             .args(["daemon", "--state-dir"])
@@ -185,36 +189,155 @@ impl Fixture {
         }
         self.run("claude-code", event)
     }
-    fn codex_patch(&self, session: &str, name: &str, call: &str, response: Option<&str>) -> Run {
-        let mut event = json!({
-            "session_id": session, "turn_id": "turn-1", "cwd": self.root(),
-            "hook_event_name": name, "model": "gpt-test", "permission_mode": "default",
-            "tool_name": "apply_patch", "tool_use_id": call,
-            "tool_input": {"command":
-                "*** Begin Patch\n*** Update File: a.txt\n@@\n-hello\n+hi\n*** End Patch"},
-        });
-        if let Some(response) = response {
-            event["tool_response"] = json!(response);
-        }
-        self.run("codex", event)
+    /// Event `number` (from 1) of the real Codex capture, in this fixture's
+    /// checkout.
+    fn codex_captured(&self, number: usize) -> Value {
+        let line = include_str!("../fixtures/codex-2026-11-26/events.jsonl")
+            .lines()
+            .nth(number - 1)
+            .unwrap()
+            .replace("/work/repo", self.root().to_str().unwrap());
+        serde_json::from_str(&line).unwrap()
     }
-    /// Codex's documented `Stop` and `SessionEnd` inputs
-    /// (developers.openai.com/codex/hooks, "Stop", "SessionEnd").
-    fn codex_lifecycle(&self, session: &str, name: &str) -> Run {
-        let mut event = json!({
-            "session_id": session, "transcript_path": null, "cwd": self.root(),
-            "hook_event_name": name, "model": "gpt-test",
-        });
-        if name == "Stop" {
-            event["turn_id"] = json!("turn-1");
-            event["permission_mode"] = json!("default");
-            event["stop_hook_active"] = json!(false);
-            event["last_assistant_message"] = json!("done");
+    /// Send captured Codex events `numbers` in order; the last one's run.
+    fn codex_replay(&self, numbers: std::ops::RangeInclusive<usize>) -> Run {
+        let mut last = None;
+        for number in numbers {
+            last = Some(self.run("codex", self.codex_captured(number)));
+        }
+        last.unwrap()
+    }
+    /// The capture's peer: the Claude Code `Write` of `notes.txt` that
+    /// `scripts/capture-codex.sh` sends between the two Codex turns, with the
+    /// file written between its two events as the script writes it.
+    fn capture_peer(&self) {
+        let event = |name: &str| {
+            json!({
+                "session_id": CAPTURE_PEER, "cwd": self.root(), "hook_event_name": name,
+                "tool_name": "Write", "tool_use_id": "capture-peer-write",
+                "tool_input": {"file_path": self.root().join("notes.txt"),
+                               "content": "alpha\nbeta\npeer\n"},
+            })
+        };
+        assert_eq!(
+            self.run("claude-code", event("PreToolUse")).coverage,
+            "admitted"
+        );
+        fs::write(self.root().join("notes.txt"), "alpha\nbeta\npeer\n").unwrap();
+        let mut post = event("PostToolUse");
+        post["tool_response"] = json!({"success": true});
+        assert_eq!(self.run("claude-code", post).coverage, "observed");
+    }
+    /// The capture's CLI holder of `notes.txt`, as the script starts it.
+    fn capture_holder(&self) {
+        for args in [
+            &[
+                "session",
+                "start",
+                CAPTURE_HOLDER,
+                "work",
+                "--request-id",
+                "hold-start",
+            ][..],
+            &[
+                "admit",
+                CAPTURE_HOLDER,
+                "notes.txt",
+                "--ttl-ms",
+                "60000",
+                "--request-id",
+                "hold",
+            ],
+        ] {
+            let run = Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .args(args)
+                .env("LANGSPAN_STATE_DIR", self.state_dir())
+                .env("LANGSPAN_AUTOSTART", "off")
+                .current_dir(self.root())
+                .output()
+                .unwrap();
+            assert!(
+                run.status.success(),
+                "{}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+        }
+    }
+}
+
+/// The capture's two Codex sessions, as LangSpan names them, and the peer
+/// and holder sessions the capture script adds.
+const CODEX_A: &str = "codex.00000000-0000-7000-8000-00000000000a";
+const CODEX_B: &str = "codex.00000000-0000-7000-8000-00000000000b";
+const CAPTURE_PEER: &str = "capture-peer-repo-XXXXXX";
+const CAPTURE_HOLDER: &str = "work.holder";
+/// The real run's digest of `notes.txt` as `alpha\nbeta\n`, and of the
+/// identical patch input refused and then admitted in turn 2.
+const REAL_FIRST_VERSION: &str = "e49c81e2d2f84e259d40e2fb8192f3bcd198b355184845d76d8f58807d0d78ee";
+const REAL_RETRIED_INPUT: &str = "14104956626e1f6dc00a8f26c87bff39503f8042eb39a5b2b719d38256d88004";
+
+/// The coordinating events of a log, in order, with session names reduced
+/// to the part a replay shares with the real run: what each admission,
+/// version, refusal, stop and end was, not its IDs or times.
+fn coordination(events: impl IntoIterator<Item = Value>) -> Vec<String> {
+    let who = |session: &Value| {
+        let session = session.as_str().unwrap();
+        if session.contains("capture-peer") {
+            "peer".to_owned()
+        } else if session.ends_with(".holder") {
+            "holder".to_owned()
         } else {
-            event["reason"] = json!("other");
+            session.to_owned()
         }
-        self.run("codex", event)
-    }
+    };
+    events
+        .into_iter()
+        .filter_map(|event| {
+            Some(match event["type"].as_str()? {
+                "lease_granted" => {
+                    let lease = &event["lease"];
+                    format!(
+                        "granted {} {} base_unknown={} regions={}",
+                        who(&lease["session_id"]),
+                        lease["paths"],
+                        lease["base_unknown"],
+                        lease["regions"].is_array()
+                    )
+                }
+                "lease_completed" => "completed".into(),
+                "source_observed" => format!(
+                    "version {} {} {}",
+                    who(&event["session_id"]),
+                    event["origin"],
+                    event["files"]
+                ),
+                "write_refused" => format!(
+                    "refused {} {} {} by {}",
+                    who(&event["session_id"]),
+                    event["kind"],
+                    event["paths"],
+                    who(&event["peer_session_id"])
+                ),
+                "operation_observed" => format!(
+                    "observed {} {}",
+                    who(&event["observation"]["session_id"]),
+                    event["observation"]["result"]
+                ),
+                "session_stopped" => format!(
+                    "stopped {} released {}",
+                    who(&event["session_id"]),
+                    event["released"].as_array()?.len()
+                ),
+                "session_ended" => format!("ended {}", who(&event["session_id"])),
+                "session_prompted" => format!(
+                    "prompted {} {}",
+                    who(&event["session_id"]),
+                    event["line_digests"]
+                ),
+                _ => return None,
+            })
+        })
+        .collect()
 }
 
 impl Drop for Fixture {
@@ -428,23 +551,48 @@ fn a_subagent_tool_batch_is_the_subagents_own() {
 #[test]
 fn a_codex_stop_releases_the_turns_admissions_and_session_end_ends_it() {
     let f = Fixture::new();
+    // Captured turn 1: session start, prompt, `cat notes.txt`, then a patch
+    // whose context does not apply. Codex sent no PostToolUse for that patch.
+    assert_eq!(f.codex_replay(1..=5).coverage, "admitted");
     assert_eq!(
-        f.codex_patch(ALICE, "PreToolUse", "call-1", None).coverage,
-        "admitted"
+        f.leases(CODEX_A),
+        [(vec!["notes.txt".to_owned()], LeaseStatus::Active)]
     );
-    let stop = f.codex_lifecycle(ALICE, "Stop");
+    assert_eq!(
+        f.claude_tool(BOB, None, "PreToolUse", "bob-1", "notes.txt")
+            .coverage,
+        "denied",
+        "the open admission still holds the file"
+    );
+    // Codex's Stop: no `turn_id`, `stop_hook_active` false.
+    let stop = f.run("codex", f.codex_captured(6));
     assert_eq!(stop.coverage, "stopped", "{}", stop.detail);
+    assert!(stop.detail.contains("1 open admission"), "{}", stop.detail);
     assert!(stop.stdout.is_empty(), "{}", stop.stdout);
     assert_eq!(
-        f.leases(&format!("codex.{ALICE}")),
-        [(vec!["a.txt".to_owned()], LeaseStatus::Completed)]
+        f.leases(CODEX_A),
+        [(vec!["notes.txt".to_owned()], LeaseStatus::Completed)]
     );
-    let end = f.codex_lifecycle(ALICE, "SessionEnd");
+    assert!(f.events().iter().any(|event| matches!(event,
+        Event::SessionStopped { session_id, released, failure: None, .. }
+            if session_id == CODEX_A && released.len() == 1)));
+    // The file is free at once, not when the 30-second TTL runs out.
+    assert_eq!(
+        f.claude_tool(BOB, None, "PreToolUse", "bob-2", "notes.txt")
+            .coverage,
+        "admitted"
+    );
+    let end = f.run("codex", f.codex_captured(7));
     assert_eq!(end.coverage, "session_ended", "{}", end.detail);
-    assert!(f.state().activity[&format!("codex.{ALICE}")].ended);
+    assert!(end.stdout.is_empty(), "{}", end.stdout);
+    assert!(f.state().activity[CODEX_A].ended);
+    // `codex exec resume` starts the same session again, and it is told of
+    // Bob's work meanwhile, as the real run's was of its peer's.
+    assert_eq!(f.codex_replay(8..=8).coverage, "briefed");
+    assert!(!f.state().activity[CODEX_A].ended);
 
-    // A Codex subagent's identity is not covered, so its stop is not taken
-    // for the parent's.
+    // Constructed: the capture ran no subagent. A Codex subagent's identity
+    // is not covered, so its stop is not taken for the parent's.
     let mut sub = json!({"session_id": ALICE, "cwd": f.root(), "hook_event_name": "Stop",
                          "turn_id": "t", "agent_id": "agent-1"});
     assert_eq!(f.run("codex", sub.clone()).coverage, "unsupported");
@@ -455,8 +603,10 @@ fn a_codex_stop_releases_the_turns_admissions_and_session_end_ends_it() {
 #[test]
 fn a_codex_patch_that_failed_still_makes_its_next_attempt_compared() {
     let f = Fixture::new();
-    // First patch of a.txt: no version recorded, so nothing is compared...
-    let first = f.codex_patch(ALICE, "PreToolUse", "call-1", None);
+    // Captured turn 1. The shell read is not reported as a read, so the
+    // first patch of notes.txt has no version to be compared with...
+    f.codex_replay(1..=4);
+    let first = f.run("codex", f.codex_captured(5));
     assert_eq!(first.coverage, "admitted");
     assert!(
         first.detail.contains("not compared for 1 file(s)"),
@@ -468,27 +618,108 @@ fn a_codex_patch_that_failed_still_makes_its_next_attempt_compared() {
         "{}",
         first.detail
     );
-    // ...and it fails (the patch context did not match).
-    assert_eq!(
-        f.codex_patch(
-            ALICE,
-            "PostToolUse",
-            "call-1",
-            Some("Exit code: 1\nWall time: 0 seconds\nOutput:\nerror: no match\n")
-        )
-        .coverage,
-        "observed"
-    );
+    // ...and is given one, the version the real run recorded too.
     assert!(f.events().iter().any(|event| matches!(event,
         Event::SourceObserved { origin: langspan_core::SourceOrigin::Snapshot, files, .. }
-            if files.len() == 1 && files[0].path == "a.txt")));
-    // Bob changes the file; Alice retries the patch she wrote before.
-    f.claude_tool(BOB, None, "PreToolUse", "bob-1", "a.txt");
-    fs::write(f.root().join("a.txt"), "changed by bob\n").unwrap();
-    f.claude_tool(BOB, None, "PostToolUse", "bob-1", "a.txt");
-    let retry = f.codex_patch(ALICE, "PreToolUse", "call-2", None);
-    assert_eq!(retry.coverage, "denied_stale", "{}", retry.detail);
-    assert!(retry.stdout.contains(&claude(BOB)), "{}", retry.stdout);
+            if files.len() == 1 && files[0].path == "notes.txt"
+                && serde_json::to_string(&files[0].state).unwrap().contains(REAL_FIRST_VERSION))));
+    // The patch did not apply, and Codex sent no PostToolUse for it: the
+    // reply ends, and so does `codex exec`.
+    f.codex_replay(6..=7);
+
+    // The peer writes notes.txt; the same Codex session, resumed, reads it
+    // with `cat` and patches it.
+    f.capture_peer();
+    f.codex_replay(8..=11);
+    let stale = f.run("codex", f.codex_captured(12));
+    assert_eq!(stale.coverage, "denied_stale", "{}", stale.detail);
+    assert!(
+        stale.stdout.contains(&claude(CAPTURE_PEER)),
+        "{}",
+        stale.stdout
+    );
+    // Codex reread the file and sent the identical patch again: admitted.
+    f.codex_replay(13..=14);
+    let retry = f.run("codex", f.codex_captured(15));
+    assert_eq!(retry.coverage, "admitted", "{}", retry.detail);
+    let refused: Vec<_> = f
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::WriteRefused {
+                session_id,
+                peer_session_id,
+                input_digest,
+                ..
+            } => Some((session_id, peer_session_id, input_digest)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        refused,
+        [(
+            CODEX_A.to_owned(),
+            Some(claude(CAPTURE_PEER)),
+            Some(REAL_RETRIED_INPUT.to_owned())
+        )],
+        "refused once, naming the peer, for the input the real run had"
+    );
+    fs::write(f.root().join("notes.txt"), "alpha\ngamma\npeer\n").unwrap();
+    assert_eq!(f.codex_replay(16..=16).coverage, "observed");
+    let stop = f.codex_replay(17..=19);
+    assert_eq!(stop.coverage, "stopped", "{}", stop.detail);
+    assert!(
+        f.leases(CODEX_A)
+            .iter()
+            .all(|(_, status)| *status == LeaseStatus::Completed)
+    );
+}
+
+#[test]
+fn a_new_codex_session_is_refused_a_held_file_and_its_stop_releases_nothing() {
+    let f = Fixture::new();
+    f.codex_replay(1..=7);
+    f.capture_holder();
+    // Captured turn 3: a new session patches notes.txt while the CLI holds it.
+    f.codex_replay(21..=24);
+    let held = f.run("codex", f.codex_captured(25));
+    assert_eq!(held.coverage, "denied", "{}", held.detail);
+    assert!(held.stdout.contains(CAPTURE_HOLDER), "{}", held.stdout);
+    let stop = f.run("codex", f.codex_captured(26));
+    assert_eq!(stop.coverage, "stopped", "{}", stop.detail);
+    assert!(f.events().iter().any(|event| matches!(event,
+        Event::SessionStopped { session_id, released, .. }
+            if session_id == CODEX_B && released.is_empty())));
+    // The holder's admission was asked for by hand: a reply's end never
+    // releases it.
+    assert_eq!(
+        f.leases(CAPTURE_HOLDER),
+        [(vec!["notes.txt".to_owned()], LeaseStatus::Active)]
+    );
+    assert_eq!(f.codex_replay(27..=27).coverage, "session_ended");
+}
+
+/// The whole capture, replayed in order with the script's peer and holder
+/// where the script ran them, coordinates exactly as the real run did.
+#[test]
+fn the_real_codex_capture_replays_to_the_real_runs_coordination() {
+    let f = Fixture::new();
+    f.codex_replay(1..=7);
+    f.capture_peer();
+    f.codex_replay(8..=15);
+    fs::write(f.root().join("notes.txt"), "alpha\ngamma\npeer\n").unwrap();
+    f.codex_replay(16..=20);
+    f.capture_holder();
+    f.codex_replay(21..=27);
+
+    let real = include_str!("../docs/evidence/codex-turn-events/langspan-events.txt")
+        .lines()
+        .map(|line| serde_json::from_str(line.split_once(' ').unwrap().1).unwrap());
+    let replayed = f
+        .events()
+        .into_iter()
+        .map(|event| serde_json::to_value(event).unwrap());
+    assert_eq!(coordination(replayed), coordination(real));
 }
 
 #[test]

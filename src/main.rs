@@ -114,7 +114,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Who holds BRANCH's push turn and who waits for it
   land-cancel WORKSPACE --onto BRANCH --request-id ID
                                  Stop the waiting landing ID; it pushes nothing
-  graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go, Java)
+  graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go, Java, C#)
                                  [--detail]: with its body digest, calls, callers
                                  by name, notes on its file and last check;
                                  [--renamed]: under the newest name a recorded
@@ -171,6 +171,15 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  kind and workspace, once per session, kind and files
                                  a day, and how many were retried and let through.
                                  Says what LangSpan did, not what it saved. Reads only
+  policy WORKSPACE               The coordination policy table in effect: each kind
+                                 of case, advisory, wait or refuse, and whether it can
+                                 be set. Reads only
+  policy set WORKSPACE conflict refuse|wait [--wait-ms N] --request-id ID
+                                 What a write meets when another session holds its file
+                                 now: refuse at once (the default) or wait for the
+                                 holder, up to N ms (0 to 2000, default 2000; 0 is
+                                 refuse), never past half the hook's remaining budget,
+                                 then compare the file again. Every other kind is fixed
   remember WORKSPACE TEXT [PATH...] [--session ID]
                                  Keep a one-line note for the repository or for files;
                                  sessions working there are told. Survives restarts
@@ -3138,6 +3147,8 @@ fn doctor(
                         limit: 1,
                         detail: false,
                         blind_in_scope: true,
+                        rank: false,
+                        session_id: None,
                         renamed: false,
                     },
                 ) {
@@ -4274,6 +4285,8 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                         limit,
                         detail: options.remove("--detail").is_some(),
                         blind_in_scope: true,
+                        rank: options.remove("--rank").is_some(),
+                        session_id: options.remove("--session"),
                         renamed: options.remove("--renamed").is_some(),
                     },
                     "references" => Command::GraphReferences {
@@ -4351,6 +4364,35 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                     Some(since) => langspan::today::parse_rfc3339(&since)?,
                     None => 0,
                 },
+            },
+            ["policy", workspace] => Command::Policy {
+                workspace_id: (*workspace).into(),
+            },
+            ["policy", "set", workspace, case, policy] => Command::SetPolicy {
+                workspace_id: (*workspace).into(),
+                case: langspan_core::PolicyCase::parse(case).ok_or_else(|| {
+                    format!(
+                        "unknown case {case:?}; the cases are {}",
+                        langspan_core::PolicyCase::ALL
+                            .iter()
+                            .map(|case| case.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?,
+                policy: match *policy {
+                    "refuse" => langspan_core::Policy::Refuse,
+                    "wait" => langspan_core::Policy::Wait,
+                    "advisory" => langspan_core::Policy::Advisory,
+                    _ => return Err("the policy is refuse, wait or advisory".into()),
+                },
+                wait_ms: options
+                    .remove("--wait-ms")
+                    .map(|ms| {
+                        ms.parse()
+                            .map_err(|_| "--wait-ms must be an integer from 0 to 2000")
+                    })
+                    .transpose()?,
             },
             ["remember", workspace, text, paths @ ..] => Command::Remember {
                 workspace_id: (*workspace).into(),
@@ -4448,6 +4490,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::Report { .. }
                 | Command::Compact { .. }
                 | Command::History { .. }
+                | Command::Policy { .. }
                 | Command::WorkspaceList { .. }
                 | Command::WorkspaceRemove { apply: false, .. }
         ) {
@@ -4589,7 +4632,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
             // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
-            // `graph symbol`: `--detail`, `--renamed`; `brief`: `--recent`;
+            // `graph symbol`: `--detail`, `--rank`, `--renamed`; `brief`: `--recent`;
             // `setup`: `--yes`; `guidance install`: `--create`).
             "--open"
             | "--allow-network"
@@ -4598,6 +4641,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--publish-as-branch"
             | "--mine"
             | "--detail"
+            | "--rank"
             | "--renamed"
             | "--recent"
             | "--all"
@@ -4617,7 +4661,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--wait-s" | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen"
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
             | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" | "--keep-days"
-            | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools" => {
+            | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools"
+            | "--wait-ms" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -4668,6 +4713,42 @@ fn no_unused_options(options: &BTreeMap<String, String>) -> Result<(), langspan:
 }
 /// The lines `graph symbol --detail` adds under a definition. Note text is
 /// another session's: quoted, so it reads as data.
+/// A ranked definition's reasons and dependents (roadmap C2), under it.
+fn print_symbol_rank(symbol: &langspan_core::SymbolRef) {
+    use langspan_core::RankReason;
+    let reason = |reason: &RankReason| match reason {
+        RankReason::OwnFile { edited: true } => "the session edited this file".to_owned(),
+        RankReason::OwnFile { edited: false } => "the session read this file".to_owned(),
+        RankReason::PeerEditing { session_id } => format!("session {session_id} is editing it"),
+        RankReason::Exported => "exported".to_owned(),
+        RankReason::QualifiedInPrompt => "the prompt names its path".to_owned(),
+    };
+    if let Some(reasons) = symbol.rank_reasons.as_ref().filter(|r| !r.is_empty()) {
+        let reasons: Vec<String> = reasons.iter().map(reason).collect();
+        println!("  ranked by: {}", reasons.join("; "));
+    }
+    let Some(dependents) = &symbol.dependents else {
+        return;
+    };
+    let listed: Vec<String> = dependents
+        .iter()
+        .map(|dependent| {
+            let mut parts = vec![format!("{} mention(s)", dependent.mentions)];
+            parts.extend(dependent.rank_reasons.iter().map(reason));
+            format!("{} ({})", dependent.path, parts.join(", "))
+        })
+        .collect();
+    let more = symbol
+        .dependent_count
+        .unwrap_or(0)
+        .saturating_sub(dependents.len() as u32);
+    match (listed.is_empty(), more) {
+        (true, _) => println!("  used by: no other indexed file"),
+        (false, 0) => println!("  used by: {}", listed.join(", ")),
+        (false, more) => println!("  used by: {} and {more} more file(s)", listed.join(", ")),
+    }
+}
+
 fn print_symbol_detail(symbol: &langspan_core::SymbolRef) {
     if let Some(digest) = &symbol.body_digest {
         println!("  body digest {digest}");
@@ -5468,6 +5549,7 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                     if symbol.exported { " (exported)" } else { "" },
                     symbol.signature
                 );
+                print_symbol_rank(symbol);
                 print_symbol_detail(symbol);
             }
             match levels {
@@ -5644,6 +5726,28 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::StatusLine { line } => println!("{}", line.text()),
         Outcome::RefusalRecorded { session_id } => {
             println!("Refusal recorded for session {session_id}.")
+        }
+        Outcome::Policy { workspace_id, rows } => {
+            println!("Coordination policies for workspace {workspace_id}:");
+            for row in rows {
+                let wait = if row.wait_ms > 0 {
+                    format!(" up to {} ms", row.wait_ms)
+                } else {
+                    String::new()
+                };
+                let fixed = if row.configurable { "" } else { " (fixed)" };
+                println!(
+                    "  {:<18} {}{wait}{fixed}",
+                    row.case.name(),
+                    row.policy.name()
+                );
+            }
+        }
+        Outcome::Holders { holders } => {
+            println!("{} current holder(s).", holders.len());
+        }
+        Outcome::WaitRecorded { session_id } => {
+            println!("Wait recorded for session {session_id}.")
         }
         Outcome::Recap { recap } => {
             println!(
@@ -6252,6 +6356,8 @@ mod option_tests {
             "cursor",
             "--file",
             "AGENTS.md",
+            "--wait-ms",
+            "300",
         ]);
         for flag in ["--yes", "--recent", "--create"] {
             assert_eq!(options[flag], "", "{flag}");
@@ -6263,6 +6369,7 @@ mod option_tests {
             ("--month", "2026-11"),
             ("--format", "cursor"),
             ("--file", "AGENTS.md"),
+            ("--wait-ms", "300"),
         ] {
             assert_eq!(options[key], value, "{key}");
         }

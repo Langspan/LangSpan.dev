@@ -372,6 +372,7 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
         state.retracted_notices.remove(session);
         state.presence.remove(session);
         state.first_writes.remove(session);
+        state.unsettled.remove(session);
     }
     // A withdrawal names its workspace; one owed to a session of another
     // workspace goes too, so it cannot outlive the messages it withdraws.
@@ -391,6 +392,7 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
     state.remote_peers.retain(|_, peer| peer.workspace_id != id);
     state.refusals.retain(|refusal| refusal.workspace_id != id);
     state.workspace_git.remove(id);
+    state.conflict_waits.remove(id);
     state.checks.remove(id);
     state.landings.remove(id);
     state.interface_notices.remove(id);

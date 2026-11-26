@@ -17,7 +17,7 @@ needs to know what each file defines and what each file mentions.
 Tree-sitter and returns the symbols it defines (name, kind, line range,
 signature text up to the body, whether exported by the language's own rule),
 the names it mentions and what it imports. Rust, Python, TypeScript/JavaScript
-(including TSX/JSX), Go and Java, chosen by file extension. It does no I/O. Inputs
+(including TSX/JSX), Go, Java and C#, chosen by file extension. It does no I/O. Inputs
 over 1 MiB are refused; a file with a syntax error is indexed as far as it
 parsed and marked partial.
 
@@ -48,6 +48,44 @@ and `calls.rs`, and
 `a_java_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_session`
 in `tests/graph.rs`.
 
+**C#** (`.cs`, added 26 November 2026 for roadmap D6,
+[issue #55](https://github.com/Langspan/LangSpan.dev/issues/55)). Classes,
+structs, records, enums and delegates are types; interfaces are interfaces;
+methods, constructors and properties are methods, since C# has no free
+functions; enum members and `const` or `static readonly` fields are
+constants, one per declarator. Namespaces, block or file-scoped, are not
+symbols, and a namespace's name is not a mention. The export rule is what
+another assembly can reach: `public`, `protected` and `protected internal`.
+`internal`, `private protected`, `private`, `file` and no modifier are not
+exported, since a type defaults to `internal` and a member to `private`. An
+interface's members are exported unless `private` or `internal`, and every
+enum member is. An explicit interface implementation (`void IPlacer.Cancel()`)
+is not exported: callers reach it through the interface's own member. Each
+declaration is judged alone, as in Java. A definition starts after the
+attributes and comments that lead it, and its signature leaves those
+attributes out, so adding `[Obsolete]` changes no caller. A constructor's
+signature ends before its `: base(...)` or `: this(...)` initializer. A
+constant's signature is its modifiers, type and name, without the value. A
+property's signature is its declaration and its accessors without their bodies
+or an initial value (`public int Count { get; private set; }`), and `{ get; }`
+for an expression-bodied property, so removing a setter is an interface
+change. A method's or constructor's block or `=> expression` is its body for
+a rename (D7); a property has none, so a renamed property is linked only by
+its lines. An import is recorded as written after `using`, `using static` or
+an alias's `=`. References are identifiers. Calls are method calls, member
+calls (`a.F(x)`, `a?.F(x)`, `F<T>(x)`) and constructor calls (`new T(x)`,
+named by the type's last identifier); a target-typed `new(x)`, an object
+initializer without parentheses and a `: base(x)` initializer are not.
+Tests: the C# tests in `crates/langspan-graph/tests/extract.rs`, `calls.rs`
+and `renames.rs`; in `tests/graph.rs`,
+`a_csharp_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_session`
+and
+`a_committed_csharp_rename_in_another_worktree_is_told_until_it_is_merged`;
+`a_csharp_method_call_that_no_longer_fits_is_told_at_the_write` in
+`tests/break_alerts.rs`; and
+`stdio_check_write_reports_a_peers_csharp_signature_and_body_changes` in
+`tests/mcp.rs`.
+
 **Everything is a name match.** Nothing resolves scopes, types, modules or
 imports. A mention of `open` matches every symbol called `open`. Every
 surface says so: the CLI output, the MCP tool descriptions and the briefing
@@ -75,7 +113,7 @@ every answer:
 
 | CLI | MCP | Returns |
 | --- | --- | --- |
-| `graph symbol WORKSPACE NAME [--detail]` | `langspan_symbol` (`detail`) | Definitions of that name; with detail, what is around each (below) |
+| `graph symbol WORKSPACE NAME [--detail] [--rank [--session ID]]` | `langspan_symbol` (`detail`, `rank`, `session_id`) | Definitions of that name; with detail, what is around each (below); ranked, the code briefing's order with each one's dependents (below) |
 | `graph references WORKSPACE NAME` | `langspan_references` | Mentions of that name |
 | `graph impact WORKSPACE PATH [--depth N]` | `langspan_impact` (`depth`) | What the file exports, and other files mentioning those names; with a depth of 2 or 3, those files level by level (below) |
 | `graph blind-spots WORKSPACE` | `langspan_blind_spots` | The files the index cannot answer for, by reason (below) |
@@ -306,9 +344,9 @@ trailing comma, a rewrapped `where` clause or spacing inside braces is not a
 changed signature, while whitespace between two words, and any change to a
 name, type or default, still is. The same rule holds for every indexed
 language, since in each a trailing comma in those lists is optional or, in
-Java's parameter lists, not allowed, and spacing around punctuation means
-nothing. A google-java-format rewrap of a parameter list is therefore not a
-changed signature, and a changed parameter type is. One trailing comma is kept: the only comma of a
+Java's and C#'s parameter lists, not allowed, and spacing around punctuation
+means nothing. A google-java-format or `dotnet format` rewrap of a parameter
+list is therefore not a changed signature, and a changed parameter type is. One trailing comma is kept: the only comma of a
 parenthesised group that is not a parameter or argument list (a parenthesis
 not right after a name or a closing `>`), because it makes a one-element
 tuple: Python's `(1,)` and `(1)`, or Rust's `(u32,)` and `(u32)`, differ.
@@ -432,6 +470,55 @@ changed, and is not remembered as delivered. Nothing is added when the index
 has no complete scan or nothing matched, and any failure adds nothing.
 `--code-briefing off` on the hook, or on `hooks install`, turns it off.
 
+**A ranked code briefing (added later, roadmap C2).** The hook sends
+`graph_context` with `rank: true`, its own session ID and up to 12
+qualifiers from the same 16 KiB of the prompt: relative paths
+(`src/store/upload.rs`), source file names (`upload.rs`) and the leading
+parts of qualified names (`store` in `store::upload` or `store.upload`). The
+qualifiers are used for that query only and, like the names, never recorded.
+The core ranks each name's definitions by fixed rules, each outranking the
+next, with no learned weight:
+
+1. A file the asking session edited or read (its touched paths, held leases
+   and recorded source versions, ADR 0005).
+2. A file a live peer is editing: a peer counted as in a briefing (this
+   generation, the same workspace or a linked worktree of its repository,
+   not exited, not ended, not the asker's parent), holding the file or
+   having edited it within the 30-minute briefing horizon. The most recent
+   such peer is named.
+3. An exported definition.
+4. A file whose path the prompt names: a qualifier equal to a directory on
+   the path, the file name or its stem, or a whole-component run of the path.
+5. Path order, then line.
+
+Each definition in the answer carries `rank_reasons` (`own_file` with
+`edited`, `peer_editing` with `session_id`, `exported`,
+`qualified_in_prompt`) and `dependents`: up to 5 files other than its own
+that mention its name, each with its count of `mentions`, ranked by rules 1,
+2 and 4, then by most mentions, then by path. `dependent_count` and the
+name's `definition_count` count what was left out. The daemon ranks among
+the first 256 definitions in path order and the first 256 in the files the
+session or a peer works on, taken by rules 1 to 3 and then path order, so a
+peer's file of many same-name definitions never crowds out the session's
+own; and among the 256 most-mentioning files and every file they work on.
+Past that a definition or file is counted, never ranked. A code-context
+answer that would exceed one 64 KiB frame is cut until it fits: first each
+definition's dependents, one fewer at a time, then each name's mentioning
+files, then each name's lowest-ranked definitions down to one, then the last
+names. `dependent_count` and `definition_count` keep their values, and a name
+that loses a definition or a file is `truncated`. The
+section puts the top definition first with a short reason, such as `(you
+edited this file)`, and `used by` with its ranked dependents and their
+counts; later definitions follow as `also`. A line is built from whole parts
+within 500 bytes: a dependent or definition that does not fit is counted (`and
+3 more file(s)`, `2 more definition(s) not shown`), never cut, and a name
+that does not fit is counted on the closing line as before. Paths and
+signatures are capped at 160 bytes each. Without `rank`, `graph_context`
+answers exactly as before. `graph symbol --rank [--session ID]` and
+`langspan_symbol` with `rank` and `session_id` give the same order outside a
+prompt, with up to 200 definitions in one frame. Nothing is resolved: a
+dependent mentions the name and may mean another symbol of it.
+
 **Another worktree's in-flight signatures (added later, roadmap C7).** The
 observer keeps, for each file that differs from the worktree's `HEAD`, the
 blob ID that `HEAD` holds for it, if any. After each indexing pass the indexer
@@ -443,7 +530,7 @@ the `HEAD` version lacks, or exports with a different signature, are the
 file's in-flight set. Signatures are compared by their tokens as a reformat
 is ([ADR 0011](0011-shell-writes.md)): spacing between tokens aside, but a
 string literal's whitespace counts. Every indexed language is split into
-words, Go and Java by the TypeScript rules, so removing spacing never joins
+words, Go, Java and C# by the TypeScript rules, so removing spacing never joins
 two tokens (`chan int` is not `chanint`). Every outcome of reading a file
 for the index or for this comparison is terminal for that version or tried
 again with a bound. A `HEAD` blob over the parse bound, or one that does not

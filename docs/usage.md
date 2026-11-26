@@ -50,7 +50,7 @@ are not published yet ([ADR 0035](adr/0035-one-command-setup.md)).
 
 The [latest stable release](https://github.com/Langspan/LangSpan.dev/releases/latest) provides
 macOS and Linux binaries. Follow the [platform downloads, verification and
-installation instructions](../README.md#install) before starting the coordinator.
+installation instructions](install.md) before starting the coordinator.
 A source build is optional.
 
 ## Build from source
@@ -350,7 +350,7 @@ out of a commit. A Cursor `Write` states a whole file, so the file is held
 whole. Cursor also runs Claude Code's hooks; LangSpan's Claude Code hook does
 nothing on a Cursor event, so a call is coordinated once.
 [ADR 0032](adr/0032-cursor-adapter.md) lists the sources, what was not
-verifiable and how to capture a real run. Consult the [availability table](../README.md#current-availability)
+verifiable and how to capture a real run. Consult the [detailed availability table](reference-overview.md#current-availability)
 before treating an adapter as validated for your host version.
 
 Remove the managed entries with the matching vendor:
@@ -645,6 +645,80 @@ holds another session's recent write of the file with unknown lines, any
 unread edit that changes lines of it is refused once, and the denial says the
 lines could not be placed. An ended or exited session's lines no longer count.
 The journal is kept on disk, so a daemon restart does not lose them.
+
+## Coordination policies
+
+Each kind of coordination case has one policy
+([ADR 0036](adr/0036-coordination-policies.md)). `langspan policy WORKSPACE`
+prints the table in effect, `--json` as rows, and the MCP tool
+`langspan_policy` reads it:
+
+| Case | Policy | Configurable |
+| --- | --- | --- |
+| `advisory`: briefings, peer notices, interface notices, break alerts, remote awareness | Advisory: informs, never holds a write | No |
+| `conflict`: another session holds the file or an overlapping region now | `refuse` (default) or `wait` | Yes, and the wait's bound |
+| `stale_base`: the file changed after this session last read it | Refuse | No |
+| `unread_lines`: the edit would change lines another live session wrote, unread | Refuse | No |
+| `commit_held`: a commit would take another live session's changes | Refuse | No |
+| `landing_not_ready`: `land` without passing evidence on the exact tree (exit code 6) | Refuse | No |
+
+Only the policy for a current holder can be set, per workspace:
+
+```sh
+langspan policy set WORKSPACE conflict wait --wait-ms 1000 --request-id policy-1
+langspan policy set WORKSPACE conflict refuse --request-id policy-2
+```
+
+`--wait-ms` is 0 to 2,000; `wait` without it waits up to 2,000 ms, and 0 is
+`refuse`. `policy set` for any other case fails, naming the case and saying
+it is fixed. The setting is local to this coordinator, survives restarts and
+goes with the workspace when it is removed.
+
+With `wait`, an edit of a file another session holds now waits for that
+holder instead of being refused at once:
+
+1. The hook asks the coordinator every 20 ms whether the holder's admission
+   has ended.
+2. The wait ends at the bound, or when half of the hook's remaining budget is
+   left (about 750 ms at the default 1,500 ms budget), whichever is first.
+3. A holder still there: the usual conflict refusal, which says how long the
+   edit waited.
+4. The holder gone: the hook compares each file with the version it saw
+   before the wait. A changed file is refused as a stale source ("These files
+   changed while this edit waited … for the session holding them."), naming
+   the path and the holder. That refusal is given once: the retry is
+   admitted.
+5. Files unchanged: the hook asks again, with every usual check, and the
+   edit is admitted.
+
+When the holder writes the file, the wait ends in a stale-source refusal, not
+an admission: the agent reads the file again instead of trying later. A wait
+admits only when the holder's admission ends with the file unchanged, after a
+refused permission prompt, a failed edit or the end of its turn. A write of a
+file nobody holds never waits. If the coordinator stops answering during a
+wait, the hook gives no decision, as when coordination is unavailable, and
+logs `wait_unavailable`.
+
+`langspan events` records each wait and what followed each refusal:
+
+```json
+{"type":"write_waited","session_id":"codex.…","workspace_id":"app","paths":["src/api.rs"],"holder_session_id":"claude-code.…","waited_ms":600,"result":"admitted","at_ms":…,"generation":1}
+{"type":"refusal_settled","session_id":"claude-code.…","workspace_id":"app","kind":"stale_base","paths":["src/api.rs"],"refused_at_ms":…,"outcome":"retried_admitted","ms_to_next_admitted":11800,"at_ms":…,"generation":1}
+```
+
+`result` is `admitted`, `refused_conflict`, `refused_stale` or
+`refused_unread`. A refused wait is also a `write_refused` event of its kind.
+A conflict, stale or unread-lines refusal is settled by the session's next
+admitted tool write or its stop: `retried_admitted` (the write names a
+refused path, with `ms_to_next_admitted`), `moved_on` (other paths only) or
+`stopped` (the turn stopped or the session ended first). A session keeps at
+most 8 unsettled refusals, and a daemon restart leaves earlier ones
+unsettled. Whether the agent asked its person is not inferred.
+
+`benchmarks/coordination/holder_wait.py` compares `refuse` with `wait` on
+the `same-file-current-holder` scenario as two arms, `langspan_refuse` and
+`langspan_wait`, keeping every run in `runs.jsonl`; `--summarize DIR` prints
+the stop rate, retries and elapsed time per arm with sample sizes.
 
 ## Automatic peer briefings
 
@@ -1343,9 +1417,13 @@ already waiting when the coordinator starts is timed from that start.
 ## Look up symbols and affected files
 
 The source index finds definitions and name mentions in Rust, Python,
-TypeScript/JavaScript (including TSX/JSX), Go and Java; `langspan doctor`
+TypeScript/JavaScript (including TSX/JSX), Go, Java and C#; `langspan doctor`
 lists them. A Java definition is exported when another package can reach it:
 `public` or `protected`, or a member of an interface that is not `private`.
+A C# definition is exported when another assembly can reach it: `public`,
+`protected` or `protected internal`, a member of an interface that is not
+`private` or `internal`, or an enum member. C# properties are methods, and
+namespaces are not symbols.
 It updates after complete Git
 scans and can lag changes on disk. Replace `PROJECT` with a registered workspace,
 `upload` with the name to look up, and `src/api.rs` with the file to inspect:
@@ -1378,7 +1456,37 @@ each definition also has:
 The answer has `resolution: "name"`: calls and callers are matched by name,
 not resolved, so a call of another function with the same name counts. No
 source body is returned. Definitions that would make the answer larger than
-64 KiB are left out and `truncated` is true. `references` finds mentions of the name. `impact` lists the file's
+64 KiB are left out and `truncated` is true.
+
+With `--rank` (MCP: `langspan_symbol` with `rank: true`), definitions come in
+the order a prompt's code briefing uses: a file the session named by
+`--session ID` (MCP: `session_id`) edited or read, then a file a live peer is
+editing, then exported ones, then path order. Each has `rank_reasons` and
+`dependents`: up to 5 other files that mention its name, each with its
+`mentions` count, ranked the same way and then by most mentions, with
+`dependent_count` counting them all. The rules are fixed and listed in
+[ADR 0008](adr/0008-derived-source-index.md). `--session` without `--rank` is
+refused:
+
+```text
+$ langspan graph symbol PROJECT upload --rank --session claude-code.alice
+src/store/upload.rs:14 function upload (exported) — pub fn upload(path: &Path) -> Result<()>
+  ranked by: the session edited this file; exported
+  used by: src/api/routes.rs (3 mention(s), session codex.bob is editing it), src/cli.rs (1 mention(s))
+tools/bench.rs:40 function upload — fn upload()
+  used by: src/api/routes.rs (3 mention(s), session codex.bob is editing it), src/cli.rs (1 mention(s))
+```
+
+At a prompt the code briefing ranks the same way, with the paths and
+qualifiers the prompt names (`store` in `store::upload`, `upload.rs`) ranked
+after exported definitions. The top definition comes first with why, and
+`used by` its ranked dependents:
+
+```text
+- "upload": function at "src/store/upload.rs":14, exported (you edited this file): "pub fn upload(path: &Path) -> Result<()>"; used by "src/api/routes.rs" (3, codex session bob is editing it), "src/cli.rs" (1); also function at "tools/bench.rs":40: "fn upload()"
+```
+
+`references` finds mentions of the name. `impact` lists the file's
 exports and other files mentioning those names, one level deep.
 
 With `--depth N` (1 to 3, default 1; MCP: `langspan_impact` with `depth`),
@@ -2189,7 +2297,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_events` | Read an ordered page of persisted events |
 | `langspan_changes` | Read file and local-branch observations with scan freshness |
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
-| `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check; with `renamed`, under the newest name a recorded rename leads to |
+| `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check; with `rank` and `session_id`, in the code briefing's order with each one's ranked dependents; with `renamed`, under the newest name a recorded rename leads to |
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
@@ -2201,6 +2309,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_flaky_tests` | Read which tests are known to flip on unchanged code, with runs, flips and the age of the last flip |
 | `langspan_land_cancel` | Stop a landing waiting for the push turn, by its `request_id` |
 | `langspan_recap` | Summarize one workspace's recorded activity, checks, notes and pending messages |
+| `langspan_policy` | Read the coordination policy table in effect for a workspace: each case, advisory, wait or refuse, whether it can be set, and a wait's bound |
 | `langspan_today` | The day so far from the event log: sessions, refusals, checks, landings and what is still open, within 2,400 bytes |
 | `langspan_report` | The coordination report: per session and per host kind, edits admitted and not compared, shell writes seen after, reads, intents, refusals, unchanged retries and briefings, within 2,400 bytes |
 | `langspan_remember` | Keep a local note about the workspace or named files |

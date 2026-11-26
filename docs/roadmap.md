@@ -42,7 +42,7 @@ as done is in its row.
 | Track | Rows | Status, 25 November 2026 |
 | --- | --- | --- |
 | L1. Line protection without a recorded read: a per-session journal of written lines; a write that changes another live session's recent lines is refused unless that session read them since | B4 | Built ([ADR 0028](adr/0028-line-ownership.md)). Shell writes, `NotebookEdit` and Codex add, delete and move are not located. Not yet observed on a host |
-| L2. Codex reads, Stop and SessionEnd | A3 | Built: Stop and SessionEnd registered; Codex reports no reads, so a first patch records a `snapshot` version instead ([ADR 0027](adr/0027-turn-and-batch-events.md)). Not yet observed on Codex |
+| L2. Codex reads, Stop and SessionEnd | A3 | Built: Stop and SessionEnd registered; Codex reports no reads, so a first patch records a `snapshot` version instead ([ADR 0027](adr/0027-turn-and-batch-events.md)). Observed on a real Codex on 26 November 2026 ([evidence](evidence/codex-turn-events/README.md)): Stop released the open admission, SessionEnd ended the session, and a stale patch after a peer's change was refused once and its retry admitted. A Codex subagent's tool event is not yet observed |
 | L3. Claude Code Stop, StopFailure, SubagentStop and PostToolBatch hooks | A2 | Done: observed on Claude Code 2.1.330 ([ADR 0027](adr/0027-turn-and-batch-events.md)). Quota and usage detection from StopFailure is J11 |
 | L4. Shared-checkout commit guard and commit of only this session's hunks | B6, B7 | Built ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)); observed with real Claude Code sessions, and `commit --mine` with a real Codex session ([evidence](evidence/codex-real-host/README.md)). The guard and `commit --mine` are tested with Codex, Cursor and Gemini CLI events; the guard is not yet observed on those hosts |
 | L5. Interface-break alerts at write time, with the lines to fix and the argument count | B9, B10 | Built for Claude Code, Codex and Gemini CLI writes and quoted-heredoc shell writes, for argument counts, renames and removals, including those made in another worktree of the repository, committed or not, until the commit reaches the writer's branch ([ADR 0029](adr/0029-break-alerts-at-write-time.md)); observed once on Claude Code. Not yet observed on Codex or Gemini CLI; Cursor waits for a captured write input |
@@ -56,7 +56,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## A. Hosts and hook events
 
-- [A3: Verify Codex end-of-reply events and the first-patch snapshot on a real Codex](https://github.com/Langspan/LangSpan.dev/issues/11): admission release at end of reply and the first-patch snapshot are built but no real Codex has run them.
+- [A3: Verify Codex end-of-reply events and the first-patch snapshot on a real Codex](https://github.com/Langspan/LangSpan.dev/issues/11): a real Codex has shown the end-of-reply release and the first-patch snapshot; a Codex subagent's tool event has not been captured.
 - [A4: Verify the Cursor adapter on a real Cursor](https://github.com/Langspan/LangSpan.dev/issues/12): the Cursor adapter rests on documentation alone, so Cursor cannot yet be relied on to be coordinated.
 - [A5: A plugin adapter for the Hermes agent](https://github.com/Langspan/LangSpan.dev/issues/13): a Hermes agent beside other hosts gets no admission or briefing, and its edits go unrecorded.
 - [A6: Gemini CLI verified on a real session, and guidance for rules-file hosts](https://github.com/Langspan/LangSpan.dev/issues/14): the Gemini CLI adapter has never run live, and editors without hooks get nothing at all.
@@ -89,7 +89,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## C. Briefings and context
 
-- [C2: Rank the code briefing and name each definition's dependents](https://github.com/Langspan/LangSpan.dev/issues/41): code briefings list definitions in path order and do not mark the files that will break.
+- [C2: Rank the code briefing and name each definition's dependents](https://github.com/Langspan/LangSpan.dev/issues/41): code briefings list definitions in path order and do not mark the files that will break. Built as a ranked code briefing with `used by` dependents; a real-host run remains.
 - [C5: Learn which briefed files agents use](https://github.com/Langspan/LangSpan.dev/issues/43): briefing relevance never adjusts to what agents in a repository actually use.
 - [C8: Tell two sessions their tasks point at the same code before either writes](https://github.com/Langspan/LangSpan.dev/issues/45): two tasks aimed at the same function are not flagged before either session edits. Built as prompt targets; a real-host run remains.
 - [C9: Leave a trail and a handoff when a session ends](https://github.com/Langspan/LangSpan.dev/issues/46): what a finished session learned is lost unless someone ran `handoff` by hand.
@@ -103,7 +103,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [D2: Show a change's blast radius level by level](https://github.com/Langspan/LangSpan.dev/issues/51): `graph impact` stops at direct dependents, hiding breaks two steps away. Built with `--depth`; a real-host run remains.
 - [D3: Typed edges, paths between symbols and a repository map](https://github.com/Langspan/LangSpan.dev/issues/52): name mentions alone cannot follow a call chain or show how modules relate.
 - [D4: Show the history of a definition](https://github.com/Langspan/LangSpan.dev/issues/53): an agent cannot see who changed a definition recently, why, or who reverted the same change. Built as `langspan graph history` and `langspan_history`; a real-host run remains.
-- [D6: Index more languages, one grammar at a time](https://github.com/Langspan/LangSpan.dev/issues/55): Java is indexed; C#, Ruby and C++ repositories get no source-index answers or interface notices.
+- [D6: Index more languages, one grammar at a time](https://github.com/Langspan/LangSpan.dev/issues/55): Java and C# are indexed; Ruby and C++ repositories get no source-index answers or interface notices.
 - [D8: Report where the index is blind](https://github.com/Langspan/LangSpan.dev/issues/57): an empty impact answer does not say which files the index could not read. Built as `graph blind-spots` and `coverage.blind_in_scope`; a real-host run remains.
 - [D9: Check a combination at the level of definitions](https://github.com/Langspan/LangSpan.dev/issues/58): a clean Git merge can pair a changed signature with a new call in the old shape.
 - [D10: Offer live activity as an MCP resource](https://github.com/Langspan/LangSpan.dev/issues/59): a live view of who is doing what takes three tool calls, and there is no resource to read.

@@ -84,6 +84,14 @@ const FILES: &[(&str, &str)] = &[
         "shop/Checkout.java",
         "package shop;\n\nclass Checkout {\n    Order submit(Orders orders, Cart cart) {\n        return orders.place(cart);\n    }\n}\n",
     ),
+    (
+        "Billing/Invoices.cs",
+        "namespace Billing;\n\npublic class Invoices\n{\n    public Invoices() { }\n\n    public Invoice Issue(Order order) => null;\n}\n",
+    ),
+    (
+        "Billing/Desk.cs",
+        "namespace Billing;\n\nclass Desk\n{\n    Invoice Close(Invoices invoices, Order order)\n    {\n        return invoices.Issue(order);\n    }\n}\n",
+    ),
 ];
 
 impl World {
@@ -518,6 +526,67 @@ fn a_java_method_call_that_no_longer_fits_is_told_at_the_write() {
         json!({"file_path": w.work().join("shop/Checkout.java"),
                "old_string": "        return orders.place(cart);\n",
                "new_string": "        return orders.place(cart, null);\n"}),
+        "PreToolUse",
+    ));
+}
+
+/// Roadmap D6, C#: a peer adds a parameter to a public method and to a
+/// constructor; writes that keep the old counts are told.
+#[test]
+fn a_csharp_method_call_that_no_longer_fits_is_told_at_the_write() {
+    let w = World::new(true);
+    w.wait_for_index();
+    w.rewrites(
+        "alice",
+        "a1",
+        "Billing/Invoices.cs",
+        "namespace Billing;\n\npublic class Invoices\n{\n    public Invoices(Ledger ledger) { }\n\n    public Invoice Issue(Order order, Tax tax) => null;\n}\n",
+    );
+    w.wait_for_notice("Issue", "Tax tax");
+    w.wait_for_notice("Invoices", "Ledger ledger");
+    let edit = w.claude(
+        "bob",
+        "b1",
+        "Edit",
+        json!({"file_path": w.work().join("Billing/Desk.cs"),
+               "old_string": "        return invoices.Issue(order);\n",
+               "new_string": "        var invoice = invoices.Issue(order);\n        return invoice;\n"}),
+        "PreToolUse",
+    );
+    let context = alert(&edit);
+    assert!(
+        context.contains(r#""Billing/Desk.cs":7 calls "Issue" with 1 argument"#),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#""public Invoice Issue(Order order, Tax tax)""#),
+        "{context}"
+    );
+    // A constructor call is a call of the type's name. Carol, since one
+    // notice is told to a session once.
+    let created = w.writes(
+        "carol",
+        "c1",
+        "Billing/Front.cs",
+        "namespace Billing;\n\nclass Front\n{\n    Invoices Open()\n    {\n        return new Invoices();\n    }\n}\n",
+    );
+    let context = alert(&created);
+    assert!(
+        context.contains(r#""Billing/Front.cs":7 calls "Invoices" with 0 arguments"#),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#""public Invoices(Ledger ledger)""#),
+        "{context}"
+    );
+    // A call with the new count is not told.
+    quiet(&w.claude(
+        "bob",
+        "b3",
+        "Edit",
+        json!({"file_path": w.work().join("Billing/Desk.cs"),
+               "old_string": "        return invoices.Issue(order);\n",
+               "new_string": "        return invoices.Issue(order, null);\n"}),
         "PreToolUse",
     ));
 }
@@ -1210,4 +1279,44 @@ fn a_removed_name_is_not_told_while_the_index_cannot_read_every_file() {
     quiet(&w.writes("bob", "b1", "cmd/extra.go", call));
     let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
     assert!(!events.contains("interface_alerted"), "{events}");
+}
+
+/// Advisory, whatever the conflict policy (roadmap B28, ADR 0036): with
+/// the workspace waiting for holders, a peer's signature change is told at
+/// the write, which is admitted without a wait.
+#[test]
+fn a_break_alert_admits_the_write_with_the_wait_policy_on() {
+    let w = World::new(true);
+    let (code, text) = w.cli(&[
+        "policy",
+        "set",
+        "app",
+        "conflict",
+        "wait",
+        "--request-id",
+        "p1",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    w.wait_for_index();
+    quiet(&w.writes("bob", "b0", "src/extra.rs", "pub fn extra() {}\n"));
+    w.rewrites(
+        "alice",
+        "a1",
+        "src/api.rs",
+        "pub fn resize(width: u32, height: u32) -> u32 {\n    width * height\n}\n",
+    );
+    w.wait_for_notice("resize", "height: u32");
+    let run = w.writes(
+        "bob",
+        "b1",
+        "src/main.rs",
+        "mod api;\nfn main() {\n    api::resize(3);\n}\n",
+    );
+    let context = alert(&run);
+    assert!(context.contains("it now takes 2"), "{context}");
+    assert!(!run.detail.contains("waiting"), "{}", run.detail);
+    let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
+    assert!(events.contains("interface_alerted"), "{events}");
+    assert!(!events.contains("write_waited"), "{events}");
+    assert!(!events.contains("write_refused"), "{events}");
 }
