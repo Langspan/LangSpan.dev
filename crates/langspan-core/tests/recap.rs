@@ -86,6 +86,8 @@ fn notes_for(state: &mut State, session: &str, id: &str) -> Vec<String> {
             deliver: true,
             mid_turn: false,
             left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         50,
@@ -370,6 +372,7 @@ fn change(change: &str, before: Option<&str>, after: Option<&str>) -> InterfaceC
         after_arity: None,
         before_count: None,
         after_count: None,
+        after_name: None,
     }
 }
 

@@ -62,6 +62,7 @@ struct Daemon(Child);
 impl Daemon {
     async fn start(state_dir: &Path) -> Self {
         let child = Command::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("daemon")
             .arg("--state-dir")
             .arg(state_dir)
@@ -100,6 +101,7 @@ impl Drop for Daemon {
 
 fn child_transport(state_dir: &Path) -> TokioChildProcess {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.env("LANGSPAN_AUTOSTART", "off");
     command.arg("mcp").arg("--state-dir").arg(state_dir);
     TokioChildProcess::new(command).expect("spawn real MCP stdio adapter")
 }
@@ -489,6 +491,7 @@ async fn stdio_changes_reads_uncached_pages_and_status_forwards_liveness() {
     #[cfg(target_os = "linux")]
     {
         let attached = Command::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args([
                 "session",
                 "attach-pid",
@@ -698,6 +701,7 @@ async fn stdio_operations_share_daemon_state_and_preserve_retry_and_conflict_res
 async fn stdio_rejects_oversized_frames_and_recovers_for_the_next_request() {
     let directory = TestDirectory::new();
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .arg("mcp")
         .arg("--state-dir")
         .arg(directory.state_dir())

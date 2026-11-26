@@ -184,6 +184,21 @@ records stay local to the coordinator.
 
 ## Get started
 
+With `langspan` on your PATH (install it below), one command connects every
+agent host it finds and keeps the coordinator running:
+
+```sh
+langspan setup
+```
+
+It shows one plan (the hosts found, the files it changes, the coordinator's
+login service and the state directory) and asks once. `--yes` skips the
+question. It installs the user-level hooks, MCP entry and skill, starts the
+coordinator as a login service (a LaunchAgent on macOS, a `systemd --user`
+unit on Linux), and runs `langspan doctor`. A second run changes nothing.
+`langspan uninstall --apply` removes all of it. See
+[Set up in one command](docs/usage.md#set-up-in-one-command).
+
 ### Install
 
 Get the archive for your operating system and processor from the
@@ -252,7 +267,9 @@ C code and the macOS linker vary between builds.
 
 ### Run
 
-Start the local coordinator and leave it running in one terminal:
+`langspan setup` starts the coordinator for you. Without setup, the first hook
+or `langspan mcp` that finds no coordinator starts one in the background. To
+run it in the foreground instead:
 
 ```sh
 langspan daemon
@@ -311,8 +328,8 @@ a Git repository it does nothing. In a repository that also has a project
 install (below), the user-level hook leaves the event to that one, so nothing
 is coordinated twice. `langspan doctor` reports both kinds of install.
 
-`langspan uninstall --apply` removes only what `install` wrote; the state
-directory stays. [ADR 0010](docs/adr/0010-user-level-install.md) records the
+`langspan uninstall --apply` removes only what `install` and `setup` wrote,
+the login service included; the state directory stays. [ADR 0010](docs/adr/0010-user-level-install.md) records the
 host documentation these locations come from and what was not verifiable.
 
 ### One project
@@ -399,7 +416,7 @@ without rereading the changed file.
 | Commits in a shared checkout | A `git add -A`, `git commit -a` or similar that would take another live session's uncommitted lines is held once, naming the session and files; `langspan commit --mine` commits only the session's own files and hunks, with your identity and hooks. Tested with the real daemon, hooks and Git; `commit --mine` committed only Codex's hunks on a real Codex ([Codex real-host evidence](docs/evidence/codex-real-host/README.md)). [Rules and limits](docs/adr/0026-commit-guard-and-commit-mine.md). |
 | Checks and landing | Check records name a Git tree; combined branches are tested in a temporary checkout. Landing requires a matching pass and `--apply`; landings wait in a bounded line for the push turn, report conflict hunks and follow file renames that landed. Tested with local file remotes. [Scope and limits](docs/adr/0007-check-evidence-integration-and-landing.md). |
 | Automatic checks | Off by default. `langspan check auto` runs the owner's command after a Claude Code or Codex session's write batch or reply, on the exact tree, and tells the session the result once at its next briefing: passed, failed with the exit code, stopped at its time limit, or inconclusive, with the output's last lines. Failures are not classified. The command runs as you, outside the agent host's sandbox. Tested with the real hook and daemon; not yet observed on a host. [ADR 0030](docs/adr/0030-automatic-checks-after-write-batches.md). |
-| Break alerts at write time | A Claude Code or Codex write whose calls no longer fit a peer's new signature is told the file, line and old and new argument counts with that write's result, once per change. Argument counts only; never a refusal. Tested with the real hook and daemon; not yet on a host. [ADR 0029](docs/adr/0029-break-alerts-at-write-time.md). |
+| Break alerts at write time | A Claude Code, Codex or Gemini CLI write, or a quoted-heredoc shell write, whose calls no longer fit a peer's new signature is told the file, line and old and new argument counts with that write's result, once per change. Argument counts only; never a refusal. Cursor writes wait for a real capture of Cursor's write input. Tested with the real hook and daemon; not yet on a host. [ADR 0029](docs/adr/0029-break-alerts-at-write-time.md). |
 | Source context | Definitions, name mentions and one-level exported-name impact queries are implemented. Interface notices stay within one physical workspace. Extraction and real-daemon tests pass; a native-agent run remains unverified. [Scope and limits](docs/adr/0008-derived-source-index.md). |
 | Recap, notes and messages | Workspace recaps, persistent local notes, messages and handoffs are implemented. Delivery and acknowledgement have real-daemon tests; native-host delivery remains unverified. Messages stay in one workspace and do not wake idle sessions. [Message scope](docs/adr/0009-agent-messages-and-handoff.md). |
 | User-level installation | Hooks and MCP registration have temporary-home integration tests. The complete user-level setup still needs a live Claude Code or Codex run. [Install scope and limits](docs/adr/0010-user-level-install.md). |

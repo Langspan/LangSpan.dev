@@ -1280,6 +1280,8 @@ impl McpAdapter {
                 deliver: true,
                 mid_turn: false,
                 left: Vec::new(),
+                recent: false,
+                recent_window_ms: None,
                 mcp: true,
             },
         )

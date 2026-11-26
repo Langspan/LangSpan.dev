@@ -45,7 +45,7 @@ as done is in its row.
 | L2. Codex reads, Stop and SessionEnd | A3 | Built: Stop and SessionEnd registered; Codex reports no reads, so a first patch records a `snapshot` version instead ([ADR 0027](adr/0027-turn-and-batch-events.md)). Not yet observed on Codex |
 | L3. Claude Code Stop, StopFailure, SubagentStop and PostToolBatch hooks | A2 | Done: observed on Claude Code 2.1.330 ([ADR 0027](adr/0027-turn-and-batch-events.md)). Quota and usage detection from StopFailure is J11 |
 | L4. Shared-checkout commit guard and commit of only this session's hunks | B6, B7 | Built ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)); observed with real Claude Code sessions. Not yet observed with Codex |
-| L5. Interface-break alerts at write time, with the lines to fix and the argument count | B9, B10 | Built for Claude Code and Codex writes ([ADR 0029](adr/0029-break-alerts-at-write-time.md)); observed once on Claude Code. Not yet observed on Codex; Gemini CLI and Cursor do not receive it yet |
+| L5. Interface-break alerts at write time, with the lines to fix and the argument count | B9, B10 | Built for Claude Code, Codex and Gemini CLI writes and quoted-heredoc shell writes, for argument counts, renames and removals ([ADR 0029](adr/0029-break-alerts-at-write-time.md)); observed once on Claude Code. Not yet observed on Codex or Gemini CLI; Cursor waits for a captured write input |
 | L6. Checks after write batches, run detached and reported in the next briefing | F1 | Built, off by default ([ADR 0030](adr/0030-automatic-checks-after-write-batches.md)). Not yet observed on a host |
 | L7. Landing depth: a bounded queue for the push turn, hunk-level conflict reports, and following renames that landed | F5 | Built ([ADR 0007](adr/0007-check-evidence-integration-and-landing.md)). Not yet called by an agent on a host |
 | L8. Release pipeline: versioned releases with prebuilt binaries for the supported platforms | I6 | Built ([ADR 0031](adr/0031-releases.md)); no release has been produced yet |
@@ -76,7 +76,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [B7: Commit only this session's hunks](https://github.com/Langspan/LangSpan.dev/issues/26): no ordinary Git command commits one session's hunks and leaves another's untouched.
 - [B8: Guard commits made outside agent shells](https://github.com/Langspan/LangSpan.dev/issues/27): commits from a terminal, IDE or script bypass the agent-shell commit guard.
 - [B9: Alert a write whose calls no longer fit a peer's new signature](https://github.com/Langspan/LangSpan.dev/issues/28): a session keeps writing calls in a function's old shape after a peer changed its parameters.
-- [B10: Tell a write about renames and same-count signature changes](https://github.com/Langspan/LangSpan.dev/issues/29): a peer's rename or same-count parameter swap is not reported at the write that uses it.
+- [B10: Tell a write about renames and same-count signature changes](https://github.com/Langspan/LangSpan.dev/issues/29): a peer's same-count parameter swap is not reported at the write that uses it. Renames and removals are built ([ADR 0029](adr/0029-break-alerts-at-write-time.md)) and not yet observed on a host.
 - [B11: Hold a write that reverses a recorded decision](https://github.com/Langspan/LangSpan.dev/issues/30): a later session that missed a team decision can write it back out.
 - [B12: A note that fires into the next editor's tool result](https://github.com/Langspan/LangSpan.dev/issues/31): a note about a file arrives at the next prompt, possibly after the wrong edit.
 - [B16: Claim the next number in a sequence](https://github.com/Langspan/LangSpan.dev/issues/32): two sessions take the same ADR or migration number and the clash shows only at landing.
@@ -92,7 +92,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 ## C. Briefings and context
 
 - [C2: Rank the code briefing and name each definition's dependents](https://github.com/Langspan/LangSpan.dev/issues/41): code briefings list definitions in path order and do not mark the files that will break.
-- [C3: Tell a new session what changed recently in the repository](https://github.com/Langspan/LangSpan.dev/issues/42): a new session hears only about active peers, not what changed in the last hours.
 - [C5: Learn which briefed files agents use](https://github.com/Langspan/LangSpan.dev/issues/43): briefing relevance never adjusts to what agents in a repository actually use.
 - [C7: Tell dependents about another worktree's new or changed signatures before they are pushed](https://github.com/Langspan/LangSpan.dev/issues/44): a session cannot see a function another worktree just added, so it duplicates or stalls.
 - [C8: Tell two sessions their tasks point at the same code before either writes](https://github.com/Langspan/LangSpan.dev/issues/45): two tasks aimed at the same function are not flagged before either session edits. Built as prompt targets; a real-host run remains.
@@ -126,14 +125,12 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 ## F. Checks and landing
 
 - [F1: Say which tests a write broke](https://github.com/Langspan/LangSpan.dev/issues/69): a failed automatic check does not say whether this write, an earlier state or a peer broke the test.
-- [F3: Run the wider check when an interface changes](https://github.com/Langspan/LangSpan.dev/issues/71): the fast check misses breaks in packages that call a changed exported function.
 - [F5: Rebase landings and adapt identifier renames](https://github.com/Langspan/LangSpan.dev/issues/72): a landing refused over a rename leaves every use to fix by hand, and there is no linear-history landing.
 - [F8: An integration branch every session lands on](https://github.com/Langspan/LangSpan.dev/issues/73): each agent's own branch leaves the person merging six branches by hand to see the work together.
 - [F9: A LangSpan mark in pull requests](https://github.com/Langspan/LangSpan.dev/issues/74): a reviewer might want to know a pull request's tree was checked through LangSpan.
 
 ## H. The person's view
 
-- [H5: A monthly refusal count](https://github.com/Langspan/LangSpan.dev/issues/79): a person deciding whether to keep LangSpan has no count of how often it intervened.
 - [H6: A daily "work saved" line, once measured](https://github.com/Langspan/LangSpan.dev/issues/80): people want a savings figure, which needs measurement rather than assumptions.
 - [H8: A coordination report per session and host](https://github.com/Langspan/LangSpan.dev/issues/81): a person cannot tell whether a new host version or model still follows coordination well.
 - [H9: What an agent did after a refusal](https://github.com/Langspan/LangSpan.dev/issues/82): nobody can tell whether a refused agent reread, waited, retried blindly or gave up.
@@ -150,7 +147,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## J. Privacy, audit, configuration and robustness
 
-- [J7: Retention limits for the event log](https://github.com/Langspan/LangSpan.dev/issues/90): the event log grows without bound, slowing start and keeping old data on disk.
 - [J9: A hash-chained event log with replay](https://github.com/Langspan/LangSpan.dev/issues/91): a person cannot show what LangSpan told an agent at a moment, or that the record is unchanged.
 - [J10: Token accounting from host transcripts](https://github.com/Langspan/LangSpan.dev/issues/92): token spending per session cannot be seen or related to refusals and rework.
 - [J11: Telling peers that a session ran out of quota](https://github.com/Langspan/LangSpan.dev/issues/93): a session stopped by its usage limit still looks active to peers and the person.

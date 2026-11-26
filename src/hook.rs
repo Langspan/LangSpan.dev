@@ -157,9 +157,23 @@ pub struct Operation {
     /// ([ADR 0029](../docs/adr/0029-break-alerts-at-write-time.md)).
     pub contents: Vec<(String, String)>,
     /// The host gives the model `additionalContext` from a pre-tool reply
-    /// (Claude Code, Codex). The break check runs only then: an alert the
-    /// model never reads would still use up its notice.
+    /// (Claude Code, Codex). The break check runs before the write only
+    /// then: an alert the model never reads would still use up its notice.
     pub pre_tool_context: bool,
+    /// The host reads no pre-tool context but adds post-tool context to the
+    /// tool's result (Gemini CLI). The write's calls are found before it and
+    /// kept; they are checked, and any alert given, after it succeeds.
+    pub breaks_after: bool,
+}
+
+/// What the pre-tool run of a write does about breaks (ADR 0029).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BreakCheck {
+    Off,
+    /// Check now and tell in the pre-tool reply.
+    Now,
+    /// Find the calls now and keep them for the post-tool run.
+    Keep,
 }
 
 /// The command of a shell call, as the host sent it.
@@ -318,9 +332,20 @@ pub fn execute(operation: Operation, config: &Config, deadline: Instant) -> Repl
             operation.paths,
             (&operation.edits, &operation.contents),
             operation.snapshot_unknown,
-            operation.pre_tool_context,
+            match (operation.pre_tool_context, operation.breaks_after) {
+                (true, _) => BreakCheck::Now,
+                (false, true) => BreakCheck::Keep,
+                (false, false) => BreakCheck::Off,
+            },
         ),
-        Phase::Post(result) => session.post(&ids, &identity, operation.paths, result, files),
+        Phase::Post(result) => session.post(
+            &ids,
+            &identity,
+            operation.paths,
+            result,
+            files,
+            operation.breaks_after,
+        ),
         Phase::Read => session.read(&ids, files),
         Phase::ShellPre {
             unknown,
@@ -559,7 +584,8 @@ fn resend(config: &Config, until: Instant, entry: &crate::spool::Entry) -> crate
             paths,
             files,
         } => {
-            session.post(&ids, &identity, paths.clone(), *result, files.clone());
+            // A report sent again is late: no break alert is due with it.
+            session.observe(&ids, &identity, paths.clone(), *result, files.clone());
         }
         crate::spool::Report::Read { files } => {
             session.read(&ids, files.clone());
@@ -1246,20 +1272,38 @@ fn lifecycle(
             deliver,
             mid_turn: false,
             left: left.clone(),
+            // What changed recently goes only into a starting context.
+            recent: starting,
+            recent_window_ms: None,
             mcp: false,
         },
     ) {
-        // A new or resumed context has lost any earlier briefing; a prompt
-        // in a continuing context gets one only when the situation changed.
         Ok(Response {
             outcome: Outcome::Briefing { briefing },
             ..
-        }) => Ok((has_content(&briefing) && (starting || briefing.changed)).then_some(briefing)),
+        }) => Ok(briefing),
         Ok(other) => Err(Reply::none(
             "unknown",
             format!("unexpected outcome {other:?}"),
         )),
         Err(failure) => Err(failure_reply(failure)),
+    };
+    // The work ended sessions left uncommitted is confirmed against the line
+    // journal within a quarter of the budget; past it, the recent section
+    // is left out and the rest of the briefing is sent. A new or resumed
+    // context has lost any earlier briefing; a prompt in a continuing
+    // context gets one only when the situation changed.
+    let confirmed = |mut briefing: langspan_core::Briefing, note: &mut String| {
+        if let Some(recent) = briefing.recent.as_mut() {
+            let share = (Instant::now() + config.budget / 4).min(deadline);
+            if let Err(reason) =
+                crate::recent::confirm_left(&config.state_dir, &ids.session_id, recent, share)
+            {
+                briefing.recent = None;
+                note.push_str(&format!("; recent changes left out: {reason}"));
+            }
+        }
+        (has_content(&briefing) && (starting || briefing.changed)).then_some(briefing)
     };
     // Delivering a briefing acknowledges its messages and check results, so
     // with less than the whole limit left (a reply joining several
@@ -1270,7 +1314,8 @@ fn lifecycle(
         None
     } else {
         match brief("brief-preview", false) {
-            Ok(preview) => Some(preview),
+            // The preview only sizes the reply; a note about it is not kept.
+            Ok(preview) => Some(confirmed(preview, &mut String::new())),
             Err(reply) => return reply,
         }
     };
@@ -1284,7 +1329,7 @@ fn lifecycle(
             None
         }
         _ => match brief("brief", true) {
-            Ok(briefing) => briefing,
+            Ok(briefing) => confirmed(briefing, &mut targets_note),
             Err(reply) => return reply,
         },
     };
@@ -1663,14 +1708,41 @@ fn render_checks(checks: &[langspan_core::CheckNotice]) -> String {
                 "was inconclusive: files changed while it ran, or it was stopped by a signal, so its result is about no tree".to_owned()
             }
         };
-        let mut section = format!(
-            "{CHECK_RESULT} {} {outcome} after your writes, on working tree {} (took {:.1} s; recorded as check {}).",
-            clean(&notice.name, 64),
-            clean(&notice.tree_oid, 64),
-            notice.duration_ms as f64 / 1000.0,
-            clean(&notice.check_id, 64),
-        );
-        if let Some(failures) = render_failures(&notice.failures) {
+        let mut section = match &notice.interface {
+            // A wider check reaches the sessions on the mentioning files
+            // too, so it says whose change it was for, not "your writes".
+            // Each part is bounded; the cut is a last guard, so that the
+            // section is never left out for its size.
+            Some(cause) => truncate(
+                &format!(
+                    "{CHECK_RESULT} ran its wider command. {}: the wider check {} {outcome}; {} On working tree {} (took {:.1} s; recorded as check {}).",
+                    interface_line(cause),
+                    clean(&notice.name, 64),
+                    mentioning_line(cause),
+                    clean(&notice.tree_oid, 64),
+                    notice.duration_ms as f64 / 1000.0,
+                    clean(&notice.check_id, 64),
+                ),
+                CHECKS_LIMIT - 200,
+            ),
+            None => format!(
+                "{CHECK_RESULT} {} {outcome} after your writes, on working tree {} (took {:.1} s; recorded as check {}).",
+                clean(&notice.name, 64),
+                clean(&notice.tree_oid, 64),
+                notice.duration_ms as f64 / 1000.0,
+                clean(&notice.check_id, 64),
+            ),
+        };
+        if notice.index_incomplete {
+            section.push_str(
+                " The source index had no complete scan, so no interface change could be found and the wider check did not run.",
+            );
+        }
+        if let Some(failures) = render_failures(&notice.failures)
+            // A wider check's header can be long: its failures are left out
+            // rather than the whole result.
+            && section.len() + failures.len() < CHECKS_LIMIT
+        {
             section.push('\n');
             section.push_str(&failures);
         }
@@ -1727,6 +1799,72 @@ fn left_work_line(work: &langspan_core::LeftWork) -> String {
             "Session {session} ended and left uncommitted work in this checkout{task}. If you are continuing that task, run `langspan adopt -- {session}` to take its lines over as yours; otherwise leave them."
         ),
         PEER_LINE_LIMIT,
+    )
+}
+
+/// `Interface change to parse_upload in core/src/lib.rs: "pub fn
+/// parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) ->
+/// u32"`, with every repository value cleaned and quoted signatures capped.
+fn interface_line(cause: &langspan_core::InterfaceCause) -> String {
+    let change = &cause.change;
+    let quoted = |text: &Option<String>| format!("{:?}", clean(text.as_deref().unwrap_or(""), 120));
+    let what = match change.change.as_str() {
+        "removed" => "removed or renamed".to_owned(),
+        "signature_changed" => format!("{} -> {}", quoted(&change.before), quoted(&change.after)),
+        "renamed" => format!(
+            "renamed, {} -> {}",
+            quoted(&change.before),
+            quoted(&change.after)
+        ),
+        _ => format!(
+            "{} definitions with this name, now {}",
+            change.before_count.unwrap_or(0),
+            change.after_count.unwrap_or(0)
+        ),
+    };
+    let more = match cause.more_changes {
+        0 => String::new(),
+        1 => " (and 1 more change)".to_owned(),
+        n => format!(" (and {n} more changes)"),
+    };
+    format!(
+        "Interface change to {} in {}: {what}{more}",
+        clean(&change.name, 64),
+        clean(&cause.path, 120),
+    )
+}
+
+/// Room for the mentioning files' names: with the change, its signatures
+/// and the record line, the section stays inside `CHECKS_LIMIT` at every
+/// bound.
+const MENTIONING_LIMIT: usize = 300;
+
+/// The files the index says mention the changed name, labelled as a name
+/// lookup with its coverage. Files past `MENTIONING_LIMIT` are counted.
+fn mentioning_line(cause: &langspan_core::InterfaceCause) -> String {
+    let mut files: Vec<String> = Vec::new();
+    let mut size = 0;
+    for path in &cause.dependents {
+        let path = clean(path, 120);
+        if size + path.len() + 2 > MENTIONING_LIMIT && !files.is_empty() {
+            break;
+        }
+        size += path.len() + 2;
+        files.push(path);
+    }
+    let left = (cause.dependents.len() - files.len()) as u64 + u64::from(cause.more_dependents);
+    let more = match left {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    let blind = match cause.blind_files {
+        0 => String::new(),
+        1 => "; 1 source file was not fully indexed, so a mention there is missing".to_owned(),
+        n => format!("; {n} source files were not fully indexed, so a mention there is missing"),
+    };
+    format!(
+        "files that mention it: {}{more} (a name lookup, not resolved uses{blind}).",
+        files.join(", ")
     )
 }
 
@@ -1856,6 +1994,32 @@ fn definitions_text(change: &langspan_core::InterfaceChange) -> String {
             _ => format!("{added} more {kinds} {name} were added"),
         };
         format!("{lead}: {} {now}", signatures(&change.after))
+    }
+}
+
+/// One interface change in words, its names and signatures quoted.
+pub(crate) fn interface_change_text(change: &langspan_core::InterfaceChange) -> String {
+    match (&change.before, &change.after) {
+        _ if change.before_count.is_some() => definitions_text(change),
+        (_, Some(after)) if change.change == "renamed" => format!(
+            "{} {} was renamed to {}: {}",
+            clean(&change.kind, 16),
+            quoted(&change.name),
+            quoted(change.after_name.as_deref().unwrap_or_default()),
+            quoted(after)
+        ),
+        (Some(before), Some(after)) => format!(
+            "{} {} changed from {} to {}",
+            clean(&change.kind, 16),
+            quoted(&change.name),
+            quoted(before),
+            quoted(after)
+        ),
+        _ => format!(
+            "{} {} was removed or renamed",
+            clean(&change.kind, 16),
+            quoted(&change.name)
+        ),
     }
 }
 
@@ -2001,6 +2165,23 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
             text.push('\n');
         }
     }
+    // What changed recently (roadmap C3), at a session's start only: its
+    // room is set aside here, after the messages, and it is placed after
+    // the peer lines. What does not fit is counted. 160 bytes stay free for
+    // the count lines that may follow it.
+    let (recent, recent_unshown) = match &briefing.recent {
+        Some(recent) => crate::recent::render(
+            recent,
+            crate::recent::LIMIT.min(limit.saturating_sub(text.len() + footer.len() + 160)),
+        ),
+        None => (String::new(), 0),
+    };
+    skipped += recent_unshown;
+    let limit = limit.saturating_sub(if recent.is_empty() {
+        0
+    } else {
+        recent.len() + 1
+    });
     if !briefing.stale_reads.is_empty() {
         let stale: Vec<String> = briefing
             .stale_reads
@@ -2075,25 +2256,7 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
         }
     }
     for impact in &briefing.interface_changes {
-        let changes: Vec<String> = impact
-            .changes
-            .iter()
-            .map(|change| match (&change.before, &change.after) {
-                _ if change.before_count.is_some() => definitions_text(change),
-                (Some(before), Some(after)) => format!(
-                    "{} {} changed from {} to {}",
-                    clean(&change.kind, 16),
-                    quoted(&change.name),
-                    quoted(before),
-                    quoted(after)
-                ),
-                _ => format!(
-                    "{} {} was removed or renamed",
-                    clean(&change.kind, 16),
-                    quoted(&change.name)
-                ),
-            })
-            .collect();
+        let changes: Vec<String> = impact.changes.iter().map(interface_change_text).collect();
         let by = impact
             .by_session
             .as_deref()
@@ -2289,6 +2452,10 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
         }
     }
     text.push_str(&remote);
+    if !recent.is_empty() {
+        text.push_str(&recent);
+        text.push('\n');
+    }
     if unshown > 0 {
         text.push_str(&format!("({unshown} more message(s) not shown.)\n"));
     }
@@ -2921,7 +3088,7 @@ impl Session<'_> {
         keys: Vec<String>,
         (edits, contents): Writes,
         snapshot_unknown: bool,
-        break_check: bool,
+        break_check: BreakCheck,
     ) -> Reply {
         // Placing an edit parses the file; it starts only while more than
         // half the budget remains, so the admission itself keeps its time.
@@ -2988,21 +3155,15 @@ impl Session<'_> {
                     // A write that will land: tell it, before its result,
                     // about calls a peer's signature change breaks.
                     let mut reply = Reply::none("admitted", detail);
-                    let alert = break_check
-                        .then(|| self.break_alert(ids, &keys, edits, contents))
-                        .flatten();
-                    if let Some((context, note)) = alert {
-                        reply.detail.push_str("; ");
-                        reply.detail.push_str(&note);
-                        if let Some(context) = context {
-                            reply.stdout = json!({
-                                "hookSpecificOutput": {
-                                    "hookEventName": "PreToolUse",
-                                    "additionalContext": context,
-                                }
-                            })
-                            .to_string();
-                        }
+                    let alert = match break_check {
+                        BreakCheck::Off => None,
+                        BreakCheck::Now => self.break_alert(ids, &keys, edits, contents),
+                        BreakCheck::Keep => self
+                            .keep_calls(ids, &keys, edits, contents)
+                            .map(|note| (None, note)),
+                    };
+                    if let Some(alert) = alert {
+                        add_alert(&mut reply, "PreToolUse", alert);
                     }
                     reply
                 }
@@ -3030,7 +3191,40 @@ impl Session<'_> {
         }
     }
 
+    /// The post-tool run of a write. With `breaks_after`, the calls its
+    /// pre-tool run kept are taken whatever the result, and checked only
+    /// when the write succeeded and was observed with the input they were
+    /// kept from. An input changed after admission (a Gemini edit the user
+    /// changes in its confirmation dialog keeps its call ID) is observed as
+    /// a mismatch: the kept calls may not be what was written, so they are
+    /// dropped unchecked and no notice is used up on them.
     fn post(
+        &mut self,
+        ids: &Identities,
+        operation: &langspan_core::ToolIdentity,
+        keys: Vec<String>,
+        result: ToolResult,
+        files: Vec<langspan_core::ObservedFile>,
+        breaks_after: bool,
+    ) -> Reply {
+        let kept = breaks_after
+            .then(|| crate::break_calls::take(&self.config.state_dir, &ids.operation_id))
+            .flatten()
+            .filter(|calls| !calls.is_empty());
+        let mut reply = self.observe(ids, operation, keys, result, files);
+        if let Some(calls) = kept
+            && result == ToolResult::Succeeded
+            && !matches!(
+                reply.coverage,
+                "timeout" | "unavailable" | "unknown" | "unsupported" | "observed_mismatch"
+            )
+        {
+            add_alert(&mut reply, "PostToolUse", self.checked_calls(ids, calls));
+        }
+        reply
+    }
+
+    fn observe(
         &mut self,
         ids: &Identities,
         operation: &langspan_core::ToolIdentity,
@@ -3113,6 +3307,10 @@ fn has_peer_content(briefing: &langspan_core::Briefing) -> bool {
         || !briefing.messages.is_empty()
         || !briefing.retracted.is_empty()
         || !briefing.checkout_changes.is_empty()
+        || briefing
+            .recent
+            .as_ref()
+            .is_some_and(|recent| !recent.is_empty())
         || !briefing.uncoordinated.is_empty()
         || !briefing.left_work.is_empty()
 }
@@ -3133,6 +3331,8 @@ impl Session<'_> {
                     deliver: true,
                     mid_turn: true,
                     left: Vec::new(),
+                    recent: false,
+                    recent_window_ms: None,
                     mcp: false,
                 },
             )
@@ -3188,10 +3388,48 @@ impl Session<'_> {
         edits: &[(String, crate::regions::Edit)],
         contents: &[(String, String)],
     ) -> Option<(Option<String>, String)> {
-        let start_by = self
-            .deadline
-            .checked_sub(self.config.budget / 4)
-            .unwrap_or(self.deadline);
+        match self.written_calls(keys, edits, contents) {
+            Err(note) => Some((None, note)),
+            Ok(calls) if calls.is_empty() => None,
+            Ok(calls) => Some(self.checked_calls(ids, calls)),
+        }
+    }
+
+    /// The break check's first half, for a host that is told after the
+    /// write (`BreakCheck::Keep`): the calls are found against the file as
+    /// it is before the write, and kept for the post-tool run. `None` when
+    /// the write has no call to check; otherwise a note for the diagnostic.
+    fn keep_calls(
+        &self,
+        ids: &Identities,
+        keys: &[String],
+        edits: &[(String, crate::regions::Edit)],
+        contents: &[(String, String)],
+    ) -> Option<String> {
+        match self.written_calls(keys, edits, contents) {
+            Err(note) => Some(note),
+            Ok(calls) if calls.is_empty() => None,
+            Ok(calls) => Some(
+                match crate::break_calls::keep(&self.config.state_dir, &ids.operation_id, &calls) {
+                    Ok(()) => format!(
+                        "break check: {} call(s) kept for the tool's result",
+                        calls.len()
+                    ),
+                    Err(error) => format!("break check unavailable: calls not kept: {error}"),
+                },
+            ),
+        }
+    }
+
+    /// The calls a write puts in its files of a supported language, at
+    /// most `MAX_CALL_SITES`. `Err` is a note: too little of the budget left.
+    fn written_calls(
+        &self,
+        keys: &[String],
+        edits: &[(String, crate::regions::Edit)],
+        contents: &[(String, String)],
+    ) -> Result<Vec<langspan_core::CallSite>, String> {
+        let start_by = self.break_start_by();
         let mut calls = Vec::new();
         for key in keys.iter().take(BREAK_FILES) {
             if langspan_graph::Language::for_path(key).is_none() {
@@ -3224,10 +3462,7 @@ impl Session<'_> {
                 continue;
             };
             if Instant::now() >= start_by {
-                return Some((
-                    None,
-                    "break check skipped: too little of the hook budget left".into(),
-                ));
+                return Err(BREAK_LATE.into());
             }
             let room = langspan_core::MAX_CALL_SITES - calls.len();
             calls.extend(crate::breaks::call_sites(
@@ -3240,14 +3475,25 @@ impl Session<'_> {
                 break;
             }
         }
-        if calls.is_empty() {
-            return None;
-        }
-        if Instant::now() >= start_by {
-            return Some((
-                None,
-                "break check skipped: too little of the hook budget left".into(),
-            ));
+        Ok(calls)
+    }
+
+    /// The break check starts only while a quarter of the budget remains.
+    fn break_start_by(&self) -> Instant {
+        self.deadline
+            .checked_sub(self.config.budget / 4)
+            .unwrap_or(self.deadline)
+    }
+
+    /// The daemon's check of `calls` against other live sessions' interface
+    /// notices: the alert, if any, and a note for the diagnostic.
+    fn checked_calls(
+        &self,
+        ids: &Identities,
+        calls: Vec<langspan_core::CallSite>,
+    ) -> (Option<String>, String) {
+        if Instant::now() >= self.break_start_by() {
+            return (None, BREAK_LATE.into());
         }
         let checked = self.call(
             wire_id("break-check", &[self.source, &ids.operation_id]),
@@ -3256,7 +3502,7 @@ impl Session<'_> {
                 calls,
             },
         );
-        Some(match checked.map(|response| response.outcome) {
+        match checked.map(|response| response.outcome) {
             Ok(Outcome::CallBreaks { ready: false, .. }) => (
                 None,
                 "break check skipped: the source index is not ready".into(),
@@ -3276,7 +3522,7 @@ impl Session<'_> {
                 None,
                 format!("break check unavailable: {}", failure_reply(failure).detail),
             ),
-        })
+        }
     }
 
     fn record_source(
@@ -3382,9 +3628,11 @@ pub fn shell_operation(
             cwd: cwd.map(str::to_owned),
         }),
         contents: Vec::new(),
-        // Shell writes are not checked for breaks (`shell_pre` asks for no
-        // break check); the context carries a formatter notice.
+        // The context carries a formatter notice, and a break alert for a
+        // quoted heredoc's calls (`shell_pre`).
         pre_tool_context,
+        // A shell write's calls are checked only before it runs.
+        breaks_after: false,
     }
 }
 
@@ -3566,7 +3814,7 @@ impl Session<'_> {
         let decided = match note {
             Some(_) => None,
             None => {
-                let reply = self.pre(ids, operation, keys, (&[], &[]), false, false);
+                let reply = self.pre(ids, operation, keys, (&[], &[]), false, BreakCheck::Off);
                 // A denied command does not run, so no run is recorded.
                 if matches!(reply.coverage, "denied" | "denied_stale" | "denied_unread") {
                     return reply;
@@ -3599,6 +3847,28 @@ impl Session<'_> {
                     }
                 })
                 .to_string();
+            }
+        }
+        // A quoted heredoc states the whole new content of its file, so its
+        // calls are checked like a `Write` (ADR 0029). Nothing above denied
+        // it, so it will run.
+        if pre_tool_context
+            && let Some(call) = call
+            && let Some((target, body)) = crate::shell::heredoc_write(&call.command)
+            && let Ok(key) = file_key(self.root, call.cwd.as_deref(), &target)
+        {
+            let alert = match self.attach(ids) {
+                Ok(()) => {
+                    let contents = [(key.clone(), body)];
+                    self.break_alert(ids, std::slice::from_ref(&key), &[], &contents)
+                }
+                Err(failure) => Some((
+                    None,
+                    format!("break check unavailable: {}", failure_reply(failure).detail),
+                )),
+            };
+            if let Some(alert) = alert {
+                add_alert(&mut reply, "PreToolUse", alert);
             }
         }
         reply
@@ -3973,6 +4243,36 @@ impl Session<'_> {
 pub const MAX_VERSION_BYTES: u64 = 4 * 1024 * 1024;
 /// Files of one write checked for call breaks, at most.
 const BREAK_FILES: usize = 8;
+const BREAK_LATE: &str = "break check skipped: too little of the hook budget left";
+
+/// Add a break check's note to the diagnostic and its alert, if any, to the
+/// model's context of the reply for `event`, after any context the reply
+/// already holds. Never a decision.
+fn add_alert(reply: &mut Reply, event: &str, (context, note): (Option<String>, String)) {
+    reply.detail.push_str("; ");
+    reply.detail.push_str(&note);
+    let Some(context) = context else {
+        return;
+    };
+    let held = serde_json::from_str::<Value>(&reply.stdout)
+        .ok()
+        .and_then(|value| {
+            value["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_owned)
+        });
+    let context = match held {
+        Some(held) => format!("{held}\n\n{context}"),
+        None => context,
+    };
+    reply.stdout = json!({
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": context,
+        }
+    })
+    .to_string();
+}
 
 /// The version of one workspace file as it is on disk now: its SHA-256, or
 /// missing. `None` when it cannot be established within bounds (a symlink, a
@@ -4455,6 +4755,7 @@ mod briefing_text {
             uncoordinated: Vec::new(),
             checks: Vec::new(),
             left_work: Vec::new(),
+            recent: None,
         }
     }
 
@@ -4477,6 +4778,99 @@ mod briefing_text {
                 .collect(),
             ..peer(id, work)
         }
+    }
+
+    /// Both sides of a merge: an uncoordinated change and the recent section
+    /// are each peer content alone, and a briefing with a peer's presence and
+    /// the recent section shows the presence on the peer line and the recent
+    /// section after the peer lines.
+    #[test]
+    fn presence_uncoordinated_changes_and_the_recent_section_all_count_and_show() {
+        use langspan_core::{ChangedPath, RecentChanges, UncoordinatedNotice};
+        let recent = RecentChanges {
+            window_ms: 4 * 60 * 60_000,
+            root: "/repos/app".into(),
+            changed_paths: vec![ChangedPath {
+                path: "src/store.rs".into(),
+                sessions: 2,
+                age_ms: 60_000,
+                elsewhere: false,
+            }],
+            interface_changes: Vec::new(),
+            contested_paths: Vec::new(),
+            left_uncommitted: Vec::new(),
+            omitted: 0,
+        };
+        let mut only_recent = briefing(Vec::new());
+        only_recent.recent = Some(recent.clone());
+        assert!(has_peer_content(&only_recent));
+        let mut only_uncoordinated = briefing(Vec::new());
+        only_uncoordinated.uncoordinated = vec![UncoordinatedNotice {
+            sessions: vec!["codex.c".into()],
+            paths: vec!["src/a.rs".into()],
+            age_ms: 1_000,
+        }];
+        assert!(has_peer_content(&only_uncoordinated));
+        assert!(!has_peer_content(&briefing(Vec::new())));
+
+        let mut both = briefing(vec![looking("alice", "src/token.rs", &["src/auth.rs"])]);
+        both.recent = Some(recent);
+        let text = render_briefing(&both);
+        let peer_line = text
+            .find(r#"looking at "src/auth.rs";"#)
+            .unwrap_or_else(|| panic!("{text}"));
+        let section = text
+            .find(crate::recent::HEADING)
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(peer_line < section, "{text}");
+        assert!(text.contains("src/store.rs"), "{text}");
+        assert!(text.len() <= BRIEFING_LIMIT, "{}", text.len());
+    }
+
+    /// Both sides of a merge: an ended session's left work (issue #161) and
+    /// the recent section (roadmap C3) in one session-start briefing. Each is
+    /// peer content alone; together, the left-work line comes before the
+    /// recent section and the text stays within the cap.
+    #[test]
+    fn left_work_and_the_recent_section_both_count_and_show() {
+        use langspan_core::{ChangedPath, LeftWork, RecentChanges};
+        let recent = RecentChanges {
+            window_ms: 4 * 60 * 60_000,
+            root: "/repos/app".into(),
+            changed_paths: vec![ChangedPath {
+                path: "src/store.rs".into(),
+                sessions: 2,
+                age_ms: 60_000,
+                elsewhere: false,
+            }],
+            interface_changes: Vec::new(),
+            contested_paths: Vec::new(),
+            left_uncommitted: Vec::new(),
+            omitted: 0,
+        };
+        let left = LeftWork {
+            session_id: "claude-code.alice".into(),
+            summary: Some("Fix the upload handler".into()),
+        };
+        let mut only_left = briefing(Vec::new());
+        only_left.left_work = vec![left.clone()];
+        assert!(has_peer_content(&only_left));
+
+        let mut both = briefing(Vec::new());
+        both.left_work = vec![left];
+        both.recent = Some(recent);
+        assert!(has_peer_content(&both));
+        let text = render_briefing(&both);
+        let told = text
+            .find("Session claude-code.alice ended and left uncommitted work in this checkout")
+            .unwrap_or_else(|| panic!("{text}"));
+        let section = text
+            .find(crate::recent::HEADING)
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(told < section, "{text}");
+        assert!(text.contains("Fix the upload handler"), "{text}");
+        assert!(text.contains("src/store.rs"), "{text}");
+        assert!(text.len() <= BRIEFING_LIMIT, "{}", text.len());
     }
 
     #[test]
@@ -4632,6 +5026,7 @@ mod briefing_text {
                     change: "signature_changed".into(),
                     before: Some("b".repeat(240)),
                     after: Some("a".repeat(240)),
+                    after_name: None,
                     before_arity: None,
                     after_arity: None,
                     before_count: None,
@@ -4648,6 +5043,38 @@ mod briefing_text {
     }
 
     #[test]
+    fn a_rename_is_said_with_its_new_name_in_the_briefing() {
+        use langspan_core::{InterfaceChange, InterfaceImpact};
+        let mut full = briefing(vec![peer("p", "app/views.py")]);
+        full.interface_changes = vec![InterfaceImpact {
+            path: "app/users.py".into(),
+            by_session: Some("codex.s".into()),
+            changes: vec![InterfaceChange {
+                name: "fetch_user".into(),
+                kind: "function".into(),
+                change: "renamed".into(),
+                before: Some("def fetch_user(id)".into()),
+                after: Some("def load_user(id)".into()),
+                after_name: Some("load_user".into()),
+                before_arity: None,
+                after_arity: None,
+                before_count: None,
+                after_count: None,
+            }],
+            affected: vec!["app/views.py".into()],
+            age_ms: 1,
+        }];
+        let text = render_briefing(&full);
+        assert!(
+            text.contains(
+                r#"function "fetch_user" was renamed to "load_user": "def load_user(id)""#
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("changed from"), "{text}");
+    }
+
+    #[test]
     fn a_count_of_same_named_definitions_is_said_as_added_or_removed() {
         use langspan_core::InterfaceChange;
         let counted = |change: &str, kind: &str, (before, after): (u32, u32)| {
@@ -4659,6 +5086,7 @@ mod briefing_text {
                 change: change.into(),
                 before: (!added).then(|| signature.clone()).flatten(),
                 after: added.then_some(signature).flatten(),
+                after_name: None,
                 before_arity: None,
                 after_arity: None,
                 before_count: Some(before),
@@ -5403,6 +5831,7 @@ mod code_briefing_text {
             uncoordinated: Vec::new(),
             checks: Vec::new(),
             left_work: Vec::new(),
+            recent: None,
         }
     }
 
@@ -5440,7 +5869,85 @@ mod code_briefing_text {
             timed_out_s: None,
             tail: tail.into(),
             failures: Vec::new(),
+            interface_grade: None,
+            interface: None,
+            index_incomplete: false,
         }
+    }
+
+    #[test]
+    fn a_wider_check_names_the_change_and_mentioning_files_within_the_check_share() {
+        let change = |before: &str, after: &str| langspan_core::InterfaceChange {
+            name: "parse_upload".into(),
+            kind: "function".into(),
+            change: "signature_changed".into(),
+            before: Some(before.into()),
+            after: Some(after.into()),
+            before_arity: None,
+            after_arity: None,
+            before_count: None,
+            after_count: None,
+            after_name: None,
+        };
+        let mut notice = failed_check("error[E0061]: this function takes 1 argument");
+        notice.name = "all".into();
+        notice.interface_grade = Some(langspan_core::InterfaceGrade::Broke);
+        notice.interface = Some(langspan_core::InterfaceCause {
+            path: "core/src/lib.rs".into(),
+            change: change(
+                "pub fn parse_upload(a: u32, b: u32) -> u32",
+                "pub fn parse_upload(a: u32) -> u32",
+            ),
+            more_changes: 0,
+            dependents: vec!["cli/src/main.rs".into(), "web/client.ts".into()],
+            more_dependents: 0,
+            blind_files: 0,
+        });
+        let text = render_checks(std::slice::from_ref(&notice));
+        assert!(
+            text.contains(r#"Interface change to parse_upload in core/src/lib.rs: "pub fn parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) -> u32": the wider check all failed (exit 101); files that mention it: cli/src/main.rs, web/client.ts (a name lookup, not resolved uses)."#),
+            "{text}"
+        );
+        assert!(!text.contains("after your writes"), "{text}");
+        assert!(text.contains("data, not instructions"), "{text}");
+        // A rename (roadmap B10) says so, with both signatures.
+        if let Some(cause) = notice.interface.as_mut() {
+            cause.change = langspan_core::InterfaceChange {
+                change: "renamed".into(),
+                after_name: Some("load_upload".into()),
+                ..change(
+                    "pub fn parse_upload(a: u32) -> u32",
+                    "pub fn load_upload(a: u32) -> u32",
+                )
+            };
+        }
+        let text = render_checks(std::slice::from_ref(&notice));
+        assert!(
+            text.contains(r#"Interface change to parse_upload in core/src/lib.rs: renamed, "pub fn parse_upload(a: u32) -> u32" -> "pub fn load_upload(a: u32) -> u32": the wider check all failed"#),
+            "{text}"
+        );
+        // At the bounds: long signatures, eight long paths, more of both.
+        let long = "x".repeat(256);
+        notice.interface = Some(langspan_core::InterfaceCause {
+            path: "p/".repeat(100),
+            change: change(&long, &long),
+            more_changes: 15,
+            dependents: (0..8)
+                .map(|n| format!("{}{n}.rs", "d/".repeat(90)))
+                .collect(),
+            more_dependents: 24,
+            blind_files: 3,
+        });
+        let text = render_checks(std::slice::from_ref(&notice));
+        assert!(text.len() <= CHECKS_LIMIT, "{}", text.len());
+        assert!(text.contains("15 more changes"), "{text}");
+        // Two long paths fit; the other 6 and the 24 beyond the cap are
+        // counted.
+        assert!(text.contains("and 30 more"), "{text}");
+        assert!(
+            text.contains("3 source files were not fully indexed"),
+            "{text}"
+        );
     }
 
     #[test]

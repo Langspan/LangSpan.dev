@@ -292,6 +292,8 @@ fn left_work(state: &mut State, session: &str, left: &[&str]) -> Vec<LeftWork> {
             mid_turn: false,
             mcp: false,
             left: left.iter().map(|id| (*id).to_owned()).collect(),
+            recent: false,
+            recent_window_ms: None,
         },
         30,
     ) {
@@ -344,6 +346,8 @@ fn a_briefing_request_naming_too_many_sessions_is_refused() {
             mid_turn: false,
             mcp: false,
             left,
+            recent: false,
+            recent_window_ms: None,
         },
         "b",
         30,

@@ -188,6 +188,52 @@ fn v3_briefing_request_and_response_match_the_committed_golden_vectors() {
     assert!(serde_json::from_str::<Response>(&unknown).is_err());
 }
 
+/// What changed recently (roadmap C3): optional fields, so the earlier
+/// briefing vectors above still decode and encode unchanged.
+#[test]
+fn v3_recent_briefing_request_and_response_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/brief-recent-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::Brief {
+            recent: true,
+            recent_window_ms: Some(14_400_000),
+            mid_turn: false,
+            ..
+        }
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+    let old: Request =
+        serde_json::from_slice(include_bytes!("../fixtures/brief-request-v3.json")).unwrap();
+    assert!(matches!(
+        &old.command,
+        Command::Brief {
+            recent: false,
+            recent_window_ms: None,
+            ..
+        }
+    ));
+
+    let wire = include_bytes!("../fixtures/recent-briefing-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    let recent = briefing.recent.as_ref().unwrap();
+    assert_eq!(recent.changed_paths[0].sessions, 2);
+    assert!(recent.changed_paths[1].elsewhere);
+    assert_eq!(recent.contested_paths[0].refusals, 1);
+    assert_eq!(recent.left_uncommitted[0].paths, ["src/store.rs"]);
+    assert_eq!(recent.omitted, 3);
+    assert_eq!(encode(&response).unwrap(), wire);
+    let unknown = String::from_utf8_lossy(wire).replace(
+        r#""window_ms":14400000"#,
+        r#""window_ms":14400000,"summary":"x""#,
+    );
+    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+}
+
 #[test]
 fn v3_base_admission_and_stale_result_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/admit-base-request-v3.json");
@@ -264,6 +310,61 @@ fn v3_code_context_request_and_response_match_the_committed_golden_vectors() {
     let unknown = String::from_utf8_lossy(wire)
         .replace(r#""truncated":false"#, r#""truncated":false,"prompt":"x""#);
     assert!(serde_json::from_str::<Response>(&unknown).is_err());
+}
+
+#[test]
+fn v3_compaction_request_and_reports_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/compact-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::Compact {
+            keep_days: 90,
+            apply: true
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    // `apply` may be left out: a dry run.
+    let dry: Request = serde_json::from_str(
+        r#"{"version":3,"request_id":"read","command":{"op":"compact","keep_days":30}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        dry.command,
+        Command::Compact {
+            keep_days: 30,
+            apply: false
+        }
+    );
+
+    let wire = include_bytes!("../fixtures/compaction-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::Compaction { report } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(report.snapshot_seq, Some(812_440));
+    assert!(report.held_by.as_deref().unwrap().contains("lease-7"));
+    assert_eq!(encode(&response).unwrap(), wire);
+    let unknown =
+        String::from_utf8_lossy(wire).replace(r#""receipts":61204"#, r#""receipts":61204,"x":1"#);
+    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/remote-sent-since-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        response.outcome,
+        langspan_core::Outcome::RemoteSent {
+            since_ms: Some(1_788_134_400_000),
+            ..
+        }
+    ));
+    assert_eq!(encode(&response).unwrap(), wire);
+    // A store never compacted leaves the field out, as earlier builds did.
+    let earlier = String::from_utf8_lossy(wire).replace(r#","since_ms":1788134400000"#, "");
+    assert!(matches!(
+        serde_json::from_str::<Response>(&earlier).unwrap().outcome,
+        langspan_core::Outcome::RemoteSent { since_ms: None, .. }
+    ));
 }
 
 #[test]
@@ -522,7 +623,7 @@ fn v3_message_handoff_and_ack_requests_match_the_committed_golden_vectors() {
     assert!(matches!(
         &old.command,
         Command::Brief {
-            mid_turn: false,
+            recent_window_ms: None,
             ..
         }
     ));

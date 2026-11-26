@@ -70,6 +70,8 @@ fn brief(session: &str, deliver: bool, mid_turn: bool) -> Command {
         deliver,
         mid_turn,
         left: Vec::new(),
+        recent: false,
+        recent_window_ms: None,
         mcp: false,
     }
 }
@@ -567,6 +569,8 @@ mod headless_handoffs {
                 deliver: false,
                 mid_turn: false,
                 left: Vec::new(),
+                recent: false,
+                recent_window_ms: None,
                 mcp: false,
             },
             "look",

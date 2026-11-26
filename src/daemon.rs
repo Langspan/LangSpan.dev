@@ -80,6 +80,9 @@ mod unix {
         /// How long a workspace's sessions must stop writing before its
         /// automatic check starts, so one burst of batches runs one check.
         auto_check_debounce_ms: u64,
+        /// When set, the daemon compacts the event log once a day, keeping
+        /// this many days (ADR 0025, J7). Unset: nothing is ever deleted.
+        retention_days: Option<u32>,
         /// A failing automatic check that took at most this long is run once
         /// more on the same tree, to learn which tests flip; 0 turns it off.
         flaky_rerun_max_s: u64,
@@ -96,6 +99,9 @@ mod unix {
         /// How often the agent hosts on this machine are checked for a
         /// LangSpan install (roadmap A7). The first check is at start.
         host_check_ms: u64,
+        /// How far back a starting session's "recently in this repository"
+        /// section looks (roadmap C3), within the current daemon run.
+        recent_window_ms: u64,
     }
     impl Default for Config {
         fn default() -> Self {
@@ -105,6 +111,7 @@ mod unix {
                 max_clients: 32,
                 remote_pass_ms: 5000,
                 auto_check_debounce_ms: 2000,
+                retention_days: None,
                 flaky_rerun_max_s: 30,
                 notify: false,
                 notify_sound: false,
@@ -112,6 +119,7 @@ mod unix {
                 notify_hourly_limit: 10,
                 notify_handoff_after_ms: 600_000,
                 host_check_ms: 3_600_000,
+                recent_window_ms: langspan_core::RECENT_WINDOW_MS,
             }
         }
     }
@@ -146,9 +154,15 @@ mod unix {
                 || !(1..=60).contains(&result.notify_hourly_limit)
                 || !(1000..=86_400_000).contains(&result.notify_handoff_after_ms)
                 || !(100..=86_400_000).contains(&result.host_check_ms)
+                || !(langspan_core::MIN_RECENT_WINDOW_MS..=langspan_core::MAX_RECENT_WINDOW_MS)
+                    .contains(&result.recent_window_ms)
+                || result.retention_days.is_some_and(|days| {
+                    !(langspan_core::MIN_RETENTION_DAYS..=langspan_core::MAX_RETENTION_DAYS)
+                        .contains(&days)
+                })
             {
                 return Err(
-                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000"
+                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000, recent_window_ms 60000..86400000, retention_days 7..3650"
                         .into(),
                 );
             }
@@ -663,11 +677,19 @@ mod unix {
                 );
             }
         };
-        let breaks =
-            match langspan_core::call_breaks(store.state(), session_id, calls, &current, now) {
-                Ok(breaks) => breaks,
-                Err(e) => return error(request_id, generation, &e.code, e.message),
-            };
+        // An absent name is gone only when the index reads every file.
+        let complete = coverage.blind_in_scope == 0;
+        let breaks = match langspan_core::call_breaks(
+            store.state(),
+            session_id,
+            calls,
+            &current,
+            complete,
+            now,
+        ) {
+            Ok(breaks) => breaks,
+            Err(e) => return error(request_id, generation, &e.code, e.message),
+        };
         // Only the notices the hook's alert will show are recorded: one
         // left out for room stays to be told at a later write. The hook
         // lays the alert out with the same function.
@@ -698,6 +720,41 @@ mod unix {
         })
     }
 
+    /// How often the daemon compacts when `retention_days` is set.
+    const COMPACTION_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// `LANGSPAN_TEST_COMPACT_PAUSE_MS`, at most 10 s: how long a compaction
+    /// holds its transaction open before committing, so that a test can
+    /// kill the daemon mid-compaction. Unset in normal use.
+    fn compaction_pause() -> Option<Duration> {
+        std::env::var("LANGSPAN_TEST_COMPACT_PAUSE_MS")
+            .ok()?
+            .parse::<u64>()
+            .ok()
+            .map(|ms| Duration::from_millis(ms.min(10_000)))
+    }
+
+    /// The daily compaction. Its outcome is a log line; a failure leaves the
+    /// log as it was and is tried again the next day.
+    fn compact_daily(store: &mut Store, days: u32) {
+        let line = match store.compact(days, true) {
+            Ok(Outcome::Compaction { report }) => {
+                if report.events == 0 && report.receipts == 0 {
+                    return;
+                }
+                serde_json::json!({"level":"info","event":"compacted","report":report})
+            }
+            Ok(Outcome::Error { code, message }) => {
+                serde_json::json!({"level":"error","event":"compaction_failed","code":code,"detail":message})
+            }
+            Ok(_) => return,
+            Err(error) => {
+                serde_json::json!({"level":"error","event":"compaction_failed","detail":error.to_string()})
+            }
+        };
+        eprintln!("{line}");
+    }
+
     /// A scan of the registration the workspace had when it was asked for.
     struct ScanResult {
         of: Registration,
@@ -713,12 +770,15 @@ mod unix {
             .map_err(|error| format!("another daemon may own this state directory: {error}"))?;
         let config =
             Config::read(&directory).map_err(|e| format!("read daemon configuration: {e}"))?;
+        let _ = RECENT_WINDOW_MS.set(config.recent_window_ms);
         local::private_file(&directory.join("state.sqlite3"), true)?;
         for name in ["state.sqlite3-wal", "state.sqlite3-shm"] {
             local::check_existing_file(&directory.join(name))?;
         }
         let mut store = Store::open(&directory.join("state.sqlite3"))
             .map_err(|e| format!("open coordination store: {e}"))?;
+        store.set_compaction_pause(compaction_pause());
+        let retention_days = config.retention_days;
         let generation = store.state().generation;
         let socket = directory.join("daemon.sock");
         match fs::symlink_metadata(&socket) {
@@ -826,6 +886,9 @@ mod unix {
                 let mut last_maintenance_error: Option<String> = None;
                 let mut urgent = std::collections::VecDeque::<String>::new();
                 let mut last_scanned = std::collections::HashMap::<String, Instant>::new();
+                // The first compaction runs as the writer starts, then one a
+                // day.
+                let mut next_compaction = Instant::now();
                 loop {
                     match receiver.recv_timeout(Duration::from_millis(100)) {
                         Ok(job) => {
@@ -839,7 +902,11 @@ mod unix {
                             let check_before = auto_check_of(store.state(), &job.request.command);
                             let boundary = boundary_session(&job.request.command);
                             let response = handle(&mut store, graph_reader.as_ref(), job.request);
-                            if let Some(message) = auto_check_message(store.state(), check_before, boundary, &response) {
+                            let messages = [
+                                auto_check_message(store.state(), graph_reader.as_ref(), check_before, boundary, &response),
+                                interface_message(store.state(), graph_reader.as_ref(), &response),
+                            ];
+                            for message in messages.into_iter().flatten() {
                                 // Never waits: a full queue loses this one
                                 // trigger, and the session's next one counts.
                                 if let Err(error) = check_sender.try_send(message) {
@@ -915,6 +982,12 @@ mod unix {
                                 }
                             }
                         }
+                    }
+                    if let Some(days) = retention_days
+                        && Instant::now() >= next_compaction
+                    {
+                        next_compaction = Instant::now() + COMPACTION_EVERY;
+                        compact_daily(&mut store, days);
                     }
                     if Instant::now() >= next_liveness {
                         observe_processes(&mut store, &mut previous_session, now);
@@ -1553,6 +1626,8 @@ mod unix {
     }
     /// When this daemon started, on the same clock, for the uptime shown.
     static STARTED_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    /// The configured `recent_window_ms`, set once at start.
+    static RECENT_WINDOW_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     /// A workspace scanned less than this long ago is not moved up again.
     const URGENT_AFTER: Duration = Duration::from_secs(5);
 
@@ -1613,6 +1688,7 @@ mod unix {
     /// nothing.
     fn auto_check_message(
         state: &State,
+        graph: Option<&crate::graph::Index>,
         check_before: Option<CheckBefore>,
         boundary: Option<String>,
         response: &Response,
@@ -1637,10 +1713,65 @@ mod unix {
         );
         let workspace_id = &state.sessions.get(&session_id)?.workspace_id;
         let check = state.auto_checks.get(workspace_id).filter(|_| wrote)?;
+        let of = Registration::of(state, workspace_id)?;
+        // Read only for a check with a wider command: one bounded query of
+        // the index's own file.
+        let index_scanned = check.on_interface_change.is_some()
+            && index_coverage(graph, &of).is_some_and(|coverage| coverage.scanned);
         Some(auto_check::Message::Wrote {
             check: check.clone(),
-            of: Registration::of(state, workspace_id)?,
+            of,
             session_id,
+            index_scanned,
+        })
+    }
+
+    fn index_coverage(
+        graph: Option<&crate::graph::Index>,
+        of: &Registration,
+    ) -> Option<langspan_core::GraphCoverage> {
+        graph?
+            .with_coverage(of, |_| Ok(()))
+            .ok()
+            .map(|((), coverage)| coverage)
+    }
+
+    /// An interface notice the index just reported, for the automatic-check
+    /// worker when the workspace's check has a wider command and a session's
+    /// writes changed an export that other files mention. A replayed report
+    /// tells it nothing.
+    fn interface_message(
+        state: &State,
+        graph: Option<&crate::graph::Index>,
+        response: &Response,
+    ) -> Option<auto_check::Message> {
+        let Outcome::InterfaceObserved { notice } = &response.outcome else {
+            return None;
+        };
+        if response.replayed || notice.dependents.is_empty() {
+            return None;
+        }
+        state
+            .auto_checks
+            .get(&notice.workspace_id)?
+            .on_interface_change
+            .as_ref()?;
+        let by_session = notice.by_session.clone()?;
+        if state.sessions.get(&by_session)?.workspace_id != notice.workspace_id {
+            return None;
+        }
+        let of = Registration::of(state, &notice.workspace_id)?;
+        Some(auto_check::Message::Interface {
+            workspace_id: notice.workspace_id.clone(),
+            change: auto_check::Pending {
+                notice_id: notice.notice_id.clone(),
+                path: notice.path.clone(),
+                changes: notice.changes.clone(),
+                dependents: notice.dependents.clone(),
+                by_session,
+                blind_files: index_coverage(graph, &of)
+                    .map_or(0, |coverage| coverage.blind_in_scope),
+            },
         })
     }
 
@@ -1844,8 +1975,16 @@ mod unix {
             return error(request_id, store.state().generation, &e.code, e.message);
         }
         // Every client, not only the CLI: the command is stored as it is.
-        if let Command::AutoCheckEnable { argv, .. } = &command
-            && let Err(message) = auto_check::refuse_secrets(argv)
+        if let Command::AutoCheckEnable {
+            argv,
+            on_interface_change,
+            ..
+        } = &command
+            && let Err(message) = auto_check::refuse_secrets(argv).and_then(|()| {
+                on_interface_change
+                    .as_ref()
+                    .map_or(Ok(()), |wider| auto_check::refuse_secrets(&wider.argv))
+            })
         {
             return error(
                 request_id,
@@ -1899,7 +2038,9 @@ mod unix {
             && workspace_id.starts_with("lsh1-root-")
             && let Ok(canonical) = fs::canonicalize(root)
             && let Some(existing) = store.state().workspaces.values().find(|existing| {
-                existing.workspace_id != *workspace_id && Path::new(&existing.root) == canonical
+                existing.workspace_id != *workspace_id
+                    && (Path::new(&existing.root) == canonical
+                        || crate::observer::same_root(Path::new(&existing.root), &canonical))
             })
         {
             return Response {
@@ -2068,6 +2209,8 @@ mod unix {
 
     /// The other workspaces whose roots overlap `canonical` as distinct
     /// linked worktrees of one repository. Any other overlap is refused.
+    /// A registered root is kept as given, so it is compared both as given
+    /// and resolved: a root that is now a link to `canonical` overlaps it.
     fn verified_overlaps(
         state: &State,
         workspace_id: &str,
@@ -2076,10 +2219,14 @@ mod unix {
     ) -> Result<Vec<String>, String> {
         let mut verified = Vec::new();
         for old in state.workspaces.values() {
-            let other = Path::new(&old.root);
+            let given = Path::new(&old.root);
+            let resolved = fs::canonicalize(given).ok();
+            let overlaps =
+                |other: &Path| canonical.starts_with(other) || other.starts_with(canonical);
             if old.workspace_id != workspace_id
-                && (canonical.starts_with(other) || other.starts_with(canonical))
+                && (overlaps(given) || resolved.as_deref().is_some_and(overlaps))
             {
+                let other = resolved.as_deref().unwrap_or(given);
                 let linked = crate::git::identity(canonical, deadline)
                     .and_then(|a| crate::git::identity(other, deadline).map(|b| (a, b)))
                     .is_ok_and(|(a, b)| {
@@ -2167,12 +2314,29 @@ mod unix {
                 )));
             }
         };
+        // The old root still resolves to NEW_ROOT, as when a link was left
+        // where the checkout used to be: the same checkout, moved.
+        // With or without --switch, there is nothing else to tell apart.
+        let same = old_exists && crate::observer::same_root(old, &canonical);
         match (switch, old_exists) {
+            _ if same => {}
             (false, true) => {
+                // A link at the old root, or on the way to it, names the
+                // directory it now leads to.
+                let link = match fs::canonicalize(old) {
+                    Ok(target) if target != old => format!(
+                        ": it is reached through a symbolic link and resolves to {}, not to NEW_ROOT",
+                        target.display()
+                    ),
+                    Err(_) if old.is_symlink() => {
+                        ": it is a symbolic link whose target cannot be resolved".into()
+                    }
+                    _ => String::new(),
+                };
                 return Err((
                     "old_root_exists",
                     format!(
-                        "The old root {} still exists. To coordinate the checkout at NEW_ROOT under {workspace_id} instead, add --switch; to coordinate both, register NEW_ROOT with `langspan workspace add`. Nothing changed",
+                        "The old root {} still exists{link}. To coordinate the checkout at NEW_ROOT under {workspace_id} instead, add --switch; to coordinate both, register NEW_ROOT with `langspan workspace add`. Nothing changed",
                         old.display()
                     ),
                 ));
@@ -2239,12 +2403,8 @@ mod unix {
                 old.display()
             ))
         })?;
-        let object = format!("{head}^{{commit}}");
-        let arguments = [&SAFE[..], &["cat-file", "-e", &object]].concat();
-        let found = crate::git::run_with_env(new, &arguments, &[], deadline, 256)
-            .map_err(|error| refused(format!("cannot read NEW_ROOT's objects: {error}")))?
-            .0
-            .success();
+        let found = crate::observer::holds_commit(new, &head, deadline)
+            .map_err(|error| refused(format!("cannot read NEW_ROOT's objects: {error}")))?;
         if found {
             Ok(())
         } else {
@@ -2266,6 +2426,18 @@ mod unix {
                 if !canonical.is_dir() {
                     return Err("workspace root must be a directory".into());
                 }
+                // The registered root reached another way, such as through a
+                // link left where the checkout used to be: the same
+                // registration, kept as given.
+                if let Some(existing) = state.workspaces.get(workspace_id)
+                    && crate::observer::same_root(Path::new(&existing.root), &canonical)
+                {
+                    return Ok(Command::WorkspaceRegisterVerified {
+                        workspace_id: workspace_id.clone(),
+                        root: existing.root.clone(),
+                        verified_overlaps: existing.verified_overlaps.clone(),
+                    });
+                }
                 let deadline = Instant::now() + Duration::from_millis(250);
                 let verified_overlaps =
                     verified_overlaps(state, workspace_id, &canonical, deadline)?;
@@ -2278,6 +2450,27 @@ mod unix {
                     verified_overlaps,
                 })
             }
+            // The window is the daemon's configuration, whatever a client
+            // sent (roadmap C3).
+            Command::Brief {
+                session_id,
+                max_peers,
+                deliver,
+                mid_turn,
+                left,
+                recent: true,
+                mcp,
+                ..
+            } => Ok(Command::Brief {
+                session_id: session_id.clone(),
+                max_peers: *max_peers,
+                deliver: *deliver,
+                mid_turn: *mid_turn,
+                left: left.clone(),
+                recent: true,
+                recent_window_ms: RECENT_WINDOW_MS.get().copied(),
+                mcp: *mcp,
+            }),
             Command::IntentSet {
                 session_id,
                 paths,
@@ -2465,18 +2658,46 @@ mod unix {
             return Err("session workspace is missing".into());
         };
         let root = Path::new(&workspace.root);
+        // A root reached through a link is the checkout the link leads to,
+        // unless the scan found that to be another repository.
         let current_root = fs::canonicalize(root)?;
-        if current_root != root {
+        if current_root != root
+            && state
+                .scan_failures
+                .get(&session.workspace_id)
+                .is_some_and(|failure| failure.detail == crate::store::IDENTITY_CHANGED)
+        {
             return Err("workspace root identity changed; use a new workspace registration".into());
+        }
+        // Other registered roots, resolved like this one, so a root behind
+        // a link still bounds its own files. A root that no longer resolves
+        // keeps its stored form.
+        let others: Vec<std::path::PathBuf> = state
+            .workspaces
+            .iter()
+            .filter(|(id, _)| **id != session.workspace_id)
+            .map(|(_, workspace)| {
+                let stored = Path::new(&workspace.root);
+                fs::canonicalize(stored).unwrap_or_else(|_| stored.to_path_buf())
+            })
+            .collect();
+        // Another workspace ID that now resolves to this very root, as when
+        // a registered clone's root was replaced by a link to another
+        // registered clone: both would admit the same physical files while
+        // the core keeps their leases apart, so neither admits any.
+        if others.contains(&current_root) {
+            return Err("workspace root now resolves to another registered workspace's root; move or remove one of them".into());
         }
         let mut keys = paths
             .iter()
             .map(|path| -> Result<String, crate::Error> {
-                let key = file_key(root, path)?;
-                let full = root.join(&key);
-                if state.workspaces.values().any(|workspace| {
-                    let descendant = Path::new(&workspace.root);
-                    descendant != root && descendant.starts_with(root) && full.starts_with(descendant)
+                // Resolved paths are compared with the resolved root.
+                let key = file_key(&current_root, path)?;
+                let full = current_root.join(&key);
+                if others.iter().any(|descendant| {
+                    *descendant != current_root
+                        && descendant.starts_with(&current_root)
+                        && full.starts_with(descendant)
                 }) {
                     return Err("file belongs to a registered descendant workspace; attach that physical root separately".into());
                 }

@@ -77,6 +77,7 @@ impl Fixture {
         let mut fixture = Self { base, daemon: None };
         fixture.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(fixture.state_dir())
                 .stdout(Stdio::null())
@@ -103,6 +104,7 @@ impl Fixture {
 
     fn hook(&self, vendor: &str, event: &Value) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", vendor, "--state-dir"])
             .arg(self.state_dir())
             .args(["--workspace", "demo", "--root"])
@@ -389,6 +391,7 @@ fn project_hooks_install_once_run_as_installed_and_remove_exactly() {
         .as_str()
         .unwrap();
     let mut child = Process::new("/bin/sh")
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["-c", command])
         .current_dir(f.work())
         .stdin(Stdio::piped())
@@ -426,6 +429,7 @@ fn a_hook_that_cannot_start_still_answers_gemini_with_an_empty_object() {
     // A bad option fails before any event is read. Gemini would otherwise
     // parse the stderr text as the answer.
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["hook", "gemini-cli", "--ttl-ms", "not-a-number"])
         .stdin(Stdio::null())
         .output()

@@ -8,6 +8,44 @@ Examples below use the binary built from the LangSpan repository root.
 If you installed a release binary on your PATH, replace
 `./target/release/langspan` with `langspan`.
 
+## Set up in one command
+
+With `langspan` on your PATH (a [release](#install-a-release) or a [source
+build](#build-from-source)), run:
+
+```sh
+langspan setup
+```
+
+Setup prints one plan and asks once, `Set this up? [Y/n]`:
+
+- the state directory;
+- the files `langspan install --skill` changes for each host whose
+  configuration directory exists: user-level hooks, the MCP entry and the
+  [LangSpan skill](#the-langspan-skill);
+- the coordinator's login service, shown in full: on macOS a LaunchAgent,
+  `~/Library/LaunchAgents/dev.langspan.coordinator.plist`; on Linux a
+  `systemd --user` unit, `~/.config/systemd/user/langspan.service` (under
+  `XDG_CONFIG_HOME` when set).
+
+It then applies the install, starts the service so the coordinator runs at
+every login and restarts after a failure, and runs `langspan doctor`. The
+service runs `langspan daemon --state-dir DIR` and appends its output to
+`daemon.log` in the state directory. On Linux without a user manager, setup
+installs no service, says so, and starts the coordinator in the background
+instead.
+
+`--yes` applies the plan without asking, for scripts. Without a terminal and
+without `--yes`, setup prints the plan and changes nothing. A second run
+changes nothing and prints `Already set up; nothing to change.` Close Claude
+Code first, as for [`install --apply`](#all-repositories-for-this-user).
+`--hosts`, `--home` and `--state-dir` work as they do for `install`; with
+`--home`, setup installs no login service. `langspan uninstall --apply` stops
+and removes the service with everything else.
+
+An install script and a Homebrew formula that run `langspan setup` for you
+are not published yet ([ADR 0035](adr/0035-one-command-setup.md)).
+
 ## Install a release
 
 [v0.1.0](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0) provides
@@ -43,7 +81,26 @@ and macOS arm64. Process probing is Linux-only; Windows transport is not impleme
 
 ## Start the coordinator
 
-In one terminal, from the LangSpan repository root:
+`langspan setup` installs the coordinator as a login service. Without it, a
+hook or `langspan mcp` that finds no coordinator for its state directory
+starts `langspan daemon` in the background, so even a source build needs no
+terminal kept open. It does so only when no login service of LangSpan's names
+that state directory, never starts a second coordinator for it, spends at
+most half of the hook's remaining budget, and logs the start to the hook's
+stderr and to `daemon.log` in the state directory. Set
+`LANGSPAN_AUTOSTART=off` to turn this off. The coordinator started this way
+keeps only the environment it needs (`HOME`, `PATH`, the locale, `XDG_*`, the
+host configuration directories `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
+`GEMINI_CLI_HOME`, the SSH agent socket and the desktop session variables),
+not a host's API keys. A relative host configuration directory is made
+absolute against the caller's working directory, since the coordinator runs
+in `/`. The login service sets `PATH` to the one setup ran
+with, so automatic checks find the same tools, and keeps any of
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME` set then, so its host
+checks read the directories setup installed into.
+[ADR 0035](adr/0035-one-command-setup.md) records the details.
+
+To run it in the foreground instead, from the LangSpan repository root:
 
 ```sh
 ./target/release/langspan daemon
@@ -60,8 +117,8 @@ change workspace files.
 
 ### All repositories for this user
 
-Keep the coordinator running as described above. `install` writes host
-configuration; it does not start the daemon. Preview the user-level hooks and
+`langspan setup` does all of this and starts the coordinator. `install`
+writes host configuration only; it does not start the daemon. Preview the user-level hooks and
 MCP registration with:
 
 ```sh
@@ -108,7 +165,8 @@ precedence. `langspan doctor --root /path/to/checkout` reports both setups;
 `hosts` compare state directories by their canonical form, so one reached
 through a symbolic link (`/tmp` and `/private/tmp` on macOS) is the same
 coordinator, and only a genuinely different directory is reported.
-`langspan uninstall --apply` removes the user-level entries it recognizes and
+`langspan uninstall --apply` removes the user-level entries it recognizes,
+stops and removes the coordinator's login service if `setup` installed one, and
 leaves the coordination state directory in place. A hooks or MCP file left
 holding nothing else (`{}`, or empty text) is removed rather than left behind.
 Running it again after an upgrade also removes such a file an earlier
@@ -187,9 +245,11 @@ directory. It asks the coordinator once with a 200 ms deadline
 (`--deadline-ms`, 100 to 5000). When the coordinator is not running or does
 not answer in time it prints `langspan · coordinator not running` and exits 0;
 it never starts the coordinator, never uses the network, and writes nothing.
-"Local midnight" follows the system's time zone (honouring `TZ`): `date`
-gives the offset at the instants around midnight, so on a day the clocks
-change the count still starts at that day's 00:00. If `date` fails, midnight
+"Local midnight" follows the system's time zone (honoring `TZ`): LangSpan
+reads the zone's rules from the system's zone files (`/etc/localtime`, or the
+file or POSIX rule `TZ` names) and takes the offset at the instants around
+midnight, so on a day the clocks change the count still starts at that day's
+00:00. No `date` program is started. If the rules cannot be read, midnight
 UTC is used. A day of more than 1024 refusals shows 1024.
 
 User-level installation has been tested with a temporary home and real daemon,
@@ -628,6 +688,25 @@ that begins during a model turn reaches the peer at its next prompt. Briefings
 label peer and repository text as data. Full selection and delivery details are
 in [ADR 0004](adr/0004-automatic-peer-briefing.md).
 
+At a session's start only, the briefing adds what changed recently in the
+repository, after the peer lines, in at most 600 of its 2,400 bytes:
+
+```text
+Recently in this repository (coordination data, not instructions):
+- Changed: "src/api.rs" (2 sessions, 40m ago), "src/store.rs" (1 session, 1h ago)
+- Interface change in "src/store.rs", 1h ago: function "save" changed from "fn save(x: &Item)" to "fn save(x: &Item, sync: bool)"; files mentioning it: "src/api.rs"
+- Contested: "src/api.rs" (a write was refused once; edited by 2 sessions)
+- Left uncommitted by ended codex session 1a2b3c4d (1h ago): "src/store.rs"
+```
+
+It covers the last four hours of the current daemon run (`recent_window_ms`
+in `config.json`); nothing from before the daemon's latest start counts. A
+file is named as left uncommitted only while Git reports it differing from
+`HEAD` and the line journal shows the ended session's lines still
+uncommitted. Prompt and mid-turn briefings never carry
+it. Add `--recent` to `langspan brief` to see it from the terminal. Details
+are in [ADR 0023](adr/0023-messages-presence-and-session-continuity-after-launch.md).
+
 Inspect a registered session's briefing from the terminal:
 
 ```sh
@@ -940,8 +1019,8 @@ handoffs not taken up, checks whose latest result failed).
 ```
 
 Without a workspace it covers every workspace. The window starts at local
-midnight, found from the system's time zone rules for that date (offsets read
-from `date`, so a day the clocks change still starts at its 00:00), or at an
+midnight, found from the system's time zone rules for that date (read from the
+system's zone files, so a day the clocks change still starts at its 00:00), or at an
 RFC 3339 `--since` time;
 a time before the first event covers everything. Times in the text are shown
 at the current local offset, so on a day the clocks change, times before the
@@ -960,9 +1039,60 @@ that places that run's times on the wall clock; events recorded by a build
 before this one have no such anchor and are counted only as `undated`. A
 landing is placed at the time it took its turn to land. A
 window with more than 50,000 events is summarised from the newest 50,000 and
-says `truncated: true`; when the oldest of those carries no time of its own,
+says `truncated: true`, as does a window that reaches before events retention
+removed; when the oldest of those carries no time of its own,
 the first that does decides whether the window may reach past them. With the
 daemon down it exits 1 with "coordination unavailable".
+
+The text also carries one line with this month's refusal count (below); the
+JSON and the MCP answer do not, so nothing of it reaches a model.
+
+## Refusals this month
+
+`count` says how often LangSpan refused a write or a commit in one local
+month. It says what LangSpan did, never what it is assumed to have saved, and
+every answer carries the line "A refusal is not proof of avoided rework."
+
+```text
+$ ./target/release/langspan count --month 2027-03
+March 2027: 17 refusals (9 conflict, 5 stale_base, 2 unread_lines, 1 commit_held)
+By workspace: app 12, web 5
+Retried and let through: 3 (the same session was admitted on the same files afterwards).
+6 repeat(s) of a refusal by the same session, kind and files on the same day are not counted again.
+A refusal is not proof of avoided rework.
+```
+
+Without `--month YYYY-MM` it counts the current local month. Months and days
+are local: each day starts at its own local midnight, found from the system's
+time zone rules for that date as `today` does, so a refusal at 02:30 UTC on
+1 April is April in UTC and March in New York. Refusals are the
+`write_refused` events of every workspace on this machine, read at query time;
+nothing is stored for the count. A refusal is counted once per session,
+workspace, kind and path set per local day, so a session refused again and
+again for the same edit is one refusal; the others are reported as `repeats`.
+`retried_through` counts refusals whose session was later admitted on the
+same files, among its next 16 admissions after its last repeat; a held commit
+has no admission and is never counted there.
+
+`--json` prints `month`, `from_ms` and `to_ms` (the window, Unix
+milliseconds), `refusals`, `by_kind` (`conflict`, `stale_base`,
+`unread_lines`, `commit_held`, which add up to `refusals`), `by_workspace`
+(at most 64, the rest in `omitted_workspaces`), `retried_through`, `repeats`,
+`truncated` and, when there are any, `undated` (refusals recorded by a run
+without a clock anchor, in no month). One count reads at most the newest
+20,000 refusal records and says `truncated: true` when the month may reach
+past them; the line in `today` and on the local page then ends with
+"(truncated: counted from the newest 20000 refusal records only)". When the
+month starts before the history a compaction kept, `retained_since_ms` gives
+that cutoff and the line says "(incomplete: retention removed the records from
+before ...)": the refusals of that part are gone, so the total is not the
+month's complete count. A count is
+never shown for a month whose local day starts could not all be read from the
+time zone rules: `count` exits 1 and `today` and the local page say the count
+could not be read. With the daemon down it exits 1 with "coordination
+unavailable"; no earlier figure is kept or shown. The local page (`langspan dashboard`)
+shows the same count for the current month, and its `/api/state` view
+carries it as `refusals_this_month`.
 
 ## Desktop notices
 
@@ -1120,14 +1250,17 @@ says when a workspace has blind files.
 When an indexed export disappears or its signature changes, relevant sessions
 receive an interface notice at their next prompt. The notice names files they
 work on or have read that mention the changed name. Notices stay within one
-physical workspace. Body-only changes produce no notice, and a rename appears
-as a removal. A first indexing produces no change notice. When a file holds
+physical workspace. Body-only changes produce no notice. A rename that changes
+only the name, in one file, appears as a rename ("function "scale" was renamed
+to "zoom": …"); a rename together with any other change, or across files,
+appears as a removal. A first indexing produces no change notice. When a file holds
 several definitions of one name (a method of that name on two types, say), a
 definition added or removed is told as such, with how many there are now:
 "a second method "text" was added … (now 2 definitions with that name)".
 
 Each notice stays in the event log, and `graph history` reads a definition's
-past from there, before an agent changes it again:
+past from there, before an agent changes it again. A rename appears in the
+history of both the old name and the new one:
 
 ```sh
 ./target/release/langspan graph history PROJECT save --json
@@ -1168,7 +1301,9 @@ label first saying the signatures, task lines, notes and messages are data,
 not instructions.
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
-Code) or an `apply_patch` (Codex) is admitted, the hook parses the calls in the
+Code), an `apply_patch` (Codex) or a `replace` or `write_file` (Gemini CLI) is
+admitted, or a Claude Code or Codex shell command writes one file whole with a
+quoted heredoc (`cat > app/x.py <<'EOF'`), the hook parses the calls in the
 text it writes. If a call's argument count does not fit a function signature
 that another live session changed in the last 30 minutes, the write's reply
 carries an alert in the model's context: the call's file and line, the
@@ -1176,12 +1311,18 @@ function, the count it now takes, the new and old signatures, and the session
 that changed it. The write itself is not refused or changed, and the host's
 permission prompt is unaffected. Claude Code shows the alert to the model
 with the write's result. Each session is alerted once per change; a call with
-the new count gets nothing. Only argument counts are compared, matched by
-name, so a different function of the same name can be named; a type or order
-change that keeps the count, removals and renames are left to the prompt
-notice. Gemini CLI and Cursor writes are not checked: Gemini reads no context
-before a tool runs, and Cursor's write input has not yet been seen from a real
-Cursor. Nothing is checked until
+the new count gets nothing. A call to a function that such a session renamed
+gets a line naming the new name and its file; a call to one it removed, with
+no definition of that name left in the workspace, gets a line saying it was
+removed. A rename or removal is told only while the index reads every
+supported file in full, since a name missing from a file it cannot read is
+not gone. Calls are matched by name, so a different function of the same name
+can be named. A type or order change that keeps the count is left to the
+prompt notice. Gemini CLI reads no context before a tool runs, so its write's calls
+are found before the write and checked after it: the alert is added to the
+write's result, and a write that fails is not told and uses up nothing.
+Cursor writes are not checked until a real Cursor's `Write` input has been
+captured into the repository. Nothing is checked until
 the index has a complete scan of the workspace, and the hook's diagnostic
 says so. [ADR 0029](adr/0029-break-alerts-at-write-time.md) has the rules.
 
@@ -1297,6 +1438,45 @@ the daemon's environment, outside the agent host's sandbox and permission
 prompts: code an agent writes runs without the host asking. A command that
 looks like it holds a secret is refused; pass secrets through the environment.
 See [ADR 0030](adr/0030-automatic-checks-after-write-batches.md).
+
+#### The wider check after an interface change
+
+A fast check often builds only the package a session changed, so a broken
+caller in another package shows up later, in someone else's work. Give the
+automatic check a second, wider command:
+
+```sh
+langspan check auto WORKSPACE --name fast -- cargo test -p core \
+  --on-interface-change all --timeout-s 1800 -- cargo test --workspace
+```
+
+The first `--timeout-s` (before the first `--`) is the regular command's; the
+one after `--on-interface-change NAME` is the wider command's (default 1800 s).
+Both commands are refused if they look like they hold a secret.
+
+When the source index reports that a session's writes changed an exported
+name that other files mention (an interface notice), the wider command runs
+after the regular one finishes, on the same tree, with the same rules: no
+shell, its own process group, cancelled and restarted with the regular
+command when a session writes again and the tree changes. LangSpan runs the
+owner's whole command and never adds paths to it, so a dependency the index
+misses still gets tested. A body-only change produces no notice and runs only
+the regular command. A change no other file mentions runs nothing extra.
+
+The wider result is an ordinary check record under its own name, graded
+`kept` when it passed and `broke` when it failed. The session that made the
+change, and any session working on or having read a mentioning file, are told
+at their next briefing:
+
+```text
+LangSpan: the automatic check ran its wider command. Interface change to parse_upload in core/src/lib.rs: "pub fn parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) -> u32": the wider check all failed (exit 101); files that mention it: cli/src/main.rs (a name lookup, not resolved uses). On working tree ...
+```
+
+The mentioning files come from the index's name lookup. The line shows at
+most 8 of them and counts the rest; a session working on any of them, shown
+or not, is told. The line also says how many source files the index could not read in full. If the
+index has no complete scan of the workspace, no interface change can be found:
+the regular result says so and the wider command does not run.
 
 #### Tests that flip on unchanged code
 
@@ -1637,6 +1817,27 @@ which check failed: `not_checkout_top`, `old_root_exists`,
 `workspace_conflict` (NEW_ROOT
 is registered already or overlaps another workspace).
 
+A checkout reached through a symbolic link is the same checkout. LangSpan
+compares a registered root with the root Git reports by resolving links and
+checking that both name the same directory (same device and inode). If you
+move a checkout and leave a link at its old path, the workspace keeps
+scanning, and sessions started through the link join it, under the
+registered path. A link to a checkout of another repository (one without the
+commit the last scan saw) stops the scan with `Git identity changed`.
+`workspace move ID NEW_ROOT` to the link's target succeeds
+without `--switch` and records NEW_ROOT. When the old root is a link to a
+different directory, the `old_root_exists` refusal names the directory it
+leads to; use `--switch` only if that is another checkout you mean to leave.
+The checkout a registered link leads to cannot be registered, or receive a
+moved workspace, under another ID. Its linked worktrees still can, at their
+resolved paths: register a new one under the checkout's new place, or move
+one registered under the old root to its resolved path. While the workspace
+at the link holds an admission, such a registration is refused with
+`workspace_in_use`; complete the admission or wait for it to expire.
+If a registered root becomes a link to another registered workspace's
+checkout, both workspaces refuse admission until you move or remove one of
+them.
+
 User-level hooks need nothing: an event from NEW_ROOT joins the moved ID.
 Project-level hooks name their root in the host's configuration, which the
 command does not edit; it prints the `hooks install` commands to rerun for the
@@ -1673,8 +1874,13 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol and SQLite schema marker are version 3. Upgrade the
-daemon and clients together. Earlier persisted records remain readable.
+The current wire protocol is version 3 and the SQLite schema marker version 4
+(retention). Upgrade the daemon and clients together. Earlier persisted
+records remain readable; a build older than the marker refuses the file.
+
+Receipts are kept until [retention](#retention) removes them, at the
+earliest 7 days after they were recorded; a retry after that is a new
+request.
 
 A daemon restart advances the generation and invalidates outstanding grants.
 Sessions and intents remain visible as stale. Reattach with a new registration
@@ -1709,19 +1915,24 @@ Optional `config.json` in the state directory must be owner-only (`0600`):
 ```json
 {"io_timeout_ms":2000,"request_timeout_ms":5000,"max_clients":32,"auto_check_debounce_ms":2000,
  "flaky_rerun_max_s":30,"host_check_ms":3600000,"notify":false,"notify_sound":false,
- "notify_kind_interval_ms":300000,"notify_hourly_limit":10,"notify_handoff_after_ms":600000}
+ "notify_kind_interval_ms":300000,"notify_hourly_limit":10,"notify_handoff_after_ms":600000,
+ "recent_window_ms":14400000}
 ```
 
 Timeout values accept 100–5000 ms; client count accepts 1–128;
 `auto_check_debounce_ms` accepts 50–60000; `flaky_rerun_max_s` accepts
 0–3600 (0: a failing automatic check is never run again); `host_check_ms`,
 how often the coordinator looks for agent hosts with no LangSpan install,
-accepts 100–86400000. For [desktop notices](#desktop-notices),
+accepts 100–86400000; `recent_window_ms`, how far back a starting session's
+"Recently in this repository" section looks, accepts 60000–86400000 and is
+read when the coordinator starts; `retention_days` (unset by default) accepts
+7–3650 and is described under [Retention](#retention). For [desktop notices](#desktop-notices),
 `notify_kind_interval_ms` and `notify_handoff_after_ms` accept 1000–86400000
 and `notify_hourly_limit` 1–60; `notify`, `notify_sound` and the two notice
 limits are read again at each notice, `notify_handoff_after_ms` when the
 coordinator starts. A build before notices refuses to start with a
-`config.json` that has these keys. IPC and MCP frames
+`config.json` that has these keys, and a build before C3 one with
+`recent_window_ms`. IPC and MCP frames
 are limited to 64 KiB. The MCP SDK discards oversized input lines without replying
 to that line. An MCP tool result carries each answer twice, as structured
 content and as JSON text that escapes every quotation mark and backslash
@@ -1746,10 +1957,47 @@ and ending in `[redacted]`, so a summary within its limit is never refused
 because it held a secret.
 Canonical path checks reject escapes, special files, and observed hard links.
 
-Events and receipts do not yet have a retention policy. History is read in
-bounded pages; large status snapshots remain subject to the IPC response limit.
-Git observation also has explicit file, byte, branch, and deadline bounds; an
-incomplete scan does not become a complete snapshot. See
-[implementation status](IMPLEMENTATION_STATUS.md) and the
+History is read in bounded pages; large status snapshots remain subject to
+the IPC response limit. Git observation also has explicit file, byte, branch,
+and deadline bounds; an incomplete scan does not become a complete snapshot.
+See [implementation status](IMPLEMENTATION_STATUS.md) and the
 [threat model](security/threat-model.md) for current coverage,
 platform limits, and the cooperative boundary.
+
+### Retention
+
+Events and receipts are kept until they are compacted
+([ADR 0025](adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md)).
+Nothing is ever deleted unless you run `langspan compact --apply` or set
+`retention_days`. For example (the numbers are illustrative):
+
+```text
+$ langspan compact --keep-days 90
+would delete 812,440 events (seq 1..812440, before 2026-08-27T09:00:00Z) and 61,204 receipts
+snapshot at seq 812440; about 410 MiB freed
+dry run: add --apply to compact
+```
+
+`compact` (default 90 days, 7–3650) is a dry run: it deletes nothing and
+reports what would go. With `--apply` the daemon writes the state those
+events built into a snapshot and, in the same transaction, deletes the
+events and receipts recorded before the window. It starts from the newest
+snapshot and replays only the events after it. With `retention_days` in
+`config.json` the daemon does the same when it starts and then once a day,
+logging a `compacted` line.
+
+- The snapshot is checked first: read back, with the later events applied, it
+  must give the state the daemon holds, or the compaction stops with
+  `snapshot_mismatch` and deletes nothing.
+- It stops before anything still open: an admission, a push turn, a waiting
+  landing or an unacknowledged message. The report says which (`held_by`).
+- A retry whose receipt was removed is answered as a new request.
+- The daemon start that dates the oldest event left is kept, so `today` can
+  still place every remaining event on a day.
+- `remote sent` lists every publication within the window and says from which
+  date it is complete.
+- Ages are wall-clock times recorded with each event and receipt; records
+  from before this version count from the upgrade.
+- The freed space is reused by SQLite; the file does not shrink.
+- The daemon does nothing else while it compacts: about 0.6 s for 500,000
+  small events on one laptop (see the ADR).

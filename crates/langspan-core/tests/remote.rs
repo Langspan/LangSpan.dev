@@ -173,6 +173,8 @@ fn briefed(state: &mut State, id: &str, now: u64) -> langspan_core::Briefing {
             deliver: true,
             mid_turn: false,
             left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         now,

@@ -87,6 +87,7 @@ impl Fixture {
     fn start_daemon(&mut self) {
         self.child = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.base.join("state"))
                 .stdout(Stdio::null())
@@ -124,6 +125,7 @@ impl Fixture {
     /// `name`, with the same state directory and daemon as every other.
     fn run_in(&self, name: &str, vendor: &str, event: Value) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", vendor, "--state-dir"])
             .arg(self.base.join("state"))
             .args(["--workspace", name, "--root"])
@@ -190,6 +192,7 @@ impl Fixture {
 
     fn shell_in(&self, name: &str, command: &str) {
         let status = Process::new("/bin/sh")
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["-c", command])
             .current_dir(self.base.join(name))
             .stdout(Stdio::null())
@@ -611,6 +614,7 @@ fn a_subagents_shell_write_is_its_own_sessions_not_its_parents() {
 /// The attributed paths of `session` recorded so far, from the event log.
 fn credited(f: &Fixture, session: &str) -> Vec<String> {
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .arg("--state-dir")
         .arg(f.base.join("state"))
         .args(["events", "--limit", "1000", "--json"])
