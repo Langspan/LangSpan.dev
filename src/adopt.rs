@@ -111,23 +111,29 @@ pub fn adopt(
         },
     };
     let response = crate::client::call_until(state_dir, &request, deadline)?;
-    let (adoption, root, recorded, live) = match response.outcome {
+    let (adoption, root, recorded, live, earlier) = match response.outcome {
         Outcome::Adopted {
             adoption,
             root,
             recorded,
             live,
-        } => (adoption, root, recorded, live),
+            earlier,
+        } => (adoption, root, recorded, live, earlier),
         Outcome::Error { code, message } => return Err(format!("{code}: {message}").into()),
         other => return Err(format!("the coordinator answered {other:?}").into()),
     };
-    let moved = journal::reassign(state_dir, &PathBuf::from(&root), from, &live, session_id).map_err(
-        |error| {
-            format!(
-                "the adoption is recorded, but its lines could not all be credited ({error}); run `langspan adopt {from}` again"
-            )
-        },
-    )?;
+    // Lines an earlier adopter never credited are still under the session
+    // it adopted: credit those as well.
+    let mut moved = BTreeSet::new();
+    for source in std::iter::once(from).chain(earlier.iter().map(String::as_str)) {
+        let paths = journal::reassign(state_dir, &PathBuf::from(&root), source, &live, session_id)
+            .map_err(|error| {
+                format!(
+                    "the adoption is recorded, but its lines could not all be credited ({error}); run `langspan adopt {from}` again"
+                )
+            })?;
+        moved.extend(paths);
+    }
     Ok(AdoptReport {
         result: if recorded {
             "adopted"

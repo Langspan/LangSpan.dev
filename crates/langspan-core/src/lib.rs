@@ -3631,13 +3631,17 @@ pub enum Outcome {
     /// nothing new was recorded, and the adapter may finish crediting the
     /// lines. `root` is the workspace's, whose line journal holds them.
     /// `live` names `from`'s subagents that have not ended: their lines
-    /// (and their own subagents') stay theirs.
+    /// (and their own subagents') stay theirs. `earlier` names the sessions
+    /// whose adoptions lead to `from`: an adopter that ended before its
+    /// lines were credited left them there, and they are credited too.
     Adopted {
         adoption: Adoption,
         root: String,
         recorded: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         live: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        earlier: Vec<String>,
     },
     SessionStopped {
         session_id: String,
@@ -8138,6 +8142,34 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
             "That session has not ended: LangSpan has neither its end nor its process's exit. Ask it to commit its own work, or adopt once it has ended",
         ));
     }
+    // An adopter that ended after its adoption was recorded, before its
+    // adapter credited the lines, leaves them under the session it adopted;
+    // that session cannot be adopted again. Passing the adoption on credits
+    // them too: every session whose adoptions lead to `from`.
+    let mut earlier: Vec<String> = Vec::new();
+    let mut pending = vec![from.to_owned()];
+    while let Some(adopter) = pending.pop() {
+        for adoption in state.adoptions.values() {
+            if adoption.session_id != adopter
+                || adoption.workspace_id != me.workspace_id
+                || adoption.from == from
+                || earlier.contains(&adoption.from)
+            {
+                continue;
+            }
+            if earlier.len() >= MAX_LEFT {
+                return Err(error(
+                    "adoption_chain",
+                    &format!(
+                        "More than {MAX_LEFT} earlier adoptions lead to that session; commit part of the work, then adopt again"
+                    ),
+                ));
+            }
+            earlier.push(adoption.from.clone());
+            pending.push(adoption.from.clone());
+        }
+    }
+    earlier.sort();
     // Ending a session does not end its subagents: one still running keeps
     // its lines.
     let live: Vec<String> = state
@@ -8145,11 +8177,15 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
         .values()
         .filter(|session| {
             session.workspace_id == me.workspace_id
-                && (session.parent.as_deref() == Some(from)
-                    || session
-                        .session_id
-                        .strip_prefix(from)
-                        .is_some_and(|rest| rest.starts_with('.')))
+                && std::iter::once(from)
+                    .chain(earlier.iter().map(String::as_str))
+                    .any(|source| {
+                        session.parent.as_deref() == Some(source)
+                            || session
+                                .session_id
+                                .strip_prefix(source)
+                                .is_some_and(|rest| rest.starts_with('.'))
+                    })
                 && !finished(state, &session.session_id)
         })
         .map(|session| session.session_id.clone())
@@ -8184,6 +8220,7 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
                 root,
                 recorded: false,
                 live,
+                earlier,
             },
         });
     }
@@ -8204,6 +8241,7 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
             root,
             recorded: true,
             live,
+            earlier,
         },
     })
 }

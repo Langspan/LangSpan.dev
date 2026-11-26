@@ -630,12 +630,14 @@ impl Store {
                     adoption,
                     root,
                     live,
+                    earlier,
                     ..
                 } if decision.events.is_empty() => Outcome::Adopted {
                     adoption,
                     root,
                     recorded,
                     live,
+                    earlier,
                 },
                 refused @ Outcome::Error { .. } => refused,
                 _ => Outcome::Error {

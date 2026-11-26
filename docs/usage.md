@@ -1319,7 +1319,12 @@ another session already adopted (`already_adopted`). Running it again is safe:
 the coordinator answers `already_adopted` with nothing new recorded, and any
 lines still credited to the ended session are credited then. A retry with the
 same `--request-id` is checked again too: if the ended session has resumed
-since, the retry is refused with `session_live` and credits none of its lines. The reason shown
+since, the retry is refused with `session_live` and credits none of its lines.
+An adopter that ends after its adoption is recorded, but before its lines are
+credited, leaves them under the session it adopted. Adopting that adopter
+credits them as well: the coordinator names every session whose adoptions
+lead to it (`earlier` in the coordinator's answer), and their lines move with
+its own, except those of subagents that have not ended. The reason shown
 is a message the ended session sent the adopter (addressed to it, or a
 handoff it took) or a `Task:` line both share; neither is required, so the
 person or agent decides. The adopting session is found as for

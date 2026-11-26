@@ -115,6 +115,12 @@ explicitly:
   nothing left to move. The journal stays the one record of who wrote which
   line; the event records the transfer. A replay after a restart gives the
   same adoption, and the journal on disk already holds the new owner.
+- An adopter that ends after its adoption is recorded, but before the
+  adapter credits the lines, leaves them under the session it adopted, which
+  cannot be adopted again. So the answer also names `earlier`: every
+  session whose adoptions lead to `from`, of the same workspace, at most 64
+  (`adoption_chain` refuses more). The adapter credits their entries too,
+  and `live` covers their subagents as well.
 - Entries are rewritten whole, so a line both `from` and a third session
   wrote is the adopter's and that session's: a `mixed` file stays mixed, and
   the third session's lines stay its own.

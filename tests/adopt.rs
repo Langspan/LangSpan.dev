@@ -603,3 +603,50 @@ fn adopting_an_ended_session_leaves_its_live_subagents_lines_with_the_subagent()
         vec![pair("a.txt", "mine")]
     );
 }
+
+/// An adopter that ends after the coordinator records its adoption but
+/// before the line journal is rewritten leaves the original session's lines
+/// under that session. Adopting the adopter credits them too, so the
+/// successor's `commit --mine` takes all of the work (review of #176).
+#[test]
+fn adopting_an_adopter_that_ended_mid_transfer_credits_the_original_sessions_lines() {
+    let f = Fixture::new();
+    f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
+    f.lifecycle(ALICE, "SessionEnd", None);
+    f.lifecycle(BOB, "SessionStart", None);
+    // Bob's adoption is recorded, then Bob ends before crediting the lines.
+    let request = langspan::protocol::Request {
+        version: langspan::protocol::PROTOCOL_VERSION,
+        request_id: "bob-adopts".into(),
+        command: langspan_core::Command::Adopt {
+            session_id: id(BOB),
+            from: id(ALICE),
+        },
+    };
+    let recorded = langspan::client::call(&f.state(), &request)
+        .unwrap()
+        .outcome;
+    assert!(
+        matches!(
+            recorded,
+            langspan_core::Outcome::Adopted { recorded: true, .. }
+        ),
+        "{recorded:?}"
+    );
+    f.edit(BOB, "bob-1", "b.txt", "beta", "beta, by Bob");
+    f.lifecycle(BOB, "SessionEnd", None);
+    assert_eq!(f.adoptions(), 1);
+
+    f.lifecycle(CAROL, "SessionStart", None);
+    let adopted = adopt_json(&f, CAROL, BOB, "carol-adopts");
+    assert!(adopted.status.success(), "{}", said(&adopted));
+    let report: Value = serde_json::from_slice(&adopted.stdout).unwrap();
+    assert_eq!(report["paths"], json!(["a.txt", "b.txt"]), "{report}");
+    assert_eq!(
+        owners(&f.status_mine(CAROL, "carol-1")),
+        vec![pair("a.txt", "mine"), pair("b.txt", "mine")]
+    );
+    let committed = f.langspan(CAROL, "carol-2", "commit --mine -m 'all of it'");
+    assert!(committed.status.success(), "{}", said(&committed));
+    assert_eq!(f.status(), "");
+}
