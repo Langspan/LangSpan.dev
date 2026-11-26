@@ -97,7 +97,7 @@ lists its tools fails too.
 - `oracle.py`: the combined-integration oracle, run on the merged result.
 - `standin_agent.py`: the dry-run agent; it makes one of its task's fixed
   edits and no model call.
-- `run-record.schema.json`: the driver's run record v4.
+- `run-record.schema.json`: the driver's run record v5.
 - `runner.py`: validate-only by default; opt-in real-process execution.
 - `manifest.schema.json`: command manifest v1.
 - `manifest.template.json`: owner-filled template for the three required arms.
@@ -125,7 +125,19 @@ definition, on the merged tree, never on a branch alone.
 | --- | --- | --- | --- |
 | `rename_vs_new_caller` | One session renames `parse_config` to `load_config` across the package; each other session adds a feature module that calls the parser, and "if another session renames that parser, call it by its new name" | A new caller uses the old name: every branch passes alone, and the merge breaks | The combined tree has `load_config` and no `parse_config`, every caller in the package uses `load_config`, every new feature module calls `load_config` (not an alias) and works, and the package's tests pass |
 | `contradictory_defaults` | Each session needs its own function to use a value of one of the defaults in `shelf/settings.py`. Some defaults are wanted by two sessions at different values (a pair), others by one session alone. Each task defines what to do: "if another session's task sets the default to a different value, leave the default unchanged and give your function its value in its own module; otherwise change the default". A session may get an unrelated control task where the keys run out | A pair both change the default: Git refuses the second merge, or one requirement is silently lost. A session alone keeps the default and sets its value locally, a hedge that ignores what its task asks | Each function returns the value its task asked for; every shared default two tasks wanted changed to different values is unchanged; every shared default only one task wanted changed holds that task's value; and the package's tests pass |
-| `discovered_change` | One session, the changer, adds `expired(items, today)` in `shelf/expiry.py` and counts the days with `days_left` from `shelf/dates.py`. Each other session, a dependent, adds a feature module that counts the days with `days_left`, and "if another session changes how `days_left` is called, call it the new way". No task text says that `days_left` changes | `days_left(day)` counts from the clock, so it cannot count from `today`: the changer finds that while working and gives it a second, required parameter. A dependent still calls `days_left(day)`: every branch passes alone, and the merge breaks | `days_left` requires two arguments, with no default, alias or wrapper that keeps one-argument calls working; `shelf/orders.py`, `expired` and every new feature module call it with two arguments; every function returns what its task asked for; and the package's tests pass. A module that counts the days itself, or falls back to the one-argument call, fails |
+| `discovered_change` | One session, the changer, adds `expired(items, today)` in `shelf/expiry.py` and counts the days with `days_left` from `shelf/dates.py`. Each other session, a dependent, adds a feature module that counts the days with `days_left`, and "if another session changes how `days_left` is called, call it the new way". No task text says that `days_left` changes | `days_left(day)` counts from the clock and gives `None` once a day has passed, so it cannot count from a past `today`, and no arithmetic on one-argument calls recovers the count: the changer finds that while working and gives it a second, required parameter. A dependent still calls `days_left(day)`: every branch passes alone, and the merge breaks | `days_left` requires two arguments, with no default, alias or wrapper that keeps one-argument calls working; `shelf/orders.py`, `expired` and every new feature module call it with two arguments; every function returns what its task asked for; and the package's tests pass. A module that counts the days itself, or falls back to the one-argument call, fails |
+
+In `discovered_change`, a dependent's result means something only when the
+changer made the change. In the third pilot, a changer subtracted two
+one-argument calls in 2 of 5 trials, which the fixture then allowed, and the
+oracle failed every dependent whatever it knew. The fixture's `days_left` now
+gives `None` for a passed day, so that workaround finds no expired item, and
+the changer's own check requires the changed signature. The oracle reads
+`shelf/dates.py` on the changer's own branch: when `days_left` there does not
+require two arguments, the record's `interface_change` is `change_not_made`,
+the changer is not accepted, and no dependent is judged (`completed` and
+`accepted` are `null`). Count such a trial apart from the arm comparison
+instead of as dependent failures.
 
 Notes a session writes in `notes/sN.md` are kept as evidence for review,
 including notes on a branch Git refuses to merge. They never change the
@@ -208,7 +220,11 @@ python3 benchmarks/coordination/driver.py --arm langspan --family discovered_cha
 ```
 
 Choose a stagger longer than the changing session takes to make its change;
-LangSpan tells peers of the change once it is on disk.
+LangSpan tells peers of the change once it is on disk. In `discovered_change`,
+use at least 60 seconds: in the third pilot the changer took 30 to 45 seconds
+to edit `shelf/dates.py`, and a 30-second stagger started the dependents
+before the change. A stagger favors the LangSpan arm's notices, so keep
+staggered trials out of the comparison between arms.
 
 ### Dry run (no model)
 
@@ -244,6 +260,10 @@ The stand-in agent makes one of the fixed edits its task defines:
   locally; a changer gives the new parameter a default, so old calls keep
   working; a dependent counts the days itself without `days_left`. In
   `rename_vs_new_caller` it is the uninformed edit.
+- `--standin-mode workaround` makes the changer in `discovered_change` finish
+  without the change, as the third pilot's did: `expired` subtracts two
+  one-argument calls of `days_left`. Every other task makes the uninformed
+  edit.
 
 The record's `standin_informed` says, per session, whether the information
 changed its edit, before or after its first write. In the LangSpan arm the stand-in runs the installed hooks
@@ -278,7 +298,10 @@ the oracle tells the arms apart:
   after the changer's edit, receives the notice before its first write
   (`notice_before_write` is `true`), and writes its module once;
 - `ignore` fails in every arm, and `hedge` fails `contradictory_defaults` and
-  `discovered_change` at N = 5 in every arm.
+  `discovered_change` at N = 5 in every arm;
+- in `discovered_change` at N = 5, in every arm, `workaround` and `hedge` fail
+  the changer's task, and the record reports `change_not_made` with no
+  dependent judged; `follow` and `ignore` report the change as `made`.
 
 A dry run shows that the harness and the oracle work; it says nothing about
 agents.
@@ -390,6 +413,7 @@ record under `docs/evidence/`.
 | Field | Source |
 | --- | --- |
 | `tasks_accepted`, `integrated_tests` | The oracle on the merged tree. A task is accepted only when its family's success definition holds for it: a contradiction task whose own function works is still not accepted if its pair's shared default moved, or, for a key alone, if the default did not change to its value. Each task's `completed` says only whether its own check passed. `integrated_tests` passes only when every branch merged, every task is accepted, no semantic conflict was found and the fixture's tests pass |
+| `interface_change` | `discovered_change`: `made` when `days_left` on the changer's own branch requires two arguments, `change_not_made` when it does not (a workaround, a default for the new parameter, or no change), and then no dependent is judged; `unknown` when the oracle did not run; `not_applicable` in the other families |
 | `merge_conflicts` | Merges Git refused, with their files |
 | `semantic_conflicts` | Conflicts the oracle found in a tree Git merged cleanly: a call to a name the merged code lacks, or a pair whose changes both merged while one requirement was lost |
 | `duplicate_work` | Branches that changed a code unit (a function or a file) another session's task owns |
@@ -660,7 +684,8 @@ the dry-run gate, metadata phases, and unknown/evidence-backed assessments.
 `test_driver.py` runs the whole dry-run pipeline for every arm and all three
 families at N = 2 and N = 5 with `follow` and `ignore`, the LangSpan arm at
 N = 10 with both, `hedge` in `contradictory_defaults` and `discovered_change`
-at N = 5 in every arm, and `discovered_change` with `--stagger 15` in the
+at N = 5 in every arm, `workaround` in `discovered_change` at N = 5 in every
+arm, and `discovered_change` with `--stagger 15` in the
 LangSpan arm, with the expectations listed under [Dry run](#dry-run-no-model). The
 LangSpan arm goes through the real hooks, coordinator, Unix socket and SQLite
 store. The suite also provokes a real stale-source refusal and checks that
@@ -671,7 +696,8 @@ tool list, the record of a failed check, the seeded assignment and its
 layouts, that each task line names what a peer needs, that no
 `discovered_change` prompt in any arm names the change, prompts, each arm's
 checkouts, every family oracle's success definition and the hedges it
-refuses, notes and merge logs kept across a failed merge, denial kinds, a
+refuses, that the third pilot's workaround cannot find the expired items and
+is reported as `change_not_made`, notes and merge logs kept across a failed merge, denial kinds, a
 session with two result lines, scan events and interface notices, that every
 Claude Code session has auto memory off and the check that refuses shared
 memory, the stagger's validation and time limits, and the configuration
