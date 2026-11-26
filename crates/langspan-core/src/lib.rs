@@ -3972,6 +3972,9 @@ pub enum Outcome {
     /// (and their own subagents') stay theirs. `earlier` names the sessions
     /// whose adoptions lead to `from`: an adopter that ended before its
     /// lines were credited left them there, and they are credited too.
+    /// `kept` names subagents of `from` (or of an `earlier` session) that
+    /// another session adopted: their lines (and their own subagents') are
+    /// that session's to credit, so they stay where they are.
     Adopted {
         adoption: Adoption,
         root: String,
@@ -3980,6 +3983,8 @@ pub enum Outcome {
         live: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         earlier: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        kept: Vec<String>,
     },
     SessionStopped {
         session_id: String,
@@ -8573,6 +8578,36 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
             ),
         ));
     }
+    // A subagent another session adopted is that session's to credit, even
+    // when its adapter has not yet rewritten the journal.
+    let mut kept: Vec<String> = state
+        .adoptions
+        .values()
+        .filter(|adoption| {
+            adoption.workspace_id == me.workspace_id
+                && adoption.session_id != session_id
+                && !earlier.contains(&adoption.from)
+                && [from]
+                    .into_iter()
+                    .chain(earlier.iter().map(String::as_str))
+                    .any(|source| {
+                        adoption
+                            .from
+                            .strip_prefix(source)
+                            .is_some_and(|rest| rest.starts_with('.'))
+                    })
+        })
+        .map(|adoption| adoption.from.clone())
+        .collect();
+    kept.sort();
+    if kept.len() > MAX_LEFT {
+        return Err(error(
+            "adoption_chain",
+            &format!(
+                "Other sessions adopted more than {MAX_LEFT} subagents of that session; commit part of the work, then adopt again"
+            ),
+        ));
+    }
     let root = state
         .workspaces
         .get(&me.workspace_id)
@@ -8596,6 +8631,7 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
                 recorded: false,
                 live,
                 earlier,
+                kept,
             },
         });
     }
@@ -8617,6 +8653,7 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
             recorded: true,
             live,
             earlier,
+            kept,
         },
     })
 }

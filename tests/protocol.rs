@@ -143,6 +143,7 @@ fn v3_adoption_request_outcome_and_left_work_briefing_request_match_the_golden_v
             recorded: true,
             live: Vec::new(),
             earlier: Vec::new(),
+            kept: Vec::new(),
         }
     );
     assert_eq!(encode(&response).unwrap(), wire);

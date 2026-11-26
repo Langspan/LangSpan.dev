@@ -123,6 +123,13 @@ explicitly:
   and `live` covers their subagents as well. A session in that chain that
   has resumed since its adoption is left out, along with the sessions its
   own adoptions lead to: what it writes again is its own.
+- A subagent of `from` (or of a session in `earlier`) that another session
+  adopted is that session's to credit, even when its adapter stopped before
+  rewriting the journal. The answer names those subagents (`kept`, at most
+  64, else `adoption_chain`), and the adapter skips their entries and their
+  own subagents' entries, as for `live`. The other session's retry then
+  credits them. An adoption the adopter itself made of such a subagent is
+  not in `kept`: its entries move with the rest.
 - Entries are rewritten whole, so a line both `from` and a third session
   wrote is the adopter's and that session's: a `mixed` file stays mixed, and
   the third session's lines stay its own.

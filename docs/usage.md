@@ -1394,7 +1394,9 @@ credited, leaves them under the session it adopted. Adopting that adopter
 credits them as well: the coordinator names every session whose adoptions
 lead to it (`earlier` in the coordinator's answer), and their lines move with
 its own, except those of subagents that have not ended and of sessions that
-have resumed since they were adopted. The reason shown
+have resumed since they were adopted. A subagent that another session adopted
+keeps its lines for that session, even before that session's adoption credits
+them (`kept` in the coordinator's answer). The reason shown
 is a message the ended session sent the adopter (addressed to it, or a
 handoff it took) or a `Task:` line both share; neither is required, so the
 person or agent decides. The adopting session is found as for

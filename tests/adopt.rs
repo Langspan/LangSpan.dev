@@ -651,6 +651,69 @@ fn adopting_an_adopter_that_ended_mid_transfer_credits_the_original_sessions_lin
     assert_eq!(f.status(), "");
 }
 
+/// Bob's adoption of Alice's ended subagent is recorded, but Bob's adapter
+/// stops before it credits the subagent's lines. Carol's adoption of Alice
+/// leaves those lines under the subagent, for Bob's retry to credit; Carol's
+/// `commit --mine` takes only Alice's own lines (review of #176).
+#[test]
+fn adopting_a_parent_leaves_a_subagent_another_live_session_adopted_with_that_session() {
+    let f = Fixture::new();
+    f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
+    f.edit_as(
+        ALICE,
+        Some("agent-one"),
+        "alice-sub-1",
+        "b.txt",
+        "beta",
+        "beta, by the subagent",
+    );
+    f.hook(json!({
+        "session_id": ALICE, "cwd": f.work(), "hook_event_name": "SubagentStop",
+        "agent_id": "agent-one", "agent_type": "general-purpose",
+        "stop_hook_active": false, "transcript_path": "/dev/null",
+    }));
+    f.lifecycle(ALICE, "SessionEnd", None);
+    f.lifecycle(BOB, "SessionStart", None);
+    let helper = format!("{ALICE}.agent-one");
+    let request = langspan::protocol::Request {
+        version: langspan::protocol::PROTOCOL_VERSION,
+        request_id: "bob-adopts-helper".into(),
+        command: langspan_core::Command::Adopt {
+            session_id: id(BOB),
+            from: id(&helper),
+        },
+    };
+    let recorded = langspan::client::call(&f.state(), &request)
+        .unwrap()
+        .outcome;
+    assert!(
+        matches!(
+            recorded,
+            langspan_core::Outcome::Adopted { recorded: true, .. }
+        ),
+        "{recorded:?}"
+    );
+
+    f.lifecycle(CAROL, "SessionStart", None);
+    let carol = adopt_json(&f, CAROL, ALICE, "carol-adopts");
+    assert!(carol.status.success(), "{}", said(&carol));
+    let report: Value = serde_json::from_slice(&carol.stdout).unwrap();
+    assert_eq!(report["paths"], json!(["a.txt"]), "{report}");
+
+    // Bob's retry finishes his transfer.
+    let bob = adopt_json(&f, BOB, &helper, "bob-adopts-helper");
+    assert!(bob.status.success(), "{}", said(&bob));
+    let report: Value = serde_json::from_slice(&bob.stdout).unwrap();
+    assert_eq!(report["paths"], json!(["b.txt"]), "{report}");
+    assert_eq!(
+        owners(&f.status_mine(BOB, "bob-1")),
+        vec![pair("b.txt", "mine")]
+    );
+    let committed = f.langspan(CAROL, "carol-1", "commit --mine -m 'Alice only'");
+    assert!(committed.status.success(), "{}", said(&committed));
+    assert_eq!(f.status(), " M b.txt\n");
+}
+
 /// Bob adopts Alice; Alice resumes and writes more; Bob ends. Carol's
 /// adoption of Bob credits Bob's lines, and Alice's new lines stay hers:
 /// a session that has resumed is not an earlier source (review of #176).

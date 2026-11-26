@@ -111,22 +111,25 @@ pub fn adopt(
         },
     };
     let response = crate::client::call_until(state_dir, &request, deadline)?;
-    let (adoption, root, recorded, live, earlier) = match response.outcome {
+    let (adoption, root, recorded, live, earlier, kept) = match response.outcome {
         Outcome::Adopted {
             adoption,
             root,
             recorded,
             live,
             earlier,
-        } => (adoption, root, recorded, live, earlier),
+            kept,
+        } => (adoption, root, recorded, live, earlier, kept),
         Outcome::Error { code, message } => return Err(format!("{code}: {message}").into()),
         other => return Err(format!("the coordinator answered {other:?}").into()),
     };
     // Lines an earlier adopter never credited are still under the session
-    // it adopted: credit those as well.
+    // it adopted: credit those as well. A live subagent's lines, and those
+    // of a subagent another session adopted, stay where they are.
+    let stay: Vec<String> = live.iter().chain(&kept).cloned().collect();
     let mut moved = BTreeSet::new();
     for source in std::iter::once(from).chain(earlier.iter().map(String::as_str)) {
-        let paths = journal::reassign(state_dir, &PathBuf::from(&root), source, &live, session_id)
+        let paths = journal::reassign(state_dir, &PathBuf::from(&root), source, &stay, session_id)
             .map_err(|error| {
                 format!(
                     "the adoption is recorded, but its lines could not all be credited ({error}); run `langspan adopt {from}` again"

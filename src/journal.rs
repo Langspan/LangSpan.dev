@@ -1036,7 +1036,8 @@ pub fn writers(entries: &[Entry]) -> BTreeMap<&str, BTreeSet<&str>> {
 
 /// Credit `from`'s entries (and its subagents') in the physical workspace at
 /// `root` to `to`: an adoption (issue #161). The entries of a subagent in
-/// `live`, which has not ended, and of its own subagents stay its own. Each
+/// `live` (one that has not ended, or that another session adopted) and of
+/// its own subagents stay where they are. Each
 /// entry keeps its file name and modification time, so it expires when it
 /// would have, and a retry finds nothing left to move. Returns the paths of
 /// the entries moved.
