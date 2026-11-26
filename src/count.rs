@@ -298,8 +298,7 @@ pub fn month(text: Option<&str>, now_ms: u64) -> Result<Month, String> {
 /// The month's local day starts, from the system's zone rules.
 pub fn day_starts(month: Month) -> Result<Vec<u64>, String> {
     let deadline = Instant::now() + DATE_BUDGET;
-    month
-        .day_starts(|at| local_day::offset_at(at, deadline, None))
+    local_day::with_offsets(deadline, None, |offset_at| month.day_starts(offset_at))
         .ok_or_else(|| {
             format!(
                 "could not read the local time zone for every day of {} (`date` failed or gave no offset within 2 s); no count is shown from a partial month",

@@ -5,7 +5,8 @@
 //! (`date -r SECONDS +%z` on BSD and macOS, `date -d @SECONDS +%z` on Linux),
 //! honouring `TZ`. One offset is not enough: on a day the clocks change, the
 //! offset now differs from the offset at midnight, and applying the current
-//! one to the whole day puts midnight an hour off.
+//! one to the whole day puts midnight an hour off. Many offsets at once (a
+//! month's days) are asked of concurrent `date` children, in rounds.
 
 use std::time::{Duration, Instant};
 
@@ -74,6 +75,80 @@ pub fn midnight_now_ms(now_ms: u64, deadline: Instant) -> u64 {
 /// inherited `TZ`). `None` when `date` fails, prints anything other than
 /// `+HHMM` or `-HHMM`, or does not finish by `deadline`.
 pub fn offset_at(at_ms: u64, deadline: Instant, tz: Option<&str>) -> Option<i32> {
+    offsets_at(&[at_ms], deadline, tz).pop().flatten()
+}
+
+/// The most `date` children run at once.
+const CONCURRENT_DATES: usize = 32;
+
+/// The zone's offset at each of `instants`, as `offset_at` gives it, with
+/// up to `CONCURRENT_DATES` `date` children running at once, all stopped at
+/// `deadline`. A month needs about a hundred offsets; one child at a time,
+/// that is about a hundred process starts in a row, which a busy machine
+/// does not finish within a couple of seconds.
+pub fn offsets_at(instants: &[u64], deadline: Instant, tz: Option<&str>) -> Vec<Option<i32>> {
+    let mut answers = Vec::with_capacity(instants.len());
+    for chunk in instants.chunks(CONCURRENT_DATES) {
+        let children: Vec<_> = chunk
+            .iter()
+            .map(|&at| {
+                (Instant::now() < deadline)
+                    .then(|| spawn_date(at, tz))
+                    .flatten()
+            })
+            .collect();
+        answers.extend(
+            children
+                .into_iter()
+                .map(|child| child.and_then(|child| finish_date(child, deadline))),
+        );
+    }
+    answers
+}
+
+/// Run `run` with offsets from `date` (see `offsets_at`), asking for each
+/// round's unknown instants together. Each round runs `run` against the
+/// offsets known so far, an unknown one answering `None`, and collects the
+/// instants it asked for; when it asked for none, that round's result is
+/// returned. `run` must depend only on the answers it is given.
+pub fn with_offsets<T>(
+    deadline: Instant,
+    tz: Option<&str>,
+    run: impl FnMut(&mut dyn FnMut(u64) -> Option<i32>) -> T,
+) -> T {
+    in_rounds(|instants| offsets_at(instants, deadline, tz), run)
+}
+
+/// `with_offsets` with any batch lookup in place of `date`.
+fn in_rounds<T>(
+    mut lookup: impl FnMut(&[u64]) -> Vec<Option<i32>>,
+    mut run: impl FnMut(&mut dyn FnMut(u64) -> Option<i32>) -> T,
+) -> T {
+    let mut known: Vec<(u64, Option<i32>)> = Vec::new();
+    loop {
+        let mut missing: Vec<u64> = Vec::new();
+        let result = run(&mut |at| {
+            if let Some(&(_, answer)) = known.iter().find(|(seen, _)| *seen == at) {
+                return answer;
+            }
+            if !missing.contains(&at) {
+                missing.push(at);
+            }
+            None
+        });
+        if missing.is_empty() {
+            return result;
+        }
+        let answers = lookup(&missing);
+        known.extend(
+            missing
+                .into_iter()
+                .zip(answers.into_iter().chain(std::iter::repeat(None))),
+        );
+    }
+}
+
+fn spawn_date(at_ms: u64, tz: Option<&str>) -> Option<std::process::Child> {
     let seconds = at_ms / 1000;
     let mut command = std::process::Command::new("date");
     if cfg!(any(target_os = "linux", target_os = "android")) {
@@ -90,7 +165,12 @@ pub fn offset_at(at_ms: u64, deadline: Instant, tz: Option<&str>) -> Option<i32>
     if let Some(tz) = tz {
         command.env("TZ", tz);
     }
-    let mut child = command.spawn().ok()?;
+    command.spawn().ok()
+}
+
+/// The offset a `date` child printed, or `None` when it failed or had not
+/// finished by `deadline` (it is then stopped).
+fn finish_date(mut child: std::process::Child, deadline: Instant) -> Option<i32> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => break,
@@ -253,6 +333,59 @@ mod tests {
         assert_eq!(
             local_midnight_ms(MARCH_8 + 16 * HOUR, system),
             MARCH_8 + 5 * HOUR
+        );
+    }
+
+    #[test]
+    fn offsets_asked_in_rounds_give_the_same_midnights_in_a_few_batches() {
+        let days: Vec<u64> = (0..31)
+            .map(|day| MARCH_8 - 7 * 24 * HOUR + day * 24 * HOUR)
+            .collect();
+        let one_by_one: Vec<u64> = days
+            .iter()
+            .map(|&day| local_midnight_ms(day + 17 * HOUR, new_york))
+            .collect();
+        let mut batches = 0;
+        let lookup = |instants: &[u64]| {
+            batches += 1;
+            instants.iter().map(|&at| new_york(at)).collect()
+        };
+        let in_batches = in_rounds(lookup, |offset_at| {
+            days.iter()
+                .map(|&day| local_midnight_ms(day + 17 * HOUR, &mut *offset_at))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(in_batches, one_by_one);
+        assert!(batches <= 4, "{batches} batches");
+        // A lookup that fails stays failed, and the round ends.
+        let failed = in_rounds(
+            |instants| vec![None; instants.len()],
+            |offset_at| offset_at(MARCH_8),
+        );
+        assert_eq!(failed, None);
+    }
+
+    #[test]
+    fn concurrent_system_dates_agree_with_one_at_a_time() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let tz = Some("America/New_York");
+        let instants: Vec<u64> = (0..40).map(|hour| MARCH_8 + hour * HOUR).collect();
+        let together = offsets_at(&instants, deadline, tz);
+        let alone: Vec<_> = instants
+            .iter()
+            .map(|&at| offset_at(at, deadline, tz))
+            .collect();
+        assert_eq!(together, alone);
+        assert!(together.iter().all(Option::is_some));
+        let midnights = with_offsets(deadline, tz, |offset_at| {
+            [MARCH_8 + 16 * HOUR, NOVEMBER_1 + 17 * HOUR]
+                .map(|now| local_midnight_ms(now, &mut *offset_at))
+        });
+        assert_eq!(midnights, [MARCH_8 + 5 * HOUR, NOVEMBER_1 + 4 * HOUR]);
+        // Past the deadline nothing is started.
+        assert_eq!(
+            offsets_at(&instants[..2], Instant::now(), tz),
+            vec![None, None]
         );
     }
 
