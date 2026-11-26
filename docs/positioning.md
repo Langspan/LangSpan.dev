@@ -1,6 +1,6 @@
 # Product positioning
 
-The public messaging contract for LangSpan, 25 November 2026.
+The public messaging contract for LangSpan, updated 26 November 2026 for v0.2.0.
 Use it for the website, repository descriptions, READMEs, organization profile,
 and project references. The [mission](mission.md) owns the product hypothesis.
 [Implementation status](IMPLEMENTATION_STATUS.md), the published release, and
@@ -39,11 +39,11 @@ recovery is an illustration, not an observed outcome.
 ## Semantic awareness within coordination
 
 The coordination layer uses source relationships as well as file activity.
-The v0.1.0 local Tree-sitter index extracts definitions, name mentions,
-imports and signatures from Rust, Python, TypeScript/JavaScript and Go.
-Java extraction is built on the main branch and is not yet in a release.
+The v0.2.0 local Tree-sitter index extracts definitions, name mentions,
+imports and signatures from Rust, Python, TypeScript/JavaScript, Go and Java.
 It matches names, not resolved scopes, types or imports. Interface notices
-stay in one physical checkout. Related sessions can receive a notice at
+can cross linked worktrees on the same machine, including relevant
+uncommitted exported signatures. Related sessions can receive a notice at
 their next prompt. Supported Claude Code and Codex writes can receive
 advisory context about a changed function's argument count with the tool
 result, without an edit refusal on that basis.
@@ -61,15 +61,19 @@ integration. The middle two belong to LangSpan; checks bind to exact Git
 trees. Semantic awareness is a mechanism, not a new product category.
 [Source index](adr/0008-derived-source-index.md) and
 [argument-count alerts](adr/0029-break-alerts-at-write-time.md) document the
-current limits. Rename-aware alerts, same-count type/order changes and
-cross-worktree symbol awareness remain roadmap work:
+current limits. Rename and removal alerts and linked-worktree semantic notices ship in
+v0.2.0. Same-count type/order checks remain roadmap work; cross-machine
+symbol publication is not a released capability. See
 [B10](https://github.com/Langspan/LangSpan.dev/issues/29) and
 [C7](https://github.com/Langspan/LangSpan.dev/issues/44).
 
 ## Claim boundaries
 
-- The coordinator, hooks, CLI, MCP and SQLite run locally. The optional
-  dashboard is read-only. No LangSpan hosted account is required.
+- The coordinator, hooks, CLI, MCP and SQLite run locally. LangSpan Live is
+  a read-only dashboard. No LangSpan hosted account is required. The released
+  `langspan setup` command connects detected hosts, starts the coordinator
+  and installs a login service where supported. The install script and
+  Homebrew tap remain unpublished.
 - Remote awareness is opt-in through Git metadata publications. Source
   contents are excluded from these publications; task text requires its own
   opt-in. This does not describe the coding-agent provider's data handling.
@@ -85,8 +89,9 @@ cross-worktree symbol awareness remain roadmap work:
   see [B28: coordination policy](https://github.com/Langspan/LangSpan.dev/issues/171).
 - Native Claude Code and Codex observations, real two-machine briefing delivery,
   scripted coordinator tests, and authored illustrations are different kinds
-  of evidence. Cursor and Gemini CLI adapters in v0.1.0 have no retained
-  live-host verification. The 5+5 topology is illustrative, not a scale test.
+  of evidence. Cursor and Gemini CLI adapters have no retained live-host verification.
+  Antigravity was corrected against an initial real run; repeat validation is
+  pending. The 5+5 topology is illustrative, not a scale test.
 - The goal is compatible parallel work with less avoidable repair and manual
   relay, not a measured reduction. Track comparative results in
   [K1: coordination benchmark](https://github.com/Langspan/LangSpan.dev/issues/172).
@@ -107,6 +112,6 @@ Link the existing local edit animation to
 [its matching scene](https://langspan.dev/#edit-coordination).
 
 Start adoption with the
-[v0.1.0 release](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0)
+[latest stable release](https://github.com/Langspan/LangSpan.dev/releases/latest)
 for macOS and Linux, or the source build instructions in the README.
 Update the availability statement only after checking the release assets.
