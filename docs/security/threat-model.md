@@ -336,8 +336,9 @@ session's edit for its own (issue #1).
 ## Commits in a shared checkout
 
 [ADR 0026](../adr/0026-commit-guard-and-commit-mine.md): the hooks keep a line
-journal under `STATE/journal/`; the `Bash` pre-tool hook reads the index and
-working tree through Git before a staging or commit command and can deny it;
+journal under `STATE/journal/`; every host's shell pre-tool hook reads the
+index and working tree through Git before a staging or commit command, then
+the journal entries of only the paths Git lists, and can deny it;
 `langspan commit --mine` and `langspan_commit_mine` write a commit and the
 shared index. `langspan status --mine` and `langspan_my_changes` (issue #40)
 run the same reads and attribution and write nothing: no private index, no
