@@ -252,6 +252,31 @@ impl Fixture {
         }
         git(&self.root(), &["add", "-A"]);
         git(&self.root(), &["commit", "--quiet", "-m", "project"]);
+        // The daemon scans the checkout every two seconds. A scan that first
+        // sees these files while the owner's baseline check runs counts as a
+        // write during that run, so the baseline is rightly not kept. Wait
+        // until a scan has seen the commit, as the state before any session.
+        let head = Process::new("git")
+            .arg("-C")
+            .arg(self.root())
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let (_, stdout, stderr) =
+                self.cli(&["changes", "work", "--after", "0", "--limit", "1", "--json"]);
+            let changes: Value = serde_json::from_str(&stdout).unwrap_or_default();
+            if changes["outcome"]["scan"]["head_oid"] == head.as_str() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no scan of {head}: {stdout}{stderr}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     /// As `wait_for_checks`, for a check that builds before it tests.
     fn wait_for_slow_checks(&self, count: usize) -> Vec<CheckRecord> {
