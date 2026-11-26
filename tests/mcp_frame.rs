@@ -61,8 +61,9 @@ impl World {
                 .unwrap(),
         );
         let deadline = Instant::now() + DEADLINE;
-        while !world.state().join("daemon.sock").exists() {
-            assert!(Instant::now() < deadline, "daemon did not bind its socket");
+        // Ready means what a client checks: an owner-only socket that accepts.
+        while !langspan::client::accepts(&world.state(), Instant::now() + Duration::from_secs(1)) {
+            assert!(Instant::now() < deadline, "daemon did not become ready");
             std::thread::sleep(Duration::from_millis(10));
         }
         let root = world.base.join("work").to_string_lossy().into_owned();
