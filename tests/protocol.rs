@@ -447,6 +447,76 @@ fn v3_blind_spots_request_and_response_match_the_committed_golden_vectors() {
     ));
 }
 
+/// Roadmap D3: `graph_path` and `graph_map` requests and answers.
+#[test]
+fn v4_path_and_map_requests_and_responses_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/graph-path-request-v4.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::GraphPath {
+            workspace_id: "app".into(),
+            from: "handler".into(),
+            to: "save".into(),
+            max_hops: 4,
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    // Without `max_hops`, the default of 4.
+    let plain = String::from_utf8_lossy(wire).replace(r#","max_hops":4"#, "");
+    let request: Request = serde_json::from_str(&plain).unwrap();
+    assert!(matches!(
+        request.command,
+        Command::GraphPath { max_hops: 4, .. }
+    ));
+
+    let wire = include_bytes!("../fixtures/graph-path-response-v4.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::GraphPath {
+        paths,
+        edges_visited,
+        truncated,
+        ..
+    } = &response.outcome
+    else {
+        panic!("{response:?}");
+    };
+    assert_eq!((paths.len(), *edges_visited, *truncated), (1, 2, false));
+    assert_eq!(paths[0].steps[2].edge, "defines");
+    assert_eq!(paths[0].steps[2].callee, None, "absent on the last step");
+    assert_eq!(paths[0].steps[1].resolution, "path");
+    assert_eq!(encode(&response).unwrap(), wire);
+    let unknown =
+        String::from_utf8_lossy(wire).replace(r#""edge":"defines""#, r#""edge":"defines","x":1"#);
+    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/graph-map-request-v4.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::GraphMap {
+            workspace_id: "app".into(),
+            depth: 1,
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    let plain = String::from_utf8_lossy(wire).replace(r#","depth":1"#, "");
+    let request: Request = serde_json::from_str(&plain).unwrap();
+    assert!(matches!(
+        request.command,
+        Command::GraphMap { depth: 1, .. }
+    ));
+
+    let wire = include_bytes!("../fixtures/graph-map-response-v4.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::GraphMap { areas, edges, .. } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!((areas.len(), edges.len()), (2, 2));
+    assert_eq!((edges[1].kind.as_str(), edges[1].count), ("imports", 1));
+    assert_eq!(encode(&response).unwrap(), wire);
+}
+
 #[test]
 fn v3_prompt_targets_request_and_target_briefing_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/prompt-targets-request-v3.json");

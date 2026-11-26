@@ -4137,3 +4137,381 @@ fn an_uncommitted_rename_whose_session_ended_is_not_told() {
         "told of an ended session's uncommitted change"
     );
 }
+
+/// `graph path app FROM TO --json`'s exit code and outcome, with `extra`
+/// options. A reply that is not JSON comes back as `{"text": ...}`.
+fn path_query(w: &World, from: &str, to: &str, extra: &[&str]) -> (i32, Value) {
+    let mut args = vec!["graph", "path", "app", from, to];
+    args.extend_from_slice(extra);
+    args.push("--json");
+    let (code, text) = w.cli(&args);
+    let outcome = serde_json::from_str::<Value>(&text).map_or_else(
+        |_| json!({"text": text}),
+        |reply: Value| reply["outcome"].clone(),
+    );
+    (code, outcome)
+}
+
+/// Wait until all `files` supported files are indexed at their current
+/// content and `graph path FROM TO` finds a chain.
+fn wait_for_path(w: &World, from: &str, to: &str, files: u64) -> Value {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (code, outcome) = path_query(w, from, to, &[]);
+        if code == 0
+            && outcome["coverage"]["current_files"] == files
+            && outcome["coverage"]["indexable_files"] == files
+            && outcome["paths"]
+                .as_array()
+                .is_some_and(|paths| !paths.is_empty())
+        {
+            return outcome;
+        }
+        assert!(Instant::now() < deadline, "never found a path: {outcome:#}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Each step of each chain as `PATH:LINE NAME EDGE CALLEE RESOLUTION
+/// AMBIGUOUS`, `-` for no callee.
+fn chain_steps(outcome: &Value) -> Vec<Vec<String>> {
+    outcome["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|chain| {
+            chain["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|step| {
+                    format!(
+                        "{}:{} {} {} {} {} {}",
+                        step["path"].as_str().unwrap(),
+                        step["line"],
+                        step["name"].as_str().unwrap(),
+                        step["edge"].as_str().unwrap(),
+                        step["callee"].as_str().unwrap_or("-"),
+                        step["resolution"].as_str().unwrap(),
+                        step["ambiguous"]
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Issue #52, first criterion, in each of the four languages it names:
+/// `handler` calls `service` calls `save`, and the chain names each step's
+/// file and line. Rust, Python and TypeScript import the callee's file, so
+/// those steps are found by path; Go names packages, not files, so its steps
+/// are found by name.
+#[test]
+fn a_call_chain_from_handler_to_save_is_found_in_each_of_four_languages() {
+    let rust = [
+        ("src/lib.rs", "mod api;\nmod service;\nmod store;\n"),
+        (
+            "src/api.rs",
+            "use crate::service::service;\n\npub fn handler() {\n    service();\n}\n",
+        ),
+        (
+            "src/service.rs",
+            "use crate::store::save;\n\npub fn service() {\n    save();\n}\n",
+        ),
+        ("src/store.rs", "pub fn save() {}\n"),
+    ];
+    let python = [
+        (
+            "app/api.py",
+            "from .service import service\n\ndef handler():\n    return service()\n",
+        ),
+        (
+            "app/service.py",
+            "from .store import save\n\ndef service():\n    return save()\n",
+        ),
+        ("app/store.py", "def save():\n    return 1\n"),
+    ];
+    let typescript = [
+        (
+            "src/api.ts",
+            "import { service } from \"./service\";\nexport function handler() {\n  return service();\n}\n",
+        ),
+        (
+            "src/service.ts",
+            "import { save } from \"./store\";\nexport function service() {\n  return save();\n}\n",
+        ),
+        ("src/store.ts", "export function save() {\n  return 1;\n}\n"),
+    ];
+    let go = [
+        (
+            "api/api.go",
+            "package api\n\nimport \"example.com/demo/service\"\n\nfunc handler() {\n\tservice.service()\n}\n",
+        ),
+        (
+            "service/service.go",
+            "package service\n\nimport \"example.com/demo/store\"\n\nfunc service() {\n\tstore.save()\n}\n",
+        ),
+        ("store/store.go", "package store\n\nfunc save() {}\n"),
+    ];
+    /// A language, its repository's files, and the chain expected in it.
+    type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], [&'a str; 3]);
+    let cases: [Case; 4] = [
+        (
+            "rust",
+            &rust,
+            [
+                "src/api.rs:4 handler calls service name false",
+                "src/service.rs:4 service calls save path false",
+                "src/store.rs:1 save defines - path false",
+            ],
+        ),
+        (
+            "python",
+            &python,
+            [
+                "app/api.py:4 handler calls service name false",
+                "app/service.py:4 service calls save path false",
+                "app/store.py:1 save defines - path false",
+            ],
+        ),
+        (
+            "typescript",
+            &typescript,
+            [
+                "src/api.ts:3 handler calls service name false",
+                "src/service.ts:3 service calls save path false",
+                "src/store.ts:1 save defines - path false",
+            ],
+        ),
+        (
+            "go",
+            &go,
+            [
+                "api/api.go:6 handler calls service name false",
+                "service/service.go:6 service calls save name false",
+                "store/store.go:3 save defines - name false",
+            ],
+        ),
+    ];
+    for (language, files, expected) in cases {
+        let w = World::with_files(Vec::new(), files);
+        let outcome = wait_for_path(&w, "handler", "save", files.len() as u64);
+        assert_eq!(chain_steps(&outcome), [expected], "{language}: {outcome:#}");
+        assert_eq!(outcome["truncated"], false, "{language}");
+        assert_eq!(outcome["paths"][0]["ambiguous"], false, "{language}");
+        assert_eq!(outcome["coverage"]["scanned"], true, "{language}");
+    }
+}
+
+/// Issue #52, its example's text: one line per step with its quoted path
+/// and line, then how the steps were found.
+#[test]
+fn a_call_chain_is_printed_one_step_per_line_with_how_each_was_found() {
+    let w = World::with_files(
+        Vec::new(),
+        &[
+            ("src/lib.rs", "mod api;\nmod service;\nmod store;\n"),
+            ("src/api.rs", "pub fn handler() {\n    service();\n}\n"),
+            (
+                "src/service.rs",
+                "use crate::store::save;\n\npub fn service() {\n    save();\n}\n",
+            ),
+            ("src/store.rs", "pub fn save() {}\n"),
+        ],
+    );
+    wait_for_path(&w, "handler", "save", 4);
+    let (code, human) = w.cli(&["graph", "path", "app", "handler", "save"]);
+    assert_eq!(code, 0, "{human}");
+    assert_eq!(
+        human,
+        concat!(
+            "1. \"src/api.rs\":2 handler calls service\n",
+            "2. \"src/service.rs\":4 service calls save\n",
+            "3. \"src/store.rs\":1 save (defined)\n",
+            "Found by name (2 steps) and by import path (1 step); not type-checked.\n",
+        )
+    );
+    let (code, none) = w.cli(&["graph", "path", "app", "save", "handler"]);
+    assert_eq!(code, 0, "{none}");
+    assert!(
+        none.contains("No chain of calls from save to handler within 4 calls"),
+        "{none}"
+    );
+}
+
+/// Issue #52, second criterion: `service` has two definitions and the
+/// caller imports neither, so both chains are told and each is ambiguous.
+#[test]
+fn a_chain_through_a_name_with_two_definitions_is_marked_ambiguous() {
+    let w = World::with_files(
+        Vec::new(),
+        &[
+            (
+                "src/lib.rs",
+                "mod api;\nmod legacy;\nmod service;\nmod store;\n",
+            ),
+            ("src/api.rs", "pub fn handler() {\n    service();\n}\n"),
+            ("src/legacy.rs", "pub fn service() {\n    save();\n}\n"),
+            ("src/service.rs", "pub fn service() {\n    save();\n}\n"),
+            ("src/store.rs", "pub fn save() {}\n"),
+        ],
+    );
+    let outcome = wait_for_path(&w, "handler", "save", 5);
+    assert_eq!(
+        chain_steps(&outcome),
+        [
+            [
+                "src/api.rs:2 handler calls service name false",
+                "src/legacy.rs:2 service calls save name true",
+                "src/store.rs:1 save defines - name false",
+            ],
+            [
+                "src/api.rs:2 handler calls service name false",
+                "src/service.rs:2 service calls save name true",
+                "src/store.rs:1 save defines - name false",
+            ],
+        ],
+        "{outcome:#}"
+    );
+    assert_eq!(outcome["paths"][0]["ambiguous"], true);
+    assert_eq!(outcome["paths"][1]["ambiguous"], true);
+    let (_, human) = w.cli(&["graph", "path", "app", "handler", "save"]);
+    assert!(
+        human.contains("service calls save (ambiguous: the name has other definitions)"),
+        "{human}"
+    );
+}
+
+/// Issue #52, third and fourth criteria: `./store` in TypeScript resolves to
+/// `src/store.ts`, so the call of `save` is told by path and the other
+/// `save` is no second chain; the map at depth 1 lists `src/api` and
+/// `src/store` and the edges between them with counts.
+#[test]
+fn a_relative_typescript_import_resolves_by_path_and_the_map_counts_its_edges() {
+    let w = World::with_files(
+        Vec::new(),
+        &[
+            (
+                "src/api.ts",
+                "import { save, load } from \"./store\";\nexport function handler() {\n  save();\n  return load();\n}\n",
+            ),
+            (
+                "src/store.ts",
+                "export function save() {}\nexport function load() {\n  return 1;\n}\n",
+            ),
+            ("src/legacy.ts", "export function save() {}\n"),
+            ("tools/build.py", "def build():\n    return 1\n"),
+        ],
+    );
+    let outcome = wait_for_path(&w, "handler", "save", 4);
+    assert_eq!(
+        chain_steps(&outcome),
+        [[
+            "src/api.ts:3 handler calls save name false",
+            "src/store.ts:1 save defines - path false",
+        ]],
+        "{outcome:#}"
+    );
+
+    let map = |extra: &[&str]| {
+        let mut args = vec!["graph", "map", "app"];
+        args.extend_from_slice(extra);
+        args.push("--json");
+        w.cli(&args)
+    };
+    let (code, text) = map(&["--depth", "1"]);
+    assert_eq!(code, 0, "{text}");
+    let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+    assert_eq!(
+        outcome["areas"],
+        json!([
+            {"path": "src/api", "files": 1, "exported": 1, "languages": ["typescript"]},
+            {"path": "src/legacy", "files": 1, "exported": 1, "languages": ["typescript"]},
+            {"path": "src/store", "files": 1, "exported": 2, "languages": ["typescript"]},
+            {"path": "tools/build", "files": 1, "exported": 1, "languages": ["python"]},
+        ]),
+        "{outcome:#}"
+    );
+    // Of the two calls only `load` is counted: `save` has two definitions.
+    // The import is one edge, resolved by path.
+    assert_eq!(
+        outcome["edges"],
+        json!([
+            {"from": "src/api", "to": "src/store", "kind": "calls", "resolution": "name", "count": 1},
+            {"from": "src/api", "to": "src/store", "kind": "imports", "resolution": "path", "count": 1},
+        ]),
+        "{outcome:#}"
+    );
+    assert_eq!(outcome["depth"], 1);
+    assert_eq!(outcome["truncated"], false);
+    assert_eq!(outcome["coverage"]["scanned"], true);
+
+    let (_, text) = map(&[]);
+    let plain = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+    assert_eq!(plain["depth"], 1, "the default depth is 1");
+    for depth in ["0", "4"] {
+        let (code, text) = map(&["--depth", depth]);
+        assert_eq!(code, 1, "{text}");
+        assert!(text.contains("depth must be between 1 and 3"), "{text}");
+    }
+    let (code, human) = w.cli(&["graph", "map", "app", "--depth", "1"]);
+    assert_eq!(code, 0, "{human}");
+    for line in [
+        "\"src/store\": 1 files, 2 exported, typescript",
+        "\"src/api\" -> \"src/store\": 1 imports (by path)",
+        "\"src/api\" -> \"src/store\": 1 calls (by name)",
+    ] {
+        assert!(human.contains(line), "{line}: {human}");
+    }
+}
+
+/// Issue #52, fifth criterion: hops outside 1 to 6 are refused, saying the
+/// allowed range, before anything is searched.
+#[test]
+fn max_hops_outside_one_to_six_is_refused_with_the_allowed_range() {
+    let w = World::new();
+    for hops in ["0", "7"] {
+        let (code, text) = w.cli(&["graph", "path", "app", "a", "b", "--max-hops", hops]);
+        assert_eq!(code, 1, "{text}");
+        assert!(
+            text.contains("max_hops must be between 1 and 6"),
+            "{hops}: {text}"
+        );
+    }
+    let (code, outcome) = path_query(&w, "main", "upload", &["--max-hops", "6"]);
+    assert_eq!(code, 0, "{outcome:#}");
+}
+
+/// Issue #52, sixth criterion: a search that reaches its 10,000-edge bound
+/// stops there and says `truncated: true`.
+#[test]
+fn a_path_search_capped_at_its_edge_bound_says_truncated() {
+    let mut hub = String::from("def hub():\n");
+    for index in 0..10_001 {
+        hub.push_str(&format!("    f{index}()\n"));
+    }
+    let w = World::with_files(
+        Vec::new(),
+        &[
+            ("hub.py", hub.as_str()),
+            ("goal.py", "def goal():\n    return 1\n"),
+        ],
+    );
+    let deadline = Instant::now() + WAIT;
+    let outcome = loop {
+        let (code, outcome) = path_query(&w, "hub", "goal", &[]);
+        if code == 0 && outcome["coverage"]["current_files"] == 2 {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "never indexed: {outcome:#}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(outcome["paths"], json!([]), "{outcome:#}");
+    assert_eq!(outcome["truncated"], true, "{outcome:#}");
+    assert_eq!(outcome["edges_visited"], 10_000, "{outcome:#}");
+    let (_, human) = w.cli(&["graph", "path", "app", "hub", "goal"]);
+    assert!(
+        human.contains("The search stopped at a bound; a chain may still exist."),
+        "{human}"
+    );
+}

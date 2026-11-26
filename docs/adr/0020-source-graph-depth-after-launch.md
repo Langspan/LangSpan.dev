@@ -22,7 +22,7 @@ about graph depth waits.
 | --- | --- | --- | --- |
 | D1 | Symbol lookup with calls, span, hash, notes and check state | Path, line, kind, signature | Built 25 November 2026 at the owner's request ([issue #50](https://github.com/Langspan/LangSpan.dev/issues/50)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Not yet called on a host |
 | D2 | Blast radius level by level | One level | Built 25 November 2026 at the owner's request ([issue #51](https://github.com/Langspan/LangSpan.dev/issues/51)), ahead of the condition below: `graph impact --depth N` (1 to 3) and `langspan_impact` with `depth`; see [ADR 0008](0008-derived-source-index.md). Not yet called on a host |
-| D3 | Typed edges, paths between symbols, a repository map | Name mentions | Not now |
+| D3 | Typed edges, paths between symbols, a repository map | `graph path` and `langspan_path`: the shortest chains of calls between two names, each step found by import path or by name and marked `ambiguous` when the name has several definitions; `graph map` and `langspan_map`: areas with their files, exports and languages, and the imports and calls between them | Built 26 November 2026 at the owner's request ([issue #52](https://github.com/Langspan/LangSpan.dev/issues/52)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Imports are resolved by path for TypeScript and JavaScript, Python and Rust only. Not yet called on a host |
 | D4 | A definition's history with rationales and reverted attempts | `graph history` and `langspan_history`: recorded interface changes newest first, with the last reported editor, its task line, nearby notes and messages, and `reverted` | Built 25 November 2026 ([issue #53](https://github.com/Langspan/LangSpan.dev/issues/53)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Not yet called on a host |
 | D5 | Graph export and import | `graph export` and `graph import` | Built 26 November 2026 ([issue #54](https://github.com/Langspan/LangSpan.dev/issues/54)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Not yet run between two machines |
 | D6 | 11 languages | 5 languages | Java built 25 November 2026 and C# 26 November 2026 at the owner's request ([issue #55](https://github.com/Langspan/LangSpan.dev/issues/55)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Neither yet run on a host. Other languages: not now. A grammar is a new C-built dependency, each with a row in [dependencies](../dependencies.md) |
@@ -40,7 +40,8 @@ real-host demonstration show agents missing.
 ## Consequences
 
 - Source context stays a name match without type, scope or import resolution,
-  as the README already says.
+  as the README already says. The one exception is D3: `graph path` and
+  `graph map` resolve imports by path, and say so on each step and edge.
 - Repositories in other languages get file- and line-level coordination and
   briefings, but no source-index answers or interface notices.
 
