@@ -6,13 +6,19 @@
 
 use langspan_core::{
     ClockAnchor, Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event,
-    HISTORY_EVENTS, HistoryQuery, LeaseStatus, Outcome, RecordedEvent, SentPublication, State,
-    StatusRecord, TODAY_EVENTS, TodayQuery, TodayWindow, apply, dashboard_denials, decide,
-    definition_history, expiry_events, shrink_status, status_records,
+    HISTORY_EVENTS, HISTORY_MOVES, HistoryQuery, LeaseStatus, Outcome, RecordedEvent, ReportQuery,
+    SentPublication, State, StatusRecord, TODAY_EVENTS, TodayQuery, TodayWindow, apply,
+    dashboard_denials, decide, definition_history, expiry_events, shrink_status, status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
+
+/// The scan failure recorded when a workspace's root or Git directory now
+/// names another checkout. Admission reads it back from the state.
+pub const IDENTITY_CHANGED: &str =
+    "Git identity changed since the previous scan; register the replacement as a new workspace";
 
 /// The wall clock in Unix milliseconds; 0 if it reads before the epoch.
 pub fn wall_now_ms() -> u64 {
@@ -55,6 +61,95 @@ const ANCHOR_LOOKUP: &str = concat!(
     " ORDER BY seq DESC LIMIT 1"
 );
 
+/// An event that sets or ends a session's intent, or binds or unbinds a
+/// session's workspace.
+macro_rules! intent_event {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         IN ('intent_set', 'intent_ended', 'session_ended', 'workspace_removed',
+             'session_registered')"
+    };
+}
+
+/// A partial index of the intent events, the workspace removals that end
+/// intents and the session registrations, so the report can find which
+/// sessions held an intent, and which workspace each session belonged to,
+/// before the events it reads without reading the rest of the older log.
+/// `events_intent` and `events_intent_state` were earlier forms of this
+/// index with fewer kinds; the new name replaces them in a database an
+/// earlier build opened.
+const INTENT_EVENT_INDEX: &str = concat!(
+    "DROP INDEX IF EXISTS events_intent; ",
+    "DROP INDEX IF EXISTS events_intent_state; ",
+    "CREATE INDEX IF NOT EXISTS events_report_state ON events(seq) WHERE ",
+    intent_event!()
+);
+
+/// Before the events a report reads: sessions holding an intent, each with
+/// its intent's workspace, each session's workspace, and what of these is
+/// known when only part of the older history was folded (`None`: all).
+type ReportHistory = (
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+    Option<langspan_core::ReportKnown>,
+);
+
+/// The newest intent and membership events after the first sequence number
+/// and before the second, newest first, at most the third parameter. Read
+/// through the partial index, so it visits no more index entries than that.
+const INTENT_EVENTS_BEFORE: &str = concat!(
+    "SELECT event_json FROM events WHERE seq > ?1 AND seq < ?2 AND ",
+    intent_event!(),
+    " ORDER BY seq DESC LIMIT ?3"
+);
+
+/// A `write_refused` row, and the index the monthly count reads them by.
+macro_rules! refusal_row {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         = 'write_refused'"
+    };
+}
+
+/// A `lease_granted` row and its session: the index a count's retry lookup
+/// reads, so finding a session's next admission does not scan the log.
+macro_rules! grant_row {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         = 'lease_granted'"
+    };
+}
+macro_rules! grant_session {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.lease.session_id') END"
+    };
+}
+
+/// Partial indexes of refusals and of admissions by session (roadmap H5).
+const COUNT_INDEXES: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_write_refused ON events(seq) WHERE ",
+    refusal_row!(),
+    ";\nCREATE INDEX IF NOT EXISTS events_grant_session ON events(",
+    grant_session!(),
+    ", seq) WHERE ",
+    grant_row!(),
+    ";"
+);
+
+/// The newest `write_refused` rows, newest first.
+const REFUSAL_ROWS: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE ",
+    refusal_row!(),
+    " ORDER BY seq DESC LIMIT ?1"
+);
+
+/// Whether a `write_refused` row precedes a sequence number.
+const REFUSAL_EARLIER: &str = concat!(
+    "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1 AND ",
+    refusal_row!(),
+    ")"
+);
+
 /// The kinds of event a definition's history reads (roadmap D4). One owner
 /// for the partial index over them and the lookups that must match it.
 macro_rules! history_kinds {
@@ -85,6 +180,29 @@ const HISTORY_FOLLOWING: &str = concat!(
     history_kinds!(),
     " AND json_extract(event_json, '$.type') IN ('remembered', 'forgotten', 'message_sent')
      ORDER BY seq LIMIT ?2"
+);
+
+/// The notices of files moved whole (roadmap D7): each change of one has
+/// `file_moved`, so the first says it.
+macro_rules! moved_kind {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') = 'interface_changed'
+         AND json_extract(event_json, '$.notice.changes[0].evidence') = 'file_moved' END"
+    };
+}
+
+/// A partial index of those notices, so every page of a history follows a
+/// moved file whatever its cursor.
+const MOVES_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_moves ON events(seq) WHERE ",
+    moved_kind!()
+);
+
+/// The newest of those notices.
+const MOVES_LOOKUP: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE ",
+    moved_kind!(),
+    " ORDER BY seq DESC LIMIT ?1"
 );
 
 /// The forgettings, one row per forgotten note.
@@ -137,6 +255,18 @@ const ANCHORS: &str = concat!(
     " ORDER BY seq"
 );
 
+/// A session's admissions after a sequence number, oldest first.
+const GRANTS_AFTER: &str = concat!(
+    "SELECT event_json FROM events WHERE ",
+    grant_session!(),
+    " = ?1 AND seq > ?2 AND ",
+    grant_row!(),
+    " ORDER BY seq LIMIT ?3"
+);
+
+/// A session's admissions a retry is looked for in, after a refusal: it
+/// may run other edits of the same reply first.
+pub const RETRY_LOOKAHEAD: u32 = 16;
 /// A history's answer stops before this many bytes: the MCP result carries
 /// it twice, once escaped again as text, inside one 64 KiB frame.
 pub const HISTORY_BUDGET_BYTES: usize = 28 * 1024;
@@ -210,6 +340,11 @@ fn digest(text: &str) -> u64 {
     hasher.finish()
 }
 
+mod retention;
+
+/// The SQLite schema marker this build writes.
+const SCHEMA_VERSION: i64 = 4;
+
 pub type StoreResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug, Clone)]
@@ -223,6 +358,16 @@ pub struct Execution {
 pub struct Store {
     connection: Connection,
     state: State,
+    /// The newest snapshot's sequence: events at or below it are not
+    /// replayed at start. Zero when there is none.
+    snapshot_seq: u64,
+    /// Wall-clock Unix milliseconds, stamped on every event and receipt so
+    /// that retention can tell their age. Not the daemon's monotonic clock,
+    /// which starts again at every boot.
+    wall_ms: Box<dyn Fn() -> u64 + Send>,
+    /// A test-only pause inside the compaction transaction, before it
+    /// commits, so that a test can kill the daemon there.
+    compaction_pause: Option<Duration>,
     tap: Option<Tap>,
 }
 
@@ -241,7 +386,7 @@ const TAP_LIMIT: usize = 64;
 /// hold a command line as typed. It is redacted wherever it is read back:
 /// into state, into an event page and from a receipt.
 fn redact_event(event: &mut Event) {
-    if let Event::CheckRecorded { check } = event {
+    if let Event::CheckRecorded { check, .. } = event {
         crate::hook::redact_check(check);
     }
 }
@@ -258,13 +403,22 @@ fn shown_event(mut event: Event, stored: String) -> StoreResult<(Event, String)>
 
 impl Store {
     pub fn open(path: &Path) -> StoreResult<Self> {
+        Self::open_with_wall_clock(path, Box::new(wall_now_ms))
+    }
+
+    /// Open with the wall clock that stamps records' ages for retention.
+    pub fn open_with_wall_clock(
+        path: &Path,
+        wall_ms: Box<dyn Fn() -> u64 + Send>,
+    ) -> StoreResult<Self> {
         let mut connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_millis(250))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !(0..=3).contains(&version) {
-            return Err(
-                format!("unsupported SQLite schema version {version}; expected at most 3").into(),
-            );
+        if !(0..=SCHEMA_VERSION).contains(&version) {
+            return Err(format!(
+                "unsupported SQLite schema version {version}; expected at most {SCHEMA_VERSION}"
+            )
+            .into());
         }
         if version == 0 {
             let tables: i64 = connection.query_row(
@@ -333,11 +487,38 @@ impl Store {
         // when opened (one pass over the log), and a build without it
         // reads and writes the same rows.
         connection.execute_batch(GENERATION_MARKER_INDEX)?;
+        connection.execute_batch(INTENT_EVENT_INDEX)?;
+        // The same for the monthly count (H5): two partial indexes.
+        connection.execute_batch(COUNT_INDEXES)?;
         connection.execute_batch(HISTORY_INDEX)?;
         connection.execute_batch(FORGOTTEN_INDEX)?;
         connection.execute_batch(RETRACTED_INDEX)?;
+        connection.execute_batch(MOVES_INDEX)?;
 
-        let state = Self::recover(&connection)?;
+        if version < 4 {
+            // Version 4 adds retention: each record's wall-clock time and the
+            // snapshots compaction writes. Records from before it have no
+            // time of their own, so they count from this upgrade.
+            let now = i64::try_from(wall_ms()).unwrap_or(i64::MAX);
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "ALTER TABLE events ADD COLUMN recorded_at_ms INTEGER;
+                 ALTER TABLE receipts ADD COLUMN recorded_at_ms INTEGER;
+                 CREATE TABLE snapshots (
+                    seq INTEGER PRIMARY KEY NOT NULL,
+                    state_json TEXT NOT NULL,
+                    cutoff_ms INTEGER NOT NULL,
+                    created_at_ms INTEGER NOT NULL
+                 );",
+            )?;
+            transaction.execute("UPDATE events SET recorded_at_ms = ?1", [now])?;
+            transaction.execute("UPDATE receipts SET recorded_at_ms = ?1", [now])?;
+            transaction.execute_batch("PRAGMA user_version = 4;")?;
+            transaction.commit()?;
+        }
+
+        let (state, snapshot_seq) = Self::recover(&connection)?;
         let generation = state
             .generation
             .checked_add(1)
@@ -345,14 +526,19 @@ impl Store {
         let mut store = Self {
             connection,
             state,
+            snapshot_seq,
+            wall_ms,
+            compaction_pause: None,
             tap: None,
         };
         // The generation's clock against the wall clock, so times can be
-        // placed on a day (the status line and `today`).
+        // placed on a day (the status line and `today`). The same wall clock
+        // stamps records' ages, so a retention cutoff and a placed time are
+        // on one clock.
         let anchor = ClockAnchor {
             generation,
             clock_ms: crate::clock::now_ms(),
-            wall_ms: wall_now_ms(),
+            wall_ms: (store.wall_ms)(),
         };
         store.commit(
             &[
@@ -405,7 +591,12 @@ impl Store {
             .workspaces
             .get(workspace_id)
             .ok_or("cannot store a scan for an unregistered workspace")?;
-        if workspace.root != snapshot.root {
+        if workspace.root != snapshot.root
+            && !crate::observer::same_root(
+                std::path::Path::new(&workspace.root),
+                std::path::Path::new(&snapshot.root),
+            )
+        {
             return Err("scan root differs from the registered physical workspace".into());
         }
         let limits = crate::observer::Limits::default();
@@ -446,21 +637,49 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let previous: Option<crate::observer::Snapshot> = previous_json
+        let mut previous: Option<crate::observer::Snapshot> = previous_json
             .map(|json| serde_json::from_str(&json))
             .transpose()?;
-        if previous
-            .as_ref()
-            .is_some_and(|old| old.root != snapshot.root || old.common_dir != snapshot.common_dir)
-        {
-            return Err("Git identity changed since the previous scan; register the replacement as a new workspace".into());
+        if previous.as_ref().is_some_and(|old| {
+            if old.root == snapshot.root && old.common_dir == snapshot.common_dir {
+                return false;
+            }
+            // Reached through a link left where the checkout used to be,
+            // both paths now name the same directories. A link to any other
+            // checkout would too, so the checkout reached must also hold the
+            // commit the previous scan saw. One bounded Git call, once per
+            // change of path: the next scan compares equal paths.
+            let same = |before: &str, now: &str| {
+                crate::observer::same_root(std::path::Path::new(before), std::path::Path::new(now))
+            };
+            !(same(&old.root, &snapshot.root)
+                && same(&old.common_dir, &snapshot.common_dir)
+                && old.head.as_deref().is_some_and(|head| {
+                    crate::observer::holds_commit(
+                        std::path::Path::new(&snapshot.root),
+                        head,
+                        std::time::Instant::now() + std::time::Duration::from_millis(500),
+                    )
+                    .unwrap_or(false)
+                }))
+        }) {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        // Accepted as the same checkout: the previous scan stays the
+        // baseline under the paths it is reached by now, so a change made
+        // while it moved is still observed with its earlier version.
+        if let Some(old) = previous.as_mut() {
+            old.root.clone_from(&snapshot.root);
+            old.common_dir.clone_from(&snapshot.common_dir);
         }
         let changes = crate::observer::diff(&previous, snapshot);
-        let sequence: i64 =
-            self.connection
-                .query_row("SELECT coalesce(max(seq), 0) FROM events", [], |row| {
-                    row.get(0)
-                })?;
+        // The sequence counter, not the newest row: retention can remove
+        // every row, and a scan ID must not repeat.
+        let sequence: i64 = self.connection.query_row(
+            "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'events'), 0)",
+            [],
+            |row| row.get(0),
+        )?;
         let scan_id = format!("scan-{}-{sequence}", self.state.generation);
         let mut commands = Vec::new();
         // Files whose content changed since a complete earlier scan, at their
@@ -654,9 +873,12 @@ impl Store {
                 | Command::Recap { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
+                | Command::Report { .. }
+                | Command::Count { .. }
                 | Command::History { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
+                | Command::Compact { .. }
                 | Command::WorkspaceList { .. }
                 | Command::WorkspaceRemove { apply: false, .. }
         ) {
@@ -709,6 +931,35 @@ impl Store {
         };
         if let Outcome::CheckRecorded { check } = &mut outcome {
             crate::hook::redact_check(check);
+        }
+        // A retried adoption rewrites the line journal from its answer, so it
+        // is decided again: the ended session may have resumed since, or a
+        // subagent may have started, and the cached answer would hand their
+        // new lines over. Only an answer that records nothing new is used.
+        if let Outcome::Adopted { recorded, .. } = outcome {
+            let decision = decide(&self.state, original, request_id, now_ms);
+            outcome = match decision.outcome {
+                Outcome::Adopted {
+                    adoption,
+                    root,
+                    live,
+                    earlier,
+                    kept,
+                    ..
+                } if decision.events.is_empty() => Outcome::Adopted {
+                    adoption,
+                    root,
+                    recorded,
+                    live,
+                    earlier,
+                    kept,
+                },
+                refused @ Outcome::Error { .. } => refused,
+                _ => Outcome::Error {
+                    code: "adoption_changed".into(),
+                    message: "this adoption's record no longer matches the coordinator's state; run `langspan adopt` again with a new request ID".into(),
+                },
+            };
         }
         Ok(Some(self.execution(outcome, true, now_ms)))
     }
@@ -794,10 +1045,16 @@ impl Store {
                 outcome
             }
             Command::Events { after, limit } => self.events(*after, *limit)?,
+            Command::Compact { keep_days, apply } => self.compact(*keep_days, *apply)?,
             Command::Today {
                 workspace_id,
                 from_ms,
             } => self.today(workspace_id.as_deref(), *from_ms, wall_now_ms(), now_ms)?,
+            Command::Report {
+                workspace_id,
+                from_ms,
+            } => self.report(workspace_id, *from_ms, wall_now_ms())?,
+            Command::Count { days } => self.count(days)?,
             Command::History {
                 workspace_id,
                 name,
@@ -1096,20 +1353,58 @@ impl Store {
         wall_ms: u64,
         now_ms: u64,
     ) -> StoreResult<Outcome> {
+        if let Some(refused) = self.refused_window(workspace_id, from_ms, wall_ms) {
+            return Ok(refused);
+        }
+        let (events, anchor, earlier) = self.newest_events()?;
+        let retained_from_ms = retention::since_ms(&self.connection)?;
+        let mut today = langspan_core::today(
+            &self.state,
+            &TodayQuery {
+                workspace_id,
+                window: TodayWindow {
+                    from_ms,
+                    to_ms: wall_ms,
+                },
+                events: &events,
+                anchor,
+                earlier,
+                retained_from_ms,
+                now_ms,
+            },
+        );
+        today.shrink_until(|today| {
+            serde_json::to_vec(today).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+        });
+        Ok(Outcome::Today { today })
+    }
+
+    /// Why a window of the event log cannot be read: an unknown workspace,
+    /// or a start after now.
+    fn refused_window(
+        &self,
+        workspace_id: Option<&str>,
+        from_ms: u64,
+        wall_ms: u64,
+    ) -> Option<Outcome> {
         if let Some(workspace_id) = workspace_id
             && !self.state.workspaces.contains_key(workspace_id)
         {
-            return Ok(Outcome::Error {
+            return Some(Outcome::Error {
                 code: "unknown_workspace".into(),
                 message: "no workspace has this ID; `langspan status` lists them".into(),
             });
         }
-        if from_ms > wall_ms {
-            return Ok(Outcome::Error {
-                code: "invalid_window".into(),
-                message: "the window starts after now; give a --since time in the past".into(),
-            });
-        }
+        (from_ms > wall_ms).then(|| Outcome::Error {
+            code: "invalid_window".into(),
+            message: "the window starts after now; give a --since time in the past".into(),
+        })
+    }
+
+    /// The newest `TODAY_EVENTS` events, oldest first, with the anchor of
+    /// the generation the first belongs to (when it was anchored) and
+    /// whether older events exist. `today` and `report` read the same.
+    fn newest_events(&self) -> StoreResult<(Vec<RecordedEvent>, Option<ClockAnchor>, bool)> {
         let mut statement = self
             .connection
             .prepare("SELECT seq, event_json FROM events ORDER BY seq DESC LIMIT ?1")?;
@@ -1126,6 +1421,9 @@ impl Store {
         events.reverse();
         let first = events.first().map_or(0, |recorded| recorded.seq);
         let first = i64::try_from(first)?;
+        // Older events exist when the log holds some before the first one
+        // read. What retention removed is the caller's to pass separately,
+        // as its cutoff: the kept generation markers are older than it.
         let earlier: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1)",
             [first],
@@ -1143,24 +1441,175 @@ impl Store {
             Some(Event::ClockAnchored { anchor }) => Some(anchor),
             _ => None,
         };
-        let mut today = langspan_core::today(
-            &self.state,
-            &TodayQuery {
-                workspace_id,
-                window: TodayWindow {
-                    from_ms,
-                    to_ms: wall_ms,
-                },
-                events: &events,
-                anchor,
-                earlier,
-                now_ms,
+        Ok((events, anchor, earlier))
+    }
+
+    /// Just before sequence number `seq`: the sessions holding an intent,
+    /// each with its intent's workspace, and each session's workspace, from
+    /// the newest snapshot (a compaction removed the events before it) and
+    /// the intent events, session registrations and workspace removals
+    /// after it and before `seq`. At most `REPORT_HISTORY_EVENTS` of those
+    /// are read, the newest: when more exist, the snapshot is not used and
+    /// the third value says which sessions the events read made known, so a
+    /// report's cost stays bounded however long the log grows.
+    fn report_history_before(&self, seq: u64) -> StoreResult<ReportHistory> {
+        let from = self.snapshot_seq;
+        let budget = langspan_core::REPORT_HISTORY_EVENTS;
+        let mut statement = self.connection.prepare_cached(INTENT_EVENTS_BEFORE)?;
+        let mut rows = statement.query(params![
+            i64::try_from(from)?,
+            i64::try_from(seq)?,
+            i64::try_from(budget + 1)?
+        ])?;
+        let mut newest_first = Vec::new();
+        while let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            newest_first.push(json);
+        }
+        let complete = newest_first.len() <= budget;
+        newest_first.truncate(budget);
+        let (mut open, mut members, mut known) = if !complete {
+            (
+                BTreeMap::new(),
+                BTreeMap::new(),
+                Some(langspan_core::ReportKnown::default()),
+            )
+        } else if self.snapshot_seq > 0 {
+            let (snapshot, _) = retention::snapshot(&self.connection)?;
+            (
+                snapshot
+                    .intents
+                    .iter()
+                    .map(|(session, intent)| (session.clone(), intent.workspace_id.clone()))
+                    .collect(),
+                snapshot
+                    .sessions
+                    .iter()
+                    .map(|(id, session)| (id.clone(), session.workspace_id.clone()))
+                    .collect(),
+                None,
+            )
+        } else {
+            (BTreeMap::new(), BTreeMap::new(), None)
+        };
+        for json in newest_first.iter().rev() {
+            let event = serde_json::from_str(json)?;
+            langspan_core::open_intents(&mut open, &event);
+            langspan_core::session_workspaces(&mut members, &event);
+            if let Some(known) = known.as_mut() {
+                langspan_core::known_sessions(known, &event);
+            }
+        }
+        Ok((open, members, known))
+    }
+
+    /// The coordination report (roadmap H8): the newest `TODAY_EVENTS`
+    /// events at most, placed in wall time as `today` places them, counted
+    /// by the core. Reads only; it writes nothing and acknowledges no
+    /// message.
+    pub fn report(&self, workspace_id: &str, from_ms: u64, wall_ms: u64) -> StoreResult<Outcome> {
+        if let Some(refused) = self.refused_window(Some(workspace_id), from_ms, wall_ms) {
+            return Ok(refused);
+        }
+        let (events, anchor, earlier) = self.newest_events()?;
+        let retained_from_ms = retention::since_ms(&self.connection)?;
+        let (open_intents, session_workspaces, known) =
+            self.report_history_before(events.first().map_or(0, |first| first.seq))?;
+        let mut report = langspan_core::report(&ReportQuery {
+            workspace_id,
+            window: TodayWindow {
+                from_ms,
+                to_ms: wall_ms,
             },
-        );
-        today.shrink_until(|today| {
-            serde_json::to_vec(today).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+            events: &events,
+            anchor,
+            earlier,
+            retained_from_ms,
+            open_intents: &open_intents,
+            session_workspaces: &session_workspaces,
+            known: known.as_ref(),
         });
-        Ok(Outcome::Today { today })
+        report.shrink_until(|report| {
+            serde_json::to_vec(report).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+        });
+        Ok(Outcome::Report { report })
+    }
+
+    /// The refusal count (H5): the newest `COUNT_REFUSALS` refusals at
+    /// most, placed by their generation's anchor and counted by the core.
+    /// Reads only; it writes nothing.
+    pub fn count(&self, days: &[u64]) -> StoreResult<Outcome> {
+        if let Err(message) = langspan_core::validate_count_days(days) {
+            return Ok(Outcome::Error {
+                code: "invalid_window".into(),
+                message,
+            });
+        }
+        let mut statement = self.connection.prepare(REFUSAL_ROWS)?;
+        let mut rows = statement.query([i64::try_from(langspan_core::COUNT_REFUSALS)?])?;
+        let mut refusals = Vec::new();
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            refusals.push(RecordedEvent {
+                seq: u64::try_from(seq)?,
+                event: serde_json::from_str(&json)?,
+            });
+        }
+        refusals.reverse();
+        let earlier: bool = match refusals.first() {
+            Some(first) => {
+                self.connection
+                    .query_row(REFUSAL_EARLIER, [i64::try_from(first.seq)?], |row| {
+                        row.get(0)
+                    })?
+            }
+            None => false,
+        };
+        let mut anchors = Vec::new();
+        let mut statement = self.connection.prepare_cached(ANCHORS)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            if let Event::ClockAnchored { anchor } = serde_json::from_str(&json)? {
+                anchors.push(anchor);
+            }
+        }
+        let mut grants = self.connection.prepare(GRANTS_AFTER)?;
+        let count = langspan_core::count_refusals(
+            &langspan_core::CountQuery {
+                days,
+                refusals: &refusals,
+                anchors: &anchors,
+                earlier,
+                retained_since_ms: retention::since_ms(&self.connection)?,
+            },
+            |session, workspace, after, paths| -> StoreResult<bool> {
+                let mut rows =
+                    grants.query(params![session, i64::try_from(after)?, RETRY_LOOKAHEAD])?;
+                while let Some(row) = rows.next()? {
+                    let json: String = row.get(0)?;
+                    if let Event::LeaseGranted { lease } = serde_json::from_str(&json)? {
+                        let mut granted: Vec<&String> = lease.paths.iter().collect();
+                        granted.sort();
+                        granted.dedup();
+                        // A refusal keeps the first `REFUSAL_PATHS` paths,
+                        // sorted: the grant's, cut the same way, must match.
+                        if lease.workspace_id == workspace
+                            && granted
+                                .iter()
+                                .take(langspan_core::REFUSAL_PATHS)
+                                .copied()
+                                .eq(paths.iter())
+                        {
+                            return Ok(true);
+                        }
+                    }
+                }
+                Ok(false)
+            },
+        )?;
+        Ok(Outcome::Count { count })
     }
 
     /// A definition's history (roadmap D4): the newest `HISTORY_EVENTS`
@@ -1246,6 +1695,10 @@ impl Store {
             events.extend(rows_of(statement.query([message_id])?)?);
         }
         drop(statement);
+        // A moved file's earlier paths hold on every page (roadmap D7).
+        let mut statement = self.connection.prepare_cached(MOVES_LOOKUP)?;
+        let moves = rows_of(statement.query([i64::try_from(HISTORY_MOVES)?])?)?;
+        drop(statement);
         let mut anchors = Vec::new();
         let mut statement = self.connection.prepare_cached(ANCHORS)?;
         let mut rows = statement.query([])?;
@@ -1262,6 +1715,7 @@ impl Store {
             limit,
             before_seq,
             events: &events,
+            moves: &moves,
             anchors: &anchors,
             now_ms,
         };
@@ -1339,7 +1793,11 @@ impl Store {
             bytes += size;
             sent.push(record);
         }
-        Ok(Outcome::RemoteSent { sent, more })
+        Ok(Outcome::RemoteSent {
+            sent,
+            more,
+            since_ms: retention::since_ms(&self.connection)?,
+        })
     }
 
     /// One message as it was sent, read from its `message_sent` event, so
@@ -1654,13 +2112,14 @@ impl Store {
         for event in events {
             apply(&mut next_state, event)?;
         }
+        let recorded_at = i64::try_from((self.wall_ms)()).unwrap_or(i64::MAX);
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for event in events {
             transaction.execute(
-                "INSERT INTO events(event_json) VALUES (?1)",
-                [serde_json::to_string(event)?],
+                "INSERT INTO events(event_json, recorded_at_ms) VALUES (?1, ?2)",
+                params![serde_json::to_string(event)?, recorded_at],
             )?;
             // The last scan was of the old checkout: the next scan of the
             // new root starts a fresh baseline, so files that differ between
@@ -1679,11 +2138,13 @@ impl Store {
         }
         if let Some((request_id, command, outcome)) = receipt {
             transaction.execute(
-                "INSERT INTO receipts(request_id, command_json, outcome_json) VALUES (?1, ?2, ?3)",
+                "INSERT INTO receipts(request_id, command_json, outcome_json, recorded_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
                 params![
                     request_id,
                     serde_json::to_string(command)?,
                     serde_json::to_string(outcome)?,
+                    recorded_at,
                 ],
             )?;
         }
@@ -1710,25 +2171,11 @@ impl Store {
         Ok(())
     }
 
-    fn recover(connection: &Connection) -> StoreResult<State> {
-        let mut state = State::default();
-        let mut statement =
-            connection.prepare("SELECT seq, event_json FROM events ORDER BY seq")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let sequence: i64 = row.get(0)?;
-            if sequence <= 0 {
-                return Err("event history contains a non-positive sequence".into());
-            }
-            let json: String = row.get(1)?;
-            let mut event: Event = serde_json::from_str(&json).map_err(|error| {
-                format!("invalid persisted event at sequence {sequence}: {error}")
-            })?;
-            redact_event(&mut event);
-            apply(&mut state, &event).map_err(|error| {
-                format!("invalid persisted transition at sequence {sequence}: {error}")
-            })?;
-        }
+    /// The state the newest snapshot and the events after it give, and the
+    /// snapshot's sequence.
+    fn recover(connection: &Connection) -> StoreResult<(State, u64)> {
+        let (mut state, snapshot_seq) = retention::snapshot(connection)?;
+        retention::replay_after(connection, &mut state, snapshot_seq, |_, _| Ok(()))?;
 
         // Receipts only answer retries. One this build cannot read (written
         // by another version, or damaged) does not stop the store opening:
@@ -1757,7 +2204,7 @@ impl Store {
                 })
             );
         }
-        Ok(state)
+        Ok((state, snapshot_seq))
     }
 }
 
@@ -1813,6 +2260,42 @@ fn observed_branches(
 mod tests {
     use super::*;
 
+    /// `count` runs in the daemon's request handler too: reading refusals
+    /// and a session's later admissions must use their partial indexes, not
+    /// read the whole log.
+    #[test]
+    fn the_count_lookups_read_their_indexes() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-count-plan-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let plan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> Vec<String> {
+            store
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(params, |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let refusals = plan(REFUSAL_ROWS, &[&10i64]);
+        let earlier = plan(REFUSAL_EARLIER, &[&10i64]);
+        let grants = plan(GRANTS_AFTER, &[&"session", &1i64, &16i64]);
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        for (steps, index) in [
+            (&refusals, "events_write_refused"),
+            (&earlier, "events_write_refused"),
+            (&grants, "events_grant_session"),
+        ] {
+            assert!(steps.iter().any(|step| step.contains(index)), "{steps:?}");
+        }
+    }
+
     /// `today` runs in the daemon's request handler: finding the anchor must
     /// read the generation markers only, not every older event of a long
     /// generation.
@@ -1838,6 +2321,373 @@ mod tests {
         assert!(
             plan.iter()
                 .any(|step| step.contains("events_generation_marker")),
+            "{plan:?}"
+        );
+    }
+
+    /// Review 4704154106: Alice registers in `work` before the newest
+    /// `TODAY_EVENTS` events; among them she reads a file, `work` is
+    /// removed and she registers the same session in `elsewhere`. The read
+    /// counts for `work` (registered again), the workspace she was in then,
+    /// and not for `elsewhere`. Real SQLite: her first registration is only in the
+    /// older part of the log.
+    #[test]
+    fn a_session_registered_again_elsewhere_keeps_its_earlier_read_in_its_old_workspace() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-report-members-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let run = |store: &mut Store, id: &str, command: Command| {
+            let now = crate::clock::now_ms();
+            let outcome = store.execute(id, &command, &command, now).unwrap().outcome;
+            assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+        };
+        let alice = "claude-code.alice";
+        for workspace in ["work", "elsewhere"] {
+            run(
+                &mut store,
+                &format!("w-{workspace}"),
+                Command::WorkspaceRegister {
+                    workspace_id: workspace.into(),
+                    root: format!("/repos/{workspace}"),
+                },
+            );
+        }
+        let register = |session: &str, workspace: &str| Command::SessionRegister {
+            session_id: session.into(),
+            workspace_id: workspace.into(),
+            parent: None,
+            headless: false,
+        };
+        run(&mut store, "s-alice", register(alice, "work"));
+        run(
+            &mut store,
+            "s-filler",
+            register("claude-code.filler", "elsewhere"),
+        );
+        let from_ms = wall_now_ms();
+        // Enough events after the registration that it is not among those
+        // read.
+        let generation = store.state.generation;
+        let filler: Vec<Event> = (0..TODAY_EVENTS)
+            .map(|_| Event::SessionSeen {
+                session_id: "claude-code.filler".into(),
+                at_ms: crate::clock::now_ms(),
+                generation,
+            })
+            .collect();
+        store.commit(&filler, None).unwrap();
+        // A prompt carries a time of its own, which places the read after it.
+        run(
+            &mut store,
+            "p",
+            Command::SessionPrompt {
+                session_id: alice.into(),
+                summary: "carry on".into(),
+                line_digests: Vec::new(),
+            },
+        );
+        run(
+            &mut store,
+            "read",
+            Command::ObserveSource {
+                session_id: alice.into(),
+                files: vec![langspan_core::ObservedFile {
+                    path: "src/lib.rs".into(),
+                    state: langspan_core::FileState::Missing,
+                }],
+                origin: langspan_core::SourceOrigin::Read,
+            },
+        );
+        run(
+            &mut store,
+            "r",
+            Command::WorkspaceRemove {
+                workspace_id: "work".into(),
+                apply: true,
+            },
+        );
+        run(&mut store, "s-again", register(alice, "elsewhere"));
+        // Registered again, so its report can be asked for.
+        run(
+            &mut store,
+            "w-work-again",
+            Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: "/repos/work".into(),
+            },
+        );
+        let to_ms = wall_now_ms() + 1;
+        let reads = |store: &Store, workspace: &str| {
+            let outcome = store.report(workspace, from_ms, to_ms).unwrap();
+            let Outcome::Report { report } = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert!(report.truncated, "{report:#?}");
+            report
+                .sessions
+                .iter()
+                .find(|row| row.session_id == alice)
+                .map(|row| row.counts.reads_reported)
+        };
+        let (work, elsewhere) = (reads(&store, "work"), reads(&store, "elsewhere"));
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(work, Some(1));
+        assert_eq!(elsewhere, Some(0));
+    }
+
+    /// Review 4703461855: an intent set before the newest `TODAY_EVENTS`
+    /// events, whose session ends inside the window, is counted as left
+    /// open. Real SQLite: the intent is only in the older part of the log.
+    #[test]
+    fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
+        assert_eq!(intents_left_open_after_older_log(false), 1);
+    }
+
+    /// Review 4703929181: removing the workspace ends the intent with it, so
+    /// the session registered again under the same ID and ended without a
+    /// new intent left none open, though the removal is in the older log.
+    #[test]
+    fn a_workspace_removed_before_the_events_read_ends_its_intents() {
+        assert_eq!(intents_left_open_after_older_log(true), 0);
+    }
+
+    /// Alice sets an intent, then (when `remove`) the workspace is removed
+    /// and registered again with her session, all before the newest
+    /// `TODAY_EVENTS` events; she ends her session inside the window. Her
+    /// `intents_left_open`.
+    fn intents_left_open_after_older_log(remove: bool) -> u32 {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-report-intent-{remove}-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let run = |store: &mut Store, id: &str, command: Command| {
+            let now = crate::clock::now_ms();
+            store.execute(id, &command, &command, now).unwrap();
+        };
+        run(
+            &mut store,
+            "w",
+            Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: "/repos/work".into(),
+            },
+        );
+        for session in ["claude-code.alice", "claude-code.filler"] {
+            run(
+                &mut store,
+                &format!("s-{session}"),
+                Command::SessionRegister {
+                    session_id: session.into(),
+                    workspace_id: "work".into(),
+                    parent: None,
+                    headless: false,
+                },
+            );
+        }
+        run(
+            &mut store,
+            "i",
+            Command::IntentSet {
+                session_id: "claude-code.alice".into(),
+                paths: vec!["src/lib.rs".into()],
+                summary: "rework the parser".into(),
+            },
+        );
+        if remove {
+            run(
+                &mut store,
+                "r",
+                Command::WorkspaceRemove {
+                    workspace_id: "work".into(),
+                    apply: true,
+                },
+            );
+            run(
+                &mut store,
+                "w2",
+                Command::WorkspaceRegister {
+                    workspace_id: "work".into(),
+                    root: "/repos/work".into(),
+                },
+            );
+            for session in ["claude-code.alice", "claude-code.filler"] {
+                run(
+                    &mut store,
+                    &format!("s2-{session}"),
+                    Command::SessionRegister {
+                        session_id: session.into(),
+                        workspace_id: "work".into(),
+                        parent: None,
+                        headless: false,
+                    },
+                );
+            }
+        }
+        let from_ms = wall_now_ms();
+        // Enough events after the intent that it is not among those read.
+        let generation = store.state.generation;
+        let filler: Vec<Event> = (0..TODAY_EVENTS)
+            .map(|_| Event::SessionSeen {
+                session_id: "claude-code.filler".into(),
+                at_ms: crate::clock::now_ms(),
+                generation,
+            })
+            .collect();
+        store.commit(&filler, None).unwrap();
+        // A prompt carries a time of its own, which places the end after it.
+        run(
+            &mut store,
+            "p",
+            Command::SessionPrompt {
+                session_id: "claude-code.alice".into(),
+                summary: "carry on".into(),
+                line_digests: Vec::new(),
+            },
+        );
+        run(
+            &mut store,
+            "e",
+            Command::SessionEnd {
+                session_id: "claude-code.alice".into(),
+            },
+        );
+        let outcome = store.report("work", from_ms, wall_now_ms() + 1).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let Outcome::Report { report } = outcome else {
+            panic!("{outcome:?}");
+        };
+        let alice = report
+            .sessions
+            .iter()
+            .find(|row| row.session_id == "claude-code.alice")
+            .unwrap_or_else(|| panic!("{report:#?}"));
+        assert_eq!(alice.counts.intents_set, 0, "{report:#?}");
+        alice.counts.intents_left_open
+    }
+
+    /// Review 4705125393: with no compaction snapshot, a report folds at
+    /// most the newest `REPORT_HISTORY_EVENTS` intent and registration
+    /// events before those it reads, however long the log, and says
+    /// `partial` when an event it counts needed an older one. Real SQLite
+    /// with 200,000 intent events: Alice registered before all of them and
+    /// prompts inside the window. Reading every older event would find her
+    /// workspace and count her; the bounded fold cannot, and says so.
+    #[test]
+    fn a_report_on_a_long_history_folds_at_most_the_budget_and_says_partial() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-report-budget-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let run = |store: &mut Store, id: &str, command: Command| {
+            let now = crate::clock::now_ms();
+            store.execute(id, &command, &command, now).unwrap();
+        };
+        run(
+            &mut store,
+            "w",
+            Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: "/repos/work".into(),
+            },
+        );
+        for session in ["claude-code.alice", "claude-code.filler"] {
+            run(
+                &mut store,
+                &format!("s-{session}"),
+                Command::SessionRegister {
+                    session_id: session.into(),
+                    workspace_id: "work".into(),
+                    parent: None,
+                    headless: false,
+                },
+            );
+        }
+        let generation = store.state.generation;
+        let history: Vec<Event> = (0..200_000)
+            .map(|index| {
+                if index % 2 == 0 {
+                    Event::IntentSet {
+                        intent: langspan_core::Intent {
+                            session_id: "claude-code.filler".into(),
+                            workspace_id: "work".into(),
+                            paths: vec!["src/lib.rs".into()],
+                            summary: "filler".into(),
+                            generation,
+                        },
+                    }
+                } else {
+                    Event::IntentEnded {
+                        session_id: "claude-code.filler".into(),
+                    }
+                }
+            })
+            .collect();
+        store.commit(&history, None).unwrap();
+        // The window starts now as the report places events: on the
+        // daemon's clock through this generation's anchor, which a long test
+        // may see drift from the wall clock.
+        let anchor = store.state.clock_anchor.unwrap();
+        let from_ms = anchor.wall_ms + (crate::clock::now_ms() - anchor.clock_ms);
+        run(
+            &mut store,
+            "p",
+            Command::SessionPrompt {
+                session_id: "claude-code.alice".into(),
+                summary: "carry on".into(),
+                line_digests: Vec::new(),
+            },
+        );
+        let outcome = store.report("work", from_ms, from_ms + 60_000).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let Outcome::Report { report } = outcome else {
+            panic!("{outcome:?}");
+        };
+        // Through JSON, so the check reads what a client is sent.
+        let report = serde_json::to_value(&report).unwrap();
+        assert_eq!(report["partial"], serde_json::json!(true), "{report:#}");
+        let rows = report["sessions"].as_array().unwrap();
+        assert!(
+            rows.iter()
+                .all(|row| row["session_id"] != "claude-code.alice"),
+            "{report:#}"
+        );
+    }
+
+    /// The intent lookup reads only intent events, not the rest of the log.
+    #[test]
+    fn the_intent_lookup_reads_only_intent_events() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-intent-plan-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let plan: Vec<String> = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {INTENT_EVENTS_BEFORE}"))
+            .unwrap()
+            .query_map([0i64, 1_000_000i64, 10i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            plan.iter().any(|step| step.contains("events_report_state")),
             "{plan:?}"
         );
     }
@@ -1870,6 +2720,7 @@ mod tests {
             (plan(HISTORY_BEFORE, &[1_000_000, 10]), "events_history"),
             (plan(HISTORY_FOLLOWING, &[1, 10]), "events_history"),
             (plan(ANCHORS, &[]), "events_generation_marker"),
+            (plan(MOVES_LOOKUP, &[10]), "events_moves"),
         ];
         let forgetting: Vec<String> = store
             .connection
@@ -1955,8 +2806,14 @@ mod tests {
                                 after_arity: None,
                                 before_count: None,
                                 after_count: None,
+                                after_name: None,
+                                before_name: None,
+                                evidence: None,
+                                before_path: None,
+                                private: false,
                             }],
                             dependents: Vec::new(),
+                            elsewhere: Vec::new(),
                             by_session: None,
                             at_ms: at.at_ms,
                             generation: at.generation,
@@ -2021,6 +2878,95 @@ mod tests {
         );
     }
 
+    /// Roadmap D7: the next page of a moved file's history, asked by its new
+    /// path from before the move, still includes what was recorded under
+    /// the old path: the move is read whatever the page's cursor.
+    #[test]
+    fn the_next_page_of_a_moved_files_history_keeps_its_old_path() {
+        use langspan_core::{InterfaceChange, InterfaceNotice};
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-history-moved-page-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let register = Command::WorkspaceRegister {
+            workspace_id: "work".into(),
+            root: directory.to_string_lossy().into_owned(),
+        };
+        store.execute("w", &register, &register, 0).unwrap();
+        let generation = store.state.generation;
+        let notice = |id: &str, path: &str, change: InterfaceChange| Event::InterfaceChanged {
+            notice: InterfaceNotice {
+                notice_id: id.into(),
+                workspace_id: "work".into(),
+                path: path.into(),
+                changes: vec![change],
+                dependents: Vec::new(),
+                elsewhere: Vec::new(),
+                by_session: None,
+                at_ms: 1_000,
+                generation,
+            },
+        };
+        let changed = |after: &str| InterfaceChange {
+            name: "save".into(),
+            kind: "function".into(),
+            change: "signature_changed".into(),
+            before: Some("fn save()".into()),
+            after: Some(after.into()),
+            before_arity: None,
+            after_arity: None,
+            before_count: None,
+            after_count: None,
+            after_name: None,
+            before_name: None,
+            evidence: None,
+            before_path: None,
+            private: false,
+        };
+        let moved = InterfaceChange {
+            change: "renamed".into(),
+            before: Some("fn save(b: u32)".into()),
+            after_name: Some("save".into()),
+            before_name: Some("save".into()),
+            evidence: Some("file_moved".into()),
+            before_path: Some("src/a.rs".into()),
+            ..changed("fn save(b: u32)")
+        };
+        store
+            .commit(
+                &[
+                    notice("n-1", "src/a.rs", changed("fn save(a: u32)")),
+                    notice("n-2", "src/a.rs", changed("fn save(b: u32)")),
+                    notice("n-3", "src/b.rs", moved),
+                ],
+                None,
+            )
+            .unwrap();
+        let page = |before_seq| match store
+            .history(("work", "save", Some("src/b.rs")), 1, before_seq, 1_000)
+            .unwrap()
+        {
+            Outcome::History { history } => history,
+            outcome => panic!("{outcome:?}"),
+        };
+        let mut seen = Vec::new();
+        let mut before_seq = None;
+        loop {
+            let history = page(before_seq);
+            seen.extend(history.entries.iter().map(|entry| entry.notice_id.clone()));
+            match history.next_seq {
+                Some(next) if seen.len() < 10 => before_seq = Some(next),
+                _ => break,
+            }
+        }
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(seen, ["n-3", "n-2", "n-1"]);
+    }
+
     /// A withdrawn message's text never comes back in a history, whether
     /// its withdrawal is within the events one answer reads or behind more
     /// following events than that.
@@ -2080,8 +3026,14 @@ mod tests {
                                     after_arity: None,
                                     before_count: None,
                                     after_count: None,
+                                    after_name: None,
+                                    before_name: None,
+                                    evidence: None,
+                                    before_path: None,
+                                    private: false,
                                 }],
                                 dependents: Vec::new(),
+                                elsewhere: Vec::new(),
                                 by_session: None,
                                 at_ms: at.at_ms,
                                 generation: at.generation,

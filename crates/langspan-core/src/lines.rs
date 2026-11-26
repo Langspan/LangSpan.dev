@@ -6,9 +6,8 @@
 //! still live.
 
 use crate::{
-    CoreError, FileState, LINE_HORIZON_MS, LivenessStatus, MAX_REGION_LINE, MAX_WRITTEN,
-    MAX_WRITTEN_RANGES, ObservedFile, Session, State, WrittenLines, error, known_versions,
-    validate_id,
+    CoreError, FileState, LINE_HORIZON_MS, MAX_REGION_LINE, MAX_WRITTEN, MAX_WRITTEN_RANGES,
+    ObservedFile, Session, State, WrittenLines, error, finished, known_versions, validate_id,
 };
 
 /// At most `MAX_WRITTEN` entries, each for a requested path, with at most
@@ -48,15 +47,7 @@ pub(crate) fn validate_overwrites(
 /// A writer whose lines still count: registered, not ended, not known to
 /// have exited.
 fn live_writer(state: &State, session_id: &str) -> bool {
-    state.sessions.contains_key(session_id)
-        && !state
-            .activity
-            .get(session_id)
-            .is_some_and(|activity| activity.ended)
-        && !state
-            .session_liveness
-            .get(session_id)
-            .is_some_and(|liveness| liveness.status == LivenessStatus::Exited)
+    state.sessions.contains_key(session_id) && !finished(state, session_id)
 }
 
 /// The supplied entries that refuse this edit: for an existing file of which

@@ -52,15 +52,20 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
     // A submodule may import only the same pure standard-library items, serde
     // and its own crate.
     let submodules = [
+        include_str!("../src/classes.rs"),
+        include_str!("../src/count.rs"),
         include_str!("../src/dashboard.rs"),
         include_str!("../src/flaky.rs"),
         include_str!("../src/history.rs"),
         include_str!("../src/lines.rs"),
         include_str!("../src/recall.rs"),
+        include_str!("../src/recent.rs"),
+        include_str!("../src/report.rs"),
         include_str!("../src/status.rs"),
         include_str!("../src/status_line.rs"),
         include_str!("../src/today.rs"),
         include_str!("../src/workspaces.rs"),
+        include_str!("../src/write_check.rs"),
     ];
     // Range bounds, `mem::take` and `iter::empty` for the status pages: pure.
     let allowed_imports = [
@@ -96,15 +101,20 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
     assert_eq!(
         modules,
         [
+            "mod classes;",
+            "mod count;",
             "mod dashboard;",
             "mod flaky;",
             "mod history;",
             "mod lines;",
             "mod recall;",
+            "mod recent;",
+            "mod report;",
             "mod status;",
             "mod status_line;",
             "mod today;",
-            "mod workspaces;"
+            "mod workspaces;",
+            "mod write_check;"
         ],
         "a new core module needs this check"
     );

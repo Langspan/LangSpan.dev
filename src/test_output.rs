@@ -107,6 +107,7 @@ pub fn results(named: &Named, all_passed: bool, prefer: &[String]) -> Option<Tes
             .collect()
     };
     Some(TestResults {
+        more_failed: failed.len() < named.failed.len(),
         failed,
         passed,
         skipped,
@@ -373,6 +374,22 @@ test result: FAILED. 3 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out
                 &["slow::one"]
             )
         );
+    }
+
+    #[test]
+    fn go_test_output_names_its_tests_with_log_lines_before_or_after_the_result() {
+        // Go 1.14 and later stream a test's log lines before its result
+        // line, as the CI runner's `go test -v` printed them; earlier
+        // versions printed them indented after it.
+        let streamed = "=== RUN   TestAdd\n    calc_test.go:7: add\n--- FAIL: TestAdd (0.00s)\n=== RUN   TestNet\n    calc_test.go:11: timed out\n--- FAIL: TestNet (0.00s)\n=== RUN   TestReady\n--- PASS: TestReady (0.00s)\nFAIL\nFAIL\texample.com/calc\t0.001s\nFAIL\n";
+        let after = "=== RUN   TestAdd\n--- FAIL: TestAdd (0.00s)\n    calc_test.go:7: add\n=== RUN   TestNet\n--- FAIL: TestNet (0.00s)\n    calc_test.go:11: timed out\n=== RUN   TestReady\n--- PASS: TestReady (0.00s)\nFAIL\nFAIL\texample.com/calc\t0.001s\n";
+        for go in [streamed, after] {
+            assert_eq!(
+                parse(go),
+                named(&["TestAdd", "TestNet"], &["TestReady"]),
+                "{go}"
+            );
+        }
     }
 
     #[test]

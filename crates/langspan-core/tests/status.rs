@@ -271,6 +271,71 @@ fn a_cursor_position_at_the_integer_limit_is_refused_not_overflowed() {
     }
 }
 
+fn adoption(from: &str, to: &str) -> langspan_core::Adoption {
+    langspan_core::Adoption {
+        from: from.into(),
+        session_id: to.into(),
+        workspace_id: "w".into(),
+        reason: None,
+        at_ms: NOW,
+        generation: 2,
+    }
+}
+
+#[test]
+fn paged_records_carry_adoptions_so_the_whole_state_rebuilds_them() {
+    let mut state = base();
+    session(&mut state, "ended", Some(NOW - 2 * STATUS_RECENT_MS));
+    session(&mut state, "adopter", Some(NOW));
+    state
+        .adoptions
+        .insert("ended".into(), adoption("ended", "adopter"));
+    let mut rebuilt = State {
+        generation: state.generation,
+        ..State::default()
+    };
+    for (_, record) in status_records(&state, None).unwrap().1 {
+        record.apply(&mut rebuilt).unwrap();
+    }
+    assert_eq!(rebuilt.adoptions, state.adoptions);
+    assert_eq!(rebuilt, state);
+}
+
+#[test]
+fn a_session_that_adopted_many_ended_sessions_still_gets_a_bounded_status() {
+    let mut state = base();
+    session(&mut state, "adopter", Some(NOW));
+    // Independent ended sessions, each adopted by the same caller: no chain
+    // limit applies, so only the view's own trimming bounds this map.
+    for index in 0..2000 {
+        let from = format!("ended-session-with-a-long-identifier-{index:05}");
+        state
+            .adoptions
+            .insert(from.clone(), adoption(&from, "adopter"));
+    }
+    let (mut view, mut summary) = status_view(&state, NOW);
+    assert!(
+        size(&view, &summary) > 48 * 1024,
+        "the fixture must start too large"
+    );
+    shrink_status(&mut view, &mut summary, |state, summary| {
+        size(state, summary) <= 48 * 1024
+    });
+    assert!(size(&view, &summary) <= 48 * 1024);
+    assert!(summary.omitted.iter().any(|part| part == "adoptions"));
+    assert!(view.sessions.contains_key("adopter"));
+
+    // Restored, it holds only the adoptions of sessions still in the view.
+    view.sessions.remove("adopter");
+    session(&mut view, "other", Some(NOW));
+    state
+        .adoptions
+        .insert("ended-other".into(), adoption("ended-other", "other"));
+    langspan_core::restore_status(&mut view, &mut summary, &state, &["adoptions"]);
+    assert_eq!(view.adoptions.keys().collect::<Vec<_>>(), ["ended-other"]);
+    assert!(!summary.omitted.iter().any(|part| part == "adoptions"));
+}
+
 #[test]
 fn a_cursor_this_coordinator_did_not_give_is_refused() {
     let state = base();

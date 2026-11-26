@@ -1,38 +1,61 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "LangSpan coordination benchmark run record v1",
-  "description": "One record per driver run: one arm, task family, session count and seed. A value the run did not measure is null, never zero. The runner's raw journal (runner/runs.jsonl) holds the per-command detail.",
+  "title": "LangSpan coordination benchmark run record v6",
+  "description": "One record per driver run: one arm, task family, session count and seed, including a run the preflight check refused. A value the run did not measure is null, never zero. The runner's raw journal (runner/runs.jsonl) holds the per-command detail. v2: isolated clones, tasks_accepted in place of tasks_completed, no contradictions_reported (notes are evidence, not a verdict), split permission denials, session cost, duration and turns, coordinator scans, the requested model, ignored options and the refused status. v3: worktrees of one repository and one coordinator in the langspan arm (isolation), the tool guard's verdict (tool_check), figures summed over every result line of a session (results, turns), peer_checkout denials, interface notices per session, and the hedge stand-in mode. v4: the discovered_change family (roles changer and dependent), the stagger (stagger_s), auto memory (auto_memory) and, per task, whether an interface notice came before the session's first write (notice_before_write). v5: whether the changer made the interface change (interface_change), with dependents not judged when it did not, and the workaround stand-in mode. v6: the repair round of a trial whose combined result failed (repair), and the cost to a correct result (cost): the run's, the repair's and the total figures, and the cost per accepted task.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version", "record_type", "run_id", "arm", "family", "sessions", "seed", "agent",
-    "dry_run", "status", "started_at", "elapsed_s", "total_elapsed_s", "time_limit_s", "versions",
-    "tasks", "tasks_total", "tasks_completed", "integrated_tests", "merge_conflicts",
-    "semantic_conflicts", "duplicate_work", "stops", "questions", "permission_denials",
-    "refusals", "tokens", "evidence"
+    "dry_run", "status", "started_at", "elapsed_s", "total_elapsed_s", "time_limit_s",
+    "ignored_options", "isolation", "stagger_s", "auto_memory", "tool_check", "versions", "tasks", "tasks_total",
+    "tasks_accepted",
+    "integrated_tests", "interface_change", "merge_conflicts", "semantic_conflicts", "duplicate_work", "stops", "questions",
+    "permission_denials", "cost_usd", "turns", "refusals", "coordinator_scans", "tokens", "repair", "cost",
+    "evidence"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 6},
     "record_type": {"const": "coordination_run"},
     "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
     "arm": {"enum": ["worktrees", "awareness_only", "langspan"]},
-    "family": {"enum": ["rename_vs_new_caller", "contradictory_defaults"]},
+    "family": {"enum": ["rename_vs_new_caller", "contradictory_defaults", "discovered_change"]},
     "sessions": {"enum": [2, 5, 10]},
     "seed": {"type": "integer", "minimum": 0},
     "agent": {"enum": ["standin", "claude-code"]},
     "dry_run": {"type": "boolean"},
-    "standin_mode": {"enum": ["naive", "coordinated"]},
-    "status": {"enum": ["succeeded", "failed", "timed_out", "setup_failed", "interrupted"]},
+    "standin_mode": {"enum": ["follow", "ignore", "hedge", "workaround"]},
+    "status": {"enum": ["succeeded", "failed", "timed_out", "setup_failed", "interrupted", "refused"]},
     "started_at": {"type": "string"},
     "elapsed_s": {"type": ["number", "null"], "minimum": 0},
     "total_elapsed_s": {"type": "number", "minimum": 0},
     "time_limit_s": {"type": "number", "minimum": 0},
+    "ignored_options": {"type": "array", "items": {"type": "string"}},
+    "isolation": {"enum": ["clone", "worktree"]},
+    "stagger_s": {
+      "description": "Seconds the sessions other than the one whose task changes an interface waited to start; 0 when all started at once.",
+      "type": "number", "minimum": 0
+    },
+    "auto_memory": {
+      "description": "off: every Claude Code session ran with auto memory turned off; not_applicable: the stand-in, which has none.",
+      "enum": ["off", "not_applicable"]
+    },
+    "tool_check": {
+      "description": "The tool guard over every session: failed when any session was offered or called a tool outside its arm's set; passed only when every session passed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "failed_sessions"],
+      "properties": {
+        "status": {"enum": ["passed", "failed", "unknown"]},
+        "failed_sessions": {"type": "array", "items": {"type": "integer", "minimum": 1}}
+      }
+    },
     "versions": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["agent_cli", "models", "langspan_commit", "langspan_binary_sha256", "git", "python"],
+      "required": ["agent_cli", "requested_model", "models", "langspan_commit", "langspan_binary_sha256", "git", "python"],
       "properties": {
         "agent_cli": {"type": ["string", "null"]},
+        "requested_model": {"type": ["string", "null"]},
         "models": {"type": "array", "items": {"type": "string"}},
         "langspan_commit": {"type": ["string", "null"]},
         "langspan_binary_sha256": {"type": ["string", "null"]},
@@ -47,12 +70,14 @@
         "additionalProperties": false,
         "required": [
           "session", "task_id", "role", "branch", "process_status", "merged", "completed",
-          "accepted", "detail", "stopped", "asked_question", "permission_denials", "tokens", "refusals"
+          "accepted", "detail", "stopped", "asked_question", "results", "tool_check", "permission_denials",
+          "tokens", "cost_usd", "duration_ms", "turns", "refusals", "interface_notices", "transcript", "hook_log",
+          "standin_informed", "notice_before_write"
         ],
         "properties": {
           "session": {"type": "integer", "minimum": 1},
           "task_id": {"type": "string"},
-          "role": {"enum": ["rename", "new_caller", "contradiction", "control"]},
+          "role": {"enum": ["rename", "new_caller", "contradiction", "control", "changer", "dependent"]},
           "branch": {"type": "string"},
           "process_status": {"type": ["string", "null"]},
           "merged": {"type": "boolean"},
@@ -61,15 +86,40 @@
           "detail": {"type": ["string", "null"]},
           "stopped": {"type": ["boolean", "null"]},
           "asked_question": {"type": ["boolean", "null"]},
-          "permission_denials": {"type": ["integer", "null"], "minimum": 0},
+          "results": {"type": ["integer", "null"], "minimum": 0},
+          "tool_check": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status", "unexpected"],
+            "properties": {
+              "status": {"enum": ["passed", "failed", "unknown"]},
+              "unexpected": {"type": "array", "items": {"type": "string"}}
+            }
+          },
+          "permission_denials": {"$ref": "#/$defs/denials"},
           "tokens": {"$ref": "#/$defs/tokens"},
-          "refusals": {"type": ["integer", "null"], "minimum": 0}
+          "cost_usd": {"type": ["number", "null"], "minimum": 0},
+          "duration_ms": {"type": ["integer", "null"], "minimum": 0},
+          "turns": {"type": ["integer", "null"], "minimum": 0},
+          "refusals": {"type": ["integer", "null"], "minimum": 0},
+          "interface_notices": {"type": ["integer", "null"], "minimum": 0},
+          "transcript": {"type": ["string", "null"]},
+          "hook_log": {"type": ["string", "null"]},
+          "standin_informed": {"type": ["boolean", "null"]},
+          "notice_before_write": {
+            "description": "LangSpan arm, a task that expects an interface notice: whether the hook log shows one in the session's context before its first Write, Edit or MultiEdit of a file its task owns. null when not measured: another arm, a task that expects none, or no such write.",
+            "type": ["boolean", "null"]
+          }
         }
       }
     },
     "tasks_total": {"type": "integer", "minimum": 1},
-    "tasks_completed": {"type": ["integer", "null"], "minimum": 0},
+    "tasks_accepted": {"type": ["integer", "null"], "minimum": 0},
     "integrated_tests": {"enum": ["passed", "failed", "unknown"]},
+    "interface_change": {
+      "description": "discovered_change: made when the changer's own branch defines the helper in its changed, required form; change_not_made when it does not, and then no dependent is judged (completed and accepted null); unknown when the oracle did not run. not_applicable in the other families.",
+      "enum": ["made", "change_not_made", "unknown", "not_applicable"]
+    },
     "merge_conflicts": {
       "type": "array",
       "items": {
@@ -84,13 +134,14 @@
     },
     "semantic_conflicts": {"type": ["integer", "null"], "minimum": 0},
     "semantic_conflict_details": {"type": "array", "items": {"type": "string"}},
-    "contradictions_reported": {"type": "array", "items": {"type": "string"}},
     "duplicate_work": {"type": ["integer", "null"], "minimum": 0},
     "duplicate_work_details": {"type": "array", "items": {"type": "string"}},
     "fixture_tests": {"enum": ["passed", "failed", "unknown"]},
     "stops": {"type": ["integer", "null"], "minimum": 0},
     "questions": {"type": ["integer", "null"], "minimum": 0},
-    "permission_denials": {"type": ["integer", "null"], "minimum": 0},
+    "permission_denials": {"$ref": "#/$defs/denials"},
+    "cost_usd": {"type": ["number", "null"], "minimum": 0},
+    "turns": {"type": ["integer", "null"], "minimum": 0},
     "refusals": {
       "type": "object",
       "additionalProperties": false,
@@ -118,6 +169,30 @@
         "admissions": {"type": ["integer", "null"], "minimum": 0}
       }
     },
+    "coordinator_scans": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "failed", "recovered", "items"],
+      "properties": {
+        "status": {"enum": ["reported", "not_applicable", "unknown"]},
+        "failed": {"type": ["integer", "null"], "minimum": 0},
+        "recovered": {"type": ["integer", "null"], "minimum": 0},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["session", "seq", "type", "detail"],
+            "properties": {
+              "session": {"type": "integer", "minimum": 1},
+              "seq": {"type": "integer", "minimum": 0},
+              "type": {"enum": ["scan_failed", "scan_recovered"]},
+              "detail": {"type": ["string", "null"]}
+            }
+          }
+        }
+      }
+    },
     "tokens": {
       "type": "object",
       "additionalProperties": false,
@@ -127,20 +202,104 @@
         "total": {"$ref": "#/$defs/tokens"}
       }
     },
+    "repair": {
+      "description": "The repair round: one session in the combined tree of a trial whose combined result failed, asked to make it succeed, with the worktrees arm's tools and limits in every arm. not_needed: the combined result passed. ran: the session ran and the oracle judged the repaired tree. not_run: no round ran, for the reason given (refused, interrupted, no combined check, a failed tool check, change_not_made, or a harness error). Every figure is null unless the round ran.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "reason", "time_limit_s", "elapsed_s", "process_status", "succeeded", "integrated_tests",
+        "tasks_accepted", "fixture_tests", "semantic_conflicts", "conflicted_merges", "stopped", "asked_question",
+        "results", "tool_check", "permission_denials", "tokens", "cost_usd", "duration_ms", "turns", "evidence"
+      ],
+      "properties": {
+        "status": {"enum": ["not_needed", "ran", "not_run"]},
+        "reason": {"type": ["string", "null"]},
+        "time_limit_s": {"type": ["number", "null"], "minimum": 0},
+        "elapsed_s": {"type": ["number", "null"], "minimum": 0},
+        "process_status": {"type": ["string", "null"]},
+        "succeeded": {
+          "description": "Whether the oracle accepted the repaired tree; null when no round ran or the oracle did not run.",
+          "type": ["boolean", "null"]
+        },
+        "integrated_tests": {"enum": ["passed", "failed", "unknown"]},
+        "tasks_accepted": {"type": ["integer", "null"], "minimum": 0},
+        "fixture_tests": {"enum": ["passed", "failed", "unknown"]},
+        "semantic_conflicts": {"type": ["integer", "null"], "minimum": 0},
+        "conflicted_merges": {
+          "description": "Sessions whose merge Git refused; the repair tree keeps each with its conflict markers committed.",
+          "type": "array", "items": {"type": "integer", "minimum": 1}
+        },
+        "stopped": {"type": ["boolean", "null"]},
+        "asked_question": {"type": ["boolean", "null"]},
+        "results": {"type": ["integer", "null"], "minimum": 0},
+        "tool_check": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["status", "unexpected"],
+          "properties": {
+            "status": {"enum": ["passed", "failed", "unknown"]},
+            "unexpected": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "permission_denials": {"$ref": "#/$defs/denials"},
+        "tokens": {"$ref": "#/$defs/tokens"},
+        "cost_usd": {"type": ["number", "null"], "minimum": 0},
+        "duration_ms": {"type": ["integer", "null"], "minimum": 0},
+        "turns": {"type": ["integer", "null"], "minimum": 0},
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["plan", "runner_journal", "transcript", "oracle"],
+          "properties": {
+            "plan": {"type": ["string", "null"]},
+            "runner_journal": {"type": ["string", "null"]},
+            "transcript": {"type": ["string", "null"]},
+            "oracle": {"type": ["string", "null"]}
+          }
+        }
+      }
+    },
+    "cost": {
+      "description": "The cost to a correct result. run: the sessions' figures (the record's tokens.total, turns and cost_usd). repair: the repair session's, zero when no repair was needed, null when one was needed and did not run. total: run plus repair, each figure null unless both have it. tasks_accepted: in the final tree, the repaired one when a round ran. correct_result: the combined result passed, or its repair did. cost_per_accepted_task: total cost_usd over tasks_accepted, null when either is null or no task was accepted.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run", "repair", "total", "tasks_accepted", "correct_result", "cost_per_accepted_task"],
+      "properties": {
+        "run": {"$ref": "#/$defs/figures"},
+        "repair": {"$ref": "#/$defs/figures"},
+        "total": {"$ref": "#/$defs/figures"},
+        "tasks_accepted": {"type": ["integer", "null"], "minimum": 0},
+        "correct_result": {"type": ["boolean", "null"]},
+        "cost_per_accepted_task": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
     "error": {"type": "string"},
     "evidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["runner_journal", "plan", "oracle", "events"],
+      "required": ["runner_journal", "plan", "integration", "oracle", "events", "notes", "merge_logs"],
       "properties": {
         "runner_journal": {"type": ["string", "null"]},
         "plan": {"type": "string"},
+        "integration": {"type": ["string", "null"]},
         "oracle": {"type": ["string", "null"]},
-        "events": {"type": ["string", "null"]}
+        "events": {"type": "array", "items": {"type": "string"}},
+        "notes": {"type": "array", "items": {"type": "string"}},
+        "merge_logs": {"type": "array", "items": {"type": "string"}}
       }
     }
   },
   "$defs": {
+    "figures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tokens", "turns", "cost_usd"],
+      "properties": {
+        "tokens": {"$ref": "#/$defs/tokens"},
+        "turns": {"type": ["integer", "null"], "minimum": 0},
+        "cost_usd": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
     "tokens": {
       "type": ["object", "null"],
       "additionalProperties": false,
@@ -150,6 +309,18 @@
         "output": {"type": "integer", "minimum": 0},
         "cache_creation": {"type": "integer", "minimum": 0},
         "cache_read": {"type": "integer", "minimum": 0}
+      }
+    },
+    "denials": {
+      "description": "Calls the agent host refused, once per tool call over every result line: peer_checkout aimed at another session's checkout, the run's other repositories, or another session's branch, all refs or the stash; outside_clone refused by the host as outside the session's own checkout; not_allowed for any other call outside the allowed tool list.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["total", "peer_checkout", "outside_clone", "not_allowed"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "peer_checkout": {"type": "integer", "minimum": 0},
+        "outside_clone": {"type": "integer", "minimum": 0},
+        "not_allowed": {"type": "integer", "minimum": 0}
       }
     }
   }

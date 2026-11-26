@@ -141,8 +141,9 @@ pub struct Today {
     pub checks: TodayChecks,
     pub landings: TodayLandings,
     pub open: TodayOpen,
-    /// The window holds more than `TODAY_EVENTS` events (or reaches before
-    /// them): the summary is of the newest ones only.
+    /// The window reaches before the oldest event read: it holds more than
+    /// `TODAY_EVENTS` events, or retention removed its older part. The
+    /// summary is of the events read only.
     pub truncated: bool,
     /// Events read that have no wall time: written by a build before
     /// generations were anchored. They are in no count.
@@ -161,13 +162,16 @@ pub struct TodayQuery<'a> {
     pub anchor: Option<ClockAnchor>,
     /// The log holds events older than the first one given.
     pub earlier: bool,
+    /// Retention removed events recorded before this wall time (the newest
+    /// compaction's cutoff); `None` when it never removed any.
+    pub retained_from_ms: Option<u64>,
     /// The daemon's clock now, for what is still held.
     pub now_ms: u64,
 }
 
 /// The session an event is about, and its own time on the daemon's clock
 /// with the generation that clock belongs to.
-fn event_facts(event: &Event) -> (Option<&str>, Option<(u64, u64)>) {
+pub(crate) fn event_facts(event: &Event) -> (Option<&str>, Option<(u64, u64)>) {
     match event {
         Event::SessionRegistered { session } => (Some(&session.session_id), None),
         Event::SessionPrompted {
@@ -209,7 +213,7 @@ fn event_facts(event: &Event) -> (Option<&str>, Option<(u64, u64)>) {
         Event::IntentEnded { session_id } | Event::SessionEnded { session_id } => {
             (Some(session_id), None)
         }
-        Event::CheckRecorded { check } => (None, Some((check.recorded_ms, check.generation))),
+        Event::CheckRecorded { check, .. } => (None, Some((check.recorded_ms, check.generation))),
         // A landing on existing check evidence records nothing else first:
         // its release is placed at the time its turn was taken.
         Event::TurnTaken { turn } => (None, Some((turn.taken_ms, turn.generation))),
@@ -218,13 +222,13 @@ fn event_facts(event: &Event) -> (Option<&str>, Option<(u64, u64)>) {
 }
 
 /// The workspace an event belongs to, when it says so itself.
-fn event_workspace<'a>(state: &'a State, event: &'a Event) -> Option<&'a str> {
+pub(crate) fn event_workspace<'a>(state: &'a State, event: &'a Event) -> Option<&'a str> {
     match event {
         Event::SessionRegistered { session } => Some(&session.workspace_id),
         Event::WriteRefused { workspace_id, .. } | Event::TurnReleased { workspace_id, .. } => {
             Some(workspace_id)
         }
-        Event::CheckRecorded { check } => Some(&check.workspace_id),
+        Event::CheckRecorded { check, .. } => Some(&check.workspace_id),
         Event::OperationObserved { observation } => Some(&observation.workspace_id),
         _ => event_facts(event)
             .0
@@ -242,6 +246,99 @@ fn cut(text: &str, limit: usize) -> String {
     cut
 }
 
+/// The one rule for whether retention cut a window starting at `from_ms`:
+/// the cutoff, when retention removed the records before it and the window
+/// starts before it, so the window's removed part may be missing. Both the
+/// report (and `today`) and the monthly count read it.
+pub(crate) fn retention_cut(retained_from_ms: Option<u64>, from_ms: u64) -> Option<u64> {
+    retained_from_ms.filter(|cutoff| *cutoff > from_ms)
+}
+
+/// Places the events of the log, read oldest first, on the wall clock.
+pub(crate) struct Placement {
+    anchor: Option<ClockAnchor>,
+    clock: Option<u64>,
+    /// The wall time of the first event read that carries one of its own
+    /// (an anchor included): every event left out is older. An event before
+    /// it only inherits a time, which may be far older than its own.
+    bound: Option<Option<u64>>,
+}
+
+impl Placement {
+    /// `anchor`: that of the generation the first event belongs to, when it
+    /// was anchored and the anchor precedes it.
+    pub(crate) fn new(anchor: Option<ClockAnchor>) -> Self {
+        Self {
+            anchor,
+            clock: anchor.map(|anchor| anchor.clock_ms),
+            bound: None,
+        }
+    }
+
+    /// The next event's wall time; `None` when its generation has no anchor.
+    pub(crate) fn place(&mut self, event: &Event) -> Option<u64> {
+        let mut timed = false;
+        match event {
+            Event::Booted { .. } => {
+                self.anchor = None;
+                self.clock = None;
+            }
+            Event::ClockAnchored { anchor: new } => {
+                self.anchor = Some(*new);
+                self.clock = Some(new.clock_ms);
+                timed = true;
+            }
+            _ => {}
+        }
+        if let Some((at_ms, generation)) = event_facts(event).1 {
+            match self.anchor {
+                Some(current) if generation == current.generation => {
+                    self.clock = Some(at_ms);
+                    timed = true;
+                }
+                // Undated: no time to compare, so nothing is known.
+                None => timed = true,
+                // Another generation's time: only an inherited wall here.
+                Some(_) => {}
+            }
+        }
+        let wall = self
+            .anchor
+            .zip(self.clock)
+            .map(|(anchor, clock)| anchor.wall(clock));
+        if timed {
+            self.bound.get_or_insert(wall);
+        }
+        wall
+    }
+
+    /// From when every event is counted: the later of the oldest event
+    /// placed that carries a time of its own and the retention cutoff, when
+    /// either is known.
+    pub(crate) fn covered_from(&self, retained_from_ms: Option<u64>) -> Option<u64> {
+        self.bound.flatten().max(retained_from_ms)
+    }
+
+    /// Whether part of a window starting at `from_ms` may be missing: in
+    /// the older part of the log, `earlier` when there is one, or in what
+    /// retention removed before `retained_from_ms`. A kept event older than
+    /// that cutoff, such as a generation's anchor, says nothing about the
+    /// removed events beside it.
+    pub(crate) fn truncated(
+        &self,
+        earlier: bool,
+        retained_from_ms: Option<u64>,
+        from_ms: u64,
+    ) -> bool {
+        retention_cut(retained_from_ms, from_ms).is_some()
+            || earlier
+                && match self.bound {
+                    Some(Some(first)) => first >= from_ms,
+                    _ => true,
+                }
+    }
+}
+
 #[derive(Default)]
 struct Tally {
     first_ms: u64,
@@ -257,50 +354,16 @@ pub fn today(state: &State, query: &TodayQuery<'_>) -> Today {
         None => true,
         Some(wanted) => workspace == Some(wanted),
     };
-    let mut anchor = query.anchor;
-    let mut clock = anchor.map(|anchor| anchor.clock_ms);
+    let mut placement = Placement::new(query.anchor);
     let mut sessions: BTreeMap<String, Tally> = BTreeMap::new();
     let mut refusals: BTreeMap<String, u32> = BTreeMap::new();
     let mut checks = TodayChecks::default();
     let mut landings = TodayLandings::default();
     let mut undated = 0u32;
-    // The wall time of the first event read that carries one of its own (an
-    // anchor included): every event left out is older. An event before it
-    // only inherits a time, which may be far older than its own.
-    let mut bound: Option<Option<u64>> = None;
     for recorded in query.events {
         let event = &recorded.event;
-        let mut timed = false;
-        match event {
-            Event::Booted { .. } => {
-                anchor = None;
-                clock = None;
-            }
-            Event::ClockAnchored { anchor: new } => {
-                anchor = Some(*new);
-                clock = Some(new.clock_ms);
-                timed = true;
-            }
-            _ => {}
-        }
-        let (session, own) = event_facts(event);
-        if let Some((at_ms, generation)) = own {
-            match anchor {
-                Some(current) if generation == current.generation => {
-                    clock = Some(at_ms);
-                    timed = true;
-                }
-                // Undated: no time to compare, so nothing is known.
-                None => timed = true,
-                // Another generation's time: only an inherited wall here.
-                Some(_) => {}
-            }
-        }
-        let wall = anchor.zip(clock).map(|(anchor, clock)| anchor.wall(clock));
-        if timed {
-            bound.get_or_insert(wall);
-        }
-        let Some(wall) = wall else {
+        let session = event_facts(event).0;
+        let Some(wall) = placement.place(event) else {
             if !matches!(event, Event::Booted { .. }) {
                 undated = undated.saturating_add(1);
             }
@@ -331,7 +394,7 @@ pub fn today(state: &State, query: &TodayQuery<'_>) -> Today {
                 let count = refusals.entry(kind.name().into()).or_default();
                 *count = count.saturating_add(1);
             }
-            Event::CheckRecorded { check } => {
+            Event::CheckRecorded { check, .. } => {
                 let count = match check.result {
                     CheckResult::Passed {} => &mut checks.passed,
                     CheckResult::Failed { .. } => &mut checks.failed,
@@ -358,12 +421,7 @@ pub fn today(state: &State, query: &TodayQuery<'_>) -> Today {
             _ => {}
         }
     }
-    // The older part of the log may hold part of the window.
-    let truncated = query.earlier
-        && match bound {
-            Some(Some(first)) => first >= window.from_ms,
-            _ => true,
-        };
+    let truncated = placement.truncated(query.earlier, query.retained_from_ms, window.from_ms);
     let mut listed: Vec<TodaySession> = sessions
         .into_iter()
         .map(|(session_id, tally)| TodaySession {

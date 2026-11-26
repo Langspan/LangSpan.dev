@@ -27,7 +27,7 @@ use std::{
 };
 
 /// The session namespace: a Gemini session is `gemini.<session_id>`.
-pub const SOURCE: &str = "gemini";
+pub const SOURCE: &str = langspan_core::GEMINI_HOST;
 pub use crate::hook::MAX_EVENT_BYTES;
 /// Tools admitted before they run.
 pub const EDIT_TOOLS: [&str; 2] = ["write_file", "replace"];
@@ -221,7 +221,7 @@ fn parse(
             paths: vec![key.clone()],
             input_fingerprint: hook::input_fingerprint(tool, &input),
             edits: replacement(tool, &input)
-                .map(|edit| vec![(key, edit)])
+                .map(|edit| vec![(key.clone(), edit)])
                 .unwrap_or_default(),
             phase,
             // Gemini appends AfterTool context to the tool's result.
@@ -230,10 +230,17 @@ fn parse(
             // It reports its reads, so it gets no snapshot.
             snapshot_unknown: false,
             shell: None,
-            contents: Vec::new(),
+            // A `write_file`'s whole new content, for the break check.
+            contents: match (tool, input.get("content").and_then(Value::as_str)) {
+                ("write_file", Some(content)) => vec![(key, content.to_owned())],
+                _ => Vec::new(),
+            },
             // Gemini reads no context on BeforeTool (ADR 0033), so a break
-            // alert there would never reach the model (ADR 0029).
+            // alert there would never reach the model. Its AfterTool context
+            // is added to the tool's result: the write's calls are found at
+            // BeforeTool, kept, and checked and told at AfterTool (ADR 0029).
             pre_tool_context: false,
+            breaks_after: true,
         },
         config,
     ))

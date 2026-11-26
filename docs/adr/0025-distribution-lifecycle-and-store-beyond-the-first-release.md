@@ -21,7 +21,7 @@ below as Missing or Partial.
 | I6 (rest) | Windows, `npx`, plugin marketplaces | Source build; Unix sockets only | Not now. Windows needs a named-pipe transport and a process probe; marketplaces follow a first release |
 | I10 | Setup and hook installation through MCP tools | CLI only | Not building. Installation changes the owner's host configuration, so it stays an owner command, as with `remote enable` ([ADR 0006](0006-remote-awareness-through-git-refs.md)) |
 | G6 | Move and remove workspaces | `workspace add`, `list`, `move [--switch]`, `remove [--apply]` | Built 25 November 2026 ([issue #75](https://github.com/Langspan/LangSpan.dev/issues/75)), ahead of the condition below; see the amendment. Not yet run on a host |
-| J7 | Retention limits for the event log and publications | No retention policy | Not now. Retention needs compaction that keeps derived state correct |
+| J7 | Retention limits for the event log and publications | `langspan compact` and `retention_days` | Built ([issue #90](https://github.com/Langspan/LangSpan.dev/issues/90)): compaction into a checked snapshot, below |
 | J9 | A hash-chained ledger with replay | Append-only events, no chain | Not now. The store has one writer and is owner-only; a chain would show tampering, not prevent it |
 | J12 | Liveness on macOS | Process probe on Linux only, plus 30 minutes of activity | Not now. Activity age covers macOS until a probe is built |
 
@@ -49,7 +49,18 @@ against, so it stays an owner command, as with `remote enable`.
   the person moved. The daemon first checks, read-only and within one
   second, that NEW_ROOT is the top of a Git checkout (`not_checkout_top`
   otherwise) and that the old root no longer exists (`old_root_exists`
-  otherwise). With `--switch`, the old root must still exist
+  otherwise). An old root that still resolves to NEW_ROOT, such as a
+  symbolic link left where the checkout used to be, counts as moved; when
+  the old root resolves to another directory through a link, the refusal
+  names that directory. Every comparison of a registered root with a
+  resolved one (the scan, a session's registration, admission) resolves
+  links and also requires the same device and inode, so a link never turns
+  one checkout into two, and two distinct checkouts are still told apart.
+  Since a link resolves every path under it, a scan reached through a
+  changed path also requires the checkout to hold the `HEAD` commit the
+  previous scan saw; a link to another repository stops the scan as an
+  identity change. The registered root is kept as given until a move
+  records a new one. With `--switch`, the old root must still exist
   (`old_root_missing`) and its `HEAD` commit must be in NEW_ROOT's object
   database (`git cat-file -e`; `different_repository` otherwise); the old
   root then stops being coordinated under the ID. `--switch` is refused
@@ -214,12 +225,70 @@ be retained.
   is not one of them.
 - An upgrade is a new binary from the release; hooks that name a binary path
   are handled by the pipeline's upgrade path, not by self-update.
-- Event logs grow without a bound until J7 is built. The
-  [usage guide](../usage.md) already says events and receipts have no
-  retention policy.
+- Event logs grow without a bound unless the owner compacts them or sets
+  `retention_days`; with it unset nothing is ever deleted.
+
+## J7: retention, as built
+
+Decided and built 25 November 2026.
+
+- **Snapshot, then delete, in one transaction.** `langspan compact
+  [--keep-days N] [--apply]` (default 90 days, accepted 7 to 3650) writes the
+  derived state at sequence N into a `snapshots` table and deletes the events
+  at or below N recorded before the window, and the receipts recorded before
+  it. Only the newest snapshot is kept. The daemon starts from it and replays
+  only the events after N. Without `--apply` it deletes nothing and reports
+  the counts, the sequence range, the snapshot sequence and the bytes the
+  removed records hold. `config.json`'s `retention_days` makes the daemon do
+  the same when it starts and then once a day; unset, nothing is deleted.
+- **Ages are wall-clock.** Every event and receipt now records its
+  wall-clock time (`recorded_at_ms`). The daemon's monotonic clock starts
+  again at each boot, so it cannot date a record across days. Records
+  written before this build have no time of their own and count from the
+  upgrade. A wall clock set back keeps records longer; one set forward removes
+  them sooner, but never below what the snapshot holds.
+- **The snapshot is checked before anything goes.** The snapshot is written
+  to JSON and read back, the events after N are applied to it, and the result
+  must equal the state the daemon holds, field for field. Otherwise the
+  compaction aborts with `snapshot_mismatch`, logs the fields that differ and
+  deletes nothing. A crash before the commit leaves the previous log.
+- **N never cuts inside open work.** N stops before the event that opened
+  any admission, push turn, waiting landing or unacknowledged message still
+  open; the report names it (`held_by`). An unacknowledged message therefore
+  holds retention until it is acknowledged or leaves the workspace's 64.
+- **The clock anchor of what is left stays.** A daemon start writes
+  `booted` and `clock_anchored`, by which `today` places a generation's
+  events on a day. A compaction keeps the start of the generation of the
+  oldest event it leaves (or the newest start, if it leaves none) and every
+  start after it, even when they are older than the window; older starts go.
+  The snapshot also records the derived fields the state leaves out of every
+  reply: the clock anchor and the recent refusals of the status line, each
+  workspace's registration revision, and the kept test results, first
+  writes and runs of writes by which a check's failures are classified
+  (ADR 0030).
+- **Retries and publications.** A retry whose receipt was removed is a new
+  request, which is why the window is at least 7 days. `remote sent` keeps
+  every `remote_published` record within the window and says from which date
+  it is complete (`since_ms`).
+- **Schema marker 4.** Version 4 adds the time columns and the `snapshots`
+  table. An older build refuses the file, as it refuses any marker above its
+  own, instead of replaying events without the snapshot they follow. Like
+  events, a snapshot this build cannot read stops the store opening
+  ([ADR 0015](0015-version-tolerance.md)): it is the state. The wire protocol
+  stays version 3: `compact` and the `since_ms` field are additions.
+- **Cost.** A compaction replays the events after the previous snapshot once,
+  in the daemon's single writer, which waits meanwhile. Measured once on an
+  arm64 macOS laptop, release build, a log of 500,000 small events (73 MiB):
+  start with full replay 220 ms, dry run 254 ms, applied compaction 633 ms,
+  start afterwards under 1 ms. Larger or more varied events take longer; a
+  request that waits past its 5 s timeout is answered as unavailable and can
+  be sent again.
+- **Not included.** SQLite reuses the freed pages; the file is not shrunk
+  (no `VACUUM`). Exporting removed events, the source index and remote refs
+  are out of scope.
 
 ## Roadmap
 
 These rows are on the public roadmap. They are worked on in the open after the first
 release of `Langspan/LangSpan.dev`, by many agent sessions developing LangSpan with
-LangSpan itself; the release does not wait for them. What would change it: Windows follows demand and a named-pipe transport design; J7 is expected soon after the first release; G6 and J12 are built, as recorded above; J9 follows a threat that a chain would answer. I5 and I10 are not planned. A real-host Claude Code run after moving a checkout is still to be retained.
+LangSpan itself; the release does not wait for them. What would change it: Windows follows demand and a named-pipe transport design; G6, J7 and J12 are built, as recorded above; J9 follows a threat that a chain would answer. I5 and I10 are not planned. A real-host Claude Code run after moving a checkout is still to be retained.

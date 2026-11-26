@@ -1,4 +1,6 @@
-use langspan::protocol::{PROTOCOL_VERSION, Request, Response, encode, read_frame};
+use langspan::protocol::{
+    OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, Response, encode, encode_for, read_frame,
+};
 use langspan_core::Command;
 
 // V1 fixtures are archived parsing/replay vectors. Their continued readability
@@ -111,10 +113,62 @@ fn v2_changes_response_matches_the_committed_golden_vector() {
 }
 
 #[test]
+fn v3_adoption_request_outcome_and_left_work_briefing_request_match_the_golden_vectors() {
+    use langspan_core::{AdoptReason, Adoption, Outcome};
+    let wire = include_bytes!("../fixtures/adopt-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::Adopt {
+            session_id: "claude-code.bob".into(),
+            from: "claude-code.alice".into(),
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    let unknown = String::from_utf8_lossy(wire).replace(r#""from""#, r#""paths":["a.txt"],"from""#);
+    assert!(serde_json::from_str::<Request>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/adopted-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        response.outcome,
+        Outcome::Adopted {
+            adoption: Adoption {
+                from: "claude-code.alice".into(),
+                session_id: "claude-code.bob".into(),
+                workspace_id: "work".into(),
+                reason: Some(AdoptReason::SameTask {}),
+                at_ms: 5000,
+                generation: 2,
+            },
+            root: "/repos/work".into(),
+            recorded: true,
+            live: Vec::new(),
+            earlier: Vec::new(),
+            kept: Vec::new(),
+        }
+    );
+    assert_eq!(encode(&response).unwrap(), wire);
+
+    // A briefing request names the sessions that left work; one without
+    // the field (every earlier request) names none.
+    let wire = include_bytes!("../fixtures/left-work-brief-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::Brief { left, .. } if left == &["claude-code.alice".to_owned()]
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+    let older: Request =
+        serde_json::from_slice(include_bytes!("../fixtures/brief-request-v3.json")).unwrap();
+    assert!(matches!(&older.command, Command::Brief { left, .. } if left.is_empty()));
+}
+
+#[test]
 fn v3_briefing_request_and_response_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/brief-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
-    assert_eq!(request.version, PROTOCOL_VERSION);
+    assert_eq!(request.version, OLDEST_PROTOCOL_VERSION);
     assert!(matches!(
         &request.command,
         Command::Brief { max_peers: 6, .. }
@@ -123,7 +177,7 @@ fn v3_briefing_request_and_response_match_the_committed_golden_vectors() {
 
     let wire = include_bytes!("../fixtures/briefing-response-v3.json");
     let response: Response = serde_json::from_slice(wire).unwrap();
-    assert_eq!(response.version, PROTOCOL_VERSION);
+    assert_eq!(response.version, OLDEST_PROTOCOL_VERSION);
     let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
         panic!("{response:?}");
     };
@@ -133,6 +187,52 @@ fn v3_briefing_request_and_response_match_the_committed_golden_vectors() {
     assert_eq!(encode(&response).unwrap(), wire);
     let unknown = String::from_utf8_lossy(wire)
         .replace(r#""changed":true"#, r#""changed":true,"allow":true"#);
+    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+}
+
+/// What changed recently (roadmap C3): optional fields, so the earlier
+/// briefing vectors above still decode and encode unchanged.
+#[test]
+fn v3_recent_briefing_request_and_response_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/brief-recent-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::Brief {
+            recent: true,
+            recent_window_ms: Some(14_400_000),
+            mid_turn: false,
+            ..
+        }
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+    let old: Request =
+        serde_json::from_slice(include_bytes!("../fixtures/brief-request-v3.json")).unwrap();
+    assert!(matches!(
+        &old.command,
+        Command::Brief {
+            recent: false,
+            recent_window_ms: None,
+            ..
+        }
+    ));
+
+    let wire = include_bytes!("../fixtures/recent-briefing-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    let recent = briefing.recent.as_ref().unwrap();
+    assert_eq!(recent.changed_paths[0].sessions, 2);
+    assert!(recent.changed_paths[1].elsewhere);
+    assert_eq!(recent.contested_paths[0].refusals, 1);
+    assert_eq!(recent.left_uncommitted[0].paths, ["src/store.rs"]);
+    assert_eq!(recent.omitted, 3);
+    assert_eq!(encode(&response).unwrap(), wire);
+    let unknown = String::from_utf8_lossy(wire).replace(
+        r#""window_ms":14400000"#,
+        r#""window_ms":14400000,"summary":"x""#,
+    );
     assert!(serde_json::from_str::<Response>(&unknown).is_err());
 }
 
@@ -192,7 +292,7 @@ fn v3_overwritten_lines_and_unread_lines_match_the_committed_golden_vectors() {
 fn v3_code_context_request_and_response_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/graph-context-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
-    assert_eq!(request.version, PROTOCOL_VERSION);
+    assert_eq!(request.version, OLDEST_PROTOCOL_VERSION);
     assert!(matches!(
         &request.command,
         Command::GraphContext { names, limit: 3, .. } if names == &["upload", "gate"]
@@ -212,6 +312,61 @@ fn v3_code_context_request_and_response_match_the_committed_golden_vectors() {
     let unknown = String::from_utf8_lossy(wire)
         .replace(r#""truncated":false"#, r#""truncated":false,"prompt":"x""#);
     assert!(serde_json::from_str::<Response>(&unknown).is_err());
+}
+
+#[test]
+fn v3_compaction_request_and_reports_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/compact-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::Compact {
+            keep_days: 90,
+            apply: true
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    // `apply` may be left out: a dry run.
+    let dry: Request = serde_json::from_str(
+        r#"{"version":3,"request_id":"read","command":{"op":"compact","keep_days":30}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        dry.command,
+        Command::Compact {
+            keep_days: 30,
+            apply: false
+        }
+    );
+
+    let wire = include_bytes!("../fixtures/compaction-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::Compaction { report } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(report.snapshot_seq, Some(812_440));
+    assert!(report.held_by.as_deref().unwrap().contains("lease-7"));
+    assert_eq!(encode(&response).unwrap(), wire);
+    let unknown =
+        String::from_utf8_lossy(wire).replace(r#""receipts":61204"#, r#""receipts":61204,"x":1"#);
+    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/remote-sent-since-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        response.outcome,
+        langspan_core::Outcome::RemoteSent {
+            since_ms: Some(1_788_134_400_000),
+            ..
+        }
+    ));
+    assert_eq!(encode(&response).unwrap(), wire);
+    // A store never compacted leaves the field out, as earlier builds did.
+    let earlier = String::from_utf8_lossy(wire).replace(r#","since_ms":1788134400000"#, "");
+    assert!(matches!(
+        serde_json::from_str::<Response>(&earlier).unwrap().outcome,
+        langspan_core::Outcome::RemoteSent { since_ms: None, .. }
+    ));
 }
 
 #[test]
@@ -436,7 +591,7 @@ fn v3_message_handoff_and_ack_requests_match_the_committed_golden_vectors() {
     ];
     for wire in vectors {
         let request: Request = serde_json::from_slice(wire).unwrap();
-        assert_eq!(request.version, PROTOCOL_VERSION);
+        assert_eq!(request.version, OLDEST_PROTOCOL_VERSION);
         assert_eq!(encode(&request).unwrap(), *wire);
     }
     let request: Request = serde_json::from_slice(vectors[0]).unwrap();
@@ -470,7 +625,7 @@ fn v3_message_handoff_and_ack_requests_match_the_committed_golden_vectors() {
     assert!(matches!(
         &old.command,
         Command::Brief {
-            mid_turn: false,
+            recent_window_ms: None,
             ..
         }
     ));
@@ -616,7 +771,7 @@ fn v3_message_retraction_matches_the_committed_golden_vectors() {
     let by_id = include_bytes!("../fixtures/retract-message-by-id-request-v3.json");
     for wire in [&last[..], &by_id[..]] {
         let request: Request = serde_json::from_slice(wire).unwrap();
-        assert_eq!(request.version, PROTOCOL_VERSION);
+        assert_eq!(request.version, OLDEST_PROTOCOL_VERSION);
         assert_eq!(encode(&request).unwrap(), wire);
     }
     let request: Request = serde_json::from_slice(last).unwrap();
@@ -738,4 +893,216 @@ fn v3_held_commit_report_and_refusal_event_match_the_committed_golden_vectors() 
     // An event without a peer omits it, and still reads.
     let alone = wire.replace(r#""peer_session_id":"codex.bob","#, "");
     assert!(serde_json::from_str::<langspan_core::Event>(&alone).is_ok());
+    // A refused tool call keeps its input digest, for the report (H8); the
+    // record above, written before it was kept, reads without one.
+    let wire = include_str!("../fixtures/write-refused-digest-event-v3.json");
+    let event: langspan_core::Event = serde_json::from_str(wire).unwrap();
+    assert!(matches!(
+        &event,
+        langspan_core::Event::WriteRefused {
+            kind: langspan_core::RefusalKind::StaleBase,
+            input_digest: Some(digest),
+            ..
+        } if digest.len() == 64
+    ));
+    assert_eq!(
+        format!("{}\n", serde_json::to_string(&event).unwrap()),
+        wire
+    );
+}
+
+#[test]
+fn v3_index_export_and_import_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/graph-export-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::GraphExport { workspace_id, path } if workspace_id == "app" && path == "/srv/index.jsonl"
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+    let wire = include_bytes!("../fixtures/graph-export-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        response.outcome,
+        langspan_core::Outcome::GraphExported {
+            files: 3912,
+            partial_files: 2,
+            ..
+        }
+    ));
+    assert_eq!(encode(&response).unwrap(), wire);
+
+    let wire = include_bytes!("../fixtures/graph-import-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::GraphImport { apply: true, .. }
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+    // Without `apply` it is a dry run, and the field is left out.
+    let dry = String::from_utf8_lossy(wire).replace(r#","apply":true"#, "");
+    let request: Request = serde_json::from_str(&dry).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::GraphImport { apply: false, .. }
+    ));
+    assert_eq!(encode(&request).unwrap(), dry.as_bytes());
+    let unknown = String::from_utf8_lossy(wire).replace(r#""apply":true"#, r#""apply":true,"x":1"#);
+    assert!(serde_json::from_str::<Request>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/graph-import-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        response.outcome,
+        langspan_core::Outcome::GraphImported {
+            applied: true,
+            loaded: 3870,
+            different: 42,
+            ..
+        }
+    ));
+    assert_eq!(encode(&response).unwrap(), wire);
+}
+
+/// Version 4 (roadmap D7): a history answer with a rename and a file move
+/// carries `after_name`, `evidence` and `before_path`. To a version 3
+/// client the same answer is encoded without them, and the earlier build
+/// reads that form.
+#[test]
+fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() {
+    let wire = include_bytes!("../fixtures/rename-history-response-v4.json");
+    let mut response: Response = serde_json::from_slice(wire).unwrap();
+    assert_eq!(response.version, PROTOCOL_VERSION);
+    let langspan_core::Outcome::History { history } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(history.entries[0].evidence.as_deref(), Some("same_body"));
+    assert_eq!(
+        history.entries[1].before_path.as_deref(),
+        Some("app/old_users.py")
+    );
+    assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
+
+    response.version = OLDEST_PROTOCOL_VERSION;
+    let earlier = include_bytes!("../fixtures/rename-history-response-v3.json");
+    assert_eq!(
+        encode_for(OLDEST_PROTOCOL_VERSION, &response).unwrap(),
+        earlier
+    );
+    // The earlier form is only for that reply: the response is unchanged.
+    assert!(
+        String::from_utf8(encode(&response).unwrap())
+            .unwrap()
+            .contains("before_path")
+    );
+}
+
+/// Roadmap D7 (review comment 4707749784): to a version 3 client an
+/// interface notice has no rename fields and no change of a definition that
+/// is not exported, while a version 4 client gets both.
+#[test]
+fn a_version_3_reply_leaves_out_rename_fields_and_private_changes() {
+    use langspan_core::{InterfaceChange, InterfaceNotice, Outcome};
+    let renamed = InterfaceChange {
+        name: "fetch_user".into(),
+        kind: "function".into(),
+        change: "renamed".into(),
+        before: Some("def fetch_user(id)".into()),
+        after: Some("def load_user(id)".into()),
+        after_name: Some("load_user".into()),
+        before_name: Some("fetch_user".into()),
+        evidence: Some("same_body".into()),
+        before_path: None,
+        private: false,
+        before_arity: None,
+        after_arity: None,
+        before_count: None,
+        after_count: None,
+    };
+    let private = InterfaceChange {
+        name: "helper".into(),
+        before: Some("def helper(x)".into()),
+        after: Some("def helper(x)".into()),
+        after_name: Some("helper".into()),
+        before_name: Some("helper".into()),
+        evidence: Some("file_moved".into()),
+        before_path: Some("app/old.py".into()),
+        private: true,
+        ..renamed.clone()
+    };
+    let notice = InterfaceNotice {
+        notice_id: "n1".into(),
+        workspace_id: "work".into(),
+        path: "app/users.py".into(),
+        changes: vec![renamed, private],
+        dependents: Vec::new(),
+        elsewhere: Vec::new(),
+        by_session: None,
+        at_ms: 1,
+        generation: 1,
+    };
+    let response = Response {
+        version: OLDEST_PROTOCOL_VERSION,
+        request_id: "r".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome: Outcome::InterfaceObserved {
+            notice: notice.clone(),
+        },
+    };
+    let earlier: serde_json::Value =
+        serde_json::from_slice(&encode_for(OLDEST_PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    assert_eq!(
+        earlier["outcome"]["notice"]["changes"],
+        serde_json::json!([{"name": "fetch_user", "kind": "function", "change": "renamed",
+            "before": "def fetch_user(id)", "after": "def load_user(id)", "after_name": "load_user"}]),
+        "{earlier:#}"
+    );
+    let current: Response =
+        serde_json::from_slice(&encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    assert!(
+        matches!(&current.outcome, Outcome::InterfaceObserved { notice: read } if read == &notice)
+    );
+}
+
+/// Roadmap D7 with C7: an in-flight rename's old name goes to a version 4
+/// client only; a version 3 client reads the in-flight symbol as before.
+#[test]
+fn a_version_3_reply_leaves_out_an_inflight_renames_old_name() {
+    use langspan_core::{InflightNotice, Outcome};
+    let inflight = InflightNotice {
+        path: "src/config.rs".into(),
+        worktree: "/work/tree".into(),
+        session: Some("claude-code.alice".into()),
+        name: "load_config".into(),
+        kind: "function".into(),
+        signature: "pub fn load_config(text: &str) -> usize".into(),
+        mentioned_in: vec!["src/main.rs".into()],
+        renamed_from: Some("parse_config".into()),
+    };
+    let response = Response {
+        version: OLDEST_PROTOCOL_VERSION,
+        request_id: "r".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome: Outcome::GraphInflight {
+            inflight: vec![inflight.clone()],
+            coverage: serde_json::from_value(serde_json::json!({"indexable_files": 3,
+                "current_files": 3, "partial_files": 0, "scanned": true}))
+            .unwrap(),
+            truncated: false,
+        },
+    };
+    let earlier: serde_json::Value =
+        serde_json::from_slice(&encode_for(OLDEST_PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    let shown = &earlier["outcome"]["inflight"][0];
+    assert!(shown.get("renamed_from").is_none(), "{earlier:#}");
+    assert_eq!(shown["name"], "load_config", "{earlier:#}");
+    let current: Response =
+        serde_json::from_slice(&encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    assert!(
+        matches!(&current.outcome, Outcome::GraphInflight { inflight: read, .. } if read == &[inflight])
+    );
 }

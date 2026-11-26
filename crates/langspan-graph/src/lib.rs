@@ -17,8 +17,10 @@ pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 pub const MAX_SYMBOLS: usize = 2_000;
 pub const MAX_REFERENCES: usize = 20_000;
 pub const MAX_IMPORTS: usize = 500;
-const SIGNATURE_BYTES: usize = 240;
-const NAME_BYTES: usize = 128;
+/// Signatures and import targets longer than this are cut and end with `…`.
+pub const SIGNATURE_BYTES: usize = 240;
+/// Longer names are not recorded.
+pub const NAME_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Language {
@@ -137,6 +139,25 @@ pub struct Symbol {
     /// The definition's own bytes in the source it was extracted from,
     /// without leading comments or attributes.
     pub bytes: std::ops::Range<usize>,
+    /// A function's or method's body: the bytes after its signature. `None`
+    /// for other kinds and for a declaration without a body.
+    pub block: Option<std::ops::Range<usize>>,
+    /// A digest of `block`'s bytes, set by `digest_blocks`. `diff` links a
+    /// removal and an addition as a rename only through it.
+    pub block_digest: Option<String>,
+}
+
+/// Set each symbol's `block_digest` from `source`, the bytes `graph` was
+/// extracted from. The caller chooses the digest, so this crate does no
+/// hashing of its own.
+pub fn digest_blocks(graph: &mut FileGraph, source: &[u8], digest: impl Fn(&[u8]) -> String) {
+    for symbol in &mut graph.symbols {
+        symbol.block_digest = symbol
+            .block
+            .clone()
+            .and_then(|block| source.get(block))
+            .map(&digest);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,6 +611,11 @@ fn visit_java(node: Node, source: &[u8], graph: &mut FileGraph) -> Option<Option
         signature: java_signature(node, source),
         exported: java_exported(node),
         bytes: start.start_byte()..whole.end_byte(),
+        block: matches!(symbol_kind, SymbolKind::Function | SymbolKind::Method)
+            .then(|| node.child_by_field_name("body"))
+            .flatten()
+            .map(|body| body.byte_range()),
+        block_digest: None,
     });
     Some(Some(name.id()))
 }
@@ -635,6 +661,11 @@ fn visit(
         )
     {
         let name_text = text(name, source);
+        // The same bound as every other definition, so an export of this
+        // file stays importable.
+        if name_text.is_empty() || name_text.len() > NAME_BYTES {
+            return Some(name.id());
+        }
         let end = value
             .child_by_field_name("body")
             .map(|body| body.start_byte())
@@ -651,6 +682,10 @@ fn visit(
             ),
             exported: exported(language, node, name_text),
             bytes: node.start_byte()..node.end_byte(),
+            block: value
+                .child_by_field_name("body")
+                .map(|body| body.byte_range()),
+            block_digest: None,
         });
         return Some(name.id());
     }
@@ -668,6 +703,11 @@ fn visit(
             signature: signature(node, source),
             exported: exported(language, node, name_text),
             bytes: node.start_byte()..node.end_byte(),
+            block: matches!(symbol_kind, SymbolKind::Function | SymbolKind::Method)
+                .then(|| node.child_by_field_name("body"))
+                .flatten()
+                .map(|body| body.byte_range()),
+            block_digest: None,
         });
         return Some(name.id());
     }
@@ -689,6 +729,18 @@ pub enum Change {
     /// No exported symbol of this name and kind remains.
     Removed,
     Added,
+    /// The only exported function or method of this name and kind went, and
+    /// the only one of a new name `to` came, with the same kind and the same
+    /// signature but for the name, and either the same block digest or the
+    /// same first and last line (`evidence` says which); each of the two
+    /// pairs with no other. Reported under the old name, which is the name
+    /// callers still use; `to` gets no `Added` of its own.
+    Renamed {
+        to: String,
+        before: String,
+        after: String,
+        evidence: RenameEvidence,
+    },
     SignatureChanged {
         before: String,
         after: String,
@@ -709,6 +761,24 @@ pub enum Change {
         before: u32,
         after: u32,
     },
+}
+
+/// What links a removal and an addition as one rename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RenameEvidence {
+    /// The same block digest.
+    SameBody,
+    /// A different block at the same first and last line.
+    SameSignature,
+}
+
+impl RenameEvidence {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::SameBody => "same_body",
+            Self::SameSignature => "same_signature",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -785,11 +855,112 @@ fn comparable(signature: &str) -> String {
     result
 }
 
+/// `signature` as compared, with the first whole-word `name` taken out, so
+/// that two signatures differing only in the name compare equal. `None` for
+/// a signature cut at its bound or not holding the name.
+fn unnamed(signature: &str, name: &str) -> Option<String> {
+    if signature.ends_with('…') {
+        return None;
+    }
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let at = signature.match_indices(name).find_map(|(at, _)| {
+        let end = at + name.len();
+        let alone = !signature[..at].ends_with(word) && !signature[end..].starts_with(word);
+        alone.then_some(at)
+    })?;
+    Some(comparable(&format!(
+        "{}{}",
+        &signature[..at],
+        &signature[at + name.len()..]
+    )))
+}
+
+/// Renames between `before` and `after`: old name and kind to the new name
+/// and what links them. See `Change::Renamed`.
+///
+/// A removed definition's candidates are the added ones of its kind whose
+/// signature equals its own but for the name and that have its block digest
+/// or its first and last line. A pair is linked only when each is the
+/// other's one candidate, so two that could each be either stay removals
+/// and additions. A line of 0 is one not recorded (a baseline stored before
+/// lines were kept): it matches nothing.
+fn renames(
+    before: &FileGraph,
+    after: &FileGraph,
+) -> std::collections::BTreeMap<(String, SymbolKind), (String, RenameEvidence)> {
+    use std::collections::BTreeMap;
+    type Only<'a> = BTreeMap<(String, SymbolKind), Option<&'a Symbol>>;
+    // Per name and kind: the only exported definition, `None` when several.
+    fn only(graph: &FileGraph) -> Only<'_> {
+        let mut map = Only::new();
+        for symbol in graph.symbols.iter().filter(|symbol| symbol.exported) {
+            map.entry((symbol.name.clone(), symbol.kind))
+                .and_modify(|seen| *seen = None)
+                .or_insert(Some(symbol));
+        }
+        map
+    }
+    let (old, new) = (only(before), only(after));
+    // The definitions that went (or came), grouped by what they are apart
+    // from their name: kind and signature without the name. Only functions
+    // and methods are linked.
+    type Groups<'a> = BTreeMap<(SymbolKind, String), Vec<&'a Symbol>>;
+    fn gone_or_come<'a>(from: &Only<'a>, other: &Only) -> Groups<'a> {
+        let mut groups = Groups::new();
+        for (key, symbol) in from.iter().filter(|(key, _)| !other.contains_key(*key)) {
+            let Some(symbol) = *symbol else { continue };
+            if !matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method) {
+                continue;
+            }
+            if let Some(rest) = unnamed(&symbol.signature, &key.0) {
+                groups.entry((symbol.kind, rest)).or_default().push(symbol);
+            }
+        }
+        groups
+    }
+    fn evidence(a: &Symbol, b: &Symbol) -> Option<RenameEvidence> {
+        if a.block_digest.is_some() && a.block_digest == b.block_digest {
+            Some(RenameEvidence::SameBody)
+        } else if a.line != 0 && (a.line, a.end_line) == (b.line, b.end_line) {
+            Some(RenameEvidence::SameSignature)
+        } else {
+            None
+        }
+    }
+    fn candidates<'a>(of: &Symbol, among: &[&'a Symbol]) -> Vec<(&'a Symbol, RenameEvidence)> {
+        among
+            .iter()
+            .filter_map(|other| evidence(of, other).map(|why| (*other, why)))
+            .collect()
+    }
+    let (gone, come) = (gone_or_come(&old, &new), gone_or_come(&new, &old));
+    let mut linked = BTreeMap::new();
+    for (shape, removed) in &gone {
+        let Some(added) = come.get(shape) else {
+            continue;
+        };
+        for symbol in removed {
+            let [(target, why)] = candidates(symbol, added)[..] else {
+                continue;
+            };
+            if candidates(target, removed).len() == 1 {
+                linked.insert(
+                    (symbol.name.clone(), symbol.kind),
+                    (target.name.clone(), why),
+                );
+            }
+        }
+    }
+    linked
+}
+
 /// Compare the exported symbols of two versions of one file, by name and
-/// kind. A rename shows as one removal and one addition: nothing here claims
-/// that two differently named symbols are the same thing. A change to a body
-/// alone, or a formatter's rewrap of a signature (see `comparable`), is not
-/// reported. A notice shows each signature as written.
+/// kind. A change to a body alone, or a formatter's rewrap of a signature
+/// (see `comparable`), is not reported. A rename is reported as one only
+/// when the signature but for the name is unchanged and the body or the
+/// lines are too (see `Change::Renamed`); otherwise it is a removal and an
+/// addition, and nothing claims the two are the same thing. A notice shows
+/// each signature as written.
 pub fn diff(before: &FileGraph, after: &FileGraph) -> Vec<SymbolChange> {
     use std::collections::BTreeMap;
     // Per name and kind: (compared form, text as written), sorted.
@@ -844,10 +1015,19 @@ pub fn diff(before: &FileGraph, after: &FileGraph) -> Vec<SymbolChange> {
             .join(" | ")
     }
     let count = |signatures: &Signatures| u32::try_from(signatures.len()).unwrap_or(u32::MAX);
+    let renamed = renames(before, after);
     let mut changes = Vec::new();
     for (key, signatures) in &old {
         let change = match new.get(key) {
-            None => Change::Removed,
+            None => match renamed.get(key) {
+                Some((to, evidence)) => Change::Renamed {
+                    to: to.clone(),
+                    before: shown(signatures),
+                    after: new.get(&(to.clone(), key.1)).map(shown).unwrap_or_default(),
+                    evidence: *evidence,
+                },
+                None => Change::Removed,
+            },
             Some(current) if same(current, signatures) => continue,
             // Only the number of same-named definitions changed, each
             // earlier (or each remaining) signature still there: say so,
@@ -875,7 +1055,15 @@ pub fn diff(before: &FileGraph, after: &FileGraph) -> Vec<SymbolChange> {
             change,
         });
     }
-    for key in new.keys().filter(|key| !old.contains_key(*key)) {
+    let target = |key: &(String, SymbolKind)| {
+        renamed
+            .iter()
+            .any(|(from, (to, _))| from.1 == key.1 && *to == key.0)
+    };
+    for key in new
+        .keys()
+        .filter(|key| !old.contains_key(*key) && !target(key))
+    {
         changes.push(SymbolChange {
             name: key.0.clone(),
             kind: key.1,

@@ -157,11 +157,14 @@ fn record_as(
             inputs: Vec::new(),
             result,
             duration_ms: 900,
-            report: Some(CheckReport {
+            report: Some(Box::new(CheckReport {
                 session_ids: vec!["alice".into()],
                 tail: "test net::times_out ... FAILED".into(),
                 timed_out_s: None,
-            }),
+                interface: None,
+                index_incomplete: false,
+                dependent_paths: Vec::new(),
+            })),
             tests: Some(tests),
             rerun,
             writes_before,
@@ -246,6 +249,7 @@ fn a_failure_then_a_pass_on_a_rerun_of_the_identical_tree_is_one_flip() {
         [TestFailure {
             test: "net::times_out".into(),
             flaky: None,
+            class: None,
         }]
     );
     assert!(flaky(&mut state, None).is_empty());
@@ -886,7 +890,12 @@ fn the_wire_forms_of_flaky_test_commands_outcomes_and_events_are_fixed() {
     );
     assert_eq!(
         serde_json::to_value(&state.check_notices["alice"][0].failures).unwrap(),
-        json!([{"test": "net::times_out", "flaky": {"flips": 2, "runs": 2}}])
+        json!([{"test": "net::times_out", "flaky": {"flips": 2, "runs": 2}, "class": "already_failing"}])
+    );
+    // It failed in c1, from before alice's first write (issue #69).
+    assert_eq!(
+        state.check_notices["alice"][0].baseline_check_id.as_deref(),
+        Some("c1")
     );
 }
 

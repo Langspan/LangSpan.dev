@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 mod formatters;
 mod git_commands;
 pub use formatters::{Formatting, Reach, formatters};
-pub use git_commands::{GitStep, git_steps};
+pub use git_commands::{GitStep, git_steps, moves_checkout};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -573,6 +573,66 @@ fn literal_path(path: &str) -> Result<String, &'static str> {
     })
 }
 
+/// The file a quoted heredoc writes whole, and what it writes: `cat > PATH
+/// <<'EOF'` or `cat <<'EOF' > PATH` (the delimiter in single or double
+/// quotes), the body, then a line that is exactly the delimiter, with
+/// nothing after it. A quoted delimiter means the shell expands nothing in
+/// the body, so the body is the file's new content. Used for the write-time
+/// break check ([ADR 0029](../docs/adr/0029-break-alerts-at-write-time.md));
+/// it admits nothing. Any other shape is `None`: `>>`, `<<-`, an unquoted
+/// delimiter, a second heredoc or command, or text after the closing line.
+/// The path is as written, not yet resolved.
+pub fn heredoc_write(command: &str) -> Option<(String, String)> {
+    if command.len() > langspan_graph::MAX_SOURCE_BYTES + MAX_COMMAND_BYTES {
+        return None;
+    }
+    let (head, rest) = command.split_once('\n')?;
+    if head.len() > MAX_COMMAND_BYTES || head.contains(">>") {
+        return None;
+    }
+    let at = head.find("<<")?;
+    let word = head[at + 2..].trim_start_matches([' ', '\t']);
+    let quote = word.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    let (delimiter, tail) = word[1..].split_once(quote)?;
+    if delimiter.is_empty()
+        || !delimiter
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        || tail.starts_with(|c: char| !matches!(c, ' ' | '\t'))
+    {
+        return None;
+    }
+    // What is left of the first line: `cat` and one `>` redirection. A
+    // second `<` stops the tokenizer.
+    let tokens = tokenize(&format!("{} {tail}", &head[..at])).ok()?;
+    let [
+        Token::Word(name),
+        Token::Redirect(None | Some(1)),
+        Token::Word(target),
+    ] = tokens.as_slice()
+    else {
+        return None;
+    };
+    if name != "cat" || target == "/dev/null" {
+        return None;
+    }
+    let target = literal_path(target).ok()?;
+    let mut lines = rest.split('\n');
+    let mut body = String::new();
+    loop {
+        let line = lines.next()?;
+        if line == delimiter {
+            break;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    match (lines.next(), lines.next()) {
+        (None, _) | (Some(""), None) => Some((target, body)),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Workspace snapshot
 // ---------------------------------------------------------------------------
@@ -597,6 +657,10 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub head: Option<String>,
+    /// The branch checked out, as `refs/heads/NAME`; `None` when `HEAD` is
+    /// detached, or in a record written before this was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub files: BTreeMap<String, Entry>,
     /// A merge, rebase, cherry-pick or revert is under way, or a file is
     /// conflicted. Nothing is denied then.
@@ -671,6 +735,7 @@ pub fn snapshot(root: &Path, deadline: Instant) -> Result<Snapshot, String> {
     .map_err(|e| format!("git status: {e}"))?;
     let mut snapshot = Snapshot {
         head,
+        branch: checked_out_branch(&git_dir),
         files: BTreeMap::new(),
         in_progress,
     };
@@ -718,6 +783,52 @@ pub fn snapshot(root: &Path, deadline: Instant) -> Result<Snapshot, String> {
         );
     }
     Ok(snapshot)
+}
+
+/// The branch `HEAD` names in the Git directory `git_dir`, as
+/// `refs/heads/NAME`, read from its `HEAD` file (at most 1 KiB). `None` when
+/// it is detached or cannot be read.
+fn checked_out_branch(git_dir: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    fs::File::open(git_dir.join("HEAD"))
+        .ok()?
+        .take(1024)
+        .read_to_string(&mut text)
+        .ok()?;
+    let reference = text.strip_prefix("ref: ")?.trim_end();
+    (reference.len() > "refs/heads/".len()
+        && reference.starts_with("refs/heads/")
+        && !reference.chars().any(char::is_control))
+    .then(|| reference.to_owned())
+}
+
+/// The checkout a run's Git command left (`Record::checkout`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckoutLeft {
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    /// It changed no file's content, as a commit does. Absent from a record
+    /// written before it was kept.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub files_unchanged: bool,
+}
+
+/// What a run whose command runs a Git operation that changes the checkout
+/// (`moves_checkout`) left, when the checkout changed while it ran: another
+/// branch or HEAD, or files changed with them in place (a restore or stash).
+pub fn checkout_left(
+    before: &Snapshot,
+    after: &Snapshot,
+    changed_files: bool,
+) -> Option<CheckoutLeft> {
+    (before.head != after.head || before.branch != after.branch || changed_files).then(|| {
+        CheckoutLeft {
+            branch: after.branch.clone(),
+            head: after.head.clone(),
+            files_unchanged: !changed_files,
+        }
+    })
 }
 
 fn unversioned() -> String {
@@ -838,9 +949,50 @@ pub struct Record {
     /// refusal to name. `None` in a record written before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// The command runs a Git operation that changes the checkout
+    /// (`moves_checkout`), read from the whole command line.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub moves_checkout: bool,
+    /// Once finished: the checkout such a command left, when the checkout
+    /// changed while it ran (issue #139).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<CheckoutLeft>,
+    /// When the command started and finished on the daemon's clock
+    /// (`crate::clock`, time since boot, the same in every process on this
+    /// machine), unlike the wall-clock `started_ms` and `finished_ms`. A
+    /// checkout run's report sends durations measured on it, so a
+    /// redelivered report keeps the command's window (issue #139). `None`
+    /// in a record written before they were kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_clock_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_clock_ms: Option<u64>,
 }
 
 impl Record {
+    /// A finished run's timing for its checkout run's report, as durations
+    /// on the daemon's clock read at `now_clock`: how long it ran and how
+    /// long ago it finished. A record without those readings (written
+    /// before they were kept) reports the wall-clock duration, finished now,
+    /// as does a finish reading later than `now_clock` (taken before a
+    /// reboot restarted the clock). A reading from before a reboot that is
+    /// earlier than `now_clock` gives a wrong age; the daemon's run is then
+    /// in a new generation, so it explains no change from before the reboot.
+    pub fn checkout_timing(&self, now_clock: u64) -> (u64, u64) {
+        match (self.started_clock_ms, self.finished_clock_ms) {
+            (Some(started), Some(finished)) => (
+                finished.saturating_sub(started),
+                now_clock.saturating_sub(finished),
+            ),
+            _ => (
+                self.finished_ms
+                    .unwrap_or(self.started_ms)
+                    .saturating_sub(self.started_ms),
+                0,
+            ),
+        }
+    }
+
     /// Of `changed`, the paths this run's session is credited with: neither
     /// contested nor another session's edit.
     pub fn attributed(&self, changed: &[String]) -> Vec<String> {
@@ -859,12 +1011,14 @@ impl Record {
     }
 }
 
-/// Whether a shell command runs `langspan commit --mine` or `langspan status
-/// --mine`, which take their session from the running call.
+/// Whether a shell command runs `langspan commit --mine`, `langspan status
+/// --mine` or `langspan adopt`, which take their session from the running
+/// call.
 pub fn runs_commit_mine(command: &str) -> bool {
     command.contains("langspan")
-        && (command.contains("commit") || command.contains("status"))
-        && command.contains("--mine")
+        && (((command.contains("commit") || command.contains("status"))
+            && command.contains("--mine"))
+            || command.contains("adopt"))
 }
 
 /// The sessions with a `langspan commit --mine` (or `status --mine`)
@@ -1855,6 +2009,48 @@ mod parser {
     }
 
     #[test]
+    fn a_quoted_heredoc_names_its_target_and_its_body() {
+        let body = Some(("app/x.py".to_owned(), "a = 1\nb = '$HOME'\n".to_owned()));
+        for command in [
+            "cat > app/x.py <<'EOF'\na = 1\nb = '$HOME'\nEOF",
+            "cat > ./app/x.py <<'EOF'\na = 1\nb = '$HOME'\nEOF\n",
+            "cat <<\"EOF\" > app/x.py\na = 1\nb = '$HOME'\nEOF",
+            "cat >app/x.py << 'EOF'\na = 1\nb = '$HOME'\nEOF",
+        ] {
+            assert_eq!(heredoc_write(command), body, "{command}");
+        }
+        assert_eq!(
+            heredoc_write("cat > a.txt <<'END_1'\nEOF\nEND_1"),
+            Some(("a.txt".into(), "EOF\n".into()))
+        );
+        assert_eq!(
+            heredoc_write("cat > a.txt <<'EOF'\nEOF"),
+            Some(("a.txt".into(), String::new()))
+        );
+        for command in [
+            "cat > a.txt <<EOF\nx\nEOF",
+            "cat >> a.txt <<'EOF'\nx\nEOF",
+            "cat > a.txt <<-'EOF'\nx\nEOF",
+            "cat > a.txt <<<'x'\n",
+            "cat > a.txt <<'EOF'\nx\nEOF\nrm b.txt",
+            "cat > a.txt <<'EOF'\nx\n EOF",
+            "cat > a.txt <<'EOF' <<'TWO'\nx\nEOF\ny\nTWO",
+            "cat > a.txt <<'EOF'; rm b.txt\nx\nEOF",
+            "cat > a.txt > b.txt <<'EOF'\nx\nEOF",
+            "cat 2> a.txt <<'EOF'\nx\nEOF",
+            "tee a.txt <<'EOF'\nx\nEOF",
+            "cat > /dev/null <<'EOF'\nx\nEOF",
+            "cat > ../a.txt <<'EOF'\nx\nEOF",
+            "cat > a.txt <<'E F'\nx\nE F",
+            "cat > a.txt <<'EOF'x\nx\nEOFx",
+            "cat > a.txt <<'EOF'\nx",
+            "cat > a.txt",
+        ] {
+            assert_eq!(heredoc_write(command), None, "{command}");
+        }
+    }
+
+    #[test]
     fn very_long_input_is_bounded_and_never_panics() {
         unknown(&format!("echo {} > a.txt", "x".repeat(MAX_COMMAND_BYTES)));
         let many: String = (0..65).map(|n| format!("touch f{n}.txt; ")).collect();
@@ -1971,6 +2167,7 @@ mod diff {
     fn snap(files: &[(&str, &str, FileState)]) -> Snapshot {
         Snapshot {
             head: Some("h".into()),
+            branch: None,
             files: files
                 .iter()
                 .map(|(path, code, state)| {
@@ -2180,6 +2377,10 @@ mod diff {
             edited_elsewhere: Vec::new(),
             reformatted: Vec::new(),
             command: None,
+            moves_checkout: false,
+            checkout: None,
+            started_clock_ms: None,
+            finished_clock_ms: None,
         };
         let note = marks(&state).join(OVERFLOW);
         assert!(!overlapping_edits(&state, &run).incomplete);
@@ -2211,5 +2412,34 @@ mod diff {
         assert!(!mark_path(&state, "late").exists());
         assert!(read_overflow(&state).unwrap().is_some_and(|at| at >= now));
         fs::remove_dir_all(&state).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod checkout_timing {
+    use super::*;
+
+    /// A finished record as a build before the daemon-clock readings wrote
+    /// it: wall-clock times only.
+    fn older() -> Record {
+        serde_json::from_value(serde_json::json!({
+            "session_id": "s", "started_ms": 1_700_000_000_000_u64, "admitted": true,
+            "before": {"Err": "test"}, "finished_ms": 1_700_000_000_300_u64, "changed": null,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn durations_come_from_the_daemons_clock_and_an_older_record_reports_now() {
+        let mut record = older();
+        assert_eq!(record.started_clock_ms, None);
+        // No readings: the wall-clock duration, finished as reported.
+        assert_eq!(record.checkout_timing(5_000), (300, 0));
+        // Both readings: the run on the daemon's clock, and its age now.
+        record.started_clock_ms = Some(1_000);
+        record.finished_clock_ms = Some(1_250);
+        assert_eq!(record.checkout_timing(5_000), (250, 3_750));
+        // A finish reading later than the clock now: finished now.
+        assert_eq!(record.checkout_timing(100), (250, 0));
     }
 }

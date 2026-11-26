@@ -87,6 +87,7 @@ impl Fixture {
     fn start_daemon(&mut self) {
         self.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -96,6 +97,7 @@ impl Fixture {
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         while !Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["status", "--state-dir"])
             .arg(self.state_dir())
             .output()
@@ -117,6 +119,7 @@ impl Fixture {
     /// it printed.
     fn start_dashboard(&mut self) -> (u16, String) {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["dashboard", "--listen", "127.0.0.1:0", "--state-dir"])
             .arg(self.state_dir())
             .stdout(Stdio::piped())
@@ -137,6 +140,7 @@ impl Fixture {
     }
     fn hook(&self, vendor: &str, event: &Value) -> String {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", vendor, "--state-dir"])
             .arg(self.state_dir())
             .args(["--workspace", "work", "--root"])
@@ -304,6 +308,10 @@ fn the_dashboard_shows_every_session_only_to_its_token_holder_and_refuses_the_re
     assert!(page.headers.contains("x-frame-options: deny"));
     assert!(page.headers.contains("referrer-policy: no-referrer"));
     let html = &page.body;
+    assert!(
+        !html.contains("langspan-demo-scenes-v1"),
+        "the live page never loads the demo scenes"
+    );
     for external in [
         "http:", "https:", "//cdn", "src=", "href=", "url(", "@import",
     ] {
@@ -385,11 +393,104 @@ fn the_dashboard_shows_every_session_only_to_its_token_holder_and_refuses_the_re
     );
 }
 
+/// A file whose name is markup, held by one session and refused to another:
+/// the JSON carries the name as escaped data, every row has an identity,
+/// and the page never holds the name.
+#[test]
+fn a_hostile_file_name_is_escaped_data_and_every_row_has_an_identity() {
+    let mut f = Fixture::new();
+    let hostile = r#"<img onerror=alert(1)>&"q".txt"#;
+    fs::write(f.root().join(hostile), "hello\n").unwrap();
+    f.start_daemon();
+    assert_eq!(f.codex_admit(BOB, "call-1", hostile), "admitted");
+    assert_eq!(f.codex_admit(CAROL, "call-2", hostile), "denied");
+    let (port, token) = f.start_dashboard();
+    let state = get(port, &format!("/api/state?t={token}"), "");
+    assert_eq!(state.status, 200, "{}", state.body);
+    assert!(
+        !state.body.contains('<') && !state.body.contains('&'),
+        "{}",
+        state.body
+    );
+    let body: Value = serde_json::from_str(&state.body).unwrap();
+    let view = &body["dashboard"];
+    let ids: Vec<&str> = view["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().expect("every row has an id"))
+        .collect();
+    assert!(
+        ids.contains(&format!("local:codex.{BOB}").as_str()),
+        "{ids:?}"
+    );
+    assert_eq!(view["editing"][0]["path"], hostile);
+    assert_eq!(view["denials"]["conflicts"][0]["paths"][0], hostile);
+    let page = get(port, &format!("/?t={token}"), "").body;
+    assert!(!page.contains(hostile) && !page.contains("onerror"));
+}
+
+/// `--demo` serves the same renderer with fictional scenes, labeled as
+/// simulated, behind the same token and policy, and serves no coordinator
+/// state, even with a coordinator running.
+#[test]
+fn the_demo_is_labeled_simulated_and_serves_no_coordinator_state() {
+    let mut f = Fixture::new();
+    f.start_daemon();
+    f.prompt(ALICE, "real task line");
+    let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .args([
+            "dashboard",
+            "--demo",
+            "--listen",
+            "127.0.0.1:0",
+            "--state-dir",
+        ])
+        .arg(f.state_dir())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    f.dashboard = Some(child);
+    let rest = line.trim().strip_prefix("http://127.0.0.1:").expect(&line);
+    let (port, query) = rest.split_once('/').unwrap();
+    let port: u16 = port.parse().unwrap();
+    let token = query.strip_prefix("?t=").unwrap();
+    assert_eq!(
+        get(port, "/", "").status,
+        401,
+        "the demo needs its token too"
+    );
+    let page = get(port, &format!("/?t={token}"), "");
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("langspan-demo-scenes-v1"));
+    assert!(page.body.contains("Simulated data"));
+    assert!(!page.body.contains("real task line"));
+    for external in ["http:", "https:", "src=", "href=", "url(", "innerHTML"] {
+        assert!(
+            !page.body.contains(external),
+            "the demo page holds {external}"
+        );
+    }
+    assert!(
+        page.headers
+            .contains("content-security-policy: default-src 'none'")
+    );
+    let state = get(port, &format!("/api/state?t={token}"), "");
+    assert_eq!(state.status, 404, "{}", state.body);
+    assert!(!state.body.contains("real task line"));
+}
+
 #[test]
 fn a_network_address_is_refused_without_allow_network() {
     let f = Fixture::new();
     for listen in ["0.0.0.0:0", "[::]:0", "192.0.2.1:7311"] {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["dashboard", "--listen", listen, "--state-dir"])
             .arg(f.state_dir())
             .stdin(Stdio::null())
@@ -403,6 +504,7 @@ fn a_network_address_is_refused_without_allow_network() {
         assert!(stderr.contains("SSH"), "{stderr}");
     }
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["dashboard", "--listen", "localhost:7311", "--state-dir"])
         .arg(f.state_dir())
         .output()
@@ -425,6 +527,7 @@ fn the_dashboard_install_advice_names_this_coordinator_state_directory() {
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
     f.daemon = Some(
         Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["daemon", "--state-dir"])
             .arg(f.state_dir())
             .env("HOME", &home)

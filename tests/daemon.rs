@@ -38,6 +38,7 @@ impl Fixture {
     fn start(&mut self) {
         self.child = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -246,11 +247,98 @@ fn daemon_rejects_path_escape_and_unifies_symlink_aliases() {
     }
 }
 
+/// Issue #205: a client that connects the moment `daemon.sock` appears finds
+/// an owner-only socket that answers, never the security refusal.
+#[test]
+fn a_client_that_connects_as_soon_as_the_socket_appears_is_answered() {
+    for _ in 0..20 {
+        let f = Fixture::new();
+        let socket = f.state_dir().join("daemon.sock");
+        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
+            .args(["daemon", "--state-dir"])
+            .arg(f.state_dir())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // Spin without sleeping, so the first sight of the path is as early
+        // as a racing client could get.
+        let mode = loop {
+            match fs::symlink_metadata(&socket) {
+                Ok(metadata) => break metadata.permissions().mode(),
+                Err(_) => {
+                    assert!(Instant::now() < deadline, "daemon did not bind its socket");
+                    assert!(child.try_wait().unwrap().is_none(), "daemon exited");
+                }
+            }
+        };
+        let answer = client::call(
+            &f.state_dir(),
+            &Request {
+                version: PROTOCOL_VERSION,
+                request_id: "first".into(),
+                command: Command::Status,
+            },
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(mode & 0o077, 0, "socket first seen with mode {mode:o}");
+        assert!(answer.is_ok(), "{:?}", answer.err());
+    }
+}
+
+/// A start that stopped between binding and renaming leaves `daemon.bind`;
+/// the next start replaces it.
+#[test]
+fn a_socket_left_by_an_interrupted_start_does_not_block_the_next() {
+    let mut f = Fixture::new();
+    fs::create_dir(f.state_dir()).unwrap();
+    fs::set_permissions(f.state_dir(), fs::Permissions::from_mode(0o700)).unwrap();
+    let leftover = f.state_dir().join("daemon.bind");
+    drop(std::os::unix::net::UnixListener::bind(&leftover).unwrap());
+    f.start();
+    assert!(!leftover.exists(), "only daemon.sock remains");
+    assert!(matches!(
+        f.call("status", Command::Status).outcome,
+        Outcome::Status { .. }
+    ));
+}
+
+/// `daemon.bind` is replaced only when it is this user's socket, as
+/// `daemon.sock` is.
+#[test]
+fn a_file_in_place_of_the_binding_socket_is_refused() {
+    let f = Fixture::new();
+    fs::create_dir(f.state_dir()).unwrap();
+    fs::set_permissions(f.state_dir(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(f.state_dir().join("daemon.bind"), "kept").unwrap();
+    let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
+        .args(["daemon", "--state-dir"])
+        .arg(f.state_dir())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("refusing to replace a non-socket or foreign daemon.bind"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(f.state_dir().join("daemon.bind")).unwrap(),
+        "kept"
+    );
+    assert!(!f.state_dir().join("daemon.sock").exists());
+}
+
 #[test]
 fn second_daemon_cannot_replace_live_socket() {
     let mut f = Fixture::new();
     f.start();
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["daemon", "--state-dir"])
         .arg(f.state_dir())
         .output()
@@ -338,6 +426,7 @@ fn cli_uses_the_same_daemon_and_exposes_conflict_exit_codes() {
     f.setup();
     let cli = |args: &[&str]| {
         Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(f.state_dir())
             .arg("--json")

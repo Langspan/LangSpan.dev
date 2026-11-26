@@ -231,8 +231,72 @@ A session whose own or read files are among them is told at its next prompt,
 with the before and after signatures and the session that last reported
 editing the file. Bodies are not compared: a change of behaviour behind an
 unchanged signature is not reported. A rename is reported as a removal; no
-link to the new name is claimed. A first indexing reports nothing, and a
+link to the new name is claimed, unless nothing but the name changed (added
+25 November 2026, roadmap B10): the only exported function or method of a
+name went and the only one of a new name came in the same file transition,
+with the same kind, the same signature apart from the name and the same body
+digest. That is one `renamed` change under the old name, with the new name
+in `after_name`, told as "function "scale" was renamed to "zoom": …"
+([ADR 0029](0029-break-alerts-at-write-time.md) has the rule and its limits).
+A removal now also carries the signature it had. A first indexing reports nothing, and a
 version that parsed only partly is not trusted to say a symbol is gone.
+
+Rename tracking (added 26 November 2026, roadmap D7) widens the link and
+records why it was made. A rename's `evidence` is `same_body` (the rule
+above), `same_signature` (a changed body, but the same signature apart from
+the name and the same first and last line; each baseline definition now keeps
+its lines in two nullable columns, so an index from before stays and tells
+its next such change as a removal and an addition) or `file_moved`. A
+removed definition's candidates are the added ones of its kind with the same
+signature apart from the name and its body digest or its lines; a pair is
+linked only when each is the other's one candidate. The notice says the
+evidence: "function "fetch_user" was renamed to "load_user" (same body)".
+A file moved whole is found as Git finds an exact rename: in one scan, a
+removed path whose indexed content parsed cleanly and a path new to the index
+with exactly that content and the same language, neither content shared by
+another removed or new path. Its rows move to the new path and are not parsed
+again, and one notice at the new path lists each export as `renamed` with
+`file_moved`, the same name and its old path in `before_path`. A file with no
+exports lists its private definitions instead, marked `private`: history only,
+told to no dependent and never held, so that the file's notes and history
+follow it too. A file with no definitions at all, such as an import-only
+module, is listed as itself: one private change of kind `file`, named by its
+file name. A file changed
+as well as moved stays a removal and a first indexing: similarity is not
+scored. The coordinator moves notes on the old path to the new one, and
+`graph history --path NEW` includes what was recorded under earlier paths,
+each only while the file was there: the moves are followed in event order, so
+a later file at a path this one left is never part of its history. The store
+reads the newest 1,000 moves through a partial index, whatever a page's
+cursor, so every page follows the same lineage.
+A notice's request ID includes the index pass that found it, so a move or
+content change that repeats an earlier one (`a → b → a → b`) is recorded
+again, and a redelivery of one notice is still a replay.
+`graph symbol OLD --renamed` follows recorded renames of one kind to the
+newest name. A
+rename across files other than such a move is never inferred.
+Earlier builds read interface changes and history entries with
+`deny_unknown_fields`, and status, briefings, recaps, history and the
+dashboard all carry them, so a per-command flag like `blind_in_scope` would
+not cover every answer. The wire protocol is version 4 instead: version 3
+with `before_name`, `evidence`, `before_path` and `private` in interface
+changes and `after_name`, `evidence` and `before_path` in history entries.
+Requests are the same in both. The daemon answers a version 3 request in
+version 3, without those fields and without private changes. The shape is
+chosen in one place, the protocol adapter, as the reply is encoded, so the
+pure core keeps one serialized form. A client of this build sends
+version 4, and when a daemon of an earlier build refuses it with
+`unsupported_version`, which that build does before reading the command, it
+sends the same request once in version 3. Tests:
+`a_protocol_3_client_reads_answers_after_a_rename_and_a_file_move`
+(`tests/graph.rs`) reads status, a briefing, two histories, a recap and the
+dashboard over the daemon's socket with strict copies of the earlier
+structures (it failed before the change);
+`v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors`
+and `a_version_3_reply_leaves_out_rename_fields_and_private_changes`
+(`tests/protocol.rs`); and
+`a_daemon_of_an_earlier_build_is_asked_again_in_its_version`
+(`src/client.rs`).
 
 Signatures are compared in a normalised form and shown as written (added 24
 November 2026, backlog item 15). The comparison removes whitespace next to
@@ -368,6 +432,168 @@ changed, and is not remembered as delivered. Nothing is added when the index
 has no complete scan or nothing matched, and any failure adds nothing.
 `--code-briefing off` on the hook, or on `hooks install`, turns it off.
 
+**Another worktree's in-flight signatures (added later, roadmap C7).** The
+observer keeps, for each file that differs from the worktree's `HEAD`, the
+blob ID that `HEAD` holds for it, if any. After each indexing pass the indexer
+compares each such file, once it is indexed at its scanned content, with that
+blob: it reads the blob raw with `git cat-file blob` (no filters, within the
+1 MiB parse bound and the pass's deadline, at most 200 reads per pass) and
+parses it like any file. The exported symbols of the working version that
+the `HEAD` version lacks, or exports with a different signature, are the
+file's in-flight set. Signatures are compared by their tokens as a reformat
+is ([ADR 0011](0011-shell-writes.md)): spacing between tokens aside, but a
+string literal's whitespace counts. Every indexed language is split into
+words, Go and Java by the TypeScript rules, so removing spacing never joins
+two tokens (`chan int` is not `chanint`). Every outcome of reading a file
+for the index or for this comparison is terminal for that version or tried
+again with a bound. A `HEAD` blob over the parse bound, or one that does not
+parse completely, says nothing and is remembered until the file or `HEAD`
+changes. A working file or blob that could not be read for now (removed,
+changed, not a regular file or not readable since the scan, or a timeout or
+missing object in Git) is tried again after a wait that doubles from one
+pass up to 32, and given up on for that version after 10 failures. Versions
+not tried yet are read before any retry, so files that keep failing never
+take a pass's budget from the others. The retries live in `graph.sqlite3`
+(`retries`, with each workspace's pass count in `passes`). A
+file new since `HEAD` puts all its
+exports in it. The set lives in `graph.sqlite3` (`inflight` and
+`inflight_files`, the latter with the indexed digest and `HEAD` blob it was
+computed at), added without a schema change, so an existing index computes
+it at its next pass. An in-flight symbol that the interface diff from the
+`HEAD` version finds renamed (roadmap D7) keeps its old name
+(`inflight.renamed_from`, added the same way). Files that mention either
+name are told, and the line names both, so a peer still calling the old
+name learns of the rename before its next write as well as at it. A file found clean again, or gone, has none. A partial
+parse at either version says nothing. When the daemon answers `Brief`, it
+reads at most 256 in-flight symbols of the other worktrees of the asking
+workspace's repository, in worktree, path and name order, and compares them
+with the asking workspace's index. Each briefing reads on from where the
+session's last one found nothing to offer, or from just before the first
+symbol it offered, and wraps to the first symbol after the last. So a
+symbol past the first 256 is reached once those before it are told or not
+mentioned, and no one is read again before the others have had their turn.
+The place is kept in the daemon's memory only; a restart starts again from
+the first symbol. A symbol counts when one of the session's own
+files (edited, held, declared or read) mentions its name, or imports a path
+whose last part is the name or the file's module name: the file name without
+its extension, or the directory for Go and for `mod.rs`, `lib.rs`, `main.rs`,
+`index.*` and `__init__.py`. Symbols already told to the session are left
+out, and at most 32 go to the core in a prepared command that only the
+daemon builds, like `WorkspaceRegisterVerified`. The core names the worktree
+root and the session that last reported editing the file, and selects at most
+3 within 600 bytes by `inflight_cost`, never more than what an adapter
+renders. It selects none for a briefing that carries a message, a withdrawal,
+an uncoordinated change or a check result: those take the briefing's room
+and are each delivered once, so the in-flight lines wait, counted. A
+delivered briefing records the keys of the signatures it told
+(`InflightDelivered`), at most 1,024 per session, so each signature is told
+once and a changed one again. A session told more than 1,024 signatures
+that are all still in flight forgets the oldest, which is told again when
+the window next reaches it. `graph inflight WORKSPACE` answers the same
+comparison for any file of the workspace, read-only, from the first 128
+symbols of each other worktree and 256 in all. Neither a worktree nor
+an asking workspace without a complete scan contributes anything; an empty
+answer still carries the asking workspace's coverage. Its answer keeps the
+leading items that fit one response frame and is marked `truncated` when any
+are left out. Tests:
+`another_worktrees_uncommitted_signature_is_told_to_the_session_whose_file_mentions_it`,
+`in_flight_lines_keep_to_their_share_and_the_rest_are_counted_and_told_later`,
+`an_empty_inflight_answer_still_reports_the_asking_workspaces_coverage`,
+`a_changed_string_default_is_in_flight_but_respacing_is_not`,
+`a_go_channel_type_joined_into_one_name_is_in_flight`,
+`every_inflight_signature_past_the_briefing_window_is_told_once`,
+`inflight_signatures_behind_unmentioned_ones_are_told_in_a_later_briefing`,
+`many_long_inflight_notices_are_trimmed_to_one_response_frame` and
+`a_head_version_that_could_not_be_read_is_compared_on_a_later_pass`
+in `tests/graph.rs`, the read-outcome and starvation tests after
+`an_oversized_head_blob_is_remembered_for_that_version_and_not_read_again`
+in `src/graph.rs`,
+`a_codex_session_is_told_a_signature_claude_code_has_in_flight_in_a_linked_worktree`
+in `tests/briefing.rs`, and the in-flight tests in
+`crates/langspan-core/tests/briefing.rs`.
+
+**Dependents in other worktrees (added later, issue #194).** A notice's
+`dependents` are files of its own workspace, fixed when the notice is
+recorded. A notice also keeps `elsewhere`: files of other worktrees of the
+same repository, each `{workspace_id, path}`, that mention a changed name
+(other than an addition), the notice's own path left out as in its own
+worktree. After each scan of a worktree, the state owner reads that
+worktree's index for the names of every held notice of the other worktrees
+of its repository from this generation and within the briefing horizon, and
+records the files not yet listed through `observe_interface_dependents`
+(event `interface_dependents_found`), at most 32 per notice. The index
+lags the scan by a pass, so a file written after the notice is listed a scan
+or two later, and one that mentioned the name before the notice is listed at
+the worktree's next scan. A replaced notice gains nothing. The paths are
+relative to the other worktree's root. Nothing of this leaves the machine
+([ADR 0035](0035-semantic-layer.md)). One command, one event, one outcome
+(`interface_dependents_observed`) and the optional `elsewhere` field: a
+store written by this build does not open in an earlier one
+([ADR 0015](0015-version-tolerance.md)), earlier stores open in this one, and
+the protocol stays at version 3. Tests:
+`a_rename_notice_lists_a_caller_written_later_in_another_worktree` in
+`tests/graph.rs`, and
+`another_worktrees_files_are_added_to_a_held_notice_once_each_up_to_the_cap`
+and `files_found_for_a_replaced_notice_change_nothing_when_replayed` in
+`crates/langspan-core/tests/elsewhere.rs`. A file written after the change
+was committed on its worktree's branch is listed the same way (issue #217,
+`a_caller_written_after_a_committed_rename_is_listed_on_its_notice`); how
+long such a change alerts at write time is in
+[ADR 0029](0029-break-alerts-at-write-time.md).
+
+**Export and import (added later, roadmap D5).** `langspan graph export
+WORKSPACE --out FILE` writes what the index holds for the workspace's
+current registration as JSON Lines; `langspan graph import WORKSPACE --in
+FILE [--apply]` reads one back, as a dry run unless `--apply` is given. Both
+are CLI-only, with no MCP tool, because they read or write a file the owner
+chose. The format is `crate::index_file`: a header (`format`
+`langspan-source-index`, `schema` 4, `workspace_root` as the root's last
+component, `created_at` in Unix milliseconds) and one line per file indexed
+at some version (`path`, `digest`, `partial`, `symbols`, `refs`, `imports`
+and `calls`, rows in stored order). `calls` is in the line because detailed
+lookups (D1) answer from it, so an imported index gives the same
+`graph symbol --detail` answers. The state owner hands both
+commands to the indexer thread, which stays the index's only writer and
+replies itself; a connection waits up to 120 s for one, and the indexer
+stops after 100 s. Export creates the file with `O_EXCL` and `O_NOFOLLOW` at
+mode `0600`, and removes it on failure. Import refuses a header of another
+format or schema and changes nothing. Each later line is parsed into typed
+structures with the extractor's bounds (`MAX_SYMBOLS`, `MAX_REFERENCES`,
+`MAX_IMPORTS`, `MAX_CALLS`, `NAME_BYTES`, `SIGNATURE_BYTES`); one over a bound
+counts as `over_limits`, any other bad line, or a second line for one path,
+as `malformed`. A file's rows load only when all of these hold: the SHA-256
+of the file on disk equals the exported `digest`; the workspace's last
+complete scan, which the indexer keeps per registration, lists the path; and
+the index holds no version of the file yet. The first rule means an imported
+row never describes content the checkout does not have. The second means the
+next pass cannot report a loaded file's exports removed. The third means an
+import never replaces what the local indexer parsed, so a change between two
+local versions is still compared and noticed. A loaded file is written as a
+first indexing would write it: its rows, its digest as both indexed and
+scanned version, and for a clean parse the interface baseline, so the next
+change to it is compared with the imported version. An import records no
+interface notice. All loads commit in one transaction at the end, so an
+error or the time limit leaves the index unchanged. An imported row is
+trusted as far as its digest goes: a crafted export can claim other names
+for content whose digest it knows, which misleads answers until the file
+changes (see the threat model). Tests: `src/index_file.rs` (bounds, field
+rules, header refusal, bounded line reading and a 20,000-case property test
+of the parser), `an_import_never_replaces_a_version_this_index_parsed_and_sets_the_baseline`
+and `a_path_missing_from_the_scan_is_not_imported` in `src/graph.rs`, and
+`an_index_imported_into_a_fresh_state_directory_answers_the_same_without_a_parse`
+and `only_files_with_the_exported_content_are_imported_and_the_rest_are_indexed_from_disk`
+in `tests/graph.rs`. The second daemon there parses nothing
+(`LANGSPAN_TEST_INDEX_FILES_PER_PASS=0`, a test-only variable), so its
+answers can only come from the import.
+Measured on 26 November 2026 with a release build, on a 4-CPU Intel Xeon at
+2.10 GHz with 15 GiB of memory, Linux, Git 2.43.0: a repository of 4,050 Rust
+files (three definitions each) reached full coverage 41.7, 41.9 and 41.8 s
+after registration without an import (3 runs). Its export took 0.24 to
+0.30 s and was 4,848,601 bytes. In a fresh state directory on the same
+checkout, `graph import --apply`, retried until the first scan was in,
+finished 0.9 s after registration in each run, with 4,050 of 4,050 files
+current: 3,850 loaded, and 200 kept that the first pass had already parsed.
+
 ## Consequences and limits
 
 - **Dependencies.** Tree-sitter and four grammars are compiled C, linked into
@@ -382,8 +608,14 @@ has no complete scan or nothing matched, and any failure adds nothing.
   With `--depth` it follows up to three levels of such name matches; each
   level compounds the false positives of the one before, and nothing is
   resolved. Import targets are stored but not yet used to narrow matches.
-- Notices cover one physical workspace. A teammate on another machine or in
-  another worktree is not yet told of an interface change.
+- A notice is recorded in one physical workspace, and its prompt briefing
+  stays there. A session in another worktree of the repository is told of a
+  renamed, removed or recounted function at the write that calls it
+  ([ADR 0029](0029-break-alerts-at-write-time.md), issue #194), and of new or
+  changed exports that are not committed (in flight), matched by name; once
+  committed they are no longer in flight until they change again. The
+  notice lists that worktree's files that mention the name in `elsewhere`.
+  Other machines get none of these.
 - False positives are expected for common names. False negatives occur for
   dynamic uses, reflection, string-built names, macros and generated code.
 - Formatter changes the normalised comparison does not absorb still read as

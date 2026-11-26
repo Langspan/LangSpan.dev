@@ -4,8 +4,9 @@
 [ADR 0007](0007-check-evidence-integration-and-landing.md) (checks bound to
 exact trees) and [ADR 0027](0027-turn-and-batch-events.md) (tool batches and
 stops). Launch track L6 in [the roadmap](../roadmap.md),
-row F1. A failure is reported without being classified (below, under
-"Not now"). Learning which tests flip on unchanged code (F2) was added on
+row F1. Learning which tests flip on unchanged code (F2) was added on
+25 November 2026 (below). Classifying a failure against the session's
+baseline (F1, issue #69), listed under "Not now" until then, was built on
 25 November 2026 (below).
 
 ## Context
@@ -231,18 +232,196 @@ flip. Breaking the write rule, the rerun bound or the write mark makes its
 test fail. **Not observed on a host:** a real Claude Code session told that a
 failure is of a test known to flip, and what it does next.
 
+## Which tests a write broke (issue #69, built 25 November 2026)
+
+**Context.** A failed automatic check named its failing tests, but the agent
+could not tell whether its own write broke a test, the test failed before it
+started, or another session's write did it, so it could spend its turn on a
+failure that is not its own. Each name comes from the same output parsers as
+above, so no new parser and no new run is needed: one earlier result of the
+same check is enough to compare with.
+
+**The baseline.** For each session a result is reported to, the core picks
+the newest record of the same check (name and `command_id`, never the
+shortened command summary) in the
+workspace, with per-test results, whose tree was taken before the session's
+first write since it registered. "Before" is decided by the workspace's
+write count (`State::writes`), never by a clock: the session's first
+recorded write notes the count just before it, and a record qualifies when
+its `writes_before` is at most that count. A record made by `check run` or
+by an earlier automatic run qualifies alike. A record keeps its results as a
+baseline only when the count is still its `writes_before` when it is
+recorded: a write counted between the run's count and its tree would be in
+the tree it tested, so a record whose count moved is no baseline, on replay
+of an older event too. A session with no such record
+has no baseline, and its results are not classified. A daemon restart
+registers a session again in place and keeps its baseline; a registration
+in another workspace starts a new one.
+
+**Classes.** Each failing test of the run is `new` (the baseline passed it:
+named as passing, or the baseline passed as a whole and did not skip it),
+`already_failing` (the baseline failed it) or `unknown_before` (the baseline
+did not name it, or skipped it). A test the baseline failed and this run
+passed is `fixed`, at most 20 named. A failure that is known to flip keeps
+its label inside its class.
+
+**Writers.** The core keeps, per workspace, runs of consecutive writes by one
+session (at most 256 runs, oldest dropped), derived on replay. The sessions
+other than the receiving one with a write counted after the baseline took its
+tree and no later than this run took its own are the run's `writers`, at most
+8. The issue proposed reading `STATE/journal/`; the write count is already in
+the core, needs no file read in the daemon, and gives the same answer on
+replay. A writer whose writes all fell out of the 256 runs is not named.
+
+**What the agent sees.** Inside the 1,200-byte check section, after its first
+line, and in at most 600 bytes with a name that does not fit counted rather
+than cut:
+
+```text
+2 new failures: parser::rejects_empty, parser::keeps_order.
+1 already failing before your writes: net::times_out.
+1 failing that the check before your writes did not name: brand::new.
+1 fixed since before your writes: old::was_broken.
+This tree also holds writes by codex session bob since the check before your writes.
+```
+
+When the output named more failing tests than the 100 names kept, a line says
+so and that the rest are not listed or classified. Without a baseline the
+failures are listed as before; output no parser recognises gives the same
+briefing as before.
+
+**Never done.** Classification changes no record, no result and nothing
+`land` accepts: `check status` and `land` give the same answers with and
+without it. A failure is never hidden or called a pass.
+
+**Storage and events.** `check_recorded` gains an optional `tests`
+(`results`, `writes_before` and `command_id`, the record's first-run
+results) so the
+baseline's results are derived on replay; `State` holds them, each session's
+first-write count and the write runs as derived fields outside the status
+reply. A check notice gains `class` on each failure, `more_failures`,
+`baseline_check_id`, `fixed` and `writers`. One record can now be reported
+in several `check_reported` events, one per group of sessions told the same;
+a desktop notification is still raised once per record. The parsed results
+already carried with `record_check` gain `more_failed`. All are optional with
+serde defaults: earlier stores open in this build, and a store written by it
+does not open in an earlier one. The protocol stays at version 3. Nothing is
+published (the remote payload of ADR 0006 is unchanged). Classification is
+one comparison in the state owner when the record arrives; no hook and no
+extra run does any work for it.
+
+**Evidence.** Core rules in `crates/langspan-core/tests/failure_classes.rs`
+(the baseline is from before the first write; a baseline that passed makes a
+failure new; no baseline or no names means no classes; writers between the
+two trees are named, each session never told of itself, and a write after the
+tree is not one; records and landing readiness are equal with and without
+classification; another command with the same summary is no baseline; a
+run whose write count moved before it was recorded is no baseline, live or
+replayed from an older event; an older `check_recorded` still applies; the state replays equal). Breaking the writers rule makes two of them fail. The rendered text
+and its bound, at the most names, writers and output it can carry, in
+`src/hook.rs`. Through the real daemon, hooks and Git in
+`tests/auto_checks.rs`: a real `cargo test` crate where the write breaks two
+tests (`new`), one failed before (`already_failing`) and one is repaired
+(`fixed`), with `check status` and `land` unchanged; a second session's write
+named; an unknown runner's briefing exactly as before; 200 failing tests within
+1,200 bytes. Real `go test -v` and `pytest -v` runs are in the same file and
+skip, saying so, where the toolchain is absent. **Not observed on a host:**
+a classified result in a real Claude Code or Codex model's context, and the
+model fixing the tests its write broke while leaving the one failing before.
+
+## The wider check after an interface change (F3), built 25 November 2026
+
+F3 was deferred by
+[ADR 0024](0024-write-check-and-landing-depth-beyond-the-launch-bar.md) until
+this track had results to work from; it is now built, issue #71. A fast
+check that builds one package passes while a caller in another package
+breaks; the break shows up later, in another session's work.
+
+**The owner's second command.** `langspan check auto WORKSPACE --name NAME
+[--timeout-s N] -- COMMAND... --on-interface-change NAME2 [--timeout-s N] --
+COMMAND2...` stores COMMAND2 with the check as `on_interface_change` (name,
+arguments and time limit, under the same bounds as the regular command, a
+name of its own, and refused when it looks like it holds a secret, by the
+daemon from any client). `AutoCheck` and `auto_check_enable` gain the field
+with a serde default, so earlier stores replay unchanged. LangSpan splits the
+command line at the literal argument `--on-interface-change`, so a regular
+command cannot contain that argument.
+
+**When it runs.** The index's comparison of a file's versions produces an
+interface notice ([ADR 0008](0008-derived-source-index.md)). When the
+workspace's check has a wider command, the notice names other files that
+mention a changed name, and a session of the workspace last reported editing
+the file, the state owner hands the change to the check worker (with the
+index's count of files it cannot read in full). A body-only change produces
+no notice; a change no other file mentions starts nothing. The worker keeps
+at most 16 ungraded changes per workspace. Notices arrive from the indexer's
+own thread, before or after the regular check of the same writes ends, so the
+worker orders the two:
+
+- Writes waiting for a check always run the regular command first.
+- When a regular run ends on a tree that held still (passed or failed), and
+  an ungraded change waits, the wider command runs next on that same tree:
+  its first snapshot must equal the regular run's tree, or nothing runs and
+  the regular command checks the new tree first.
+- A change that arrives after its regular run ended starts the wider command
+  after the debounce, on the tree of that regular run.
+
+The wider run has the regular run's rules: no shell, its own process group,
+its own time limit, and a tree change from a session's write stops it and
+starts the regular command again on the new tree, followed by the wider one.
+It is never run a second time to learn which tests flip. LangSpan does not
+narrow the command to the mentioning files: the owner's whole command runs,
+so a dependency the name lookup misses cannot skip a test.
+
+**Grading and who is told.** The result is an ordinary check record under
+the wider command's name. Its `check_reported` notice carries the cause: the
+newest notice's changed file and its first change (name, old and new signatures), how many more
+changes the run covered, at most 8 mentioning files with a count of the rest,
+and the count of files the index could not read in full. The core grades it:
+`interface_grade: kept` when it passed, `broke` when it failed, none when it
+was inconclusive. The core refuses a grade that disagrees with the result on
+replay. The sessions the run was for are told, and the core adds the running
+sessions of the workspace that work on or have read a mentioning file, by the
+same rule the briefing uses for interface notices, up to the 16 sessions a
+report names. Recipients are chosen from every mentioning file of the
+changes the run covered, not only the 8 the notice shows: the daemon sends
+all of them, at most 512 (16 waiting changes of at most 32 files each), in
+the report's `dependent_paths`, which the core uses for that choice and does
+not keep. The briefing says, inside the check section's 1,200 bytes:
+`Interface change to parse_upload in core/src/lib.rs: "pub fn
+parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) -> u32":
+the wider check all failed (exit 101); files that mention it: cli/src/main.rs
+(a name lookup, not resolved uses).`
+
+**Failure mode.** With no complete scan of the workspace the index produces
+no notice, so the wider command does not run; the regular result then says
+the index had no complete scan (`index_incomplete`), so a passing fast check
+is not read as covering callers. A daemon stop loses ungraded changes, as it
+loses triggers waiting for their debounce.
+
+**Evidence.** Core rules in `crates/langspan-core/tests/wider_checks.rs`.
+Through the real hook executable, a real daemon, real Git, the real indexer
+and a two-crate Rust workspace (`tests/wider_checks.rs`, with commands that
+log how they ran): a body-only change runs only the regular command; a
+signature change runs the wider command after it on the same tree, whole,
+with no argument added, grades a failure `broke` with the mentioning file
+and a pass `kept`; the session working on the mentioning file receives the
+grade at its next briefing; a write during the wider run stops it and runs
+both again on the new tree; the CLI shows the wider command and refuses one
+with a secret, without a command, or with the regular check's name. Breaking
+the rule that tells sessions on mentioning files, or adding a path to the
+wider command, makes its test fail. **Not observed on a host:** a real
+Claude Code or Codex session told that the wider check broke, and what it
+does next.
+
 ## Not now, with reasons
 
-- **Classifying failures** (whether a test failed before this session's
-  change, which session's writes are in the tree: F1). **Not now.** A result
-  is reported with the failing tests its output named (above), not classified
-  as new or already failing: that needs a baseline run per session.
-- **Running dependents' tests after an interface change** (F3, also
-  ADR 0024). The source index matches names, not resolved dependencies
+- **Selecting dependents' tests from the index.** The source index matches
+  names, not resolved dependencies
   ([ADR 0008](0008-derived-source-index.md),
   [ADR 0020](0020-source-graph-depth-after-launch.md)); selecting tests from
-  it would skip tests that a change does affect. The owner's whole command
-  runs instead.
+  it would skip tests that a change does affect. The owner's whole wider
+  command runs instead (F3, below).
 - **Choosing files.** A check could run only when a batch wrote a source file
   of a known language. LangSpan runs after any recorded write; the owner chooses a
   command that is cheap enough, and the debounce bounds how often.

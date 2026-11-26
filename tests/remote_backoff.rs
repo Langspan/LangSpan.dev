@@ -110,6 +110,7 @@ impl World {
         let mut world = Self { base, daemon: None };
         world.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(&state)
                 .stdout(Stdio::null())
@@ -129,6 +130,7 @@ impl World {
     }
     fn cli(&self, args: &[&str]) -> (i32, String) {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.base.join("state"))
             .args(args)

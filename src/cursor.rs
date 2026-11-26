@@ -19,13 +19,20 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{io::Read, time::Instant};
 
-pub const SOURCE: &str = "cursor";
+pub const SOURCE: &str = langspan_core::CURSOR_HOST;
 /// Tools whose calls are admitted before they run. `Write` creates or
 /// replaces a file, `Delete` removes one, `Shell` runs a command.
 pub const ADMITTED_TOOLS: [&str; 3] = ["Write", "Delete", "Shell"];
 /// A completed `Read` is recorded as the version the session saw.
 pub const READ_TOOL: &str = "Read";
 pub const SHELL_TOOL: &str = "Shell";
+/// The captured `preToolUse` event of a real Cursor `Write`, relative to the
+/// repository root, that the write-time break check is enabled by
+/// ([ADR 0029](../docs/adr/0029-break-alerts-at-write-time.md)). None yet:
+/// the adapter is built from documentation, and a check whose alert might
+/// never reach the model would still use up its notice. A test fails when a
+/// captured `pre-write.json` appears and this does not name it.
+pub const CAPTURED_WRITE: Option<&str> = None;
 /// A completed `Grep` shows peers the path it searched (roadmap A13), read
 /// from its `path` input; its pattern is never read. The input's shape is
 /// taken from Cursor's documentation and not yet seen from a real Cursor.
@@ -250,7 +257,7 @@ fn dispatch(event: HostEvent, config: &Config, deadline: Instant) -> Reply {
             host_session,
             tool_use_id,
             tool: tool.into(),
-            paths: vec![key],
+            paths: vec![key.clone()],
             input_fingerprint: hook::input_fingerprint(tool, input),
             // A Write states the whole new content and a Delete none: the
             // file is held whole.
@@ -261,11 +268,17 @@ fn dispatch(event: HostEvent, config: &Config, deadline: Instant) -> Reply {
             // It reports its reads, so it gets no snapshot.
             snapshot_unknown: false,
             shell: None,
-            contents: Vec::new(),
+            // A `Write`'s whole new content, for the break check.
+            contents: match (tool, input.get("content").and_then(Value::as_str)) {
+                ("Write", Some(content)) => vec![(key, content.to_owned())],
+                _ => Vec::new(),
+            },
             // Cursor documents `additional_context` on `preToolUse`, but its
-            // `Write` input has not been seen from a real Cursor, so its
-            // writes are not checked for breaks yet (ADR 0029).
-            pre_tool_context: false,
+            // `Write` input has not been seen from a real Cursor: its writes
+            // are checked for breaks only once a capture is in the
+            // repository (ADR 0029).
+            pre_tool_context: CAPTURED_WRITE.is_some(),
+            breaks_after: false,
         },
         &config,
         deadline,
@@ -320,6 +333,35 @@ mod tests {
             .join("fixtures/cursor-constructed")
             .join(name);
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_break_check_is_on_exactly_when_a_captured_write_fixture_is_named() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // Every `pre-write.json` outside the constructed set is a capture.
+        let captured: Vec<String> = std::fs::read_dir(root.join("fixtures"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("cursor-") && name != "cursor-constructed")
+            .map(|name| format!("fixtures/{name}/pre-write.json"))
+            .filter(|path| root.join(path).is_file())
+            .collect();
+        match CAPTURED_WRITE {
+            None => assert!(
+                captured.is_empty(),
+                "a captured Cursor Write is present ({captured:?}): name it in CAPTURED_WRITE once it shows `file_path` and `content`"
+            ),
+            Some(path) => {
+                assert!(captured.iter().any(|found| found == path), "{path}");
+                let event: Value =
+                    serde_json::from_str(&std::fs::read_to_string(root.join(path)).unwrap())
+                        .unwrap();
+                assert_eq!(event["tool_name"], "Write", "{path}");
+                assert!(event["tool_input"]["file_path"].is_string(), "{path}");
+                assert!(event["tool_input"]["content"].is_string(), "{path}");
+            }
+        }
     }
 
     #[test]

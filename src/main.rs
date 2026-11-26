@@ -1,3 +1,4 @@
+use langspan::today::utc;
 use langspan::{
     client,
     hosts::UserHome,
@@ -10,15 +11,29 @@ const HELP: &str = r#"LangSpan — local cooperative coordination for AI coding 
 
 Usage: langspan [--state-dir DIR] COMMAND [--json]
 
+  setup [--home DIR] [--hosts ...] [--yes]
+                                 From nothing to coordinated sessions: shows one plan
+                                 (the hosts found, the files `install --skill` changes,
+                                 the coordinator's login service and the state
+                                 directory), asks once, applies it, starts the
+                                 coordinator and runs `doctor`. --yes applies without
+                                 asking; without a terminal and without --yes it only
+                                 prints the plan. A second run changes nothing
   daemon                         Run the local coordinator in the foreground
-  mcp                            Serve MCP over stdin/stdout using the coordinator
-  dashboard [--listen 127.0.0.1:7311] [--open] [--allow-network]
+  mcp [--tools all|hooked --host claude-code|codex]
+                                 Serve MCP over stdin/stdout using the coordinator.
+                                 --tools hooked leaves the four tools the hooks call
+                                 out of the list while that host's hooks report here;
+                                 each still answers when called
+  dashboard [--listen 127.0.0.1:7311] [--open] [--allow-network] [--demo]
                                  Serve a live, read-only page of every agent on this
                                  machine and every teammate heard from, on loopback.
                                  Prints the URL with this run's access token; --open
                                  also opens it in the browser. A non-loopback address
                                  is refused without --allow-network; from a phone, use
-                                 an SSH tunnel or a VPN to this machine instead
+                                 an SSH tunnel or a VPN to this machine instead.
+                                 --demo serves the same page with fictional, labeled
+                                 simulated data and reads nothing from the coordinator
   workspace add ID ROOT          Register a physical workspace
   workspace list [--after ID]    Every workspace: root and whether it exists, current
                                  sessions, notes, pending messages, check records,
@@ -43,7 +58,8 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   admit SESSION PATH...          Request a whole file set; --ttl-ms defaults to 5000
   complete SESSION LEASE         Complete a current admission
   brief SESSION                  Look at the peer work a session would be told about;
-                                 optional --max-peers N (1..16). Does not count as delivery
+                                 optional --max-peers N (1..16); --recent adds what changed
+                                 recently, as told at a session's start. Does not count as delivery
   remote enable WORKSPACE --name NAME [--remote origin] [--share-task on] [--root DIR]
                 [--publish-as-branch]
                                  Publish this workspace's work summary to teammates
@@ -69,6 +85,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Claude Code and Codex Stop), on the exact working tree,
                                  records it as check NAME and tells that session the
                                  result at its next briefing. Without options: show it
+    [COMMAND... --on-interface-change NAME2 [--timeout-s N] -- COMMAND2...]
+                                 When the writes changed an indexed export that other
+                                 files mention, COMMAND2 runs whole after COMMAND on the
+                                 same tree, recorded as NAME2 and graded kept or broke
   check flaky WORKSPACE [--name NAME] | --forget TEST [--name NAME] --request-id ID
                                  Tests that flipped on unchanged code (two results on
                                  one tree, no write between); --forget clears one
@@ -96,7 +116,9 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Stop the waiting landing ID; it pushes nothing
   graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go, Java)
                                  [--detail]: with its body digest, calls, callers
-                                 by name, notes on its file and last check
+                                 by name, notes on its file and last check;
+                                 [--renamed]: under the newest name a recorded
+                                 rename of NAME leads to
   graph references WORKSPACE NAME  Where a name is mentioned
   graph impact WORKSPACE PATH    What a file exports and which files mention those names.
                                  [--depth N]: 1 to 3 levels, each the files that
@@ -106,6 +128,24 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Files the index cannot answer for: partial, never
                                  parsed cleanly, waiting, too large, left out of the
                                  scan, and other languages by extension
+  graph inflight WORKSPACE       Exported names other worktrees of the repository
+                                 added or changed and not committed, that this
+                                 workspace's files mention or import
+  graph export WORKSPACE --out FILE
+                                 Write the source index to a new owner-only FILE
+                                 (JSON Lines); it never replaces an existing file
+  graph import WORKSPACE --in FILE [--apply]
+                                 Dry run: how many exported files have the same
+                                 content here. --apply loads those the index does
+                                 not hold yet; the rest are indexed from disk
+  check-write SESSION PATH... [--symbol NAME]...
+                                 Before a write, for a host without hooks: per PATH
+                                 (1 to 8) who holds it, lines other sessions wrote in
+                                 the last 30 minutes and whether it changed since
+                                 SESSION read it; per NAME (up to 16, or without any,
+                                 the definitions in PATH) a peer's recent signature
+                                 change, removal or body lines, matched by name.
+                                 Records nothing
   graph history WORKSPACE NAME [--path PATH] [--limit N] [--before SEQ]
                                  The recorded interface changes of definitions named
                                  NAME, newest first (--limit 1 to 50, default 10):
@@ -121,6 +161,16 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  What each session did since local midnight (or the
                                  time given), refusals by kind, checks, landings, and
                                  what is still open. Reads only; acknowledges nothing
+  report WORKSPACE [--since RFC3339]
+                                 Per session and per host kind: edits admitted, those
+                                 not compared with a read, shell writes seen only
+                                 after, reads, intents set/ended/left open, refusals,
+                                 unchanged retries, briefings. Counts of recorded
+                                 events (all of them without --since). Reads only
+  count [--month YYYY-MM]        Refusals in one local month (default: this one), by
+                                 kind and workspace, once per session, kind and files
+                                 a day, and how many were retried and let through.
+                                 Says what LangSpan did, not what it saved. Reads only
   remember WORKSPACE TEXT [PATH...] [--session ID]
                                  Keep a one-line note for the repository or for files;
                                  sessions working there are told. Survives restarts
@@ -140,6 +190,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  staged or not. Refuses (exit 1) a hunk whose author is
                                  not known. Without --session, the session whose shell
                                  call is running it now
+  adopt SESSION [--session ID] [--root DIR]
+                                 Take over the uncommitted lines an ended session left
+                                 in this workspace: status --mine and commit --mine then
+                                 treat them as this session's; lines another session
+                                 also wrote stay shared. Refused for a live session and
+                                 for one of another workspace. Recorded as an event.
+                                 Session found as for commit --mine
   message WORKSPACE TEXT [PATH...] [--to SESSION] [--from SESSION]
                                  Send one line to a session, or without --to to every
                                  other session of the workspace. Without --from it is
@@ -174,6 +231,17 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  directory exists, its user-level install (none,
                                  current, outdated, other_state_dir, unknown) and the
                                  command that installs it. Reads only
+  guidance [--format agents|gemini|cursor-rules]
+                                 Print LangSpan's block for AGENTS.md, GEMINI.md or a
+                                 Cursor rule: which MCP tools an agent calls to
+                                 coordinate. Without hooks it is advice, not a gate
+  guidance install --root DIR --file FILE [--create] [--apply]
+  guidance remove --root DIR --file FILE [--apply]
+                                 Show (default) or write the block into FILE under DIR
+                                 between <!-- langspan:begin --> and <!-- langspan:end
+                                 -->, or take out only that block; every other byte of
+                                 FILE stays. A missing FILE is created only with
+                                 --create. A hand-edited block stops it, with its lines
   status                         Show workspaces, live or recent sessions, intents and
                                  open admissions; closed ones are counted per session
   status --mine [--session ID] [--root DIR]
@@ -202,6 +270,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   status --all [--after CURSOR]  Read every record, history included, one page at a
                                  time; pass the page's `next` as --after for the next
   events [--after SEQ] [--limit N] Read ordered events (default limit 100; maximum 1000)
+  compact [--keep-days N] [--apply]
+                                 Delete events and receipts older than N days (default
+                                 90, 7..3650) after snapshotting the state they built.
+                                 A dry run unless --apply: shows what would go
   changes WORKSPACE [--after SEQ] [--limit N]
                                  Read disk and local-branch observations and scan freshness
   request JSON                   Send a complete version 3 request envelope
@@ -256,7 +328,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  .agents/rules/langspan.md, which hooks remove removes
   install [--home DIR] [--hosts claude-code,codex,cursor,gemini-cli,antigravity]
           [--prompt-summary off] [--presence off] [--presence-minutes N]
-          [--skill] [--statusline on|off] [--apply]
+          [--skill] [--statusline on|off] [--mcp-tools all|hooked] [--apply]
                                  Install the hooks once for every repository, in each
                                  host's user configuration, and register `langspan mcp`
                                  as the MCP server `langspan`. Hosts default to those
@@ -272,10 +344,17 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Antigravity are chosen only by name in --hosts.
                                  --statusline on sets Claude Code's
                                  statusLine to `langspan statusline` where none is
-                                 set (never replacing one); off removes LangSpan's
+                                 set (never replacing one); off removes LangSpan's.
+                                 --mcp-tools hooked writes `mcp --tools hooked` for
+                                 Claude Code and Codex (default all)
   uninstall [--home DIR] [--hosts ...] [--apply]
-                                 Remove only what install wrote, the skill included;
-                                 the state directory stays
+                                 Remove only what install and setup wrote, the skill
+                                 and the coordinator's login service included; the
+                                 state directory stays
+
+A hook or `mcp` that finds no coordinator, where no login service is installed for
+its state directory, starts `langspan daemon` in the background and logs it to
+daemon.log in the state directory. LANGSPAN_AUTOSTART=off turns that off.
 
 Every mutation requires --request-id ID. Retry the identical ID and command after
 an unknown outcome; a new operation needs a new ID. Old grants never become fresh
@@ -417,6 +496,12 @@ fn hook(input: Vec<String>) -> ExitCode {
         }
         let deadline = std::time::Instant::now() + config.budget;
         let input = langspan::hook::read_stdin_until(deadline);
+        // At most half of what is left, so the event itself keeps the rest.
+        let now = std::time::Instant::now();
+        start_coordinator(
+            &config.state_dir,
+            now + deadline.saturating_duration_since(now) / 2,
+        );
         // Opt-in, for capturing what a real host sends so it can become a
         // fixture. Off unless the variable names an existing directory; a
         // failure to write is ignored and never changes the hook's answer.
@@ -544,6 +629,7 @@ fn hooks(
         .map(|registration| langspan::user_install::McpServer {
             executable: registration.executable.clone(),
             state_dir: registration.state_dir.clone(),
+            hooked_host: None,
         });
     let registration = registration.as_ref();
     let server = server.as_ref();
@@ -740,15 +826,113 @@ type FilePlan<'a> = (
     Option<Box<langspan::install::LeftEmpty<'a>>>,
 );
 
+/// `guidance`: print LangSpan's block for AGENTS.md and similar files, or
+/// write it into (`install`) or take it out of (`remove`) one file of the
+/// owner's repository. A dry run unless `--apply`. Needs no coordinator.
+fn guidance(
+    args: &[String],
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+    apply: bool,
+) -> Result<u8, langspan::Error> {
+    use langspan::guidance::{self, Format};
+    if json {
+        return Err("--json is not valid for guidance; it prints text".into());
+    }
+    // Accepted for every command; the guidance never uses the coordinator.
+    options.remove("--state-dir");
+    let install = match args {
+        [] => {
+            let format = match options.remove("--format") {
+                None => Format::Agents,
+                Some(name) => Format::from_name(&name)
+                    .ok_or_else(|| format!("--format {name}: expected {}", Format::USAGE))?,
+            };
+            no_unused_options(options)?;
+            if apply {
+                return Err("--apply is valid for `guidance install` and `guidance remove`".into());
+            }
+            print!("{}", guidance::render(format));
+            return Ok(0);
+        }
+        [action] if action == "install" => true,
+        [action] if action == "remove" => false,
+        _ => {
+            return Err(format!(
+                "usage: langspan guidance [--format {}] | guidance install --root DIR --file FILE [--create] [--apply] | guidance remove --root DIR --file FILE [--apply]",
+                Format::USAGE
+            )
+            .into());
+        }
+    };
+    let root = options
+        .remove("--root")
+        .ok_or("guidance install and remove need --root DIR, the repository")?;
+    let file = options
+        .remove("--file")
+        .ok_or("guidance install and remove need --file FILE, such as AGENTS.md")?;
+    let create = options.remove("--create").is_some();
+    if create && !install {
+        return Err("--create is valid only for `guidance install`".into());
+    }
+    no_unused_options(options)?;
+    let path = guidance::target(std::path::Path::new(&root), &file)?;
+    let plan = guidance::plan_file(&path, install, create)?;
+    if plan.unchanged() {
+        println!(
+            "{}",
+            if install {
+                format!("{file} already has LangSpan's block; nothing changed.")
+            } else {
+                format!("{file} has no LangSpan block; nothing changed.")
+            }
+        );
+        return Ok(0);
+    }
+    if !apply {
+        print!("{}", plan.diff());
+        if plan.planned.is_none() {
+            println!("{file} would be removed: it held only LangSpan's block.");
+        }
+        println!(
+            "dry run: add --apply to {} {file}",
+            if install { "write" } else { "change" }
+        );
+        return Ok(0);
+    }
+    plan.apply()?;
+    println!(
+        "{}",
+        match (install, plan.planned.is_some()) {
+            (true, _) => format!("wrote LangSpan's block to {file}"),
+            (false, true) => format!("removed LangSpan's block from {file}"),
+            (false, false) => format!("removed {file}: it held only LangSpan's block"),
+        }
+    );
+    Ok(0)
+}
+
+/// How `user_install` runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Show the plan and how to apply it.
+    DryRun,
+    /// Show the plan only: `setup` says how to apply it.
+    Plan,
+    Apply,
+}
+
 /// `install` / `uninstall`: LangSpan's user-level hooks and MCP server entry
-/// for each chosen host. Every file is planned, and every refusal raised,
-/// before anything is written.
+/// for each chosen host, and on uninstall the coordinator's login service.
+/// Every file is planned, and every refusal raised, before anything is
+/// written. Returns how many files would change or changed.
 fn user_install(
     install: bool,
     options: &mut BTreeMap<String, String>,
-    apply: bool,
-) -> Result<u8, langspan::Error> {
+    mode: Mode,
+) -> Result<usize, langspan::Error> {
     use langspan::{install as hooks, install::Vendor, user_install};
+    let apply = mode == Mode::Apply;
     let home = UserHome::new(options.remove("--home").map(PathBuf::from))?;
     let state_dir = std::path::absolute(home.state_dir(options.remove("--state-dir")))?;
     let share_prompt = switch(options, "--prompt-summary")?;
@@ -768,6 +952,16 @@ fn user_install(
                 .into(),
         );
     }
+    let hooked_tools = match options.remove("--mcp-tools").as_deref() {
+        Some(_) if !install => {
+            return Err("--mcp-tools is valid only for `install`; `uninstall` removes the whole MCP entry, flag included".into());
+        }
+        None | Some("all") => false,
+        Some("hooked") => true,
+        Some(other) => {
+            return Err(format!("--mcp-tools takes all or hooked, not {other:?}").into());
+        }
+    };
     no_unused_options(options)?;
     let vendors: Vec<Vendor> = match hosts {
         Some(list) => list
@@ -788,12 +982,18 @@ fn user_install(
             .filter(|vendor| home.files(*vendor).config_dir.is_dir())
             .collect(),
     };
-    if vendors.is_empty() {
+    if vendors.is_empty() && install {
         return Err(format!(
             "no host configuration found under {} (.claude, .codex or .cursor); choose --hosts claude-code,codex,cursor,gemini-cli,antigravity",
             home.home.display()
         )
         .into());
+    }
+    if vendors.is_empty() {
+        println!(
+            "No host configuration found under {} (.claude, .codex or .cursor), so no host's files change.",
+            home.home.display()
+        );
     }
     let executable = hooks::installed_executable(&std::env::current_exe()?)?;
     // Claude Code's `statusLine` (roadmap H2): only where none is set, and
@@ -823,15 +1023,45 @@ fn user_install(
         share_prompt,
         presence,
     });
-    let server = install.then(|| user_install::McpServer {
-        executable: executable.clone(),
-        state_dir: state_dir.clone(),
-    });
+    // Each host's entry: with `--mcp-tools hooked`, the Claude Code and Codex
+    // entries list fewer tools while their hooks report (roadmap I11).
+    let servers: Vec<(Vendor, user_install::McpServer)> = if install {
+        vendors
+            .iter()
+            .map(|&vendor| {
+                let hooked_host = (hooked_tools
+                    && langspan::mcp::HOOKED_HOSTS.contains(&vendor.name()))
+                .then(|| vendor.name().to_owned());
+                (
+                    vendor,
+                    user_install::McpServer {
+                        executable: executable.clone(),
+                        state_dir: state_dir.clone(),
+                        hooked_host,
+                    },
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     // A host may rewrite its file between this plan and the write.
     let mut plans: Vec<FilePlan> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
+    if hooked_tools {
+        let others: Vec<&str> = vendors
+            .iter()
+            .map(|vendor| vendor.name())
+            .filter(|name| !langspan::mcp::HOOKED_HOSTS.contains(name))
+            .collect();
+        if !others.is_empty() {
+            notes.push(format!(
+                "--mcp-tools hooked applies to claude-code and codex; {} keep every tool until their hooks are verified on a real host.",
+                others.join(" and ")
+            ));
+        }
+    }
     let registration = registration.as_ref();
-    let server = server.as_ref();
     // On uninstall, a file LangSpan may have created is removed when nothing
     // but LangSpan's entries was in it, rather than left holding `{}`.
     let emptied = |vendor: Vendor| {
@@ -840,6 +1070,10 @@ fn user_install(
         })
     };
     for &vendor in &vendors {
+        let server = servers
+            .iter()
+            .find(|(each, _)| *each == vendor)
+            .map(|(_, server)| server);
         let files = home.files(vendor);
         let original = hooks::read_bytes(&files.hooks)?;
         let existing = hooks::parse_json(&files.hooks, original.as_deref())?;
@@ -1118,7 +1352,10 @@ fn user_install(
             );
         }
     }
-    if changed > 0 && !apply {
+    if !install {
+        changed += remove_service(&home, apply)?;
+    }
+    if changed > 0 && mode == Mode::DryRun {
         println!("Dry run; nothing was written. Run the same command with --apply to write it.");
     }
     if !install && apply {
@@ -1127,7 +1364,345 @@ fn user_install(
     for note in notes {
         println!("{note}");
     }
+    Ok(changed)
+}
+
+/// Starts a coordinator for `state_dir` if none runs and no login service is
+/// installed for it, waiting at most until `until`. Never fails: what
+/// happened goes to stderr as one structured line.
+fn start_coordinator(state_dir: &std::path::Path, until: std::time::Instant) {
+    if langspan::autostart::disabled() {
+        return;
+    }
+    let Ok(state_dir) = std::path::absolute(state_dir) else {
+        return;
+    };
+    // The usual case, before anything else is looked up.
+    if langspan::client::accepts(
+        &state_dir,
+        until.min(std::time::Instant::now() + std::time::Duration::from_millis(100)),
+    ) {
+        return;
+    }
+    let executable = std::env::current_exe()
+        .map_err(langspan::Error::from)
+        .and_then(|exe| Ok(langspan::install::installed_executable(&exe)?));
+    let outcome = match executable {
+        Ok(executable) => {
+            let service = UserHome::new(None)
+                .is_ok_and(|home| langspan::service::installed_for(&home, &state_dir));
+            langspan::autostart::ensure(&state_dir, &executable, None, service, until)
+        }
+        Err(error) => {
+            langspan::autostart::Outcome::Failed(format!("cannot find this executable: {error}"))
+        }
+    };
+    if let Some(line) = outcome.log_line(&state_dir) {
+        eprintln!("{line}");
+    }
+}
+
+/// The login service `setup` would install, as planned.
+enum ServicePlan {
+    /// No service: why, and so the coordinator is started on demand.
+    None(String),
+    /// The file and the manager already match.
+    Unchanged(PathBuf),
+    /// The file to write, its text, and what is there now.
+    Install {
+        manager: langspan::service::Manager,
+        path: PathBuf,
+        text: String,
+        existing: Option<String>,
+    },
+}
+
+fn plan_service(
+    home: &UserHome,
+    executable: &std::path::Path,
+    state_dir: &std::path::Path,
+) -> Result<ServicePlan, langspan::Error> {
+    use langspan::service::{self, Manager};
+    let Some(manager) = Manager::current() else {
+        return Ok(ServicePlan::None(
+            "this platform has no supported login service".into(),
+        ));
+    };
+    if home.explicit() {
+        return Ok(ServicePlan::None(
+            "--home names a home other than the login user's, whose service manager setup does not change".into(),
+        ));
+    }
+    let path = manager.file(home);
+    let existing = service::read(&path)?;
+    if let Some(existing) = &existing
+        && manager.state_dir_of(existing).is_none()
+    {
+        return Err(format!(
+            "{} exists and LangSpan did not write it; move it aside, then run setup again",
+            path.display()
+        )
+        .into());
+    }
+    if let Err(reason) = service::manager_available(manager) {
+        return Ok(ServicePlan::None(reason));
+    }
+    let text = manager.render(executable, state_dir, &|name| std::env::var(name).ok())?;
+    if existing.as_deref() == Some(text.as_str()) && service::running(manager) {
+        return Ok(ServicePlan::Unchanged(path));
+    }
+    Ok(ServicePlan::Install {
+        manager,
+        path,
+        text,
+        existing,
+    })
+}
+
+/// `setup`: one plan for the user-level install with the skill, the
+/// coordinator's login service and the state directory; one question; then
+/// the install, the service, a running coordinator and `doctor`.
+fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langspan::Error> {
+    use std::io::{BufRead, IsTerminal, Read, Write};
+    if json {
+        return Err(
+            "--json is not valid for `setup`; run `langspan doctor --json` after it".into(),
+        );
+    }
+    let yes = options.remove("--yes").is_some();
+    if options.contains_key("--skill") {
+        return Err("`setup` always installs the skill; leave out --skill".into());
+    }
+    options.insert("--skill".into(), String::new());
+    let home = UserHome::new(options.get("--home").map(PathBuf::from))?;
+    let state_dir = std::path::absolute(home.state_dir(options.get("--state-dir").cloned()))?;
+    langspan::autostart::check_state_dir(&state_dir)?;
+    let executable = langspan::install::installed_executable(&std::env::current_exe()?)?;
+    println!("LangSpan setup for {}", home.home.display());
+    println!("State directory: {}", state_dir.display());
+    println!("Hook and MCP files:");
+    let mut plan_options = options.clone();
+    let files = user_install(true, &mut plan_options, Mode::Plan)?;
+    let service = plan_service(&home, &executable, &state_dir)?;
+    println!("Coordinator:");
+    match &service {
+        ServicePlan::None(reason) => println!(
+            "  No login service: {reason}. Hooks and `langspan mcp` start the coordinator when they find none, and setup starts one now."
+        ),
+        ServicePlan::Unchanged(path) => {
+            println!(
+                "  Login service {} is installed and running; nothing to change.",
+                path.display()
+            )
+        }
+        ServicePlan::Install {
+            path,
+            text,
+            existing,
+            ..
+        } => {
+            if existing.as_deref() == Some(text.as_str()) {
+                println!(
+                    "  Start login service {}, which is installed but not running.",
+                    path.display()
+                );
+            } else {
+                println!(
+                    "  {} {} and start it, so the coordinator runs at every login:",
+                    if existing.is_some() {
+                        "Replace"
+                    } else {
+                        "Write"
+                    },
+                    path.display()
+                );
+                for line in text.lines() {
+                    println!("    {line}");
+                }
+            }
+        }
+    }
+    let service_changes = matches!(service, ServicePlan::Install { .. });
+    let running = langspan::client::accepts(
+        &state_dir,
+        std::time::Instant::now() + std::time::Duration::from_millis(500),
+    );
+    if files == 0 && !service_changes && running {
+        println!("Already set up; nothing to change.");
+        return Ok(0);
+    }
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            println!(
+                "Not run from a terminal and no --yes, so nothing was changed. Run `langspan setup --yes` to apply this plan."
+            );
+            return Ok(0);
+        }
+        eprint!("Set this up? [Y/n] ");
+        let _ = std::io::stderr().flush();
+        let mut answer = String::new();
+        std::io::stdin().lock().take(256).read_line(&mut answer)?;
+        if !matches!(
+            answer.trim().to_ascii_lowercase().as_str(),
+            "" | "y" | "yes"
+        ) {
+            println!("Nothing was changed.");
+            return Ok(0);
+        }
+    }
+    if files > 0 {
+        user_install(true, options, Mode::Apply)?;
+    }
+    langspan::autostart::prepare_state_dir(&state_dir)?;
+    match service {
+        ServicePlan::Install {
+            manager,
+            path,
+            text,
+            existing,
+        } => {
+            install_service(manager, &path, existing.as_deref(), &text, &state_dir)?;
+        }
+        ServicePlan::Unchanged(_) => {}
+        ServicePlan::None(_) => {
+            let outcome = langspan::autostart::ensure(
+                &state_dir,
+                &executable,
+                home.explicit().then_some(home.home.as_path()),
+                false,
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            );
+            match outcome {
+                langspan::autostart::Outcome::Running => {
+                    println!("A coordinator is already running.")
+                }
+                langspan::autostart::Outcome::Started { pid, ready: true } => println!(
+                    "Started a coordinator in the background (process {pid}); it logs to {}.",
+                    langspan::autostart::log_path(&state_dir).display()
+                ),
+                langspan::autostart::Outcome::Started { pid, ready: false } => println!(
+                    "Started a coordinator (process {pid}), but it did not accept connections within 5 seconds; read {} for why.",
+                    langspan::autostart::log_path(&state_dir).display()
+                ),
+                langspan::autostart::Outcome::Skipped(reason) => {
+                    println!("No coordinator was started ({reason}).")
+                }
+                langspan::autostart::Outcome::Failed(error) => {
+                    println!("No coordinator was started: {error}.")
+                }
+            }
+        }
+    }
+    println!("langspan doctor:");
+    // Setup itself succeeded; what doctor finds is reported, not its exit.
+    doctor(&state_dir, None, &home, false)?;
     Ok(0)
+}
+
+/// Writes the login service file, unless it changed from `planned` since
+/// the plan was shown, and starts it, then waits up to five seconds for the
+/// coordinator to accept connections.
+fn install_service(
+    manager: langspan::service::Manager,
+    path: &std::path::Path,
+    planned: Option<&str>,
+    text: &str,
+    state_dir: &std::path::Path,
+) -> Result<(), langspan::Error> {
+    use langspan::service;
+    // The manager creates the log as it starts the service: owner-only first.
+    drop(langspan::autostart::open_log(&std::fs::canonicalize(
+        state_dir,
+    )?)?);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    langspan::service::write(path, planned, text)?;
+    println!("Wrote {}.", path.display());
+    let commands = service::start_commands(manager, path);
+    let last = commands.len() - 1;
+    for (index, (program, args)) in commands.iter().enumerate() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let ran = service::run(program, &args)?;
+        // launchd's first step unloads an earlier load, and fails when there
+        // was none.
+        let optional = manager == service::Manager::Launchd && index < last;
+        if !ran.success && !optional {
+            return Err(format!(
+                "`{program} {}` failed: {}. {} is written; run that command again, or `langspan daemon` to start the coordinator by hand",
+                args.join(" "),
+                ran.said,
+                path.display()
+            )
+            .into());
+        }
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut ready = false;
+    while std::time::Instant::now() < deadline {
+        if langspan::client::accepts(state_dir, deadline) {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if ready {
+        println!("Started the login service; the coordinator accepts connections.");
+    } else {
+        println!(
+            "Started the login service, but the coordinator did not accept connections within 5 seconds; see {}.",
+            langspan::autostart::log_path(state_dir).display()
+        );
+    }
+    Ok(())
+}
+
+/// On uninstall, stops and removes the login service LangSpan wrote, if
+/// any. Returns 1 when there is one to remove, else 0.
+fn remove_service(home: &UserHome, apply: bool) -> Result<usize, langspan::Error> {
+    use langspan::service::{self, Manager};
+    let Some(manager) = Manager::current() else {
+        return Ok(0);
+    };
+    let path = manager.file(home);
+    match service::read(&path)? {
+        None => return Ok(0),
+        Some(text) if manager.state_dir_of(&text).is_none() => {
+            println!(
+                "{} was not written by LangSpan; it was left in place.",
+                path.display()
+            );
+            return Ok(0);
+        }
+        Some(_) => {}
+    }
+    if !apply {
+        println!(
+            "The coordinator's login service {} would be stopped and removed.",
+            path.display()
+        );
+        return Ok(1);
+    }
+    // Another home's manager is not this login's: only the file goes.
+    if !home.explicit() {
+        for (program, args) in service::stop_commands(manager) {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            match service::run(&program, &args) {
+                Ok(ran) if ran.success => {}
+                Ok(ran) => println!("`{program} {}` said: {}", args.join(" "), ran.said),
+                Err(error) => println!("{error}"),
+            }
+        }
+    }
+    std::fs::remove_file(&path)?;
+    if !home.explicit() && manager == Manager::Systemd {
+        let _ = service::run("systemctl", &["--user", "daemon-reload"]);
+    }
+    println!(
+        "Stopped and removed the coordinator's login service {}.",
+        path.display()
+    );
+    Ok(1)
 }
 
 /// What a dry run shows of Gemini CLI's settings file: LangSpan's entries
@@ -1412,6 +1987,29 @@ fn status_line(
     Ok(0)
 }
 
+/// `count`: refusals in one local month, read from the event log (H5).
+/// The coordinator being down is an error (exit 1); no earlier figure is
+/// shown instead.
+fn refusal_count(
+    state_dir: &std::path::Path,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    use langspan::count;
+    let month = count::month(
+        options.remove("--month").as_deref(),
+        langspan::store::wall_now_ms(),
+    )?;
+    no_unused_options(options)?;
+    let answer = count::ask(state_dir, month, count::day_starts(month)?)?;
+    if json {
+        println!("{}", serde_json::to_string(&answer)?);
+    } else {
+        println!("{}", answer.text(&month.label()));
+    }
+    Ok(0)
+}
+
 /// `notify on|off|status [--sound on|off]`: desktop notices (H3). Writes
 /// only `notify` and `notify_sound` in `config.json`; the daemon reads them
 /// at each notice.
@@ -1455,6 +2053,37 @@ fn notify(
     match &found {
         Some((program, path)) => println!("notifier: {} ({})", program.name(), path.display()),
         None => println!("notifier: none found (no {program} on PATH); no notice can be shown"),
+    }
+    Ok(0)
+}
+
+/// `adopt SESSION`: take over an ended session's uncommitted lines (issue
+/// #161). The adopting session is `--session`, or the one running this
+/// command through its shell tool.
+fn adopt(
+    state_dir: &std::path::Path,
+    from: &str,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    let root = match options.remove("--root") {
+        Some(root) => PathBuf::from(root),
+        None => std::env::current_dir()?,
+    };
+    let session = options.remove("--session");
+    let request_id = options.remove("--request-id");
+    no_unused_options(options)?;
+    let session = match session {
+        Some(session) => session,
+        None => langspan::commit::running_session(state_dir, &root)?,
+    };
+    let request_id = request_id.unwrap_or_else(|| unique("adopt", &[&session, from]));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let report = langspan::adopt::adopt(state_dir, &request_id, &session, from, deadline)?;
+    if json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        println!("{}", report.text());
     }
     Ok(0)
 }
@@ -1597,10 +2226,14 @@ fn auto_check(
         let timeout_s = u32::try_from(number(options, "--timeout-s", 1800)?)
             .map_err(|_| "--timeout-s is at most 3600")?;
         no_unused_options(options)?;
+        let (command, wider) = wider_check(command)?;
         if command.is_empty() {
             return Err("give the check command after --, for example: -- cargo test".into());
         }
         langspan::auto_check::refuse_secrets(command)?;
+        if let Some(wider) = &wider {
+            langspan::auto_check::refuse_secrets(&wider.argv)?;
+        }
         ask(
             state_dir,
             unique("auto-check", &[workspace, &name]),
@@ -1609,6 +2242,7 @@ fn auto_check(
                 name,
                 argv: command.to_vec(),
                 timeout_s,
+                on_interface_change: wider.map(Box::new),
             },
         )?
     };
@@ -1628,6 +2262,48 @@ fn auto_check(
         state_dir,
     )?;
     Ok(0)
+}
+
+/// `COMMAND... --on-interface-change NAME [--timeout-s N] -- COMMAND2...`:
+/// the regular command and the wider one, which runs whole after it when a
+/// session's writes changed an indexed interface that other files mention.
+fn wider_check(
+    command: &[String],
+) -> Result<(&[String], Option<langspan_core::WiderCheck>), langspan::Error> {
+    const USAGE: &str = "give the wider check as --on-interface-change NAME [--timeout-s N] -- COMMAND..., after the regular command";
+    let Some(at) = command
+        .iter()
+        .position(|arg| arg == "--on-interface-change")
+    else {
+        return Ok((command, None));
+    };
+    let (regular, rest) = command.split_at(at);
+    let (name, mut rest) = match rest {
+        [_, name, rest @ ..] if !name.starts_with("--") => (name.clone(), rest),
+        _ => return Err(USAGE.into()),
+    };
+    let mut timeout_s = 1800;
+    if let [flag, value, after @ ..] = rest
+        && flag == "--timeout-s"
+    {
+        timeout_s = value
+            .parse::<u32>()
+            .ok()
+            .filter(|seconds| (1..=langspan_core::MAX_AUTO_CHECK_TIMEOUT_S).contains(seconds))
+            .ok_or("--timeout-s of the wider check is 1 to 3600 seconds")?;
+        rest = after;
+    }
+    match rest {
+        [separator, argv @ ..] if separator == "--" && !argv.is_empty() => Ok((
+            regular,
+            Some(langspan_core::WiderCheck {
+                name,
+                argv: argv.to_vec(),
+                timeout_s,
+            }),
+        )),
+        _ => Err(USAGE.into()),
+    }
 }
 
 /// An inconclusive check's reason and next step, as the MCP result has them.
@@ -2333,7 +3009,7 @@ fn doctor(
         Err(error) => note(
             false,
             format!(
-                "Coordinator not reachable at {}: {error}. Start it with `langspan daemon`. Until then every hook gives no decision and no briefing.",
+                "Coordinator not reachable at {}: {error}. Run `langspan setup` to install it as a login service, or start it with `langspan daemon`. Until then a hook starts one when it finds none, unless LANGSPAN_AUTOSTART=off or a login service is installed for it.",
                 state_dir.display()
             ),
         ),
@@ -2431,6 +3107,7 @@ fn doctor(
                         limit: 1,
                         detail: false,
                         blind_in_scope: true,
+                        renamed: false,
                     },
                 ) {
                     let behind = coverage.indexable_files - coverage.current_files;
@@ -3129,13 +3806,33 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         args,
         command,
         mut options,
+        symbols,
         json,
         apply,
     } = parse_options(input)?;
+    if !symbols.is_empty() && args.first().map(String::as_str) != Some("check-write") {
+        return Err("option --symbol is not valid for this command".into());
+    }
     if let [action] = args.as_slice()
         && (action == "install" || action == "uninstall")
     {
-        return user_install(action == "install", &mut options, apply);
+        user_install(
+            action == "install",
+            &mut options,
+            if apply { Mode::Apply } else { Mode::DryRun },
+        )?;
+        return Ok(0);
+    }
+    if args == ["setup"] {
+        if apply {
+            return Err(
+                "`setup` asks before it changes anything; use --yes to skip the question".into(),
+            );
+        }
+        return setup(&mut options, json);
+    }
+    if args.first().map(String::as_str) == Some("guidance") && command.is_empty() {
+        return guidance(&args[1..], &mut options, json, apply);
     }
     let home_option = options.remove("--home").map(PathBuf::from);
     let state_option = options.get("--state-dir").cloned();
@@ -3182,10 +3879,16 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             );
         }
         ["statusline"] => return status_line(&state_dir, &mut options, json),
+        ["count"] => return refusal_count(&state_dir, &mut options, json),
         ["notify", action] if command.is_empty() => {
             return notify(&state_dir, action, &mut options, json);
         }
         ["commit"] => return commit_mine(&state_dir, &mut options, json),
+        // `adopt SESSION` or `adopt -- SESSION`, for an ID that begins with
+        // a hyphen.
+        ["adopt"] | ["adopt", _] if words.len() == 2 => {
+            return adopt(&state_dir, words[1], &mut options, json);
+        }
         ["status"] if options.remove("--mine").is_some() => {
             return status_mine(&state_dir, &mut options, json);
         }
@@ -3210,10 +3913,14 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     {
         return hooks(vendor, *action == "install", state_dir, &mut options, apply);
     }
-    let removes_workspace = matches!(words.as_slice(), ["workspace", "remove", _]);
-    if apply && !removes_workspace {
+    let takes_apply = before_command == ["compact"]
+        || matches!(
+            words.as_slice(),
+            ["workspace", "remove", _] | ["graph", "import", _]
+        );
+    if apply && !takes_apply {
         return Err(
-            "--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land` and `workspace remove`"
+            "--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"
                 .into(),
         );
     }
@@ -3229,11 +3936,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         };
         let open = options.remove("--open").is_some();
         let allow_network = options.remove("--allow-network").is_some();
+        let demo = options.remove("--demo").is_some();
         no_unused_options(&options)?;
         let options = langspan::dashboard::Options {
             listen,
             open,
             allow_network,
+            demo,
         };
         if json {
             return Err(
@@ -3244,13 +3953,26 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             .await??;
         return Ok(0);
     }
-    if words == ["daemon"] || words == ["mcp"] {
+    if words == ["daemon"] {
         no_unused_options(&options)?;
-        if words[0] == "daemon" {
-            langspan::daemon::run(state_dir).await?;
-        } else {
-            langspan::mcp::serve(state_dir).await?;
-        }
+        langspan::daemon::run(state_dir).await?;
+        return Ok(0);
+    }
+    if words == ["mcp"] {
+        let list = langspan::mcp::ToolList::parse(
+            options.remove("--tools").as_deref(),
+            options.remove("--host").as_deref(),
+        )?;
+        no_unused_options(&options)?;
+        let dir = state_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            start_coordinator(
+                &dir,
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+        })
+        .await?;
+        langspan::mcp::serve(state_dir, list).await?;
         return Ok(0);
     }
     let mut enable_root: Option<String> = None;
@@ -3326,6 +4048,9 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 // A look from the terminal is not a delivery to the session.
                 deliver: false,
                 mid_turn: false,
+                left: Vec::new(),
+                recent: options.remove("--recent").is_some(),
+                recent_window_ms: None,
                 mcp: false,
             },
             ["remote", "enable", workspace] => Command::RemoteEnable {
@@ -3371,6 +4096,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                         limit,
                         detail: options.remove("--detail").is_some(),
                         blind_in_scope: true,
+                        renamed: options.remove("--renamed").is_some(),
                     },
                     "references" => Command::GraphReferences {
                         workspace_id,
@@ -3390,6 +4116,18 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                     },
                 }
             }
+            ["graph", "inflight", workspace] => Command::GraphInflight {
+                workspace_id: (*workspace).into(),
+            },
+            ["graph", "export", workspace] => Command::GraphExport {
+                workspace_id: (*workspace).into(),
+                path: absolute_option(&mut options, "--out")?,
+            },
+            ["graph", "import", workspace] => Command::GraphImport {
+                workspace_id: (*workspace).into(),
+                path: absolute_option(&mut options, "--in")?,
+                apply,
+            },
             ["graph", "history", workspace, name] => Command::History {
                 workspace_id: (*workspace).into(),
                 name: (*name).into(),
@@ -3400,6 +4138,11 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                     .remove("--before")
                     .map(|seq| seq.parse().map_err(|_| "--before must be an integer"))
                     .transpose()?,
+            },
+            ["check-write", session, paths @ ..] if !paths.is_empty() => Command::CheckWrite {
+                session_id: (*session).into(),
+                paths: paths.iter().map(|path| (*path).into()).collect(),
+                symbols: symbols.clone(),
             },
             ["graph", "blind-spots", workspace] => Command::GraphBlindSpots {
                 workspace_id: (*workspace).into(),
@@ -3423,6 +4166,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                     options.remove("--since").as_deref(),
                     langspan::store::wall_now_ms(),
                 )?,
+            },
+            ["report", workspace] => Command::Report {
+                workspace_id: (*workspace).into(),
+                from_ms: match options.remove("--since") {
+                    Some(since) => langspan::today::parse_rfc3339(&since)?,
+                    None => 0,
+                },
             },
             ["remember", workspace, text, paths @ ..] => Command::Remember {
                 workspace_id: (*workspace).into(),
@@ -3475,6 +4225,11 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 limit: u32::try_from(number(&mut options, "--limit", 100)?)
                     .map_err(|_| "--limit is too large")?,
             },
+            ["compact"] => Command::Compact {
+                keep_days: u32::try_from(number(&mut options, "--keep-days", 90)?)
+                    .map_err(|_| "--keep-days is too large")?,
+                apply,
+            },
             ["events"] => Command::Events {
                 after: options
                     .remove("--after")
@@ -3503,15 +4258,23 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphReferences { .. }
                 | Command::GraphImpact { .. }
                 | Command::GraphBlindSpots { .. }
+                | Command::GraphInflight { .. }
+                | Command::GraphExport { .. }
+                | Command::GraphImport { .. }
+                | Command::CheckWrite { .. }
                 | Command::Recap { .. }
                 | Command::ShowMessage { .. }
                 | Command::MessageStatus { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
+                | Command::Report { .. }
+                | Command::Compact { .. }
                 | Command::History { .. }
                 | Command::WorkspaceList { .. }
                 | Command::WorkspaceRemove { apply: false, .. }
         ) {
+            // Compaction is never recorded or replayed: running it again
+            // finds what is left to remove.
             options
                 .remove("--request-id")
                 .unwrap_or_else(|| "read".into())
@@ -3545,9 +4308,54 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             },
         )?;
     }
-    let response = client::call(&state_dir, &request)?;
+    let mut response = if matches!(
+        request.command,
+        Command::GraphExport { .. } | Command::GraphImport { .. }
+    ) {
+        // The daemon allows an index transfer up to two minutes.
+        client::call_until(
+            &state_dir,
+            &request,
+            std::time::Instant::now() + std::time::Duration::from_secs(125),
+        )?
+    } else {
+        client::call(&state_dir, &request)?
+    };
+    // As at a session's start: work ended sessions left is named only while
+    // the line journal shows it still uncommitted (roadmap C3).
+    if let (
+        Command::Brief { session_id, .. },
+        Outcome::Briefing {
+            briefing:
+                langspan_core::Briefing {
+                    recent: recent @ Some(_),
+                    ..
+                },
+        },
+    ) = (&request.command, &mut response.outcome)
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        if let Some(found) = recent.as_mut()
+            && let Err(reason) =
+                langspan::recent::confirm_left(&state_dir, session_id, found, deadline)
+        {
+            eprintln!("langspan: what changed recently is left out: {reason}");
+            *recent = None;
+        }
+    }
     if json {
         println!("{}", serde_json::to_string(&response)?);
+    } else if let Outcome::Today { today } = &response.outcome {
+        // The month's refusal count, one line, for the person only (H5).
+        let month = langspan::count::today_line(
+            &state_dir,
+            today.workspace_id.as_deref(),
+            langspan::store::wall_now_ms(),
+        );
+        println!(
+            "{}",
+            langspan::today::text(today, &langspan::today::shown(&today.window), Some(&month))
+        );
     } else {
         print_human(&response, &state_dir)?;
         if let Outcome::WorkspaceMoved {
@@ -3573,6 +4381,8 @@ struct ParsedOptions {
     /// Everything after a literal `--`: a check's command line.
     command: Vec<String>,
     options: BTreeMap<String, String>,
+    /// Each `--symbol NAME`, in order: the one option that may repeat.
+    symbols: Vec<String>,
     json: bool,
     apply: bool,
 }
@@ -3581,6 +4391,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
     let mut positionals = Vec::new();
     let mut command = Vec::new();
     let mut options = BTreeMap::new();
+    let mut symbols = Vec::new();
     let mut json = false;
     let mut apply = false;
     let mut raw = false;
@@ -3594,20 +4405,27 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
         match arg.as_str() {
             "--" => raw = true,
             "--json" => json = true,
+            "--symbol" => symbols.push(input.next().ok_or("--symbol needs a value")?),
             "--apply" => apply = true,
             // Flags, kept with the options so that only the commands that take
-            // them accept them (`dashboard`: `--open`, `--allow-network`;
+            // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
             // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
-            // `graph symbol`: `--detail`).
+            // `graph symbol`: `--detail`, `--renamed`; `brief`: `--recent`;
+            // `setup`: `--yes`; `guidance install`: `--create`).
             "--open"
             | "--allow-network"
+            | "--demo"
             | "--check-again"
             | "--publish-as-branch"
             | "--mine"
             | "--detail"
+            | "--renamed"
+            | "--recent"
             | "--all"
             | "--skill"
+            | "--create"
+            | "--yes"
             | "--switch"
             | "--off" => {
                 if options.insert(arg.clone(), String::new()).is_some() {
@@ -3620,7 +4438,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--max-peers" | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s"
             | "--wait-s" | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen"
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
-            | "--sound" | "--depth" | "--path" | "--before" => {
+            | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" | "--keep-days"
+            | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -3644,9 +4463,24 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
         args: positionals,
         command,
         options,
+        symbols,
         json,
         apply,
     })
+}
+/// A required file option as an absolute path, so the daemon, which runs
+/// in another directory, opens the file the owner named.
+fn absolute_option(
+    options: &mut BTreeMap<String, String>,
+    name: &str,
+) -> Result<String, langspan::Error> {
+    let value = options
+        .remove(name)
+        .ok_or_else(|| format!("{name} FILE is required"))?;
+    let path = std::path::absolute(&value).map_err(|e| format!("cannot resolve {name}: {e}"))?;
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| format!("{name} must be a UTF-8 path").into())
 }
 fn no_unused_options(options: &BTreeMap<String, String>) -> Result<(), langspan::Error> {
     if let Some((name, _)) = options.first_key_value() {
@@ -3749,6 +4583,121 @@ fn print_project_hook_reruns(
             install::quote(&state.to_string_lossy()),
         );
     }
+}
+
+/// Line ranges as `1-2, 6`.
+fn line_ranges(ranges: &[langspan_core::LineRange]) -> String {
+    ranges
+        .iter()
+        .map(|range| {
+            if range.start_line == range.end_line {
+                range.start_line.to_string()
+            } else {
+                format!("{}-{}", range.start_line, range.end_line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A write check (roadmap B26). Paths, names and signatures are quoted:
+/// repository text, shown as data.
+fn print_write_check(check: &langspan_core::WriteCheck) -> Result<(), langspan::Error> {
+    println!("{}", langspan_core::WRITE_CHECK_LABEL);
+    let seconds = |age_ms: u64| format!("{}s ago", age_ms / 1000);
+    for path in &check.paths {
+        let mut parts = vec![match &path.held_by {
+            Some(holder) => format!("held by {holder}"),
+            None => "not held".to_owned(),
+        }];
+        parts.push(
+            match path.stale {
+                Some(true) => "changed since this session last read it",
+                Some(false) => "as this session last read it",
+                None => "no read by this session recorded",
+            }
+            .to_owned(),
+        );
+        for unread in &path.unread_lines {
+            parts.push(if unread.lines.is_empty() {
+                format!(
+                    "{} wrote lines not known {}",
+                    unread.session_id,
+                    seconds(unread.age_ms)
+                )
+            } else {
+                format!(
+                    "{} wrote lines {} {}",
+                    unread.session_id,
+                    line_ranges(&unread.lines),
+                    seconds(unread.age_ms)
+                )
+            });
+        }
+        if path.omitted_writers > 0 {
+            parts.push(format!("{} more writer(s) left out", path.omitted_writers));
+        }
+        println!(
+            "{}: {}.",
+            serde_json::to_string(&path.path)?,
+            parts.join("; ")
+        );
+    }
+    if !check.index_ready {
+        println!(
+            "Symbols not checked: the source index has no complete scan of this workspace yet."
+        );
+        return Ok(());
+    }
+    for symbol in &check.symbols {
+        let by = symbol.by_session.as_deref().unwrap_or("an unknown session");
+        let age = symbol.age_ms.map(seconds).unwrap_or_default();
+        let what = match symbol.change.as_str() {
+            "signature" => format!(
+                "signature changed by {by} {age}, from {} to {}",
+                serde_json::to_string(symbol.before.as_deref().unwrap_or_default())?,
+                serde_json::to_string(symbol.after.as_deref().unwrap_or_default())?
+            ),
+            "removed" => match &symbol.renamed_to {
+                Some(new) => format!("renamed to {} by {by} {age}", serde_json::to_string(new)?),
+                None => format!("removed by {by} {age}"),
+            },
+            _ => format!(
+                "body lines {} written by {by} {age}",
+                line_ranges(&symbol.lines)
+            ),
+        };
+        let intents = if symbol.intents.is_empty() {
+            String::new()
+        } else {
+            format!("; intent of {} names it", symbol.intents.join(", "))
+        };
+        println!(
+            "{} ({} in {}): {what}{intents}.",
+            serde_json::to_string(&symbol.name)?,
+            symbol.kind,
+            serde_json::to_string(&symbol.path)?
+        );
+    }
+    if check.symbols.is_empty() {
+        println!("No recent change by another session to these symbols is recorded.");
+    }
+    if check.omitted_symbols > 0 {
+        println!("{} more symbol change(s) left out.", check.omitted_symbols);
+    }
+    if check.unchecked_bodies > 0 {
+        println!(
+            "{} definition(s) not compared with recent writes: their file is not indexed at its current content, or another session's write changed lines the journal does not know.",
+            check.unchecked_bodies
+        );
+    }
+    if check.definitions_truncated {
+        println!(
+            "More definitions matched than one check compares ({}): body changes to the rest are not shown.",
+            langspan_core::WRITE_CHECK_DEFINITIONS
+        );
+    }
+    Ok(())
 }
 
 fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), langspan::Error> {
@@ -3942,13 +4891,28 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::SessionEnded { session_id } => {
             println!("Session {session_id} marked ended.")
         }
-        Outcome::AutoCheck { check } => println!(
-            "Automatic check {} is on for workspace {}: after a session's writes, {:?} runs on the exact working tree (time limit {} s).",
-            check.name,
-            check.workspace_id,
-            langspan::landing::command_line(&check.argv),
-            check.timeout_s
+        Outcome::Adopted { adoption, .. } => println!(
+            "Session {} adopted the uncommitted work of session {}.",
+            adoption.session_id, adoption.from
         ),
+        Outcome::AutoCheck { check } => {
+            println!(
+                "Automatic check {} is on for workspace {}: after a session's writes, {:?} runs on the exact working tree (time limit {} s).",
+                check.name,
+                check.workspace_id,
+                langspan::landing::command_line(&check.argv),
+                check.timeout_s
+            );
+            if let Some(wider) = &check.on_interface_change {
+                println!(
+                    "On an interface change: {} runs {:?} whole, after {} on the same tree, when the writes changed an indexed export that other files mention (time limit {} s).",
+                    wider.name,
+                    langspan::landing::command_line(&wider.argv),
+                    check.name,
+                    wider.timeout_s
+                );
+            }
+        }
         Outcome::AutoCheckDisabled { workspace_id } => {
             println!("Automatic check is off for workspace {workspace_id}.")
         }
@@ -4045,7 +5009,18 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             );
             println!("{}", serde_json::to_string_pretty(publication)?);
         }
-        Outcome::RemoteSent { sent, more } => {
+        Outcome::Compaction { report } => print_compaction(report),
+        Outcome::RemoteSent {
+            sent,
+            more,
+            since_ms,
+        } => {
+            if let Some(since) = since_ms {
+                println!(
+                    "Retention removed older records: this lists every publication since {}.",
+                    utc(*since)
+                );
+            }
             if sent.is_empty() {
                 println!("Nothing has been published for this workspace.");
             }
@@ -4148,6 +5123,10 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             notice.changes.len(),
             notice.dependents.len()
         ),
+        Outcome::WriteCheck { check } => print_write_check(check)?,
+        Outcome::InterfaceDependentsObserved { notice_id, added } => {
+            println!("Interface notice {notice_id}: {added} file(s) of another worktree added.")
+        }
         Outcome::CallBreaks { ready: false, .. } => {
             println!("Not checked: the source index has no complete scan of this workspace yet.")
         }
@@ -4197,6 +5176,85 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 coverage.current_files, coverage.indexable_files
             );
         }
+        Outcome::GraphInflight {
+            inflight,
+            coverage,
+            truncated,
+        } => {
+            if !coverage.scanned {
+                println!("The index has no complete scan of this workspace yet.");
+            } else if inflight.is_empty() {
+                println!(
+                    "No other worktree of this repository has an uncommitted signature that this workspace mentions."
+                );
+            }
+            for item in inflight {
+                let session = item
+                    .session
+                    .as_deref()
+                    .map(|session| format!(", session {session}"))
+                    .unwrap_or_default();
+                println!(
+                    "{} {} in {} (worktree {}{session}, not committed): {} — mentioned in {}",
+                    item.kind,
+                    item.name,
+                    item.path,
+                    item.worktree,
+                    item.signature,
+                    item.mentioned_in.join(", ")
+                );
+            }
+            if *truncated {
+                println!("More results exist than the limit allows.");
+            }
+            if !inflight.is_empty() {
+                println!("Matches are by name, not resolved.");
+            }
+        }
+        Outcome::GraphExported {
+            workspace_id,
+            files,
+            partial_files,
+            bytes,
+        } => println!(
+            "Exported {files} files ({partial_files} partial, {bytes} bytes) from workspace {workspace_id}."
+        ),
+        Outcome::GraphImported {
+            workspace_id,
+            applied,
+            loaded,
+            different,
+            kept,
+            over_limits,
+            malformed,
+        } => {
+            let mut parts = vec![if *applied {
+                format!("Loaded {loaded} files into workspace {workspace_id}")
+            } else {
+                format!(
+                    "Dry run: {loaded} files have the same content here and can be loaded into workspace {workspace_id}"
+                )
+            }];
+            parts.push(format!(
+                "{different} differ or are missing here and are left to the indexer"
+            ));
+            if *kept > 0 {
+                parts.push(format!("{kept} are already indexed here and are kept"));
+            }
+            if *over_limits > 0 {
+                parts.push(format!(
+                    "{over_limits} lines over a parse bound were skipped"
+                ));
+            }
+            if *malformed > 0 {
+                parts.push(format!("{malformed} malformed lines were skipped"));
+            }
+            println!(
+                "{}.{}",
+                parts.join("; "),
+                if *applied { "" } else { " Add --apply." }
+            );
+        }
         Outcome::GraphBlindSpots {
             blind_spots,
             coverage,
@@ -4209,8 +5267,19 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             coverage,
             truncated,
             levels,
+            renamed,
             ..
         } => {
+            // Roadmap D7: the renames followed, names and path quoted.
+            for hop in renamed.iter().flatten() {
+                println!(
+                    "{} was renamed to {} in {}{}",
+                    serde_json::to_string(&hop.name)?,
+                    serde_json::to_string(&hop.after_name)?,
+                    serde_json::to_string(&hop.path)?,
+                    langspan_core::rename_evidence_words(hop.evidence.as_deref())
+                );
+            }
             for symbol in symbols {
                 println!(
                     "{}:{} {} {}{} — {}",
@@ -4372,6 +5441,10 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 change.files
             )
         ),
+        Outcome::CheckoutRunObserved { run } => println!(
+            "Checkout change by session {} recorded for {}.",
+            run.session_id, run.workspace_id
+        ),
         Outcome::UncoordinatedObserved { sessions, paths } => println!(
             "Uncoordinated change recorded: sessions {}; files {}.",
             sessions.join(", "),
@@ -4380,9 +5453,16 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::Today { today } => {
             println!(
                 "{}",
-                langspan::today::text(today, &langspan::today::shown(&today.window))
+                langspan::today::text(today, &langspan::today::shown(&today.window), None)
             );
         }
+        Outcome::Report { report } => println!("{}", langspan::report::text(report)),
+        Outcome::Count { count } => println!(
+            "{} refusals from {} to {} (UTC).",
+            count.refusals,
+            utc(count.from_ms),
+            utc(count.to_ms)
+        ),
         Outcome::StatusLine { line } => println!("{}", line.text()),
         Outcome::RefusalRecorded { session_id } => {
             println!("Refusal recorded for session {session_id}.")
@@ -4443,6 +5523,15 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                         ))
                         .unwrap_or_default()
                 );
+                if let Some(adopter) = &session.adopted_by {
+                    println!("  Its uncommitted work was adopted by session {adopter}.");
+                }
+                if !session.adopted.is_empty() {
+                    println!(
+                        "  Adopted the uncommitted work of ended session(s) {}.",
+                        session.adopted.join(", ")
+                    );
+                }
             }
             if recap.omitted_sessions > 0 {
                 println!("({} more session(s) not shown.)", recap.omitted_sessions);
@@ -4584,6 +5673,20 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                         )
                     }
                     "removed" => format!("{} removed or renamed", entry.kind),
+                    // Roadmap D7: a definition moved with its whole file.
+                    "renamed" if entry.before_path.is_some() => format!(
+                        "{} {} moved with its file from {}",
+                        entry.kind,
+                        quoted(&entry.after)?,
+                        quoted(&entry.before_path)?
+                    ),
+                    "renamed" => format!(
+                        "{} renamed from {} to {}{}",
+                        entry.kind,
+                        quoted(&entry.before)?,
+                        quoted(&entry.after)?,
+                        langspan_core::rename_evidence_words(entry.evidence.as_deref())
+                    ),
                     "definition_added" => {
                         format!("{} definition {} added", entry.kind, quoted(&entry.after)?)
                     }
@@ -4703,6 +5806,12 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                     None => println!("  Last hook run: none recorded in this generation."),
                 }
             }
+            for adoption in state.adoptions.values() {
+                println!(
+                    "Adoption: session {} took over the uncommitted work of ended session {}.",
+                    adoption.session_id, adoption.from
+                );
+            }
             for intent in state.intents.values() {
                 println!(
                     "Intent {} [{}]: {} {:?}",
@@ -4805,17 +5914,54 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
     Ok(())
 }
 
-/// Unix milliseconds as an ISO 8601 UTC time, for people.
-fn utc(ms: u64) -> String {
-    let seconds = ms / 1000;
-    let (days, rest) = (seconds / 86_400, seconds % 86_400);
-    let (year, month, day) = langspan::today::civil_from_days(days as i64);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
+/// `value` with a comma between each group of three digits.
+fn grouped(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// `bytes` in the largest binary unit that keeps a whole number.
+fn sized(bytes: u64) -> String {
+    match bytes {
+        0..1024 => format!("{bytes} bytes"),
+        1024..1_048_576 => format!("{} KiB", bytes / 1024),
+        _ => format!("{} MiB", bytes / 1_048_576),
+    }
+}
+
+fn print_compaction(report: &langspan_core::CompactionReport) {
+    let verb = if report.applied {
+        "deleted"
+    } else {
+        "would delete"
+    };
+    let range = match (report.first_seq, report.last_seq) {
+        (Some(first), Some(last)) => format!("seq {first}..{last}, "),
+        _ => String::new(),
+    };
+    println!(
+        "{verb} {} events ({range}before {}) and {} receipts",
+        grouped(report.events),
+        utc(report.cutoff_ms),
+        grouped(report.receipts)
+    );
+    match report.snapshot_seq {
+        Some(seq) => println!("snapshot at seq {seq}; about {} freed", sized(report.bytes)),
+        None => println!("no snapshot: no event is older than the window"),
+    }
+    if let Some(held) = &report.held_by {
+        println!("kept from there on: {held}");
+    }
+    if !report.applied {
+        println!("dry run: add --apply to compact");
+    }
 }
 
 /// `messages status` for a person: the message, then one line per
@@ -4886,9 +6032,58 @@ fn print_message_status(status: &langspan_core::MessageStatus) {
 #[cfg(test)]
 mod time_tests {
     #[test]
-    fn unix_milliseconds_are_shown_as_utc() {
-        assert_eq!(super::utc(0), "1970-01-01T00:00:00Z");
-        assert_eq!(super::utc(951_782_400_000), "2000-02-29T00:00:00Z");
-        assert_eq!(super::utc(1_795_521_906_123), "2026-11-24T12:05:06Z");
+    fn counts_and_sizes_read_as_people_write_them() {
+        assert_eq!(super::grouped(0), "0");
+        assert_eq!(super::grouped(999), "999");
+        assert_eq!(super::grouped(1000), "1,000");
+        assert_eq!(super::grouped(812_440), "812,440");
+        assert_eq!(super::grouped(61_204_000), "61,204,000");
+        assert_eq!(super::sized(1023), "1023 bytes");
+        assert_eq!(super::sized(2048), "2 KiB");
+        assert_eq!(super::sized(410 * 1_048_576 + 5), "410 MiB");
+    }
+}
+
+#[cfg(test)]
+mod option_tests {
+    fn parsed(input: &[&str]) -> std::collections::BTreeMap<String, String> {
+        super::parse_options(input.iter().map(|s| s.to_string()).collect())
+            .unwrap()
+            .options
+    }
+
+    #[test]
+    fn flags_and_values_from_setup_brief_retention_and_guidance_all_parse() {
+        let options = parsed(&[
+            "x",
+            "--yes",
+            "--recent",
+            "--create",
+            "--event",
+            "e",
+            "--before",
+            "b",
+            "--keep-days",
+            "7",
+            "--month",
+            "2026-11",
+            "--format",
+            "cursor",
+            "--file",
+            "AGENTS.md",
+        ]);
+        for flag in ["--yes", "--recent", "--create"] {
+            assert_eq!(options[flag], "", "{flag}");
+        }
+        for (key, value) in [
+            ("--event", "e"),
+            ("--before", "b"),
+            ("--keep-days", "7"),
+            ("--month", "2026-11"),
+            ("--format", "cursor"),
+            ("--file", "AGENTS.md"),
+        ] {
+            assert_eq!(options[key], value, "{key}");
+        }
     }
 }

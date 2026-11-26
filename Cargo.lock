@@ -395,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "langspan"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "langspan-core",
  "langspan-graph",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "langspan-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "langspan-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tree-sitter",
  "tree-sitter-c-sharp",

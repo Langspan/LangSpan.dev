@@ -1,7 +1,8 @@
 //! Which peers a briefing names, and when it is delivered again.
 use langspan_core::{
-    BRIEF_HORIZON_MS, Briefing, Command, Event, LivenessStatus, Outcome, PresenceKind,
-    ProcessIdentity, SessionActivity, State, ToolResult, apply, decide,
+    BRIEF_HORIZON_MS, Briefing, Command, Event, InterfaceChange, LivenessStatus, Outcome,
+    PresenceKind, ProcessIdentity, RECENT_WINDOW_MS, RecentChanges, SessionActivity, State,
+    ToolIdentity, ToolResult, apply, decide,
 };
 
 fn run(state: &mut State, id: &str, command: Command, now: u64) -> Outcome {
@@ -95,6 +96,9 @@ fn brief(state: &mut State, session: &str, id: &str, now: u64) -> Briefing {
             max_peers: 8,
             deliver: true,
             mid_turn: false,
+            left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         now,
@@ -370,6 +374,9 @@ fn invalid_briefing_inputs_are_rejected_without_events() {
             max_peers: 0,
             deliver: true,
             mid_turn: false,
+            left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         Command::Brief {
@@ -377,6 +384,9 @@ fn invalid_briefing_inputs_are_rejected_without_events() {
             max_peers: 4,
             deliver: true,
             mid_turn: false,
+            left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         Command::SessionPrompt {
@@ -457,6 +467,9 @@ fn the_largest_briefing_is_still_an_event_the_core_accepts_and_fits_one_frame() 
             max_peers: 16,
             deliver: true,
             mid_turn: false,
+            left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         300,
@@ -480,6 +493,9 @@ fn a_look_from_outside_is_not_a_delivery_and_not_activity() {
         max_peers: 8,
         deliver: false,
         mid_turn: false,
+        left: Vec::new(),
+        recent: false,
+        recent_window_ms: None,
         mcp: false,
     };
     let decision = decide(&state, &look, "look", 200);
@@ -794,6 +810,9 @@ fn brief_mid_turn(state: &mut State, session: &str, id: &str, now: u64) -> Brief
             max_peers: 8,
             deliver: true,
             mid_turn: true,
+            left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         now,
@@ -1205,6 +1224,9 @@ fn presence_never_takes_the_place_of_a_peer_with_work() {
             max_peers: 1,
             deliver: false,
             mid_turn: false,
+            left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         "b",
@@ -1364,6 +1386,9 @@ fn a_change_of_presence_alone_waits_for_the_next_prompt_not_the_next_tool_call()
             max_peers: 8,
             deliver: true,
             mid_turn: true,
+            left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         now,
@@ -1540,6 +1565,688 @@ fn a_declared_intent_replaces_the_prompt_summary_in_a_briefing() {
     assert_eq!(
         after.peers[0].intent.as_deref(),
         Some("refresh the session handler")
+    );
+}
+
+fn quota(workspace: &str, signature: &str, mentioned_in: &[&str]) -> langspan_core::InflightSymbol {
+    langspan_core::InflightSymbol {
+        workspace_id: workspace.into(),
+        path: "src/quota.rs".into(),
+        name: "quota".into(),
+        kind: "function".into(),
+        signature: signature.into(),
+        mentioned_in: mentioned_in.iter().map(|path| (*path).into()).collect(),
+        renamed_from: None,
+    }
+}
+
+fn brief_with(
+    state: &mut State,
+    session: &str,
+    id: &str,
+    now: u64,
+    inflight: Vec<langspan_core::InflightSymbol>,
+) -> Briefing {
+    match ok(run(
+        state,
+        id,
+        Command::BriefPrepared {
+            session_id: session.into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+            left: Vec::new(),
+            inflight,
+        },
+        now,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Roadmap C7, as the core decides it: what the daemon found in flight in
+/// another worktree is told to a session whose own files mention it, once
+/// per signature, and waits while a message takes the briefing.
+#[test]
+fn an_in_flight_signature_is_told_once_per_signature_and_only_from_another_worktree() {
+    let mut state = ready();
+    edited(&mut state, "carol", "src/quota.rs", 1_000);
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    let v1 = "pub fn quota(user: &User) -> u64";
+    let found = |signature: &str| {
+        vec![
+            quota("tree", signature, &["src/routes.rs", "src/other.rs"]),
+            // The asking session's own checkout, and another repository:
+            // never told through this channel.
+            quota("main", signature, &["src/routes.rs"]),
+            quota("other", signature, &["src/routes.rs"]),
+        ]
+    };
+    let told = brief_with(&mut state, "alice", "b1", 2_000, found(v1));
+    assert_eq!(told.inflight.len(), 1, "{told:?}");
+    let notice = &told.inflight[0];
+    assert_eq!(notice.worktree, "/repos/app-tree");
+    assert_eq!(notice.session.as_deref(), Some("carol"));
+    assert_eq!(notice.signature, v1);
+    // Only alice's own files are named.
+    assert_eq!(notice.mentioned_in, ["src/routes.rs"]);
+    assert!(told.changed);
+    // Bob's files mention nothing of it.
+    assert!(
+        brief_with(&mut state, "bob", "b2", 2_000, found(v1))
+            .inflight
+            .is_empty()
+    );
+    // Told once.
+    let again = brief_with(&mut state, "alice", "b3", 3_000, found(v1));
+    assert!(again.inflight.is_empty(), "{again:?}");
+    // A message waits for no one: the new signature waits for the next
+    // briefing, counted.
+    ok(run(
+        &mut state,
+        "m1",
+        Command::SendMessage {
+            workspace_id: "main".into(),
+            from: Some("bob".into()),
+            to: Some("alice".into()),
+            text: "hello".into(),
+            paths: Vec::new(),
+        },
+        3_500,
+    ));
+    let v2 = "pub fn quota(user: &User, limit: u64) -> u64";
+    let busy = brief_with(&mut state, "alice", "b4", 4_000, found(v2));
+    assert_eq!(busy.messages.len(), 1);
+    assert!(busy.inflight.is_empty());
+    assert_eq!(busy.omitted_inflight, 1);
+    let next = brief_with(&mut state, "alice", "b5", 5_000, found(v2));
+    assert_eq!(next.inflight.len(), 1);
+    assert_eq!(next.inflight[0].signature, v2);
+    assert!(
+        brief_with(&mut state, "alice", "b6", 6_000, found(v2))
+            .inflight
+            .is_empty()
+    );
+    // A look from outside shows it and records nothing.
+    let v3 = "pub fn quota() -> u64";
+    let look = match ok(run(
+        &mut state,
+        "b7",
+        Command::BriefPrepared {
+            session_id: "alice".into(),
+            max_peers: 8,
+            deliver: false,
+            mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+            left: Vec::new(),
+            inflight: found(v3),
+        },
+        7_000,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(look.inflight.len(), 1);
+    assert_eq!(
+        brief_with(&mut state, "alice", "b8", 8_000, found(v3))
+            .inflight
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn in_flight_lines_are_at_most_three_within_their_share_and_the_rest_counted() {
+    let mut state = ready();
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    let many: Vec<_> = (0..10)
+        .map(|n| langspan_core::InflightSymbol {
+            name: format!("quota_{n}"),
+            ..quota("tree", "pub fn q() -> u64", &["src/routes.rs"])
+        })
+        .collect();
+    let told = brief_with(&mut state, "alice", "b1", 2_000, many.clone());
+    assert!((1..=3).contains(&told.inflight.len()), "{told:?}");
+    assert!(
+        told.inflight
+            .iter()
+            .map(langspan_core::inflight_cost)
+            .sum::<usize>()
+            <= langspan_core::INFLIGHT_BYTES
+    );
+    assert_eq!(told.omitted_inflight as usize, 10 - told.inflight.len());
+    // More than the daemon may offer is refused.
+    let too_many: Vec<_> = (0..=langspan_core::INFLIGHT_CANDIDATES)
+        .map(|n| langspan_core::InflightSymbol {
+            name: format!("q{n}"),
+            ..quota("tree", "pub fn q() -> u64", &["src/routes.rs"])
+        })
+        .collect();
+    let refused = run(
+        &mut state,
+        "b2",
+        Command::BriefPrepared {
+            session_id: "alice".into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+            left: Vec::new(),
+            inflight: too_many,
+        },
+        3_000,
+    );
+    assert!(matches!(refused, Outcome::Error { .. }), "{refused:?}");
+}
+
+/// `count` in-flight signatures of one worktree, each a name of its own.
+fn many_inflight(count: usize) -> Vec<langspan_core::InflightSymbol> {
+    (0..count)
+        .map(|n| langspan_core::InflightSymbol {
+            name: format!("quota_{n:04}"),
+            ..quota("tree", "pub fn q() -> u64", &["src/routes.rs"])
+        })
+        .collect()
+}
+
+/// Brief `session` as the daemon does, offering at most
+/// `INFLIGHT_CANDIDATES` of `all` it was not told, until it was told every
+/// one. Returns the names told, in order, and the clock after.
+fn tell_every(
+    state: &mut State,
+    session: &str,
+    all: &[langspan_core::InflightSymbol],
+    mut now: u64,
+) -> (Vec<String>, u64) {
+    let mut told = Vec::new();
+    while told.len() < all.len() {
+        let offered: Vec<_> = all
+            .iter()
+            .filter(|item| !langspan_core::inflight_told(state, session, item))
+            .take(langspan_core::INFLIGHT_CANDIDATES)
+            .cloned()
+            .collect();
+        if offered.is_empty() {
+            break;
+        }
+        now += 1;
+        let briefing = brief_with(state, session, &format!("t{now}"), now, offered);
+        assert!(!briefing.inflight.is_empty(), "nothing told at {now}");
+        told.extend(briefing.inflight.into_iter().map(|notice| notice.name));
+    }
+    (told, now)
+}
+
+/// Offer every one of `all` again, unfiltered, as a briefing window that
+/// came round to them would, and return the names told again.
+fn told_again(
+    state: &mut State,
+    session: &str,
+    all: &[langspan_core::InflightSymbol],
+    mut now: u64,
+) -> Vec<String> {
+    let mut again = Vec::new();
+    for chunk in all.chunks(langspan_core::INFLIGHT_CANDIDATES) {
+        now += 1;
+        let briefing = brief_with(state, session, &format!("r{now}"), now, chunk.to_vec());
+        again.extend(briefing.inflight.into_iter().map(|notice| notice.name));
+    }
+    again
+}
+
+/// What a session was told is remembered for as many signatures as it can
+/// be offered in turn (review comment 4704678374): the daemon's briefing
+/// window now rotates over every in-flight row, so a memory smaller than
+/// the rows would tell the oldest again. At the limit nothing is told
+/// twice; one past it, every signature is still told once, and only one of
+/// the oldest is forgotten.
+#[test]
+fn a_session_is_told_each_in_flight_signature_once_up_to_its_memory() {
+    let limit = langspan_core::MAX_INFLIGHT_TOLD;
+    assert!(limit >= 1024, "a session remembers only {limit}");
+    let mut state = ready();
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    let all = many_inflight(limit);
+    let (told, now) = tell_every(&mut state, "alice", &all, 2_000);
+    let names: Vec<String> = all.iter().map(|item| item.name.clone()).collect();
+    assert_eq!(told, names, "each told once, in order");
+    assert_eq!(
+        told_again(&mut state, "alice", &all, now),
+        Vec::<String>::new()
+    );
+
+    let mut state = ready();
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    let all = many_inflight(limit + 1);
+    let (told, now) = tell_every(&mut state, "alice", &all, 2_000);
+    let names: Vec<String> = all.iter().map(|item| item.name.clone()).collect();
+    assert_eq!(told, names, "each told once, none starved");
+    // One of the first briefing's lines, which were told together.
+    let again = told_again(&mut state, "alice", &all, now);
+    assert_eq!(again.len(), 1, "only the oldest is forgotten: {again:?}");
+    assert!(
+        names[..langspan_core::INFLIGHT_LINES].contains(&again[0]),
+        "{again:?}"
+    );
+}
+
+/// Presence (roadmap A13) and in-flight signatures (roadmap C7) share one
+/// briefing signature: each is news on its own, and neither repeats the
+/// other once told.
+#[test]
+fn presence_and_an_in_flight_signature_are_each_news_once() {
+    let mut state = ready();
+    edited(&mut state, "carol", "src/quota.rs", 1_000);
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    read(&mut state, "bob", "src/auth.rs", 1_500);
+    let found = |signature: &str| vec![quota("tree", signature, &["src/routes.rs"])];
+    let v1 = "pub fn quota(user: &User) -> u64";
+    let both = brief_with(&mut state, "alice", "b1", 2_000, found(v1));
+    assert!(both.changed);
+    assert_eq!(both.inflight.len(), 1, "{both:?}");
+    assert_eq!(looking(&both, "bob"), [("src/auth.rs", PresenceKind::Read)]);
+    // Told once: the next briefings carry presence but not the signature,
+    // and once settled nothing new is news.
+    let next = brief_with(&mut state, "alice", "b2", 2_500, found(v1));
+    assert!(next.inflight.is_empty(), "{next:?}");
+    assert_eq!(looking(&next, "bob"), [("src/auth.rs", PresenceKind::Read)]);
+    let same = brief_with(&mut state, "alice", "b2b", 3_000, found(v1));
+    assert!(!same.changed, "{same:?}");
+    assert!(same.inflight.is_empty());
+    // Mid-turn, a new presence path is not news, with a signature carried.
+    read(&mut state, "bob", "src/session.rs", 3_200);
+    let mid = match ok(run(
+        &mut state,
+        "b2c",
+        Command::BriefPrepared {
+            session_id: "alice".into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: true,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+            left: Vec::new(),
+            inflight: found(v1),
+        },
+        3_500,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    };
+    assert!(!mid.changed, "{mid:?}");
+    assert!(mid.inflight.is_empty());
+    // At the next prompt it is news; the told signature stays told.
+    let looked = brief_with(&mut state, "alice", "b3", 4_000, found(v1));
+    assert!(looked.changed, "{looked:?}");
+    assert!(looked.inflight.is_empty());
+    assert_eq!(looking(&looked, "bob").len(), 2);
+    // A changed signature is news while presence is unchanged.
+    let v2 = "pub fn quota(user: &User, limit: u64) -> u64";
+    let changed = brief_with(&mut state, "alice", "b4", 5_000, found(v2));
+    assert!(changed.changed, "{changed:?}");
+    assert_eq!(changed.inflight.len(), 1);
+    assert_eq!(changed.inflight[0].signature, v2);
+    assert!(
+        brief_with(&mut state, "alice", "b5", 6_000, found(v2))
+            .inflight
+            .is_empty()
+    );
+}
+
+// Recent change at session start (roadmap C3, ADR 0023).
+
+const HOUR: u64 = 60 * MINUTE;
+
+fn register_at(state: &mut State, session: &str, workspace: &str, now: u64) {
+    ok(run(
+        state,
+        &format!("s-{session}-{now}"),
+        Command::SessionRegister {
+            session_id: session.into(),
+            workspace_id: workspace.into(),
+            parent: None,
+            headless: false,
+        },
+        now,
+    ));
+}
+
+fn end(state: &mut State, session: &str, now: u64) {
+    ok(run(
+        state,
+        &format!("end-{session}-{now}"),
+        Command::SessionEnd {
+            session_id: session.into(),
+        },
+        now,
+    ));
+}
+
+fn start_brief(state: &mut State, session: &str, window: Option<u64>, now: u64) -> Briefing {
+    match ok(run(
+        state,
+        &format!("start-{session}-{now}-{}", window.unwrap_or(0)),
+        Command::Brief {
+            session_id: session.into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: false,
+            left: Vec::new(),
+            recent: true,
+            recent_window_ms: window,
+            mcp: false,
+        },
+        now,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn recent(state: &mut State, session: &str, now: u64) -> RecentChanges {
+    start_brief(state, session, None, now)
+        .recent
+        .expect("a starting briefing carries the recent section")
+}
+
+fn admit(state: &mut State, id: &str, session: &str, path: &str, now: u64) -> Outcome {
+    run(
+        state,
+        id,
+        Command::AdmitTool {
+            session_id: session.into(),
+            operation: ToolIdentity {
+                operation_id: format!("op-{id}"),
+                source: "test".into(),
+                tool: "Edit".into(),
+                input_digest: "f".repeat(64),
+            },
+            paths: vec![path.into()],
+            base: Vec::new(),
+            regions: Vec::new(),
+            overwrites: Vec::new(),
+            ttl_ms: 30_000,
+        },
+        now,
+    )
+}
+
+fn signature_change(name: &str, before: &str, after: &str) -> InterfaceChange {
+    InterfaceChange {
+        name: name.into(),
+        kind: "function".into(),
+        change: "signature_changed".into(),
+        before: Some(before.into()),
+        after: Some(after.into()),
+        after_name: None,
+        before_name: None,
+        evidence: None,
+        before_path: None,
+        private: false,
+        before_arity: None,
+        after_arity: None,
+        before_count: None,
+        after_count: None,
+    }
+}
+
+fn changed_paths(recent: &RecentChanges) -> Vec<String> {
+    recent
+        .changed_paths
+        .iter()
+        .map(|path| path.path.clone())
+        .collect()
+}
+
+#[test]
+fn a_starting_session_hears_which_files_changed_recently_and_by_how_many_sessions() {
+    let mut state = ready();
+    let start = 10 * HOUR;
+    edited(&mut state, "alice", "src/api.rs", start - 2 * HOUR);
+    edited(&mut state, "bob", "src/store.rs", start - HOUR);
+    edited(&mut state, "bob", "src/api.rs", start - 40 * MINUTE);
+    // Another repository is not this one's news.
+    edited(&mut state, "dave", "src/api.rs", start - MINUTE);
+    end(&mut state, "alice", start - 90 * MINUTE);
+    end(&mut state, "bob", start - 30 * MINUTE);
+    register_at(&mut state, "erin", "main", start);
+    let recent = recent(&mut state, "erin", start);
+    assert_eq!(recent.window_ms, RECENT_WINDOW_MS);
+    let changed: Vec<(&str, u32, u64)> = recent
+        .changed_paths
+        .iter()
+        .map(|path| (path.path.as_str(), path.sessions, path.age_ms))
+        .collect();
+    assert_eq!(
+        changed,
+        [("src/api.rs", 2, 40 * MINUTE), ("src/store.rs", 1, HOUR)],
+        "most sessions first, each with the newest age"
+    );
+    assert!(recent.changed_paths.iter().all(|path| !path.elsewhere));
+    // Two sessions edited one file: it was worked on from two sides.
+    assert_eq!(recent.contested_paths.len(), 1);
+    assert_eq!(recent.contested_paths[0].path, "src/api.rs");
+    assert_eq!(recent.contested_paths[0].sessions, 2);
+    assert_eq!(recent.contested_paths[0].refusals, 0);
+}
+
+#[test]
+fn edits_in_a_linked_worktree_are_counted_and_marked_as_elsewhere() {
+    let mut state = ready();
+    edited(&mut state, "carol", "src/tree.rs", HOUR);
+    end(&mut state, "carol", HOUR + 1);
+    register_at(&mut state, "erin", "main", 2 * HOUR);
+    let recent = recent(&mut state, "erin", 2 * HOUR);
+    assert_eq!(changed_paths(&recent), ["src/tree.rs"]);
+    assert!(recent.changed_paths[0].elsewhere, "{recent:?}");
+    // The line journal is per checkout: nothing of carol's is left in this one.
+    assert!(recent.left_uncommitted.is_empty(), "{recent:?}");
+}
+
+#[test]
+fn an_interface_change_appears_even_when_the_new_sessions_files_do_not_mention_it() {
+    let mut state = ready();
+    edited(&mut state, "bob", "src/store.rs", HOUR);
+    ok(run(
+        &mut state,
+        "interface-1",
+        Command::ObserveInterface {
+            workspace_id: "main".into(),
+            path: "src/store.rs".into(),
+            changes: vec![signature_change(
+                "save",
+                "fn save(x: &Item)",
+                "fn save(x: &Item, sync: bool)",
+            )],
+            dependents: vec!["src/api.rs".into()],
+        },
+        HOUR + 1,
+    ));
+    register_at(&mut state, "erin", "main", 2 * HOUR);
+    let briefing = start_brief(&mut state, "erin", None, 2 * HOUR);
+    // The peer section names only changes its own files mention.
+    assert!(briefing.interface_changes.is_empty());
+    let recent = briefing.recent.unwrap();
+    assert_eq!(recent.interface_changes.len(), 1);
+    let change = &recent.interface_changes[0];
+    assert_eq!(change.path, "src/store.rs");
+    assert_eq!(change.by_session.as_deref(), Some("bob"));
+    assert_eq!(
+        change.changes[0].before.as_deref(),
+        Some("fn save(x: &Item)")
+    );
+    assert_eq!(
+        change.changes[0].after.as_deref(),
+        Some("fn save(x: &Item, sync: bool)")
+    );
+    assert_eq!(change.dependents, ["src/api.rs"]);
+    assert_eq!(change.age_ms, HOUR - 1);
+}
+
+#[test]
+fn a_path_refused_to_one_session_and_edited_by_another_is_contested() {
+    let mut state = ready();
+    assert!(matches!(
+        ok(admit(&mut state, "bob-1", "bob", "src/api.rs", HOUR)),
+        Outcome::Admitted { .. }
+    ));
+    let refused = admit(&mut state, "alice-1", "alice", "src/api.rs", HOUR + 10);
+    assert!(
+        !matches!(refused, Outcome::Admitted { .. }),
+        "the held file is refused: {refused:?}"
+    );
+    edited(&mut state, "bob", "src/api.rs", HOUR + 20);
+    register_at(&mut state, "erin", "main", 2 * HOUR);
+    let recent = recent(&mut state, "erin", 2 * HOUR);
+    assert_eq!(recent.contested_paths.len(), 1, "{recent:?}");
+    let contested = &recent.contested_paths[0];
+    assert_eq!(contested.path, "src/api.rs");
+    assert_eq!(contested.refusals, 1);
+    assert_eq!(contested.sessions, 1, "only bob's edit landed");
+}
+
+#[test]
+fn an_ended_session_in_this_checkout_is_a_candidate_for_work_left_uncommitted() {
+    let mut state = ready();
+    edited(&mut state, "alice", "src/lib.rs", HOUR);
+    edited(&mut state, "alice", "src/main.rs", HOUR + 5);
+    end(&mut state, "alice", HOUR + 10);
+    // A live session's edits are its own, still in progress.
+    edited(&mut state, "bob", "src/bob.rs", HOUR + 20);
+    register_at(&mut state, "erin", "main", 2 * HOUR);
+    let recent = recent(&mut state, "erin", 2 * HOUR);
+    assert_eq!(recent.left_uncommitted.len(), 1, "{recent:?}");
+    let left = &recent.left_uncommitted[0];
+    assert_eq!(left.session_id, "alice");
+    assert_eq!(left.paths, ["src/main.rs", "src/lib.rs"], "newest first");
+    assert_eq!(left.age_ms, HOUR - 5);
+    assert_eq!(recent.root, "/repos/app");
+}
+
+#[test]
+fn nothing_older_than_the_window_or_from_before_the_current_boot_appears() {
+    let mut state = ready();
+    let now = 10 * HOUR;
+    edited(
+        &mut state,
+        "alice",
+        "src/old.rs",
+        now - RECENT_WINDOW_MS - 1,
+    );
+    edited(&mut state, "alice", "src/edge.rs", now - RECENT_WINDOW_MS);
+    edited(&mut state, "bob", "src/new.rs", now - 2 * MINUTE);
+    register_at(&mut state, "erin", "main", now);
+    assert_eq!(
+        changed_paths(&recent(&mut state, "erin", now)),
+        ["src/new.rs", "src/edge.rs"]
+    );
+    // A shorter configured window.
+    let short = start_brief(&mut state, "erin", Some(5 * MINUTE), now)
+        .recent
+        .unwrap();
+    assert_eq!(short.window_ms, 5 * MINUTE);
+    assert_eq!(changed_paths(&short), ["src/new.rs"]);
+    // A window outside the accepted range is refused, not stretched.
+    for window in [MINUTE - 1, 24 * HOUR + 1] {
+        let outcome = run(
+            &mut state,
+            &format!("bad-{window}"),
+            Command::Brief {
+                session_id: "erin".into(),
+                max_peers: 8,
+                deliver: false,
+                mid_turn: false,
+                left: Vec::new(),
+                recent: true,
+                recent_window_ms: Some(window),
+                mcp: false,
+            },
+            now,
+        );
+        assert!(matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+    }
+    // After a restart, the earlier run's edits and refusals are gone, even
+    // within the window: only this boot's events count.
+    apply(&mut state, &Event::Booted { generation: 2 }).unwrap();
+    register_at(&mut state, "erin", "main", now + MINUTE);
+    register_at(&mut state, "bob", "main", now + MINUTE);
+    let after = recent(&mut state, "erin", now + MINUTE);
+    assert!(after.is_empty(), "{after:?}");
+    edited(&mut state, "bob", "src/later.rs", now + 2 * MINUTE);
+    assert_eq!(
+        changed_paths(&recent(&mut state, "erin", now + 3 * MINUTE)),
+        ["src/later.rs"]
+    );
+}
+
+#[test]
+fn the_section_is_bounded_and_counts_what_it_leaves_out() {
+    let mut state = ready();
+    for n in 0..12 {
+        edited(&mut state, "alice", &format!("src/a{n:02}.rs"), HOUR + n);
+        edited(
+            &mut state,
+            "bob",
+            &format!("src/a{n:02}.rs"),
+            HOUR + 100 + n,
+        );
+    }
+    register_at(&mut state, "erin", "main", 2 * HOUR);
+    let recent = recent(&mut state, "erin", 2 * HOUR);
+    assert_eq!(recent.changed_paths.len(), 8);
+    assert_eq!(recent.contested_paths.len(), 4);
+    // 4 changed and 8 contested paths left out.
+    assert_eq!(recent.omitted, 12, "{recent:?}");
+    // Newest first among equals.
+    assert_eq!(recent.changed_paths[0].path, "src/a11.rs");
+}
+
+#[test]
+fn only_a_starting_briefing_carries_the_section_and_it_is_never_news_by_itself() {
+    let mut state = ready();
+    edited(&mut state, "alice", "src/api.rs", HOUR);
+    end(&mut state, "alice", HOUR + 1);
+    register_at(&mut state, "erin", "main", 2 * HOUR);
+    let start = start_brief(&mut state, "erin", None, 2 * HOUR);
+    assert!(!start.recent.unwrap().is_empty());
+    // A prompt briefing does not carry it, and what it said is not
+    // remembered as delivered peer work.
+    let prompt = brief(&mut state, "erin", "prompt-1", 2 * HOUR + 10);
+    assert_eq!(prompt.recent, None);
+    // A mid-turn briefing cannot ask for it.
+    let outcome = run(
+        &mut state,
+        "mid",
+        Command::Brief {
+            session_id: "erin".into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: true,
+            left: Vec::new(),
+            recent: true,
+            recent_window_ms: None,
+            mcp: false,
+        },
+        2 * HOUR + 20,
+    );
+    assert!(matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+    // The asking session's own edits are not news to it.
+    edited(&mut state, "erin", "src/mine.rs", 2 * HOUR + 30);
+    let again = recent(&mut state, "erin", 2 * HOUR + 40);
+    assert!(
+        again
+            .changed_paths
+            .iter()
+            .all(|path| path.path != "src/mine.rs")
     );
 }
 

@@ -6,15 +6,27 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+mod classes;
+mod count;
 mod dashboard;
 mod flaky;
 mod history;
 mod lines;
 mod recall;
+mod recent;
+mod report;
 mod status;
 mod status_line;
 mod today;
 mod workspaces;
+mod write_check;
+pub use classes::{
+    FailureClass, KeptTests, MAX_FIXED_NAMED, MAX_WRITE_RUNS, MAX_WRITERS_NAMED, WriteRun,
+};
+pub use count::{
+    COUNT_DAYS, COUNT_KINDS, COUNT_REFUSALS, COUNT_WORKSPACES, CountQuery, RefusalCount,
+    count_refusals, validate_count_days,
+};
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
@@ -27,12 +39,23 @@ pub use flaky::{
     MAX_TEST_RESULT_BYTES, TestFailure, TestHistory, TestLearning, TestResults,
 };
 pub use history::{
-    HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_NAME_BYTES, HISTORY_RELATED,
-    HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote, HistoryQuery,
-    history as definition_history,
+    HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_MOVES, HISTORY_NAME_BYTES,
+    HISTORY_RELATED, HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote,
+    HistoryQuery, history as definition_history,
 };
 pub use recall::{
     RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
+};
+pub use recent::{
+    ChangedPath, ContestedPath, LeftUncommitted, MAX_PATH_REFUSALS, MAX_RECENT_WINDOW_MS,
+    MIN_RECENT_WINDOW_MS, PathRefusal, RECENT_BYTES, RECENT_CHANGED, RECENT_CONTESTED,
+    RECENT_INTERFACES, RECENT_LEFT, RECENT_LEFT_CANDIDATES, RECENT_NOTICE_CHANGES,
+    RECENT_WINDOW_MS, RecentChanges, RecentInterfaceChange,
+};
+pub use report::{
+    OTHER_HOST, REPORT_HISTORY_EVENTS, REPORT_SESSIONS, Report, ReportCounts, ReportHost,
+    ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
+    session_workspaces,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
@@ -49,6 +72,12 @@ pub use today::{
 };
 pub use workspaces::{
     MAX_ENDING_SESSIONS, MAX_WORKSPACE_PAGE, WorkspaceEnding, WorkspaceKept, WorkspaceSummary,
+};
+pub use write_check::{
+    DefinitionFacts, IndexFacts, PathFacts, UnreadLines, WRITE_CHECK_DEFINITIONS,
+    WRITE_CHECK_LABEL, WRITE_CHECK_PATHS, WRITE_CHECK_SYMBOLS, WRITE_CHECK_WRITERS, WriteCheck,
+    WriteCheckPath, WriteCheckRequest, WriteCheckSymbol, write_check, write_check_noticed,
+    write_check_request,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -509,6 +538,10 @@ pub struct SessionActivity {
     /// first, at most `MAX_ALERTED`. Each is alerted once (ADR 0029).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alerted: Vec<String>,
+    /// In-flight signatures told to this session, newest first, at most
+    /// `MAX_INFLIGHT_TOLD` (roadmap C7).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inflight_told: Vec<String>,
     /// The host reported the session over. Its recent edits stay relevant to
     /// peers until they age out; they are labelled as a finished session's.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -626,6 +659,7 @@ pub fn acting_session(command: &Command) -> Option<&str> {
         | Command::SetPromptTargets { session_id, .. }
         | Command::SessionStop { session_id, .. }
         | Command::ObserveToolBatch { session_id, .. }
+        | Command::Adopt { session_id, .. }
         | Command::Brief {
             session_id,
             deliver: true,
@@ -833,6 +867,39 @@ pub struct SentPublication {
     pub payload: Option<String>,
 }
 
+/// The retention windows a compaction accepts, in days, inclusive. The lower bound
+/// stays well above any client's retry time, since a retry whose receipt
+/// was removed is a new request.
+pub const MIN_RETENTION_DAYS: u32 = 7;
+pub const MAX_RETENTION_DAYS: u32 = 3650;
+
+/// One compaction of the event log (ADR 0025, J7). Times are wall-clock
+/// Unix milliseconds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionReport {
+    /// False for a dry run, which deleted nothing.
+    pub applied: bool,
+    pub keep_days: u32,
+    /// Records written before this time are older than the window.
+    pub cutoff_ms: u64,
+    /// The sequence the derived state is snapshotted at: events at or below
+    /// it are no longer replayed at start. `None` when none is kept.
+    pub snapshot_seq: Option<u64>,
+    /// Events removed (or to be removed), and their sequence range.
+    pub events: u64,
+    pub first_seq: Option<u64>,
+    pub last_seq: Option<u64>,
+    pub receipts: u64,
+    /// Bytes of the removed records. SQLite reuses the space for new records
+    /// rather than shrinking the file.
+    pub bytes: u64,
+    /// Why the snapshot stops before the newest event older than the
+    /// window: something still open was started there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<String>,
+}
+
 /// The owner's standing choice to publish a workspace's work to a Git remote.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -948,7 +1015,56 @@ pub struct AutoCheck {
     pub name: String,
     pub argv: Vec<String>,
     pub timeout_s: u32,
+    /// The wider check run after this one, on the same tree, when the
+    /// session's writes changed an indexed export that other files mention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_interface_change: Option<WiderCheck>,
 }
+
+/// The owner's second, wider command (for example the whole workspace's
+/// tests), run whole: LangSpan never narrows it to the files the index names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WiderCheck {
+    pub name: String,
+    pub argv: Vec<String>,
+    pub timeout_s: u32,
+}
+
+/// What an interface change did to the wider check.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InterfaceGrade {
+    /// The wider check passed.
+    Kept,
+    /// The wider check failed.
+    Broke,
+}
+
+/// The interface change a wider check ran for: one changed export, and the
+/// files that mention its name, from the index. A name lookup, not resolved
+/// uses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InterfaceCause {
+    /// The file whose export changed.
+    pub path: String,
+    pub change: InterfaceChange,
+    /// Other changed exports the same run was for.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub more_changes: u32,
+    /// At most [`MAX_CAUSE_DEPENDENTS`] files that mention a changed name.
+    pub dependents: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub more_dependents: u32,
+    /// Supported-language files the index could not read in full when the
+    /// change was reported: a mention in one of them is missing here.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub blind_files: u32,
+}
+
+/// Mentioning files a wider check's report names at most.
+pub const MAX_CAUSE_DEPENDENTS: usize = 8;
 
 /// Bounds of an automatic check's command and of what is kept of its output.
 pub const MAX_AUTO_CHECK_ARGS: usize = 64;
@@ -978,7 +1094,27 @@ pub struct CheckReport {
     /// The command was stopped at its time limit, of this many seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timed_out_s: Option<u32>,
+    /// For a wider check: the interface change it ran for. The core grades
+    /// it from the result and tells the sessions working on the mentioning
+    /// files too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<Box<InterfaceCause>>,
+    /// A wider check is configured, but the index had no complete scan, so
+    /// no interface change could be found and the wider check did not run.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub index_incomplete: bool,
+    /// For a wider check: every file that mentions a changed name, at most
+    /// [`MAX_REPORT_DEPENDENT_PATHS`]. The sessions working on any of them
+    /// are told, even past the [`MAX_CAUSE_DEPENDENTS`] the notice shows.
+    /// Used to choose recipients and not kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependent_paths: Vec<String>,
 }
+
+/// Mentioning files a wider check's report may name to choose its
+/// recipients: the daemon's 16 waiting interface notices, each with at
+/// most [`NOTICE_DEPENDENTS`] files.
+pub const MAX_REPORT_DEPENDENT_PATHS: usize = 16 * NOTICE_DEPENDENTS;
 
 /// An automatic check's result waiting to be placed in one session's
 /// context, once.
@@ -997,6 +1133,33 @@ pub struct CheckNotice {
     /// to flip on unchanged code. Empty when no test was named.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<TestFailure>,
+    /// Its output named more failing tests than `failures` holds.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub more_failures: bool,
+    /// The record its failures were compared with: the session's baseline
+    /// (issue #69). `None` when nothing was compared, and then no failure
+    /// has a class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_check_id: Option<String>,
+    /// Tests that failed in the baseline and pass now, at most
+    /// `MAX_FIXED_NAMED`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixed: Vec<String>,
+    /// Other sessions that wrote between the baseline's tree and this one,
+    /// at most `MAX_WRITERS_NAMED`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writers: Vec<String>,
+    /// A wider check's grade: `kept` when it passed, `broke` when it failed,
+    /// absent when it was inconclusive or is no wider check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface_grade: Option<InterfaceGrade>,
+    /// The interface change a wider check ran for. Boxed: it holds a whole
+    /// `InterfaceChange`, and most notices have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<Box<InterfaceCause>>,
+    /// See [`CheckReport::index_incomplete`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub index_incomplete: bool,
 }
 
 /// A push of an integrated result that LangSpan made at the owner's command.
@@ -1317,17 +1480,48 @@ pub struct BlindSpots {
 pub struct InterfaceChange {
     pub name: String,
     pub kind: String,
-    /// `added`, `removed`, `signature_changed`, `definition_added` or
-    /// `definition_removed`. `added` is a new exported name with its
+    /// `added`, `removed`, `signature_changed`, `renamed`, `definition_added`
+    /// or `definition_removed`. `added` is a new exported name with its
     /// signature in `after`: kept in the log for a definition's history
     /// (roadmap D4), never held for briefings. A removal recorded since
-    /// then carries the removed signature in `before`. The last two mean only the number of
-    /// definitions sharing the name and kind changed: `after` (added) or
-    /// `before` (removed) holds the signatures that came or went, and the
-    /// counts say how many there were and are.
+    /// then carries the removed signature in `before`. `renamed` means the
+    /// only definition of `name` went and one with the same signature but
+    /// for the name came as `after_name`, with the evidence `evidence`
+    /// names; with `file_moved`, the definition kept its name and moved with
+    /// its whole file from `before_path` to the notice's path. The last two
+    /// mean only the number of definitions sharing the name and kind
+    /// changed: `after` (added) or `before` (removed) holds the signatures
+    /// that came or went, and the counts say how many there were and are.
     pub change: String,
     pub before: Option<String>,
     pub after: Option<String>,
+    /// The new name, for `renamed` only (roadmap B10). Absent from notices
+    /// recorded before renames were told apart from removals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_name: Option<String>,
+    /// The old name, for `renamed` only: always `name` (roadmap D7). Absent
+    /// from notices recorded before it was kept. This field, `evidence`,
+    /// `before_path` and `private` are left out of replies to protocol
+    /// version 3 clients, and so is a change with `private` set
+    /// (`protocol::encode_for` in the daemon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_name: Option<String>,
+    /// What links the two, for `renamed` only (roadmap D7): `same_body`
+    /// (the same body digest), `same_signature` (a changed body at the same
+    /// first and last line) or `file_moved` (the whole file moved, with
+    /// exactly the same content). Absent from renames recorded before it
+    /// was kept, which were all `same_body`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// Where the file was before, for `file_moved` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_path: Option<String>,
+    /// A definition that is not exported, for `file_moved` only: what the
+    /// notice of a file with no exports lists, so that the file's notes and
+    /// history follow it (roadmap D7). History only, like `added`: never
+    /// held for briefings, recaps, break alerts or the dashboard.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub private: bool,
     /// Parameter counts of `before` and `after`, when each is exactly one
     /// function's signature (ADR 0029). Absent from notices recorded
     /// before they were kept.
@@ -1341,6 +1535,51 @@ pub struct InterfaceChange {
     pub before_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_count: Option<u32>,
+}
+
+/// One recorded rename of an exported definition (roadmap D7): `name` went
+/// from `path` and `after_name` came, linked by `evidence` (absent for a
+/// rename recorded before it was kept).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Rename {
+    pub name: String,
+    pub after_name: String,
+    pub kind: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// The rename's new signature.
+    pub after: String,
+}
+
+/// Renames remembered per workspace for `graph symbol --renamed`.
+pub const MAX_RENAMES: usize = 256;
+/// Renames one lookup follows at most, old name to newest.
+pub const MAX_RENAME_HOPS: usize = 8;
+
+/// The renames that took `name` to its newest name in `workspace_id`, in
+/// order, at most `MAX_RENAME_HOPS`; `None` when no rename of it is
+/// recorded. Each hop after the first is of the first one's kind, so an
+/// unrelated definition's rename never continues the chain. A hop back to a
+/// name already passed ends the chain.
+pub fn renamed_to(state: &State, workspace_id: &str, name: &str) -> Option<Vec<Rename>> {
+    let renames = state.renames.get(workspace_id)?;
+    let mut hops: Vec<Rename> = Vec::new();
+    let mut current = name;
+    while hops.len() < MAX_RENAME_HOPS {
+        let Some(hop) = renames.iter().find(|rename| {
+            rename.name == current && hops.first().is_none_or(|first| first.kind == rename.kind)
+        }) else {
+            break;
+        };
+        if hop.after_name == name || hops.iter().any(|seen| seen.name == hop.after_name) {
+            break;
+        }
+        hops.push(hop.clone());
+        current = &hop.after_name;
+    }
+    (!hops.is_empty()).then_some(hops)
 }
 
 /// Definitions sharing one name and kind that a notice counts at most.
@@ -1386,20 +1625,32 @@ pub struct CallSite {
     pub member: bool,
 }
 
-/// A written call whose argument count does not fit a signature another
-/// live session just changed. A name match, not a resolved call.
+/// A written call that another live session's recent change makes wrong: its
+/// argument count does not fit the new signature, or the function it names
+/// was renamed or removed. A name match, not a resolved call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CallBreak {
     pub notice_id: String,
     pub call: CallSite,
+    /// The interface change: `signature_changed`, `renamed` or `removed`.
+    pub change: String,
     /// The file whose exported signature changed.
     pub defined_in: String,
+    /// The root of the other worktree of the repository whose index holds
+    /// the change, when it is not the asking session's own workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
     pub by_session: String,
     pub before: String,
+    /// Empty for `removed`.
     pub after: String,
+    /// The new name, for `renamed` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_name: Option<String>,
     pub before_arity: Option<Arity>,
-    pub after_arity: Arity,
+    /// Always present for `signature_changed`.
+    pub after_arity: Option<Arity>,
     pub age_ms: u64,
 }
 
@@ -1421,11 +1672,26 @@ pub struct InterfaceNotice {
     pub changes: Vec<InterfaceChange>,
     /// Other files in the workspace that mention a changed name.
     pub dependents: Vec<String>,
+    /// Files of other worktrees of the repository that mention a changed
+    /// name, as their indexes find them after the notice, at most
+    /// `NOTICE_DEPENDENTS` (issue #194). Absent from notices recorded
+    /// before it was kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub elsewhere: Vec<WorktreeFile>,
     /// The session that most recently reported editing `path`. A
     /// correlation, not proof of who made the change.
     pub by_session: Option<String>,
     pub at_ms: u64,
     pub generation: u64,
+}
+
+/// A file of one workspace, named by its path relative to that workspace's
+/// root.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeFile {
+    pub workspace_id: String,
+    pub path: String,
 }
 
 /// An interface change that touches the asking session's own files.
@@ -1438,6 +1704,157 @@ pub struct InterfaceImpact {
     /// The asking session's files that mention a changed name.
     pub affected: Vec<String>,
     pub age_ms: u64,
+}
+
+/// In-flight lines one briefing carries at most (roadmap C7).
+pub const INFLIGHT_LINES: usize = 3;
+/// Rendered bytes the in-flight lines of one briefing take together, at
+/// most, by `inflight_cost`: their share of the briefing cap.
+pub const INFLIGHT_BYTES: usize = 600;
+/// In-flight symbols the daemon offers one briefing, at most.
+pub const INFLIGHT_CANDIDATES: usize = 32;
+/// The asking side's files named for one in-flight symbol, at most.
+pub const INFLIGHT_MENTIONS: usize = 4;
+/// In-flight signatures remembered as told per session. The daemon's
+/// briefing window reads every in-flight row in turn, so this bounds how
+/// many signatures still in flight a session hears once each; past it the
+/// oldest is forgotten and told again.
+pub const MAX_INFLIGHT_TOLD: usize = 1024;
+
+/// An exported symbol that another worktree of the repository added, or
+/// whose signature it changed, in a file that differs from that worktree's
+/// `HEAD`: work not yet committed there (roadmap C7). Found by the daemon
+/// in its source index by name, with the asking workspace's files that
+/// mention the name or import a path ending in it or in the file's module.
+/// The signature is repository data, never instructions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InflightSymbol {
+    /// The worktree's workspace, never the asking one.
+    pub workspace_id: String,
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub signature: String,
+    pub mentioned_in: Vec<String>,
+    /// The name `HEAD` gave this symbol, when the worktree renamed it
+    /// (roadmap D7): files that mention either name are told. Left out of
+    /// replies to protocol version 3 clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
+}
+
+/// An in-flight symbol as a briefing or `graph inflight` tells it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InflightNotice {
+    pub path: String,
+    /// The worktree's root.
+    pub worktree: String,
+    /// The session in that worktree that most recently reported editing
+    /// `path`. A correlation, not proof of who made the change.
+    pub session: Option<String>,
+    pub name: String,
+    pub kind: String,
+    pub signature: String,
+    /// The asking side's files that mention it.
+    pub mentioned_in: Vec<String>,
+    /// See [`InflightSymbol::renamed_from`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
+}
+
+/// What a symbol's in-flight line costs of `INFLIGHT_BYTES`: at least what
+/// an adapter renders for it, quoting included, and never more than the
+/// whole share, so the first line always fits.
+pub fn inflight_cost(notice: &InflightNotice) -> usize {
+    let quoted = |text: &str| text.len() + text.matches(['"', '\\']).count() + 4;
+    let raw = [
+        &notice.path,
+        &notice.worktree,
+        &notice.name,
+        &notice.kind,
+        &notice.signature,
+    ]
+    .into_iter()
+    .map(|text| quoted(text))
+    .sum::<usize>()
+        + notice.session.as_deref().map_or(0, quoted)
+        // ` (renamed from "…")`.
+        + notice.renamed_from.as_deref().map_or(0, |from| quoted(from) + 16)
+        + notice
+            .mentioned_in
+            .iter()
+            .map(|path| quoted(path))
+            .sum::<usize>();
+    (200 + raw).min(INFLIGHT_BYTES)
+}
+
+/// One in-flight signature, as remembered once told to a session: a change
+/// of signature is a new key, so it is told again.
+fn inflight_key(item: &InflightSymbol) -> String {
+    fingerprint(&format!(
+        "{}\n{}\n{}\n{}\n{}",
+        item.workspace_id, item.path, item.kind, item.name, item.signature
+    ))
+}
+
+/// Whether this signature of `item` was already told to `session_id`.
+pub fn inflight_told(state: &State, session_id: &str, item: &InflightSymbol) -> bool {
+    state
+        .activity
+        .get(session_id)
+        .is_some_and(|activity| activity.inflight_told.contains(&inflight_key(item)))
+}
+
+/// The worktree root and reporting session of an in-flight symbol, from
+/// projected state; `None` when its workspace is not registered.
+pub fn inflight_notice(state: &State, item: &InflightSymbol) -> Option<InflightNotice> {
+    let workspace = state.workspaces.get(&item.workspace_id)?;
+    let session = state
+        .activity
+        .values()
+        .filter(|activity| activity.generation == state.generation)
+        .filter(|activity| {
+            state
+                .sessions
+                .get(&activity.session_id)
+                .is_some_and(|session| session.workspace_id == item.workspace_id)
+        })
+        .filter_map(|activity| {
+            let touch = activity
+                .touched
+                .iter()
+                .find(|touch| touch.path == item.path)?;
+            Some((touch.at_ms, &activity.session_id))
+        })
+        .max()
+        .map(|(_, session)| session.clone());
+    Some(InflightNotice {
+        path: item.path.clone(),
+        worktree: workspace.root.clone(),
+        session,
+        name: item.name.clone(),
+        kind: item.kind.clone(),
+        signature: item.signature.clone(),
+        mentioned_in: item.mentioned_in.clone(),
+        renamed_from: item.renamed_from.clone(),
+    })
+}
+
+/// What a briefing of `session_id` compares in-flight work with: the
+/// session's workspace, and the files it works on or has read. `None` for
+/// a session that is not current.
+pub fn briefing_concern(
+    state: &State,
+    session_id: &str,
+    now_ms: u64,
+) -> Option<(String, BTreeSet<String>)> {
+    let me = current_session(state, session_id).ok()?;
+    Some((
+        me.workspace_id.clone(),
+        concerned_paths(state, session_id, now_ms),
+    ))
 }
 
 /// When an event that has no time of its own was decided: the daemon's
@@ -1499,6 +1916,51 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "is_false")]
     pub retracted: bool,
 }
+
+/// Why a session took over an ended session's uncommitted work, when
+/// LangSpan can tell (issue #161). Shown, never required: the person or
+/// agent decides.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AdoptReason {
+    /// The ended session sent the adopter this message: addressed to it,
+    /// or a handoff the adopter took.
+    Handoff { message_id: String },
+    /// Both sessions have the same task line.
+    SameTask {},
+}
+
+/// One session took over an ended session's journaled, uncommitted lines
+/// in the same workspace (issue #161). The line journal credits them to
+/// `session_id` from then on; this record names the transfer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Adoption {
+    /// The ended session whose lines were taken over.
+    pub from: String,
+    /// The session that took them over.
+    pub session_id: String,
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<AdoptReason>,
+    /// The daemon's clock, within `generation`.
+    pub at_ms: u64,
+    pub generation: u64,
+}
+
+/// An ended session that left uncommitted work in the briefed session's
+/// checkout and that nobody has adopted: the briefing suggests `langspan
+/// adopt` (issue #161). Its task line is data from that session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LeftWork {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+/// Ended sessions one briefing names as having left work, at most.
+pub const BRIEF_LEFT_WORK: usize = 4;
 
 /// A message a session received and that was then withdrawn: the session
 /// is told once, at its next briefing, to disregard it.
@@ -1860,6 +2322,13 @@ pub struct RecapSession {
     pub intent: Option<String>,
     pub editing: Vec<String>,
     pub recent: Vec<RecentPath>,
+    /// The session that took over this ended session's uncommitted work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_by: Option<String>,
+    /// Ended sessions whose uncommitted work this session took over, at
+    /// most `RECAP_ITEMS`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adopted: Vec<String>,
 }
 
 /// A bounded account of one workspace: who is here, what changed, what is
@@ -1981,6 +2450,16 @@ pub struct Briefing {
     /// name. A name match, not a resolved dependency.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interface_changes: Vec<InterfaceImpact>,
+    /// Exported symbols another worktree of the repository has added or
+    /// changed and not committed, that this session's files mention by name
+    /// (roadmap C7). Each signature is told once, at most `INFLIGHT_LINES`
+    /// within `INFLIGHT_BYTES`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inflight: Vec<InflightNotice>,
+    /// In-flight symbols owed to this session but left for a later
+    /// briefing.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_inflight: u32,
     /// Remembered notes about the workspace or about files this session
     /// works on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1994,7 +2473,8 @@ pub struct Briefing {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retracted: Vec<RetractedMessage>,
     /// The checkout this session works in changed under it since it last
-    /// read or edited a file there. Newest first.
+    /// read or edited a file there, other than by its own shell command.
+    /// Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkout_changes: Vec<CheckoutNotice>,
     /// Changes on disk in this checkout that no session reported, with the
@@ -2006,6 +2486,15 @@ pub struct Briefing {
     /// yet delivered. Each is delivered once. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckNotice>,
+    /// Ended sessions that left uncommitted work in this checkout, from the
+    /// sessions the request named (`Brief::left`). At most
+    /// `BRIEF_LEFT_WORK`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_work: Vec<LeftWork>,
+    /// What changed recently in the repository, only in a briefing asked
+    /// for at session start (roadmap C3). Never part of the signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent: Option<RecentChanges>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -2074,6 +2563,11 @@ pub struct State {
     /// Checkout changes per workspace, newest first, at most `MAX_CHECKOUTS`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub checkouts: BTreeMap<String, Vec<CheckoutChange>>,
+    /// Sessions' shell runs that moved the checkout, per workspace, newest
+    /// first: the newest `MAX_CHECKOUT_RUNS`, and any older run that
+    /// explains a held checkout change (at most `MAX_CHECKOUTS` more).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub checkout_runs: BTreeMap<String, Vec<CheckoutRun>>,
     /// Uncoordinated changes per workspace, newest first, at most
     /// `MAX_UNCOORDINATED`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2096,6 +2590,15 @@ pub struct State {
     /// Sessions whose presence setting is not the default, by session ID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub presence: BTreeMap<String, PresenceSetting>,
+    /// Ended sessions whose uncommitted work another session took over, by
+    /// the ended session's ID (issue #161). One adoption per ended session.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub adoptions: BTreeMap<String, Adoption>,
+    /// Recorded renames per workspace, newest first, at most `MAX_RENAMES`
+    /// (roadmap D7): what `graph symbol --renamed` follows. A name defined
+    /// again is dropped. Derived on replay; not part of the status reply.
+    #[serde(skip)]
+    pub renames: BTreeMap<String, Vec<Rename>>,
     /// The current generation's clock anchor, once recorded. Derived from
     /// the events on replay; not part of the status reply.
     #[serde(skip)]
@@ -2104,6 +2607,11 @@ pub struct State {
     /// line (roadmap H2). Derived on replay; not part of the status reply.
     #[serde(skip)]
     pub refusals: Vec<RecentRefusal>,
+    /// Refusals of the current run with their paths, newest first, at most
+    /// `MAX_PATH_REFUSALS`, for a starting session's recent section
+    /// (roadmap C3). Derived on replay; not part of the status reply.
+    #[serde(skip)]
+    pub path_refusals: Vec<PathRefusal>,
     /// How many times each workspace ID has been moved or removed: its
     /// registration revision. With the root it names one registration, so
     /// what was derived outside the log during an earlier one (the source
@@ -2119,6 +2627,21 @@ pub struct State {
     /// can read it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub writes: BTreeMap<String, u64>,
+    /// Per workspace, then check ID: the per-test results of the records it
+    /// holds, for comparing a later run with them (issue #69). Derived on
+    /// replay; not part of the status reply.
+    #[serde(skip)]
+    pub kept_tests: BTreeMap<String, BTreeMap<String, KeptTests>>,
+    /// Per session, the workspace's write count just before the session's
+    /// first write since it registered. Derived on replay; not part of the
+    /// status reply.
+    #[serde(skip)]
+    pub first_writes: BTreeMap<String, u64>,
+    /// Per workspace, its sessions' runs of consecutive writes, oldest
+    /// first, at most `MAX_WRITE_RUNS`. Derived on replay; not part of the
+    /// status reply.
+    #[serde(skip)]
+    pub write_runs: BTreeMap<String, Vec<WriteRun>>,
 }
 
 /// Checkout changes kept per workspace.
@@ -2144,7 +2667,8 @@ pub struct UninstalledHost {
 /// its branch changed, its HEAD moved and files changed with it, or several
 /// changed files went back to their committed version at once (`git
 /// checkout`, `switch`, `reset --hard`, `stash`, `pull`). Built from the
-/// scan's branch observation. Who did it is not known.
+/// scan's branch observation. Who did it is not known, unless a session's
+/// shell command explains it (`CheckoutRun`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CheckoutChange {
@@ -2170,6 +2694,12 @@ pub const MAX_UNCOORDINATED_SESSIONS: usize = 2;
 pub const MAX_UNCOORDINATED_OBSERVED: usize = 256;
 /// The host name that starts a Codex session's ID (`codex.<host session>`).
 pub const CODEX_HOST: &str = "codex";
+/// The host names that start the other hooked hosts' session IDs.
+pub const CLAUDE_CODE_HOST: &str = "claude-code";
+pub const CURSOR_HOST: &str = "cursor";
+pub const GEMINI_HOST: &str = "gemini";
+/// The tool name of a shell call on every host, as the hooks record it.
+pub const SHELL_TOOL: &str = "Bash";
 
 /// Files a scan saw change in one physical workspace that no session of it
 /// reported, while Codex sessions are registered there (issue #129). Codex
@@ -2212,6 +2742,94 @@ pub struct CheckoutNotice {
     pub to_head: Option<String>,
     pub files: u32,
     pub age_ms: u64,
+    /// The other session whose shell command explains the change, when one
+    /// does (`CheckoutRun`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_session: Option<String>,
+    /// That command's line, redacted and capped by its hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// Shell runs that moved a checkout, kept per workspace.
+pub const MAX_CHECKOUT_RUNS: usize = 8;
+/// A checkout change first observed up to this long after a run finished,
+/// at the state the run left, is the run's: the observer scans every few
+/// seconds and may see the change only after the run's hook reported it.
+pub const CHECKOUT_RUN_GRACE_MS: u64 = 60_000;
+/// The longest a checkout run is taken to have run: a shell call's
+/// supported lifetime, two hours.
+pub const MAX_CHECKOUT_RUN_MS: u64 = 2 * 60 * 60 * 1000;
+/// The command text a checkout run keeps, at most, in bytes.
+pub const MAX_CHECKOUT_COMMAND_BYTES: usize = 256;
+
+/// One session's shell command ran a Git operation that changes the
+/// checkout (`git merge`, `pull`, `rebase`, `reset`, `checkout`, `switch`,
+/// `stash` and the like) and the checkout changed while it ran: reported by
+/// that session's post-tool hook. A checkout change it explains is not news
+/// to that session, and other sessions are told whose command it was.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CheckoutRun {
+    pub run_id: String,
+    pub workspace_id: String,
+    pub session_id: String,
+    /// The command line, redacted and capped by the hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// The checkout the command left.
+    pub to_branch: Option<String>,
+    pub to_head: Option<String>,
+    /// When the command started and finished on the daemon's clock, placed
+    /// back from the report's arrival by the durations its hook measured
+    /// (never after the arrival), whenever it is reported.
+    pub started_ms: u64,
+    pub finished_ms: u64,
+    pub generation: u64,
+    /// The command changed no file's content: it moved HEAD or the branch
+    /// only, as a commit does. Absent from an earlier record.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub files_unchanged: bool,
+}
+
+impl CheckoutRun {
+    /// Whether this run explains `change`: observed while the command ran,
+    /// or the first change observed after it finished, within
+    /// `CHECKOUT_RUN_GRACE_MS`, at the checkout the command left, unless a
+    /// change while it ran already showed that checkout or the command
+    /// changed no file and the change left branch and HEAD in place.
+    /// `changes` are the workspace's changes, to find the first.
+    pub fn explains(&self, change: &CheckoutChange, changes: &[CheckoutChange]) -> bool {
+        if change.workspace_id != self.workspace_id
+            || change.generation != self.generation
+            || change.at_ms < self.started_ms
+        {
+            return false;
+        }
+        if change.at_ms <= self.finished_ms {
+            return true;
+        }
+        let left = |other: &CheckoutChange| {
+            other.to_head == self.to_head && other.to_branch == self.to_branch
+        };
+        // A run that changed no file (a commit) explains no later change
+        // with branch and HEAD in place (a restore): the scan records no
+        // change for such a run, so that one came after it.
+        let moved = change.from_head != change.to_head || change.from_branch != change.to_branch;
+        change.at_ms <= self.finished_ms.saturating_add(CHECKOUT_RUN_GRACE_MS)
+            && left(change)
+            && (moved || !self.files_unchanged)
+            && !changes.iter().any(|other| {
+                other.change_id != change.change_id
+                    && other.workspace_id == self.workspace_id
+                    && other.generation == self.generation
+                    && other.at_ms < change.at_ms
+                    // Another change after the run came first; one while it
+                    // ran at the state it left already showed its result.
+                    && (other.at_ms > self.finished_ms
+                        || (other.at_ms >= self.started_ms && left(other)))
+            })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2236,6 +2854,12 @@ pub enum Event {
         /// The other session the refusal names, when there is one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer_session_id: Option<String>,
+        /// The refused tool call's input digest (`ToolIdentity`), so the
+        /// coordination report can tell an identical retry from a changed
+        /// call. Absent for a held commit and from records written before it
+        /// was kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_digest: Option<String>,
         at_ms: u64,
         generation: u64,
     },
@@ -2329,6 +2953,11 @@ pub enum Event {
     SessionEnded {
         session_id: String,
     },
+    /// A session took over an ended session's uncommitted work (issue
+    /// #161).
+    SessionAdopted {
+        adoption: Adoption,
+    },
     /// The host said the session finished its reply (Stop, StopFailure or
     /// SubagentStop). `released` are the tool admissions still open then,
     /// completed by this event's preceding `LeaseCompleted` events.
@@ -2353,6 +2982,12 @@ pub enum Event {
     BriefingDelivered {
         session_id: String,
         signature: String,
+    },
+    /// These in-flight signatures were placed in the session's context with
+    /// a briefing (roadmap C7). Each is told once.
+    InflightDelivered {
+        session_id: String,
+        keys: Vec<String>,
     },
     /// A write was told about these interface notices (ADR 0029).
     InterfaceAlerted {
@@ -2394,6 +3029,10 @@ pub enum Event {
     },
     CheckRecorded {
         check: CheckRecord,
+        /// The per-test results of a working-tree record, kept to compare a
+        /// later run with (issue #69). Absent from older logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tests: Option<KeptTests>,
     },
     AutoCheckEnabled {
         check: AutoCheck,
@@ -2481,6 +3120,13 @@ pub enum Event {
     InterfaceChanged {
         notice: InterfaceNotice,
     },
+    /// Files of another worktree found to mention a held notice's changed
+    /// names (issue #194).
+    InterfaceDependentsFound {
+        notice_workspace_id: String,
+        notice_id: String,
+        files: Vec<WorktreeFile>,
+    },
     Remembered {
         note: Note,
         /// When it was remembered. Absent from notes recorded before it was
@@ -2541,6 +3187,9 @@ pub enum Event {
     },
     CheckoutChanged {
         change: CheckoutChange,
+    },
+    CheckoutRunObserved {
+        run: CheckoutRun,
     },
     /// A scan saw files change that no session reported, with Codex
     /// sessions registered in the checkout (issue #129).
@@ -2604,16 +3253,22 @@ impl Command {
     /// Whether `other`, sent under this command's request ID, is the same
     /// request: an identical retry, answered with the recorded outcome.
     /// What the sender measures anew on every send is not compared: the age
-    /// of each written-lines entry of an admission (`WrittenLines::age_ms`),
-    /// which changes between two deliveries of one tool call.
+    /// of each written-lines entry of an admission (`WrittenLines::age_ms`)
+    /// and a checkout run's `finished_ago_ms`, which change between two
+    /// deliveries of one tool call.
     pub fn same_request(&self, other: &Command) -> bool {
         fn ageless(command: &Command) -> Option<Command> {
             let mut command = command.clone();
-            let Command::AdmitTool { overwrites, .. } = &mut command else {
-                return None;
-            };
-            for entry in overwrites.iter_mut() {
-                entry.age_ms = 0;
+            match &mut command {
+                Command::AdmitTool { overwrites, .. } => {
+                    for entry in overwrites.iter_mut() {
+                        entry.age_ms = 0;
+                    }
+                }
+                Command::ObserveCheckoutRun {
+                    finished_ago_ms, ..
+                } => *finished_ago_ms = 0,
+                _ => return None,
             }
             Some(command)
         }
@@ -2791,7 +3446,7 @@ pub enum Command {
         /// For an automatic check: the sessions to tell, and its output's
         /// end.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        report: Option<CheckReport>,
+        report: Option<Box<CheckReport>>,
         /// The tests its output named, for a working-tree check that passed
         /// or failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2834,6 +3489,10 @@ pub enum Command {
         name: String,
         argv: Vec<String>,
         timeout_s: u32,
+        /// The wider check to run after it when the session's writes
+        /// changed an indexed interface that other files mention.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_interface_change: Option<Box<WiderCheck>>,
     },
     AutoCheckDisable {
         workspace_id: String,
@@ -2897,6 +3556,15 @@ pub enum Command {
         path: String,
         changes: Vec<InterfaceChange>,
         dependents: Vec<String>,
+    },
+    /// Files of `workspace_id` that the index finds mention a name changed
+    /// by the notice `notice_id` of `notice_workspace_id`, another worktree
+    /// of the same repository (issue #194). Internal to the daemon's scan.
+    ObserveInterfaceDependents {
+        notice_workspace_id: String,
+        notice_id: String,
+        workspace_id: String,
+        paths: Vec<String>,
     },
     Remember {
         workspace_id: String,
@@ -2973,6 +3641,28 @@ pub enum Command {
         to_head: Option<String>,
         files: u32,
     },
+    /// A session's shell command ran a Git operation that changed its
+    /// checkout (`CheckoutRun`). Sent by the session's post-tool hook.
+    ObserveCheckoutRun {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        to_branch: Option<String>,
+        to_head: Option<String>,
+        /// How long the command ran, as its hook measured it.
+        ran_ms: u64,
+        /// How long ago the command finished, as its hook measured it when
+        /// sending: a report redelivered later keeps the command's own
+        /// window. A duration, not a time: the daemon places the finish
+        /// this long before its own now, never after it. Absent from an
+        /// earlier hook, which reported as the command finished.
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        finished_ago_ms: u64,
+        /// The command changed no file's content (`CheckoutRun`). Absent
+        /// from an earlier hook.
+        #[serde(default, skip_serializing_if = "is_false")]
+        files_unchanged: bool,
+    },
     /// Files a scan saw change outside a checkout change, at their new
     /// versions. The core keeps those no session of the workspace reported
     /// and names its Codex sessions (issue #129). Internal to the daemon's
@@ -3022,6 +3712,19 @@ pub enum Command {
         workspace_id: Option<String>,
         from_ms: u64,
     },
+    /// Read-only, answered from the event log: the coordination report of
+    /// one workspace since `from_ms` (wall clock, Unix milliseconds), per
+    /// session and per host kind.
+    Report {
+        workspace_id: String,
+        from_ms: u64,
+    },
+    /// Read-only, answered from the event log: refusals in the local days
+    /// starting at each of `days` (wall clock, Unix milliseconds), the last
+    /// being the end, once per session, kind and path set per day (H5).
+    Count {
+        days: Vec<u64>,
+    },
     /// Read-only: the person's status line for the directory `root`, with
     /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
     StatusLine {
@@ -3052,6 +3755,10 @@ pub enum Command {
         /// the coverage shape that build knows.
         #[serde(default, skip_serializing_if = "is_false")]
         blind_in_scope: bool,
+        /// Follow recorded renames of `name` to its newest name and look
+        /// that up instead (roadmap D7); the answer's `renamed` says which.
+        #[serde(default, skip_serializing_if = "is_false")]
+        renamed: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
@@ -3087,6 +3794,40 @@ pub enum Command {
         workspace_id: String,
         names: Vec<String>,
         limit: u32,
+    },
+    /// Read-only: what other worktrees of the workspace's repository have
+    /// in flight that any of its indexed files mention (roadmap C7). Never
+    /// recorded.
+    GraphInflight {
+        workspace_id: String,
+    },
+    /// Owner-only, CLI-only: write the workspace's source index to the
+    /// absolute path `path` as JSON Lines, created owner-only and never over
+    /// an existing file (roadmap D5). Not recorded.
+    GraphExport {
+        workspace_id: String,
+        path: String,
+    },
+    /// Owner-only, CLI-only: read an exported index from the absolute path
+    /// `path`. Only files whose content here has the exported digest, and
+    /// that the index does not hold already, are loaded, and only with
+    /// `apply`; without it nothing changes. Not recorded (roadmap D5).
+    GraphImport {
+        workspace_id: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        apply: bool,
+    },
+    /// Answered by the daemon from its records, the line journal and its
+    /// source index (roadmap B26): whether `paths` are held, which of their
+    /// lines peers wrote recently and whether they are stale for the
+    /// session, and what a peer just changed in `symbols` (or, without
+    /// any, in the definitions of `paths`). A read: never recorded.
+    CheckWrite {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        symbols: Vec<String>,
     },
     /// Answered by the daemon with its source index: the calls among
     /// `calls` whose argument count does not fit a signature another live
@@ -3199,11 +3940,49 @@ pub enum Command {
         /// tool call. A handoff waits for a session's start or next prompt.
         #[serde(default, skip_serializing_if = "is_false")]
         mid_turn: bool,
+        /// Add what changed recently in the repository (roadmap C3). Set
+        /// by session-start hooks and `langspan brief --recent` only; never
+        /// with `mid_turn`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        recent: bool,
+        /// How far back `recent` looks. The daemon sets it from its
+        /// configuration; absent means `RECENT_WINDOW_MS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recent_window_ms: Option<u64>,
         /// True when the session asked through the MCP tool
         /// `langspan_brief`, so a message it carries is recorded as
         /// delivered that way (roadmap E12).
         #[serde(default, skip_serializing_if = "is_false")]
         mcp: bool,
+        /// Sessions whose journaled lines are still uncommitted in this
+        /// session's checkout, as its adapter found them at the session's
+        /// start. The ended ones nobody adopted are named in the briefing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        left: Vec<String>,
+    },
+    /// Take over an ended session's journaled, uncommitted lines in the
+    /// same workspace (issue #161). Refused for a live session and for one
+    /// of another workspace. The line journal is the adapter's: once the
+    /// event is recorded, the adapter credits the lines to `session_id`.
+    Adopt {
+        session_id: String,
+        from: String,
+    },
+    /// Prepared adapter input only, as `WorkspaceRegisterVerified`: the
+    /// receipt stores the original `Brief`. `inflight` is what the daemon's
+    /// source index found other worktrees have in flight that the session's
+    /// workspace mentions (roadmap C7).
+    #[serde(skip_serializing)]
+    BriefPrepared {
+        session_id: String,
+        max_peers: u32,
+        deliver: bool,
+        mid_turn: bool,
+        recent: bool,
+        recent_window_ms: Option<u64>,
+        mcp: bool,
+        left: Vec<String>,
+        inflight: Vec<InflightSymbol>,
     },
     /// Read-only: the bounded view of what matters now. Closed admissions
     /// are counted, not listed; the answer always fits one frame.
@@ -3231,6 +4010,15 @@ pub enum Command {
         workspace_id: String,
         after: u64,
         limit: u32,
+    },
+    /// Retention (ADR 0025, J7): snapshot the derived state and delete the
+    /// events and receipts recorded more than `keep_days` ago. A dry run
+    /// (`apply` false) deletes nothing and reports what would go. Answered
+    /// by the daemon's store; never recorded and never replayed.
+    Compact {
+        keep_days: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        apply: bool,
     },
 }
 
@@ -3381,7 +4169,7 @@ enum CommandWire {
         /// For an automatic check: the sessions to tell, and its output's
         /// end.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        report: Option<CheckReport>,
+        report: Option<Box<CheckReport>>,
         /// The tests its output named, for a working-tree check that passed
         /// or failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3424,6 +4212,10 @@ enum CommandWire {
         name: String,
         argv: Vec<String>,
         timeout_s: u32,
+        /// The wider check to run after it when the session's writes
+        /// changed an indexed interface that other files mention.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_interface_change: Option<Box<WiderCheck>>,
     },
     AutoCheckDisable {
         workspace_id: String,
@@ -3487,6 +4279,15 @@ enum CommandWire {
         path: String,
         changes: Vec<InterfaceChange>,
         dependents: Vec<String>,
+    },
+    /// Files of `workspace_id` that the index finds mention a name changed
+    /// by the notice `notice_id` of `notice_workspace_id`, another worktree
+    /// of the same repository (issue #194). Internal to the daemon's scan.
+    ObserveInterfaceDependents {
+        notice_workspace_id: String,
+        notice_id: String,
+        workspace_id: String,
+        paths: Vec<String>,
     },
     Remember {
         workspace_id: String,
@@ -3563,6 +4364,28 @@ enum CommandWire {
         to_head: Option<String>,
         files: u32,
     },
+    /// A session's shell command ran a Git operation that changed its
+    /// checkout (`CheckoutRun`). Sent by the session's post-tool hook.
+    ObserveCheckoutRun {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        to_branch: Option<String>,
+        to_head: Option<String>,
+        /// How long the command ran, as its hook measured it.
+        ran_ms: u64,
+        /// How long ago the command finished, as its hook measured it when
+        /// sending: a report redelivered later keeps the command's own
+        /// window. A duration, not a time: the daemon places the finish
+        /// this long before its own now, never after it. Absent from an
+        /// earlier hook, which reported as the command finished.
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        finished_ago_ms: u64,
+        /// The command changed no file's content (`CheckoutRun`). Absent
+        /// from an earlier hook.
+        #[serde(default, skip_serializing_if = "is_false")]
+        files_unchanged: bool,
+    },
     /// Files a scan saw change outside a checkout change, at their new
     /// versions. The core keeps those no session of the workspace reported
     /// and names its Codex sessions (issue #129). Internal to the daemon's
@@ -3612,6 +4435,19 @@ enum CommandWire {
         workspace_id: Option<String>,
         from_ms: u64,
     },
+    /// Read-only, answered from the event log: the coordination report of
+    /// one workspace since `from_ms` (wall clock, Unix milliseconds), per
+    /// session and per host kind.
+    Report {
+        workspace_id: String,
+        from_ms: u64,
+    },
+    /// Read-only, answered from the event log: refusals in the local days
+    /// starting at each of `days` (wall clock, Unix milliseconds), the last
+    /// being the end, once per session, kind and path set per day (H5).
+    Count {
+        days: Vec<u64>,
+    },
     /// Read-only: the person's status line for the directory `root`, with
     /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
     StatusLine {
@@ -3642,6 +4478,10 @@ enum CommandWire {
         /// the coverage shape that build knows.
         #[serde(default, skip_serializing_if = "is_false")]
         blind_in_scope: bool,
+        /// Follow recorded renames of `name` to its newest name and look
+        /// that up instead (roadmap D7); the answer's `renamed` says which.
+        #[serde(default, skip_serializing_if = "is_false")]
+        renamed: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
@@ -3677,6 +4517,28 @@ enum CommandWire {
         workspace_id: String,
         names: Vec<String>,
         limit: u32,
+    },
+    /// Read-only: what other worktrees of the workspace's repository have
+    /// in flight that any of its indexed files mention (roadmap C7). Never
+    /// recorded.
+    GraphInflight {
+        workspace_id: String,
+    },
+    GraphExport {
+        workspace_id: String,
+        path: String,
+    },
+    GraphImport {
+        workspace_id: String,
+        path: String,
+        #[serde(default)]
+        apply: bool,
+    },
+    CheckWrite {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default)]
+        symbols: Vec<String>,
     },
     /// Answered by the daemon with its source index: the calls among
     /// `calls` whose argument count does not fit a signature another live
@@ -3789,11 +4651,21 @@ enum CommandWire {
         /// tool call. A handoff waits for a session's start or next prompt.
         #[serde(default, skip_serializing_if = "is_false")]
         mid_turn: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        recent: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recent_window_ms: Option<u64>,
         /// True when the session asked through the MCP tool
         /// `langspan_brief`, so a message it carries is recorded as
         /// delivered that way (roadmap E12).
         #[serde(default, skip_serializing_if = "is_false")]
         mcp: bool,
+        #[serde(default)]
+        left: Vec<String>,
+    },
+    Adopt {
+        session_id: String,
+        from: String,
     },
     Status {},
     StatusRecords {
@@ -3811,6 +4683,11 @@ enum CommandWire {
         workspace_id: String,
         after: u64,
         limit: u32,
+    },
+    Compact {
+        keep_days: u32,
+        #[serde(default)]
+        apply: bool,
     },
 }
 
@@ -3928,6 +4805,27 @@ pub enum Outcome {
     SessionEnded {
         session_id: String,
     },
+    /// `recorded` is false when this session had already adopted `from`:
+    /// nothing new was recorded, and the adapter may finish crediting the
+    /// lines. `root` is the workspace's, whose line journal holds them.
+    /// `live` names `from`'s subagents that have not ended: their lines
+    /// (and their own subagents') stay theirs. `earlier` names the sessions
+    /// whose adoptions lead to `from`: an adopter that ended before its
+    /// lines were credited left them there, and they are credited too.
+    /// `kept` names subagents of `from` (or of an `earlier` session) that
+    /// another session adopted: their lines (and their own subagents') are
+    /// that session's to credit, so they stay where they are.
+    Adopted {
+        adoption: Adoption,
+        root: String,
+        recorded: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        live: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        earlier: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        kept: Vec<String>,
+    },
     SessionStopped {
         session_id: String,
         released: Vec<String>,
@@ -3981,6 +4879,15 @@ pub enum Outcome {
     RemoteSent {
         sent: Vec<SentPublication>,
         more: bool,
+        /// Wall-clock Unix milliseconds from which the list is complete:
+        /// publications recorded before it may have been removed by
+        /// retention. Absent when nothing has ever been removed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since_ms: Option<u64>,
+    },
+    /// What a compaction removed, or with `applied` false would remove.
+    Compaction {
+        report: CompactionReport,
     },
     /// `accepted` is false for a publication that is not newer than the one
     /// already held: a replay, or one that arrived out of order.
@@ -4063,6 +4970,12 @@ pub enum Outcome {
     InterfaceObserved {
         notice: InterfaceNotice,
     },
+    /// How many files of another worktree were added to the notice's
+    /// `elsewhere`; zero when every one was already listed or it is full.
+    InterfaceDependentsObserved {
+        notice_id: String,
+        added: u32,
+    },
     Remembered {
         note: Note,
     },
@@ -4104,6 +5017,9 @@ pub enum Outcome {
     CheckoutObserved {
         change: CheckoutChange,
     },
+    CheckoutRunObserved {
+        run: CheckoutRun,
+    },
     /// The Codex sessions named and the files kept; both empty when every
     /// change was explained or nothing new was recorded.
     UncoordinatedObserved {
@@ -4121,6 +5037,12 @@ pub enum Outcome {
     },
     Today {
         today: Today,
+    },
+    Report {
+        report: Report,
+    },
+    Count {
+        count: RefusalCount,
     },
     StatusLine {
         line: StatusLine,
@@ -4146,11 +5068,48 @@ pub enum Outcome {
         /// the same index snapshot as `coverage`. Absent otherwise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         levels: Option<Vec<ImpactLevel>>,
+        /// `graph symbol --renamed` of a name with a recorded rename: the
+        /// renames followed, in order; `symbols` are the last new name's.
+        /// Absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        renamed: Option<Vec<Rename>>,
     },
     /// Only names with at least one definition, in the order asked.
     GraphContext {
         matches: Vec<NameContext>,
         coverage: GraphCoverage,
+    },
+    /// What other worktrees have in flight that the workspace mentions, in
+    /// worktree, path and name order. `coverage` is the asking workspace's;
+    /// a worktree without a complete scan contributes nothing.
+    GraphInflight {
+        inflight: Vec<InflightNotice>,
+        coverage: GraphCoverage,
+        truncated: bool,
+    },
+    /// The source index was written to a file (roadmap D5).
+    GraphExported {
+        workspace_id: String,
+        files: u32,
+        partial_files: u32,
+        bytes: u64,
+    },
+    /// What an index import found, by file line (roadmap D5). Only
+    /// `loaded` files were written, and only when `applied`.
+    GraphImported {
+        workspace_id: String,
+        applied: bool,
+        /// Same content here, and not yet indexed here: loaded, or would be.
+        loaded: u32,
+        /// Content here differs, or the file is missing or not in the last
+        /// scan: left to the indexer.
+        different: u32,
+        /// Already indexed here: the local rows are kept.
+        kept: u32,
+        /// Over a parse bound (symbols, references, imports, calls, line size).
+        over_limits: u32,
+        /// Not a valid file record, or a path seen earlier in the file.
+        malformed: u32,
     },
     /// `ready` is false when the index has no complete scan of the
     /// workspace: nothing was checked.
@@ -4158,6 +5117,10 @@ pub enum Outcome {
         breaks: Vec<CallBreak>,
         coverage: GraphCoverage,
         ready: bool,
+    },
+    /// The answer to `CheckWrite` (roadmap B26). Nothing was recorded.
+    WriteCheck {
+        check: WriteCheck,
     },
     /// Where the index cannot answer for the workspace's source (roadmap
     /// D8). Each list is in path order and holds at most the request's
@@ -4474,6 +5437,9 @@ fn decide_checked(
                 kind,
                 paths: paths.iter().take(REFUSAL_PATHS).cloned().collect(),
                 peer_session_id: peer.cloned(),
+                input_digest: operation
+                    .as_ref()
+                    .map(|operation| operation.input_digest.clone()),
                 at_ms: now_ms,
                 generation: state.generation,
             };
@@ -5234,8 +6200,27 @@ fn decide_checked(
                 changed_since: false,
             };
             validate_check(state, &check)?;
+            // Kept with the record so that a later run can be compared with
+            // it; validated with the test results below.
+            let kept = match (tests, *writes_before, command_id) {
+                (Some(results), Some(writes_before), Some(command_id)) => Some(KeptTests {
+                    results: results.clone(),
+                    writes_before,
+                    command_id: command_id.clone(),
+                }),
+                _ => None,
+            };
+            // The write generation the run took before its tree. A write
+            // recorded since, even one undone before the run (or its rerun)
+            // ended, means its results are not of unchanged code: they are
+            // checked but learned from by neither this record nor a later
+            // one, and are no baseline (a write counted between the count
+            // and the tree would be in the tree it tested).
+            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
+            let unchanged = *writes_before == Some(writes);
             let mut events = vec![Event::CheckRecorded {
                 check: check.clone(),
+                tests: kept.clone().filter(|_| unchanged),
             }];
             // What this record teaches about tests that flip, learned on a
             // copy so that its notice is labelled with it.
@@ -5266,13 +6251,6 @@ fn decide_checked(
                     ));
                 }
             };
-            // The write generation the run took before its tree. A write
-            // recorded since, even one undone before the run (or its rerun)
-            // ended, means its results are not of unchanged code: they are
-            // checked but learned from by neither this record nor a later
-            // one.
-            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
-            let unchanged = *writes_before == Some(writes);
             let runs = tests
                 .iter()
                 .map(|results| (results, false))
@@ -5306,30 +6284,84 @@ fn decide_checked(
                     at_ms: now_ms,
                 });
             }
-            let failures = tests
-                .iter()
-                .flat_map(|results| &results.failed)
-                .map(|test| TestFailure {
-                    test: test.clone(),
-                    flaky: learning.label(name, test),
-                })
-                .collect();
+            let notice = |comparison: Option<&classes::Comparison>| CheckNotice {
+                check_id: check.check_id.clone(),
+                name: check.name.clone(),
+                tree_oid: check.tree_oid.clone(),
+                result: check.result.clone(),
+                duration_ms: check.duration_ms,
+                timed_out_s: report.as_ref().and_then(|report| report.timed_out_s),
+                tail: report
+                    .as_ref()
+                    .map(|report| report.tail.clone())
+                    .unwrap_or_default(),
+                failures: tests
+                    .iter()
+                    .flat_map(|results| &results.failed)
+                    .enumerate()
+                    .map(|(at, test)| TestFailure {
+                        test: test.clone(),
+                        flaky: learning.label(name, test),
+                        class: comparison
+                            .and_then(|comparison| comparison.classes.get(at).copied()),
+                    })
+                    .collect(),
+                more_failures: tests.as_ref().is_some_and(|results| results.more_failed),
+                baseline_check_id: comparison
+                    .map(|comparison| comparison.baseline_check_id.clone()),
+                fixed: comparison.map_or_else(Vec::new, |comparison| comparison.fixed.clone()),
+                writers: comparison.map_or_else(Vec::new, |comparison| comparison.writers.clone()),
+                interface_grade: interface_grade(
+                    report
+                        .as_ref()
+                        .and_then(|report| report.interface.as_deref()),
+                    &check.result,
+                ),
+                interface: report.as_ref().and_then(|report| report.interface.clone()),
+                index_incomplete: report
+                    .as_ref()
+                    .is_some_and(|report| report.index_incomplete),
+            };
             if let Some(report) = report {
-                let reported = Event::CheckReported {
-                    session_ids: report.session_ids.clone(),
-                    notice: CheckNotice {
-                        check_id: check.check_id.clone(),
-                        name: check.name.clone(),
-                        tree_oid: check.tree_oid.clone(),
-                        result: check.result.clone(),
-                        duration_ms: check.duration_ms,
-                        timed_out_s: report.timed_out_s,
-                        tail: report.tail.clone(),
-                        failures,
+                let mut session_ids = report.session_ids.clone();
+                validate_dependent_paths(report)?;
+                if let Some(cause) = &report.interface {
+                    validate_interface_cause(cause)?;
+                    // The sessions working on any mentioning file are told
+                    // too, not only those on the files the notice shows,
+                    // decided here so that replay gives the same set.
+                    let mut paths = cause.dependents.clone();
+                    paths.extend(report.dependent_paths.iter().cloned());
+                    for peer in concerned_sessions(state, &check.workspace_id, &paths, now_ms) {
+                        if session_ids.len() >= MAX_CHECK_REPORT_SESSIONS {
+                            break;
+                        }
+                        if !session_ids.contains(&peer) {
+                            session_ids.push(peer);
+                        }
+                    }
+                }
+                validate_check_report(
+                    state,
+                    &check.workspace_id,
+                    &Event::CheckReported {
+                        session_ids: session_ids.clone(),
+                        notice: notice(None),
                     },
-                };
-                validate_check_report(state, &check.workspace_id, &reported)?;
-                events.push(reported);
+                )?;
+                // Each session's failures are compared with its own baseline:
+                // one report per group of sessions told the same.
+                let groups = classes::group(&session_ids, |session| {
+                    classes::compare(state, workspace_id, name, kept.as_ref()?, session)
+                });
+                for (comparison, session_ids) in groups {
+                    let reported = Event::CheckReported {
+                        session_ids,
+                        notice: notice(comparison.as_ref()),
+                    };
+                    validate_check_report(state, &check.workspace_id, &reported)?;
+                    events.push(reported);
+                }
             }
             Ok(Decision {
                 events,
@@ -5385,12 +6417,14 @@ fn decide_checked(
             name,
             argv,
             timeout_s,
+            on_interface_change,
         } => {
             let check = AutoCheck {
                 workspace_id: workspace_id.clone(),
                 name: name.clone(),
                 argv: argv.clone(),
                 timeout_s: *timeout_s,
+                on_interface_change: on_interface_change.as_deref().cloned(),
             };
             validate_auto_check(state, &check)?;
             let events = if state.auto_checks.get(workspace_id) == Some(&check) {
@@ -5719,12 +6753,27 @@ fn decide_checked(
                 },
             })
         }
+        Command::Adopt { session_id, from } => adopt(state, session_id, from, now_ms),
         Command::Brief {
             session_id,
             max_peers,
             deliver,
             mid_turn,
+            left,
+            recent,
+            recent_window_ms,
             mcp,
+        }
+        | Command::BriefPrepared {
+            session_id,
+            max_peers,
+            deliver,
+            mid_turn,
+            left,
+            recent,
+            recent_window_ms,
+            mcp,
+            ..
         } => {
             if !(1..=MAX_BRIEF_PEERS).contains(max_peers) {
                 return Err(error(
@@ -5732,8 +6781,34 @@ fn decide_checked(
                     "A briefing names between 1 and 16 peers",
                 ));
             }
-            let (mut briefing, signature) =
-                brief(state, session_id, *max_peers, !*mid_turn, now_ms)?;
+            if *recent && *mid_turn {
+                return Err(error(
+                    "invalid_request",
+                    "What changed recently is told at a session's start, never mid-turn; leave out recent",
+                ));
+            }
+            let window = recent::window(*recent_window_ms)?;
+            let inflight = match command {
+                Command::BriefPrepared { inflight, .. } => {
+                    if inflight.len() > INFLIGHT_CANDIDATES {
+                        return Err(error(
+                            "invalid_limit",
+                            "A briefing is offered at most 32 in-flight symbols",
+                        ));
+                    }
+                    inflight.as_slice()
+                }
+                _ => &[],
+            };
+            let (mut briefing, signature, inflight_keys) =
+                brief(state, session_id, *max_peers, !*mid_turn, now_ms, inflight)?;
+            briefing.left_work = left_work(state, session_id, left)?;
+            // Not part of the signature: a prompt's briefing never carries
+            // it, so it must not make the next one look new.
+            if *recent {
+                let me = current_session(state, session_id)?;
+                briefing.recent = Some(recent::recent(state, me, window, now_ms));
+            }
             let previous = state
                 .activity
                 .get(session_id)
@@ -5751,7 +6826,8 @@ fn decide_checked(
                 || !briefing.messages.is_empty()
                 || !briefing.uncoordinated.is_empty()
                 || !briefing.retracted.is_empty()
-                || !briefing.checks.is_empty();
+                || !briefing.checks.is_empty()
+                || !briefing.left_work.is_empty();
             let mut events = Vec::new();
             if *deliver {
                 if signature != previous && briefing.changed {
@@ -5789,6 +6865,12 @@ fn decide_checked(
                     session_id: session_id.clone(),
                     check_id: notice.check_id.clone(),
                 }));
+                if !inflight_keys.is_empty() {
+                    events.push(Event::InflightDelivered {
+                        session_id: session_id.clone(),
+                        keys: inflight_keys,
+                    });
+                }
                 events.extend(
                     uncoordinated_owed(state, session_id, now_ms).map(|(change, _)| {
                         Event::UncoordinatedDelivered {
@@ -6113,6 +7195,44 @@ fn decide_checked(
                 outcome: Outcome::CheckoutObserved { change },
             })
         }
+        Command::ObserveCheckoutRun {
+            session_id,
+            command,
+            to_branch,
+            to_head,
+            ran_ms,
+            finished_ago_ms,
+            files_unchanged,
+        } => {
+            let Some(session) = state.sessions.get(session_id) else {
+                return Err(error(
+                    "unknown_session",
+                    "A checkout run names a registered session; register it first",
+                ));
+            };
+            // When the command ran, not when its report arrived: a
+            // redelivered report credits no later change. Placed back from
+            // the daemon's own now by durations, so never after it; a run
+            // two hours at most, a shell call's lifetime.
+            let finished_ms = now_ms.saturating_sub(*finished_ago_ms);
+            let run = CheckoutRun {
+                run_id: request_id.into(),
+                workspace_id: session.workspace_id.clone(),
+                session_id: session_id.clone(),
+                command: command.clone(),
+                to_branch: to_branch.clone(),
+                to_head: to_head.clone(),
+                started_ms: finished_ms.saturating_sub((*ran_ms).min(MAX_CHECKOUT_RUN_MS)),
+                finished_ms,
+                generation: state.generation,
+                files_unchanged: *files_unchanged,
+            };
+            validate_checkout_run(state, &run)?;
+            Ok(Decision {
+                events: vec![Event::CheckoutRunObserved { run: run.clone() }],
+                outcome: Outcome::CheckoutRunObserved { run },
+            })
+        }
         Command::ObserveUncoordinated {
             workspace_id,
             files,
@@ -6236,6 +7356,7 @@ fn decide_checked(
                     kind: *kind,
                     paths: paths.into_iter().take(REFUSAL_PATHS).collect(),
                     peer_session_id: peer_session_id.clone(),
+                    input_digest: None,
                     at_ms: now_ms,
                     generation: state.generation,
                 }],
@@ -6257,6 +7378,7 @@ fn decide_checked(
                 path: path.clone(),
                 changes: changes.clone(),
                 dependents: dependents.clone(),
+                elsewhere: Vec::new(),
                 by_session: last_peer_edit(state, "", workspace_id, path, 0)
                     .map(|(session, _)| session.to_owned()),
                 at_ms: now_ms,
@@ -6270,12 +7392,78 @@ fn decide_checked(
                 outcome: Outcome::InterfaceObserved { notice },
             })
         }
+        Command::ObserveInterfaceDependents {
+            notice_workspace_id,
+            notice_id,
+            workspace_id,
+            paths,
+        } => {
+            validate_known_workspace(state, notice_workspace_id)?;
+            validate_known_workspace(state, workspace_id)?;
+            if workspace_id == notice_workspace_id
+                || !related_workspace(state, notice_workspace_id, workspace_id)
+            {
+                return Err(error(
+                    "invalid_notice",
+                    "Dependents found elsewhere are files of another worktree of the notice's repository",
+                ));
+            }
+            if paths.len() > NOTICE_DEPENDENTS {
+                return Err(error(
+                    "invalid_notice",
+                    "At most 32 dependent files are reported at once",
+                ));
+            }
+            for path in paths {
+                validate_relative_path(path)?;
+            }
+            let notice = state
+                .interface_notices
+                .get(notice_workspace_id)
+                .and_then(|notices| notices.iter().find(|n| n.notice_id == *notice_id))
+                .ok_or_else(|| {
+                    error(
+                        "unknown_notice",
+                        "The interface notice is not held: a newer one for its file replaced it, or it was never recorded",
+                    )
+                })?;
+            let room = NOTICE_DEPENDENTS.saturating_sub(notice.elsewhere.len());
+            let files: Vec<WorktreeFile> = paths
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|path| WorktreeFile {
+                    workspace_id: workspace_id.clone(),
+                    path: path.clone(),
+                })
+                .filter(|file| !notice.elsewhere.contains(file))
+                .take(room)
+                .collect();
+            Ok(Decision {
+                outcome: Outcome::InterfaceDependentsObserved {
+                    notice_id: notice_id.clone(),
+                    added: files.len() as u32,
+                },
+                events: if files.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Event::InterfaceDependentsFound {
+                        notice_workspace_id: notice_workspace_id.clone(),
+                        notice_id: notice_id.clone(),
+                        files,
+                    }]
+                },
+            })
+        }
         Command::Events { .. }
         | Command::Today { .. }
+        | Command::Report { .. }
+        | Command::Count { .. }
         | Command::History { .. }
         | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
+        | Command::Compact { .. }
         | Command::ShowMessage { .. }
         | Command::MessageStatus { .. }
         | Command::GraphSymbol { .. }
@@ -6283,6 +7471,10 @@ fn decide_checked(
         | Command::GraphImpact { .. }
         | Command::GraphBlindSpots { .. }
         | Command::GraphContext { .. }
+        | Command::GraphInflight { .. }
+        | Command::GraphExport { .. }
+        | Command::GraphImport { .. }
+        | Command::CheckWrite { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
             "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores",
@@ -6592,6 +7784,17 @@ fn recap(state: &State, workspace_id: &str, now_ms: u64) -> Recap {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    adopted_by: state
+                        .adoptions
+                        .get(&session.session_id)
+                        .map(|adoption| adoption.session_id.clone()),
+                    adopted: state
+                        .adoptions
+                        .values()
+                        .filter(|adoption| adoption.session_id == session.session_id)
+                        .take(RECAP_ITEMS)
+                        .map(|adoption| adoption.from.clone())
+                        .collect(),
                 },
             )
         })
@@ -6683,13 +7886,18 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
     if notice.changes.is_empty()
         || notice.changes.len() > NOTICE_CHANGES
         || notice.dependents.len() > NOTICE_DEPENDENTS
+        || notice.elsewhere.len() > NOTICE_DEPENDENTS
     {
         return Err(error(
             "invalid_notice",
-            "An interface notice names 1 to 16 changes and at most 32 dependent files",
+            "An interface notice names 1 to 16 changes and at most 32 dependent files in its own worktree and 32 in others",
         ));
     }
-    for path in &notice.dependents {
+    for path in notice
+        .dependents
+        .iter()
+        .chain(notice.elsewhere.iter().map(|file| &file.path))
+    {
         validate_relative_path(path)?;
     }
     for change in &notice.changes {
@@ -6702,40 +7910,54 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
             Some(&change.name),
             change.before.as_ref(),
             change.after.as_ref(),
+            change.after_name.as_ref(),
         ];
+        validate_rename_record(notice, change)?;
         let counts = match (change.before_count, change.after_count) {
             (Some(before), Some(after)) => Some((before, after)),
             (None, None) => None,
             _ => Some((0, 0)),
         };
-        // A count change names its counts, in the direction it says, and
-        // carries the signatures that came or went; nothing else has
-        // counts.
-        let shaped = match (change.change.as_str(), counts) {
-            ("removed" | "signature_changed", None) => true,
-            // A new export: its signature, and no parameter counts.
-            ("added", None) => {
-                change.before.is_none()
-                    && change.after.is_some()
-                    && change.before_arity.is_none()
-                    && change.after_arity.is_none()
+        // Only a rename has a new name, other than the old one, and both
+        // signatures. A count change names its counts, in the direction it
+        // says, and carries the signatures that came or went; nothing else
+        // has counts.
+        // A definition moved with its file keeps its name (roadmap D7).
+        let renamed = change.change == "renamed";
+        let moved = change.evidence.as_deref() == Some(FILE_MOVED);
+        let named = match &change.after_name {
+            Some(to) => {
+                renamed && !to.is_empty() && to.len() <= 128 && ((*to == change.name) == moved)
             }
-            ("definition_added", Some((before, after))) => {
-                before >= 1
-                    && before < after
-                    && after <= MAX_DEFINITION_COUNT
-                    && change.before.is_none()
-                    && change.after.is_some()
-            }
-            ("definition_removed", Some((before, after))) => {
-                after >= 1
-                    && after < before
-                    && before <= MAX_DEFINITION_COUNT
-                    && change.before.is_some()
-                    && change.after.is_none()
-            }
-            _ => false,
+            None => !renamed,
         };
+        let shaped = named
+            && match (change.change.as_str(), counts) {
+                ("removed" | "signature_changed", None) => true,
+                ("renamed", None) => change.before.is_some() && change.after.is_some(),
+                // A new export: its signature, and no parameter counts.
+                ("added", None) => {
+                    change.before.is_none()
+                        && change.after.is_some()
+                        && change.before_arity.is_none()
+                        && change.after_arity.is_none()
+                }
+                ("definition_added", Some((before, after))) => {
+                    before >= 1
+                        && before < after
+                        && after <= MAX_DEFINITION_COUNT
+                        && change.before.is_none()
+                        && change.after.is_some()
+                }
+                ("definition_removed", Some((before, after))) => {
+                    after >= 1
+                        && after < before
+                        && before <= MAX_DEFINITION_COUNT
+                        && change.before.is_some()
+                        && change.after.is_none()
+                }
+                _ => false,
+            };
         if change.name.is_empty()
             || change.name.len() > 128
             || !shaped
@@ -6747,9 +7969,121 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         {
             return Err(error(
                 "invalid_notice",
-                "An interface change has a name, a kind, `added`, `removed`, `signature_changed`, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
+                "An interface change has a name, a kind, `added`, `removed`, `signature_changed`, `renamed` with a different `after_name` of at most 128 bytes, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
             ));
         }
+    }
+    Ok(())
+}
+
+/// What a notice's renames and moves change in the state (roadmap D7). A
+/// rename is remembered under its old name and kind, replacing an earlier
+/// rename of that name and kind; a name that comes back as the
+/// same kind (added, or the new name of another rename) is forgotten as
+/// renamed. A file moved
+/// whole takes its notes along: each note about the old path is about the
+/// new one instead.
+fn follow_renames(state: &mut State, notice: &InterfaceNotice) {
+    for change in &notice.changes {
+        let moved = change.evidence.as_deref() == Some(FILE_MOVED);
+        let renames = state
+            .renames
+            .entry(notice.workspace_id.clone())
+            .or_default();
+        let back = match (change.change.as_str(), &change.after_name) {
+            ("added", _) => Some(&change.name),
+            ("renamed", Some(to)) if !moved => Some(to),
+            _ => None,
+        };
+        if let Some(back) = back {
+            // Only a definition of the renamed one's kind takes its name
+            // back, as the lookup's own check does.
+            renames.retain(|rename| rename.name != *back || rename.kind != change.kind);
+        }
+        if let ("renamed", Some(to), false) = (change.change.as_str(), &change.after_name, moved) {
+            renames.retain(|rename| rename.name != change.name || rename.kind != change.kind);
+            renames.insert(
+                0,
+                Rename {
+                    name: change.name.clone(),
+                    after_name: to.clone(),
+                    kind: change.kind.clone(),
+                    path: notice.path.clone(),
+                    evidence: change.evidence.clone(),
+                    after: change.after.clone().unwrap_or_default(),
+                },
+            );
+            renames.truncate(MAX_RENAMES);
+        }
+        if renames.is_empty() {
+            state.renames.remove(&notice.workspace_id);
+        }
+        let Some(from) = change.before_path.as_ref().filter(|_| moved) else {
+            continue;
+        };
+        for note in state
+            .notes
+            .get_mut(&notice.workspace_id)
+            .into_iter()
+            .flatten()
+        {
+            // Sorted and once each, as a note's paths are recorded.
+            if let Some(at) = note.paths.iter().position(|path| path == from) {
+                note.paths[at].clone_from(&notice.path);
+                note.paths.sort();
+                note.paths.dedup();
+            }
+        }
+    }
+}
+
+/// What links a rename's two names (roadmap D7).
+pub const RENAME_EVIDENCE: [&str; 3] = ["same_body", "same_signature", FILE_MOVED];
+/// The evidence of a definition that moved with its whole file.
+pub const FILE_MOVED: &str = "file_moved";
+
+/// A rename's evidence in words, as a notice ends its rename: ` (same
+/// body)`, ` (same signature)`, or nothing for a rename recorded before its
+/// evidence was kept and for a moved file, whose text says so itself.
+pub fn rename_evidence_words(evidence: Option<&str>) -> &'static str {
+    match evidence {
+        Some("same_body") => " (same body)",
+        Some("same_signature") => " (same signature)",
+        _ => "",
+    }
+}
+
+/// A rename's old name, evidence and old path (roadmap D7): each only on a
+/// rename, the old name always `name`, and an old path exactly when the
+/// file moved, other than the notice's path. A rename without them was
+/// recorded before they were kept and is read as it was.
+fn validate_rename_record(
+    notice: &InterfaceNotice,
+    change: &InterfaceChange,
+) -> Result<(), CoreError> {
+    let renamed = change.change == "renamed";
+    let moved = change.evidence.as_deref() == Some(FILE_MOVED);
+    let shaped = change
+        .before_name
+        .as_ref()
+        .is_none_or(|name| renamed && *name == change.name)
+        && change
+            .evidence
+            .as_deref()
+            .is_none_or(|evidence| renamed && RENAME_EVIDENCE.contains(&evidence))
+        && match &change.before_path {
+            Some(path) => moved && *path != notice.path,
+            None => !moved,
+        }
+        && (!change.private || moved);
+    if !shaped {
+        return Err(error(
+            "invalid_notice",
+            "A rename's `before_name` is its name, its `evidence` is `same_body`, `same_signature` or `file_moved`, and only `file_moved` has a `before_path`, another file than the notice's, or is `private`",
+        ));
+    }
+    if let Some(path) = &change.before_path {
+        validate_relative_path(path)?;
     }
     Ok(())
 }
@@ -7424,55 +8758,22 @@ fn live_lease(state: &State, lease: &Lease, now_ms: u64) -> bool {
 /// Returns the briefing and a signature that ignores ages, so an unchanged
 /// situation is not delivered twice.
 /// The signature leaves out messages: a delivered message is acknowledged,
-/// so its absence afterwards is not a change.
+/// so its absence afterwards is not a change. Also returns the keys of the
+/// in-flight signatures it carries, to be remembered once delivered.
 fn brief(
     state: &State,
     session_id: &str,
     max_peers: u32,
     handoffs: bool,
     now_ms: u64,
-) -> Result<(Briefing, String), CoreError> {
+    inflight: &[InflightSymbol],
+) -> Result<(Briefing, String, Vec<String>), CoreError> {
     let me = current_session(state, session_id)?;
     let repository = state
         .workspace_git
         .get(&me.workspace_id)
         .map(|git| git.repository_id.as_str());
-    let work_paths = |id: &str| -> (Vec<String>, Vec<RecentPath>, BTreeSet<String>) {
-        let editing: Vec<String> = state
-            .leases
-            .values()
-            .filter(|lease| lease.session_id == id && live_lease(state, lease, now_ms))
-            .flat_map(|lease| lease.paths.iter().cloned())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let recent: Vec<RecentPath> = state
-            .activity
-            .get(id)
-            .filter(|activity| activity.generation == state.generation)
-            .map(|activity| {
-                activity
-                    .touched
-                    .iter()
-                    .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
-                    .map(|touch| RecentPath {
-                        path: touch.path.clone(),
-                        age_ms: now_ms.saturating_sub(touch.at_ms),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut all: BTreeSet<String> = editing.iter().cloned().collect();
-        all.extend(recent.iter().map(|recent| recent.path.clone()));
-        if let Some(intent) = state
-            .intents
-            .get(id)
-            .filter(|intent| intent.generation == state.generation)
-        {
-            all.extend(intent.paths.iter().cloned());
-        }
-        (editing, recent, all)
-    };
+    let work_paths = |id: &str| work_paths(state, id, now_ms);
     // Where a running session's last prompt pointed, while it is recent.
     let prompt_targets = |id: &str| -> BTreeSet<String> {
         state
@@ -7668,12 +8969,14 @@ fn brief(
         .map(|(_, peer)| peer)
         .take(max_peers as usize)
         .take_while(|peer| {
+            // Counted as encoded, escapes included, so quoted or control
+            // characters cannot push the reply past its frame.
             let cost = 256
-                + peer.workspace_root.len()
+                + recent::json_len(&peer.workspace_root)
                 + [&peer.summary, &peer.intent, &peer.branch_ref]
                     .into_iter()
                     .flatten()
-                    .map(String::len)
+                    .map(|text| recent::json_len(text))
                     .sum::<usize>()
                 + peer
                     .editing
@@ -7681,7 +8984,7 @@ fn brief(
                     .chain(&peer.overlap)
                     .chain(&peer.target_overlap)
                     .chain(peer.recent.iter().map(|recent| &recent.path))
-                    .map(|path| path.len() + 32)
+                    .map(|path| recent::json_len(path) + 32)
                     .sum::<usize>();
             bytes += cost;
             if bytes > BRIEF_BYTES {
@@ -7697,7 +9000,7 @@ fn brief(
         let presence: usize = peer
             .looking
             .iter()
-            .map(|looked| looked.path.len() + 32)
+            .map(|looked| recent::json_len(&looked.path) + 32)
             .sum();
         if bytes + presence <= BRIEF_BYTES {
             bytes += presence;
@@ -7770,14 +9073,7 @@ fn brief(
             ))
     });
     remote.truncate(BRIEF_PATHS);
-    // Files this session works on or has read: what a changed interface
-    // could break for it.
-    let mut concerned = mine.clone();
-    concerned.extend(
-        known_versions(state, session_id)
-            .iter()
-            .map(|version| version.path.clone()),
-    );
+    let concerned = concerned_paths(state, session_id, now_ms);
     let interface_changes: Vec<InterfaceImpact> = state
         .interface_notices
         .get(&me.workspace_id)
@@ -7872,13 +9168,24 @@ fn brief(
         .collect();
     // A checkout change matters to a session that read or edited files
     // here before it: what it knows may no longer be on disk.
+    // A change a session's own shell command explains is not news to it;
+    // others are told whose command it was.
     let mut checkout_ids = Vec::new();
-    let checkout_changes: Vec<CheckoutNotice> = state
+    let changes = state
         .checkouts
         .get(&me.workspace_id)
         .map(Vec::as_slice)
-        .unwrap_or(&[])
+        .unwrap_or(&[]);
+    let runs = state
+        .checkout_runs
+        .get(&me.workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let explained_by =
+        |change: &CheckoutChange| runs.iter().find(|run| run.explains(change, changes));
+    let checkout_changes: Vec<CheckoutNotice> = changes
         .iter()
+        .filter(|change| explained_by(change).is_none_or(|run| run.session_id != session_id))
         .filter(|change| {
             change.generation == state.generation
                 && now_ms.saturating_sub(change.at_ms) <= BRIEF_HORIZON_MS
@@ -7900,7 +9207,10 @@ fn brief(
         .take(2)
         .map(|change| {
             checkout_ids.push(change.change_id.clone());
+            let run = explained_by(change);
             CheckoutNotice {
+                by_session: run.map(|run| run.session_id.clone()),
+                command: run.and_then(|run| run.command.clone()),
                 from_branch: change.from_branch.clone(),
                 to_branch: change.to_branch.clone(),
                 from_head: change.from_head.clone(),
@@ -7910,7 +9220,44 @@ fn brief(
             }
         })
         .collect();
+    // In-flight signatures from other worktrees of the repository (roadmap
+    // C7), each told once. Each line is delivered once, so it is chosen
+    // only for a briefing with nothing else used up on delivery, whose
+    // text is sure to hold it; otherwise every one is counted and waits.
+    let quiet = messages.is_empty()
+        && retracted.is_empty()
+        && uncoordinated.is_empty()
+        && !state.check_notices.contains_key(session_id);
+    let owed: Vec<(String, InflightNotice)> = inflight
+        .iter()
+        .filter(|item| {
+            item.workspace_id != me.workspace_id
+                && related_workspace(state, &me.workspace_id, &item.workspace_id)
+                && !inflight_told(state, session_id, item)
+        })
+        .filter_map(|item| {
+            let key = inflight_key(item);
+            let mut notice = inflight_notice(state, item)?;
+            notice.mentioned_in.retain(|path| concerned.contains(path));
+            notice.mentioned_in.truncate(INFLIGHT_MENTIONS);
+            (!notice.mentioned_in.is_empty()).then_some((key, notice))
+        })
+        .collect();
+    let mut inflight_keys = Vec::new();
+    let mut inflight_notices = Vec::new();
+    let mut bytes = 0;
+    for (key, notice) in &owed {
+        bytes += inflight_cost(notice);
+        if !quiet || inflight_notices.len() == INFLIGHT_LINES || bytes > INFLIGHT_BYTES {
+            break;
+        }
+        inflight_keys.push(key.clone());
+        inflight_notices.push(notice.clone());
+    }
     let mut signature = String::new();
+    for key in &inflight_keys {
+        signature.push_str(&format!("inflight|{key}\n"));
+    }
     for id in &checkout_ids {
         signature.push_str(&format!("checkout|{id}\n"));
     }
@@ -7997,11 +9344,16 @@ fn brief(
             stale_reads,
             remote,
             interface_changes,
+            omitted_inflight: u32::try_from(owed.len() - inflight_notices.len())
+                .unwrap_or(u32::MAX),
+            inflight: inflight_notices,
             notes,
             messages,
             retracted,
             checkout_changes,
             uncoordinated,
+            // Filled in by the request that names the sessions (`Brief::left`).
+            left_work: Vec::new(),
             // One result per briefing, the newest: it always fits the
             // rendered text, and each delivered one is removed, so the rest
             // follow at the next briefings.
@@ -8012,8 +9364,10 @@ fn brief(
                 .cloned()
                 .into_iter()
                 .collect(),
+            recent: None,
         },
         signature,
+        inflight_keys,
     ))
 }
 
@@ -8240,12 +9594,27 @@ fn wrote_since_boundary(state: &State, session_id: &str) -> bool {
 
 fn validate_auto_check(state: &State, check: &AutoCheck) -> Result<(), CoreError> {
     validate_known_workspace(state, &check.workspace_id)?;
-    validate_id(&check.name, "check name")?;
-    if check.name.len() > 64
-        || check.argv.is_empty()
-        || check.argv.len() > MAX_AUTO_CHECK_ARGS
-        || check.argv[0].is_empty()
-        || check.argv.iter().any(|arg| {
+    validate_check_command(&check.name, &check.argv, check.timeout_s)?;
+    if let Some(wider) = &check.on_interface_change {
+        validate_check_command(&wider.name, &wider.argv, wider.timeout_s)?;
+        if wider.name == check.name {
+            return Err(error(
+                "invalid_check",
+                "The wider check has a name of its own: its records are told apart from the regular check's by name",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// One automatic command's name, arguments and time limit.
+fn validate_check_command(name: &str, argv: &[String], timeout_s: u32) -> Result<(), CoreError> {
+    validate_id(name, "check name")?;
+    if name.len() > 64
+        || argv.is_empty()
+        || argv.len() > MAX_AUTO_CHECK_ARGS
+        || argv[0].is_empty()
+        || argv.iter().any(|arg| {
             arg.is_empty()
                 || arg.len() > MAX_AUTO_CHECK_ARG_BYTES
                 || arg.chars().any(char::is_control)
@@ -8258,13 +9627,146 @@ fn validate_auto_check(state: &State, check: &AutoCheck) -> Result<(), CoreError
             ),
         ));
     }
-    if !(1..=MAX_AUTO_CHECK_TIMEOUT_S).contains(&check.timeout_s) {
+    if !(1..=MAX_AUTO_CHECK_TIMEOUT_S).contains(&timeout_s) {
         return Err(error(
             "invalid_limit",
             &format!("An automatic check's time limit is 1 to {MAX_AUTO_CHECK_TIMEOUT_S} seconds"),
         ));
     }
     Ok(())
+}
+
+/// A report's mentioning files come only with an interface change, are
+/// valid paths and number at most [`MAX_REPORT_DEPENDENT_PATHS`].
+fn validate_dependent_paths(report: &CheckReport) -> Result<(), CoreError> {
+    if report.dependent_paths.is_empty() {
+        return Ok(());
+    }
+    if report.interface.is_none() || report.dependent_paths.len() > MAX_REPORT_DEPENDENT_PATHS {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A check report names mentioning files only for an interface change, at most {MAX_REPORT_DEPENDENT_PATHS}"
+            ),
+        ));
+    }
+    for path in &report.dependent_paths {
+        validate_relative_path(path)?;
+    }
+    Ok(())
+}
+
+/// A wider check's cause names one valid change, a valid path and at most
+/// [`MAX_CAUSE_DEPENDENTS`] valid mentioning files.
+fn validate_interface_cause(cause: &InterfaceCause) -> Result<(), CoreError> {
+    validate_relative_path(&cause.path)?;
+    if cause.dependents.is_empty() || cause.dependents.len() > MAX_CAUSE_DEPENDENTS {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A wider check's interface change names 1 to {MAX_CAUSE_DEPENDENTS} files that mention it"
+            ),
+        ));
+    }
+    for path in &cause.dependents {
+        validate_relative_path(path)?;
+    }
+    // The change itself is shaped as in an interface notice.
+    validate_notice(&InterfaceNotice {
+        notice_id: "cause".into(),
+        workspace_id: String::new(),
+        path: cause.path.clone(),
+        changes: vec![cause.change.clone()],
+        dependents: Vec::new(),
+        elsewhere: Vec::new(),
+        by_session: None,
+        at_ms: 0,
+        generation: 0,
+    })
+}
+
+/// What session `id` works on: the paths its live leases hold, the files it
+/// touched within the briefing horizon (with their ages), and those with the
+/// paths of its declared intent.
+fn work_paths(
+    state: &State,
+    id: &str,
+    now_ms: u64,
+) -> (Vec<String>, Vec<RecentPath>, BTreeSet<String>) {
+    let editing: Vec<String> = state
+        .leases
+        .values()
+        .filter(|lease| lease.session_id == id && live_lease(state, lease, now_ms))
+        .flat_map(|lease| lease.paths.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let recent: Vec<RecentPath> = state
+        .activity
+        .get(id)
+        .filter(|activity| activity.generation == state.generation)
+        .map(|activity| {
+            activity
+                .touched
+                .iter()
+                .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
+                .map(|touch| RecentPath {
+                    path: touch.path.clone(),
+                    age_ms: now_ms.saturating_sub(touch.at_ms),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut all: BTreeSet<String> = editing.iter().cloned().collect();
+    all.extend(recent.iter().map(|recent| recent.path.clone()));
+    if let Some(intent) = state
+        .intents
+        .get(id)
+        .filter(|intent| intent.generation == state.generation)
+    {
+        all.extend(intent.paths.iter().cloned());
+    }
+    (editing, recent, all)
+}
+
+/// Files session `id` works on or has read: what a changed interface could
+/// break for it.
+fn concerned_paths(state: &State, id: &str, now_ms: u64) -> BTreeSet<String> {
+    let (_, _, mut concerned) = work_paths(state, id, now_ms);
+    concerned.extend(
+        known_versions(state, id)
+            .iter()
+            .map(|version| version.path.clone()),
+    );
+    concerned
+}
+
+/// The running sessions of the workspace, in this daemon's lifetime, that
+/// work on or have read one of `paths`, as a briefing counts them.
+fn concerned_sessions(
+    state: &State,
+    workspace_id: &str,
+    paths: &[String],
+    now_ms: u64,
+) -> Vec<String> {
+    state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.workspace_id == workspace_id && session.generation == state.generation
+        })
+        .filter(|session| {
+            state
+                .activity
+                .get(&session.session_id)
+                .is_some_and(|activity| !activity.ended)
+        })
+        .filter(|session| {
+            let concerned = concerned_paths(state, &session.session_id, now_ms);
+            paths.iter().any(|path| concerned.contains(path))
+        })
+        .map(|session| session.session_id.clone())
+        .collect()
 }
 
 /// The sessions are this workspace's, the tail is bounded, and the notice
@@ -8303,15 +9805,66 @@ fn validate_check_report(
     }
     validate_request_id(&notice.check_id)?;
     validate_oid(&notice.tree_oid)?;
+    // A comparison (issue #69) is whole: a baseline, and a class for every
+    // failure, or neither.
+    let compared = notice.baseline_check_id.is_some();
+    if let Some(baseline) = &notice.baseline_check_id {
+        validate_request_id(baseline)?;
+    }
+    let names_ok = notice.fixed.len() <= MAX_FIXED_NAMED
+        && notice.fixed.iter().all(|test| {
+            !test.is_empty()
+                && test.len() <= MAX_TEST_NAME_BYTES
+                && !test.chars().any(char::is_control)
+        });
+    if !names_ok
+        || notice.writers.len() > MAX_WRITERS_NAMED
+        || (!compared && !(notice.fixed.is_empty() && notice.writers.is_empty()))
+        || notice
+            .failures
+            .iter()
+            .any(|failure| failure.class.is_some() != compared)
+    {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A check report compared with a baseline classes every failure and names at most {MAX_FIXED_NAMED} fixed tests and {MAX_WRITERS_NAMED} writers; one not compared has none of them"
+            ),
+        ));
+    }
+    for writer in &notice.writers {
+        validate_id(writer, "session ID")?;
+    }
+    if let Some(cause) = &notice.interface {
+        validate_interface_cause(cause)?;
+    }
+    // A grade is the wider check's result, and only a wider check has one.
+    if notice.interface_grade != interface_grade(notice.interface.as_deref(), &notice.result) {
+        return Err(error(
+            "invalid_check_report",
+            "An interface grade is kept for a passed wider check and broke for a failed one",
+        ));
+    }
     Ok(())
+}
+
+/// The grade of a wider check with `interface`, from its result.
+fn interface_grade(
+    interface: Option<&InterfaceCause>,
+    result: &CheckResult,
+) -> Option<InterfaceGrade> {
+    match (interface, result) {
+        (Some(_), CheckResult::Passed {}) => Some(InterfaceGrade::Kept),
+        (Some(_), CheckResult::Failed { .. }) => Some(InterfaceGrade::Broke),
+        _ => None,
+    }
 }
 
 /// A write was recorded in the workspace: its write generation moves on, so
 /// no check result is compared with one from before it to learn which tests
 /// flip.
-fn wrote_in(state: &mut State, workspace_id: &str) {
-    let writes = state.writes.entry(workspace_id.to_owned()).or_default();
-    *writes = writes.saturating_add(1);
+fn wrote_in(state: &mut State, workspace_id: &str, session_id: Option<&str>) {
+    classes::wrote(state, workspace_id, session_id);
 }
 
 fn validate_forget_flaky(name: Option<&str>, test: &str) -> Result<(), CoreError> {
@@ -8408,6 +9961,281 @@ fn shared_prompt_lines(state: &State, session_id: &str, digests: &[String]) -> u
         })
         .max()
         .unwrap_or(0) as u32
+}
+
+/// Whether a registered session is over: the host reported it ended, or its
+/// process is known to have exited. A session LangSpan cannot tell is over
+/// (killed while its liveness was unknown) counts as live.
+pub(crate) fn finished(state: &State, session_id: &str) -> bool {
+    state
+        .activity
+        .get(session_id)
+        .is_some_and(|activity| activity.ended)
+        || state
+            .session_liveness
+            .get(session_id)
+            .is_some_and(|liveness| liveness.status == LivenessStatus::Exited)
+}
+
+/// Sessions a briefing's `left` may name, at most.
+pub const MAX_LEFT: usize = 64;
+
+/// `session_id` takes over `from`'s uncommitted work (issue #161).
+fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Decision, CoreError> {
+    // The adopter is the caller, at work: registered, perhaps not yet again
+    // since the coordinator restarted.
+    let me = known_session(state, session_id)?;
+    let theirs = known_session(state, from)?;
+    if session_id == from {
+        return Err(error(
+            "invalid_adoption",
+            "A session cannot adopt its own work; name the ended session whose work to take over",
+        ));
+    }
+    if finished(state, session_id) {
+        return Err(error(
+            "session_ended",
+            "This session has ended; adopt from the session that continues the task",
+        ));
+    }
+    if theirs.workspace_id != me.workspace_id {
+        return Err(error(
+            "other_workspace",
+            &format!(
+                "That session worked in workspace {:?}, not this session's {:?}; only an ended session's work in the same checkout can be adopted",
+                theirs.workspace_id, me.workspace_id
+            ),
+        ));
+    }
+    if !finished(state, from) {
+        return Err(error(
+            "session_live",
+            "That session has not ended: LangSpan has neither its end nor its process's exit. Ask it to commit its own work, or adopt once it has ended",
+        ));
+    }
+    // An adopter that ended after its adoption was recorded, before its
+    // adapter credited the lines, leaves them under the session it adopted;
+    // that session cannot be adopted again. Passing the adoption on credits
+    // them too: every session whose adoptions lead to `from`. A session that
+    // has resumed since it was adopted owns what it writes again, so it is
+    // left out, and so is what its own adoptions lead to.
+    let mut earlier: Vec<String> = Vec::new();
+    let mut pending = vec![from.to_owned()];
+    while let Some(adopter) = pending.pop() {
+        for adoption in state.adoptions.values() {
+            if adoption.session_id != adopter
+                || adoption.workspace_id != me.workspace_id
+                || adoption.from == from
+                || earlier.contains(&adoption.from)
+                || !finished(state, &adoption.from)
+            {
+                continue;
+            }
+            if earlier.len() >= MAX_LEFT {
+                return Err(error(
+                    "adoption_chain",
+                    &format!(
+                        "More than {MAX_LEFT} earlier adoptions lead to that session; commit part of the work, then adopt again"
+                    ),
+                ));
+            }
+            earlier.push(adoption.from.clone());
+            pending.push(adoption.from.clone());
+        }
+    }
+    earlier.sort();
+    // Ending a session does not end its subagents: one still running keeps
+    // its lines.
+    let live: Vec<String> = state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.workspace_id == me.workspace_id
+                && [from]
+                    .into_iter()
+                    .chain(earlier.iter().map(String::as_str))
+                    .any(|source| {
+                        session.parent.as_deref() == Some(source)
+                            || session
+                                .session_id
+                                .strip_prefix(source)
+                                .is_some_and(|rest| rest.starts_with('.'))
+                    })
+                && !finished(state, &session.session_id)
+        })
+        .map(|session| session.session_id.clone())
+        .collect();
+    if live.len() > MAX_LEFT {
+        return Err(error(
+            "session_live",
+            &format!(
+                "More than {MAX_LEFT} subagents of that session have not ended; adopt once they have"
+            ),
+        ));
+    }
+    // A subagent another session adopted is that session's to credit, even
+    // when its adapter has not yet rewritten the journal.
+    let mut kept: Vec<String> = state
+        .adoptions
+        .values()
+        .filter(|adoption| {
+            adoption.workspace_id == me.workspace_id
+                && adoption.session_id != session_id
+                && !earlier.contains(&adoption.from)
+                && [from]
+                    .into_iter()
+                    .chain(earlier.iter().map(String::as_str))
+                    .any(|source| {
+                        adoption
+                            .from
+                            .strip_prefix(source)
+                            .is_some_and(|rest| rest.starts_with('.'))
+                    })
+        })
+        .map(|adoption| adoption.from.clone())
+        .collect();
+    kept.sort();
+    if kept.len() > MAX_LEFT {
+        return Err(error(
+            "adoption_chain",
+            &format!(
+                "Other sessions adopted more than {MAX_LEFT} subagents of that session; commit part of the work, then adopt again"
+            ),
+        ));
+    }
+    let root = state
+        .workspaces
+        .get(&me.workspace_id)
+        .map(|workspace| workspace.root.clone())
+        .unwrap_or_default();
+    if let Some(adoption) = state.adoptions.get(from) {
+        if adoption.session_id != session_id {
+            return Err(error(
+                "already_adopted",
+                &format!(
+                    "Session {} already adopted that session's work; adopt from {} once it has ended",
+                    adoption.session_id, adoption.session_id
+                ),
+            ));
+        }
+        return Ok(Decision {
+            events: Vec::new(),
+            outcome: Outcome::Adopted {
+                adoption: adoption.clone(),
+                root,
+                recorded: false,
+                live,
+                earlier,
+                kept,
+            },
+        });
+    }
+    let adoption = Adoption {
+        from: from.to_owned(),
+        session_id: session_id.to_owned(),
+        workspace_id: me.workspace_id.clone(),
+        reason: adopt_reason(state, &me.workspace_id, session_id, from),
+        at_ms: now_ms,
+        generation: state.generation,
+    };
+    Ok(Decision {
+        events: vec![Event::SessionAdopted {
+            adoption: adoption.clone(),
+        }],
+        outcome: Outcome::Adopted {
+            adoption,
+            root,
+            recorded: true,
+            live,
+            earlier,
+            kept,
+        },
+    })
+}
+
+/// Why `session_id` may be continuing `from`'s task, newest evidence
+/// first: a message `from` sent it (addressed to it, or a handoff it took),
+/// then the same task line.
+fn adopt_reason(
+    state: &State,
+    workspace_id: &str,
+    session_id: &str,
+    from: &str,
+) -> Option<AdoptReason> {
+    let held = state.messages.get(workspace_id).into_iter().flatten();
+    let history = state
+        .message_history
+        .get(workspace_id)
+        .into_iter()
+        .flatten();
+    let handoff = held.chain(history).find(|message| {
+        message.from.as_deref() == Some(from)
+            && !message.retracted
+            && match &message.to {
+                Recipient::Session { session_id: to } => to == session_id,
+                Recipient::NextSession {} => {
+                    message.acknowledged.iter().any(|taker| taker == session_id)
+                }
+                Recipient::Everyone {} => false,
+            }
+    });
+    if let Some(message) = handoff {
+        return Some(AdoptReason::Handoff {
+            message_id: message.message_id.clone(),
+        });
+    }
+    let task = |id: &str| {
+        state
+            .activity
+            .get(id)
+            .and_then(|activity| activity.summary.as_deref())
+    };
+    (task(from).is_some() && task(from) == task(session_id)).then_some(AdoptReason::SameTask {})
+}
+
+/// Of `left`, the sessions a briefing names as having left uncommitted
+/// work: of `session_id`'s workspace, over, not adopted, and neither the
+/// session nor one of its own subagents.
+fn left_work(state: &State, session_id: &str, left: &[String]) -> Result<Vec<LeftWork>, CoreError> {
+    if left.len() > MAX_LEFT {
+        return Err(error(
+            "invalid_left",
+            &format!("A briefing names at most {MAX_LEFT} sessions that left work"),
+        ));
+    }
+    for id in left {
+        validate_id(id, "session ID")?;
+    }
+    if left.is_empty() {
+        return Ok(Vec::new());
+    }
+    let me = known_session(state, session_id)?;
+    let mut found: Vec<LeftWork> = Vec::new();
+    for id in left {
+        let Some(session) = state.sessions.get(id) else {
+            continue;
+        };
+        if id == session_id
+            || session.parent.as_deref() == Some(session_id)
+            || session.workspace_id != me.workspace_id
+            || !finished(state, id)
+            || state.adoptions.contains_key(id)
+            || found.iter().any(|work| &work.session_id == id)
+        {
+            continue;
+        }
+        found.push(LeftWork {
+            session_id: id.clone(),
+            summary: state
+                .activity
+                .get(id)
+                .and_then(|activity| activity.summary.clone()),
+        });
+        if found.len() == BRIEF_LEFT_WORK {
+            break;
+        }
+    }
+    Ok(found)
 }
 
 fn validate_workspace_git(state: &State, git: &WorkspaceGit) -> Result<(), CoreError> {
@@ -8772,6 +10600,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             workspace_id,
             paths,
             peer_session_id,
+            input_digest,
             at_ms,
             generation,
             ..
@@ -8783,13 +10612,17 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 || peer_session_id
                     .as_ref()
                     .is_some_and(|peer| peer.len() > 200)
+                || input_digest
+                    .as_ref()
+                    .is_some_and(|digest| !is_hex_digest(digest, 64))
             {
                 return Err(error(
                     "invalid_event",
-                    "A refusal keeps at most 8 paths and one peer session ID",
+                    "A refusal keeps at most 8 paths, one peer session ID and a SHA-256 input digest",
                 ));
             }
             status_line::remember(state, workspace_id, *at_ms, *generation);
+            recent::remember_refusal(state, workspace_id, paths, *at_ms, *generation);
         }
         Event::WorkspaceRegistered { workspace } => {
             validate_workspace(state, workspace)?;
@@ -8806,6 +10639,15 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         }
         Event::SessionRegistered { session } => {
             validate_session_registration(state, session)?;
+            // A new registration, or one in another workspace, has written
+            // nothing yet; a daemon restart's registers again in place.
+            if state
+                .sessions
+                .get(&session.session_id)
+                .is_none_or(|old| old.workspace_id != session.workspace_id)
+            {
+                state.first_writes.remove(&session.session_id);
+            }
             state
                 .sessions
                 .insert(session.session_id.clone(), session.clone());
@@ -8922,7 +10764,11 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             // decisions rather than rejecting an existing event log.
             if observation.result == ToolResult::Succeeded {
                 if !observation.paths.is_empty() {
-                    wrote_in(state, &observation.workspace_id);
+                    wrote_in(
+                        state,
+                        &observation.workspace_id,
+                        Some(&observation.session_id),
+                    );
                 }
                 let activity = activity_mut(state, &observation.session_id);
                 activity.wrote_since_boundary |= !observation.paths.is_empty();
@@ -9042,6 +10888,25 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             known_session(state, session_id)?;
             activity_mut(state, session_id).ended = true;
             state.intents.remove(session_id);
+        }
+        Event::SessionAdopted { adoption } => {
+            let adopter = known_session(state, &adoption.session_id)?;
+            let ended = known_session(state, &adoption.from)?;
+            if adoption.from == adoption.session_id
+                || adopter.workspace_id != adoption.workspace_id
+                || ended.workspace_id != adoption.workspace_id
+            {
+                return Err(error(
+                    "invalid_event",
+                    "An adoption names two different sessions of its workspace",
+                ));
+            }
+            if let Some(AdoptReason::Handoff { message_id }) = &adoption.reason {
+                validate_request_id(message_id)?;
+            }
+            state
+                .adoptions
+                .insert(adoption.from.clone(), adoption.clone());
         }
         // Boundaries in the log. The admissions a stop released ended in
         // their own `LeaseCompleted` events.
@@ -9430,6 +11295,31 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             changes.insert(0, change.clone());
             changes.truncate(MAX_CHECKOUTS);
         }
+        Event::CheckoutRunObserved { run } => {
+            validate_checkout_run(state, run)?;
+            let runs = state
+                .checkout_runs
+                .entry(run.workspace_id.clone())
+                .or_default();
+            runs.insert(0, run.clone());
+            // Commits add runs and no change, so the two lists move apart.
+            // An older run stays while it explains a change still held, so
+            // that change keeps its attribution.
+            let changes = state
+                .checkouts
+                .get(&run.workspace_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let explaining: BTreeSet<usize> = changes
+                .iter()
+                .filter_map(|change| runs.iter().position(|run| run.explains(change, changes)))
+                .collect();
+            let mut index = 0;
+            runs.retain(|_| {
+                index += 1;
+                index <= MAX_CHECKOUT_RUNS || explaining.contains(&(index - 1))
+            });
+        }
         Event::UncoordinatedChanged { change } => {
             validate_uncoordinated(state, change)?;
             if !change.delivered.is_empty() {
@@ -9473,8 +11363,11 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             // news to no dependent, so it is not held for briefings, recaps,
             // break alerts or the dashboard, and an addition alone does not
             // replace the file's held notice or open a workspace's entry.
+            // A private definition moved with its file is history only too.
+            follow_renames(state, notice);
             let mut held = notice.clone();
-            held.changes.retain(|change| change.change != "added");
+            held.changes
+                .retain(|change| change.change != "added" && !change.private);
             if !held.changes.is_empty() {
                 let notices = state
                     .interface_notices
@@ -9486,14 +11379,68 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 notices.truncate(MAX_NOTICES);
             }
         }
-        Event::CheckRecorded { check } => {
+        Event::InterfaceDependentsFound {
+            notice_workspace_id,
+            notice_id,
+            files,
+        } => {
+            if files.len() > NOTICE_DEPENDENTS {
+                return Err(error(
+                    "invalid_event",
+                    "At most 32 dependent files are found at once",
+                ));
+            }
+            for file in files {
+                validate_relative_path(&file.path)?;
+            }
+            // A notice replaced or dropped since then has nothing to add to.
+            if let Some(notice) = state
+                .interface_notices
+                .get_mut(notice_workspace_id)
+                .and_then(|notices| notices.iter_mut().find(|n| n.notice_id == *notice_id))
+            {
+                for file in files {
+                    if notice.elsewhere.len() < NOTICE_DEPENDENTS
+                        && !notice.elsewhere.contains(file)
+                    {
+                        notice.elsewhere.push(file.clone());
+                    }
+                }
+            }
+        }
+        Event::CheckRecorded { check, tests } => {
             validate_check(state, check)?;
+            if let Some(kept) = tests {
+                let passed = match check.result {
+                    CheckResult::Passed {} => true,
+                    CheckResult::Failed { .. } => false,
+                    CheckResult::Inconclusive {} => {
+                        return Err(error(
+                            "invalid_event",
+                            "An inconclusive record has no test results",
+                        ));
+                    }
+                };
+                if !check.inputs.is_empty() || !flaky::is_command_id(&kept.command_id) {
+                    return Err(error(
+                        "invalid_event",
+                        "Test results belong to a working-tree record and name their command's identity",
+                    ));
+                }
+                flaky::validate_test_results(&kept.results, passed)?;
+            }
             let records = state.checks.entry(check.workspace_id.clone()).or_default();
             // One record per name and tree: a rerun replaces the earlier result.
             records
                 .retain(|record| !(record.name == check.name && record.tree_oid == check.tree_oid));
             records.insert(0, check.clone());
             records.truncate(MAX_CHECKS);
+            // Kept only when no write was counted after the run took its
+            // count; an earlier version also stored results whose count had
+            // moved, and on replay they are no baseline either.
+            let writes = state.writes.get(&check.workspace_id).copied().unwrap_or(0);
+            let kept = tests.as_ref().filter(|tests| tests.writes_before == writes);
+            classes::keep(state, &check.workspace_id, &check.check_id, kept);
         }
         Event::AutoCheckEnabled { check } => {
             validate_auto_check(state, check)?;
@@ -9815,6 +11762,26 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             }
             activity_mut(state, session_id).briefed = Some(signature.clone());
         }
+        Event::InflightDelivered { session_id, keys } => {
+            current_session(state, session_id)?;
+            if keys.is_empty()
+                || keys.len() > INFLIGHT_LINES
+                || keys
+                    .iter()
+                    .any(|key| key.is_empty() || key.len() > 64 || !key.is_ascii())
+            {
+                return Err(error(
+                    "invalid_event",
+                    "A delivery names 1 to 3 in-flight keys of at most 64 ASCII bytes",
+                ));
+            }
+            let told = &mut activity_mut(state, session_id).inflight_told;
+            told.retain(|held| !keys.contains(held));
+            for key in keys.iter().rev() {
+                told.insert(0, key.clone());
+            }
+            told.truncate(MAX_INFLIGHT_TOLD);
+        }
         Event::DiskObserved { observation } => {
             validate_disk_observation(state, observation)?;
             // A first baseline is not a change. Anything else means the
@@ -9824,7 +11791,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 .as_ref()
                 .is_some_and(|before| before != &observation.after);
             if changed {
-                wrote_in(state, &observation.workspace_id);
+                wrote_in(state, &observation.workspace_id, None);
             }
             if changed && let Some(records) = state.checks.get_mut(&observation.workspace_id) {
                 for record in records.iter_mut().filter(|record| record.inputs.is_empty()) {
@@ -9981,15 +11948,93 @@ pub fn validate_calls(calls: &[CallSite]) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Signature changes to functions that another live session of this
-/// session's workspace made, in this generation and within the briefing
-/// horizon, that this session has not been alerted to: `(notice, change,
-/// after's arity, the peer)`. Newest notice first.
+/// Where a notice of another worktree stands against the asking session's
+/// checkout, as Git answers it (issue #217).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// The notice's file differs from its worktree's `HEAD`: not committed.
+    Uncommitted,
+    /// Committed on its worktree's branch, in a commit the asking
+    /// checkout's `HEAD` does not contain.
+    Unmerged,
+    /// The asking checkout's `HEAD` contains the commit.
+    Merged,
+}
+
+/// Standings by `(workspace ID, notice ID)`. A notice missing from it, such
+/// as one Git could not answer for in time, keeps the uncommitted rules.
+pub type Standings = BTreeMap<(String, String), Standing>;
+
+/// Notices of other worktrees whose standing one write check asks Git for,
+/// at most.
+pub const MAX_STANDING_QUESTIONS: usize = 8;
+
+/// A notice of another worktree whose standing a write check asks Git for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandingQuestion {
+    pub workspace_id: String,
+    pub notice_id: String,
+    /// The notice's file, relative to that worktree's root.
+    pub path: String,
+}
+
+/// The notices of other worktrees that `calls` could be alerted to if they
+/// were committed and not merged: those the uncommitted rules would also
+/// keep, and those they leave out only because the change is older than the
+/// briefing horizon or its session has ended. At most
+/// `MAX_STANDING_QUESTIONS`, each workspace's newest first. Usually none, and
+/// then Git is not asked.
+pub fn standing_questions(
+    state: &State,
+    session_id: &str,
+    calls: &[CallSite],
+    now_ms: u64,
+) -> Result<Vec<StandingQuestion>, CoreError> {
+    validate_calls(calls)?;
+    let own = &current_session(state, session_id)?.workspace_id;
+    let mut questions: Vec<StandingQuestion> = Vec::new();
+    for (notice, change, _) in alertable(state, session_id, now_ms, None)? {
+        let asked = questions.iter().any(|question| {
+            question.workspace_id == notice.workspace_id && question.notice_id == notice.notice_id
+        });
+        if notice.workspace_id == *own
+            || asked
+            || !calls.iter().any(|call| call.name == change.name)
+        {
+            continue;
+        }
+        if questions.len() == MAX_STANDING_QUESTIONS {
+            break;
+        }
+        questions.push(StandingQuestion {
+            workspace_id: notice.workspace_id.clone(),
+            notice_id: notice.notice_id.clone(),
+            path: notice.path.clone(),
+        });
+    }
+    Ok(questions)
+}
+
+/// Changes to functions that another session made in this session's
+/// workspace or in another worktree of its repository (issue #194), in this
+/// generation, that this session has not been alerted to: `(notice, change,
+/// the peer)`. A signature change counts only with the new parameter count;
+/// a rename and a removal always count. The session's own workspace first,
+/// each workspace's newest notice first.
+///
+/// An uncommitted change counts within the briefing horizon while its
+/// session is live. Another worktree's change that `standings` says is
+/// committed and not merged into this session's checkout counts whatever
+/// its age and whether or not its session has ended, and one it says is
+/// merged never counts (issue #217). With `standings` `None` (asking which
+/// notices Git should answer for), every other worktree's change counts
+/// as if committed and not merged.
 fn alertable<'a>(
     state: &'a State,
     session_id: &str,
     now_ms: u64,
-) -> Result<Vec<(&'a InterfaceNotice, &'a InterfaceChange, Arity, &'a str)>, CoreError> {
+    standings: Option<&Standings>,
+) -> Result<Vec<(&'a InterfaceNotice, &'a InterfaceChange, &'a str)>, CoreError> {
     let me = current_session(state, session_id)?;
     let alerted = state
         .activity
@@ -10012,92 +12057,184 @@ fn alertable<'a>(
                 .is_none_or(|activity| !activity.ended)
     };
     let mut found = Vec::new();
-    for notice in state
+    let own = state.interface_notices.get(&me.workspace_id);
+    let others = state
         .interface_notices
-        .get(&me.workspace_id)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-    {
+        .iter()
+        .filter(|(workspace_id, _)| {
+            **workspace_id != me.workspace_id
+                && related_workspace(state, &me.workspace_id, workspace_id)
+        })
+        .map(|(_, notices)| notices);
+    for notice in own.into_iter().chain(others).flatten() {
         let Some(peer) = notice.by_session.as_deref() else {
             continue;
         };
+        let standing = if notice.workspace_id == me.workspace_id {
+            Some(Standing::Uncommitted)
+        } else {
+            match standings {
+                None => Some(Standing::Unmerged),
+                Some(standings) => standings
+                    .get(&(notice.workspace_id.clone(), notice.notice_id.clone()))
+                    .copied(),
+            }
+        };
+        let committed = match standing {
+            Some(Standing::Merged) => continue,
+            Some(Standing::Unmerged) => true,
+            Some(Standing::Uncommitted) | None => false,
+        };
         if notice.generation != state.generation
-            || now_ms.saturating_sub(notice.at_ms) > BRIEF_HORIZON_MS
             || peer == session_id
             || alerted.contains(&notice.notice_id)
-            || !live(peer)
+            || (!committed
+                && (now_ms.saturating_sub(notice.at_ms) > BRIEF_HORIZON_MS || !live(peer)))
         {
             continue;
         }
         for change in &notice.changes {
-            if let (true, Some(arity)) = (
-                change.change == "signature_changed"
-                    && matches!(change.kind.as_str(), "function" | "method"),
-                change.after_arity,
-            ) {
-                found.push((notice, change, arity, peer));
+            let alerts = match change.change.as_str() {
+                "signature_changed" => change.after_arity.is_some(),
+                "renamed" => change.after_name.is_some(),
+                "removed" => true,
+                _ => false,
+            };
+            if alerts && matches!(change.kind.as_str(), "function" | "method") {
+                found.push((notice, change, peer));
             }
         }
     }
     Ok(found)
 }
 
-/// The names among `calls` that a write check must look up in the index:
-/// those of a change it could alert to. Usually none, and then nothing is
-/// looked up.
+/// The names among `calls` that a write check must look up in the index,
+/// by the workspace whose index holds the change: those of a change it
+/// could alert to, and a renamed function's new name. `standings` holds
+/// Git's answers for `standing_questions`. Usually none, and then nothing
+/// is looked up.
 pub fn call_candidates(
     state: &State,
     session_id: &str,
     calls: &[CallSite],
+    standings: &Standings,
     now_ms: u64,
-) -> Result<BTreeSet<String>, CoreError> {
+) -> Result<BTreeMap<String, BTreeSet<String>>, CoreError> {
     validate_calls(calls)?;
-    Ok(alertable(state, session_id, now_ms)?
-        .into_iter()
-        .filter(|(_, change, _, _)| calls.iter().any(|call| call.name == change.name))
-        .map(|(_, change, _, _)| change.name.clone())
-        .collect())
+    let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (notice, change, _) in alertable(state, session_id, now_ms, Some(standings))? {
+        if calls.iter().any(|call| call.name == change.name) {
+            candidates
+                .entry(notice.workspace_id.clone())
+                .or_default()
+                .extend(
+                    [&change.name]
+                        .into_iter()
+                        .chain(&change.after_name)
+                        .cloned(),
+                );
+        }
+    }
+    Ok(candidates)
 }
 
-/// The calls that do not fit a changed signature, at most
-/// `MAX_CALL_BREAKS`, from notices this session was not alerted to. A
-/// change counts only while `current` (the index's definitions of the
-/// called names) still holds its new signature in its file, so a notice
-/// the index has moved past is never used. Pure; the caller records the
-/// alert.
+/// What one workspace's index holds of a write check's candidate names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexedNames {
+    /// Every definition of a candidate name.
+    pub definitions: Vec<SymbolRef>,
+    /// The index reads every supported file of the workspace at its current
+    /// content (`GraphCoverage::blind_in_scope` is zero).
+    pub complete: bool,
+}
+
+/// The calls a peer's recent change makes wrong, at most `MAX_CALL_BREAKS`,
+/// from notices this session was not alerted to. `current` holds, by
+/// workspace, the index's definitions of every candidate name
+/// (`call_candidates`), and a change counts only while it is still true in
+/// the index of the workspace it was made in, so a notice the index has
+/// moved past is never used, and a notice of a workspace missing from
+/// `current` is not used at all:
+///
+/// - a signature change, while its file holds the new signature; a call
+///   whose count does not fit it breaks;
+/// - a rename, while its file holds the new name's signature and no
+///   definition of the old name is left anywhere; every call of the old
+///   name breaks;
+/// - a removal, while no definition of the name is left anywhere; every
+///   call of it breaks.
+///
+/// "No definition left anywhere" is read from that workspace's index, so a
+/// rename or a removal counts only when it is `complete`. A name moved into
+/// a file not indexed yet, partial or too large is otherwise missing from
+/// `current` without being gone. A change made in another worktree is
+/// judged in that worktree: the session's own checkout still defines the
+/// old name until the branches meet, which is the break being told.
+///
+/// A same-count change is not alerted: calls are matched by name, and
+/// without the argument types at a call site nothing tells a right call
+/// from a wrong one (ADR 0029). `standings` is as for `call_candidates`.
+/// Pure; the caller records the alert.
 pub fn call_breaks(
     state: &State,
     session_id: &str,
     calls: &[CallSite],
-    current: &[SymbolRef],
+    standings: &Standings,
+    current: &BTreeMap<String, IndexedNames>,
     now_ms: u64,
 ) -> Result<Vec<CallBreak>, CoreError> {
     validate_calls(calls)?;
+    let own_workspace = &current_session(state, session_id)?.workspace_id;
     let mut breaks = Vec::new();
-    for (notice, change, arity, peer) in alertable(state, session_id, now_ms)? {
-        let after = change.after.as_deref().unwrap_or("");
-        let still = current.iter().any(|symbol| {
-            symbol.path == notice.path && symbol.name == change.name && symbol.signature == after
-        });
-        if !still {
+    for (notice, change, peer) in alertable(state, session_id, now_ms, Some(standings))? {
+        let Some(indexed) = current.get(&notice.workspace_id) else {
             continue;
-        }
-        for call in calls
-            .iter()
-            .filter(|call| call.name == change.name && !arity.fits(call.args, call.member))
-        {
+        };
+        let gone = |name: &str| {
+            indexed.complete && !indexed.definitions.iter().any(|symbol| symbol.name == name)
+        };
+        let holds = |path: &str, name: &str, signature: &str| {
+            indexed.definitions.iter().any(|symbol| {
+                symbol.path == path && symbol.name == name && symbol.signature == signature
+            })
+        };
+        let worktree = (notice.workspace_id != *own_workspace)
+            .then(|| state.workspaces.get(&notice.workspace_id))
+            .flatten()
+            .map(|workspace| workspace.root.clone());
+        let after = change.after.as_deref().unwrap_or("");
+        // `Some`: a call breaks when its count does not fit; `None`: every
+        // call of the name breaks.
+        let fit: Option<Arity> = match change.change.as_str() {
+            "signature_changed" => match change.after_arity {
+                Some(arity) if holds(&notice.path, &change.name, after) => Some(arity),
+                _ => continue,
+            },
+            "renamed" => match &change.after_name {
+                Some(to) if holds(&notice.path, to, after) && gone(&change.name) => None,
+                _ => continue,
+            },
+            "removed" if gone(&change.name) => None,
+            _ => continue,
+        };
+        for call in calls.iter().filter(|call| {
+            call.name == change.name && fit.is_none_or(|arity| !arity.fits(call.args, call.member))
+        }) {
             if breaks.len() == MAX_CALL_BREAKS {
                 return Ok(breaks);
             }
             breaks.push(CallBreak {
                 notice_id: notice.notice_id.clone(),
                 call: call.clone(),
+                change: change.change.clone(),
                 defined_in: notice.path.clone(),
+                worktree: worktree.clone(),
                 by_session: peer.to_owned(),
                 before: change.before.clone().unwrap_or_default(),
                 after: after.to_owned(),
+                after_name: change.after_name.clone(),
                 before_arity: change.before_arity,
-                after_arity: arity,
+                after_arity: change.after_arity,
                 age_ms: now_ms.saturating_sub(notice.at_ms),
             });
         }
@@ -10461,10 +12598,58 @@ fn validate_checkout(state: &State, change: &CheckoutChange) -> Result<(), CoreE
         &change.workspace_id,
         change.generation,
     )?;
-    for reference in [&change.from_branch, &change.to_branch]
-        .into_iter()
-        .flatten()
+    validate_checkout_state(
+        [&change.from_branch, &change.to_branch],
+        [&change.from_head, &change.to_head],
+    )?;
+    if change.from_branch == change.to_branch
+        && change.from_head == change.to_head
+        && change.files == 0
     {
+        return Err(error(
+            "invalid_checkout",
+            "A checkout change needs a different branch or HEAD, or changed files",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_checkout_run(state: &State, run: &CheckoutRun) -> Result<(), CoreError> {
+    validate_fact_header(state, &run.run_id, &run.workspace_id, run.generation)?;
+    if state
+        .sessions
+        .get(&run.session_id)
+        .is_none_or(|session| session.workspace_id != run.workspace_id)
+    {
+        return Err(error(
+            "unknown_session",
+            "A checkout run names a session registered in its workspace",
+        ));
+    }
+    validate_checkout_state([&run.to_branch], [&run.to_head])?;
+    if run.command.as_ref().is_some_and(|command| {
+        command.len() > MAX_CHECKOUT_COMMAND_BYTES || command.chars().any(char::is_control)
+    }) {
+        return Err(error(
+            "invalid_command",
+            "A checkout run's command is at most 256 bytes without control characters",
+        ));
+    }
+    if run.started_ms > run.finished_ms {
+        return Err(error(
+            "invalid_event",
+            "A checkout run cannot start after it finished",
+        ));
+    }
+    Ok(())
+}
+
+/// Branches are nonempty `refs/heads/` names; heads are Git object IDs.
+fn validate_checkout_state<const B: usize, const H: usize>(
+    branches: [&Option<String>; B],
+    heads: [&Option<String>; H],
+) -> Result<(), CoreError> {
+    for reference in branches.into_iter().flatten() {
         if reference.len() > 512
             || reference.chars().any(char::is_control)
             || !reference
@@ -10477,17 +12662,8 @@ fn validate_checkout(state: &State, change: &CheckoutChange) -> Result<(), CoreE
             ));
         }
     }
-    for oid in [&change.from_head, &change.to_head].into_iter().flatten() {
+    for oid in heads.into_iter().flatten() {
         validate_oid(oid)?;
-    }
-    if change.from_branch == change.to_branch
-        && change.from_head == change.to_head
-        && change.files == 0
-    {
-        return Err(error(
-            "invalid_checkout",
-            "A checkout change needs a different branch or HEAD, or changed files",
-        ));
     }
     Ok(())
 }
@@ -10577,6 +12753,21 @@ fn validate_no_parent_claims(state: &State, workspace: &Workspace) -> Result<(),
         let Some(parent) = state.workspaces.get(&lease.workspace_id) else {
             continue;
         };
+        // A verified overlap whose roots do not overlap as text, such as a
+        // registered root that is now a link: the core cannot tell which of
+        // the lease's paths lie under this root, so any current admission
+        // there makes the registration wait.
+        if !roots_overlap(&parent.root, &workspace.root)
+            && workspace
+                .verified_overlaps
+                .binary_search(&parent.workspace_id)
+                .is_ok()
+        {
+            return Err(error(
+                "workspace_in_use",
+                "A current admission in a workspace this root overlaps through a link may cover it; complete it or wait for expiry, then start a new registration attempt with a new request ID",
+            ));
+        }
         let prefix = if parent.root.ends_with('/') {
             parent.root.clone()
         } else {
@@ -10631,10 +12822,13 @@ fn validate_workspace_link_targets(
                 "A verified overlap must name an already registered workspace",
             )
         })?;
-        if id == workspace_id || other.root == root || !roots_overlap(&other.root, root) {
+        // The roots need not overlap as text: a registered root kept as
+        // given can be a link to a directory around or inside `root`, and
+        // only the adapter can resolve it.
+        if id == workspace_id || other.root == root {
             return Err(error(
                 "invalid_workspace_verification",
-                "Verified overlaps must name distinct, overlapping physical roots; identical roots must share one workspace ID",
+                "Verified overlaps must name distinct physical roots; identical roots must share one workspace ID",
             ));
         }
     }

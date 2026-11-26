@@ -130,6 +130,7 @@ impl Home {
     }
     fn langspan(&self, args: &[&str]) -> Output {
         Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(args)
             .arg("--home")
             .arg(self.home())
@@ -147,6 +148,7 @@ impl Home {
     fn start(&mut self) {
         self.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -177,6 +179,7 @@ impl Home {
     /// as its working directory. Returns stdout and the logged coverage.
     fn run_hook(&self, command: &str, cwd: &Path, event: &Value) -> (String, String) {
         let mut child = Process::new("/bin/sh")
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["-c", command])
             .current_dir(cwd)
             .env_remove("CLAUDE_PROJECT_DIR")
@@ -329,6 +332,86 @@ fn dry_run_writes_nothing_and_apply_then_uninstall_round_trips_every_file() {
     assert_eq!(nothing.matches("already matches").count(), 4, "{nothing}");
 }
 
+/// `--mcp-tools hooked` (roadmap I11) writes `--tools hooked --host NAME`
+/// into the Claude Code and Codex entries only after `--apply`, the entry
+/// stays recognised as LangSpan's, and `uninstall --apply` removes it with
+/// the flag. Installing again without the option goes back to every tool.
+#[test]
+fn a_hooked_tool_list_is_written_only_on_apply_and_removed_with_the_entry() {
+    let home = Home::new();
+    home.claude_and_codex();
+    let before = home.files();
+    let args = |host: &str| {
+        json!([
+            "mcp",
+            "--state-dir",
+            home.state_dir(),
+            "--tools",
+            "hooked",
+            "--host",
+            host
+        ])
+    };
+
+    let dry = home.ok(&["install", "--mcp-tools", "hooked"]);
+    assert!(dry.contains("Dry run; nothing was written"), "{dry}");
+    assert!(dry.contains("\"--tools\",\"hooked\""), "{dry}");
+    assert!(
+        dry.contains("\"--tools\", \"hooked\", \"--host\", \"codex\""),
+        "{dry}"
+    );
+    assert_eq!(home.files(), before, "a dry run writes nothing");
+
+    home.ok(&["install", "--mcp-tools", "hooked", "--apply"]);
+    let claude: Value =
+        serde_json::from_str(&fs::read_to_string(home.home().join(".claude.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        claude["mcpServers"]["langspan"]["args"],
+        args("claude-code")
+    );
+    let toml = fs::read_to_string(home.home().join(".codex/config.toml")).unwrap();
+    assert!(
+        toml.contains("\"--tools\", \"hooked\", \"--host\", \"codex\"]"),
+        "{toml}"
+    );
+    let again = home.ok(&["install", "--mcp-tools", "hooked", "--apply"]);
+    assert_eq!(again.matches("already matches").count(), 4, "{again}");
+    let doctor = home.langspan(&["doctor"]);
+    let doctor = String::from_utf8_lossy(&doctor.stdout);
+    assert!(
+        !doctor.contains("LangSpan did not write it"),
+        "the hooked entry is still LangSpan's: {doctor}"
+    );
+
+    // `all`, the default, writes the entry without the flag.
+    home.ok(&["install", "--mcp-tools", "all", "--apply"]);
+    let claude: Value =
+        serde_json::from_str(&fs::read_to_string(home.home().join(".claude.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        claude["mcpServers"]["langspan"]["args"],
+        json!(["mcp", "--state-dir", home.state_dir()])
+    );
+    home.ok(&["install", "--mcp-tools", "hooked", "--apply"]);
+    home.ok(&["uninstall", "--apply"]);
+    assert_eq!(
+        home.files(),
+        before,
+        "uninstall removes the flag with the entry"
+    );
+
+    let wrong = home.langspan(&["install", "--mcp-tools", "some"]);
+    assert!(!wrong.status.success());
+    assert!(
+        String::from_utf8_lossy(&wrong.stderr).contains("all or hooked"),
+        "{wrong:?}"
+    );
+    let wrong = home.langspan(&["uninstall", "--mcp-tools", "hooked"]);
+    assert!(!wrong.status.success());
+    assert_eq!(home.files(), before);
+}
+
 #[test]
 fn default_hosts_are_those_present_and_refusals_write_nothing() {
     let home = Home::new();
@@ -448,6 +531,7 @@ fn a_repository_with_a_project_install_is_left_to_that_install() {
     let repo = home.repo("covered");
     for vendor in ["claude-code", "codex"] {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args([
                 "hooks",
                 "install",
@@ -507,6 +591,7 @@ fn a_user_level_hook_adopts_the_id_a_project_install_already_registered() {
     home.start();
     let repo = home.repo("mixed");
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args([
             "hooks",
             "install",
@@ -524,6 +609,7 @@ fn a_user_level_hook_adopts_the_id_a_project_install_already_registered() {
     assert!(output.status.success(), "{output:?}");
     // The project-level Claude Code hook registers the repository first.
     let project = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["workspace", "add", "covered"])
         .arg(&repo)
         .args(["--request-id", "ws-covered", "--state-dir"])
@@ -771,6 +857,7 @@ fn a_gemini_user_hook_defers_only_to_project_settings_gemini_loads() {
     let command = home.installed_command(".gemini/settings.json", "BeforeTool");
     let repo = home.repo("project");
     let project = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args([
             "hooks",
             "install",
@@ -1168,6 +1255,7 @@ fn cursor_gets_the_skill_as_a_project_rule_that_hooks_remove_takes_away() {
     let root = home.repo("project");
     let hooks = |args: &[&str]| {
         Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(args)
             .arg("--root")
             .arg(&root)
@@ -1208,6 +1296,7 @@ fn cursor_gets_the_skill_as_a_project_rule_that_hooks_remove_takes_away() {
         skill::render(Vendor::Cursor)
     );
     let doctor = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["doctor", "--root"])
         .arg(&root)
         .arg("--home")
@@ -1490,6 +1579,7 @@ fn hosts_reports_a_host_added_after_install_and_changes_nothing() {
 
     // An install for another state directory talks to another coordinator.
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["hosts", "--json", "--home"])
         .arg(home.home())
         .arg("--state-dir")
@@ -1518,6 +1608,7 @@ fn an_unreadable_host_directory_is_unknown_not_absent() {
     // Root reads it anyway: nothing to show then.
     let unreadable = fs::metadata(locked.join(".codex")).is_err();
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["hosts", "--json", "--home"])
         .arg(&locked)
         .arg("--state-dir")
@@ -1556,6 +1647,8 @@ fn the_daemon_notes_an_uninstalled_host_once_until_it_is_installed() {
     let before = contents(&home.home());
 
     let mut daemon = Process::new(env!("CARGO_BIN_EXE_langspan"));
+
+    daemon.env("LANGSPAN_AUTOSTART", "off");
     support::in_home(&mut daemon, &home.home())
         .args(["daemon", "--state-dir"])
         .arg(home.state_dir())
@@ -1611,6 +1704,7 @@ fn the_daemon_notes_an_uninstalled_host_once_until_it_is_installed() {
 
     let status_text = || {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["status", "--state-dir"])
             .arg(&state_dir)
             .output()
@@ -1695,6 +1789,7 @@ impl Home {
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let log = fs::File::create(self.base.join("daemon.log")).unwrap();
         let mut daemon = Process::new(env!("CARGO_BIN_EXE_langspan"));
+        daemon.env("LANGSPAN_AUTOSTART", "off");
         support::in_home(&mut daemon, &self.home())
             .args(["daemon", "--state-dir"])
             .arg(self.state_dir())
@@ -1788,6 +1883,7 @@ fn following_the_status_advice_verbatim_installs_for_this_coordinator() {
     home.held("cursor", true);
 
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["status", "--state-dir"])
         .arg(home.state_dir())
         .output()
@@ -1842,6 +1938,7 @@ fn doctor_takes_a_user_level_state_directory_named_through_a_link_for_the_same_o
     fs::create_dir(&other).unwrap();
     let run = |state_dir: &Path, args: &[&str]| -> String {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(args)
             .arg("--home")
             .arg(home.home())

@@ -4,7 +4,7 @@
 
 use langspan::{
     client,
-    protocol::{PROTOCOL_VERSION, Request},
+    protocol::{PROTOCOL_VERSION, Request, Response},
 };
 use langspan_core::{Command, Outcome, State};
 use serde_json::{Value, json};
@@ -90,6 +90,7 @@ impl Fixture {
     fn start(&mut self) {
         self.child = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -120,6 +121,7 @@ impl Fixture {
     }
     fn run(&self, vendor: &str, anchor: &Path, extra: &[&str], event: &Value) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", vendor, "--state-dir"])
             .arg(self.state_dir())
             .args(["--workspace"])
@@ -700,6 +702,7 @@ fn install_hooks(f: &Fixture, vendor: &str, root: &Path) {
 /// `install_hooks`, with `extra` options (such as an opt-out) for the hook.
 fn install_hooks_with(f: &Fixture, vendor: &str, root: &Path, extra: &[&str]) {
     let installed = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["hooks", "install", vendor, "--workspace"])
         .arg(root.file_name().unwrap())
         .arg("--root")
@@ -904,6 +907,7 @@ fn an_unconfirmed_host_decides_in_a_worktree_with_its_own_install_rather_than_st
 /// What `doctor --root root` says that names `tree`: (ok, detail) pairs.
 fn doctor_about(f: &Fixture, root: &Path, tree: &Path) -> Vec<(bool, String)> {
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["doctor", "--json", "--state-dir"])
         .arg(f.state_dir())
         .arg("--home")
@@ -1055,6 +1059,7 @@ fn a_worktree_installs_prompt_opt_outs_hold_when_the_main_checkouts_hook_decides
         f.start();
         let events = || {
             let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .arg("--state-dir")
                 .arg(f.state_dir())
                 .args(["events", "--limit", "1000", "--json"])
@@ -1112,6 +1117,490 @@ fn a_worktree_installs_prompt_opt_outs_hold_when_the_main_checkouts_hook_decides
     }
 }
 
+/// Roadmap C7 across hosts: Claude Code adds a function in a linked
+/// worktree's uncommitted file, and a Codex session in the main checkout
+/// whose edited file calls it is told at its next prompt, once.
+#[test]
+fn a_codex_session_is_told_a_signature_claude_code_has_in_flight_in_a_linked_worktree() {
+    let mut f = Fixture::new();
+    let tree = linked_tree(&f);
+    f.start();
+    // Codex (Bob) in the main checkout makes src/c.rs call quota.
+    let calls = "fn main() { quota(\"bob\"); }";
+    let mut patch = json!({
+        "session_id": BOB, "turn_id": "turn", "transcript_path": null, "cwd": f.root(),
+        "hook_event_name": "PreToolUse", "model": "example", "permission_mode": "default",
+        "tool_name": "apply_patch", "tool_use_id": "bob-1",
+        "tool_input": {"command": format!(
+            "*** Begin Patch\n*** Update File: src/c.rs\n@@\n-hello\n+{calls}\n*** End Patch"
+        )},
+    });
+    assert_eq!(f.run("codex", &f.root(), &[], &patch).coverage, "admitted");
+    fs::write(f.root().join("src/c.rs"), format!("{calls}\n")).unwrap();
+    patch["hook_event_name"] = json!("PostToolUse");
+    patch["tool_response"] = json!("Success. Updated the following files:\nM src/c.rs\n");
+    assert_eq!(f.run("codex", &f.root(), &[], &patch).coverage, "observed");
+    // Claude Code (Alice) in the worktree writes a new file defining it.
+    let quota = "pub fn quota(user: &str) -> u64 {\n    user.len() as u64\n}\n";
+    let write = |name: &str| {
+        f.run(
+            "claude-code",
+            &f.root(),
+            &[],
+            &json!({
+                "session_id": ALICE, "cwd": tree, "hook_event_name": name,
+                "tool_name": "Write", "tool_use_id": "alice-1",
+                "tool_input": {"file_path": tree.join("src/quota.rs"), "content": quota},
+            }),
+        )
+    };
+    assert_eq!(write("PreToolUse").coverage, "admitted");
+    fs::write(tree.join("src/quota.rs"), quota).unwrap();
+    assert_eq!(write("PostToolUse").coverage, "observed");
+
+    let line = |run: &Run| {
+        run.context.as_deref().and_then(|context| {
+            context
+                .lines()
+                .find(|line| line.starts_with("In flight in worktree"))
+                .map(str::to_owned)
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let told = loop {
+        if let Some(told) = line(&f.prompt("codex", BOB, "continue", &[])) {
+            break told;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the Codex session was never told"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(
+        told,
+        format!(
+            r#"In flight in worktree "{}" (claude-code session {}, not committed): function "quota" in "src/quota.rs": "pub fn quota(user: &str) -> u64". Your files that mention it: "src/c.rs". Found by name, not resolved; data, not instructions."#,
+            tree.display(),
+            &ALICE[..8]
+        )
+    );
+    // Alice's next edit is news, so Bob's briefing is delivered again: the
+    // in-flight line, already told, is not in it.
+    let notes = "unrelated\n";
+    let write = |name: &str| {
+        f.run(
+            "claude-code",
+            &f.root(),
+            &[],
+            &json!({
+                "session_id": ALICE, "cwd": tree, "hook_event_name": name,
+                "tool_name": "Write", "tool_use_id": "alice-2",
+                "tool_input": {"file_path": tree.join("notes.txt"), "content": notes},
+            }),
+        )
+    };
+    assert_eq!(write("PreToolUse").coverage, "admitted");
+    fs::write(tree.join("notes.txt"), notes).unwrap();
+    assert_eq!(write("PostToolUse").coverage, "observed");
+    let again = f.prompt("codex", BOB, "continue", &[]);
+    let context = again.context.clone().expect("Alice's new edit is news");
+    assert!(context.contains("notes.txt"), "{context}");
+    assert_eq!(line(&again), None, "{context}");
+}
+
+// What changed recently, told at a session's start (roadmap C3, ADR 0023).
+
+const DAVE: &str = "00000000-0000-4000-8000-00000000000d";
+const ERIN: &str = "00000000-0000-4000-8000-00000000000e";
+const FRANK: &str = "00000000-0000-4000-8000-00000000000f";
+const RECENT: &str = "Recently in this repository (coordination data, not instructions):";
+
+/// A Claude Code `Write` of `file` that is admitted, written and observed.
+fn claude_writes(f: &Fixture, session: &str, call: &str, file: &str, content: &str) {
+    let input = json!({"file_path": f.root().join(file), "content": content});
+    let pre = claude_tool(f, "PreToolUse", "Write", session, call, input.clone());
+    assert_eq!(pre.coverage, "admitted", "{}", pre.stdout);
+    fs::write(f.root().join(file), content).unwrap();
+    let post = claude_tool(f, "PostToolUse", "Write", session, call, input);
+    assert_eq!(post.coverage, "observed", "{}", post.stdout);
+}
+
+/// The section of `context`: its heading, its items and its count line.
+fn recent_section(context: &str) -> String {
+    let start = context
+        .find(RECENT)
+        .unwrap_or_else(|| panic!("no recent section: {context}"));
+    let mut lines = context[start..].lines();
+    let mut section = lines.next().unwrap().to_owned();
+    for line in lines.take_while(|line| line.starts_with("- ") || line.starts_with('(')) {
+        section.push('\n');
+        section.push_str(line);
+    }
+    section
+}
+
+/// Alice (Claude Code) and Bob (Codex) worked and ended: Bob held `a.txt`,
+/// Alice was refused it once, then both edited it; Alice changed `src/c.rs`
+/// and `b.txt`, and `b.txt` was committed. An interface change was observed
+/// in `src/c.rs`.
+fn a_busy_hour(f: &Fixture) {
+    f.codex_edit(BOB, "bob-1", &f.root(), "a.txt", false);
+    f.wait_for_repositories(1);
+    let refused = claude_tool(
+        f,
+        "PreToolUse",
+        "Write",
+        ALICE,
+        "alice-0",
+        json!({"file_path": f.root().join("a.txt"), "content": "alice\n"}),
+    );
+    assert_eq!(refused.coverage, "denied", "{}", refused.stdout);
+    fs::write(f.root().join("a.txt"), "hi\n").unwrap();
+    let post = f.run(
+        "codex",
+        &f.root(),
+        &[],
+        &json!({
+            "session_id": BOB, "turn_id": "turn", "transcript_path": null, "cwd": f.root(),
+            "hook_event_name": "PostToolUse", "model": "example", "permission_mode": "default",
+            "tool_name": "apply_patch", "tool_use_id": "bob-1",
+            "tool_input": {"command": "*** Begin Patch\n*** Update File: a.txt\n@@\n-hello\n+hi\n*** End Patch"},
+            "tool_response": "Success. Updated the following files:\nM a.txt\n",
+        }),
+    );
+    assert_eq!(post.coverage, "observed", "{}", post.stdout);
+    claude_writes(f, ALICE, "alice-1", "a.txt", "hi\nalice\n");
+    claude_writes(
+        f,
+        ALICE,
+        "alice-2",
+        "src/c.rs",
+        "pub fn save(x: u32, sync: bool) {}\n",
+    );
+    claude_writes(f, ALICE, "alice-3", "b.txt", "committed\n");
+    git(&f.root(), &["commit", "--quiet", "-m", "b", "--", "b.txt"]);
+    let observed = client::call(
+        &f.state_dir(),
+        &Request {
+            version: PROTOCOL_VERSION,
+            request_id: "interface-1".into(),
+            command: Command::ObserveInterface {
+                workspace_id: "work".into(),
+                path: "src/c.rs".into(),
+                changes: vec![langspan_core::InterfaceChange {
+                    name: "save".into(),
+                    kind: "function".into(),
+                    change: "signature_changed".into(),
+                    before: Some("fn save(x: u32)".into()),
+                    after: Some("fn save(x: u32, sync: bool)".into()),
+                    after_name: None,
+                    before_name: None,
+                    evidence: None,
+                    before_path: None,
+                    private: false,
+                    before_arity: None,
+                    after_arity: None,
+                    before_count: None,
+                    after_count: None,
+                }],
+                dependents: vec!["src/main.rs".into()],
+            },
+        },
+    )
+    .unwrap();
+    assert!(
+        !matches!(observed.outcome, Outcome::Error { .. }),
+        "{observed:?}"
+    );
+    assert_eq!(
+        f.lifecycle("claude-code", "SessionEnd", ALICE, &f.root())
+            .coverage,
+        "session_ended"
+    );
+    assert_eq!(
+        f.lifecycle("codex", "SessionEnd", BOB, &f.root()).coverage,
+        "session_ended"
+    );
+}
+
+fn assert_recent_section(vendor: &str, context: &str) {
+    assert!(
+        context.len() <= langspan::hook::BRIEFING_LIMIT,
+        "{vendor}: {}",
+        context.len()
+    );
+    let section = recent_section(context);
+    assert!(
+        section.len() <= langspan::recent::LIMIT,
+        "{vendor}: {} bytes: {section}",
+        section.len()
+    );
+    // Placed after the peer lines.
+    assert!(
+        context.find("(session ended)").unwrap() < context.find(RECENT).unwrap(),
+        "{vendor}: {context}"
+    );
+    assert!(
+        section.contains(r#"- Changed: "a.txt" (2 sessions, "#),
+        "{vendor}: {section}"
+    );
+    assert!(
+        section.contains(
+            r#" ago: function "save" changed from "fn save(x: u32)" to "fn save(x: u32, sync: bool)"; files mentioning it: "src/main.rs""#
+        ),
+        "{vendor}: {section}"
+    );
+    assert!(
+        section
+            .contains(r#"- Contested: "a.txt" (a write was refused once; edited by 2 sessions)"#),
+        "{vendor}: {section}"
+    );
+    let alice = section
+        .lines()
+        .find(|line| line.starts_with("- Left uncommitted by ended claude-code session"))
+        .unwrap_or_else(|| panic!("{vendor}: {section}"));
+    assert!(
+        alice.contains(r#""src/c.rs""#) && alice.contains(r#""a.txt""#),
+        "{vendor}: {alice}"
+    );
+    // Committed since: no longer left uncommitted.
+    assert!(!alice.contains("b.txt"), "{vendor}: {alice}");
+}
+
+#[test]
+fn a_session_starting_late_on_each_host_is_told_what_changed_recently() {
+    let mut f = Fixture::new();
+    f.start();
+    a_busy_hour(&f);
+
+    let claude = f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    assert_eq!(claude.coverage, "briefed", "{}", claude.stdout);
+    assert_recent_section("claude-code", &claude.context.unwrap());
+
+    let codex = f.lifecycle("codex", "SessionStart", DAVE, &f.root());
+    assert_eq!(codex.coverage, "briefed", "{}", codex.stdout);
+    assert_recent_section("codex", &codex.context.unwrap());
+
+    let gemini = f.run(
+        "gemini-cli",
+        &f.root(),
+        &[],
+        &json!({
+            "session_id": ERIN, "transcript_path": "/dev/null", "cwd": f.root(),
+            "hook_event_name": "SessionStart", "timestamp": "2026-11-24T23:15:00.000Z",
+            "source": "startup",
+        }),
+    );
+    assert_eq!(gemini.coverage, "briefed", "{}", gemini.stdout);
+    assert_recent_section("gemini-cli", &gemini.context.unwrap());
+
+    let cursor = f.run(
+        "cursor",
+        &f.root(),
+        &[],
+        &json!({
+            "conversation_id": FRANK, "generation_id": FRANK, "model": "default",
+            "session_id": FRANK, "hook_event_name": "sessionStart",
+            "cursor_version": "1.7.2", "workspace_roots": [f.root()],
+            "user_email": null, "transcript_path": null,
+            "is_background_agent": false, "composer_mode": "agent",
+        }),
+    );
+    assert_eq!(cursor.coverage, "briefed", "{}", cursor.stdout);
+    let reply: Value = serde_json::from_str(&cursor.stdout).unwrap();
+    assert_recent_section("cursor", reply["additional_context"].as_str().unwrap());
+
+    // A prompt's briefing never carries the section, nor a mid-turn one.
+    claude_writes(&f, DAVE, "dave-1", "src/c.rs", "pub fn save() {}\n");
+    let prompt = f.prompt("claude-code", CAROL, "carry on", &[]);
+    assert!(!prompt.stdout.contains(RECENT), "{}", prompt.stdout);
+    claude_writes(&f, DAVE, "dave-2", "a.txt", "dave\n");
+    let input = json!({"file_path": f.root().join("b.txt"), "content": "carol\n"});
+    claude_tool(&f, "PreToolUse", "Write", CAROL, "carol-1", input.clone());
+    let post = claude_tool(&f, "PostToolUse", "Write", CAROL, "carol-1", input);
+    assert!(!post.stdout.contains(RECENT), "{}", post.stdout);
+}
+
+#[test]
+fn brief_recent_shows_the_section_without_delivering_and_uses_the_configured_window() {
+    let mut f = Fixture::new();
+    fs::create_dir(f.state_dir()).unwrap();
+    fs::set_permissions(f.state_dir(), fs::Permissions::from_mode(0o700)).unwrap();
+    let config = f.state_dir().join("config.json");
+    fs::write(&config, r#"{"recent_window_ms": 600000}"#).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    f.start();
+    a_busy_hour(&f);
+    f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    let session = format!("claude-code.{CAROL}");
+    let cli = |args: &[&str]| {
+        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .arg("--state-dir")
+            .arg(f.state_dir())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let reply: Value = serde_json::from_str(&cli(&[
+        "brief",
+        &session,
+        "--recent",
+        "--json",
+        "--request-id",
+        "look-1",
+    ]))
+    .unwrap();
+    let recent = &reply["outcome"]["briefing"]["recent"];
+    assert_eq!(recent["window_ms"], 600_000, "{reply}");
+    assert_eq!(recent["changed_paths"][0]["path"], "a.txt", "{reply}");
+    assert_eq!(recent["changed_paths"][0]["sessions"], 2, "{reply}");
+    // Confirmed against the line journal: the committed file is not named.
+    let left = recent["left_uncommitted"].to_string();
+    assert!(
+        left.contains("src/c.rs") && !left.contains("b.txt"),
+        "{left}"
+    );
+    let text = cli(&["brief", &session, "--recent", "--request-id", "look-2"]);
+    assert!(text.contains(RECENT), "{text}");
+    // Without the flag, the section is not asked for.
+    let plain: Value = serde_json::from_str(&cli(&[
+        "brief",
+        &session,
+        "--json",
+        "--request-id",
+        "look-3",
+    ]))
+    .unwrap();
+    assert!(
+        plain["outcome"]["briefing"].get("recent").is_none(),
+        "{plain}"
+    );
+    // A look is not a delivery: the session's next start is told again.
+    let again = f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    assert!(again.context.unwrap().contains(RECENT));
+}
+
+/// `langspan brief SESSION --recent --json`, parsed.
+fn brief_recent_json(f: &Fixture, session: &str) -> Value {
+    let id = format!("recent-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    serde_json::from_str(&cli(
+        f,
+        &["brief", session, "--recent", "--json", "--request-id", &id],
+    ))
+    .unwrap()
+}
+
+/// The paths of `left_uncommitted` in a `brief --recent --json` reply.
+fn left_paths(reply: &Value) -> Vec<String> {
+    reply["outcome"]["briefing"]["recent"]["left_uncommitted"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{reply}"))
+        .iter()
+        .flat_map(|left| left["paths"].as_array().unwrap().clone())
+        .map(|path| path.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_file_too_large_for_the_journal_is_left_uncommitted_only_while_it_differs_from_head() {
+    // Review 4703451488: a file over the journal's bound has no recorded
+    // lines, which read as "still changed" even once committed.
+    let mut f = Fixture::new();
+    f.start();
+    let large = "x\n".repeat(300 * 1024);
+    claude_writes(&f, ALICE, "alice-1", "big-committed.txt", &large);
+    claude_writes(&f, ALICE, "alice-2", "big-left.txt", &large);
+    git(&f.root(), &["add", "big-committed.txt"]);
+    git(&f.root(), &["commit", "--quiet", "-m", "big"]);
+    assert_eq!(
+        f.lifecycle("claude-code", "SessionEnd", ALICE, &f.root())
+            .coverage,
+        "session_ended"
+    );
+    f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    let reply = brief_recent_json(&f, &format!("claude-code.{CAROL}"));
+    let left = left_paths(&reply);
+    assert_eq!(left, vec!["big-left.txt".to_owned()], "{reply}");
+}
+
+#[test]
+fn an_older_uncommitted_edit_is_kept_when_the_newest_edits_were_committed() {
+    // Review 4703451495: the path cap ran before confirmation, so eight
+    // newer committed files hid an older uncommitted one.
+    let mut f = Fixture::new();
+    f.start();
+    claude_writes(&f, ALICE, "alice-old", "old.txt", "left\n");
+    for n in 0..8 {
+        let file = format!("new-{n}.txt");
+        claude_writes(&f, ALICE, &format!("alice-{n}"), &file, "done\n");
+        git(&f.root(), &["add", &file]);
+    }
+    git(&f.root(), &["commit", "--quiet", "-m", "new"]);
+    assert_eq!(
+        f.lifecycle("claude-code", "SessionEnd", ALICE, &f.root())
+            .coverage,
+        "session_ended"
+    );
+    f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    let reply = brief_recent_json(&f, &format!("claude-code.{CAROL}"));
+    assert_eq!(left_paths(&reply), vec!["old.txt".to_owned()], "{reply}");
+    let start = f.lifecycle("claude-code", "SessionStart", DAVE, &f.root());
+    let section = recent_section(&start.context.unwrap());
+    assert!(
+        section.contains(r#"- Left uncommitted by ended claude-code session 00000000 "#)
+            && section.contains(r#""old.txt""#),
+        "{section}"
+    );
+}
+
+#[test]
+fn many_long_escaped_paths_keep_the_recent_section_within_its_wire_budget() {
+    // Review 4703920148: eight ended sessions with eight long, quoted paths
+    // each made a briefing larger than one protocol frame.
+    let mut f = Fixture::new();
+    f.start();
+    let quotes = "\"".repeat(150);
+    let directory = format!("{quotes}/{quotes}/{quotes}");
+    fs::create_dir_all(f.root().join(&directory)).unwrap();
+    let sessions: Vec<String> = (0..8)
+        .map(|n| format!("00000000-0000-4000-8000-0000000001{n:02}"))
+        .collect();
+    for (s, session) in sessions.iter().enumerate() {
+        for n in 0..8 {
+            let file = format!("{directory}/{s}{n}-{}", "\"".repeat(40));
+            assert!(file.len() <= 512, "{}", file.len());
+            claude_writes(&f, session, &format!("w-{s}-{n}"), &file, "x\n");
+        }
+        assert_eq!(
+            f.lifecycle("claude-code", "SessionEnd", session, &f.root())
+                .coverage,
+            "session_ended"
+        );
+    }
+    f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    let reply = brief_recent_json(&f, &format!("claude-code.{CAROL}"));
+    let recent = &reply["outcome"]["briefing"]["recent"];
+    assert!(recent.is_object(), "{reply}");
+    let bytes = serde_json::to_vec(recent).unwrap().len();
+    assert!(
+        bytes <= langspan_core::RECENT_BYTES,
+        "{bytes} bytes of recent changes"
+    );
+    assert!(recent["omitted"].as_u64().unwrap() > 0, "{recent}");
+    assert!(!left_paths(&reply).is_empty(), "{reply}");
+    // A delivering start fits its frame too and is still briefed.
+    let start = f.lifecycle("claude-code", "SessionStart", DAVE, &f.root());
+    assert_eq!(start.coverage, "briefed", "{}", start.stdout);
+    assert!(start.context.unwrap().contains(RECENT));
+}
+
 // Presence (roadmap A13): where peers are looking, from recorded Read and
 // Grep events and shell calls, through the real hook binary and daemon.
 
@@ -1130,6 +1619,7 @@ fn presence_repository(f: &Fixture) {
 /// What `langspan` prints for `args` against the fixture's coordinator.
 fn cli(f: &Fixture, args: &[&str]) -> String {
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .arg("--state-dir")
         .arg(f.state_dir())
         .args(args)
@@ -1369,4 +1859,93 @@ fn a_shell_command_that_reads_files_is_presence_on_every_host() {
     ] {
         assert!(!output.contains(PATTERN), "{output}");
     }
+}
+
+/// Wait until the index holds an exported `name` in `path`.
+fn indexed(f: &Fixture, name: &str, path: &str) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let answer = client::call(
+            &f.state_dir(),
+            &Request {
+                version: PROTOCOL_VERSION,
+                request_id: "symbol".into(),
+                command: Command::GraphSymbol {
+                    workspace_id: "work".into(),
+                    name: name.into(),
+                    limit: 10,
+                    detail: false,
+                    blind_in_scope: true,
+                    renamed: false,
+                },
+            },
+        );
+        if let Ok(Response {
+            outcome: Outcome::Graph { symbols, .. },
+            ..
+        }) = &answer
+            && symbols.iter().any(|symbol| symbol.path == path)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{name} never indexed: {answer:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Roadmap D7, the issue's example: a Claude Code session renames
+/// `fetch_user` to `load_user` with an unchanged body, and a Codex session
+/// whose file calls the old name is told both names at its next prompt.
+#[test]
+fn a_codex_session_is_told_both_names_of_a_rename_a_claude_session_made() {
+    let mut f = Fixture::new();
+    let root = f.root();
+    fs::write(
+        root.join("src/users.py"),
+        "def fetch_user(id):\n    return id + 1\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/api.py"), "hello\nfetch_user(1)\n").unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "users"]);
+    f.start();
+    f.prompt("claude-code", ALICE, "Rename the user loader", &[]);
+    f.prompt("codex", BOB, "Wire the API", &[]);
+    // Bob works on the file that calls fetch_user.
+    f.codex_edit(BOB, "bob-1", &root, "src/api.py", true);
+    fs::write(root.join("src/api.py"), "hi\nfetch_user(1)\n").unwrap();
+    indexed(&f, "fetch_user", "src/users.py");
+
+    claude_writes(
+        &f,
+        ALICE,
+        "alice-1",
+        "src/users.py",
+        "def load_user(id):\n    return id + 1\n",
+    );
+    let expected =
+        r#"function "fetch_user" was renamed to "load_user" (same body): "def load_user(id)""#;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let context = loop {
+        if let Some(context) = f
+            .prompt("codex", BOB, "carry on", &[])
+            .context
+            .filter(|context| context.contains("Interface change"))
+        {
+            break context;
+        }
+        assert!(Instant::now() < deadline, "bob was never told");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(context.contains(expected), "{context}");
+    assert!(context.contains(r#""src/users.py""#), "{context}");
+    assert!(context.contains(r#""src/api.py""#), "{context}");
+    assert!(
+        context.contains(&format!("claude-code.{ALICE}")),
+        "{context}"
+    );
+    assert!(!context.contains("removed or renamed"), "{context}");
 }

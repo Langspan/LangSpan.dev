@@ -52,11 +52,13 @@ pub struct TestResults {
     /// named here or not. A skipped test did not run.
     #[serde(default, skip_serializing_if = "is_false")]
     pub all_passed: bool,
+    /// The output named more failing tests than fit the bound: `failed`
+    /// lists only the first of them.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub more_failed: bool,
 }
 
 impl TestResults {
-    /// Whether the run passed `test`: `None` when it says nothing about it,
-    /// or skipped it.
     /// Say nothing about `test` from now on, as if the run had skipped it.
     /// Only a forgotten test is added, and each record replaces the result,
     /// so this grows it by at most the tests followed.
@@ -68,7 +70,9 @@ impl TestResults {
         }
     }
 
-    fn passed(&self, test: &str) -> Option<bool> {
+    /// Whether the run passed `test`: `None` when it says nothing about it,
+    /// or skipped it.
+    pub(crate) fn passed(&self, test: &str) -> Option<bool> {
         if self.failed.iter().any(|name| name == test) {
             Some(false)
         } else if self.skipped.iter().any(|name| name == test) {
@@ -143,6 +147,10 @@ pub struct TestFailure {
     /// still a failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flaky: Option<FlakyCount>,
+    /// How it compares with the session's baseline (issue #69); `None` when
+    /// no baseline was compared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<crate::FailureClass>,
 }
 
 /// One line of `check flaky`.
@@ -188,7 +196,9 @@ pub(crate) fn validate_test_results(results: &TestResults, passed: bool) -> Resu
             ),
         ));
     }
-    if results.all_passed != passed || (results.all_passed && !results.failed.is_empty()) {
+    if results.all_passed != passed
+        || (results.all_passed && (!results.failed.is_empty() || results.more_failed))
+    {
         return Err(error(
             "invalid_test_results",
             "Test results pass as a whole exactly when their run passed, and then name no failure",

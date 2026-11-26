@@ -4,9 +4,9 @@
 //! as a sequence of records in pages, each resumed after an opaque cursor.
 
 use crate::{
-    AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CoreError, Intent, InterfaceNotice,
-    Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, PresenceSetting, RemoteLink,
-    RemotePeer, RetractedMessage, ScanCoverage, ScanFailure, Session, SessionActivity,
+    Adoption, AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CheckoutRun, CoreError, Intent,
+    InterfaceNotice, Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, PresenceSetting,
+    RemoteLink, RemotePeer, RetractedMessage, ScanCoverage, ScanFailure, Session, SessionActivity,
     SessionLiveness, State, TestLearning, Turn, TurnWaiter, UninstalledHost, Workspace,
     WorkspaceGit, error,
 };
@@ -81,6 +81,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         scan_failures,
         scan_coverage,
         checkouts,
+        checkout_runs,
         uncoordinated,
         auto_checks,
         check_notices,
@@ -93,14 +94,24 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         // Read by a message status query only.
         dropped_messages: _,
         presence,
+        adoptions,
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
+        // Derived for a starting session's recent section; likewise.
+        path_refusals: _,
         // Derived for the source index; never part of the status reply.
         workspace_revisions: _,
+        // Derived for `graph symbol --renamed`; likewise.
+        renames: _,
         // The write generation check runs carry: one count per workspace,
         // never trimmed.
         writes,
+        // Derived for comparing check results (issue #69); never part of
+        // the status reply.
+        kept_tests: _,
+        first_writes: _,
+        write_runs: _,
     } = state;
     let mut summary = StatusSummary::default();
     let mut open = BTreeMap::new();
@@ -162,6 +173,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         scan_failures: scan_failures.clone(),
         scan_coverage: scan_coverage.clone(),
         checkouts: checkouts.clone(),
+        checkout_runs: checkout_runs.clone(),
         uncoordinated: uncoordinated.clone(),
         auto_checks: auto_checks.clone(),
         check_notices: keep(check_notices, of_shown),
@@ -171,11 +183,22 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         message_history: BTreeMap::new(),
         dropped_messages: BTreeMap::new(),
         presence: keep(presence, of_shown),
+        // An adoption is shown with either of its sessions.
+        adoptions: adoptions
+            .iter()
+            .filter(|(from, adoption)| of_shown(from) || of_shown(&adoption.session_id))
+            .map(|(from, adoption)| (from.clone(), adoption.clone()))
+            .collect(),
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),
+        path_refusals: Vec::new(),
         workspace_revisions: BTreeMap::new(),
+        renames: BTreeMap::new(),
         writes: writes.clone(),
+        kept_tests: BTreeMap::new(),
+        first_writes: BTreeMap::new(),
+        write_runs: BTreeMap::new(),
     };
     (view, summary)
 }
@@ -236,7 +259,7 @@ macro_rules! activity {
 /// Parts of the view left out, in this order, while it does not fit: the
 /// bulkiest histories first, current coordination last. Each name is the one
 /// `StatusSummary::omitted` gives.
-const TRIMS: [Trim; 17] = [
+const TRIMS: [Trim; 19] = [
     activity!("activity.known", known),
     // `check flaky` reads it through its own command.
     field!("test_learning", test_learning),
@@ -244,6 +267,7 @@ const TRIMS: [Trim; 17] = [
     field!("landings", landings),
     field!("interface_notices", interface_notices),
     field!("checkouts", checkouts),
+    field!("checkout_runs", checkout_runs),
     field!("uncoordinated", uncoordinated),
     field!("notes", notes),
     field!("remote_peers", remote_peers),
@@ -261,6 +285,23 @@ const TRIMS: [Trim; 17] = [
                 .iter()
                 .filter(|(id, _)| view.sessions.contains_key(*id))
                 .map(|(id, notices)| (id.clone(), notices.clone()))
+                .collect();
+        },
+    },
+    // One session can adopt any number of independent ended sessions. Only
+    // the adoptions of sessions in the view are given back.
+    Trim {
+        name: "adoptions",
+        trim: |state| take(&mut state.adoptions),
+        restore: |view, full| {
+            view.adoptions = full
+                .adoptions
+                .iter()
+                .filter(|(from, adoption)| {
+                    view.sessions.contains_key(*from)
+                        || view.sessions.contains_key(&adoption.session_id)
+                })
+                .map(|(from, adoption)| (from.clone(), adoption.clone()))
                 .collect();
         },
     },
@@ -475,6 +516,16 @@ pub enum StatusRecord {
         key: String,
         setting: PresenceSetting,
     },
+    /// Another session took over ended session `key`'s uncommitted lines.
+    Adoption {
+        key: String,
+        adoption: Adoption,
+    },
+    /// A command run in workspace `key` that may explain a checkout change.
+    CheckoutRun {
+        key: String,
+        run: CheckoutRun,
+    },
     /// Part of one record too large for a page: `text` is its JSON from
     /// byte `offset`. The parts of a record come in order, the last with
     /// `last`, and joined they are that record's JSON. A part at offset 0
@@ -487,7 +538,7 @@ pub enum StatusRecord {
 }
 
 /// Record kinds in page order. The cursor names one of these.
-const KINDS: [&str; 26] = [
+const KINDS: [&str; 28] = [
     "workspace",
     "session",
     "intent",
@@ -514,6 +565,8 @@ const KINDS: [&str; 26] = [
     "sent_message",
     "retracted_notice",
     "presence",
+    "adoption",
+    "checkout_run",
 ];
 
 impl StatusRecord {
@@ -566,6 +619,8 @@ impl StatusRecord {
                 state.retracted_notices.entry(key).or_default().push(notice)
             }
             Self::Presence { key, setting } => drop(state.presence.insert(key, setting)),
+            Self::Adoption { key, adoption } => drop(state.adoptions.insert(key, adoption)),
+            Self::CheckoutRun { key, run } => state.checkout_runs.entry(key).or_default().push(run),
         }
         Ok(())
     }
@@ -752,7 +807,7 @@ pub fn status_records<'a>(
         .as_ref()
         .and_then(|after| Some((after.position.clone(), after.within?)));
     let after = after.as_ref();
-    let pages: [Page<'a>; 26] = [
+    let pages: [Page<'a>; 28] = [
         entries(0, &state.workspaces, after, |key, workspace| {
             StatusRecord::Workspace { key, workspace }
         }),
@@ -834,6 +889,12 @@ pub fn status_records<'a>(
         }),
         entries(25, &state.presence, after, |key, setting| {
             StatusRecord::Presence { key, setting }
+        }),
+        entries(26, &state.adoptions, after, |key, adoption| {
+            StatusRecord::Adoption { key, adoption }
+        }),
+        lists(27, &state.checkout_runs, after, |key, run| {
+            StatusRecord::CheckoutRun { key, run }
         }),
     ];
     Ok((resume, pages.into_iter().flatten()))

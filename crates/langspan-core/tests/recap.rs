@@ -85,6 +85,9 @@ fn notes_for(state: &mut State, session: &str, id: &str) -> Vec<String> {
             max_peers: 4,
             deliver: true,
             mid_turn: false,
+            left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         50,
@@ -369,6 +372,11 @@ fn change(change: &str, before: Option<&str>, after: Option<&str>) -> InterfaceC
         after_arity: None,
         before_count: None,
         after_count: None,
+        after_name: None,
+        before_name: None,
+        evidence: None,
+        before_path: None,
+        private: false,
     }
 }
 
@@ -387,6 +395,7 @@ fn notice(
             path: path.into(),
             changes,
             dependents: Vec::new(),
+            elsewhere: Vec::new(),
             by_session: by.map(str::to_owned),
             at_ms,
             generation,
@@ -469,6 +478,7 @@ fn ask(
             limit,
             before_seq,
             events,
+            moves: &[],
             anchors,
             now_ms,
         },
@@ -844,6 +854,7 @@ fn a_history_query_is_validated() {
         limit,
         before_seq: None,
         events: &[],
+        moves: &[],
         anchors: &[],
         now_ms: 0,
     };

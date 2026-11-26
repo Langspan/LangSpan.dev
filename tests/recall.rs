@@ -56,6 +56,7 @@ impl World {
     fn start(&mut self) {
         self.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state())
                 .stdout(Stdio::null())
@@ -77,6 +78,7 @@ impl World {
     }
     fn cli_full(&self, args: &[&str]) -> (i32, String, String) {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.state())
             .args(args)
@@ -128,6 +130,7 @@ impl World {
     /// A session starts through the real Claude Code hook.
     fn session_start(&self, session: &str) {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.state())
             .args(["--workspace", "app", "--root"])
@@ -330,7 +333,7 @@ fn recall_requests_match_the_committed_golden_vectors() {
     ];
     for wire in vectors {
         let request: Request = serde_json::from_slice(wire).unwrap();
-        assert_eq!(request.version, PROTOCOL_VERSION);
+        assert_eq!(request.version, langspan::protocol::OLDEST_PROTOCOL_VERSION);
         assert_eq!(langspan::protocol::encode(&request).unwrap(), *wire);
     }
     let request: Request = serde_json::from_slice(vectors[0]).unwrap();
@@ -408,6 +411,7 @@ async fn the_mcp_tool_labels_notes_as_data_and_fits_one_frame() {
         .unwrap();
     }
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.env("LANGSPAN_AUTOSTART", "off");
     command.arg("mcp").arg("--state-dir").arg(&state);
     let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
 
@@ -513,6 +517,7 @@ async fn the_mcp_tool_fits_one_frame_when_notes_are_full_of_quotes_and_backslash
         .unwrap();
     }
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.env("LANGSPAN_AUTOSTART", "off");
     command.arg("mcp").arg("--state-dir").arg(&state);
     let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
 

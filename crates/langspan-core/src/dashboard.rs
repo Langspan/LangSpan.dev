@@ -77,6 +77,15 @@ pub struct RecentFile {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRow {
+    /// An opaque identity, stable across views: the same session on every
+    /// row that shows it, and never shared by two sessions. Overlap
+    /// `members` name rows by it. Absent from a coordinator that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The overlap group of the row's workspace: an opaque key that linked
+    /// worktrees of one repository share. Absent from an older coordinator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub local: bool,
     /// The teammate's published name; absent for this machine.
     pub machine: Option<String>,
@@ -102,7 +111,18 @@ pub struct AgentRow {
     pub active_age_ms: Option<u64>,
     /// A teammate: time since this daemon last received their publication.
     pub heard_age_ms: Option<u64>,
+    /// Local: the session that took over this ended session's uncommitted
+    /// work (issue #161).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_by: Option<String>,
+    /// Local: ended sessions whose uncommitted work this session took
+    /// over, at most `ADOPTED_SHOWN`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adopted: Vec<String>,
 }
+
+/// Adopted sessions one agent row names, at most.
+pub const ADOPTED_SHOWN: usize = 4;
 
 /// A file a local session holds a current admission for.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,10 +142,23 @@ pub struct EditRow {
 pub struct OverlapRow {
     pub workspace_id: String,
     pub path: String,
-    /// Labels of the agents: `host prefix`, or `name: host prefix`.
+    /// Labels of the agents: `host prefix`, or `name: host prefix`, at most
+    /// `DASHBOARD_PATHS`. Labels are shortened and can collide.
     pub agents: Vec<String>,
     /// At least one of them is editing it now.
     pub editing: bool,
+    /// The overlap group, as on the agent rows. Absent from an older
+    /// coordinator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// The agent row `id` of each label in `agents`, index for index. Empty
+    /// from an older coordinator.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+    /// Agents left out of `agents`. Absent from an older coordinator, which
+    /// cut the list without a count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub more_agents: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -275,6 +308,10 @@ pub struct PublishRow {
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceRow {
     pub workspace_id: String,
+    /// The overlap group, as on the agent rows. Absent from an older
+    /// coordinator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub root: String,
     pub branch_ref: Option<String>,
     /// Sessions registered in this daemon run.
@@ -414,7 +451,9 @@ fn paths(items: impl IntoIterator<Item = String>, limit: usize) -> (Vec<String>,
 }
 
 fn agent_cost(row: &AgentRow) -> usize {
-    320 + encoded_opt(&row.machine)
+    320 + encoded_opt(&row.id)
+        + encoded_opt(&row.group)
+        + encoded_opt(&row.machine)
         + encoded(&row.host)
         + encoded(&row.session)
         + encoded_opt(&row.session_id)
@@ -428,6 +467,17 @@ fn agent_cost(row: &AgentRow) -> usize {
             .iter()
             .map(|file| encoded(&file.path) + 32)
             .sum::<usize>()
+}
+
+/// The identity of a local session, as its row and overlap members carry it.
+fn local_identity(session_id: &str) -> String {
+    format!("local:{session_id}")
+}
+
+/// The identity of a teammate's published session. Participant, host and
+/// session are validated IDs, which never contain `:`.
+fn peer_identity(participant: &str, host: &str, session: &str) -> String {
+    format!("peer:{participant}:{host}:{session}")
 }
 
 /// One agent's recent contact with one file, a candidate overlap.
@@ -490,11 +540,12 @@ fn agents(state: &State, now_ms: u64) -> (Vec<AgentRow>, Vec<Touch>) {
             AgentState::Idle
         };
         let (host, prefix) = host_and_prefix(id);
+        let identity = local_identity(id);
+        let group = overlap_group(state, &session.workspace_id);
         if matches!(
             state_now,
             AgentState::Editing | AgentState::Active | AgentState::Idle | AgentState::Ended
         ) {
-            let group = overlap_group(state, &session.workspace_id);
             // A subagent shares its parent's host session ID; its own part
             // keeps it apart in the label.
             let label = match session
@@ -513,7 +564,7 @@ fn agents(state: &State, now_ms: u64) -> (Vec<AgentRow>, Vec<Touch>) {
                 touches.push(Touch {
                     group: group.clone(),
                     path: path.clone(),
-                    session: id.clone(),
+                    session: identity.clone(),
                     label: label.clone(),
                     editing: true,
                 });
@@ -523,7 +574,7 @@ fn agents(state: &State, now_ms: u64) -> (Vec<AgentRow>, Vec<Touch>) {
                     touches.push(Touch {
                         group: group.clone(),
                         path: path.clone(),
-                        session: id.clone(),
+                        session: identity.clone(),
                         label: label.clone(),
                         editing: false,
                     });
@@ -541,6 +592,8 @@ fn agents(state: &State, now_ms: u64) -> (Vec<AgentRow>, Vec<Touch>) {
             })
             .collect();
         rows.push(AgentRow {
+            id: Some(identity),
+            group: Some(group),
             local: true,
             machine: None,
             more_files: count(total_files - editing.len() - recent.len()),
@@ -568,6 +621,17 @@ fn agents(state: &State, now_ms: u64) -> (Vec<AgentRow>, Vec<Touch>) {
             liveness,
             active_age_ms,
             heard_age_ms: None,
+            adopted_by: state
+                .adoptions
+                .get(id)
+                .map(|adoption| clip(&adoption.session_id)),
+            adopted: state
+                .adoptions
+                .values()
+                .filter(|adoption| &adoption.session_id == id)
+                .take(ADOPTED_SHOWN)
+                .map(|adoption| clip(&adoption.from))
+                .collect(),
         });
     }
     for peer in state.remote_peers.values() {
@@ -576,10 +640,7 @@ fn agents(state: &State, now_ms: u64) -> (Vec<AgentRow>, Vec<Touch>) {
         let group = overlap_group(state, &peer.workspace_id);
         for work in &peer.publication.work {
             let label = format!("{}: {} {}", peer.publication.name, work.host, work.session);
-            let identity = format!(
-                "remote\n{}\n{}\n{}",
-                peer.publication.participant, work.host, work.session
-            );
+            let identity = peer_identity(&peer.publication.participant, &work.host, &work.session);
             if fresh {
                 for path in &work.editing {
                     touches.push(Touch {
@@ -615,6 +676,8 @@ fn agents(state: &State, now_ms: u64) -> (Vec<AgentRow>, Vec<Touch>) {
                 })
                 .collect();
             rows.push(AgentRow {
+                id: Some(identity),
+                group: Some(group.clone()),
                 local: false,
                 machine: Some(clip(&peer.publication.name)),
                 host: clip(&work.host),
@@ -637,6 +700,8 @@ fn agents(state: &State, now_ms: u64) -> (Vec<AgentRow>, Vec<Touch>) {
                 liveness: None,
                 active_age_ms: None,
                 heard_age_ms,
+                adopted_by: None,
+                adopted: Vec::new(),
             });
         }
     }
@@ -687,19 +752,22 @@ fn overlaps(state: &State, touches: Vec<Touch>) -> Vec<OverlapRow> {
     let mut rows: Vec<OverlapRow> = files
         .into_iter()
         .filter(|(_, (agents, _))| agents.len() >= 2)
-        .map(|((group, path), (agents, editing))| OverlapRow {
-            workspace_id: clip(names.get(&group).map_or("", String::as_str)),
-            path: clip(&path),
-            agents: {
-                let mut labels: Vec<&String> = agents.values().collect();
-                labels.sort();
-                labels
-                    .into_iter()
-                    .take(DASHBOARD_PATHS)
-                    .map(|a| clip(a))
-                    .collect()
-            },
-            editing,
+        .map(|((group, path), (agents, editing))| {
+            // Labels in order, each beside the identity it stands for.
+            let mut members: Vec<(&String, &String)> =
+                agents.iter().map(|(id, label)| (label, id)).collect();
+            members.sort();
+            let more_agents = count(members.len().saturating_sub(DASHBOARD_PATHS));
+            members.truncate(DASHBOARD_PATHS);
+            OverlapRow {
+                workspace_id: clip(names.get(&group).map_or("", String::as_str)),
+                path: clip(&path),
+                agents: members.iter().map(|(label, _)| clip(label)).collect(),
+                editing,
+                members: members.iter().map(|(_, id)| (*id).clone()).collect(),
+                more_agents: Some(more_agents),
+                group: Some(group),
+            }
         })
         .collect();
     rows.sort_by(|a, b| {
@@ -749,7 +817,13 @@ pub(crate) fn dashboard(state: &State, now_ms: u64) -> Dashboard {
         overlaps(state, touches),
         DASHBOARD_ITEMS,
         SECTION_BYTES,
-        |row| 80 + encoded(&row.workspace_id) + encoded(&row.path) + encoded_all(&row.agents),
+        |row| {
+            100 + encoded(&row.workspace_id)
+                + encoded(&row.path)
+                + encoded_all(&row.agents)
+                + encoded_opt(&row.group)
+                + encoded_all(&row.members)
+        },
     );
 
     let mut notices: Vec<_> = state.interface_notices.values().flatten().collect();
@@ -966,6 +1040,7 @@ pub(crate) fn dashboard(state: &State, now_ms: u64) -> Dashboard {
         .map(|workspace| {
             let id = &workspace.workspace_id;
             WorkspaceRow {
+                group: Some(overlap_group(state, id)),
                 workspace_id: clip(id),
                 root: clip(&workspace.root),
                 branch_ref: clip_opt(
@@ -1009,6 +1084,7 @@ pub(crate) fn dashboard(state: &State, now_ms: u64) -> Dashboard {
     let (workspaces, more_workspaces) =
         bounded(workspaces, DASHBOARD_ITEMS, WORKSPACE_BYTES, |row| {
             360 + encoded(&row.workspace_id)
+                + encoded_opt(&row.group)
                 + encoded(&row.root)
                 + encoded_opt(&row.branch_ref)
                 + row

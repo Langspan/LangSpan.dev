@@ -56,7 +56,7 @@ mod unix {
     use std::{
         fs,
         io::{self, Read},
-        os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+        os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
         path::{Path, PathBuf},
         sync::{Arc, mpsc},
         time::{Duration, Instant},
@@ -80,6 +80,9 @@ mod unix {
         /// How long a workspace's sessions must stop writing before its
         /// automatic check starts, so one burst of batches runs one check.
         auto_check_debounce_ms: u64,
+        /// When set, the daemon compacts the event log once a day, keeping
+        /// this many days (ADR 0025, J7). Unset: nothing is ever deleted.
+        retention_days: Option<u32>,
         /// A failing automatic check that took at most this long is run once
         /// more on the same tree, to learn which tests flip; 0 turns it off.
         flaky_rerun_max_s: u64,
@@ -96,6 +99,9 @@ mod unix {
         /// How often the agent hosts on this machine are checked for a
         /// LangSpan install (roadmap A7). The first check is at start.
         host_check_ms: u64,
+        /// How far back a starting session's "recently in this repository"
+        /// section looks (roadmap C3), within the current daemon run.
+        recent_window_ms: u64,
     }
     impl Default for Config {
         fn default() -> Self {
@@ -105,6 +111,7 @@ mod unix {
                 max_clients: 32,
                 remote_pass_ms: 5000,
                 auto_check_debounce_ms: 2000,
+                retention_days: None,
                 flaky_rerun_max_s: 30,
                 notify: false,
                 notify_sound: false,
@@ -112,6 +119,7 @@ mod unix {
                 notify_hourly_limit: 10,
                 notify_handoff_after_ms: 600_000,
                 host_check_ms: 3_600_000,
+                recent_window_ms: langspan_core::RECENT_WINDOW_MS,
             }
         }
     }
@@ -146,9 +154,15 @@ mod unix {
                 || !(1..=60).contains(&result.notify_hourly_limit)
                 || !(1000..=86_400_000).contains(&result.notify_handoff_after_ms)
                 || !(100..=86_400_000).contains(&result.host_check_ms)
+                || !(langspan_core::MIN_RECENT_WINDOW_MS..=langspan_core::MAX_RECENT_WINDOW_MS)
+                    .contains(&result.recent_window_ms)
+                || result.retention_days.is_some_and(|days| {
+                    !(langspan_core::MIN_RETENTION_DAYS..=langspan_core::MAX_RETENTION_DAYS)
+                        .contains(&days)
+                })
             {
                 return Err(
-                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000"
+                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000, recent_window_ms 60000..86400000, retention_days 7..3650"
                         .into(),
                 );
             }
@@ -180,6 +194,212 @@ mod unix {
         scan: crate::graph::ScanView,
     }
 
+    /// An export or import of the source index (roadmap D5), handed by
+    /// the state owner to the indexer, which writes the index alone and
+    /// replies itself.
+    struct Transfer {
+        of: Registration,
+        request_id: String,
+        generation: u64,
+        command: Command,
+        reply: oneshot::Sender<Response>,
+    }
+
+    /// How long a connection waits for an export or import, and how long
+    /// the indexer may spend on one. An import of the largest file reads up
+    /// to 256 MiB and every listed source file.
+    const TRANSFER_WAIT: Duration = Duration::from_secs(120);
+    const TRANSFER_BUDGET: Duration = Duration::from_secs(100);
+
+    fn is_transfer(command: &Command) -> bool {
+        matches!(
+            command,
+            Command::GraphExport { .. } | Command::GraphImport { .. }
+        )
+    }
+
+    /// For tests only: `LANGSPAN_TEST_INDEX_FILES_PER_PASS` sets how many
+    /// files the indexer parses per pass (default `FILES_PER_PASS`), so a
+    /// test can show what an import loads without a parse. Not a setting:
+    /// it is undocumented for users.
+    fn files_per_pass() -> usize {
+        std::env::var("LANGSPAN_TEST_INDEX_FILES_PER_PASS")
+            .ok()
+            .and_then(|text| text.parse::<usize>().ok())
+            .map_or(crate::graph::FILES_PER_PASS, |files| {
+                files.min(crate::graph::FILES_PER_PASS)
+            })
+    }
+
+    /// Check a transfer request and hand it to the indexer; anything that
+    /// fails is answered here.
+    fn forward_transfer(state: &State, transfers: &mpsc::SyncSender<Transfer>, job: Job) {
+        let Request {
+            version,
+            request_id,
+            command,
+        } = job.request;
+        let refuse = |code: &str, message: String| {
+            error(request_id.clone(), state.generation, code, message)
+        };
+        let (Command::GraphExport { workspace_id, path }
+        | Command::GraphImport {
+            workspace_id, path, ..
+        }) = &command
+        else {
+            return;
+        };
+        let refused = if !protocol::answers(version) {
+            Some(refuse("unsupported_version", unsupported_version()))
+        } else if let Err(e) = validate_request_id(&request_id) {
+            Some(refuse(&e.code, e.message))
+        } else if !Path::new(path).is_absolute() || path.len() > 4096 || path.contains('\0') {
+            Some(refuse(
+                "invalid_path",
+                "the file must be named by an absolute path of at most 4096 bytes".into(),
+            ))
+        } else {
+            None
+        };
+        if let Some(refused) = refused {
+            let _ = job.reply.send(refused);
+            return;
+        }
+        let Some(of) = Registration::of(state, workspace_id) else {
+            let _ = job.reply.send(refuse(
+                "unknown_workspace",
+                format!(
+                    "workspace {workspace_id} is not registered; run `langspan workspace list`"
+                ),
+            ));
+            return;
+        };
+        let transfer = Transfer {
+            of,
+            request_id: request_id.clone(),
+            generation: state.generation,
+            command,
+            reply: job.reply,
+        };
+        if let Err(error) = transfers.try_send(transfer) {
+            let (message, transfer) = match error {
+                mpsc::TrySendError::Full(transfer) => (
+                    "the indexer is handling another export or import; try again when it finishes",
+                    transfer,
+                ),
+                mpsc::TrySendError::Disconnected(transfer) => (
+                    "the index is not available; see the daemon's index_unavailable log line",
+                    transfer,
+                ),
+            };
+            let _ = transfer
+                .reply
+                .send(refuse("index_unavailable", message.into()));
+        }
+    }
+
+    /// Run one transfer on the indexer thread and build its reply.
+    fn transfer(
+        index: &mut crate::graph::Index,
+        scans: &std::collections::HashMap<String, (Registration, crate::graph::ScanView)>,
+        transfer: &Transfer,
+    ) -> Result<Outcome, (&'static str, String)> {
+        let deadline = Instant::now() + TRANSFER_BUDGET;
+        let of = &transfer.of;
+        match &transfer.command {
+            Command::GraphExport { path, .. } => {
+                let path = Path::new(path);
+                let file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+                    .open(path)
+                    .map_err(|error| {
+                        let hint = if error.kind() == io::ErrorKind::AlreadyExists {
+                            "; an export never replaces a file: remove it or choose another path"
+                        } else {
+                            ""
+                        };
+                        (
+                            "index_export_failed",
+                            format!("cannot create {}: {error}{hint}", path.display()),
+                        )
+                    })?;
+                let mut out = io::BufWriter::new(file);
+                let written = index
+                    .export(of, &mut out, now_ms(), deadline)
+                    .and_then(|exported| {
+                        use std::io::Write;
+                        out.flush()?;
+                        out.get_ref().sync_all()?;
+                        Ok(exported)
+                    });
+                match written {
+                    Ok(exported) => Ok(Outcome::GraphExported {
+                        workspace_id: of.workspace_id.clone(),
+                        files: exported.files,
+                        partial_files: exported.partial_files,
+                        bytes: exported.bytes,
+                    }),
+                    Err(error) => {
+                        drop(out);
+                        let _ = fs::remove_file(path);
+                        Err(("index_export_failed", error.to_string()))
+                    }
+                }
+            }
+            Command::GraphImport { path, apply, .. } => {
+                let refused = |message: String| ("index_import_refused", message);
+                let Some((_, scan)) = scans
+                    .get(&of.workspace_id)
+                    .filter(|(scanned, _)| scanned == of)
+                else {
+                    return Err(refused(format!(
+                        "workspace {} has no complete scan yet; try again in a few seconds",
+                        of.workspace_id
+                    )));
+                };
+                // Opened nonblocking, so a FIFO with no writer (or a symlink
+                // to one) cannot hold the indexer before the type check;
+                // a regular file ignores the flag.
+                let file = fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                    .open(path)
+                    .map_err(|error| refused(format!("cannot open {path}: {error}")))?;
+                let metadata = file
+                    .metadata()
+                    .map_err(|error| refused(format!("cannot read {path}: {error}")))?;
+                if !metadata.is_file() {
+                    return Err(refused(format!("{path} is not a regular file")));
+                }
+                let max = crate::index_file::MAX_FILE_BYTES;
+                if metadata.len() > max {
+                    return Err(refused(format!(
+                        "{path} is {} bytes; an import reads at most {} MiB",
+                        metadata.len(),
+                        max / (1024 * 1024)
+                    )));
+                }
+                let mut input = io::BufReader::new(file.take(max));
+                let imported = index
+                    .import(of, scan, &mut input, *apply, now_ms(), deadline)
+                    .map_err(|error| refused(error.to_string()))?;
+                Ok(Outcome::GraphImported {
+                    workspace_id: of.workspace_id.clone(),
+                    applied: *apply,
+                    loaded: imported.loaded,
+                    different: imported.different,
+                    kept: imported.kept,
+                    over_limits: imported.over_limits,
+                    malformed: imported.malformed,
+                })
+            }
+            _ => Err(("internal", "not an index transfer".into())),
+        }
+    }
+
     /// For tests only: `LANGSPAN_TEST_INDEX_REPORT_DELAY_MS`, at most 5 s,
     /// holds an index pass's notices that long before they are reported, so
     /// a test can move or remove the workspace in between. Not a setting: it
@@ -194,7 +414,12 @@ mod unix {
     /// The index's single writer. It only ever reads working trees and its
     /// own file; what it learns reaches coordination state as a request to
     /// the state owner, like any other client's.
-    fn index_worker(jobs: mpsc::Receiver<IndexJob>, sender: mpsc::SyncSender<Job>, path: PathBuf) {
+    fn index_worker(
+        jobs: mpsc::Receiver<IndexJob>,
+        transfers: mpsc::Receiver<Transfer>,
+        sender: mpsc::SyncSender<Job>,
+        path: PathBuf,
+    ) {
         let mut index = match crate::graph::Index::open(&path) {
             Ok(index) => index,
             Err(error) => {
@@ -205,8 +430,35 @@ mod unix {
                 return;
             }
         };
+        index.set_files_per_pass(files_per_pass());
         let mut last_failure: Option<String> = None;
-        while let Ok(job) = jobs.recv() {
+        // Each workspace's last complete scan: an import loads only files
+        // it lists, so the next pass cannot report a loaded file removed.
+        let mut scans =
+            std::collections::HashMap::<String, (Registration, crate::graph::ScanView)>::new();
+        loop {
+            while let Ok(request) = transfers.try_recv() {
+                let outcome =
+                    transfer(&mut index, &scans, &request).unwrap_or_else(|(code, message)| {
+                        Outcome::Error {
+                            code: code.into(),
+                            message,
+                        }
+                    });
+                let _ = request.reply.send(Response {
+                    version: PROTOCOL_VERSION,
+                    request_id: request.request_id,
+                    replayed: false,
+                    generation: request.generation,
+                    lease_valid: None,
+                    outcome,
+                });
+            }
+            let job = match jobs.recv_timeout(Duration::from_millis(50)) {
+                Ok(job) => job,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             let deadline = Instant::now() + Duration::from_secs(2);
             let of = &job.of;
             match index.update(
@@ -223,9 +475,11 @@ mod unix {
                         std::thread::sleep(report_delay());
                     }
                     for notice in notices {
-                        // One request per version of the file in one
-                        // registration: redelivery is a replay, and the same
-                        // change in a later registration is a new request. A
+                        // One request per transition of the file in one index
+                        // pass of one registration: redelivery is a replay,
+                        // and the same transition in a later pass (a file
+                        // moved back and forth) or a later registration is a
+                        // new request. A
                         // pass of a checkout the workspace has since left, by
                         // a move or a removal, is refused.
                         ask_as(
@@ -240,6 +494,7 @@ mod unix {
                                     &notice.path,
                                     &notice.before_digest,
                                     &notice.digest,
+                                    &notice.pass.to_string(),
                                 ],
                             ),
                             Command::ObserveInterface {
@@ -262,6 +517,7 @@ mod unix {
                     }
                 }
             }
+            scans.insert(job.of.workspace_id.clone(), (job.of, job.scan));
         }
     }
 
@@ -311,10 +567,28 @@ mod unix {
         let graph = graph.ok_or("the index is not available yet; try again shortly")?;
         let failed = |error: Box<dyn std::error::Error + Send + Sync>| error.to_string();
         let detail = matches!(command, Command::GraphSymbol { detail: true, .. });
+        // Roadmap D7: an old name asked for with `--renamed` is looked up
+        // under the newest name its recorded renames lead to.
+        let mut renamed = match command {
+            Command::GraphSymbol {
+                name,
+                renamed: true,
+                ..
+            } => langspan_core::renamed_to(state, workspace_id, name),
+            _ => None,
+        };
         let started = Instant::now();
         let ((mut symbols, mut references, levels), coverage) = graph
             .with_coverage(&of, |graph| match command {
                 Command::GraphSymbol { name, .. } => {
+                    if let Some(hops) = renamed.as_mut() {
+                        defined_again(graph, workspace_id, hops)?;
+                    }
+                    renamed = renamed.take().filter(|hops| !hops.is_empty());
+                    let name = renamed
+                        .as_ref()
+                        .and_then(|hops| hops.last())
+                        .map_or(name, |hop| &hop.after_name);
                     let mut symbols = graph.symbol(workspace_id, name, limit)?;
                     if detail {
                         for symbol in symbols.iter_mut().take(limit as usize) {
@@ -359,6 +633,7 @@ mod unix {
             coverage,
             truncated,
             levels,
+            renamed,
         })
     }
 
@@ -401,6 +676,28 @@ mod unix {
                 cut = true;
             }
         }
+    }
+
+    /// Cut `hops` at the first rename whose old name the index defines
+    /// again, exported and of the same kind (roadmap D7). A file's first
+    /// indexing tells no addition, so a name a new file brings back is
+    /// found here, not from the notices.
+    fn defined_again(
+        graph: &crate::graph::Index,
+        workspace_id: &str,
+        hops: &mut Vec<langspan_core::Rename>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for (at, hop) in hops.iter().enumerate() {
+            let defined = graph
+                .symbol(workspace_id, &hop.name, crate::graph::MAX_RESULTS)?
+                .iter()
+                .any(|symbol| symbol.exported && symbol.kind == hop.kind);
+            if defined {
+                hops.truncate(at);
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// What the coordinator, not the index, knows about each definition's
@@ -591,6 +888,530 @@ mod unix {
         Ok(Outcome::GraphContext { matches, coverage })
     }
 
+    /// In-flight symbols `graph inflight` reads from one worktree's index,
+    /// at most.
+    const INFLIGHT_PER_WORKTREE: usize = 128;
+    /// In-flight symbols compared with the asking workspace's files, at most:
+    /// for `graph inflight` across worktrees, and for one briefing.
+    const INFLIGHT_OFFERED: usize = 256;
+
+    /// A place in the in-flight rows of a repository's worktrees, ordered by
+    /// worktree workspace and then as `Index::inflight` orders a worktree's.
+    type InflightAt = (String, crate::graph::InflightRow);
+
+    /// Per session, the last in-flight row its briefings went past without
+    /// finding anything to offer before it (review comment 4704678374).
+    /// Each briefing reads at most `INFLIGHT_OFFERED` rows from there, and
+    /// from the first row again after the last, so every row is read in
+    /// turn, however many there are. Only the request thread uses it. A
+    /// restart loses it, which costs a briefing or two, never a notice: what
+    /// a session was told is recorded in the store.
+    static BRIEF_WINDOWS: std::sync::Mutex<std::collections::BTreeMap<String, InflightAt>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+    /// The other worktrees of `workspace_id`'s repository whose index has a
+    /// complete scan, in workspace order, with their registrations.
+    fn inflight_worktrees<'a>(
+        state: &'a State,
+        workspace_id: &str,
+    ) -> Vec<(&'a String, Registration)> {
+        let Some(git) = state.workspace_git.get(workspace_id) else {
+            return Vec::new();
+        };
+        state
+            .workspace_git
+            .iter()
+            .filter(|(other, other_git)| {
+                *other != workspace_id && other_git.repository_id == git.repository_id
+            })
+            .filter_map(|(other, _)| Some((other, Registration::of(state, other)?)))
+            .collect()
+    }
+
+    /// After a scan of `workspace_id`: its files that the index finds
+    /// mention a name changed by a held notice of another worktree of its
+    /// repository are added to that notice's `elsewhere` (issue #194). Only
+    /// notices of this generation within the briefing horizon are read, and
+    /// the notice's own file is left out, as in its own worktree. The index
+    /// lags the scan by a pass, so a file is found at a later scan than the
+    /// one that saw it change. Nothing is found while the workspace's index
+    /// has no complete scan; a failure is logged and the next scan tries
+    /// again.
+    fn observe_elsewhere(
+        store: &mut Store,
+        graph: Option<&crate::graph::Index>,
+        workspace_id: &str,
+        now: u64,
+    ) {
+        let state = store.state();
+        let (Some(graph), Some(of), Some(git)) = (
+            graph,
+            Registration::of(state, workspace_id),
+            state.workspace_git.get(workspace_id),
+        ) else {
+            return;
+        };
+        let wanted: Vec<&langspan_core::InterfaceNotice> = state
+            .interface_notices
+            .iter()
+            .filter(|(other, _)| {
+                *other != workspace_id
+                    && state
+                        .workspace_git
+                        .get(*other)
+                        .is_some_and(|other| other.repository_id == git.repository_id)
+            })
+            .flat_map(|(_, notices)| notices)
+            .filter(|notice| {
+                notice.generation == state.generation
+                    && now.saturating_sub(notice.at_ms) <= langspan_core::BRIEF_HORIZON_MS
+                    && notice.elsewhere.len() < langspan_core::NOTICE_DEPENDENTS
+            })
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let looked_up = graph.with_coverage(&of, |graph| {
+            let mut found = Vec::new();
+            for notice in &wanted {
+                let names: Vec<&str> = notice
+                    .changes
+                    .iter()
+                    .filter(|change| change.change != "added")
+                    .map(|change| change.name.as_str())
+                    .collect();
+                let paths: Vec<String> = graph
+                    .dependents(workspace_id, Some(&notice.path), &names)?
+                    .into_iter()
+                    .filter(|path| {
+                        !notice
+                            .elsewhere
+                            .iter()
+                            .any(|file| file.workspace_id == workspace_id && file.path == *path)
+                    })
+                    .collect();
+                if !paths.is_empty() {
+                    found.push(Command::ObserveInterfaceDependents {
+                        notice_workspace_id: notice.workspace_id.clone(),
+                        notice_id: notice.notice_id.clone(),
+                        workspace_id: workspace_id.to_owned(),
+                        paths,
+                    });
+                }
+            }
+            Ok(found)
+        });
+        let commands = match looked_up {
+            Ok((commands, coverage)) if coverage.scanned => commands,
+            Ok(_) => return,
+            Err(failure) => {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"level":"warn","event":"elsewhere_dependents_unavailable","workspace_id":workspace_id,"detail":failure.to_string()})
+                );
+                return;
+            }
+        };
+        for command in commands {
+            let Command::ObserveInterfaceDependents {
+                notice_id, paths, ..
+            } = &command
+            else {
+                continue;
+            };
+            let mut parts = vec![notice_id.as_str(), workspace_id];
+            parts.extend(paths.iter().map(String::as_str));
+            let id = crate::hook::wire_id("interface-elsewhere", &parts);
+            let failure = match store.execute(&id, &command, &command, now) {
+                Ok(Execution {
+                    outcome: Outcome::Error { message, .. },
+                    ..
+                }) => Some(message),
+                Ok(_) => None,
+                Err(failure) => Some(failure.to_string()),
+            };
+            if let Some(detail) = failure {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"level":"warn","event":"elsewhere_dependents_not_recorded","workspace_id":workspace_id,"detail":detail})
+                );
+            }
+        }
+    }
+
+    /// Up to `budget` in-flight rows of other worktrees after `after`, in
+    /// order, and whether they run to the last row.
+    fn inflight_after(
+        graph: &crate::graph::Index,
+        state: &State,
+        workspace_id: &str,
+        after: Option<&InflightAt>,
+        budget: usize,
+    ) -> Result<(Vec<InflightAt>, bool), Box<dyn std::error::Error + Send + Sync>> {
+        let mut rows = Vec::new();
+        for (other, at) in inflight_worktrees(state, workspace_id) {
+            if after.is_some_and(|(from, _)| other < from) {
+                continue;
+            }
+            let from = after.filter(|(from, _)| from == other).map(|(_, row)| row);
+            let left = budget - rows.len();
+            // One more than is left, to tell the last row from a cut.
+            let (read, coverage) =
+                graph.with_coverage(&at, |graph| graph.inflight_after(other, from, left + 1))?;
+            if !coverage.scanned {
+                continue;
+            }
+            let cut = read.len() > left;
+            rows.extend(read.into_iter().take(left).map(|row| (other.clone(), row)));
+            if cut {
+                return Ok((rows, false));
+            }
+        }
+        Ok((rows, true))
+    }
+
+    /// Which of `offered` the asking workspace's files mention: the files in
+    /// `among` for a briefing, any file for `graph inflight`. Each found
+    /// item comes with its place in `offered`. `keep` decides which count
+    /// toward `limit`; the flag says more were found. The coverage is the
+    /// asking workspace's, and an asking workspace without a complete scan
+    /// finds nothing.
+    #[allow(clippy::type_complexity)]
+    fn inflight_mentioned(
+        graph: &crate::graph::Index,
+        of: &Registration,
+        workspace_id: &str,
+        among: Option<&std::collections::BTreeSet<String>>,
+        offered: Vec<InflightAt>,
+        limit: usize,
+        keep: impl Fn(&langspan_core::InflightSymbol) -> bool,
+    ) -> Result<
+        (
+            Vec<(usize, langspan_core::InflightSymbol)>,
+            langspan_core::GraphCoverage,
+            bool,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        if offered.is_empty() {
+            // Nothing to look up, but the answer still says whether the
+            // asking workspace is indexed.
+            let ((), coverage) = graph.with_coverage(of, |_| Ok(()))?;
+            return Ok((Vec::new(), coverage, false));
+        }
+        let ((found, more), coverage) = graph.with_coverage(of, |graph| {
+            let imports = graph.imports_of(workspace_id, among)?;
+            let mut found = Vec::new();
+            for (place, (other, (path, name, kind, signature, renamed_from))) in
+                offered.into_iter().enumerate()
+            {
+                // A rename (roadmap D7) is told to files that still use the
+                // old name as well as to those that use the new one.
+                let mut mentioned_in = std::collections::BTreeSet::new();
+                for name in std::iter::once(&name).chain(renamed_from.as_ref()) {
+                    mentioned_in.extend(graph.mentioning(
+                        workspace_id,
+                        (&path, name),
+                        &imports,
+                        among,
+                        langspan_core::INFLIGHT_MENTIONS,
+                    )?);
+                }
+                let mentioned_in: Vec<String> = mentioned_in
+                    .into_iter()
+                    .take(langspan_core::INFLIGHT_MENTIONS)
+                    .collect();
+                if mentioned_in.is_empty() {
+                    continue;
+                }
+                let item = langspan_core::InflightSymbol {
+                    workspace_id: other,
+                    path,
+                    name,
+                    kind,
+                    signature,
+                    mentioned_in,
+                    renamed_from,
+                };
+                if !keep(&item) {
+                    continue;
+                }
+                if found.len() == limit {
+                    return Ok((found, true));
+                }
+                found.push((place, item));
+            }
+            Ok((found, false))
+        })?;
+        if !coverage.scanned {
+            return Ok((Vec::new(), coverage, false));
+        }
+        Ok((found, coverage, more))
+    }
+
+    /// What other worktrees have in flight (roadmap C7) that the session's
+    /// files mention and it was not told, for its briefing: from the rows
+    /// after its window's place, at most `INFLIGHT_OFFERED` of them, wrapping
+    /// to the first row after the last. The window then starts just before
+    /// the first item offered, or after the last row read when none was, so
+    /// an item not told this time is read again first, and rows past it are
+    /// reached once what precedes them is told or not mentioned.
+    fn brief_inflight(
+        graph: &crate::graph::Index,
+        state: &State,
+        session_id: &str,
+        workspace_id: &str,
+        concerned: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<langspan_core::InflightSymbol>, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(of) = Registration::of(state, workspace_id) else {
+            return Ok(Vec::new());
+        };
+        let mut windows = BRIEF_WINDOWS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        windows.retain(|session, _| state.sessions.contains_key(session));
+        let from = windows.get(session_id).cloned();
+        let (mut rows, end) =
+            inflight_after(graph, state, workspace_id, from.as_ref(), INFLIGHT_OFFERED)?;
+        if let Some(from) = from.as_ref().filter(|_| end) {
+            let (first, _) = inflight_after(
+                graph,
+                state,
+                workspace_id,
+                None,
+                INFLIGHT_OFFERED - rows.len(),
+            )?;
+            rows.extend(first.into_iter().take_while(|row| row <= from));
+        }
+        let place = |at: usize| at.checked_sub(1).map(|at| rows[at].clone());
+        let last = rows.last().cloned();
+        let read = rows.len();
+        let (found, _, _) = inflight_mentioned(
+            graph,
+            &of,
+            workspace_id,
+            Some(concerned),
+            rows.clone(),
+            langspan_core::INFLIGHT_CANDIDATES,
+            |item| !langspan_core::inflight_told(state, session_id, item),
+        )?;
+        let next = match found.first() {
+            Some((0, _)) => from,
+            Some((first, _)) => place(*first),
+            None if read == 0 => None,
+            None => last,
+        };
+        match next {
+            Some(next) => windows.insert(session_id.to_owned(), next),
+            None => windows.remove(session_id),
+        };
+        Ok(found.into_iter().map(|(_, item)| item).collect())
+    }
+
+    /// `Brief` with what the index finds in flight in other worktrees for
+    /// the session's own files. An index that cannot be read leaves it out.
+    fn prepare_brief(
+        state: &State,
+        graph: Option<&crate::graph::Index>,
+        command: &Command,
+    ) -> Command {
+        let Command::Brief {
+            session_id,
+            max_peers,
+            deliver,
+            mid_turn,
+            left,
+            recent,
+            recent_window_ms,
+            mcp,
+        } = command
+        else {
+            return command.clone();
+        };
+        // The window is the daemon's configuration, whatever a client
+        // sent (roadmap C3).
+        let recent_window_ms = if *recent {
+            RECENT_WINDOW_MS.get().copied()
+        } else {
+            *recent_window_ms
+        };
+        let inflight = graph
+            .zip(langspan_core::briefing_concern(state, session_id, now_ms()))
+            .filter(|(_, (_, concerned))| !concerned.is_empty())
+            .and_then(|(graph, (workspace_id, concerned))| {
+                brief_inflight(graph, state, session_id, &workspace_id, &concerned)
+                .inspect_err(|error| {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({"level":"warn","event":"inflight_unavailable","detail":error.to_string()})
+                    );
+                })
+                .ok()
+            })
+            .unwrap_or_default();
+        Command::BriefPrepared {
+            session_id: session_id.clone(),
+            max_peers: *max_peers,
+            deliver: *deliver,
+            mid_turn: *mid_turn,
+            recent: *recent,
+            recent_window_ms,
+            mcp: *mcp,
+            left: left.clone(),
+            inflight,
+        }
+    }
+
+    /// What `graph inflight` compares: the first `INFLIGHT_PER_WORKTREE`
+    /// rows of each other worktree, at most `INFLIGHT_OFFERED` in all. The
+    /// flag says a limit left rows unread or more were found than are
+    /// listed, so the comparison was partial (review comment 4704149471).
+    #[allow(clippy::type_complexity)]
+    fn listed_inflight(
+        graph: &crate::graph::Index,
+        state: &State,
+        workspace_id: &str,
+    ) -> Result<
+        (
+            Vec<(usize, langspan_core::InflightSymbol)>,
+            langspan_core::GraphCoverage,
+            bool,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let Some(of) = Registration::of(state, workspace_id) else {
+            return Ok((Vec::new(), langspan_core::GraphCoverage::default(), false));
+        };
+        let mut offered = Vec::new();
+        // One more row than the limit is read to tell a full worktree from
+        // a cut one.
+        let mut capped = false;
+        for (other, at) in inflight_worktrees(state, workspace_id) {
+            let (mut rows, coverage) = graph.with_coverage(&at, |graph| {
+                graph.inflight(other, INFLIGHT_PER_WORKTREE + 1)
+            })?;
+            if !coverage.scanned {
+                continue;
+            }
+            if rows.len() > INFLIGHT_PER_WORKTREE {
+                rows.truncate(INFLIGHT_PER_WORKTREE);
+                capped = true;
+            }
+            offered.extend(rows.into_iter().map(|row| (other.clone(), row)));
+            if offered.len() > INFLIGHT_OFFERED {
+                offered.truncate(INFLIGHT_OFFERED);
+                capped = true;
+                break;
+            }
+        }
+        let (found, coverage, more) = inflight_mentioned(
+            graph,
+            &of,
+            workspace_id,
+            None,
+            offered,
+            crate::graph::MAX_RESULTS as usize,
+            |_| true,
+        )?;
+        let partial = coverage.scanned && (more || capped);
+        Ok((found, coverage, partial))
+    }
+
+    /// `graph inflight`: what other worktrees have in flight that any of
+    /// the workspace's files mention.
+    fn graph_inflight(
+        graph: Option<&crate::graph::Index>,
+        state: &State,
+        workspace_id: &str,
+    ) -> Result<Outcome, String> {
+        if !state.workspaces.contains_key(workspace_id) {
+            return Err("workspace is not registered".into());
+        }
+        let graph = graph.ok_or("the index is not available yet; try again shortly")?;
+        let (found, coverage, truncated) =
+            listed_inflight(graph, state, workspace_id).map_err(|error| error.to_string())?;
+        let mut inflight: Vec<langspan_core::InflightNotice> = found
+            .iter()
+            .filter_map(|(_, item)| langspan_core::inflight_notice(state, item))
+            .collect();
+        let cut = fit_inflight(&mut inflight, &coverage);
+        Ok(Outcome::GraphInflight {
+            inflight,
+            coverage,
+            truncated: truncated || cut,
+        })
+    }
+
+    /// Keep the leading in-flight notices whose answer fits one response
+    /// frame. Returns whether any was left out.
+    fn fit_inflight(
+        notices: &mut Vec<langspan_core::InflightNotice>,
+        coverage: &langspan_core::GraphCoverage,
+    ) -> bool {
+        // The envelope, the request ID and the outcome's other fields.
+        const ROOM: usize = 1024;
+        fn size(value: &impl serde::Serialize) -> usize {
+            serde_json::to_vec(value).map_or(usize::MAX / 2, |bytes| bytes.len())
+        }
+        let mut used = ROOM + size(coverage);
+        let keep = notices
+            .iter()
+            .take_while(|notice| {
+                used = used.saturating_add(size(*notice) + 1);
+                used < MAX_FRAME_BYTES
+            })
+            .count();
+        let cut = keep < notices.len();
+        notices.truncate(keep);
+        cut
+    }
+
+    /// How long one write check may spend asking Git where other worktrees'
+    /// changes stand (issue #217). A notice Git has not answered for by then
+    /// keeps the uncommitted rules.
+    const STANDING_BUDGET: Duration = Duration::from_millis(250);
+
+    /// Git's answer, for each of the write's `standing_questions`, to where
+    /// that worktree's change stands against the session's checkout. A
+    /// failure or the budget running out leaves a notice out, and is logged.
+    fn standings(
+        state: &State,
+        session_id: &str,
+        calls: &[langspan_core::CallSite],
+        now: u64,
+    ) -> Result<langspan_core::Standings, langspan_core::CoreError> {
+        let questions = langspan_core::standing_questions(state, session_id, calls, now)?;
+        let mut standings = langspan_core::Standings::new();
+        let base = state
+            .sessions
+            .get(session_id)
+            .and_then(|session| state.workspaces.get(&session.workspace_id));
+        let (Some(base), false) = (base, questions.is_empty()) else {
+            return Ok(standings);
+        };
+        let deadline = Instant::now() + STANDING_BUDGET;
+        for question in questions {
+            let Some(changed) = state.workspaces.get(&question.workspace_id) else {
+                continue;
+            };
+            match crate::git::standing(
+                Path::new(&changed.root),
+                &question.path,
+                Path::new(&base.root),
+                deadline,
+            ) {
+                Ok(standing) => {
+                    standings.insert((question.workspace_id, question.notice_id), standing);
+                }
+                Err(detail) => eprintln!(
+                    "{}",
+                    serde_json::json!({"level":"info","event":"change_standing_unknown","workspace_id":question.workspace_id,"detail":detail})
+                ),
+            }
+        }
+        Ok(standings)
+    }
+
     /// The write-time break check (ADR 0029). The calls are used for this
     /// answer only: never logged or recorded. What is recorded, when a
     /// break is found, is which notices the session was alerted to.
@@ -611,11 +1432,16 @@ mod unix {
             lease_valid: None,
             outcome,
         };
-        let candidates = match langspan_core::call_candidates(store.state(), session_id, calls, now)
-        {
-            Ok(candidates) => candidates,
+        let standings = match standings(store.state(), session_id, calls, now) {
+            Ok(standings) => standings,
             Err(e) => return error(request_id, generation, &e.code, e.message),
         };
+        let candidates =
+            match langspan_core::call_candidates(store.state(), session_id, calls, &standings, now)
+            {
+                Ok(candidates) => candidates,
+                Err(e) => return error(request_id, generation, &e.code, e.message),
+            };
         let workspace_id = store.state().sessions[session_id].workspace_id.clone();
         let not_ready = |coverage: Option<langspan_core::GraphCoverage>| {
             answer(Outcome::CallBreaks {
@@ -642,32 +1468,87 @@ mod unix {
                 );
             }
         }
-        // The new signatures and the coverage they are judged with come from
-        // one snapshot of the index.
-        let looked_up = graph.with_coverage(&of, |graph| {
-            let mut current = Vec::new();
-            for name in &candidates {
-                current.extend(graph.symbol(&workspace_id, name, crate::graph::MAX_RESULTS)?);
-            }
-            Ok(current)
-        });
-        let (current, coverage) = match looked_up {
-            Ok((current, coverage)) if coverage.scanned => (current, coverage),
-            Ok((_, coverage)) => return not_ready(Some(coverage)),
-            Err(failure) => {
-                return error(
-                    request_id,
-                    generation,
-                    "index_unavailable",
-                    failure.to_string(),
-                );
-            }
-        };
-        let breaks =
-            match langspan_core::call_breaks(store.state(), session_id, calls, &current, now) {
-                Ok(breaks) => breaks,
-                Err(e) => return error(request_id, generation, &e.code, e.message),
+        // Each workspace's new signatures and the coverage they are judged
+        // with come from one snapshot of its index. A change in another
+        // worktree is judged in that worktree's index (issue #194), and
+        // only once it has a complete scan.
+        let mut current = std::collections::BTreeMap::new();
+        let mut coverage = None;
+        for (notice_workspace, names) in &candidates {
+            let own = *notice_workspace == workspace_id;
+            let registration = if own {
+                Some(of.clone())
+            } else {
+                Registration::of(store.state(), notice_workspace)
             };
+            let Some(registration) = registration else {
+                continue;
+            };
+            let looked_up = graph.with_coverage(&registration, |graph| {
+                let mut found = Vec::new();
+                for name in names {
+                    found.extend(graph.symbol(
+                        notice_workspace,
+                        name,
+                        crate::graph::MAX_RESULTS,
+                    )?);
+                }
+                Ok(found)
+            });
+            match looked_up {
+                Ok((definitions, scanned)) if scanned.scanned => {
+                    current.insert(
+                        notice_workspace.clone(),
+                        langspan_core::IndexedNames {
+                            definitions,
+                            // An absent name is gone only when the index
+                            // reads every file.
+                            complete: scanned.blind_in_scope == 0,
+                        },
+                    );
+                    if own {
+                        coverage = Some(scanned);
+                    }
+                }
+                Ok((_, scanned)) if own => return not_ready(Some(scanned)),
+                Ok(_) => {}
+                Err(failure) => {
+                    return error(
+                        request_id,
+                        generation,
+                        "index_unavailable",
+                        failure.to_string(),
+                    );
+                }
+            }
+        }
+        // The answer's coverage is the asking workspace's.
+        let coverage = match coverage {
+            Some(coverage) => coverage,
+            None => match graph.with_coverage(&of, |_| Ok(())) {
+                Ok(((), coverage)) if coverage.scanned => coverage,
+                Ok(((), coverage)) => return not_ready(Some(coverage)),
+                Err(failure) => {
+                    return error(
+                        request_id,
+                        generation,
+                        "index_unavailable",
+                        failure.to_string(),
+                    );
+                }
+            },
+        };
+        let breaks = match langspan_core::call_breaks(
+            store.state(),
+            session_id,
+            calls,
+            &standings,
+            &current,
+            now,
+        ) {
+            Ok(breaks) => breaks,
+            Err(e) => return error(request_id, generation, &e.code, e.message),
+        };
         // Only the notices the hook's alert will show are recorded: one
         // left out for room stays to be told at a later write. The hook
         // lays the alert out with the same function.
@@ -698,10 +1579,249 @@ mod unix {
         })
     }
 
+    /// Bytes a write check's answer takes at most, so that the MCP result,
+    /// which carries it twice, fits one frame.
+    const WRITE_CHECK_BYTES: usize = 24 * 1024;
+
+    /// A write check (roadmap B26), answered and never recorded: no event,
+    /// no receipt, no sighting of the session. Reads the asked paths and the
+    /// files of the definitions found, each at most 512 KiB and at most
+    /// twice `WRITE_CHECK_PATHS` files in all, their line-journal entries,
+    /// and one snapshot of the index, on the owner thread. Latency budget
+    /// (**Target**, not measured): under 100 ms, as `check_calls` plus
+    /// those bounded reads. Failure mode: an index error is a tool error;
+    /// no complete scan answers for the paths only.
+    fn check_write(
+        store: &Store,
+        graph: Option<&crate::graph::Index>,
+        state_dir: &Path,
+        request_id: String,
+        (session_id, paths, symbols): (&str, &[String], &[String]),
+    ) -> Response {
+        use langspan_core::{
+            DefinitionFacts, IndexFacts, LineRange, PathFacts, WRITE_CHECK_DEFINITIONS,
+            WRITE_CHECK_PATHS,
+        };
+        let now = now_ms();
+        let state = store.state();
+        let generation = state.generation;
+        let request = match langspan_core::write_check_request(state, session_id, paths, symbols) {
+            Ok(request) => request,
+            Err(e) => return error(request_id, generation, &e.code, e.message),
+        };
+        let Some(of) = Registration::of(state, &request.workspace_id) else {
+            return error(
+                request_id,
+                generation,
+                "workspace_not_found",
+                "the session's workspace is not registered",
+            );
+        };
+        // Definitions from one snapshot of the index: by name, or without
+        // names, those in the asked paths, each read one past the bound so
+        // truncation shows; and the definitions at each place (path and name)
+        // a recorded signature change or removal names, read whatever that
+        // bound left out. None without a complete scan.
+        let noticed = langspan_core::write_check_noticed(state, session_id, &request, now);
+        let definitions = match graph.map(|graph| {
+            graph.with_coverage(&of, |graph| {
+                let bound = WRITE_CHECK_DEFINITIONS as usize;
+                let mut found = Vec::new();
+                let mut truncated = false;
+                let mut keep = |mut read: Vec<langspan_core::SymbolRef>| {
+                    truncated |= read.len() > bound;
+                    read.truncate(bound);
+                    found.extend(read);
+                };
+                if request.names.is_empty() {
+                    for path in &request.paths {
+                        keep(graph.symbols_in(
+                            &of.workspace_id,
+                            path,
+                            WRITE_CHECK_DEFINITIONS + 1,
+                        )?);
+                    }
+                } else {
+                    for name in &request.names {
+                        // `symbol` reads one past its limit.
+                        keep(graph.symbol(&of.workspace_id, name, WRITE_CHECK_DEFINITIONS)?);
+                    }
+                }
+                let mut at = Vec::new();
+                for (path, name) in &noticed {
+                    at.extend(graph.symbols_at(
+                        &of.workspace_id,
+                        path,
+                        name,
+                        WRITE_CHECK_DEFINITIONS,
+                    )?);
+                }
+                Ok((found, truncated, at))
+            })
+        }) {
+            Some(Ok((found, coverage))) if coverage.scanned => Some(found),
+            Some(Ok(_)) | None => None,
+            Some(Err(failure)) => {
+                return error(
+                    request_id,
+                    generation,
+                    "index_unavailable",
+                    failure.to_string(),
+                );
+            }
+        };
+        // The asked paths first, then the definitions' files, up to the bound.
+        let mut files: Vec<String> = request.paths.clone();
+        for symbol in definitions.iter().flat_map(|(found, _, _)| found) {
+            if files.len() < 2 * WRITE_CHECK_PATHS && !files.contains(&symbol.path) {
+                files.push(symbol.path.clone());
+            }
+        }
+        // Each file's version and content, `None` when it could not be read.
+        type Read = Option<(langspan_core::FileState, Option<Vec<u8>>)>;
+        let read: std::collections::BTreeMap<&str, Read> = files
+            .iter()
+            .map(|path| (path.as_str(), crate::journal::current_file(&of.root, path)))
+            .collect();
+        let entries = crate::journal::entries_for(state_dir, &of.root, &files);
+        let wall = crate::shell::now_ms();
+        let path_facts: Vec<PathFacts> = request
+            .paths
+            .iter()
+            .map(|path| {
+                let found = read.get(path.as_str()).and_then(Option::as_ref);
+                PathFacts {
+                    path: path.clone(),
+                    current: found.map(|(version, _)| version.clone()),
+                    written: found
+                        .and_then(|(_, content)| content.as_deref())
+                        .map(|content| {
+                            crate::lines::overwritten(
+                                &entries, session_id, path, content, None, wall,
+                            )
+                        })
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+        let index = definitions.map(|(found, truncated, noticed)| IndexFacts {
+            definitions: found
+                .into_iter()
+                .map(|symbol| {
+                    // Lines are placed only in the content the index read.
+                    let content = read
+                        .get(symbol.path.as_str())
+                        .and_then(Option::as_ref)
+                        .and_then(|(version, content)| match version {
+                            langspan_core::FileState::Present { digest, .. }
+                                if *digest == symbol.digest =>
+                            {
+                                content.as_deref()
+                            }
+                            _ => None,
+                        });
+                    let span = [LineRange {
+                        start_line: symbol.line,
+                        end_line: symbol.end_line.max(symbol.line),
+                    }];
+                    DefinitionFacts {
+                        body_writers: content.map(|content| {
+                            crate::lines::overwritten(
+                                &entries,
+                                session_id,
+                                &symbol.path,
+                                content,
+                                Some(&span),
+                                wall,
+                            )
+                        }),
+                        symbol,
+                    }
+                })
+                .collect(),
+            truncated,
+            noticed,
+        });
+        let mut check = langspan_core::write_check(
+            state,
+            session_id,
+            &request,
+            &path_facts,
+            index.as_ref(),
+            now,
+        );
+        check.shrink_until(|check| {
+            serde_json::to_vec(check).is_ok_and(|bytes| bytes.len() <= WRITE_CHECK_BYTES)
+        });
+        Response {
+            version: PROTOCOL_VERSION,
+            request_id,
+            replayed: false,
+            generation,
+            lease_valid: None,
+            outcome: Outcome::WriteCheck { check },
+        }
+    }
+
+    /// How often the daemon compacts when `retention_days` is set.
+    const COMPACTION_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// `LANGSPAN_TEST_COMPACT_PAUSE_MS`, at most 10 s: how long a compaction
+    /// holds its transaction open before committing, so that a test can
+    /// kill the daemon mid-compaction. Unset in normal use.
+    fn compaction_pause() -> Option<Duration> {
+        std::env::var("LANGSPAN_TEST_COMPACT_PAUSE_MS")
+            .ok()?
+            .parse::<u64>()
+            .ok()
+            .map(|ms| Duration::from_millis(ms.min(10_000)))
+    }
+
+    /// The daily compaction. Its outcome is a log line; a failure leaves the
+    /// log as it was and is tried again the next day.
+    fn compact_daily(store: &mut Store, days: u32) {
+        let line = match store.compact(days, true) {
+            Ok(Outcome::Compaction { report }) => {
+                if report.events == 0 && report.receipts == 0 {
+                    return;
+                }
+                serde_json::json!({"level":"info","event":"compacted","report":report})
+            }
+            Ok(Outcome::Error { code, message }) => {
+                serde_json::json!({"level":"error","event":"compaction_failed","code":code,"detail":message})
+            }
+            Ok(_) => return,
+            Err(error) => {
+                serde_json::json!({"level":"error","event":"compaction_failed","detail":error.to_string()})
+            }
+        };
+        eprintln!("{line}");
+    }
+
     /// A scan of the registration the workspace had when it was asked for.
     struct ScanResult {
         of: Registration,
         snapshot: Result<crate::observer::Snapshot, String>,
+    }
+
+    /// Remove a socket this user left at `path` from an earlier run. Anything
+    /// else there (a file, a link, another user's socket) is refused.
+    fn remove_own_socket(path: &Path) -> Result<(), crate::Error> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata)
+                if metadata.file_type().is_socket()
+                    && metadata.uid() == rustix::process::geteuid().as_raw() =>
+            {
+                Ok(fs::remove_file(path)?)
+            }
+            Ok(_) => Err(format!(
+                "refusing to replace a non-socket or foreign {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )
+            .into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub async fn run(state_dir: PathBuf) -> Result<(), crate::Error> {
@@ -713,28 +1833,32 @@ mod unix {
             .map_err(|error| format!("another daemon may own this state directory: {error}"))?;
         let config =
             Config::read(&directory).map_err(|e| format!("read daemon configuration: {e}"))?;
+        let _ = RECENT_WINDOW_MS.set(config.recent_window_ms);
         local::private_file(&directory.join("state.sqlite3"), true)?;
         for name in ["state.sqlite3-wal", "state.sqlite3-shm"] {
             local::check_existing_file(&directory.join(name))?;
         }
         let mut store = Store::open(&directory.join("state.sqlite3"))
             .map_err(|e| format!("open coordination store: {e}"))?;
+        store.set_compaction_pause(compaction_pause());
+        let retention_days = config.retention_days;
         let generation = store.state().generation;
         let socket = directory.join("daemon.sock");
-        match fs::symlink_metadata(&socket) {
-            Ok(metadata)
-                if metadata.file_type().is_socket()
-                    && metadata.uid() == rustix::process::geteuid().as_raw() =>
-            {
-                fs::remove_file(&socket)?
-            }
-            Ok(_) => return Err("refusing to replace a non-socket or foreign daemon.sock".into()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+        // Clients look only at `daemon.sock` and refuse one that is not
+        // owner-only. Binding creates the socket with the process umask, so
+        // bind it under another name, make it owner-only, then rename it into
+        // place: `daemon.sock` never exists with wider permissions, and once
+        // it exists it is listening (issue #205). The name is no longer than
+        // `daemon.sock`, so the state directory's length check covers it.
+        let binding = directory.join("daemon.bind");
+        for path in [&socket, &binding] {
+            remove_own_socket(path)?;
         }
         let listener =
-            UnixListener::bind(&socket).map_err(|e| format!("bind local Unix socket: {e}"))?;
-        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+            UnixListener::bind(&binding).map_err(|e| format!("bind local Unix socket: {e}"))?;
+        fs::set_permissions(&binding, fs::Permissions::from_mode(0o600))?;
+        fs::rename(&binding, &socket)
+            .map_err(|e| format!("move the local Unix socket into place: {e}"))?;
         let (sender, receiver) = mpsc::sync_channel::<Job>(config.max_clients);
         let (scan_sender, scan_receiver) = mpsc::sync_channel::<Registration>(1);
         let (scan_result_sender, scan_results) = mpsc::sync_channel::<ScanResult>(1);
@@ -755,12 +1879,15 @@ mod unix {
         let graph_path = directory.join("graph.sqlite3");
         local::private_file(&graph_path, true)?;
         let (index_sender, index_receiver) = mpsc::sync_channel::<IndexJob>(1);
+        let (transfer_sender, transfer_receiver) = mpsc::sync_channel::<Transfer>(1);
         {
             let sender = sender.clone();
             let graph_path = graph_path.clone();
             std::thread::Builder::new()
                 .name("langspan-indexer".into())
-                .spawn(move || index_worker(index_receiver, sender, graph_path))?;
+                .spawn(move || {
+                    index_worker(index_receiver, transfer_receiver, sender, graph_path)
+                })?;
         }
         let (check_sender, check_receiver) = mpsc::sync_channel::<auto_check::Message>(256);
         let write_counts = auto_check::WriteCounts::default();
@@ -803,6 +1930,8 @@ mod unix {
         }
         let handoff_after = Duration::from_millis(config.notify_handoff_after_ms);
         store.tap(notify::relevant);
+        // A write check reads the line journal under the state directory.
+        let owner_directory = directory.clone();
         std::thread::Builder::new()
             .name("langspan-owner".into())
             .spawn(move || {
@@ -826,6 +1955,9 @@ mod unix {
                 let mut last_maintenance_error: Option<String> = None;
                 let mut urgent = std::collections::VecDeque::<String>::new();
                 let mut last_scanned = std::collections::HashMap::<String, Instant>::new();
+                // The first compaction runs as the writer starts, then one a
+                // day.
+                let mut next_compaction = Instant::now();
                 loop {
                     match receiver.recv_timeout(Duration::from_millis(100)) {
                         Ok(job) => {
@@ -834,12 +1966,18 @@ mod unix {
                             }
                             if let Some(refused) = stale_report(store.state(), &job) {
                                 let _ = job.reply.send(refused);
+                            } else if is_transfer(&job.request.command) {
+                                forward_transfer(store.state(), &transfer_sender, job);
                             } else {
                             let touched = touched_workspace(store.state(), &job.request.command);
                             let check_before = auto_check_of(store.state(), &job.request.command);
                             let boundary = boundary_session(&job.request.command);
-                            let response = handle(&mut store, graph_reader.as_ref(), job.request);
-                            if let Some(message) = auto_check_message(store.state(), check_before, boundary, &response) {
+                            let response = handle(&mut store, graph_reader.as_ref(), &owner_directory, job.request);
+                            let messages = [
+                                auto_check_message(store.state(), graph_reader.as_ref(), check_before, boundary, &response),
+                                interface_message(store.state(), graph_reader.as_ref(), &response),
+                            ];
+                            for message in messages.into_iter().flatten() {
                                 // Never waits: a full queue loses this one
                                 // trigger, and the session's next one counts.
                                 if let Err(error) = check_sender.try_send(message) {
@@ -901,6 +2039,7 @@ mod unix {
                             };
                             let id = format!("scan-outcome-{}-{now}", store.state().generation);
                             let _ = store.execute(&id, &command, &command, now);
+                            observe_elsewhere(&mut store, graph_reader.as_ref(), &workspace_id, now);
                         }
                         match recorded {
                             Ok(_) => {
@@ -916,6 +2055,12 @@ mod unix {
                             }
                         }
                     }
+                    if let Some(days) = retention_days
+                        && Instant::now() >= next_compaction
+                    {
+                        next_compaction = Instant::now() + COMPACTION_EVERY;
+                        compact_daily(&mut store, days);
+                    }
                     if Instant::now() >= next_liveness {
                         observe_processes(&mut store, &mut previous_session, now);
                         for notice in handoffs.due(store.state(), Instant::now(), handoff_after) {
@@ -924,10 +2069,9 @@ mod unix {
                         next_liveness = Instant::now() + Duration::from_secs(1);
                     }
                     // Facts already committed, whoever asked for them.
-                    for event in store.take_tapped() {
-                        if let Some(notice) = notify::notice_for(store.state(), &event) {
-                            raise(notice);
-                        }
+                    let tapped = store.take_tapped();
+                    for notice in notify::notices_for(store.state(), &tapped) {
+                        raise(notice);
                     }
                     if !scan_pending && (!urgent.is_empty() || Instant::now() >= next_scan) {
                         let workspace = std::iter::from_fn(|| urgent.pop_front())
@@ -1524,6 +2668,14 @@ mod unix {
         ))
     }
 
+    /// Why a request of another protocol version is refused.
+    fn unsupported_version() -> String {
+        format!(
+            "expected protocol version {} to {PROTOCOL_VERSION}; restart the daemon after upgrading LangSpan",
+            protocol::OLDEST_PROTOCOL_VERSION
+        )
+    }
+
     fn error(id: String, generation: u64, code: &str, message: impl Into<String>) -> Response {
         Response {
             version: PROTOCOL_VERSION,
@@ -1553,6 +2705,8 @@ mod unix {
     }
     /// When this daemon started, on the same clock, for the uptime shown.
     static STARTED_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    /// The configured `recent_window_ms`, set once at start.
+    static RECENT_WINDOW_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     /// A workspace scanned less than this long ago is not moved up again.
     const URGENT_AFTER: Duration = Duration::from_secs(5);
 
@@ -1613,6 +2767,7 @@ mod unix {
     /// nothing.
     fn auto_check_message(
         state: &State,
+        graph: Option<&crate::graph::Index>,
         check_before: Option<CheckBefore>,
         boundary: Option<String>,
         response: &Response,
@@ -1637,10 +2792,65 @@ mod unix {
         );
         let workspace_id = &state.sessions.get(&session_id)?.workspace_id;
         let check = state.auto_checks.get(workspace_id).filter(|_| wrote)?;
+        let of = Registration::of(state, workspace_id)?;
+        // Read only for a check with a wider command: one bounded query of
+        // the index's own file.
+        let index_scanned = check.on_interface_change.is_some()
+            && index_coverage(graph, &of).is_some_and(|coverage| coverage.scanned);
         Some(auto_check::Message::Wrote {
             check: check.clone(),
-            of: Registration::of(state, workspace_id)?,
+            of,
             session_id,
+            index_scanned,
+        })
+    }
+
+    fn index_coverage(
+        graph: Option<&crate::graph::Index>,
+        of: &Registration,
+    ) -> Option<langspan_core::GraphCoverage> {
+        graph?
+            .with_coverage(of, |_| Ok(()))
+            .ok()
+            .map(|((), coverage)| coverage)
+    }
+
+    /// An interface notice the index just reported, for the automatic-check
+    /// worker when the workspace's check has a wider command and a session's
+    /// writes changed an export that other files mention. A replayed report
+    /// tells it nothing.
+    fn interface_message(
+        state: &State,
+        graph: Option<&crate::graph::Index>,
+        response: &Response,
+    ) -> Option<auto_check::Message> {
+        let Outcome::InterfaceObserved { notice } = &response.outcome else {
+            return None;
+        };
+        if response.replayed || notice.dependents.is_empty() {
+            return None;
+        }
+        state
+            .auto_checks
+            .get(&notice.workspace_id)?
+            .on_interface_change
+            .as_ref()?;
+        let by_session = notice.by_session.clone()?;
+        if state.sessions.get(&by_session)?.workspace_id != notice.workspace_id {
+            return None;
+        }
+        let of = Registration::of(state, &notice.workspace_id)?;
+        Some(auto_check::Message::Interface {
+            workspace_id: notice.workspace_id.clone(),
+            change: auto_check::Pending {
+                notice_id: notice.notice_id.clone(),
+                path: notice.path.clone(),
+                changes: notice.changes.clone(),
+                dependents: notice.dependents.clone(),
+                by_session,
+                blind_files: index_coverage(graph, &of)
+                    .map_or(0, |coverage| coverage.blind_in_scope),
+            },
         })
     }
 
@@ -1736,11 +2946,12 @@ mod unix {
     fn handle(
         store: &mut Store,
         graph: Option<&crate::graph::Index>,
+        state_dir: &Path,
         request: Request,
     ) -> Response {
         let reads_blind = reads_blind_in_scope(&request.command);
         let acting = langspan_core::acting_session(&request.command).map(str::to_owned);
-        let mut response = answer(store, graph, request);
+        let mut response = answer(store, graph, state_dir, request);
         // Refused or retried, the request still shows the session's hook ran.
         if let Some(session_id) = acting {
             record_seen(store, session_id);
@@ -1825,6 +3036,7 @@ mod unix {
     fn answer(
         store: &mut Store,
         graph: Option<&crate::graph::Index>,
+        state_dir: &Path,
         request: Request,
     ) -> Response {
         let Request {
@@ -1832,20 +3044,28 @@ mod unix {
             request_id,
             command,
         } = request;
-        if version != PROTOCOL_VERSION {
+        if !protocol::answers(version) {
             return error(
                 request_id,
                 store.state().generation,
                 "unsupported_version",
-                "expected protocol version 3; restart the daemon after upgrading LangSpan",
+                unsupported_version(),
             );
         }
         if let Err(e) = validate_request_id(&request_id) {
             return error(request_id, store.state().generation, &e.code, e.message);
         }
         // Every client, not only the CLI: the command is stored as it is.
-        if let Command::AutoCheckEnable { argv, .. } = &command
-            && let Err(message) = auto_check::refuse_secrets(argv)
+        if let Command::AutoCheckEnable {
+            argv,
+            on_interface_change,
+            ..
+        } = &command
+            && let Err(message) = auto_check::refuse_secrets(argv).and_then(|()| {
+                on_interface_change
+                    .as_ref()
+                    .map_or(Ok(()), |wider| auto_check::refuse_secrets(&wider.argv))
+            })
         {
             return error(
                 request_id,
@@ -1857,6 +3077,20 @@ mod unix {
         if let Command::CheckCalls { session_id, calls } = &command {
             return check_calls(store, graph, request_id, session_id, calls);
         }
+        if let Command::CheckWrite {
+            session_id,
+            paths,
+            symbols,
+        } = &command
+        {
+            return check_write(
+                store,
+                graph,
+                state_dir,
+                request_id,
+                (session_id, paths, symbols),
+            );
+        }
         if matches!(
             command,
             Command::GraphSymbol { .. }
@@ -1864,8 +3098,13 @@ mod unix {
                 | Command::GraphImpact { .. }
                 | Command::GraphBlindSpots { .. }
                 | Command::GraphContext { .. }
+                | Command::GraphInflight { .. }
         ) {
             let answer = match &command {
+                Command::GraphInflight { workspace_id } => {
+                    graph_inflight(graph, store.state(), workspace_id)
+                        .map_err(|message| ("index_unavailable", message))
+                }
                 Command::GraphBlindSpots {
                     workspace_id,
                     limit,
@@ -1899,7 +3138,9 @@ mod unix {
             && workspace_id.starts_with("lsh1-root-")
             && let Ok(canonical) = fs::canonicalize(root)
             && let Some(existing) = store.state().workspaces.values().find(|existing| {
-                existing.workspace_id != *workspace_id && Path::new(&existing.root) == canonical
+                existing.workspace_id != *workspace_id
+                    && (Path::new(&existing.root) == canonical
+                        || crate::observer::same_root(Path::new(&existing.root), &canonical))
             })
         {
             return Response {
@@ -1937,6 +3178,8 @@ mod unix {
                     return error(request_id, store.state().generation, code, message);
                 }
             }
+        } else if let Command::Brief { .. } = &command {
+            prepare_brief(store.state(), graph, &command)
         } else {
             match prepare(store.state(), &command) {
                 Ok(command) => command,
@@ -2007,13 +3250,19 @@ mod unix {
             }
             Ok(bytes)
         };
-        let reply = match timeout(Duration::from_millis(config.io_timeout_ms), read).await {
+        // Answered in the version the client asked in, and in that
+        // version's shape; a request that does not parse, in the version it
+        // names when the daemon answers that one.
+        let mut asked = PROTOCOL_VERSION;
+        let mut reply = match timeout(Duration::from_millis(config.io_timeout_ms), read).await {
             Ok(Ok(bytes)) => match serde_json::from_slice::<Request>(&bytes) {
                 Ok(mut request) => {
+                    asked = request.version;
                     // Clients redact before sending; a client that did not
                     // still cannot have a secret recorded.
                     crate::hook::redact_command(&mut request.command);
                     let id = request.request_id.clone();
+                    let transfer = is_transfer(&request.command);
                     let (tx, rx) = oneshot::channel();
                     match sender.try_send(Job {
                         request,
@@ -2021,9 +3270,12 @@ mod unix {
                         of: None,
                     }) {
                         Ok(()) => {
-                            match timeout(Duration::from_millis(config.request_timeout_ms), rx)
-                                .await
-                            {
+                            let wait = if transfer {
+                                TRANSFER_WAIT
+                            } else {
+                                Duration::from_millis(config.request_timeout_ms)
+                            };
+                            match timeout(wait, rx).await {
                                 Ok(Ok(reply)) => reply,
                                 _ => error(
                                     id,
@@ -2041,12 +3293,21 @@ mod unix {
                         ),
                     }
                 }
-                Err(_) => error(
-                    String::new(),
-                    0,
-                    "invalid_request",
-                    "expected a typed version 1 request; unknown fields are rejected",
-                ),
+                Err(_) => {
+                    if let Some(version) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .ok()
+                        .and_then(|request| request.get("version")?.as_u64())
+                        .and_then(|version| u16::try_from(version).ok())
+                    {
+                        asked = version;
+                    }
+                    error(
+                        String::new(),
+                        0,
+                        "invalid_request",
+                        "expected a typed version 1 request; unknown fields are rejected",
+                    )
+                }
             },
             Ok(Err(e)) => error(String::new(), 0, "invalid_frame", e.to_string()),
             Err(_) => error(
@@ -2056,7 +3317,20 @@ mod unix {
                 "JSON request was not received before the I/O deadline",
             ),
         };
-        let bytes=protocol::encode(&reply).or_else(|_|protocol::encode(&error(reply.request_id,reply.generation,"response_too_large","response exceeds 64 KiB; reduce the event page size, or page the state with `status --all`")));
+        if !protocol::answers(asked) {
+            asked = PROTOCOL_VERSION;
+        }
+        reply.version = asked;
+        let bytes = protocol::encode_for(asked, &reply).or_else(|_| {
+            let mut too_large = error(
+                reply.request_id,
+                reply.generation,
+                "response_too_large",
+                "response exceeds 64 KiB; reduce the event page size, or page the state with `status --all`",
+            );
+            too_large.version = asked;
+            protocol::encode(&too_large)
+        });
         if let Ok(bytes) = bytes {
             let _ = timeout(
                 Duration::from_millis(config.io_timeout_ms),
@@ -2068,6 +3342,8 @@ mod unix {
 
     /// The other workspaces whose roots overlap `canonical` as distinct
     /// linked worktrees of one repository. Any other overlap is refused.
+    /// A registered root is kept as given, so it is compared both as given
+    /// and resolved: a root that is now a link to `canonical` overlaps it.
     fn verified_overlaps(
         state: &State,
         workspace_id: &str,
@@ -2076,10 +3352,14 @@ mod unix {
     ) -> Result<Vec<String>, String> {
         let mut verified = Vec::new();
         for old in state.workspaces.values() {
-            let other = Path::new(&old.root);
+            let given = Path::new(&old.root);
+            let resolved = fs::canonicalize(given).ok();
+            let overlaps =
+                |other: &Path| canonical.starts_with(other) || other.starts_with(canonical);
             if old.workspace_id != workspace_id
-                && (canonical.starts_with(other) || other.starts_with(canonical))
+                && (overlaps(given) || resolved.as_deref().is_some_and(overlaps))
             {
+                let other = resolved.as_deref().unwrap_or(given);
                 let linked = crate::git::identity(canonical, deadline)
                     .and_then(|a| crate::git::identity(other, deadline).map(|b| (a, b)))
                     .is_ok_and(|(a, b)| {
@@ -2167,12 +3447,29 @@ mod unix {
                 )));
             }
         };
+        // The old root still resolves to NEW_ROOT, as when a link was left
+        // where the checkout used to be: the same checkout, moved.
+        // With or without --switch, there is nothing else to tell apart.
+        let same = old_exists && crate::observer::same_root(old, &canonical);
         match (switch, old_exists) {
+            _ if same => {}
             (false, true) => {
+                // A link at the old root, or on the way to it, names the
+                // directory it now leads to.
+                let link = match fs::canonicalize(old) {
+                    Ok(target) if target != old => format!(
+                        ": it is reached through a symbolic link and resolves to {}, not to NEW_ROOT",
+                        target.display()
+                    ),
+                    Err(_) if old.is_symlink() => {
+                        ": it is a symbolic link whose target cannot be resolved".into()
+                    }
+                    _ => String::new(),
+                };
                 return Err((
                     "old_root_exists",
                     format!(
-                        "The old root {} still exists. To coordinate the checkout at NEW_ROOT under {workspace_id} instead, add --switch; to coordinate both, register NEW_ROOT with `langspan workspace add`. Nothing changed",
+                        "The old root {} still exists{link}. To coordinate the checkout at NEW_ROOT under {workspace_id} instead, add --switch; to coordinate both, register NEW_ROOT with `langspan workspace add`. Nothing changed",
                         old.display()
                     ),
                 ));
@@ -2239,12 +3536,8 @@ mod unix {
                 old.display()
             ))
         })?;
-        let object = format!("{head}^{{commit}}");
-        let arguments = [&SAFE[..], &["cat-file", "-e", &object]].concat();
-        let found = crate::git::run_with_env(new, &arguments, &[], deadline, 256)
-            .map_err(|error| refused(format!("cannot read NEW_ROOT's objects: {error}")))?
-            .0
-            .success();
+        let found = crate::observer::holds_commit(new, &head, deadline)
+            .map_err(|error| refused(format!("cannot read NEW_ROOT's objects: {error}")))?;
         if found {
             Ok(())
         } else {
@@ -2265,6 +3558,18 @@ mod unix {
                     .map_err(|e| format!("cannot resolve workspace root: {e}"))?;
                 if !canonical.is_dir() {
                     return Err("workspace root must be a directory".into());
+                }
+                // The registered root reached another way, such as through a
+                // link left where the checkout used to be: the same
+                // registration, kept as given.
+                if let Some(existing) = state.workspaces.get(workspace_id)
+                    && crate::observer::same_root(Path::new(&existing.root), &canonical)
+                {
+                    return Ok(Command::WorkspaceRegisterVerified {
+                        workspace_id: workspace_id.clone(),
+                        root: existing.root.clone(),
+                        verified_overlaps: existing.verified_overlaps.clone(),
+                    });
                 }
                 let deadline = Instant::now() + Duration::from_millis(250);
                 let verified_overlaps =
@@ -2465,18 +3770,46 @@ mod unix {
             return Err("session workspace is missing".into());
         };
         let root = Path::new(&workspace.root);
+        // A root reached through a link is the checkout the link leads to,
+        // unless the scan found that to be another repository.
         let current_root = fs::canonicalize(root)?;
-        if current_root != root {
+        if current_root != root
+            && state
+                .scan_failures
+                .get(&session.workspace_id)
+                .is_some_and(|failure| failure.detail == crate::store::IDENTITY_CHANGED)
+        {
             return Err("workspace root identity changed; use a new workspace registration".into());
+        }
+        // Other registered roots, resolved like this one, so a root behind
+        // a link still bounds its own files. A root that no longer resolves
+        // keeps its stored form.
+        let others: Vec<std::path::PathBuf> = state
+            .workspaces
+            .iter()
+            .filter(|(id, _)| **id != session.workspace_id)
+            .map(|(_, workspace)| {
+                let stored = Path::new(&workspace.root);
+                fs::canonicalize(stored).unwrap_or_else(|_| stored.to_path_buf())
+            })
+            .collect();
+        // Another workspace ID that now resolves to this very root, as when
+        // a registered clone's root was replaced by a link to another
+        // registered clone: both would admit the same physical files while
+        // the core keeps their leases apart, so neither admits any.
+        if others.contains(&current_root) {
+            return Err("workspace root now resolves to another registered workspace's root; move or remove one of them".into());
         }
         let mut keys = paths
             .iter()
             .map(|path| -> Result<String, crate::Error> {
-                let key = file_key(root, path)?;
-                let full = root.join(&key);
-                if state.workspaces.values().any(|workspace| {
-                    let descendant = Path::new(&workspace.root);
-                    descendant != root && descendant.starts_with(root) && full.starts_with(descendant)
+                // Resolved paths are compared with the resolved root.
+                let key = file_key(&current_root, path)?;
+                let full = current_root.join(&key);
+                if others.iter().any(|descendant| {
+                    *descendant != current_root
+                        && descendant.starts_with(&current_root)
+                        && full.starts_with(descendant)
                 }) {
                     return Err("file belongs to a registered descendant workspace; attach that physical root separately".into());
                 }
@@ -2597,6 +3930,7 @@ mod unix {
                     coverage,
                     truncated: true,
                     levels: None,
+                    renamed: None,
                 },
             };
             protocol::encode(&response).expect("fits one frame");
@@ -2636,6 +3970,7 @@ mod unix {
                     coverage,
                     truncated: true,
                     levels: Some(levels),
+                    renamed: None,
                 },
             };
             protocol::encode(&response).expect("fits one frame");

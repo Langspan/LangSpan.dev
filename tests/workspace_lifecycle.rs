@@ -50,6 +50,7 @@ impl Home {
     fn run(&self, args: &[&str]) -> Output {
         // Before the arguments: a check's command follows a literal `--`.
         Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.state_dir())
             .args(args)
@@ -114,6 +115,7 @@ impl Home {
             fs::write(path, text).unwrap();
         }
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["install", "--apply", "--home"])
             .arg(self.home())
             .arg("--state-dir")
@@ -125,6 +127,7 @@ impl Home {
     fn start(&mut self) {
         self.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -154,6 +157,7 @@ impl Home {
     /// Run a hook command as the host does, in `cwd`. Stdout and coverage.
     fn hook(&self, command: &str, cwd: &Path, event: &Value) -> (String, String) {
         let mut child = Process::new("/bin/sh")
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["-c", command])
             .current_dir(cwd)
             .env_remove("CLAUDE_PROJECT_DIR")
@@ -220,6 +224,29 @@ impl Home {
     }
     fn status(&self) -> Value {
         self.json(&["status"])["outcome"]["state"].clone()
+    }
+    fn restart(&mut self) {
+        if let Some(mut child) = self.daemon.take() {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+        self.start();
+    }
+    /// Wait until a completed scan of `workspace` has seen HEAD at `head`.
+    fn wait_for_scan(&self, workspace: &str, head: &str) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let changes = self.json(&["changes", workspace, "--after", "0", "--limit", "1"]);
+            if changes["outcome"]["scan"]["head_oid"] == head {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no scan of {head}: {changes} {}",
+                self.status()["scan_failures"]
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -780,4 +807,541 @@ fn removal_is_a_dry_run_until_applied_and_waits_for_admissions_and_sharing() {
     });
     home.start();
     assert!(home.status()["workspaces"].get("gone").is_none());
+}
+
+/// The checkout's directory moves to another disk and a symbolic link takes
+/// its place (issue #170). Every path LangSpan holds still names the same
+/// directory, so it keeps observing it under the registered path.
+#[test]
+fn a_checkout_replaced_by_a_link_to_its_new_place_is_still_the_same_checkout() {
+    let mut home = Home::new();
+    home.install();
+    home.start();
+    let old = home.repo("disk1/app");
+    home.ok(&["workspace", "add", "app", text(&old), "--request-id", "add"]);
+    let first = head(&old);
+    home.wait_for_scan("app", &first);
+
+    fs::create_dir(home.base.join("disk2")).unwrap();
+    let new = home.base.join("disk2/app");
+    fs::rename(&old, &new).unwrap();
+    std::os::unix::fs::symlink(&new, &old).unwrap();
+    // The next coordinator start, as after the move that found this.
+    home.restart();
+    commit(&new, "src/b.rs");
+    let second = head(&new);
+    assert_ne!(first, second);
+    home.wait_for_scan("app", &second);
+    let state = home.status();
+    assert!(
+        state["scan_failures"].get("app").is_none(),
+        "{}",
+        state["scan_failures"]
+    );
+    assert_eq!(home.workspaces()[0]["root"], text(&old), "kept as given");
+
+    // A session reached through the link joins the registered workspace,
+    // and registering the link path again is the same registration.
+    let (_, coverage) = home.session_start(".claude/settings.json", ALICE, &old);
+    assert_ne!(coverage, "unsupported");
+    assert_eq!(
+        home.sessions()
+            .get(&format!("claude-code.{ALICE}"))
+            .map(|s| &s["workspace_id"]),
+        Some(&json!("app"))
+    );
+    home.ok(&[
+        "workspace",
+        "add",
+        "app",
+        text(&old),
+        "--request-id",
+        "add-again",
+    ]);
+    assert_eq!(home.workspaces().len(), 1, "no second workspace");
+    home.ok(&["remember", "app", NOTE, "--request-id", "note"]);
+    // A session there is admitted through the link.
+    home.ok(&["session", "start", "s1", "app", "--request-id", "s1"]);
+    let admitted = home.json(&[
+        "admit",
+        "s1",
+        "src/a.rs",
+        "--ttl-ms",
+        "60000",
+        "--request-id",
+        "admit",
+    ]);
+    assert_eq!(admitted["lease_valid"], true, "{admitted}");
+    let lease = admitted["outcome"]["lease"]["lease_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{admitted}"))
+        .to_owned();
+    // Finish it before the move: a move waits for held admissions. A
+    // completion, not a lapse, so that no step depends on how fast the
+    // machine is.
+    home.ok(&["complete", "s1", &lease, "--request-id", "complete"]);
+
+    // Moving to the link's target needs no --switch and records it.
+    home.ok(&[
+        "workspace",
+        "move",
+        "app",
+        text(&new),
+        "--request-id",
+        "move",
+    ]);
+    let listed = home.workspaces();
+    assert_eq!(listed[0]["root"], text(&new));
+    assert_eq!(listed[0]["notes"], 1);
+    commit(&new, "src/c.rs");
+    home.wait_for_scan("app", &head(&new));
+    assert!(home.status()["scan_failures"].get("app").is_none());
+}
+
+/// A checkout registered through a link from the start, as a home directory
+/// reached through one is, scans normally and its sessions join it.
+#[test]
+fn a_checkout_registered_through_a_link_scans_normally() {
+    let mut home = Home::new();
+    home.install();
+    home.start();
+    let real = home.repo("real/app");
+    let link = home.base.join("link");
+    std::os::unix::fs::symlink(home.base.join("real"), &link).unwrap();
+    let through = link.join("app");
+    home.ok(&[
+        "workspace",
+        "add",
+        "app",
+        text(&through),
+        "--request-id",
+        "add",
+    ]);
+    home.wait_for_scan("app", &head(&real));
+    commit(&real, "src/b.rs");
+    home.wait_for_scan("app", &head(&real));
+    assert!(home.status()["scan_failures"].get("app").is_none());
+    let (_, coverage) = home.session_start(".claude/settings.json", ALICE, &through);
+    assert_ne!(coverage, "unsupported");
+    assert_eq!(
+        home.sessions()
+            .get(&format!("claude-code.{ALICE}"))
+            .map(|s| &s["workspace_id"]),
+        Some(&json!("app"))
+    );
+    assert_eq!(home.workspaces().len(), 1, "no second workspace");
+}
+
+/// An old root that is now a link to another checkout is still there: the
+/// refusal says it is a link and names where it points, and `--switch`
+/// still moves the workspace to a different checkout.
+#[test]
+fn a_move_refused_because_the_old_root_is_a_link_says_where_it_points() {
+    let mut home = Home::new();
+    home.start();
+    let old = home.repo("app");
+    home.ok(&["workspace", "add", "app", text(&old), "--request-id", "add"]);
+    let elsewhere = home.base.join("elsewhere");
+    fs::rename(&old, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &old).unwrap();
+    let clone = home.base.join("clone");
+    git(
+        &home.base,
+        &["clone", "--quiet", text(&elsewhere), text(&clone)],
+    );
+    let refused = home.json(&[
+        "workspace",
+        "move",
+        "app",
+        text(&clone),
+        "--request-id",
+        "m1",
+    ]);
+    assert_eq!(refused["outcome"]["code"], "old_root_exists", "{refused}");
+    let message = refused["outcome"]["message"].as_str().unwrap();
+    assert!(message.contains("symbolic link"), "{message}");
+    assert!(message.contains(text(&elsewhere)), "{message}");
+    assert_eq!(home.workspaces()[0]["root"], text(&old), "nothing changed");
+    home.ok(&[
+        "workspace",
+        "move",
+        "app",
+        text(&clone),
+        "--switch",
+        "--request-id",
+        "m2",
+    ]);
+    assert_eq!(
+        home.workspaces()[0]["root"],
+        text(&fs::canonicalize(&clone).unwrap())
+    );
+}
+
+/// A link at the registered root to a checkout of another repository is not
+/// the same checkout: the scan stops with the identity change, as a
+/// replacement directory there would.
+#[test]
+fn a_link_to_another_repository_at_the_registered_root_is_an_identity_change() {
+    let mut home = Home::new();
+    home.start();
+    let old = home.repo("app");
+    home.ok(&["workspace", "add", "app", text(&old), "--request-id", "add"]);
+    home.wait_for_scan("app", &head(&old));
+    let stranger = home.repo("stranger");
+    fs::rename(&old, home.base.join("aside")).unwrap();
+    std::os::unix::fs::symlink(&stranger, &old).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let failure = home.status()["scan_failures"]["app"]["detail"].clone();
+        if failure
+            .as_str()
+            .is_some_and(|detail| detail.contains("Git identity changed"))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no identity change: {failure}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Nor is a session there admitted through the link.
+    home.ok(&["session", "start", "s1", "app", "--request-id", "s1"]);
+    let refused = home.json(&["admit", "s1", "src/a.rs", "--request-id", "admit"]);
+    assert_eq!(refused["outcome"]["type"], "error", "{refused}");
+    assert!(
+        refused["outcome"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("identity changed"),
+        "{refused}"
+    );
+    let changes = home.json(&["changes", "app", "--after", "0", "--limit", "1"]);
+    assert_ne!(
+        changes["outcome"]["scan"]["head_oid"],
+        head(&stranger).as_str(),
+        "{changes}"
+    );
+}
+
+/// A registered root that is now a link to the checkout's new place still
+/// holds that checkout: a second ID for the link's target, by registration
+/// or by moving another workspace there, is refused, so two workspaces never
+/// admit the same physical file.
+#[test]
+fn a_second_id_for_the_checkout_a_registered_link_leads_to_is_refused() {
+    let mut home = Home::new();
+    home.start();
+    let old = home.repo("disk1/app");
+    home.ok(&["workspace", "add", "a", text(&old), "--request-id", "add-a"]);
+    fs::create_dir(home.base.join("disk2")).unwrap();
+    let new = home.base.join("disk2/app");
+    fs::rename(&old, &new).unwrap();
+    std::os::unix::fs::symlink(&new, &old).unwrap();
+
+    let refused = home.json(&["workspace", "add", "b", text(&new), "--request-id", "add-b"]);
+    assert_eq!(refused["outcome"]["type"], "error", "{refused}");
+    assert!(
+        refused["outcome"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("overlaps an existing physical workspace"),
+        "{refused}"
+    );
+    // Nor inside it.
+    let refused = home.json(&[
+        "workspace",
+        "add",
+        "b",
+        text(&new.join("src")),
+        "--request-id",
+        "add-b-src",
+    ]);
+    assert_eq!(refused["outcome"]["type"], "error", "{refused}");
+
+    // Nor by moving another workspace onto the link's target.
+    let other = home.repo("other");
+    home.ok(&[
+        "workspace",
+        "add",
+        "c",
+        text(&other),
+        "--request-id",
+        "add-c",
+    ]);
+    fs::remove_dir_all(&other).unwrap();
+    let refused = home.json(&[
+        "workspace",
+        "move",
+        "c",
+        text(&new),
+        "--request-id",
+        "move-c",
+    ]);
+    assert_eq!(
+        refused["outcome"]["code"], "workspace_conflict",
+        "{refused}"
+    );
+
+    let ids: Vec<_> = home
+        .workspaces()
+        .iter()
+        .map(|w| w["workspace_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, ["a", "c"]);
+    // Through the link, the registration of `a` is unchanged.
+    home.ok(&[
+        "workspace",
+        "add",
+        "a",
+        text(&old),
+        "--request-id",
+        "add-a-again",
+    ]);
+}
+
+/// After a checkout moves and a link takes its place, its linked worktrees
+/// stay registrable: a new one under the new place, and one registered
+/// under the old root that moves to its resolved path. The registered
+/// parent's root is still the link, so the two roots do not overlap as text.
+/// While the parent holds an admission, the new registration waits, since
+/// the core cannot tell which of its paths the worktree covers.
+#[test]
+fn a_linked_worktree_of_a_checkout_moved_behind_a_link_registers() {
+    let mut home = Home::new();
+    home.start();
+    let old = home.repo("disk1/app");
+    git(&old, &["worktree", "add", "--quiet", ".worktrees/third"]);
+    home.ok(&["workspace", "add", "a", text(&old), "--request-id", "add-a"]);
+    home.ok(&[
+        "workspace",
+        "add",
+        "third",
+        text(&old.join(".worktrees/third")),
+        "--request-id",
+        "add-third",
+    ]);
+    fs::create_dir(home.base.join("disk2")).unwrap();
+    let new = home.base.join("disk2/app");
+    fs::rename(&old, &new).unwrap();
+    std::os::unix::fs::symlink(&new, &old).unwrap();
+    git(&new, &["worktree", "add", "--quiet", ".worktrees/second"]);
+    let second = new.join(".worktrees/second");
+
+    // A held parent admission makes the registration wait.
+    home.ok(&["session", "start", "s1", "a", "--request-id", "s1"]);
+    let admitted = home.json(&[
+        "admit",
+        "s1",
+        "src/a.rs",
+        "--ttl-ms",
+        "60000",
+        "--request-id",
+        "admit",
+    ]);
+    let lease = admitted["outcome"]["lease"]["lease_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{admitted}"))
+        .to_owned();
+    let waiting = home.json(&[
+        "workspace",
+        "add",
+        "second",
+        text(&second),
+        "--request-id",
+        "add-second-held",
+    ]);
+    assert_eq!(waiting["outcome"]["code"], "workspace_in_use", "{waiting}");
+    home.ok(&["complete", "s1", &lease, "--request-id", "complete"]);
+
+    home.ok(&[
+        "workspace",
+        "add",
+        "second",
+        text(&second),
+        "--request-id",
+        "add-second",
+    ]);
+    home.ok(&[
+        "workspace",
+        "move",
+        "third",
+        text(&new.join(".worktrees/third")),
+        "--request-id",
+        "move-third",
+    ]);
+    let roots: Vec<_> = home
+        .workspaces()
+        .iter()
+        .map(|w| w["root"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(roots.contains(&text(&second).to_owned()), "{roots:?}");
+    assert!(
+        roots.contains(&text(&new.join(".worktrees/third")).to_owned()),
+        "{roots:?}"
+    );
+    // The recorded links replay: a restart reads the same registrations.
+    home.restart();
+    assert_eq!(home.workspaces().len(), 3);
+}
+
+/// Review finding: after a checkout moves behind a link, its registered
+/// root stays the link while a linked worktree registers at its resolved
+/// place inside. The parent must still refuse that worktree's files, so the
+/// two workspaces never admit one physical file under different IDs.
+#[test]
+fn a_parent_behind_a_link_refuses_its_registered_worktree_files() {
+    let mut home = Home::new();
+    home.start();
+    let old = home.repo("disk1/app");
+    home.ok(&["workspace", "add", "a", text(&old), "--request-id", "add-a"]);
+    fs::create_dir(home.base.join("disk2")).unwrap();
+    let new = home.base.join("disk2/app");
+    fs::rename(&old, &new).unwrap();
+    std::os::unix::fs::symlink(&new, &old).unwrap();
+    git(&new, &["worktree", "add", "--quiet", ".worktrees/child"]);
+    let child = new.join(".worktrees/child");
+    home.ok(&[
+        "workspace",
+        "add",
+        "child",
+        text(&child),
+        "--request-id",
+        "add-child",
+    ]);
+    fs::write(child.join("file"), "x\n").unwrap();
+    // Without its `.git` file, only the registration marks the worktree,
+    // so the nested-checkout check cannot refuse its files instead.
+    fs::remove_file(child.join(".git")).unwrap();
+    home.ok(&["session", "start", "s1", "a", "--request-id", "s1"]);
+    let refused = home.json(&[
+        "admit",
+        "s1",
+        ".worktrees/child/file",
+        "--ttl-ms",
+        "60000",
+        "--request-id",
+        "admit-child-file",
+    ]);
+    assert!(
+        refused["outcome"]["lease"]["lease_id"].is_null(),
+        "{refused}"
+    );
+    assert!(
+        refused
+            .to_string()
+            .contains("registered descendant workspace"),
+        "{refused}"
+    );
+}
+
+/// Two registered clones of one repository, and the first one's root is then
+/// replaced by a link to the second. Both workspaces now resolve to one
+/// physical checkout, so neither admits a file there.
+#[test]
+fn a_registered_root_relinked_to_another_registered_clone_admits_nothing() {
+    let mut home = Home::new();
+    home.start();
+    let a = home.repo("a");
+    let b = home.base.join("b");
+    git(&home.base, &["clone", "--quiet", text(&a), text(&b)]);
+    home.ok(&["workspace", "add", "a", text(&a), "--request-id", "add-a"]);
+    home.ok(&["workspace", "add", "b", text(&b), "--request-id", "add-b"]);
+    home.wait_for_scan("a", &head(&a));
+    home.wait_for_scan("b", &head(&b));
+    fs::rename(&a, home.base.join("a-aside")).unwrap();
+    std::os::unix::fs::symlink(&b, &a).unwrap();
+    home.ok(&["session", "start", "s1", "a", "--request-id", "s1"]);
+    home.ok(&["session", "start", "s2", "b", "--request-id", "s2"]);
+    for (session, request) in [("s1", "admit-a"), ("s2", "admit-b")] {
+        let refused = home.json(&[
+            "admit",
+            session,
+            "src/a.rs",
+            "--ttl-ms",
+            "60000",
+            "--request-id",
+            request,
+        ]);
+        assert!(
+            refused["outcome"]["lease"]["lease_id"].is_null(),
+            "{session}: {refused}"
+        );
+        assert!(
+            refused
+                .to_string()
+                .contains("another registered workspace's root"),
+            "{session}: {refused}"
+        );
+    }
+}
+
+/// A file committed between the last scan at the old path and the first
+/// scan through the link is still observed: the accepted move keeps the
+/// previous scan as the baseline.
+#[test]
+fn a_commit_made_while_the_checkout_moved_behind_a_link_is_observed() {
+    let mut home = Home::new();
+    home.start();
+    let old = home.repo("disk1/app");
+    home.ok(&["workspace", "add", "app", text(&old), "--request-id", "add"]);
+    home.wait_for_scan("app", &head(&old));
+    if let Some(mut child) = home.daemon.take() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    fs::create_dir(home.base.join("disk2")).unwrap();
+    let new = home.base.join("disk2/app");
+    fs::rename(&old, &new).unwrap();
+    std::os::unix::fs::symlink(&new, &old).unwrap();
+    fs::write(new.join("src/a.rs"), "fn a() { changed() }\n").unwrap();
+    git(
+        &new,
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--quiet",
+            "-am",
+            "change",
+        ],
+    );
+    home.start();
+    home.wait_for_scan("app", &head(&new));
+    assert!(home.status()["scan_failures"].get("app").is_none());
+    let changes = home.json(&["changes", "app", "--after", "0", "--limit", "1000"]);
+    assert!(
+        changes["outcome"]["events"]
+            .to_string()
+            .contains("src/a.rs"),
+        "{changes}"
+    );
+}
+
+fn head(root: &Path) -> String {
+    let output = Process::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Commit a new file at `relative` in the checkout at `root`.
+fn commit(root: &Path, relative: &str) {
+    fs::write(root.join(relative), "fn added() {}\n").unwrap();
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            relative,
+        ],
+    );
 }

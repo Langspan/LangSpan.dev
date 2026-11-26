@@ -12,7 +12,7 @@ use crate::hook::{file_key, valid_host_id};
 use langspan_core::ToolResult;
 use serde::Deserialize;
 use std::{io::Read, time::Instant};
-pub const SOURCE: &str = "claude-code";
+pub const SOURCE: &str = langspan_core::CLAUDE_CODE_HOST;
 pub const SUPPORTED_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 /// A completed `Read` is recorded as the version the session saw. It is
 /// never admitted or denied.
@@ -195,6 +195,7 @@ pub fn run_until(input: impl Read, config: &Config, deadline: Instant) -> Reply 
             // A `Write`'s content is in `edits`.
             contents: Vec::new(),
             pre_tool_context: true,
+            breaks_after: false,
         },
         &config,
         deadline,

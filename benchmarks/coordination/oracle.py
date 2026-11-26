@@ -8,8 +8,10 @@ integrated result is accepted. The task definitions come from PLAN, written
 by the driver; nothing is imported from this directory.
 """
 
+import ast
 import datetime
 import importlib
+import inspect
 import json
 from pathlib import Path
 import re
@@ -44,12 +46,142 @@ def expected(function, value):
     return value
 
 
-def run_checks(task):
+def references(text, name):
+    """Each place TEXT names NAME (as `name`, `module.name`, or an alias
+    that `from ... import name as alias` binds), in source order: the call's
+    argument count, or None for a reference that is not a plain call (a call
+    with `*args` or `**kwargs`, or the name passed or kept as a value). None
+    when TEXT does not parse."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    local = {name} | {alias.asname for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                      for alias in node.names if alias.name == name and alias.asname}
+
+    def names(node):
+        return (isinstance(node, ast.Name) and node.id in local) or (isinstance(node, ast.Attribute) and node.attr == name)
+
+    counts = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and names(node.func):
+            spread = any(isinstance(arg, ast.Starred) for arg in node.args) or any(k.arg is None for k in node.keywords)
+            counts[id(node.func)] = None if spread else len(node.args) + len(node.keywords)
+    found = [(node.lineno, node.col_offset, counts.get(id(node))) for node in ast.walk(tree) if names(node)]
+    return [count for _, _, count in sorted(found, key=lambda item: item[:2])]
+
+
+def arity(function):
+    """The (fewest, most) arguments FUNCTION takes; most is None when it
+    takes any number."""
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return None
+    variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    fewest = sum(p.default is inspect.Parameter.empty and p.kind not in variadic for p in parameters)
+    most = None if any(p.kind in variadic for p in parameters) else len(parameters)
+    return fewest, most
+
+
+def required_arguments(text, name):
+    """How many arguments the last top-level definition of the function NAME
+    in TEXT requires, or None when TEXT is None, does not parse or does not
+    define NAME. Read from the source, so nothing in TEXT runs."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, TypeError, ValueError, RecursionError, MemoryError):
+        return None
+    found = None
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            args = node.args
+            found = (len(args.posonlyargs) + len(args.args) - len(args.defaults)
+                     + sum(default is None for default in args.kw_defaults))
+    return found
+
+
+def interface_change(plan, checkout):
+    """Whether the changer changed the interface its family is about: `made`
+    when its branch's helper requires the changed form's arguments, else
+    `change_not_made`; None in a family without one. The driver passes the
+    helper's source on the changer's branch as `interface_source`, so a
+    change another session's branch made does not count; without it the
+    merged tree's source is read."""
+    interface = next((task["interface"] for task in plan["tasks"] if task["role"] == "changer"), None)
+    if plan["family"] != "discovered_change" or interface is None:
+        return None
+    path = interface["module"].replace(".", "/") + ".py"
+    text = plan["interface_source"] if "interface_source" in plan else source_of(checkout, path)
+    required = required_arguments(text, interface["name"])
+    return "made" if required is not None and required >= interface["arity"] else "change_not_made"
+
+
+def source_of(checkout, path):
+    file = checkout / path
+    return file.read_text(encoding="utf-8", errors="replace") if file.is_file() else None
+
+
+def changed_form(task, checkout):
+    """Whether TASK's code calls the changed interface only in its changed
+    form: at least once, and every reference a call with at least the
+    arguments the change requires. A fallback to the old form, a call with
+    spread arguments, or code that counts without the helper is a hedge."""
+    interface = task["interface"]
+    own = task["module"].replace(".", "/") + ".py"
+    for path in task.get("callers") or [own]:
+        text = source_of(checkout, path)
+        if text is None:
+            return False, "%s is missing" % path
+        found = references(text, interface["name"])
+        if found is None:
+            return False, "%s does not parse" % path
+        if not found and path == own:
+            return False, "%s does not call %s, so it does not use the shared helper" % (path, interface["name"])
+        old = [count for count in found if count is None or count < interface["arity"]]
+        if old:
+            return False, "%s calls %s in its old form or through a fallback (%s)" % (
+                path, interface["name"], ", ".join("not a plain call" if c is None else "%d argument(s)" % c for c in old))
+    return True, None
+
+
+def dated(task, arguments):
+    """A check's arguments with each item's day offset made a date: from
+    today for a dependent, which uses the clock, and from DAY for the
+    changer, whose function is also given DAY."""
+    base = DAY if task["dates"] == "fixed" else datetime.date.today()
+    items = [(name, base + datetime.timedelta(days=offset)) for name, offset in arguments[0]]
+    return [items, *arguments[1:]] + ([DAY] if task["dates"] == "fixed" else [])
+
+
+def run_checks(task, checkout):
     """Import the task's module from the integrated tree and check it."""
+    if task["role"] == "changer":
+        interface = task["interface"]
+        helper = getattr(load(interface["module"]), interface["name"], None)
+        taken = arity(helper) if callable(helper) else None
+        if taken is None:
+            return False, "%s is not defined in %s" % (interface["name"], interface["module"])
+        if taken[0] < interface["arity"]:
+            return False, ("%s still accepts %d argument(s): a default or the old signature keeps its old calls "
+                           "working" % (interface["name"], taken[0]))
+    if task["role"] in ("changer", "dependent"):
+        ok, why = changed_form(task, checkout)
+        if not ok:
+            return False, why
+    if task["role"] == "new_caller":
+        # The new caller must use the new name, not reach the parser through
+        # an alias or a wrapper the rename was told not to keep.
+        source = checkout / (task["module"].replace(".", "/") + ".py")
+        text = source.read_text(encoding="utf-8", errors="replace") if source.is_file() else ""
+        if re.search(r"\bparse_config\b", text) or not re.search(r"\bload_config\b", text):
+            return False, "%s does not call load_config, or still names parse_config" % source.relative_to(checkout)
     module = importlib.import_module(task["module"])
     call = getattr(module, task["function"])
     if "checks" in task:
         for arguments, result in task["checks"]:
+            if "dates" in task:
+                arguments = dated(task, arguments)
             got = call(*arguments)
             if got != result:
                 return False, "%s%r returned %r, expected %r" % (task["function"], tuple(arguments), got, result)
@@ -77,21 +209,12 @@ def python_sources(checkout):
             for path in sorted(root.rglob("*.py"))}
 
 
-def mentions(text, value):
-    """Whether TEXT names VALUE as a whole token: 10 is not in 100 or 10.5."""
-    return re.search(r"(?<![\w.])%s(?!\.?\w)" % re.escape(str(value)), text) is not None
-
-
-def reports_contradiction(text, key, members):
-    """A note reports a pair's contradiction when it names the setting and
-    every value the pair's tasks asked for: the incompatible requirements
-    themselves, not only the setting or the functions involved."""
-    return mentions(text, key) and all(mentions(text, task["value"]) for _, task in members)
-
-
 def judge(plan, checkout):
+    """The verdict on one combined tree. Success is what tasks.SUCCESS states
+    for the family; notes sessions wrote are kept as evidence, never judged."""
     sys.path.insert(0, str(checkout))
     merged = {entry["session"] for entry in plan["integration"] if entry["merged"]}
+    change = interface_change(plan, checkout)
     tasks = []
     for session, task in enumerate(plan["tasks"], 1):
         if task["role"] == "rename":
@@ -105,7 +228,7 @@ def judge(plan, checkout):
             entry = {"completed": ok, "detail": detail}
         else:
             try:
-                ok, detail = run_checks(task)
+                ok, detail = run_checks(task, checkout)
             except Exception as error:  # Agent code can fail in any way; record it.
                 ok, detail = False, "%s: %s" % (type(error).__name__, error)
                 if "--traceback" in sys.argv:
@@ -115,7 +238,6 @@ def judge(plan, checkout):
         tasks.append(entry)
 
     conflicts = []
-    reports = []
     if plan["family"] == "rename_vs_new_caller":
         config = load("shelf.config")
         defined = {name for name in ("parse_config", "load_config") if hasattr(config, name)}
@@ -125,21 +247,64 @@ def judge(plan, checkout):
                     conflicts.append("%s calls %s, which the integrated shelf/config.py does not define" % (path, name))
         for entry in tasks:
             entry["accepted"] = entry["completed"]
+    elif plan["family"] == "discovered_change":
+        # A call that does not fit the integrated helper breaks the tree,
+        # whichever branch wrote it.
+        interface = next(task["interface"] for task in plan["tasks"] if "interface" in task)
+        helper = getattr(load(interface["module"]), interface["name"], None)
+        taken = arity(helper) if callable(helper) else None
+        for path, text in python_sources(checkout).items():
+            counts = [count for count in references(text, interface["name"]) or [] if count is not None]
+            if counts and taken is None:
+                conflicts.append("%s calls %s, which the integrated tree does not define" % (path, interface["name"]))
+            elif taken is not None:
+                unfit = sorted({count for count in counts
+                                if count < taken[0] or (taken[1] is not None and count > taken[1])})
+                if unfit:
+                    conflicts.append("%s calls %s with %s argument(s); the integrated %s takes %d to %s" % (
+                        path, interface["name"], " or ".join(map(str, unfit)), interface["module"], taken[0],
+                        "any number" if taken[1] is None else taken[1]))
+        for entry in tasks:
+            entry["accepted"] = entry["completed"]
+        if change == "change_not_made":
+            # Nothing changed for a dependent to follow, so its work says
+            # nothing about what it knew: it is not judged (issue #218).
+            why = "the changer's branch does not make %s require %d arguments" % (
+                interface["name"], interface["arity"])
+            for entry, task in zip(tasks, plan["tasks"]):
+                if task["role"] == "changer":
+                    entry.update(accepted=False, detail="change_not_made: %s; %s" % (why, entry["detail"]))
+                else:
+                    entry.update(completed=None, accepted=None, detail="change_not_made: not judged, because " + why)
     else:
-        notes = checkout / "notes"
-        texts = [path.read_text(encoding="utf-8", errors="replace") for path in sorted(notes.glob("conflict-*.md"))] if notes.is_dir() else []
+        # What every contradiction task defines. Two tasks that want
+        # different values of one default: each function gets its own value
+        # and the default stays as it was. One task alone: the default
+        # changes to its value. Keeping the default and setting the value
+        # locally, which holds up whatever peers do, passes only the first.
+        defaults = getattr(load("shelf.settings"), "DEFAULTS", None)
         pairs = {}
         for entry, task in zip(tasks, plan["tasks"]):
             if "pair" in task:
                 pairs.setdefault(task["pair"], []).append((entry, task))
         for key, members in sorted(pairs.items()):
-            reconciled = all(entry["completed"] for entry, _ in members)
-            reported = any(reports_contradiction(text, key, members) for text in texts)
-            if reported:
-                reports.append(key)
+            old = members[0][1]["old"]
+            present = isinstance(defaults, dict) and key in defaults
+            if len(members) == 1:
+                entry, task = members[0]
+                changed = present and defaults[key] == task["value"]
+                entry["accepted"] = entry["completed"] and changed
+                if entry["completed"] and not changed:
+                    entry["detail"] += ("; no other task wants %s, so the shared default should hold %s"
+                                        % (key, json.dumps(task["value"])))
+                continue
+            kept = present and defaults[key] == old
+            reconciled = kept and all(entry["completed"] for entry, _ in members)
             for entry, _ in members:
-                entry["accepted"] = reconciled or reported
-            if all(entry["merged"] for entry, _ in members) and not reconciled and not reported:
+                entry["accepted"] = reconciled
+                if entry["completed"] and not kept:
+                    entry["detail"] += "; the shared default %s is no longer %s" % (key, json.dumps(old))
+            if all(entry["merged"] for entry, _ in members) and not all(entry["completed"] for entry, _ in members):
                 lost = [task["function"] for entry, task in members if not entry["completed"]]
                 conflicts.append("%s: both changes merged cleanly, but %s no longer gets what its task asked for" % (key, ", ".join(lost)))
         for entry in tasks:
@@ -160,9 +325,9 @@ def judge(plan, checkout):
     accepted = all_merged and fixture_tests == "passed" and not conflicts and all(t["accepted"] for t in tasks)
     return {
         "integrated_tests": "passed" if accepted else "failed",
+        "interface_change": change,
         "tasks": tasks,
         "semantic_conflicts": conflicts,
-        "contradictions_reported": reports,
         "fixture_tests": fixture_tests,
         "fixture_tests_output_tail": fixture_output,
     }

@@ -51,6 +51,7 @@ impl World {
         let mut world = Self { base, daemon: None };
         world.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(world.state())
                 .stdin(Stdio::null())
@@ -60,8 +61,9 @@ impl World {
                 .unwrap(),
         );
         let deadline = Instant::now() + DEADLINE;
-        while !world.state().join("daemon.sock").exists() {
-            assert!(Instant::now() < deadline, "daemon did not bind its socket");
+        // Ready means what a client checks: an owner-only socket that accepts.
+        while !langspan::client::accepts(&world.state(), Instant::now() + Duration::from_secs(1)) {
+            assert!(Instant::now() < deadline, "daemon did not become ready");
             std::thread::sleep(Duration::from_millis(10));
         }
         let root = world.base.join("work").to_string_lossy().into_owned();
@@ -92,6 +94,7 @@ impl World {
     /// The CLI's `--json` answer.
     fn cli(&self, args: &[&str]) -> Value {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.state())
             .args(args)
@@ -134,6 +137,7 @@ impl World {
 
     async fn mcp(&self) -> RunningService<RoleClient, ()> {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+        command.env("LANGSPAN_AUTOSTART", "off");
         command.arg("mcp").arg("--state-dir").arg(self.state());
         tokio::time::timeout(DEADLINE, ().serve(TokioChildProcess::new(command).unwrap()))
             .await

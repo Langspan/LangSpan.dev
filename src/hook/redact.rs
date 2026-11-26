@@ -97,6 +97,12 @@ pub fn redact_command(command: &mut Command) {
                 results.skipped.retain(|name| !contains_secret(name));
             }
         }
+        Command::ObserveCheckoutRun {
+            command: Some(command),
+            ..
+        } => {
+            *command = redact_bounded(command, langspan_core::MAX_CHECKOUT_COMMAND_BYTES);
+        }
         _ => {}
     }
 }
@@ -685,6 +691,7 @@ mod tests {
             passed: vec![secret.clone(), "parser::keeps_order".into()],
             skipped: vec![secret.clone(), "needs_net".into()],
             all_passed: false,
+            more_failed: false,
         };
         let mut command = Command::RecordCheck {
             workspace_id: "w".into(),
