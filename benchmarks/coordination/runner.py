@@ -17,7 +17,10 @@ import sys
 import time
 import uuid
 
-ARMS = ("no_tool", "coarse_claims", "langspan", "comparable_tool")
+# The three K1 conditions come first. `no_tool` and `coarse_claims` are the
+# v0 arm names, still accepted so earlier manifests keep validating; they are
+# no longer part of the required comparison (see README.md, "Arms").
+ARMS = ("worktrees", "awareness_only", "langspan", "no_tool", "coarse_claims", "comparable_tool")
 REQUIRED_ARMS = set(ARMS[:3])
 COVERAGE_STATES = (
     "admitted", "denied", "unavailable", "timeout", "unsupported",
@@ -91,7 +94,7 @@ def load_manifest(path):
             raise ValueError("item.description must be a bounded string")
         arms = item["arms"]
         if not isinstance(arms, dict) or not arms or arms.keys() - set(ARMS):
-            raise ValueError("arms must select no_tool, coarse_claims, langspan, or comparable_tool")
+            raise ValueError("arms must select " + ", ".join(ARMS))
         for arm_name, arm in arms.items():
             object_fields(arm, {"agents", "versions", "setup", "checks", "evidence_file"}, {"agents"}, arm_name)
             if "evidence_file" in arm:
