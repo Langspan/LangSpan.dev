@@ -367,6 +367,63 @@ fn a_body_change_names_the_newest_other_writer_and_an_unreadable_body_is_counted
     assert_eq!(check.unchecked_bodies, 1);
 }
 
+/// Two methods of one name in one file (`A::text` and `B::text`) are one
+/// name-matched symbol: the newest body change among them is reported,
+/// whatever their order in the index.
+#[test]
+fn same_named_definitions_in_one_file_report_their_newest_body_change() {
+    let state = ready();
+    let writer = |session: &str, line, age_ms| WrittenLines {
+        path: "src/doc.rs".into(),
+        session_id: session.into(),
+        lines: vec![LineRange {
+            start_line: line,
+            end_line: line,
+        }],
+        age_ms,
+    };
+    let at = |line, writers| {
+        let mut found = definition("src/doc.rs", "text", "fn text(&self)", Some(writers));
+        found.symbol.line = line;
+        found.symbol.end_line = line + 2;
+        found
+    };
+    let older = at(5, vec![writer("carol", 6, 90_000)]);
+    let newer = at(20, vec![writer("alice", 21, 2_000)]);
+    let asked = request(&state, "bob", &["src/doc.rs"], &["text"]);
+    for index in [
+        [older.clone(), newer.clone()],
+        [newer.clone(), older.clone()],
+    ] {
+        let check = write_check(
+            &state,
+            "bob",
+            &asked,
+            &no_paths(&asked),
+            Some(&read_all(&index)),
+            10,
+        );
+        assert_eq!(check.symbols.len(), 1, "{check:?}");
+        let body = &check.symbols[0];
+        assert_eq!(
+            (
+                body.change.as_str(),
+                body.by_session.as_deref(),
+                body.age_ms,
+                body.lines.clone()
+            ),
+            (
+                "body",
+                Some("alice"),
+                Some(2_000),
+                newer.body_writers.clone().unwrap()[0].lines.clone()
+            ),
+            "{check:?}"
+        );
+        assert_eq!(check.unchecked_bodies, 0);
+    }
+}
+
 /// A removal or signature change is checked against the index's definitions
 /// at its own place, not against the bounded list of definitions compared
 /// for bodies, and a truncated list is said.

@@ -10,7 +10,7 @@
 //! module decides what may be claimed from it. Symbol answers are matched by
 //! name (ADR 0035), and they inform; nothing here refuses a write.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -453,7 +453,10 @@ pub fn write_check(
         }
     }
     // Lines of a definition's body other sessions wrote, from the journal.
-    let mut bodies = Vec::new();
+    // Same-named definitions in one file (two types' `text` methods) are one
+    // name-matched symbol: the newest body change among them is kept,
+    // whatever their order in the index.
+    let mut bodies: BTreeMap<(String, String), WriteCheckSymbol> = BTreeMap::new();
     let mut unchecked_bodies = 0;
     for definition in &index.definitions {
         let symbol = &definition.symbol;
@@ -483,23 +486,32 @@ pub fn write_check(
             }
             continue;
         };
-        reported.insert((symbol.name.clone(), symbol.path.clone()));
-        bodies.push(WriteCheckSymbol {
-            name: symbol.name.clone(),
-            kind: symbol.kind.clone(),
-            path: symbol.path.clone(),
-            change: "body".into(),
-            before: None,
-            after: None,
-            renamed_to: None,
-            lines: newest.lines.clone(),
-            by_session: Some(newest.session_id.clone()),
-            age_ms: Some(newest.age_ms),
-            intents: intents(&symbol.name),
-            confidence: "name_match".into(),
-        });
+        let key = (symbol.name.clone(), symbol.path.clone());
+        if bodies
+            .get(&key)
+            .is_some_and(|kept| kept.age_ms <= Some(newest.age_ms))
+        {
+            continue;
+        }
+        bodies.insert(
+            key,
+            WriteCheckSymbol {
+                name: symbol.name.clone(),
+                kind: symbol.kind.clone(),
+                path: symbol.path.clone(),
+                change: "body".into(),
+                before: None,
+                after: None,
+                renamed_to: None,
+                lines: newest.lines.clone(),
+                by_session: Some(newest.session_id.clone()),
+                age_ms: Some(newest.age_ms),
+                intents: intents(&symbol.name),
+                confidence: "name_match".into(),
+            },
+        );
     }
-    symbols.extend(bodies);
+    symbols.extend(bodies.into_values());
     symbols.sort_by(|a, b| (a.age_ms, &a.path, &a.name).cmp(&(b.age_ms, &b.path, &b.name)));
     let omitted_symbols = symbols.len().saturating_sub(WRITE_CHECK_SYMBOLS);
     symbols.truncate(WRITE_CHECK_SYMBOLS);

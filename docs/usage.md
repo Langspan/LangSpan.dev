@@ -1604,7 +1604,9 @@ A signature change counts only while the index still holds the new
 signature, and a removal only while the file defines no symbol of that name;
 both are checked against the whole index. A body change is found only in a
 file indexed at its current content and only from a write whose lines the
-journal knows. `unchecked_bodies` counts the definitions that could not be
+journal knows. Definitions of one name in one file, such as two types'
+methods of that name, count as one symbol, and the newest body change among
+them is reported. `unchecked_bodies` counts the definitions that could not be
 compared, including those whose only recent writer by another session changed
 lines the journal does not know. The check compares at most 64 definitions per
 name or per path; `definitions_truncated` is `true` when more matched, and body
