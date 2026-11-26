@@ -191,7 +191,7 @@ pub fn status_line(state: &State, root: &str, from_ms: u64, now_ms: u64) -> Stat
                     .is_some_and(|activity| {
                         activity.generation == state.generation
                             && !activity.ended
-                            && now_ms.saturating_sub(activity.last_ms) <= BRIEF_HORIZON_MS
+                            && now_ms.saturating_sub(activity.last_seen_ms()) <= BRIEF_HORIZON_MS
                     })
         })
         .count();
