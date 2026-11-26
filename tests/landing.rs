@@ -2042,6 +2042,12 @@ impl World {
     /// `feature-import` adds a call of `save` with three arguments,
     /// `feature-drop` removes `load` and `feature-use` adds a file that
     /// calls it.
+    ///
+    /// The branches are made in another clone and fetched, so the
+    /// workspace's checkout goes from no sources straight to the target's
+    /// two. It returns once the daemon's own index holds both at their
+    /// current content: that index follows the checkout in the background,
+    /// and a test that compares its bytes must start after it settles.
     fn with_definitions(&self) {
         let work = self.work();
         fs::create_dir_all(work.join("src")).unwrap();
@@ -2050,6 +2056,18 @@ impl World {
         git(&work, &["add", "src"]);
         git(&work, &["commit", "--quiet", "-m", "sources"]);
         git(&work, &["push", "--quiet", "origin", "main"]);
+        let side = self.base.join("side");
+        git(
+            &self.base,
+            &[
+                "clone",
+                "--quiet",
+                self.hub().to_str().unwrap(),
+                side.to_str().unwrap(),
+            ],
+        );
+        git(&side, &["config", "user.name", "Dev"]);
+        git(&side, &["config", "user.email", "dev@example.invalid"]);
         let edits: [(&str, &str, String); 5] = [
             (
                 "feature-sync",
@@ -2077,13 +2095,36 @@ impl World {
                 "pub fn report() -> u32 {\n    crate::store::load()\n}\n".into(),
             ),
         ];
+        let mut fetch = vec!["fetch".to_string(), "--quiet".into(), "origin".into()];
         for (branch, path, text) in edits {
-            git(&work, &["checkout", "--quiet", "-b", branch, "main"]);
-            fs::write(work.join(path), text).unwrap();
-            git(&work, &["add", path]);
-            git(&work, &["commit", "--quiet", "-m", branch]);
+            git(&side, &["checkout", "--quiet", "-b", branch, "main"]);
+            fs::write(side.join(path), text).unwrap();
+            git(&side, &["add", path]);
+            git(&side, &["commit", "--quiet", "-m", branch]);
+            git(&side, &["push", "--quiet", "origin", branch]);
+            fetch.push(format!("{branch}:{branch}"));
         }
-        git(&work, &["checkout", "--quiet", "main"]);
+        git(&work, &fetch.iter().map(String::as_str).collect::<Vec<_>>());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let (_, text) = self.cli(&["graph", "symbol", "app", "save", "--json"]);
+            let outcome = serde_json::from_str::<serde_json::Value>(&text)
+                .map(|value| value["outcome"].clone())
+                .unwrap_or_default();
+            let coverage = &outcome["coverage"];
+            if coverage["indexable_files"] == 2
+                && coverage["current_files"] == 2
+                && coverage["partial_files"] == 0
+                && coverage.get("blind_in_scope").is_none()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the target's sources were never indexed: {text}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     fn check_json(&self, branches: &[&str], extra: &[&str], command: &[&str]) -> serde_json::Value {
         let (code, text) = self.integrate(branches, &[&["--json"][..], extra].concat(), command);
@@ -2110,12 +2151,50 @@ impl World {
             .concat(),
         )
     }
-    /// The source index's files as bytes, to show a run wrote nothing there.
-    fn graph_bytes(&self) -> Vec<Option<Vec<u8>>> {
-        ["graph.sqlite3", "graph.sqlite3-wal"]
-            .iter()
-            .map(|name| fs::read(self.base.join("state").join(name)).ok())
-            .collect()
+    /// Every row of the source index, by table and sorted, to show a run
+    /// put nothing there. The daemon rescans the workspace after Git
+    /// activity, and each rescan commits a pass, rewriting the same rows
+    /// and counting the pass in `passes`: neither the file bytes nor that
+    /// counter can show whether a check wrote anything.
+    fn graph_rows(&self) -> Vec<(String, Vec<String>)> {
+        let connection = rusqlite::Connection::open_with_flags(
+            self.base.join("state").join("graph.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        // One read snapshot for every table.
+        connection.execute_batch("BEGIN").unwrap();
+        let tables: Vec<String> = connection
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let rows = tables
+            .into_iter()
+            .filter(|table| table != "passes")
+            .map(|table| {
+                let mut statement = connection
+                    .prepare(&format!("SELECT * FROM \"{table}\""))
+                    .unwrap();
+                let width = statement.column_count();
+                let mut rows: Vec<String> = statement
+                    .query_map([], |row| {
+                        (0..width)
+                            .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                            .collect::<Result<Vec<_>, _>>()
+                            .map(|values| format!("{values:?}"))
+                    })
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                rows.sort();
+                (table, rows)
+            })
+            .collect();
+        connection.execute_batch("COMMIT").unwrap();
+        rows
     }
 }
 
@@ -2123,7 +2202,13 @@ impl World {
 fn symbols_name_a_call_that_a_clean_combination_breaks_and_never_change_the_result() {
     let w = World::new();
     w.with_definitions();
-    let graph = w.graph_bytes();
+    let graph = w.graph_rows();
+    assert!(
+        graph
+            .iter()
+            .any(|(table, rows)| table == "symbols" && !rows.is_empty()),
+        "the target is indexed before the checks: {graph:?}"
+    );
     let pair = ["feature-sync", "feature-import"];
     let report = w.check_json(&pair, &["--symbols", "--request-id", "s1"], &["true"]);
     assert_eq!(report["check"]["result"]["type"], "passed", "{report}");
@@ -2143,7 +2228,7 @@ fn symbols_name_a_call_that_a_clean_combination_breaks_and_never_change_the_resu
     assert_eq!(finding["line"], 1, "{report}");
     assert_eq!(finding["other_line"], 2, "{report}");
     assert_eq!(finding["args"], 3, "{report}");
-    assert_eq!(w.graph_bytes(), graph, "the source index is not written");
+    assert_eq!(w.graph_rows(), graph, "the source index is not written");
 
     // A finding never fails a passing check, and is told to a person.
     let (code, text) = w.integrate(&pair, &["--symbols", "--request-id", "s2"], &["true"]);
@@ -2166,7 +2251,7 @@ fn symbols_name_a_call_that_a_clean_combination_breaks_and_never_change_the_resu
     let (code, text) = w.integrate(&pair, &["--request-id", "p2"], &["true"]);
     assert_eq!(code, 0, "{text}");
     assert!(!text.contains("Definition findings"), "{text}");
-    assert_eq!(w.graph_bytes(), graph, "the source index is not written");
+    assert_eq!(w.graph_rows(), graph, "the source index is not written");
 
     // A landing compares nothing.
     let (code, text) = w.cli(&[
