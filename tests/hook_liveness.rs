@@ -93,6 +93,8 @@ impl Fixture {
                     max_peers: 8,
                     deliver: false,
                     mid_turn: false,
+                    recent: false,
+                    recent_window_ms: None,
                     mcp: false,
                 },
             )

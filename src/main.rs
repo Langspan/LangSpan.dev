@@ -51,7 +51,8 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   admit SESSION PATH...          Request a whole file set; --ttl-ms defaults to 5000
   complete SESSION LEASE         Complete a current admission
   brief SESSION                  Look at the peer work a session would be told about;
-                                 optional --max-peers N (1..16). Does not count as delivery
+                                 optional --max-peers N (1..16); --recent adds what changed
+                                 recently, as told at a session's start. Does not count as delivery
   remote enable WORKSPACE --name NAME [--remote origin] [--share-task on] [--root DIR]
                 [--publish-as-branch]
                                  Publish this workspace's work summary to teammates
@@ -3780,6 +3781,8 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 // A look from the terminal is not a delivery to the session.
                 deliver: false,
                 mid_turn: false,
+                recent: options.remove("--recent").is_some(),
+                recent_window_ms: None,
                 mcp: false,
             },
             ["remote", "enable", workspace] => Command::RemoteEnable {
@@ -4007,7 +4010,29 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             },
         )?;
     }
-    let response = client::call(&state_dir, &request)?;
+    let mut response = client::call(&state_dir, &request)?;
+    // As at a session's start: work ended sessions left is named only while
+    // the line journal shows it still uncommitted (roadmap C3).
+    if let (
+        Command::Brief { session_id, .. },
+        Outcome::Briefing {
+            briefing:
+                langspan_core::Briefing {
+                    recent: recent @ Some(_),
+                    ..
+                },
+        },
+    ) = (&request.command, &mut response.outcome)
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        if let Some(found) = recent.as_mut()
+            && let Err(reason) =
+                langspan::recent::confirm_left(&state_dir, session_id, found, deadline)
+        {
+            eprintln!("langspan: what changed recently is left out: {reason}");
+            *recent = None;
+        }
+    }
     if json {
         println!("{}", serde_json::to_string(&response)?);
     } else {
@@ -4061,13 +4086,14 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             // them accept them (`dashboard`: `--open`, `--allow-network`;
             // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
-            // `graph symbol`: `--detail`).
+            // `graph symbol`: `--detail`; `brief`: `--recent`).
             "--open"
             | "--allow-network"
             | "--check-again"
             | "--publish-as-branch"
             | "--mine"
             | "--detail"
+            | "--recent"
             | "--all"
             | "--skill"
             | "--yes"
