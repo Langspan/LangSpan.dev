@@ -40,12 +40,64 @@ pub const TOKEN_HEADER: &str = "x-langspan-token";
 /// process's arguments, which other users of the machine can list.
 const OPEN_FILE: &str = "dashboard-open.html";
 
-const PAGE: &str = include_str!("dashboard.html");
+/// The page: one inline style block, one inline script block, and markers
+/// that `page` fills.
+const SHELL: &str = include_str!("dashboard.html");
+/// Fictional scenes for `--demo`, shown labeled as simulated. The live page
+/// never contains them.
+const DEMO_SCENES: &str = include_str!("dashboard-demo.js");
+/// The brand lockup (mark and outlined wordmark), from the approved kit,
+/// used as is.
+const LOCKUP_LIGHT: &str = include_str!("../docs/assets/brand/langspan-lockup-light.svg");
+const LOCKUP_DARK: &str = include_str!("../docs/assets/brand/langspan-lockup-dark.svg");
+const MARK_MARKER: &str = "<!--langspan:brand-mark-->";
+const DEMO_MARKER: &str = "/*langspan:demo-scenes*/";
 
 pub struct Options {
     pub listen: SocketAddr,
     pub allow_network: bool,
     pub open: bool,
+    /// Serve the simulated demonstration instead of the coordinator's view.
+    pub demo: bool,
+}
+
+/// The kit's artwork as inline markup: every line after the header as the
+/// file has it, without the namespace and fixed size a standalone file
+/// needs, and hidden from assistive technology because the page names the
+/// product in text.
+fn brand_mark(svg: &str, class: &str) -> Result<String, crate::Error> {
+    let unexpected = || "the brand file does not start with the kit's header";
+    let (header, body) = svg.trim().split_once('\n').ok_or_else(unexpected)?;
+    let view_box = header
+        .strip_prefix("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"")
+        .and_then(|rest| rest.split_once('"'))
+        .filter(|(_, rest)| rest.ends_with(" fill=\"none\">"))
+        .map(|(view_box, _)| view_box)
+        .ok_or_else(unexpected)?;
+    Ok(format!(
+        "<svg class=\"{class}\" viewBox=\"{view_box}\" fill=\"none\" aria-hidden=\"true\" focusable=\"false\">\n{body}"
+    ))
+}
+
+/// The page served at `/`: the live view, or with `demo` the same page and
+/// renderer with the simulated scenes in place of the coordinator.
+pub fn page(demo: bool) -> Result<String, crate::Error> {
+    if SHELL.matches(MARK_MARKER).count() != 1 || SHELL.matches(DEMO_MARKER).count() != 1 {
+        return Err("the dashboard page must have one brand-mark and one demo marker".into());
+    }
+    let mark = format!(
+        "{}{}",
+        brand_mark(LOCKUP_LIGHT, "ls-mark ls-mark-light")?,
+        brand_mark(LOCKUP_DARK, "ls-mark ls-mark-dark")?
+    );
+    let scenes = if demo {
+        DEMO_SCENES
+    } else {
+        "const DEMO_SCENES = null;"
+    };
+    Ok(SHELL
+        .replace(MARK_MARKER, &mark)
+        .replace(DEMO_MARKER, scenes))
 }
 
 pub fn default_listen() -> SocketAddr {
@@ -75,13 +127,16 @@ struct Context {
     state_dir: PathBuf,
     token: String,
     csp: String,
+    page: String,
+    demo: bool,
 }
 
 /// Bind, print the URL, and serve until the process is stopped.
 pub fn serve(state_dir: PathBuf, options: Options) -> Result<(), crate::Error> {
     let warn = check_listen(options.listen, options.allow_network)?;
     let token = random_token()?;
-    let csp = content_security_policy(PAGE)?;
+    let page = page(options.demo)?;
+    let csp = content_security_policy(&page)?;
     let listener = TcpListener::bind(options.listen)
         .map_err(|error| format!("cannot listen on {}: {error}", options.listen))?;
     let bound = listener.local_addr()?;
@@ -107,7 +162,8 @@ pub fn serve(state_dir: PathBuf, options: Options) -> Result<(), crate::Error> {
     io::stdout().flush()?;
     eprintln!(
         "{}",
-        serde_json::json!({"level":"info","event":"dashboard_ready","address":bound.to_string()})
+        serde_json::json!({"level":"info","event":"dashboard_ready","address":bound.to_string(),
+            "data": if options.demo { "simulated" } else { "coordinator" }})
     );
     if options.open
         && let Err(error) = open_browser(&state_dir, &url)
@@ -121,6 +177,8 @@ pub fn serve(state_dir: PathBuf, options: Options) -> Result<(), crate::Error> {
         state_dir,
         token,
         csp,
+        page,
+        demo: options.demo,
     });
     let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
@@ -376,9 +434,15 @@ fn route(request: &Parsed, arrived: SocketAddr, context: &Context) -> Reply {
         return Reply {
             status: 200,
             content_type: "text/html; charset=utf-8",
-            body: PAGE.as_bytes().to_vec(),
+            body: context.page.as_bytes().to_vec(),
             allow: false,
         };
+    }
+    if context.demo {
+        return Reply::text(
+            404,
+            "this dashboard serves simulated data only; run langspan dashboard without --demo for the coordinator's view",
+        );
     }
     state(&context.state_dir)
 }
@@ -592,10 +656,164 @@ mod tests {
 
     #[test]
     fn the_policy_names_the_page_blocks_by_hash_and_nothing_inline_otherwise() {
-        let csp = content_security_policy(PAGE).unwrap();
-        assert!(!csp.contains("unsafe"), "{csp}");
-        assert!(csp.contains("default-src 'none'"), "{csp}");
-        assert_eq!(csp.matches("'sha256-").count(), 2, "{csp}");
+        for demo in [false, true] {
+            let csp = content_security_policy(&page(demo).unwrap()).unwrap();
+            assert!(!csp.contains("unsafe"), "{csp}");
+            assert!(csp.contains("default-src 'none'"), "{csp}");
+            assert!(csp.contains("img-src 'none'"), "{csp}");
+            assert!(csp.contains("connect-src 'self'"), "{csp}");
+            assert_eq!(csp.matches("'sha256-").count(), 2, "{csp}");
+        }
+    }
+
+    /// The hash covers exactly the served block: one changed byte in it
+    /// changes the policy.
+    #[test]
+    fn the_policy_hashes_follow_the_served_blocks() {
+        let live = page(false).unwrap();
+        let demo = page(true).unwrap();
+        let script = |csp: &str| {
+            csp.split("script-src ")
+                .nth(1)
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        let style = |csp: &str| {
+            csp.split("style-src ")
+                .nth(1)
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        let (live_csp, demo_csp) = (
+            content_security_policy(&live).unwrap(),
+            content_security_policy(&demo).unwrap(),
+        );
+        assert_ne!(
+            script(&live_csp),
+            script(&demo_csp),
+            "the demo script differs"
+        );
+        assert_eq!(style(&live_csp), style(&demo_csp), "one style serves both");
+        let start = live.find("<script>").unwrap() + "<script>".len();
+        let end = live.find("</script>").unwrap();
+        let expected = format!(
+            "'sha256-{}'",
+            base64(&crate::sha256::digest(&live.as_bytes()[start..end]))
+        );
+        assert_eq!(script(&live_csp), expected);
+    }
+
+    /// The live page carries the renderer and never the simulated scenes;
+    /// the demonstration carries both and says it is simulated.
+    #[test]
+    fn the_live_page_never_contains_the_demo_scenes() {
+        let live = page(false).unwrap();
+        let demo = page(true).unwrap();
+        let sentinel = "langspan-demo-scenes-v1";
+        assert!(DEMO_SCENES.contains(sentinel));
+        for closing in ["</script", "<script", "<!--"] {
+            assert!(
+                !DEMO_SCENES.to_ascii_lowercase().contains(closing),
+                "the scenes would end the script block early: {closing}"
+            );
+        }
+        assert!(
+            !live.contains(sentinel),
+            "the live page loads demo fixtures"
+        );
+        assert!(demo.contains(sentinel));
+        assert!(live.contains("const DEMO_SCENES = null;"));
+        for composed in [&live, &demo] {
+            assert!(!composed.contains(MARK_MARKER) && !composed.contains(DEMO_MARKER));
+            assert_eq!(composed.matches("<script>").count(), 1);
+            assert_eq!(composed.matches("<style>").count(), 1);
+        }
+        assert!(demo.contains("Simulated data"));
+    }
+
+    /// Quoted names the script passes to `call`, such as `byId('scope')`.
+    fn quoted_arguments<'a>(script: &'a str, call: &str) -> Vec<&'a str> {
+        script
+            .match_indices(call)
+            .filter_map(|(at, _)| {
+                let rest = &script[at + call.len()..];
+                rest.strip_prefix('\'')
+                    .and_then(|rest| rest.split_once('\''))
+                    .map(|(name, _)| name)
+            })
+            .collect()
+    }
+
+    /// Every element the script looks up and every icon it draws exists in
+    /// the page, so a typo fails here instead of in a browser.
+    #[test]
+    fn every_element_and_icon_the_script_names_exists() {
+        let page = page(true).unwrap();
+        let script = &page[page.find("<script>").unwrap()..];
+        let ids = quoted_arguments(script, "byId(");
+        assert!(ids.len() > 30, "{ids:?}");
+        for id in ids {
+            assert!(
+                page.contains(&format!("id=\"{id}\"")),
+                "no element with id {id}"
+            );
+        }
+        let mut icons = quoted_arguments(script, "icon(");
+        // Icons named in tables of marks, records and panel titles.
+        for table in [", '", "icon: '"] {
+            for name in quoted_arguments(script, table) {
+                if page.contains(&format!("data-icon=\"{name}\"")) {
+                    icons.push(name);
+                }
+            }
+        }
+        for name in [
+            "ban", "lock", "edit", "layers", "notice", "peer", "dot", "check", "fail", "warn",
+            "land", "turn", "message", "note", "machine", "scope", "inspect", "health", "users",
+            "file", "down", "right",
+        ] {
+            assert!(
+                page.contains(&format!("data-icon=\"{name}\"")),
+                "no icon {name}"
+            );
+        }
+        for name in icons {
+            assert!(
+                page.contains(&format!("data-icon=\"{name}\"")),
+                "no icon {name}"
+            );
+        }
+    }
+
+    /// The lockup is the approved kit's artwork, line for line after its
+    /// header, in both themes; nothing is redrawn.
+    #[test]
+    fn the_brand_mark_is_the_kits_artwork_unchanged() {
+        let live = page(false).unwrap();
+        for file in [LOCKUP_LIGHT, LOCKUP_DARK] {
+            let lines: Vec<&str> = file.trim().lines().skip(1).collect();
+            assert!(lines.iter().filter(|line| line.contains("<path ")).count() >= 4);
+            assert!(
+                live.contains(&lines.join("\n")),
+                "the artwork is embedded whole"
+            );
+        }
+        assert!(live.contains("viewBox=\"0 0 288 80\""));
+        assert!(live.contains("ls-mark-light") && live.contains("ls-mark-dark"));
+        assert!(
+            brand_mark("<svg>", "x").is_err(),
+            "an unexpected file fails loudly"
+        );
+        assert!(
+            brand_mark("<svg viewBox=\"0 0 1 1\">\n<path/>\n</svg>", "x").is_err(),
+            "a header without the kit's namespace and fill fails loudly"
+        );
     }
 
     #[test]
