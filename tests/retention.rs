@@ -1670,3 +1670,105 @@ fn a_start_after_compaction_keeps_both_generations_placed_and_the_cutoff_in_forc
     assert!(from_1.truncated, "{from_1:#?}");
     assert_eq!(from_1.covered_from_ms, Some(START_MS + 3 * DAY_MS));
 }
+
+/// What the classification of failing tests keeps per workspace and session
+/// (issue #69, ADR 0030) is derived outside the status reply: the retained
+/// test results, each session's first write and the runs of writes. A
+/// compaction past a recorded write and a check with test results must keep
+/// all three, or its snapshot check refuses it and history is never removed.
+#[test]
+fn a_compaction_keeps_the_retained_tests_and_write_history() {
+    use langspan_core::{CheckResult, TestResults, ToolIdentity, ToolResult};
+    let directory = Directory::new();
+    let path = directory.file("state.sqlite3");
+    let wall = Wall::at(START_MS);
+    let mut store = wall.open(&path);
+    run(
+        &mut store,
+        "workspace",
+        Command::WorkspaceRegister {
+            workspace_id: "w".into(),
+            root: "/retention-workspace".into(),
+        },
+        0,
+    );
+    run(
+        &mut store,
+        "register-alice",
+        Command::SessionRegister {
+            session_id: "alice".into(),
+            workspace_id: "w".into(),
+            parent: None,
+            headless: false,
+        },
+        0,
+    );
+    let recorded = run(
+        &mut store,
+        "check",
+        Command::RecordCheck {
+            workspace_id: "w".into(),
+            name: "tests".into(),
+            command: "cargo test".into(),
+            tree_oid: "a".repeat(40),
+            head_oid: None,
+            inputs: Vec::new(),
+            result: CheckResult::Failed { exit_code: 101 },
+            duration_ms: 900,
+            report: None,
+            writes_before: Some(0),
+            command_id: Some("c".repeat(64)),
+            tests: Some(TestResults {
+                failed: vec!["old::broken".into()],
+                passed: vec!["parser::keeps_order".into()],
+                ..TestResults::default()
+            }),
+            rerun: None,
+        },
+        100,
+    );
+    assert!(
+        !matches!(recorded.outcome, Outcome::Error { .. }),
+        "{:?}",
+        recorded.outcome
+    );
+    let observed = run(
+        &mut store,
+        "write",
+        Command::ObserveTool {
+            session_id: "alice".into(),
+            operation: ToolIdentity {
+                operation_id: "op-write".into(),
+                source: "test".into(),
+                tool: "Write".into(),
+                input_digest: "a".repeat(64),
+            },
+            paths: vec!["src/alice.rs".into()],
+            result: ToolResult::Succeeded,
+            lease_id: None,
+        },
+        200,
+    );
+    assert!(
+        matches!(observed.outcome, Outcome::Observed { .. }),
+        "{:?}",
+        observed.outcome
+    );
+    let before = store.state().clone();
+    assert!(!before.kept_tests.is_empty(), "no test results were kept");
+    assert!(!before.first_writes.is_empty(), "no first write was kept");
+    assert!(!before.write_runs.is_empty(), "no write run was kept");
+
+    wall.set(START_MS + 100 * DAY_MS);
+    let applied = report(store.compact(30, true).unwrap());
+    assert!(applied.applied && applied.events > 0, "{applied:?}");
+    drop(store);
+    let store = wall.open(&path);
+    let after = store.state();
+    assert_eq!(after.kept_tests, before.kept_tests, "kept_tests was lost");
+    assert_eq!(
+        after.first_writes, before.first_writes,
+        "first_writes was lost"
+    );
+    assert_eq!(after.write_runs, before.write_runs, "write_runs was lost");
+}

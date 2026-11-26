@@ -240,7 +240,7 @@ fn named_workspace(event: &Event) -> Option<&str> {
         Event::WriteRefused { workspace_id, .. } | Event::TurnReleased { workspace_id, .. } => {
             Some(workspace_id)
         }
-        Event::CheckRecorded { check } => Some(&check.workspace_id),
+        Event::CheckRecorded { check, .. } => Some(&check.workspace_id),
         Event::OperationObserved { observation } => Some(&observation.workspace_id),
         Event::LeaseGranted { lease } => Some(&lease.workspace_id),
         Event::IntentSet { intent } => Some(&intent.workspace_id),
