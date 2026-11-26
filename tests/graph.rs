@@ -856,6 +856,108 @@ fn an_index_pass_reporting_after_removal_and_registration_again_records_no_notic
     assert!(!notices.contains("stale: u16"), "{notices}");
 }
 
+/// The original `src/upload.rs` of `World::new`.
+const ORIGINAL_UPLOAD: &str = "pub fn upload(path: &str) -> bool {\n    !path.is_empty()\n}\n\npub fn gate(user: &str) -> bool {\n    user == \"admin\"\n}\n";
+
+/// The same interface change in two lifetimes of a workspace: a change
+/// from version A to version B, then removal, A restored, registration
+/// again at the same root, and A to B once more. The second notice is news
+/// for the new registration and is recorded, not taken for a retry of the
+/// first one.
+#[test]
+fn the_same_change_in_a_later_registration_is_noticed_again() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    a_delayed_notice_is_recorded(&w);
+    let (code, text) = w.cli(&[
+        "workspace",
+        "remove",
+        "app",
+        "--apply",
+        "--request-id",
+        "r1",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(noticed(&w), "", "removal forgets the notice");
+    fs::write(w.work().join("src/upload.rs"), ORIGINAL_UPLOAD).unwrap();
+    let root = w.work();
+    let (code, text) = w.cli(&[
+        "workspace",
+        "add",
+        "app",
+        root.to_str().unwrap(),
+        "--request-id",
+        "ws-again",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    w.wait_for("version A indexed again", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+            && outcome["symbols"].as_array().is_some_and(|symbols| {
+                symbols.iter().any(|symbol| {
+                    symbol["signature"].as_str().unwrap() == "pub fn upload(path: &str) -> bool"
+                })
+            })
+    });
+    a_delayed_notice_is_recorded(&w);
+}
+
+/// After removal, an ID registered again at a root the observer cannot
+/// scan (not a Git checkout) is never indexed. Index answers for it hold
+/// nothing from the earlier registration and say it is not scanned.
+#[test]
+fn an_unscanned_registration_again_is_not_answered_from_the_earlier_index() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let (code, text) = w.cli(&[
+        "workspace",
+        "remove",
+        "app",
+        "--apply",
+        "--request-id",
+        "r1",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let plain = w.base.join("plain");
+    fs::create_dir_all(plain.join("src")).unwrap();
+    fs::write(plain.join("src/upload.rs"), ORIGINAL_UPLOAD).unwrap();
+    let (code, text) = w.cli(&[
+        "workspace",
+        "add",
+        "app",
+        plain.to_str().unwrap(),
+        "--request-id",
+        "ws-plain",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    for args in [
+        &["graph", "symbol", "app", "upload", "--json"][..],
+        &["graph", "references", "app", "upload", "--json"][..],
+        &["graph", "blind-spots", "app", "--json"][..],
+    ] {
+        let (code, text) = w.cli(args);
+        assert_eq!(code, 0, "{args:?}: {text}");
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        assert_eq!(
+            outcome["coverage"]["scanned"], false,
+            "{args:?}: {outcome:#}"
+        );
+        assert_eq!(
+            outcome["coverage"]["indexable_files"], 0,
+            "{args:?}: {outcome:#}"
+        );
+        for list in ["symbols", "references"] {
+            assert!(
+                outcome[list].as_array().is_none_or(Vec::is_empty),
+                "{args:?}: {outcome:#}"
+            );
+        }
+    }
+}
+
 /// Wait until `session`'s next prompt carries an interface notice holding
 /// `text`.
 fn told(w: &World, session: &str, text: &str) -> String {

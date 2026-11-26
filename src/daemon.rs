@@ -222,9 +222,11 @@ mod unix {
                         std::thread::sleep(report_delay());
                     }
                     for notice in notices {
-                        // One request per version of the file: redelivery is
-                        // a replay. A pass of a checkout the workspace has
-                        // since left, by a move or a removal, is refused.
+                        // One request per version of the file in one
+                        // registration: redelivery is a replay, and the same
+                        // change in a later registration is a new request. A
+                        // pass of a checkout the workspace has since left, by
+                        // a move or a removal, is refused.
                         ask_as(
                             &sender,
                             Some(of.clone()),
@@ -232,6 +234,8 @@ mod unix {
                                 "interface",
                                 &[
                                     &of.workspace_id,
+                                    &of.root.to_string_lossy(),
+                                    &of.removals.to_string(),
                                     &notice.path,
                                     &notice.before_digest,
                                     &notice.digest,
@@ -289,9 +293,7 @@ mod unix {
             } => (workspace_id, *limit),
             _ => return Err("not an index query".into()),
         };
-        if !state.workspaces.contains_key(workspace_id) {
-            return Err("workspace is not registered".into());
-        }
+        let of = Registration::of(state, workspace_id).ok_or("workspace is not registered")?;
         if !(1..=crate::graph::MAX_RESULTS).contains(&limit) {
             return Err("limit must be between 1 and 200".into());
         }
@@ -310,7 +312,7 @@ mod unix {
         let detail = matches!(command, Command::GraphSymbol { detail: true, .. });
         let started = Instant::now();
         let ((mut symbols, mut references, levels), coverage) = graph
-            .with_coverage(workspace_id, |graph| match command {
+            .with_coverage(&of, |graph| match command {
                 Command::GraphSymbol { name, .. } => {
                     let mut symbols = graph.symbol(workspace_id, name, limit)?;
                     if detail {
@@ -475,15 +477,13 @@ mod unix {
         workspace_id: &str,
         limit: u32,
     ) -> Result<Outcome, String> {
-        if !state.workspaces.contains_key(workspace_id) {
-            return Err("workspace is not registered".into());
-        }
+        let of = Registration::of(state, workspace_id).ok_or("workspace is not registered")?;
         if !(1..=crate::graph::MAX_RESULTS).contains(&limit) {
             return Err("limit must be between 1 and 200".into());
         }
         let graph = graph.ok_or("the index is not available yet; try again shortly")?;
         let (mut blind_spots, coverage) = graph
-            .with_coverage(workspace_id, |graph| graph.blind_spots(workspace_id, limit))
+            .with_coverage(&of, |graph| graph.blind_spots(workspace_id, limit))
             .map_err(|error| error.to_string())?;
         let scan_failure = state.scan_failures.get(workspace_id).cloned();
         let totals = &blind_spots.totals;
@@ -556,16 +556,15 @@ mod unix {
         langspan_core::validate_graph_context(names, limit)
             .map_err(|error| ("invalid_graph_context", error.message))?;
         let unavailable = |message: String| ("index_unavailable", message);
-        if !state.workspaces.contains_key(workspace_id) {
-            return Err(unavailable("workspace is not registered".into()));
-        }
+        let of = Registration::of(state, workspace_id)
+            .ok_or_else(|| unavailable("workspace is not registered".into()))?;
         let graph = graph.ok_or_else(|| {
             unavailable("the index is not available yet; try again shortly".into())
         })?;
         let failed =
             |error: Box<dyn std::error::Error + Send + Sync>| unavailable(error.to_string());
         let (matches, coverage) = graph
-            .with_coverage(workspace_id, |graph| {
+            .with_coverage(&of, |graph| {
                 let mut matches = Vec::new();
                 for name in names {
                     let mut definitions = graph.symbol(workspace_id, name, limit)?;
@@ -624,11 +623,13 @@ mod unix {
                 ready: false,
             })
         };
-        // Nothing is looked up before the index has a complete scan.
-        let Some(graph) = graph else {
+        // Nothing is looked up before the index has a complete scan of the
+        // workspace's current registration.
+        let (Some(graph), Some(of)) = (graph, Registration::of(store.state(), &workspace_id))
+        else {
             return not_ready(None);
         };
-        match graph.with_coverage(&workspace_id, |_| Ok(())) {
+        match graph.with_coverage(&of, |_| Ok(())) {
             Ok(((), coverage)) if coverage.scanned => {}
             Ok(((), coverage)) => return not_ready(Some(coverage)),
             Err(failure) => {
@@ -642,7 +643,7 @@ mod unix {
         }
         // The new signatures and the coverage they are judged with come from
         // one snapshot of the index.
-        let looked_up = graph.with_coverage(&workspace_id, |graph| {
+        let looked_up = graph.with_coverage(&of, |graph| {
             let mut current = Vec::new();
             for name in &candidates {
                 current.extend(graph.symbol(&workspace_id, name, crate::graph::MAX_RESULTS)?);
@@ -1907,7 +1908,7 @@ mod unix {
         match store.execute(&request_id, &command, &prepared, now_ms()) {
             Ok(mut execution) => {
                 if let Outcome::Dashboard { dashboard } = &mut execution.outcome {
-                    complete_dashboard(dashboard, graph);
+                    complete_dashboard(dashboard, store.state(), graph);
                 }
                 // Only the daemon looks at the filesystem.
                 if let Outcome::Workspaces { workspaces, .. } = &mut execution.outcome {
@@ -1931,6 +1932,7 @@ mod unix {
     /// be read is left without it, and the page says so.
     fn complete_dashboard(
         dashboard: &mut langspan_core::Dashboard,
+        state: &State,
         graph: Option<&crate::graph::Index>,
     ) {
         dashboard.uptime_ms = STARTED_MS
@@ -1938,10 +1940,9 @@ mod unix {
             .map(|started| now_ms().saturating_sub(*started));
         if let Some(graph) = graph {
             for workspace in &mut dashboard.workspaces {
-                workspace.coverage = graph
-                    .with_coverage(&workspace.workspace_id, |_| Ok(()))
-                    .map(|(_, coverage)| coverage)
-                    .ok();
+                workspace.coverage = Registration::of(state, &workspace.workspace_id)
+                    .and_then(|of| graph.with_coverage(&of, |_| Ok(())).ok())
+                    .map(|(_, coverage)| coverage);
             }
         }
     }

@@ -292,21 +292,10 @@ impl Index {
         root: &Path,
         removals: u32,
     ) -> Result<(), Failure> {
-        let root = root.to_string_lossy();
-        let indexed: Option<(String, u32)> = self
-            .connection
-            .query_row(
-                "SELECT root, removals FROM roots WHERE workspace_id = ?1",
-                [workspace_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if indexed
-            .as_ref()
-            .is_some_and(|(at, count)| at == root.as_ref() && *count == removals)
-        {
+        if self.indexed_as(workspace_id, root, removals)? {
             return Ok(());
         }
+        let root = root.to_string_lossy();
         let transaction = self.connection.transaction()?;
         for table in [
             "files",
@@ -331,6 +320,21 @@ impl Index {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Whether what the index holds for the workspace was indexed at this
+    /// root and removal count: of this registration, not an earlier one.
+    fn indexed_as(&self, workspace_id: &str, root: &Path, removals: u32) -> Result<bool, Failure> {
+        let indexed: Option<(String, u32)> = self
+            .connection
+            .query_row(
+                "SELECT root, removals FROM roots WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(indexed
+            .is_some_and(|(at, count)| at == root.to_string_lossy().as_ref() && count == removals))
     }
 
     /// Bring one workspace's index up to `scan.files`, the indexable paths
@@ -539,17 +543,26 @@ impl Index {
     /// separate reads could pair results from before a commit with coverage
     /// from after it and claim more than the results hold. This is the only
     /// way to get coverage, so every answer's coverage describes its rows.
-    pub fn with_coverage<T>(
+    ///
+    /// The answer is for `of`, the workspace's current registration. Until
+    /// the indexer has started that registration's index, what the index
+    /// holds is of an earlier one (another root, or before a removal):
+    /// `reads` is not run, and the answer is empty and not scanned.
+    pub fn with_coverage<T: Default>(
         &self,
-        workspace_id: &str,
+        of: &crate::daemon::Registration,
         reads: impl FnOnce(&Self) -> Result<T, Failure>,
     ) -> Result<(T, GraphCoverage), Failure> {
         // A deferred transaction in WAL mode reads one snapshot, fixed at
         // its first read, until it ends. It only reads, so ending it on an
         // error by dropping it (a rollback) loses nothing.
         let snapshot = self.connection.unchecked_transaction()?;
+        if !self.indexed_as(&of.workspace_id, &of.root, of.removals)? {
+            snapshot.commit()?;
+            return Ok((T::default(), GraphCoverage::default()));
+        }
         let answer = reads(self)?;
-        let coverage = self.coverage(workspace_id)?;
+        let coverage = self.coverage(&of.workspace_id)?;
         snapshot.commit()?;
         Ok((answer, coverage))
     }
@@ -1281,10 +1294,47 @@ mod review_regressions {
             .unwrap()
     }
 
-    fn blind(index: &Index, limit: u32) -> (langspan_core::BlindSpots, GraphCoverage) {
+    /// Workspace `w` at `root`, never removed: what `pass` indexes.
+    fn of(root: &Path) -> crate::daemon::Registration {
+        crate::daemon::Registration {
+            workspace_id: "w".into(),
+            root: root.to_path_buf(),
+            removals: 0,
+        }
+    }
+
+    fn blind(index: &Index, root: &Path, limit: u32) -> (langspan_core::BlindSpots, GraphCoverage) {
         index
-            .with_coverage("w", |index| index.blind_spots("w", limit))
+            .with_coverage(&of(root), |index| index.blind_spots("w", limit))
             .unwrap()
+    }
+
+    /// Answers are for the workspace's current registration: until the
+    /// indexer starts its index, the index of another root or of the
+    /// registration before a removal is not read.
+    #[test]
+    fn an_answer_for_another_registration_reads_nothing() {
+        let (dir, mut index) = setup("registration");
+        pass(&dir, &mut index, &[("src/api.rs", "pub fn upload() {}\n")]);
+        let (symbols, coverage) = index
+            .with_coverage(&of(&dir.0), |index| index.symbol("w", "upload", 10))
+            .unwrap();
+        assert_eq!((symbols.len(), coverage.scanned), (1, true));
+        let moved = crate::daemon::Registration {
+            root: dir.0.join("elsewhere"),
+            ..of(&dir.0)
+        };
+        let removed = crate::daemon::Registration {
+            removals: 1,
+            ..of(&dir.0)
+        };
+        for other in [moved, removed] {
+            let (symbols, coverage) = index
+                .with_coverage(&other, |index| index.symbol("w", "upload", 10))
+                .unwrap();
+            assert!(symbols.is_empty(), "{other:?}: {symbols:?}");
+            assert_eq!(coverage, GraphCoverage::default(), "{other:?}");
+        }
     }
 
     const BROKEN: (&str, &str) = ("src/broken.rs", "pub fn half( {{{\n");
@@ -1337,7 +1387,7 @@ mod review_regressions {
         let (dir, mut index) = setup("blind");
         let api = ("src/api.rs", "pub fn upload() {}\n");
         pass(&dir, &mut index, &[api, BROKEN, CALLER]);
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &dir.0, 10);
         assert_eq!(
             spots.partial,
             [langspan_core::PartialFile {
@@ -1358,12 +1408,12 @@ mod review_regressions {
             NOW + 60_000,
             Duration::from_secs(10),
         );
-        assert_eq!(blind(&index, 10).0.partial[0].since_ms, NOW);
+        assert_eq!(blind(&index, &dir.0, 10).0.partial[0].since_ms, NOW);
 
         // Fixed: in no list, and the count says so.
         let fixed = ("src/broken.rs", "pub fn half() {}\n");
         pass(&dir, &mut index, &[api, fixed, CALLER]);
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &dir.0, 10);
         assert_eq!(spots, langspan_core::BlindSpots::default());
         assert_eq!(coverage.blind_in_scope, 0);
 
@@ -1376,11 +1426,11 @@ mod review_regressions {
             NOW,
             Duration::ZERO,
         );
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &dir.0, 10);
         assert_eq!(spots.waiting, ["src/api.rs"]);
         assert_eq!((spots.totals.waiting, coverage.blind_in_scope), (1, 1));
         pass(&dir, &mut index, &[changed, fixed, CALLER]);
-        assert!(blind(&index, 10).0.waiting.is_empty());
+        assert!(blind(&index, &dir.0, 10).0.waiting.is_empty());
     }
 
     #[test]
@@ -1388,7 +1438,7 @@ mod review_regressions {
         let (dir, mut index) = setup("oversize");
         let big = format!("// {}\n", "x".repeat(MAX_SOURCE_BYTES));
         pass(&dir, &mut index, &[("src/big.rs", &big), CALLER]);
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &dir.0, 10);
         assert_eq!(spots.too_large, ["src/big.rs"]);
         assert!(spots.waiting.is_empty(), "{spots:?}");
         assert_eq!(coverage.blind_in_scope, 1);
@@ -1408,7 +1458,7 @@ mod review_regressions {
             &mut index,
             &[("src/big.rs", "pub fn small() {}\n"), CALLER],
         );
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &dir.0, 10);
         assert!(spots.too_large.is_empty(), "{spots:?}");
         assert_eq!(coverage.blind_in_scope, 0);
     }
@@ -1443,7 +1493,7 @@ mod review_regressions {
         fs::write(dir.0.join("src/api.rs"), small).unwrap();
         let far = Instant::now() + Duration::from_secs(10);
         index.update("w", &dir.0, 0, &scan, NOW, far).unwrap();
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &dir.0, 10);
         assert_eq!(spots, langspan_core::BlindSpots::default());
         assert_eq!(coverage.blind_in_scope, 0);
     }
@@ -1454,8 +1504,8 @@ mod review_regressions {
         let names: Vec<String> = (0..5).map(|n| format!("src/b{n}.rs")).collect();
         let files: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), BROKEN.1)).collect();
         pass(&dir, &mut index, &files);
-        let first = blind(&index, 2).0;
-        assert_eq!(first, blind(&index, 2).0);
+        let first = blind(&index, &dir.0, 2).0;
+        assert_eq!(first, blind(&index, &dir.0, 2).0);
         let paths: Vec<&str> = first
             .partial
             .iter()
@@ -1472,7 +1522,7 @@ mod review_regressions {
         let user = ("src/user.rs", "fn caller() { lonely(); }\nfn half( {{{\n");
         pass(&dir, &mut index, &[api, user]);
         let ((_, references), coverage) = index
-            .with_coverage("w", |index| index.impact("w", "src/api.rs", 10))
+            .with_coverage(&of(&dir.0), |index| index.impact("w", "src/api.rs", 10))
             .unwrap();
         assert_eq!(coverage.partial_files, 1);
         assert_eq!(coverage.blind_in_scope, 1);
@@ -1526,7 +1576,7 @@ mod review_regressions {
                 Instant::now() + Duration::from_secs(10),
             )
             .unwrap();
-        let (spots, coverage) = blind(&index, 10);
+        let (spots, coverage) = blind(&index, &root, 10);
         assert_eq!(spots.too_large, ["src/0huge.rs"]);
         assert_eq!(spots.unscanned, ["src/c.rs"]);
         assert_eq!(
@@ -1696,7 +1746,7 @@ mod review_regressions {
         // The writer adds a file between the reader's levels and its
         // coverage: neither the levels nor the coverage see it.
         let (two, coverage) = reader
-            .with_coverage("w", |reader| {
+            .with_coverage(&of(&dir.0), |reader| {
                 let two = reader.impact_levels(
                     "w",
                     "src/a.rs",
@@ -1711,7 +1761,7 @@ mod review_regressions {
         assert_eq!(reached(&two[1]), [("src/c.rs", "beta", "src/b.rs")]);
         assert_eq!(coverage.indexable_files, 3, "{coverage:?}");
         let (after, coverage) = reader
-            .with_coverage("w", |reader| {
+            .with_coverage(&of(&dir.0), |reader| {
                 reader.impact_levels("w", "src/a.rs", 2, Instant::now() + Duration::from_secs(10))
             })
             .unwrap();
@@ -1781,7 +1831,7 @@ mod review_regressions {
         pass(&dir, &mut writer, &[CALLER]);
         let reader = Index::open_reader(&dir.0.join("graph.sqlite3")).unwrap();
         let (symbols, coverage) = reader
-            .with_coverage("w", |reader| {
+            .with_coverage(&of(&dir.0), |reader| {
                 let symbols = reader.symbol("w", "upload", 10)?;
                 pass(
                     &dir,
@@ -1799,7 +1849,7 @@ mod review_regressions {
         );
         // A later answer sees both.
         let (symbols, coverage) = reader
-            .with_coverage("w", |reader| reader.symbol("w", "upload", 10))
+            .with_coverage(&of(&dir.0), |reader| reader.symbol("w", "upload", 10))
             .unwrap();
         assert_eq!(symbols.len(), 1);
         assert_eq!((coverage.indexable_files, coverage.current_files), (2, 2));

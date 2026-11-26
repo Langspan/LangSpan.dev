@@ -122,7 +122,15 @@ against, so it stays an owner command, as with `remote enable`.
   registered again at the same root, or switched to another checkout while
   an index pass of the old one was queued or running, starts a new index
   baseline instead of reporting interface changes from its earlier
-  registration. Remote passes carry no registration: move and removal wait
+  registration. An interface notice's request ID includes the root and the
+  removal count, so the same change of the same file in a later
+  registration is a new notice, not a replay of the earlier one's receipt.
+  Index answers (`graph`, code context, call breaks, the dashboard's
+  coverage) read the index only when its root and count match the
+  workspace's current registration. Until the indexer starts that
+  registration's index, or for good at a root it cannot scan, the answer is
+  empty with `scanned: false`, never the earlier registration's symbols.
+  Remote passes carry no registration: move and removal wait
   until publication is off and its ref withdrawn, which only the remote
   worker's own sequential pass completes, so no pass of it is in flight
   across either. The event log keeps every earlier event (`langspan events`). A disabled,
