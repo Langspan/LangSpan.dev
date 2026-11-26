@@ -12,6 +12,7 @@ mod dashboard;
 mod flaky;
 mod history;
 mod lines;
+mod rank;
 mod recall;
 mod recent;
 mod report;
@@ -43,6 +44,10 @@ pub use history::{
     HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_MOVES, HISTORY_NAME_BYTES,
     HISTORY_RELATED, HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote,
     HistoryQuery, history as definition_history,
+};
+pub use rank::{
+    Dependent, QUALIFIER_BYTES, RANK_CANDIDATES, RankInputs, RankReason, is_qualifier,
+    rank_definitions, rank_dependents, rank_inputs, validate_rank,
 };
 pub use recall::{
     RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
@@ -1322,6 +1327,18 @@ pub struct SymbolRef {
     /// indexed content. Absent when none was found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_check: Option<LastCheck>,
+    /// In a ranked answer, why this definition ranks where it does, in
+    /// rank order; empty for path order alone (roadmap C2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank_reasons: Option<Vec<RankReason>>,
+    /// In a ranked answer, the files other than its own that mention this
+    /// definition's name, ranked, at most `CONTEXT_FILES`. Found by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependents: Option<Vec<Dependent>>,
+    /// In a ranked answer, how many files other than its own mention the
+    /// name: `dependents` and those left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependent_count: Option<u32>,
 }
 
 /// Distinct callees listed for one definition.
@@ -2421,6 +2438,10 @@ pub struct NameContext {
     pub mentioned_in: Vec<String>,
     /// True when more definitions or mentioning files exist than are listed.
     pub truncated: bool,
+    /// In a ranked answer, how many definitions the name has: those listed
+    /// and those left out (roadmap C2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_count: Option<u32>,
 }
 
 pub const MAX_CHECKS: usize = 64;
@@ -3794,6 +3815,13 @@ pub enum Command {
         /// the coverage shape that build knows.
         #[serde(default, skip_serializing_if = "is_false")]
         blind_in_scope: bool,
+        /// Rank the definitions as a code briefing does and give each the
+        /// files that mention its name (roadmap C2).
+        #[serde(default, skip_serializing_if = "is_false")]
+        rank: bool,
+        /// The asking session, whose own files rank first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         /// Follow recorded renames of `name` to its newest name and look
         /// that up instead (roadmap D7); the answer's `renamed` says which.
         #[serde(default, skip_serializing_if = "is_false")]
@@ -3833,6 +3861,18 @@ pub enum Command {
         workspace_id: String,
         names: Vec<String>,
         limit: u32,
+        /// Rank each name's definitions and give each the files that
+        /// mention its name (roadmap C2). Without it the answer is the one
+        /// earlier builds give, in path order.
+        #[serde(default, skip_serializing_if = "is_false")]
+        rank: bool,
+        /// The asking session, whose own files rank first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// Paths and qualifiers the prompt names (`store` in `store::upload`).
+        /// Used for this query only: never logged, recorded or kept.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        qualifiers: Vec<String>,
     },
     /// Read-only: what other worktrees of the workspace's repository have
     /// in flight that any of its indexed files mention (roadmap C7). Never
@@ -4529,6 +4569,13 @@ enum CommandWire {
         /// the coverage shape that build knows.
         #[serde(default, skip_serializing_if = "is_false")]
         blind_in_scope: bool,
+        /// Rank the definitions as a code briefing does and give each the
+        /// files that mention its name (roadmap C2).
+        #[serde(default, skip_serializing_if = "is_false")]
+        rank: bool,
+        /// The asking session, whose own files rank first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         /// Follow recorded renames of `name` to its newest name and look
         /// that up instead (roadmap D7); the answer's `renamed` says which.
         #[serde(default, skip_serializing_if = "is_false")]
@@ -4568,6 +4615,18 @@ enum CommandWire {
         workspace_id: String,
         names: Vec<String>,
         limit: u32,
+        /// Rank each name's definitions and give each the files that
+        /// mention its name (roadmap C2). Without it the answer is the one
+        /// earlier builds give, in path order.
+        #[serde(default, skip_serializing_if = "is_false")]
+        rank: bool,
+        /// The asking session, whose own files rank first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// Paths and qualifiers the prompt names (`store` in `store::upload`).
+        /// Used for this query only: never logged, recorded or kept.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        qualifiers: Vec<String>,
     },
     /// Read-only: what other worktrees of the workspace's repository have
     /// in flight that any of its indexed files mention (roadmap C7). Never

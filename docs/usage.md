@@ -50,7 +50,7 @@ are not published yet ([ADR 0035](adr/0035-one-command-setup.md)).
 
 The [latest stable release](https://github.com/Langspan/LangSpan.dev/releases/latest) provides
 macOS and Linux binaries. Follow the [platform downloads, verification and
-installation instructions](../README.md#install) before starting the coordinator.
+installation instructions](install.md) before starting the coordinator.
 A source build is optional.
 
 ## Build from source
@@ -350,7 +350,7 @@ out of a commit. A Cursor `Write` states a whole file, so the file is held
 whole. Cursor also runs Claude Code's hooks; LangSpan's Claude Code hook does
 nothing on a Cursor event, so a call is coordinated once.
 [ADR 0032](adr/0032-cursor-adapter.md) lists the sources, what was not
-verifiable and how to capture a real run. Consult the [availability table](../README.md#current-availability)
+verifiable and how to capture a real run. Consult the [detailed availability table](reference-overview.md#current-availability)
 before treating an adapter as validated for your host version.
 
 Remove the managed entries with the matching vendor:
@@ -1423,7 +1423,37 @@ each definition also has:
 The answer has `resolution: "name"`: calls and callers are matched by name,
 not resolved, so a call of another function with the same name counts. No
 source body is returned. Definitions that would make the answer larger than
-64 KiB are left out and `truncated` is true. `references` finds mentions of the name. `impact` lists the file's
+64 KiB are left out and `truncated` is true.
+
+With `--rank` (MCP: `langspan_symbol` with `rank: true`), definitions come in
+the order a prompt's code briefing uses: a file the session named by
+`--session ID` (MCP: `session_id`) edited or read, then a file a live peer is
+editing, then exported ones, then path order. Each has `rank_reasons` and
+`dependents`: up to 5 other files that mention its name, each with its
+`mentions` count, ranked the same way and then by most mentions, with
+`dependent_count` counting them all. The rules are fixed and listed in
+[ADR 0008](adr/0008-derived-source-index.md). `--session` without `--rank` is
+refused:
+
+```text
+$ langspan graph symbol PROJECT upload --rank --session claude-code.alice
+src/store/upload.rs:14 function upload (exported) — pub fn upload(path: &Path) -> Result<()>
+  ranked by: the session edited this file; exported
+  used by: src/api/routes.rs (3 mention(s), session codex.bob is editing it), src/cli.rs (1 mention(s))
+tools/bench.rs:40 function upload — fn upload()
+  used by: src/api/routes.rs (3 mention(s), session codex.bob is editing it), src/cli.rs (1 mention(s))
+```
+
+At a prompt the code briefing ranks the same way, with the paths and
+qualifiers the prompt names (`store` in `store::upload`, `upload.rs`) ranked
+after exported definitions. The top definition comes first with why, and
+`used by` its ranked dependents:
+
+```text
+- "upload": function at "src/store/upload.rs":14, exported (you edited this file): "pub fn upload(path: &Path) -> Result<()>"; used by "src/api/routes.rs" (3, codex session bob is editing it), "src/cli.rs" (1); also function at "tools/bench.rs":40: "fn upload()"
+```
+
+`references` finds mentions of the name. `impact` lists the file's
 exports and other files mentioning those names, one level deep.
 
 With `--depth N` (1 to 3, default 1; MCP: `langspan_impact` with `depth`),
@@ -1998,14 +2028,21 @@ run); a runner LangSpan does not recognise teaches nothing.
 ## Commits in a shared checkout
 
 When several sessions work in one checkout they share one Git index, and a
-commit takes whole files. The `Bash` hook holds a command that would stage or
-commit another live session's uncommitted changes: `git add -A`, `git add .`,
+commit takes whole files. The shell pre-tool hook (Claude Code and Codex
+`Bash`, Cursor `Shell`, Gemini CLI `run_shell_command`) holds a command that
+would stage or commit another live session's uncommitted changes: `git add -A`, `git add .`,
 `git add -u`, `git add PATH…`, `git commit -a`, `git commit PATH…`, or a plain
 `git commit` while the index already holds such changes. The reason names the
 other session and its files and lines, and gives the options. The same command
 run again is not held: each is held once, so the choice stays with the agent
 and the owner. Changes no session made (your own editor), this session's own
-changes, and changes of sessions that have ended never hold a commit.
+changes, and changes of sessions that have ended never hold a commit. The
+hold has the same text and coverage, `denied_commit`, on every host. The
+guard reads the line journal only for the files the command would take, so
+its time grows with those files, not with the journal. With the coordinator
+down, a Git listing over its bounds (16 MiB of diff, 1,024 untracked files)
+or the hook deadline reached, it makes no decision, and the hook's detail
+says which.
 
 To commit only what this session wrote:
 
@@ -2227,7 +2264,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_events` | Read an ordered page of persisted events |
 | `langspan_changes` | Read file and local-branch observations with scan freshness |
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
-| `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check; with `renamed`, under the newest name a recorded rename leads to |
+| `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check; with `rank` and `session_id`, in the code briefing's order with each one's ranked dependents; with `renamed`, under the newest name a recorded rename leads to |
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |

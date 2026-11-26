@@ -1529,14 +1529,27 @@ pub fn guard_hook(config: &Config, me: &str, call: &ShellCall, deadline: Instant
         Err(why) => return Guarded::Passed(format!("commit guard: no decision ({why})")),
     };
     let passed = |why: String| Guarded::Passed(format!("commit guard: {why}"));
-    let entries = journal::entries(&config.state_dir, &config.root);
-    if !entries.iter().any(|entry| !is_own(me, &entry.session_id)) {
-        return passed("no other session's uncommitted lines are journaled".into());
-    }
     // Decisions get two thirds of the time left; the shell snapshot that
     // follows needs the rest.
     let now = Instant::now();
     let until = now + deadline.saturating_duration_since(now) * 2 / 3;
+    let start = match &call.cwd {
+        Some(cwd) => PathBuf::from(cwd),
+        None => config.root.clone(),
+    };
+    let mut files = match taken(&config.root, &start, &steps, until) {
+        Ok(files) => files,
+        Err(error) => return passed(format!("no decision ({error})")),
+    };
+    // Only the journal entries of the paths the command would take: the
+    // guard's cost grows with the changed files, not with the journal.
+    let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+    let entries = journal::entries_for(&config.state_dir, &config.root, &paths);
+    if !entries.iter().any(|entry| !is_own(me, &entry.session_id)) {
+        return passed(
+            "no other session's uncommitted lines are journaled in what it would take".into(),
+        );
+    }
     let live = match live_sessions(config, until) {
         Ok(live) => live,
         Err(error) => return passed(format!("no decision ({error})")),
@@ -1546,16 +1559,10 @@ pub fn guard_hook(config: &Config, me: &str, call: &ShellCall, deadline: Instant
         .filter(|entry| !is_own(me, &entry.session_id) && is_live(&live, &entry.session_id))
         .collect();
     if live_others.is_empty() {
-        return passed("no live session's uncommitted lines are journaled".into());
+        return passed(
+            "no live session's uncommitted lines are journaled in what it would take".into(),
+        );
     }
-    let start = match &call.cwd {
-        Some(cwd) => PathBuf::from(cwd),
-        None => config.root.clone(),
-    };
-    let mut files = match taken(&config.root, &start, &steps, until) {
-        Ok(files) => files,
-        Err(error) => return passed(format!("no decision ({error})")),
-    };
     let claims = journal::by_file(&entries);
     // Session -> path -> where.
     let mut found: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
@@ -3382,5 +3389,119 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("3 changed file(s)"), "{text}");
+    }
+
+    /// The guard reads the journal entries of the paths the command would
+    /// take, not the whole workspace's (issue #25): its cost grows with the
+    /// changed files, not with the journal.
+    #[test]
+    fn the_guard_reads_only_the_journal_entries_of_the_paths_it_would_take() {
+        let base = std::env::temp_dir().join(format!("ls-guard-reads-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("work")).unwrap();
+        let root = fs::canonicalize(base.join("work")).unwrap();
+        let state = base.join("state");
+        let git = |arguments: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(arguments)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {arguments:?}: {output:?}");
+        };
+        let files: Vec<String> = (0..42).map(|n| format!("f{n:02}.txt")).collect();
+        for file in &files {
+            fs::write(root.join(file), "one\ntwo\n").unwrap();
+        }
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Owner"]);
+        git(&["config", "user.email", "owner@example.invalid"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "start"]);
+        // Another session's writes of 40 files, ten each, and this
+        // session's one write each of the first two.
+        let write = |session: &str, operation: &str, path: &str, content: &str| {
+            let paths = vec![path.to_owned()];
+            journal::before_edit(&state, operation, &root, &paths);
+            fs::write(root.join(path), content).unwrap();
+            journal::record(
+                &state,
+                &root,
+                session,
+                &paths,
+                journal::Origin::Edit {
+                    operation_id: operation,
+                },
+            )
+            .unwrap();
+        };
+        for (n, file) in files.iter().enumerate().skip(2) {
+            for round in 0..10 {
+                let content = format!("one\ntwo, round {round}\n");
+                write(
+                    "claude-code.other",
+                    &format!("o-{n}-{round}"),
+                    file,
+                    &content,
+                );
+            }
+        }
+        write("claude-code.me", "m-0", &files[0], "one, mine\ntwo\n");
+        write("claude-code.me", "m-1", &files[1], "one, mine\ntwo\n");
+        assert_eq!(journal::entries(&state, &root).len(), 402);
+
+        let config = Config {
+            state_dir: state.clone(),
+            workspace_id: "work".into(),
+            root: root.clone(),
+            ttl_ms: 30_000,
+            budget: Duration::from_millis(1500),
+            share_prompt: false,
+            code_briefing: false,
+            presence: false,
+            presence_window_ms: langspan_core::PRESENCE_WINDOW_MS,
+            vendor: crate::install::Vendor::ClaudeCode,
+            user_level: false,
+        };
+        let call = |command: &str| ShellCall {
+            command: command.into(),
+            cwd: Some(root.to_string_lossy().into_owned()),
+        };
+        let deadline = Instant::now() + Duration::from_secs(4);
+        journal::entry_reads();
+        let detail = match guard_hook(
+            &config,
+            "claude-code.me",
+            &call("git commit -m x -- f00.txt f01.txt"),
+            deadline,
+        ) {
+            Guarded::Passed(detail) => detail,
+            _ => panic!("not passed"),
+        };
+        // Only this session's entries are on the two paths: no coordinator
+        // call (none runs here), and only those two entries are read.
+        assert!(
+            detail.contains("no other session's uncommitted lines are journaled"),
+            "{detail}"
+        );
+        assert_eq!(journal::entry_reads(), 2);
+
+        // Another session's entries on a path it would take are read, and
+        // only that path's: here the coordinator is down, so no decision.
+        let detail = match guard_hook(
+            &config,
+            "claude-code.me",
+            &call("git commit -m x -- f00.txt f02.txt"),
+            deadline,
+        ) {
+            Guarded::Passed(detail) => detail,
+            _ => panic!("not passed"),
+        };
+        assert!(detail.contains("no decision (coordinator"), "{detail}");
+        assert_eq!(journal::entry_reads(), 11);
+        let _ = fs::remove_dir_all(&base);
     }
 }
