@@ -43,18 +43,44 @@ pub fn private_directory(path: &Path) -> Result<(), crate::Error> {
 pub fn prepare_directory(path: &Path) -> Result<PathBuf, crate::Error> {
     private_directory(path)?;
     let path = fs::canonicalize(path)?;
-    if path
-        .join("daemon.sock")
-        .as_os_str()
-        .as_encoded_bytes()
-        .len()
-        > 100
-    {
-        return Err(
-            "state directory is too long for a Unix socket; choose a shorter --state-dir".into(),
-        );
-    }
+    check_socket_fits(&path)?;
     Ok(path)
+}
+
+/// Refuses a state directory whose `daemon.sock` would not fit in a Unix
+/// socket address. `path` need not exist yet: its longest existing ancestor
+/// is resolved first, as the daemon resolves the whole path once it exists
+/// (on macOS `/var` becomes `/private/var`).
+#[cfg(unix)]
+pub fn check_socket_fits(path: &Path) -> Result<(), crate::Error> {
+    let path = std::path::absolute(path)?;
+    let mut existing = path.as_path();
+    let mut rest = Vec::new();
+    let resolved = loop {
+        match fs::canonicalize(existing) {
+            Ok(resolved) => break resolved,
+            Err(_) => match (existing.parent(), existing.file_name()) {
+                (Some(parent), Some(name)) => {
+                    rest.push(name);
+                    existing = parent;
+                }
+                _ => break existing.to_path_buf(),
+            },
+        }
+    };
+    let socket = rest
+        .iter()
+        .rev()
+        .fold(resolved, |path, name| path.join(name))
+        .join("daemon.sock");
+    if socket.as_os_str().as_encoded_bytes().len() > 100 {
+        return Err(format!(
+            "state directory {} is too long for a Unix socket; choose a shorter --state-dir",
+            path.display()
+        )
+        .into());
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

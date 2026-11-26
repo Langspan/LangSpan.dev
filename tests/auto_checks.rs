@@ -100,6 +100,7 @@ impl Fixture {
         fs::write(&config, config_json.to_string()).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let daemon = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["daemon", "--state-dir"])
             .arg(&state)
             .stdout(Stdio::null())
@@ -174,6 +175,7 @@ impl Fixture {
     fn cli(&self, args: &[&str]) -> (i32, String, String) {
         // Before the arguments: everything after `--` is the check's command.
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.state_dir())
             .args(args)
@@ -208,6 +210,7 @@ impl Fixture {
     fn run(&self, vendor: &str, event: Value) -> Run {
         let started = Instant::now();
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", vendor, "--state-dir"])
             .arg(self.state_dir())
             .args(["--workspace", "work", "--root"])

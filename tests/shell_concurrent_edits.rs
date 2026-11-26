@@ -100,6 +100,7 @@ impl Fixture {
         git(&work, &["add", "."]);
         git(&work, &["commit", "-q", "-m", "start"]);
         let daemon = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["daemon", "--state-dir"])
             .arg(base.join("state"))
             .stdout(Stdio::null())
@@ -129,6 +130,7 @@ impl Fixture {
 
     fn hook(&self, event: Value) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.state())
             .args(["--workspace", "work", "--root"])
@@ -231,6 +233,7 @@ impl Fixture {
         let pre = self.bash(session, "PreToolUse", call, &command);
         assert_eq!(pre.coverage, "shell_observing", "{pre:?}");
         let child = Process::new("/bin/sh")
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["-c", &command])
             .current_dir(self.work())
             .stdout(Stdio::null())
@@ -242,6 +245,7 @@ impl Fixture {
     /// The paths `session` was credited with, by tool, from the event log.
     fn credited(&self, session: &str, tool: &str) -> Vec<String> {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.state())
             .args(["events", "--limit", "1000", "--json"])
@@ -277,6 +281,7 @@ impl Fixture {
         let pre = self.bash(session, "PreToolUse", call, &commit);
         assert!(!pre.coverage.starts_with("denied"), "{pre:?}");
         let ran = Process::new("/bin/sh")
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["-c", &commit])
             .current_dir(self.work())
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -310,6 +315,7 @@ impl Fixture {
         let pre = self.bash(session, "PreToolUse", call, command);
         assert!(!pre.coverage.starts_with("denied"), "{pre:?}");
         let status = Process::new("/bin/sh")
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["-c", command])
             .current_dir(self.work())
             .status()
@@ -472,6 +478,7 @@ fn commit_mine_after_a_long_command_commits_its_own_lines_and_leaves_the_editors
     let pre = f.bash(ALICE, "PreToolUse", "alice-2", &commit);
     assert!(!pre.coverage.starts_with("denied"), "{pre:?}");
     let ran = Process::new("/bin/sh")
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["-c", &commit])
         .current_dir(f.work())
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -909,6 +916,7 @@ fn a_shell_write_during_an_edits_post_hook_is_not_taken_for_the_edits() {
     let _ = fs::remove_file(&socket);
     f.daemon = Some(
         Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["daemon", "--state-dir"])
             .arg(f.state())
             .stdout(Stdio::null())

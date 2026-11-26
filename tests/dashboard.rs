@@ -87,6 +87,7 @@ impl Fixture {
     fn start_daemon(&mut self) {
         self.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -96,6 +97,7 @@ impl Fixture {
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         while !Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["status", "--state-dir"])
             .arg(self.state_dir())
             .output()
@@ -117,6 +119,7 @@ impl Fixture {
     /// it printed.
     fn start_dashboard(&mut self) -> (u16, String) {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["dashboard", "--listen", "127.0.0.1:0", "--state-dir"])
             .arg(self.state_dir())
             .stdout(Stdio::piped())
@@ -137,6 +140,7 @@ impl Fixture {
     }
     fn hook(&self, vendor: &str, event: &Value) -> String {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", vendor, "--state-dir"])
             .arg(self.state_dir())
             .args(["--workspace", "work", "--root"])
@@ -390,6 +394,7 @@ fn a_network_address_is_refused_without_allow_network() {
     let f = Fixture::new();
     for listen in ["0.0.0.0:0", "[::]:0", "192.0.2.1:7311"] {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["dashboard", "--listen", listen, "--state-dir"])
             .arg(f.state_dir())
             .stdin(Stdio::null())
@@ -403,6 +408,7 @@ fn a_network_address_is_refused_without_allow_network() {
         assert!(stderr.contains("SSH"), "{stderr}");
     }
     let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["dashboard", "--listen", "localhost:7311", "--state-dir"])
         .arg(f.state_dir())
         .output()
@@ -425,6 +431,7 @@ fn the_dashboard_install_advice_names_this_coordinator_state_directory() {
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
     f.daemon = Some(
         Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["daemon", "--state-dir"])
             .arg(f.state_dir())
             .env("HOME", &home)
