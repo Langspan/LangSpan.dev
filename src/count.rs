@@ -205,6 +205,21 @@ impl MonthCount {
         }
     }
 
+    /// `12 in app`, the named workspace's part of the count. A workspace
+    /// absent from `by_workspace` while some were left out of it has an
+    /// unknown part, never a zero.
+    pub fn workspace_part(&self, id: &str) -> String {
+        let count = &self.count;
+        match count.by_workspace.get(id) {
+            Some(n) => format!("{n} in {id}"),
+            None if count.omitted_workspaces > 0 => format!(
+                "{id}'s part is not listed ({} in workspaces left out of the count)",
+                refusals(count.omitted_workspaces)
+            ),
+            None => format!("0 in {id}"),
+        }
+    }
+
     /// The text for a person.
     pub fn text(&self, label: &str) -> String {
         let count = &self.count;
@@ -320,10 +335,7 @@ pub fn today_line(state_dir: &Path, workspace_id: Option<&str>, now_ms: u64) -> 
     match this_month(state_dir, now_ms) {
         Ok((month, count)) => {
             let part = match workspace_id {
-                Some(id) => format!(
-                    " in every workspace, {} in {id}",
-                    count.count.by_workspace.get(id).copied().unwrap_or(0)
-                ),
+                Some(id) => format!(" in every workspace, {}", count.workspace_part(id)),
                 None => String::new(),
             };
             let truncation = count

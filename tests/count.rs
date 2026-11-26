@@ -512,3 +512,69 @@ fn a_month_whose_day_starts_cannot_all_be_read_is_not_counted() {
     assert!(out.is_empty(), "no count from a partial month: {out}");
     assert!(err.contains("time zone"), "{err}");
 }
+
+/// Copy the log's first refusal once into each of `workspaces`, with the
+/// daemon stopped.
+fn copy_first_refusal_into(state: &std::path::Path, workspaces: &[String]) {
+    let connection = rusqlite::Connection::open(state.join("state.sqlite3")).unwrap();
+    for workspace in workspaces {
+        let copied = connection
+            .execute(
+                "INSERT INTO events (event_json)
+                 SELECT json_set(event_json, '$.workspace_id', ?1) FROM events
+                 WHERE json_extract(event_json, '$.type') = 'write_refused'
+                 ORDER BY seq LIMIT 1",
+                [workspace],
+            )
+            .unwrap();
+        assert_eq!(copied, 1);
+    }
+}
+
+#[test]
+fn a_workspace_left_out_of_the_count_is_not_shown_as_zero() {
+    let mut w = World::new();
+    w.start();
+    w.started("alice");
+    w.started("bob");
+    assert!(!w.write("bob", "hold", "src/lib.rs", "PreToolUse"));
+    assert!(w.write("alice", "try-1", "src/lib.rs", "PreToolUse"));
+    // 64 workspaces that rank before `app` on a tie: `app` is left out.
+    let others: Vec<String> = (0..64).map(|i| format!("aa{i:02}")).collect();
+    for other in &others {
+        let root = w.base.join(other);
+        fs::create_dir(&root).unwrap();
+        let root = root.to_str().unwrap().to_owned();
+        let request = format!("add-{other}");
+        let (code, out, err) = w.cli(
+            &["--request-id", &request, "workspace", "add", other, &root],
+            None,
+        );
+        assert_eq!(code, 0, "{out}{err}");
+    }
+    w.stop();
+    copy_first_refusal_into(&w.state(), &others);
+    w.start();
+    let count = w.count(None, None);
+    assert_eq!(count["truncated"], false, "{count:#}");
+    assert_eq!(count["omitted_workspaces"], 1, "{count:#}");
+    assert!(count["by_workspace"].get("app").is_none(), "{count:#}");
+
+    let (code, today, _) = w.cli(&["today", "app"], None);
+    assert_eq!(code, 0, "{today}");
+    let line = today
+        .lines()
+        .find(|line| line.starts_with("This month, "))
+        .unwrap_or_else(|| panic!("{today}"));
+    assert!(!line.contains(" 0 in app"), "{line}");
+    assert!(
+        line.contains("app's part is not listed (1 refusal in workspaces left out of the count)"),
+        "{line}"
+    );
+    assert_no_outcome_claimed(line);
+
+    // A workspace with no refusal and none left out is still a plain zero.
+    let (code, today, _) = w.cli(&["today", "aa00"], None);
+    assert_eq!(code, 0, "{today}");
+    assert!(today.contains(" 1 in aa00"), "{today}");
+}
