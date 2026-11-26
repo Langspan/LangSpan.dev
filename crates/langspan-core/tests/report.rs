@@ -264,6 +264,7 @@ fn a_session_that_ends_with_its_intent_set_leaves_one_open() {
     };
     let end = |session: &str| Command::SessionEnd {
         session_id: session.into(),
+        trail: None,
     };
     // Alice sets an intent twice (an update) and ends the session with it.
     log.run("i-a1", intent(alice, "rework the parser"), START + MINUTE);
@@ -330,6 +331,7 @@ fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
         "e-a",
         Command::SessionEnd {
             session_id: alice.into(),
+            trail: None,
         },
         START + 30 * MINUTE,
     );
@@ -408,6 +410,7 @@ fn a_removed_workspace_ends_its_intents_for_the_report() {
         "e-a",
         Command::SessionEnd {
             session_id: alice.into(),
+            trail: None,
         },
         START + 30 * MINUTE,
     );
@@ -944,6 +947,7 @@ fn a_session_unknown_to_a_partial_history_is_not_counted_and_the_report_is_parti
         "e-a",
         Command::SessionEnd {
             session_id: alice.into(),
+            trail: None,
         },
         START + 30 * MINUTE,
     );

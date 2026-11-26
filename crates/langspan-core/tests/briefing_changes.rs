@@ -165,6 +165,7 @@ fn an_item_that_goes_away_and_comes_back_is_told_again() {
         "end-bob",
         Command::SessionEnd {
             session_id: "bob".into(),
+            trail: None,
         },
         3_000,
     ));

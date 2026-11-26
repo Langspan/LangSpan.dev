@@ -3279,6 +3279,19 @@ mod unix {
                 message,
             );
         }
+        if command == Command::Version {
+            return Response {
+                version: PROTOCOL_VERSION,
+                request_id,
+                replayed: false,
+                generation: store.state().generation,
+                lease_valid: None,
+                outcome: Outcome::Version {
+                    version: crate::binary_version::VERSION.into(),
+                    pid: std::process::id(),
+                },
+            };
+        }
         if let Command::CheckCalls { session_id, calls } = &command {
             return check_calls(store, graph, request_id, session_id, calls);
         }

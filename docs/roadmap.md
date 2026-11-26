@@ -92,7 +92,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [C2: Rank the code briefing and name each definition's dependents](https://github.com/Langspan/LangSpan.dev/issues/41): code briefings list definitions in path order and do not mark the files that will break. Built as a ranked code briefing with `used by` dependents; a real-host run remains.
 - [C5: Learn which briefed files agents use](https://github.com/Langspan/LangSpan.dev/issues/43): briefing relevance never adjusts to what agents in a repository actually use.
 - [C8: Tell two sessions their tasks point at the same code before either writes](https://github.com/Langspan/LangSpan.dev/issues/45): two tasks aimed at the same function are not flagged before either session edits. Built as prompt targets; a real-host run remains.
-- [C9: Leave a trail and a handoff when a session ends](https://github.com/Langspan/LangSpan.dev/issues/46): what a finished session learned is lost unless someone ran `handoff` by hand.
 - [C10: Brief the owner's next session on what happened since the last one](https://github.com/Langspan/LangSpan.dev/issues/47): overnight landings, failed checks and unread messages are scattered across several commands.
 - [C11: Offer a finished, checked task as a worked example](https://github.com/Langspan/LangSpan.dev/issues/48): agents rediscover the same files and helpers for a recurring kind of task.
 - [C12: Advise on worktrees and tidy finished ones on request](https://github.com/Langspan/LangSpan.dev/issues/49): linked worktrees pile up and the owner cannot tell which are safe to remove.
@@ -131,7 +130,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## I. Install and lifecycle
 
-- [I5: Self-update with rollback](https://github.com/Langspan/LangSpan.dev/issues/84): a hand-installed release can fall behind and run an old daemon against newer hooks.
+- [I5: Self-update with rollback](https://github.com/Langspan/LangSpan.dev/issues/84): `langspan doctor` reports a coordinator and hook binary of different versions ([ADR 0025](adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md#i5-mixed-versions-as-built)); a real `brew upgrade` once the tap is published and a run of every command with networking blocked remain.
 - [I6: More ways to install, and Windows](https://github.com/Langspan/LangSpan.dev/issues/85): a source build needs Rust and a C compiler, and Windows is not supported.
 - [I8: A LangSpan skill that teaches agents how to work with it](https://github.com/Langspan/LangSpan.dev/issues/87): part 1, the general skill for every host, is built ([ADR 0034](adr/0034-langspan-skill.md), [usage](usage.md#the-langspan-skill)) and still needs a real-host run; part 2, task skills for landing, recovery and shared commits, is planned.
 - [I10: Setup through MCP tools](https://github.com/Langspan/LangSpan.dev/issues/88): an agent asked to set up LangSpan has no MCP tool for it.

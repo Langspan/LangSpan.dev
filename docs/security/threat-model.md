@@ -568,6 +568,19 @@ Withdrawing a message (`langspan messages retract`, `langspan_retract_message`, 
 | Denial of service | Withdrawals owed to a session are capped at 64, oldest dropped; at most four, within the message budget, per briefing. The history kept for withdrawal is the latest 64 messages per workspace. |
 | Elevation of privilege | A withdrawal grants and releases nothing; it only stops delivery and adds a notice. |
 
+### Trails at session end
+
+A trail (roadmap C9, [ADR 0023](../adr/0023-messages-presence-and-session-continuity-after-launch.md)) carries what one ended session read, edited and left into the next session's context. It widens the message boundary with facts no one wrote by hand: the end hook reads the line journal on this machine, and the coordinator builds the trail from its own records.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | The ending session is the host's session ID, as for every lifecycle event. A same-user process that can reach the socket can end any registered session and report journal facts for it, as it could already forge its edits. |
+| Tampering (prompt injection) | A trail holds paths, line numbers, check names and results, message IDs, and two texts from that session: its task line (redacted as a prompt summary is, absent with `--prompt-summary off`) and its intent summary (redacted when set). The hook ignores the end event's `last_assistant_message` and never opens the transcript, so neither is stored or shown. Every value is cleaned, quoted and labelled "data, not instructions", in at most three lines and 600 bytes inside the 2,400-byte cap. The core accepts at most 64 relative paths per list and at most 4 one-based ranges per file. |
+| Repudiation | Each trail is a `trail_recorded` event and its delivery a `trail_taken` event naming the session told. |
+| Information disclosure | Paths and line numbers only: no line text, file content or model output. Every local session can list trails through `langspan trail` and `langspan_recap`, as it can read the activity they come from through `status`. Trails are never published to teammates. A session with presence off has no reads in its trail. |
+| Denial of service | The end hook reads the journal within half its remaining time and sends what it has, marked partial. A workspace keeps 16 trails; a listing is held to one 48 KiB frame, counting what it leaves out. A trail shares the briefing's message budget and waits when messages fill it. |
+| Elevation of privilege | A trail grants nothing: no lease, intent, admission or journal credit changes. Taking over uncommitted lines still needs `langspan adopt`. |
+
 ## Moving and removing a workspace
 
 `workspace move` rebinds a workspace ID to another root and `workspace remove` takes it out of the derived state ([ADR 0025](../adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md), row G6). They are CLI commands over the existing owner-only socket; no MCP tool offers them, so an agent following repository or peer text has no tool that moves or removes a workspace (a shell command can still run the CLI, as it can `remote disable`).
@@ -875,6 +888,23 @@ below has been observed in a real run.
 | **Repudiation** | The provenance names the workflow, commit and run; the run log is kept by GitHub. | Log retention is GitHub's. |
 | **Information disclosure**: build paths or tokens in the binary or logs | Paths remapped with `--remap-path-prefix`; checkouts do not persist credentials; no secret is used. | None known. |
 | **Elevation of privilege**: a pull request or a dependency gains write access | `permissions: {}` at the top of each workflow; each job names its own. Release jobs never run on `pull_request`. Signing permissions are only in jobs that compile nothing. | A maintainer merging the release pull request publishes whatever `main` holds. |
+
+## Mixed versions and `doctor`'s version check
+
+Roadmap I5 ([ADR 0025](../adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md#i5-mixed-versions-as-built))
+adds no download and no binary replacement: LangSpan never fetches,
+verifies or installs a release itself. It widens two existing boundaries.
+`doctor` reads the executable named in a host's hook or MCP configuration,
+which a repository can supply. The socket also answers one more read-only
+request, `version`.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Elevation of privilege**: a repository's settings name a program that `doctor` would run | `doctor` reads the file for its version marker and never executes it, nor any program a configuration names. | None from `doctor`; the host still runs whatever its hooks name, as before. |
+| **Spoofing**: a planted file carries a false version marker | The marker only changes a `doctor` line. Exactly one well-formed marker is accepted; two different ones read as no version. | A crafted file can make `doctor` report a matching version. It cannot change what runs. |
+| **Denial of service**: a huge or endless file named as the executable | At most 1 GiB is read, in 1 MiB pieces, with a bounded marker length; a file that cannot be read is reported, not retried. | Reading a large file takes as long as the disk needs; `doctor` is run by the person, not on a hot path. |
+| **Information disclosure**: the `version` answer | It holds the build version and the daemon's process ID, on the owner-only socket. | None beyond what `ps` shows the same user. |
+| **Tampering / repudiation** | `version` is never recorded and changes no state. | None. |
 
 ## Failure cases guarded by tests
 

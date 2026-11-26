@@ -53,6 +53,7 @@ fn end(state: &mut State, session: &str) {
         &format!("e-{session}"),
         Command::SessionEnd {
             session_id: session.into(),
+            trail: None,
         },
         2,
     );

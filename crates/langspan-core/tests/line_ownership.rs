@@ -157,6 +157,7 @@ fn an_ended_exited_unknown_or_own_writer_does_not_refuse() {
         "end",
         Command::SessionEnd {
             session_id: "alice".into(),
+            trail: None,
         },
         5,
     );

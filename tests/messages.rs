@@ -92,6 +92,10 @@ impl Fixture {
     /// hook's environment under `claude -p`; otherwise it is unset, so
     /// whoever runs the suite does not decide.
     fn run_as(&self, vendor: &str, event: &Value, headless: bool) -> Run {
+        self.run_with(vendor, event, headless, &[])
+    }
+    /// `run_as` with more hook options (`--prompt-summary off`).
+    fn run_with(&self, vendor: &str, event: &Value, headless: bool, options: &[&str]) -> Run {
         let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
         command.env("LANGSPAN_AUTOSTART", "off");
         command.env_remove("CLAUDE_CODE_SESSION_ATTENDED");
@@ -103,6 +107,7 @@ impl Fixture {
             .arg(self.state_dir())
             .args(["--workspace", "work", "--root"])
             .arg(self.root())
+            .args(options)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1177,4 +1182,395 @@ fn a_held_message_whose_sent_event_was_removed_is_answered_in_part() {
     let (code, gone) = f.cli(&["messages", "status", "work", "m-never"]);
     assert_eq!(code, 1);
     assert!(gone.contains("message_not_kept"), "{gone}");
+}
+
+// Trails (roadmap C9, issue #46): what an ended session read, edited and
+// left uncommitted, built from recorded events at its end and told once to
+// the next session of the checkout.
+
+const SUBAGENT: &str = "a8830b110c1d1bfdf";
+const LAST_REPLY: &str = "FINAL-REPLY-WORDS-7d1e: all done, the uploader retries now";
+
+fn git(root: &Path, arguments: &[&str]) {
+    let output = Process::new("git")
+        .arg("-C")
+        .arg(root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+        ])
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {arguments:?}: {output:?}");
+}
+
+/// A recorded host event with this test's session and checkout.
+fn recorded(fixture: &str, session: &str, cwd: &Path) -> Value {
+    let path = format!("{}/fixtures/{fixture}.json", env!("CARGO_MANIFEST_DIR"));
+    let mut event: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    event["session_id"] = json!(session);
+    event["cwd"] = json!(cwd);
+    event["transcript_path"] = json!("/dev/null");
+    event
+}
+
+/// The trail's lines in a briefing: the line that opens it and the
+/// indented lines that continue it.
+fn trail_block(context: &str) -> Option<String> {
+    let mut lines = context
+        .lines()
+        .skip_while(|line| !line.starts_with("Trail of ended"));
+    let first = lines.next()?;
+    let mut block = vec![first];
+    block.extend(lines.take_while(|line| line.starts_with("  ")));
+    Some(block.join("\n"))
+}
+
+impl Fixture {
+    /// `a.txt`, `b.txt` and `c.txt` of twenty numbered lines, committed.
+    fn repository(&self) {
+        let numbered: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        for file in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(self.root().join(file), &numbered).unwrap();
+        }
+        git(&self.root(), &["init", "-q"]);
+        git(&self.root(), &["add", "."]);
+        git(&self.root(), &["commit", "-q", "-m", "start"]);
+    }
+    fn tool_event(&self, session: &str, agent: Option<&str>, phase: &str, tool: &str) -> Value {
+        let mut event = json!({
+            "session_id": session, "cwd": self.root(), "hook_event_name": phase,
+            "tool_name": tool,
+        });
+        if let Some(agent) = agent {
+            event["agent_id"] = json!(agent);
+            event["agent_type"] = json!("general-purpose");
+        }
+        event
+    }
+    fn read_as(&self, session: &str, agent: Option<&str>, call: &str, file: &str) {
+        let mut event = self.tool_event(session, agent, "PostToolUse", "Read");
+        event["tool_use_id"] = json!(call);
+        event["tool_input"] = json!({"file_path": self.root().join(file)});
+        let run = self.run("claude-code", &event);
+        assert!(!run.coverage.starts_with("denied"), "{}", run.stdout);
+    }
+    /// A Claude Code `Edit` replacing `old` with `new` in `file`.
+    fn edit_as(
+        &self,
+        session: &str,
+        agent: Option<&str>,
+        call: &str,
+        file: &str,
+        old: &str,
+        new: &str,
+    ) {
+        let path = self.root().join(file);
+        let input = json!({"file_path": path, "old_string": old, "new_string": new});
+        let mut event = self.tool_event(session, agent, "PreToolUse", "Edit");
+        event["tool_use_id"] = json!(call);
+        event["tool_input"] = input;
+        let pre = self.run("claude-code", &event);
+        assert_eq!(pre.coverage, "admitted", "{}", pre.stdout);
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains(old), "{file} lacks {old:?}");
+        fs::write(&path, content.replacen(old, new, 1)).unwrap();
+        event["hook_event_name"] = json!("PostToolUse");
+        event["tool_response"] = json!({"filePath": path});
+        let post = self.run("claude-code", &event);
+        assert_eq!(post.coverage, "observed", "{}", post.stdout);
+    }
+    fn prompt_text(&self, session: &str, text: &str, options: &[&str]) -> Run {
+        let mut event = lifecycle("UserPromptSubmit", session, &self.root());
+        event["prompt"] = json!(text);
+        self.run_with("claude-code", &event, false, options)
+    }
+    /// Claude Code's recorded `SessionEnd`, carrying a final reply as a
+    /// host could, so that a test can look for it in the store.
+    fn end_claude(&self, session: &str, options: &[&str]) -> Run {
+        let mut event = recorded("claude-code-2.1.330/session-end", session, &self.root());
+        event["last_assistant_message"] = json!(LAST_REPLY);
+        let run = self.run_with("claude-code", &event, false, options);
+        assert_eq!(run.coverage, "session_ended", "{}", run.stdout);
+        assert!(
+            run.stdout.is_empty(),
+            "an end prints nothing: {}",
+            run.stdout
+        );
+        run
+    }
+    /// Codex's recorded `SessionStart` in this checkout.
+    fn start_codex(&self, session: &str) -> Run {
+        self.run(
+            "codex",
+            &recorded("codex-0.171.0/session-start", session, &self.root()),
+        )
+    }
+    /// Alice's session: a task line, three reads, edits of two files.
+    fn alice_works(&self) {
+        self.start_session("claude-code", ALICE);
+        self.prompt_text(ALICE, "add retry to the uploader", &[]);
+        for (call, file) in [("r1", "a.txt"), ("r2", "b.txt"), ("r3", "c.txt")] {
+            self.read_as(ALICE, None, call, file);
+        }
+        self.edit_as(ALICE, None, "e1", "a.txt", "line 5\n", "line 5, retried\n");
+        self.edit_as(
+            ALICE,
+            None,
+            "e2",
+            "b.txt",
+            "line 10\nline 11\n",
+            "line 10, retried\nline 11, retried\n",
+        );
+    }
+    /// `trail work --json`: the trails it lists.
+    fn trails(&self) -> Vec<Value> {
+        let (code, text) = self.cli(&["trail", "work", "--json"]);
+        assert_eq!(code, 0, "{text}");
+        let reply: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(reply["outcome"]["type"], "trails", "{reply}");
+        reply["outcome"]["trails"].as_array().unwrap().clone()
+    }
+    /// Every byte the daemon's state directory holds, the store and its
+    /// write-ahead log included.
+    fn stored_bytes(&self) -> Vec<u8> {
+        fn walk(path: &Path, bytes: &mut Vec<u8>) {
+            for entry in fs::read_dir(path).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, bytes);
+                } else if let Ok(content) = fs::read(&path) {
+                    bytes.extend(content);
+                }
+            }
+        }
+        let mut bytes = Vec::new();
+        walk(&self.state_dir(), &mut bytes);
+        bytes
+    }
+}
+
+#[test]
+fn an_ended_claude_code_session_leaves_a_trail_the_next_codex_session_starts_with() {
+    let f = Fixture::new();
+    f.repository();
+    f.alice_works();
+    f.end_claude(ALICE, &[]);
+
+    let bob = f.start_codex(BOB);
+    let context = bob.context.expect("a briefing");
+    let mut lines = context.lines();
+    assert!(lines.next().unwrap().starts_with("LangSpan:"), "{context}");
+    assert!(
+        lines
+            .next()
+            .unwrap()
+            .starts_with(&format!("Trail of ended claude-code session {ALICE} (")),
+        "the briefing begins with the trail: {context}"
+    );
+    let trail = trail_block(&context).unwrap();
+    assert!(trail.len() <= 600, "{} bytes: {trail}", trail.len());
+    assert!(trail.lines().count() <= 3, "{trail}");
+    assert!(
+        trail.contains(r#"task: "add retry to the uploader""#),
+        "{trail}"
+    );
+    for file in ["a.txt", "b.txt", "c.txt"] {
+        assert!(trail.contains(&format!("{file:?}")), "{file}: {trail}");
+    }
+    assert!(trail.contains(r#""a.txt" line 5"#), "{trail}");
+    assert!(trail.contains(r#""b.txt" lines 10-11"#), "{trail}");
+    assert!(
+        trail.contains(r#"left uncommitted: "a.txt", "b.txt""#)
+            || trail.contains(r#"left uncommitted: "b.txt", "a.txt""#),
+        "{trail}"
+    );
+    // Told once: Bob's next prompt and a later session do not hear it again.
+    assert!(!mentions(&f.prompt("codex", BOB), "Trail of ended"));
+    assert!(!mentions(
+        &f.start_session("codex", CAROL),
+        "Trail of ended"
+    ));
+
+    // `trail WORKSPACE --json` lists it with its session, time and paths.
+    let trails = f.trails();
+    assert_eq!(trails.len(), 1, "{trails:?}");
+    let listed = &trails[0];
+    assert_eq!(
+        listed["trail"]["session_id"],
+        format!("claude-code.{ALICE}"),
+        "{listed}"
+    );
+    assert!(listed["age_ms"].is_u64(), "{listed}");
+    assert!(listed["trail"]["at_ms"].is_u64(), "{listed}");
+    assert_eq!(
+        listed["trail"]["taken_by"],
+        format!("codex.{BOB}"),
+        "{listed}"
+    );
+    assert_eq!(
+        listed["trail"]["read"].as_array().unwrap().len(),
+        3,
+        "{listed}"
+    );
+    let edited = listed["trail"]["edited"].as_array().unwrap();
+    let b = edited.iter().find(|file| file["path"] == "b.txt").unwrap();
+    assert_eq!(
+        b["lines"],
+        json!([{"start_line": 10, "end_line": 11}]),
+        "{listed}"
+    );
+    // The text form names it too.
+    let (code, text) = f.cli(&["trail", "work"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains(&format!("Trail of ended claude-code session {ALICE}")),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_trail_holds_no_words_of_the_final_reply_or_the_transcript() {
+    let f = Fixture::new();
+    f.repository();
+    f.alice_works();
+    // A subagent's stop carries its last reply too.
+    f.read_as(ALICE, Some(SUBAGENT), "s1", "c.txt");
+    let mut stop = recorded("claude-code-2.1.330/subagent-stop", ALICE, &f.root());
+    stop["last_assistant_message"] = json!(LAST_REPLY);
+    f.run("claude-code", &stop);
+    f.end_claude(ALICE, &[]);
+    assert_eq!(f.trails().len(), 1);
+    let stored = f.stored_bytes();
+    let needle = b"FINAL-REPLY-WORDS-7d1e";
+    assert!(
+        !stored.windows(needle.len()).any(|window| window == needle),
+        "the final reply reached the store"
+    );
+}
+
+#[test]
+fn a_headless_session_that_starts_first_does_not_take_an_interactive_sessions_trail() {
+    let f = Fixture::new();
+    f.repository();
+    f.alice_works();
+    f.end_claude(ALICE, &[]);
+    for name in ["SessionStart", "UserPromptSubmit"] {
+        let script = f.run_as("claude-code", &lifecycle(name, BOB, &f.root()), true);
+        assert!(!mentions(&script, "Trail of ended"), "{:?}", script.context);
+    }
+    let carol = f.start_codex(CAROL);
+    assert!(mentions(&carol, "Trail of ended"), "{:?}", carol.context);
+}
+
+#[test]
+fn with_the_prompt_summary_off_a_trail_has_no_task_line() {
+    let f = Fixture::new();
+    f.repository();
+    let off = ["--prompt-summary", "off"];
+    let start = lifecycle("SessionStart", ALICE, &f.root());
+    f.run_with("claude-code", &start, false, &off);
+    f.prompt_text(ALICE, "add retry to the uploader", &off);
+    f.read_as(ALICE, None, "r1", "a.txt");
+    f.end_claude(ALICE, &off);
+    let trails = f.trails();
+    assert_eq!(trails.len(), 1, "{trails:?}");
+    assert_eq!(trails[0]["trail"].get("summary"), None, "{}", trails[0]);
+    let bob = f.start_codex(BOB);
+    let trail = trail_block(bob.context.as_deref().unwrap()).unwrap();
+    assert!(!trail.contains("uploader"), "{trail}");
+    assert!(trail.contains("no task line"), "{trail}");
+}
+
+#[test]
+fn a_sessions_explicit_handoff_is_shown_before_its_trail() {
+    let f = Fixture::new();
+    f.repository();
+    f.alice_works();
+    let alice = format!("claude-code.{ALICE}");
+    f.send(&[
+        "handoff",
+        &alice,
+        "Retries done; tune the backoff next",
+        "--request-id",
+        "h1",
+    ]);
+    f.end_claude(ALICE, &[]);
+    let context = f.start_codex(BOB).context.unwrap();
+    let handoff = context
+        .find("Retries done; tune the backoff next")
+        .unwrap_or_else(|| panic!("{context}"));
+    let trail = context
+        .find("Trail of ended")
+        .unwrap_or_else(|| panic!("{context}"));
+    assert!(handoff < trail, "{context}");
+    assert_eq!(context.matches("Retries done").count(), 1, "{context}");
+}
+
+#[test]
+fn a_trail_survives_a_daemon_restart_and_is_still_told_once() {
+    let mut f = Fixture::new();
+    f.repository();
+    f.alice_works();
+    f.end_claude(ALICE, &[]);
+    if let Some(mut child) = f.child.take() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    f.start();
+    let trails = f.trails();
+    assert_eq!(trails.len(), 1, "{trails:?}");
+    // Its age is on the earlier run's clock, so none is given.
+    assert_eq!(trails[0].get("age_ms"), None, "{}", trails[0]);
+    let bob = f.start_codex(BOB);
+    let trail = trail_block(bob.context.as_deref().unwrap()).unwrap();
+    assert!(trail.contains("(in an earlier daemon run;"), "{trail}");
+    assert!(!mentions(&f.start_codex(CAROL), "Trail of ended"));
+}
+
+#[test]
+fn a_session_that_read_and_wrote_nothing_leaves_no_trail() {
+    let f = Fixture::new();
+    f.repository();
+    f.start_session("claude-code", ALICE);
+    f.prompt_text(ALICE, "look around", &[]);
+    f.end_claude(ALICE, &[]);
+    assert!(f.trails().is_empty());
+    assert!(!mentions(&f.start_codex(BOB), "Trail of ended"));
+}
+
+#[test]
+fn a_subagents_reads_and_edits_join_its_parents_trail() {
+    let f = Fixture::new();
+    f.repository();
+    f.start_session("claude-code", ALICE);
+    f.read_as(ALICE, None, "r1", "a.txt");
+    f.edit_as(
+        ALICE,
+        Some(SUBAGENT),
+        "s1",
+        "c.txt",
+        "line 3\n",
+        "line 3, by the subagent\n",
+    );
+    let stop = recorded("claude-code-2.1.330/subagent-stop", ALICE, &f.root());
+    let stop = f.run("claude-code", &stop);
+    assert_eq!(stop.coverage, "subagent_ended", "{}", stop.stdout);
+    // The subagent's own end leaves no trail of its own.
+    assert!(f.trails().is_empty(), "{:?}", f.trails());
+    f.end_claude(ALICE, &[]);
+    let trails = f.trails();
+    assert_eq!(trails.len(), 1, "{trails:?}");
+    let edited = trails[0]["trail"]["edited"].as_array().unwrap();
+    assert_eq!(edited[0]["path"], "c.txt", "{}", trails[0]);
+    assert_eq!(
+        edited[0]["lines"],
+        json!([{"start_line": 3, "end_line": 3}])
+    );
+    assert_eq!(trails[0]["trail"]["uncommitted"], json!(["c.txt"]));
 }

@@ -262,6 +262,7 @@ fn stale_exited_and_ended_work_is_excluded() {
         "end",
         Command::SessionEnd {
             session_id: "carol".into(),
+            trail: None,
         },
         late + 2,
     ));
@@ -488,6 +489,252 @@ fn the_largest_briefing_is_still_an_event_the_core_accepts_and_fits_one_frame() 
     assert!(state.activity["alice"].briefed.as_ref().unwrap().len() <= 64);
 }
 
+/// Sixteen peers filling the briefing's peer budget, as in the test above.
+fn full_of_peers(state: &mut State) {
+    let long = |n: usize| format!("{}/{n:03}", "d".repeat(500));
+    for index in 0..16 {
+        let session = format!("big{index:02}");
+        ok(run(
+            state,
+            &format!("s-{session}"),
+            Command::SessionRegister {
+                session_id: session.clone(),
+                workspace_id: "main".into(),
+                parent: None,
+                headless: false,
+            },
+            0,
+        ));
+        for file in 0..16 {
+            edited(state, &session, &long(file), 100 + file as u64);
+        }
+    }
+}
+
+/// A path of 512 bytes, each a control character or a quote: the most a
+/// valid path takes once JSON escapes it.
+fn escaped_path(kind: char, n: usize) -> String {
+    format!("{}{n:03}", kind.to_string().repeat(509))
+}
+
+/// The trail of the review finding: `erin` reads, edits, leaves uncommitted
+/// and holds eight quote-heavy 512-byte paths each, with the longest intent
+/// and task line.
+fn erin_leaves_the_largest_trail(state: &mut State) {
+    ok(run(
+        state,
+        "s-erin",
+        Command::SessionRegister {
+            session_id: "erin".into(),
+            workspace_id: "main".into(),
+            parent: None,
+            headless: false,
+        },
+        0,
+    ));
+    let path = |n: usize| escaped_path('"', n);
+    ok(run(
+        state,
+        "p-erin",
+        Command::SessionPrompt {
+            session_id: "erin".into(),
+            summary: "\"".repeat(512),
+            line_digests: Vec::new(),
+        },
+        10,
+    ));
+    for n in 0..8 {
+        ok(run(
+            state,
+            &format!("r-erin-{n}"),
+            Command::ObserveSource {
+                session_id: "erin".into(),
+                files: vec![langspan_core::ObservedFile {
+                    path: path(n),
+                    state: langspan_core::FileState::Present {
+                        digest: "1".repeat(64),
+                        kind: Default::default(),
+                    },
+                }],
+                origin: langspan_core::SourceOrigin::Read,
+            },
+            20 + n as u64,
+        ));
+        edited(state, "erin", &path(100 + n), 40 + n as u64);
+    }
+    ok(run(
+        state,
+        "lease-erin",
+        Command::Admit {
+            session_id: "erin".into(),
+            paths: (200..208).map(path).collect(),
+            ttl_ms: 60_000,
+        },
+        60,
+    ));
+    ok(run(
+        state,
+        "i-erin",
+        Command::IntentSet {
+            session_id: "erin".into(),
+            paths: vec![path(300)],
+            summary: "\"".repeat(2048),
+        },
+        70,
+    ));
+    let range = langspan_core::LineRange {
+        start_line: 1_000_000,
+        end_line: 2_000_000,
+    };
+    ok(run(
+        state,
+        "end-erin",
+        Command::SessionEnd {
+            session_id: "erin".into(),
+            trail: Some(langspan_core::TrailFacts {
+                edited: (100..108)
+                    .map(|n| langspan_core::TrailFile {
+                        path: path(n),
+                        lines: vec![range; 4],
+                        more_lines: true,
+                    })
+                    .collect(),
+                uncommitted: (400..408).map(path).collect(),
+                no_task: false,
+                partial: false,
+            }),
+        },
+        80,
+    ));
+}
+
+fn encoded_len(value: &impl serde::Serialize) -> usize {
+    serde_json::to_vec(value).unwrap().len()
+}
+
+/// Review finding on #236: an owed trail of long escaped paths beside a
+/// full peer budget made the briefing too large for its frame, after the
+/// trail was already marked taken, so the next session lost it.
+#[test]
+fn an_owed_trail_of_escaped_paths_beside_full_peers_still_fits_one_frame() {
+    let mut state = ready();
+    full_of_peers(&mut state);
+    erin_leaves_the_largest_trail(&mut state);
+    let stored = &state.trails["main"][0];
+    assert!(
+        encoded_len(stored) <= langspan_core::TRAIL_JSON_BYTES,
+        "the stored trail is bounded: {} bytes",
+        encoded_len(stored)
+    );
+    assert!(
+        stored.more_read + stored.more_edited + stored.more_uncommitted > 0,
+        "what the bound left out is counted: {stored:?}"
+    );
+    let outcome = ok(run(
+        &mut state,
+        "big",
+        Command::Brief {
+            session_id: "alice".into(),
+            max_peers: 16,
+            deliver: true,
+            mid_turn: false,
+            left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+            changes_only: false,
+        },
+        300,
+    ));
+    let bytes = encoded_len(&outcome);
+    assert!(bytes < 60 * 1024, "{bytes}");
+    let Outcome::Briefing { briefing } = outcome else {
+        unreachable!()
+    };
+    let view = briefing
+        .trail
+        .as_ref()
+        .expect("the trail is told, not lost");
+    assert_eq!(view.trail.session_id, "erin");
+    assert!(encoded_len(view) <= langspan_core::TRAIL_JSON_BYTES);
+    assert!(!briefing.peers.is_empty(), "peers share the frame");
+    // The trail takes its room from the peers' 40 KiB, so the briefing is
+    // no larger than one without a trail.
+    let shared = encoded_len(&briefing.peers) + encoded_len(view);
+    assert!(shared <= 40 * 1024, "{shared}");
+    assert_eq!(state.trails["main"][0].taken_by.as_deref(), Some("alice"));
+}
+
+/// A trail recorded before the bound, as an older daemon of this branch
+/// could store it, is bounded when it is shown: in a briefing and in a
+/// listing.
+#[test]
+fn an_unbounded_stored_trail_is_bounded_when_shown() {
+    let mut state = ready();
+    full_of_peers(&mut state);
+    ok(run(
+        &mut state,
+        "end-bob",
+        Command::SessionEnd {
+            session_id: "bob".into(),
+            trail: None,
+        },
+        90,
+    ));
+    let path = |n: usize| escaped_path('\u{2}', n);
+    let paths = |from: usize| (from..from + 8).map(path).collect::<Vec<_>>();
+    let trail = langspan_core::Trail {
+        session_id: "bob".into(),
+        workspace_id: "main".into(),
+        summary: Some("\u{2}".repeat(512)),
+        intent: Some("\u{2}".repeat(2048)),
+        read: paths(0),
+        more_read: 0,
+        edited: paths(10)
+            .into_iter()
+            .map(|path| langspan_core::TrailFile {
+                path,
+                lines: Vec::new(),
+                more_lines: false,
+            })
+            .collect(),
+        more_edited: 0,
+        checks: Vec::new(),
+        uncommitted: paths(20),
+        more_uncommitted: 0,
+        held: paths(30),
+        waiting_on: Vec::new(),
+        partial: false,
+        headless: false,
+        at_ms: 90,
+        generation: 1,
+        taken_by: None,
+    };
+    assert!(encoded_len(&trail) > 64 * 1024, "{}", encoded_len(&trail));
+    apply(&mut state, &Event::TrailRecorded { trail }).unwrap();
+    let listed = ok(run(
+        &mut state,
+        "list",
+        Command::Trails {
+            workspace_id: "main".into(),
+            limit: None,
+        },
+        95,
+    ));
+    let Outcome::Trails { trails, .. } = listed else {
+        unreachable!()
+    };
+    assert!(encoded_len(&trails[0]) <= langspan_core::TRAIL_JSON_BYTES + 64);
+    let briefing = brief(&mut state, "alice", "b-old", 100);
+    let view = briefing.trail.as_ref().expect("the trail is told");
+    assert!(encoded_len(view) <= langspan_core::TRAIL_JSON_BYTES + 64);
+    assert!(
+        encoded_len(&briefing) < 60 * 1024,
+        "{}",
+        encoded_len(&briefing)
+    );
+}
+
 #[test]
 fn a_look_from_outside_is_not_a_delivery_and_not_activity() {
     let mut state = ready();
@@ -528,6 +775,7 @@ fn ending_a_session_always_labels_it_and_drops_its_task_line() {
         "end",
         Command::SessionEnd {
             session_id: "bob".into(),
+            trail: None,
         },
         30,
     ));
@@ -541,6 +789,7 @@ fn ending_a_session_always_labels_it_and_drops_its_task_line() {
         "end2",
         Command::SessionEnd {
             session_id: "carol".into(),
+            trail: None,
         },
         50,
     ));
@@ -983,6 +1232,7 @@ fn old_targets_and_an_ended_sessions_targets_cause_no_notice() {
         "end",
         Command::SessionEnd {
             session_id: "carol".into(),
+            trail: None,
         },
         late + 1,
     ));
@@ -1439,6 +1689,7 @@ fn presence_belongs_to_one_generation_and_an_ended_session_has_none() {
         "end",
         Command::SessionEnd {
             session_id: "alice".into(),
+            trail: None,
         },
         1_500,
     ));
@@ -1519,6 +1770,7 @@ fn a_prompt_is_told_how_many_leading_lines_a_live_peer_in_its_repository_shares(
                 &format!("end-{session}"),
                 Command::SessionEnd {
                     session_id: session.into(),
+                    trail: None,
                 },
                 60,
             ));
@@ -1938,6 +2190,7 @@ fn end(state: &mut State, session: &str, now: u64) {
         &format!("end-{session}-{now}"),
         Command::SessionEnd {
             session_id: session.into(),
+            trail: None,
         },
         now,
     ));
