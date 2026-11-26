@@ -530,6 +530,49 @@ fn a_sessions_own_merge_is_not_briefed_to_it_and_is_named_to_the_others() {
     }
 }
 
+/// Issue #139: Alice commits through her shell tool, which moves HEAD and
+/// changes no file, so the scan records no checkout change for it. The owner
+/// then restores two dirty files in a terminal, within the grace period, at
+/// the branch and HEAD the commit left. That restore is the owner's, not
+/// Alice's commit: she is told of it, with nobody named.
+#[test]
+fn a_restore_after_a_sessions_own_commit_is_still_news_to_it() {
+    let w = World::new(upstream_to_merge);
+    w.writes(ALICE, "alice-a", "a.txt", "alice a.txt\n");
+    fs::write(w.work().join("b.txt"), "owner b.txt\n").unwrap();
+    fs::write(w.work().join("c.txt"), "owner c.txt\n").unwrap();
+    w.wait("the owner's dirty files", || {
+        let (events, _) = w.changes();
+        let paths = disk_paths(&events);
+        (paths.contains(&"b.txt".to_owned()) && paths.contains(&"c.txt".to_owned())).then_some(())
+    });
+
+    let command = "git commit --quiet -m alice a.txt";
+    w.shell(ALICE, "alice-commit", command, || {
+        ok(&w.work(), &["commit", "--quiet", "-m", "alice", "a.txt"]);
+    });
+    w.wait_for_scan_of_head();
+    assert!(
+        w.state().checkouts.get("work").is_none_or(Vec::is_empty),
+        "a commit is not a checkout change"
+    );
+
+    ok(&w.work(), &["checkout", "--", "b.txt", "c.txt"]);
+    let restore = w.wait("the owner's restore", || {
+        w.state().checkouts.get("work")?.first().cloned()
+    });
+    assert_eq!(restore.from_head, restore.to_head);
+    let context = w.prompt(ALICE).context.unwrap_or_default();
+    let line = context
+        .lines()
+        .find(|line| line.contains("The checkout changed under you"))
+        .unwrap_or_else(|| panic!("Alice is told of the owner's restore: {context}"));
+    assert!(
+        !line.contains("session claude-code."),
+        "nobody is named: {line}"
+    );
+}
+
 /// `main` with three files, `origin/main` a commit ahead changing two of
 /// them, and a branch `other` at `main`.
 fn upstream_to_merge(work: &Path) {
@@ -614,6 +657,7 @@ fn a_redelivered_merge_report_keeps_the_merges_own_window() {
             to_head: run.to_head.clone(),
             ran_ms: 10,
             finished_ago_ms: ago,
+            files_unchanged: run.files_unchanged,
         },
     };
     let first = client::call(&w.state_dir(), &report(0)).unwrap();

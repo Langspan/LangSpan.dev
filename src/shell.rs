@@ -636,6 +636,10 @@ fn checked_out_branch(git_dir: &Path) -> Option<String> {
 pub struct CheckoutLeft {
     pub branch: Option<String>,
     pub head: Option<String>,
+    /// It changed no file's content, as a commit does. Absent from a record
+    /// written before it was kept.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub files_unchanged: bool,
 }
 
 /// What a run whose command runs a Git operation that changes the checkout
@@ -650,6 +654,7 @@ pub fn checkout_left(
         CheckoutLeft {
             branch: after.branch.clone(),
             head: after.head.clone(),
+            files_unchanged: !changed_files,
         }
     })
 }

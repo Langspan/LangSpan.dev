@@ -321,7 +321,11 @@ no change from before it. A duration counts as two hours at most. The
 run explains a checkout change the scan observed while it ran, or the first
 change observed after it, within 60 seconds, at the branch and HEAD it left.
 Once a scan while it ran has seen that branch and HEAD, no later change is
-its, so a later file restore at the same HEAD is still told. Either order
+its, so a later file restore at the same HEAD is still told. The run also
+records whether the command changed any file's content. One that changed
+none, as a commit does, gets no checkout change from the scan, so a change
+after it with branch and HEAD in place, such as a file restore, is not its.
+Either order
 works: the scan may see the change before the hook reports, or
 after. The session that ran it is not told of a change it explains; every
 other session in the checkout still is, with that session and its command

@@ -3403,6 +3403,7 @@ impl Session<'_> {
                     to_head: left.head.clone(),
                     ran_ms,
                     finished_ago_ms,
+                    files_unchanged: left.files_unchanged,
                 },
             ) {
                 Ok(_) => {}

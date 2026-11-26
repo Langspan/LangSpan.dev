@@ -1674,13 +1674,18 @@ pub struct CheckoutRun {
     pub started_ms: u64,
     pub finished_ms: u64,
     pub generation: u64,
+    /// The command changed no file's content: it moved HEAD or the branch
+    /// only, as a commit does. Absent from an earlier record.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub files_unchanged: bool,
 }
 
 impl CheckoutRun {
     /// Whether this run explains `change`: observed while the command ran,
     /// or the first change observed after it finished, within
     /// `CHECKOUT_RUN_GRACE_MS`, at the checkout the command left, unless a
-    /// change while it ran already showed that checkout.
+    /// change while it ran already showed that checkout or the command
+    /// changed no file and the change left branch and HEAD in place.
     /// `changes` are the workspace's changes, to find the first.
     pub fn explains(&self, change: &CheckoutChange, changes: &[CheckoutChange]) -> bool {
         if change.workspace_id != self.workspace_id
@@ -1695,8 +1700,13 @@ impl CheckoutRun {
         let left = |other: &CheckoutChange| {
             other.to_head == self.to_head && other.to_branch == self.to_branch
         };
+        // A run that changed no file (a commit) explains no later change
+        // with branch and HEAD in place (a restore): the scan records no
+        // change for such a run, so that one came after it.
+        let moved = change.from_head != change.to_head || change.from_branch != change.to_branch;
         change.at_ms <= self.finished_ms.saturating_add(CHECKOUT_RUN_GRACE_MS)
             && left(change)
+            && (moved || !self.files_unchanged)
             && !changes.iter().any(|other| {
                 other.change_id != change.change_id
                     && other.workspace_id == self.workspace_id
@@ -2356,6 +2366,10 @@ pub enum Command {
         /// earlier hook, which reported as the command finished.
         #[serde(default, skip_serializing_if = "is_zero_u64")]
         finished_ago_ms: u64,
+        /// The command changed no file's content (`CheckoutRun`). Absent
+        /// from an earlier hook.
+        #[serde(default, skip_serializing_if = "is_false")]
+        files_unchanged: bool,
     },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
@@ -2878,6 +2892,10 @@ enum CommandWire {
         /// earlier hook, which reported as the command finished.
         #[serde(default, skip_serializing_if = "is_zero_u64")]
         finished_ago_ms: u64,
+        /// The command changed no file's content (`CheckoutRun`). Absent
+        /// from an earlier hook.
+        #[serde(default, skip_serializing_if = "is_false")]
+        files_unchanged: bool,
     },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
@@ -5189,6 +5207,7 @@ fn decide_checked(
             to_head,
             ran_ms,
             finished_ago_ms,
+            files_unchanged,
         } => {
             let Some(session) = state.sessions.get(session_id) else {
                 return Err(error(
@@ -5211,6 +5230,7 @@ fn decide_checked(
                 started_ms: finished_ms.saturating_sub((*ran_ms).min(MAX_CHECKOUT_RUN_MS)),
                 finished_ms,
                 generation: state.generation,
+                files_unchanged: *files_unchanged,
             };
             validate_checkout_run(state, &run)?;
             Ok(Decision {

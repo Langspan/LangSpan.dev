@@ -104,9 +104,50 @@ fn reported(state: &mut State, session: &str, to: char, ran: u64, ago: u64, now:
             to_head: Some(oid(to)),
             ran_ms: ran,
             finished_ago_ms: ago,
+            files_unchanged: false,
         },
         now,
     )
+}
+
+/// `session`'s `git commit` ran for `ran` ms and moved `main` to `to`,
+/// changing no file; reported at `now`, as it finished.
+fn committed(state: &mut State, session: &str, to: char, ran: u64, now: u64) -> Outcome {
+    run(
+        state,
+        &format!("commit-{session}-{now}"),
+        Command::ObserveCheckoutRun {
+            session_id: session.into(),
+            command: Some("git commit -m work".into()),
+            to_branch: Some(MAIN.into()),
+            to_head: Some(oid(to)),
+            ran_ms: ran,
+            finished_ago_ms: 0,
+            files_unchanged: true,
+        },
+        now,
+    )
+}
+
+/// The scan sees `files` restored with branch `main` and HEAD `at` in place.
+fn restored(state: &mut State, id: &str, at: char, now: u64) {
+    let outcome = run(
+        state,
+        id,
+        Command::ObserveCheckout {
+            workspace_id: "work".into(),
+            from_branch: Some(MAIN.into()),
+            to_branch: Some(MAIN.into()),
+            from_head: Some(oid(at)),
+            to_head: Some(oid(at)),
+            files: 2,
+        },
+        now,
+    );
+    assert!(
+        matches!(outcome, Outcome::CheckoutObserved { .. }),
+        "{outcome:?}"
+    );
 }
 
 fn notices(state: &mut State, session: &str, now: u64) -> Vec<CheckoutNotice> {
@@ -170,23 +211,7 @@ fn a_change_after_the_run_whose_result_was_already_seen_is_not_its_own() {
     let mut state = ready();
     checkout(&mut state, "c1", MAIN, 'b', 1_000);
     merged(&mut state, "alice", 'b', 300, 1_100);
-    let outcome = run(
-        &mut state,
-        "c2",
-        Command::ObserveCheckout {
-            workspace_id: "work".into(),
-            from_branch: Some(MAIN.into()),
-            to_branch: Some(MAIN.into()),
-            from_head: Some(oid('b')),
-            to_head: Some(oid('b')),
-            files: 2,
-        },
-        5_000,
-    );
-    assert!(
-        matches!(outcome, Outcome::CheckoutObserved { .. }),
-        "{outcome:?}"
-    );
+    restored(&mut state, "c2", 'b', 5_000);
     let alice = notices(&mut state, "alice", 5_100);
     assert_eq!(alice.len(), 1, "{alice:?}");
     assert_eq!(alice[0].by_session, None);
@@ -206,6 +231,42 @@ fn a_change_after_the_run_whose_result_was_already_seen_is_not_its_own() {
     checkout(&mut state, "c1", OTHER, 'c', 1_000);
     merged(&mut state, "alice", 'b', 300, 1_100);
     checkout(&mut state, "c2", MAIN, 'b', 3_000);
+    assert_eq!(notices(&mut state, "alice", 3_100), []);
+}
+
+/// A commit moves HEAD and changes no file, so the scan records no checkout
+/// change for it. A restore of dirty files the owner makes afterward, within
+/// the grace period, at the branch and HEAD the commit left, is the first
+/// change after the run, but not its own.
+#[test]
+fn a_restore_after_a_commit_that_changed_no_file_is_not_its_own() {
+    let mut state = ready();
+    committed(&mut state, "alice", 'b', 300, 1_000);
+    restored(&mut state, "c1", 'b', 5_000);
+    let alice = notices(&mut state, "alice", 5_100);
+    assert_eq!(alice.len(), 1, "{alice:?}");
+    assert_eq!(alice[0].by_session, None);
+    let bob = notices(&mut state, "bob", 5_100);
+    assert_eq!(bob.len(), 1, "{bob:?}");
+    assert_eq!(bob[0].by_session, None);
+
+    // Such a run still explains a change that moved HEAD: a `reset --soft`
+    // whose staged files the scan sees after the hook reported.
+    let mut state = ready();
+    committed(&mut state, "alice", 'b', 300, 1_000);
+    checkout(&mut state, "c1", MAIN, 'b', 3_000);
+    assert_eq!(notices(&mut state, "alice", 3_100), []);
+
+    // And a restore while it ran, as any run does.
+    let mut state = ready();
+    restored(&mut state, "c1", 'b', 900);
+    committed(&mut state, "alice", 'b', 300, 1_000);
+    assert_eq!(notices(&mut state, "alice", 1_100), []);
+
+    // A run that changed files explains a later restore as before: a stash.
+    let mut state = ready();
+    merged(&mut state, "alice", 'b', 300, 1_000);
+    restored(&mut state, "c1", 'b', 3_000);
     assert_eq!(notices(&mut state, "alice", 3_100), []);
 }
 
@@ -279,6 +340,7 @@ fn a_run_is_refused_for_an_unknown_session_or_an_invalid_state() {
             to_head: Some(oid('b')),
             ran_ms: 0,
             finished_ago_ms: 0,
+            files_unchanged: false,
         },
         1_000,
     );
@@ -293,6 +355,7 @@ fn a_run_is_refused_for_an_unknown_session_or_an_invalid_state() {
             to_head: Some(oid('b')),
             ran_ms: 0,
             finished_ago_ms: 0,
+            files_unchanged: false,
         },
         1_000,
     );
@@ -328,6 +391,7 @@ fn a_retry_differing_only_in_the_finish_age_is_the_same_request() {
         to_head: Some(oid(to)),
         ran_ms: ran,
         finished_ago_ms: ago,
+        files_unchanged: false,
     };
     let first = command('b', 300, 0);
     assert!(first.same_request(&command('b', 300, 5_000)));
