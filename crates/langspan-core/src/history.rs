@@ -161,7 +161,8 @@ fn names_file(paths: &[String], text: &str, path: &str) -> bool {
     paths.iter().any(|named| named == path) || text.contains(path)
 }
 
-/// The recorded changes of `query.name`, newest first, at most
+/// The recorded changes of `query.name`, including a rename to it, newest
+/// first, at most
 /// `query.limit` (a whole event's entries are kept together).
 pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreError> {
     validate_known_workspace(state, query.workspace_id)?;
@@ -197,7 +198,13 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
         {
             continue;
         }
-        for change in notice.changes.iter().filter(|c| c.name == query.name) {
+        // A rename is recorded under the old name, and the new name's
+        // addition is folded into it: it belongs to both names' histories.
+        let named = |c: &&InterfaceChange| {
+            c.name == query.name
+                || (c.change == "renamed" && c.after_name.as_deref() == Some(query.name))
+        };
+        for change in notice.changes.iter().filter(named) {
             found.push((recorded.seq, notice, change));
         }
     }

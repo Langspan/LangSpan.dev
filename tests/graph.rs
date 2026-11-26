@@ -1646,3 +1646,33 @@ fn a_renamed_definitions_history_says_it_was_renamed_with_both_signatures() {
         "{text}"
     );
 }
+
+#[test]
+fn a_renamed_definition_is_in_its_new_names_history_too() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    // The new name's addition is folded into the rename, so the rename is
+    // the only record of when `send` appeared and who was editing then.
+    w.edits(
+        "alice",
+        "a1",
+        "src/upload.rs",
+        &original.replace("pub fn upload(", "pub fn send("),
+    );
+    history(&w, "upload", 1);
+    let found = history(&w, "send", 1);
+    let entries = found["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{found:#}");
+    assert_eq!(entries[0]["change"], "renamed", "{found:#}");
+    assert_eq!(entries[0]["before"], "pub fn upload(path: &str) -> bool");
+    assert_eq!(entries[0]["after"], "pub fn send(path: &str) -> bool");
+    assert!(
+        entries[0]["by_session"]
+            .as_str()
+            .is_some_and(|session| session.ends_with("alice")),
+        "{found:#}"
+    );
+}

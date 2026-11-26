@@ -1130,7 +1130,8 @@ definition added or removed is told as such, with how many there are now:
 "a second method "text" was added … (now 2 definitions with that name)".
 
 Each notice stays in the event log, and `graph history` reads a definition's
-past from there, before an agent changes it again:
+past from there, before an agent changes it again. A rename appears in the
+history of both the old name and the new one:
 
 ```sh
 ./target/release/langspan graph history PROJECT save --json
