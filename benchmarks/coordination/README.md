@@ -43,7 +43,7 @@ after every session's branch is merged, never a branch alone.
 | Family | Sessions | What can go wrong | The oracle accepts |
 | --- | --- | --- | --- |
 | `rename_vs_new_caller` | One session renames `parse_config` to `load_config` across the package; each other session adds a feature module that must call the parser | A new caller uses the old name: every branch passes alone, and the merge breaks | The rename done, every feature working on the merged tree, no call to a name the merged `shelf/config.py` lacks |
-| `contradictory_defaults` | Pairs of sessions; each is asked to change the same default in `shelf/settings.py` to a different value for its own caller. With N odd, one session gets an unrelated control task | Both change the default: Git refuses the second merge, or one requirement is silently lost | Per pair: both callers get the value their task asked for, or a session reported the contradiction in `notes/conflict-sN.md` |
+| `contradictory_defaults` | Pairs of sessions; each is asked to change the same default in `shelf/settings.py` to a different value for its own caller. With N odd, one session gets an unrelated control task | Both change the default: Git refuses the second merge, or one requirement is silently lost | Per pair: both callers get the value their task asked for, or a session reported the contradiction in `notes/conflict-sN.md`: one note names the setting and both values the pair asked for |
 
 N is 2, 5 or 10. The seed chooses which features or pairs run when N is below
 the pool, and which session gets which task; the same arguments always give

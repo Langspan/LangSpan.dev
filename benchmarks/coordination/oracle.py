@@ -77,6 +77,18 @@ def python_sources(checkout):
             for path in sorted(root.rglob("*.py"))}
 
 
+def mentions(text, value):
+    """Whether TEXT names VALUE as a whole token: 10 is not in 100 or 10.5."""
+    return re.search(r"(?<![\w.])%s(?!\.?\w)" % re.escape(str(value)), text) is not None
+
+
+def reports_contradiction(text, key, members):
+    """A note reports a pair's contradiction when it names the setting and
+    every value the pair's tasks asked for: the incompatible requirements
+    themselves, not only the setting or the functions involved."""
+    return mentions(text, key) and all(mentions(text, task["value"]) for _, task in members)
+
+
 def judge(plan, checkout):
     sys.path.insert(0, str(checkout))
     merged = {entry["session"] for entry in plan["integration"] if entry["merged"]}
@@ -122,8 +134,7 @@ def judge(plan, checkout):
                 pairs.setdefault(task["pair"], []).append((entry, task))
         for key, members in sorted(pairs.items()):
             reconciled = all(entry["completed"] for entry, _ in members)
-            names = [key] + [task["function"] for _, task in members]
-            reported = any(name in text for text in texts for name in names)
+            reported = any(reports_contradiction(text, key, members) for text in texts)
             if reported:
                 reports.append(key)
             for entry, _ in members:

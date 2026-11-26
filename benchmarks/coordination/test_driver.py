@@ -122,6 +122,33 @@ class DriverUnitTests(Temporary):
         self.assertIn(driver.CLAUDE_CONFIG_ENV, result.stderr)
         self.assertFalse((self.root / "out").exists())
 
+    def test_a_langspan_arm_claude_session_uses_the_run_coordinator(self):
+        """The session's bare `langspan status` and `langspan commit --mine`
+        must reach the coordinator the hooks use, not a default state."""
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        langspan = bin_dir / "langspan"
+        langspan.write_text("#!/bin/sh\nexit 0\n")
+        langspan.chmod(0o755)
+        seen = self.root / "seen.txt"
+        claude = self.root / "fake-claude"
+        claude.write_text('#!/bin/sh\nprintf "%%s\\n%%s\\n" "$LANGSPAN_STATE_DIR" "$(command -v langspan)" > %s\n'
+                          % seen)
+        claude.chmod(0o755)
+        config = self.root / "claude-config"
+        config.mkdir()
+        state = self.root / "lsb-state"
+        plan = driver.make_plan("langspan", "rename_vs_new_caller", 2, 1, "claude", "naive", 60)
+        plan.update(langspan=str(langspan), state_dir=str(state))
+        plan_path = self.root / "plan.json"
+        plan_path.write_text(json.dumps(plan))
+        env = dict(os.environ, **{driver.CLAUDE_CONFIG_ENV: str(config), driver.CLAUDE_BIN_ENV: str(claude),
+                                  "LANGSPAN_STATE_DIR": str(self.root / "operator-state")})
+        done = subprocess.run([sys.executable, "-I", "-B", str(HERE / "driver.py"), "session", str(plan_path), "1"],
+                              capture_output=True, text=True, timeout=30, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(seen.read_text().splitlines(), [str(state), str(langspan)])
+
     def test_duplicate_work_is_a_change_to_a_unit_another_task_owns(self):
         work = self.root / "work"
         work.mkdir()
@@ -160,6 +187,15 @@ class DriverUnitTests(Temporary):
         self.assertEqual(code, 1)
         self.assertEqual(len(verdict["semantic_conflicts"]), 1, "list_page silently got 100")
         (checkout / "notes").mkdir()
+        # Naming the setting or a function is not a report of the contradiction.
+        for text in ("I will update page_size.\n", "Changed page_size for export_batch and list_page.\n",
+                     "page_size: export wants 100.\n", "page_size: 1000 or 10.5 instead.\n"):
+            (checkout / "notes" / "conflict-s1.md").write_text(text)
+            code, verdict = oracle()
+            self.assertEqual((code, verdict["integrated_tests"]), (1, "failed"), text)
+            self.assertEqual(verdict["contradictions_reported"], [], text)
+            self.assertEqual([t["accepted"] for t in verdict["tasks"]], [False, False], text)
+        (checkout / "notes" / "conflict-s1.md").unlink()
         (checkout / "notes" / "conflict-s2.md").write_text("page_size: export wants 100, listing wants 10.\n")
         code, verdict = oracle()
         self.assertEqual((code, verdict["integrated_tests"]), (0, "passed"), verdict)

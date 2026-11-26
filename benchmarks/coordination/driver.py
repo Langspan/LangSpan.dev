@@ -293,7 +293,10 @@ def session_main(plan_path, index):
         return 2
     env = dict(os.environ, CLAUDE_CONFIG_DIR=config_dir)
     if plan["arm"] == "langspan":
+        # The session's own `langspan` commands must reach the run's
+        # coordinator, the one its hooks name, not a default state directory.
         env["PATH"] = str(Path(plan["langspan"]).parent) + os.pathsep + env.get("PATH", "")
+        env["LANGSPAN_STATE_DIR"] = plan["state_dir"]
     argv = claude_argv(os.environ.get(CLAUDE_BIN_ENV, "claude"), plan["prompts"][index - 1], plan["arm"],
                        os.environ.get(CLAUDE_MODEL_ENV))
     executable = shutil.which(argv[0], path=env["PATH"]) or argv[0]
@@ -647,6 +650,7 @@ def run(args):
         if langspan:
             # A Unix socket path holds about 100 bytes: keep the state short.
             state_dir = Path(tempfile.mkdtemp(prefix="lsb-", dir="/tmp"))
+            plan["state_dir"] = str(state_dir)
             install_langspan(langspan, state_dir, worktrees, work)
             coordinator = Coordinator(langspan, state_dir, output / "coordinator.log")
         (output / "plan.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
