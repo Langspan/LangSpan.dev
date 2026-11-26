@@ -14,6 +14,11 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 use std::time::Duration;
 
+/// The scan failure recorded when a workspace's root or Git directory now
+/// names another checkout. Admission reads it back from the state.
+pub const IDENTITY_CHANGED: &str =
+    "Git identity changed since the previous scan; register the replacement as a new workspace";
+
 /// The wall clock in Unix milliseconds; 0 if it reads before the epoch.
 pub fn wall_now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -405,7 +410,12 @@ impl Store {
             .workspaces
             .get(workspace_id)
             .ok_or("cannot store a scan for an unregistered workspace")?;
-        if workspace.root != snapshot.root {
+        if workspace.root != snapshot.root
+            && !crate::observer::same_root(
+                std::path::Path::new(&workspace.root),
+                std::path::Path::new(&snapshot.root),
+            )
+        {
             return Err("scan root differs from the registered physical workspace".into());
         }
         let limits = crate::observer::Limits::default();
@@ -446,14 +456,40 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let previous: Option<crate::observer::Snapshot> = previous_json
+        let mut previous: Option<crate::observer::Snapshot> = previous_json
             .map(|json| serde_json::from_str(&json))
             .transpose()?;
-        if previous
-            .as_ref()
-            .is_some_and(|old| old.root != snapshot.root || old.common_dir != snapshot.common_dir)
-        {
-            return Err("Git identity changed since the previous scan; register the replacement as a new workspace".into());
+        if previous.as_ref().is_some_and(|old| {
+            if old.root == snapshot.root && old.common_dir == snapshot.common_dir {
+                return false;
+            }
+            // Reached through a link left where the checkout used to be,
+            // both paths now name the same directories. A link to any other
+            // checkout would too, so the checkout reached must also hold the
+            // commit the previous scan saw. One bounded Git call, once per
+            // change of path: the next scan compares equal paths.
+            let same = |before: &str, now: &str| {
+                crate::observer::same_root(std::path::Path::new(before), std::path::Path::new(now))
+            };
+            !(same(&old.root, &snapshot.root)
+                && same(&old.common_dir, &snapshot.common_dir)
+                && old.head.as_deref().is_some_and(|head| {
+                    crate::observer::holds_commit(
+                        std::path::Path::new(&snapshot.root),
+                        head,
+                        std::time::Instant::now() + std::time::Duration::from_millis(500),
+                    )
+                    .unwrap_or(false)
+                }))
+        }) {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        // Accepted as the same checkout: the previous scan stays the
+        // baseline under the paths it is reached by now, so a change made
+        // while it moved is still observed with its earlier version.
+        if let Some(old) = previous.as_mut() {
+            old.root.clone_from(&snapshot.root);
+            old.common_dir.clone_from(&snapshot.common_dir);
         }
         let changes = crate::observer::diff(&previous, snapshot);
         let sequence: i64 =

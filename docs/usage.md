@@ -1628,6 +1628,27 @@ which check failed: `not_checkout_top`, `old_root_exists`,
 `workspace_conflict` (NEW_ROOT
 is registered already or overlaps another workspace).
 
+A checkout reached through a symbolic link is the same checkout. LangSpan
+compares a registered root with the root Git reports by resolving links and
+checking that both name the same directory (same device and inode). If you
+move a checkout and leave a link at its old path, the workspace keeps
+scanning, and sessions started through the link join it, under the
+registered path. A link to a checkout of another repository (one without the
+commit the last scan saw) stops the scan with `Git identity changed`.
+`workspace move ID NEW_ROOT` to the link's target succeeds
+without `--switch` and records NEW_ROOT. When the old root is a link to a
+different directory, the `old_root_exists` refusal names the directory it
+leads to; use `--switch` only if that is another checkout you mean to leave.
+The checkout a registered link leads to cannot be registered, or receive a
+moved workspace, under another ID. Its linked worktrees still can, at their
+resolved paths: register a new one under the checkout's new place, or move
+one registered under the old root to its resolved path. While the workspace
+at the link holds an admission, such a registration is refused with
+`workspace_in_use`; complete the admission or wait for it to expire.
+If a registered root becomes a link to another registered workspace's
+checkout, both workspaces refuse admission until you move or remove one of
+them.
+
 User-level hooks need nothing: an event from NEW_ROOT joins the moved ID.
 Project-level hooks name their root in the host's configuration, which the
 command does not edit; it prints the `hooks install` commands to rerun for the
