@@ -13,10 +13,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::dashboard::host_and_prefix;
-use crate::today::{Placement, event_facts, event_workspace};
+use crate::today::{Placement, event_facts};
 use crate::{
     CLAUDE_CODE_HOST, CODEX_HOST, CURSOR_HOST, ClockAnchor, Event, GEMINI_HOST, LeaseRelation,
-    RecordedEvent, SHELL_TOOL, SourceOrigin, State, TodayWindow, ToolResult, is_zero,
+    RecordedEvent, SHELL_TOOL, SourceOrigin, TodayWindow, ToolResult, is_zero,
 };
 
 /// Session rows one report lists, earliest first; the rest are in the host
@@ -142,6 +142,50 @@ pub struct ReportQuery<'a> {
     /// `open_intents` folded. An intent set before the events read and
     /// still open when its session ends in the window counts as left open.
     pub open_intents: &'a BTreeMap<String, String>,
+    /// Each session's workspace just before the first event given, from the
+    /// older events `session_workspaces` folded. An event that names no
+    /// workspace of its own counts for the workspace its session belonged
+    /// to when it was recorded, not the one it belongs to now.
+    pub session_workspaces: &'a BTreeMap<String, String>,
+}
+
+/// Fold one event into each session's workspace (session to workspace), as
+/// `apply` changes `State::sessions`: a registration binds a session, and
+/// removing a workspace unbinds its sessions, which may then register in
+/// another. The store folds the events before those it reads with this, and
+/// the report the ones it reads.
+pub fn session_workspaces(members: &mut BTreeMap<String, String>, event: &Event) {
+    match event {
+        Event::SessionRegistered { session } => {
+            members.insert(session.session_id.clone(), session.workspace_id.clone());
+        }
+        Event::WorkspaceRemoved { workspace_id } => {
+            members.retain(|_, workspace| workspace != workspace_id);
+        }
+        _ => {}
+    }
+}
+
+/// The workspace an event counts for: the one it names, or else the one its
+/// session belonged to when it was recorded.
+fn event_workspace<'a>(
+    members: &'a BTreeMap<String, String>,
+    event: &'a Event,
+    session: Option<&str>,
+) -> Option<&'a str> {
+    match event {
+        Event::SessionRegistered { session } => Some(&session.workspace_id),
+        Event::WriteRefused { workspace_id, .. } | Event::TurnReleased { workspace_id, .. } => {
+            Some(workspace_id)
+        }
+        Event::CheckRecorded { check } => Some(&check.workspace_id),
+        Event::OperationObserved { observation } => Some(&observation.workspace_id),
+        Event::LeaseGranted { lease } => Some(&lease.workspace_id),
+        Event::IntentSet { intent } => Some(&intent.workspace_id),
+        _ => session
+            .and_then(|session| members.get(session))
+            .map(String::as_str),
+    }
 }
 
 /// Fold one event into the sessions holding an intent (session to the
@@ -199,7 +243,7 @@ struct Tally {
 }
 
 /// Build the report. Pure: every time and every event is supplied.
-pub fn report(state: &State, query: &ReportQuery<'_>) -> Report {
+pub fn report(query: &ReportQuery<'_>) -> Report {
     let window = query.window;
     let mut placement = Placement::new(query.anchor);
     let mut sessions: BTreeMap<String, Tally> = BTreeMap::new();
@@ -207,6 +251,8 @@ pub fn report(state: &State, query: &ReportQuery<'_>) -> Report {
     // every event read: an intent set before the window and still open when
     // the session ends in it counts.
     let mut open: BTreeMap<String, String> = query.open_intents.clone();
+    // Each session's workspace at the event being counted.
+    let mut members: BTreeMap<String, String> = query.session_workspaces.clone();
     // Refused calls in the window not yet admitted: (session, input digest).
     let mut refused: BTreeSet<(String, String)> = BTreeSet::new();
     let mut undated = 0u32;
@@ -215,12 +261,8 @@ pub fn report(state: &State, query: &ReportQuery<'_>) -> Report {
         let wall = placement.place(event);
         let session = event_session(event);
         let in_window = wall.is_some_and(|wall| wall >= window.from_ms && wall <= window.to_ms);
-        let workspace = event_workspace(state, event).or_else(|| {
-            session
-                .and_then(|session| state.sessions.get(session))
-                .map(|session| session.workspace_id.as_str())
-        });
-        let ours = workspace == Some(query.workspace_id);
+        let ours = event_workspace(&members, event, session) == Some(query.workspace_id);
+        session_workspaces(&mut members, event);
         let was_open = session.is_some_and(|session| open.contains_key(session));
         open_intents(&mut open, event);
         if wall.is_none() && !matches!(event, Event::Booted { .. }) {

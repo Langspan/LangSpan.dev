@@ -61,27 +61,36 @@ const ANCHOR_LOOKUP: &str = concat!(
     " ORDER BY seq DESC LIMIT 1"
 );
 
-/// An event that sets or ends a session's intent.
+/// An event that sets or ends a session's intent, or binds or unbinds a
+/// session's workspace.
 macro_rules! intent_event {
     () => {
         "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
-         IN ('intent_set', 'intent_ended', 'session_ended', 'workspace_removed')"
+         IN ('intent_set', 'intent_ended', 'session_ended', 'workspace_removed',
+             'session_registered')"
     };
 }
 
-/// A partial index of the intent events (and the workspace removals that
-/// end intents), so the report can find which sessions held an intent
+/// A partial index of the intent events, the workspace removals that end
+/// intents and the session registrations, so the report can find which
+/// sessions held an intent, and which workspace each session belonged to,
 /// before the events it reads without reading the rest of the older log.
-/// `events_intent` was the same index without workspace removals; the new
-/// name replaces it in a database an earlier build of this index opened.
+/// `events_intent` and `events_intent_state` were earlier forms of this
+/// index with fewer kinds; the new name replaces them in a database an
+/// earlier build opened.
 const INTENT_EVENT_INDEX: &str = concat!(
     "DROP INDEX IF EXISTS events_intent; ",
-    "CREATE INDEX IF NOT EXISTS events_intent_state ON events(seq) WHERE ",
+    "DROP INDEX IF EXISTS events_intent_state; ",
+    "CREATE INDEX IF NOT EXISTS events_report_state ON events(seq) WHERE ",
     intent_event!()
 );
 
-/// The intent events before a sequence number, oldest first. Read through
-/// the partial index.
+/// Before the events a report reads: sessions holding an intent, each with
+/// its intent's workspace, and each session's workspace.
+type ReportHistory = (BTreeMap<String, String>, BTreeMap<String, String>);
+
+/// The intent and membership events before a sequence number, oldest
+/// first. Read through the partial index.
 const INTENT_EVENTS_BEFORE: &str = concat!(
     "SELECT event_json FROM events WHERE seq < ?1 AND ",
     intent_event!(),
@@ -1252,18 +1261,21 @@ impl Store {
         Ok((events, anchor, earlier))
     }
 
-    /// The sessions holding an intent just before sequence number `seq`,
-    /// each with its intent's workspace, from the intent events and
-    /// workspace removals before it.
-    fn open_intents_before(&self, seq: u64) -> StoreResult<BTreeMap<String, String>> {
+    /// Just before sequence number `seq`: the sessions holding an intent,
+    /// each with its intent's workspace, and each session's workspace, from
+    /// the intent events, session registrations and workspace removals
+    /// before it.
+    fn report_history_before(&self, seq: u64) -> StoreResult<ReportHistory> {
         let mut statement = self.connection.prepare(INTENT_EVENTS_BEFORE)?;
         let mut rows = statement.query([i64::try_from(seq)?])?;
-        let mut open = BTreeMap::new();
+        let (mut open, mut members) = (BTreeMap::new(), BTreeMap::new());
         while let Some(row) = rows.next()? {
             let json: String = row.get(0)?;
-            langspan_core::open_intents(&mut open, &serde_json::from_str(&json)?);
+            let event = serde_json::from_str(&json)?;
+            langspan_core::open_intents(&mut open, &event);
+            langspan_core::session_workspaces(&mut members, &event);
         }
-        Ok(open)
+        Ok((open, members))
     }
 
     /// The coordination report (roadmap H8): the newest `TODAY_EVENTS`
@@ -1275,21 +1287,20 @@ impl Store {
             return Ok(refused);
         }
         let (events, anchor, earlier) = self.newest_events()?;
-        let open_intents = self.open_intents_before(events.first().map_or(0, |first| first.seq))?;
-        let mut report = langspan_core::report(
-            &self.state,
-            &ReportQuery {
-                workspace_id,
-                window: TodayWindow {
-                    from_ms,
-                    to_ms: wall_ms,
-                },
-                events: &events,
-                anchor,
-                earlier,
-                open_intents: &open_intents,
+        let (open_intents, session_workspaces) =
+            self.report_history_before(events.first().map_or(0, |first| first.seq))?;
+        let mut report = langspan_core::report(&ReportQuery {
+            workspace_id,
+            window: TodayWindow {
+                from_ms,
+                to_ms: wall_ms,
             },
-        );
+            events: &events,
+            anchor,
+            earlier,
+            open_intents: &open_intents,
+            session_workspaces: &session_workspaces,
+        });
         report.shrink_until(|report| {
             serde_json::to_vec(report).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
         });
@@ -1975,6 +1986,121 @@ mod tests {
         );
     }
 
+    /// Review 4704154106: Alice registers in `work` before the newest
+    /// `TODAY_EVENTS` events; among them she reads a file, `work` is
+    /// removed and she registers the same session in `elsewhere`. The read
+    /// counts for `work` (registered again), the workspace she was in then,
+    /// and not for `elsewhere`. Real SQLite: her first registration is only in the
+    /// older part of the log.
+    #[test]
+    fn a_session_registered_again_elsewhere_keeps_its_earlier_read_in_its_old_workspace() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-report-members-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let run = |store: &mut Store, id: &str, command: Command| {
+            let now = crate::clock::now_ms();
+            let outcome = store.execute(id, &command, &command, now).unwrap().outcome;
+            assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+        };
+        let alice = "claude-code.alice";
+        for workspace in ["work", "elsewhere"] {
+            run(
+                &mut store,
+                &format!("w-{workspace}"),
+                Command::WorkspaceRegister {
+                    workspace_id: workspace.into(),
+                    root: format!("/repos/{workspace}"),
+                },
+            );
+        }
+        let register = |session: &str, workspace: &str| Command::SessionRegister {
+            session_id: session.into(),
+            workspace_id: workspace.into(),
+            parent: None,
+            headless: false,
+        };
+        run(&mut store, "s-alice", register(alice, "work"));
+        run(
+            &mut store,
+            "s-filler",
+            register("claude-code.filler", "elsewhere"),
+        );
+        let from_ms = wall_now_ms();
+        // Enough events after the registration that it is not among those
+        // read.
+        let generation = store.state.generation;
+        let filler: Vec<Event> = (0..TODAY_EVENTS)
+            .map(|_| Event::SessionSeen {
+                session_id: "claude-code.filler".into(),
+                at_ms: crate::clock::now_ms(),
+                generation,
+            })
+            .collect();
+        store.commit(&filler, None).unwrap();
+        // A prompt carries a time of its own, which places the read after it.
+        run(
+            &mut store,
+            "p",
+            Command::SessionPrompt {
+                session_id: alice.into(),
+                summary: "carry on".into(),
+                line_digests: Vec::new(),
+            },
+        );
+        run(
+            &mut store,
+            "read",
+            Command::ObserveSource {
+                session_id: alice.into(),
+                files: vec![langspan_core::ObservedFile {
+                    path: "src/lib.rs".into(),
+                    state: langspan_core::FileState::Missing,
+                }],
+                origin: langspan_core::SourceOrigin::Read,
+            },
+        );
+        run(
+            &mut store,
+            "r",
+            Command::WorkspaceRemove {
+                workspace_id: "work".into(),
+                apply: true,
+            },
+        );
+        run(&mut store, "s-again", register(alice, "elsewhere"));
+        // Registered again, so its report can be asked for.
+        run(
+            &mut store,
+            "w-work-again",
+            Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: "/repos/work".into(),
+            },
+        );
+        let to_ms = wall_now_ms() + 1;
+        let reads = |store: &Store, workspace: &str| {
+            let outcome = store.report(workspace, from_ms, to_ms).unwrap();
+            let Outcome::Report { report } = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert!(report.truncated, "{report:#?}");
+            report
+                .sessions
+                .iter()
+                .find(|row| row.session_id == alice)
+                .map(|row| row.counts.reads_reported)
+        };
+        let (work, elsewhere) = (reads(&store, "work"), reads(&store, "elsewhere"));
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(work, Some(1));
+        assert_eq!(elsewhere, Some(0));
+    }
+
     /// Review 4703461855: an intent set before the newest `TODAY_EVENTS`
     /// events, whose session ends inside the window, is counted as left
     /// open. Real SQLite: the intent is only in the older part of the log.
@@ -2130,7 +2256,7 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(&directory).unwrap();
         assert!(
-            plan.iter().any(|step| step.contains("events_intent_state")),
+            plan.iter().any(|step| step.contains("events_report_state")),
             "{plan:?}"
         );
     }

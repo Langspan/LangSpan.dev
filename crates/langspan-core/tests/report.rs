@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use langspan_core::{
     ClockAnchor, Command, Event, FileKind, FileState, ObservedFile, Outcome, REPORT_SESSIONS,
     RecordedEvent, RefusalKind, Report, ReportCounts, ReportQuery, SourceOrigin, State,
-    TodayWindow, ToolIdentity, apply, decide, open_intents, report,
+    TodayWindow, ToolIdentity, apply, decide, open_intents, report, session_workspaces,
 };
 
 /// 2026-11-25T00:00:00Z, the wall time the daemon's clock reads `START` at.
@@ -162,21 +162,29 @@ impl Log {
     }
 
     fn report_from(&self, from_ms: u64, earlier: bool) -> Report {
-        report(
-            &self.state,
-            &ReportQuery {
-                workspace_id: "work",
-                window: TodayWindow {
-                    from_ms,
-                    to_ms: WALL + 600 * MINUTE,
-                },
-                events: &self.events,
-                anchor: None,
-                earlier,
-                open_intents: &BTreeMap::new(),
+        report(&ReportQuery {
+            workspace_id: "work",
+            window: TodayWindow {
+                from_ms,
+                to_ms: WALL + 600 * MINUTE,
             },
-        )
+            events: &self.events,
+            anchor: None,
+            earlier,
+            open_intents: &BTreeMap::new(),
+            session_workspaces: &BTreeMap::new(),
+        })
     }
+}
+
+/// The sessions' workspaces just before the events read, as the store folds
+/// them from the older events.
+fn members_before(older: &[RecordedEvent]) -> BTreeMap<String, String> {
+    let mut members = BTreeMap::new();
+    for recorded in older {
+        session_workspaces(&mut members, &recorded.event);
+    }
+    members
 }
 
 fn row<'a>(report: &'a Report, session: &str) -> &'a ReportCounts {
@@ -333,24 +341,22 @@ fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
         open_intents(&mut before, &recorded.event);
     }
     assert!(before.contains_key(alice), "{before:?}");
-    let cut = report(
-        &log.state,
-        &ReportQuery {
-            workspace_id: "work",
-            window: TodayWindow {
-                from_ms: WALL + 10 * MINUTE,
-                to_ms: WALL + 600 * MINUTE,
-            },
-            events: &log.events[start..],
-            anchor: Some(ClockAnchor {
-                generation: 1,
-                clock_ms: START,
-                wall_ms: WALL,
-            }),
-            earlier: true,
-            open_intents: &before,
+    let cut = report(&ReportQuery {
+        workspace_id: "work",
+        window: TodayWindow {
+            from_ms: WALL + 10 * MINUTE,
+            to_ms: WALL + 600 * MINUTE,
         },
-    );
+        events: &log.events[start..],
+        anchor: Some(ClockAnchor {
+            generation: 1,
+            clock_ms: START,
+            wall_ms: WALL,
+        }),
+        earlier: true,
+        open_intents: &before,
+        session_workspaces: &members_before(&log.events[..start]),
+    });
     assert!(!cut.truncated, "{cut:#?}");
     let a = row(&cut, alice);
     assert_eq!((a.intents_set, a.intents_left_open), (0, 1), "{cut:#?}");
@@ -409,17 +415,15 @@ fn a_removed_workspace_ends_its_intents_for_the_report() {
         from_ms: WALL + 10 * MINUTE,
         to_ms: WALL + 600 * MINUTE,
     };
-    let whole = report(
-        &log.state,
-        &ReportQuery {
-            workspace_id: "work",
-            window,
-            events: &log.events,
-            anchor: None,
-            earlier: false,
-            open_intents: &BTreeMap::new(),
-        },
-    );
+    let whole = report(&ReportQuery {
+        workspace_id: "work",
+        window,
+        events: &log.events,
+        anchor: None,
+        earlier: false,
+        open_intents: &BTreeMap::new(),
+        session_workspaces: &BTreeMap::new(),
+    });
     assert_eq!(row(&whole, alice).intents_left_open, 0, "{whole:#?}");
     // Read from the first prompt on: the removal is in the older events.
     let start = log
@@ -432,17 +436,15 @@ fn a_removed_workspace_ends_its_intents_for_the_report() {
         open_intents(&mut before, &recorded.event);
     }
     assert!(before.is_empty(), "{before:?}");
-    let cut = report(
-        &log.state,
-        &ReportQuery {
-            workspace_id: "work",
-            window,
-            events: &log.events[start..],
-            anchor,
-            earlier: true,
-            open_intents: &before,
-        },
-    );
+    let cut = report(&ReportQuery {
+        workspace_id: "work",
+        window,
+        events: &log.events[start..],
+        anchor,
+        earlier: true,
+        open_intents: &before,
+        session_workspaces: &members_before(&log.events[..start]),
+    });
     assert_eq!(row(&cut, alice).intents_left_open, 0, "{cut:#?}");
 }
 
@@ -671,28 +673,122 @@ fn the_window_leaves_out_older_events_and_says_what_it_covered() {
         state: log.state.clone(),
         events: log.events[start..].to_vec(),
     };
-    let cut = report(
-        &newest.state,
-        &ReportQuery {
-            workspace_id: "work",
-            window: TodayWindow {
-                from_ms: 0,
-                to_ms: WALL + 600 * MINUTE,
-            },
-            events: &newest.events,
-            anchor: Some(ClockAnchor {
-                generation: 1,
-                clock_ms: START,
-                wall_ms: WALL,
-            }),
-            earlier: true,
-            open_intents: &BTreeMap::new(),
+    let cut = report(&ReportQuery {
+        workspace_id: "work",
+        window: TodayWindow {
+            from_ms: 0,
+            to_ms: WALL + 600 * MINUTE,
         },
-    );
+        events: &newest.events,
+        anchor: Some(ClockAnchor {
+            generation: 1,
+            clock_ms: START,
+            wall_ms: WALL,
+        }),
+        earlier: true,
+        open_intents: &BTreeMap::new(),
+        session_workspaces: &members_before(&log.events[..start]),
+    });
     assert!(cut.truncated, "{cut:#?}");
     assert_eq!(cut.covered_from_ms, Some(WALL));
     assert_eq!(row(&cut, alice).edits_admitted, 2, "{cut:#?}");
     // An empty log: no rows, nothing truncated.
     let empty = Log::ready(&[]).report_from(0, false);
     assert!(empty.sessions.is_empty() && empty.hosts.is_empty());
+}
+
+/// Review 4704154106: Alice works in `work`, the workspace is removed and
+/// she registers the same session in `elsewhere`. Her earlier admission,
+/// intent and read stay in `work`'s report and are not counted in
+/// `elsewhere`'s, whether her first registration is among the events read
+/// or only in the older events `session_workspaces` folds.
+#[test]
+fn a_session_registered_again_elsewhere_keeps_its_earlier_events_in_its_old_workspace() {
+    let alice = "claude-code.alice";
+    let mut log = Log::ready(&[alice]);
+    log.prompt(alice, START + MINUTE);
+    log.source(alice, "src/lib.rs", present('a'), SourceOrigin::Read);
+    log.edit(alice, "1", "src/lib.rs", present('a'), '1', START + MINUTE);
+    log.complete(alice, "1", START + MINUTE + 1);
+    log.run(
+        "i-a",
+        Command::IntentSet {
+            session_id: alice.into(),
+            paths: vec!["src/lib.rs".into()],
+            summary: "rework the parser".into(),
+        },
+        START + MINUTE,
+    );
+    let outcome = log.run(
+        "r-work",
+        Command::WorkspaceRemove {
+            workspace_id: "work".into(),
+            apply: true,
+        },
+        START + 2 * MINUTE,
+    );
+    assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+    log.run(
+        "s-again",
+        Command::SessionRegister {
+            session_id: alice.into(),
+            workspace_id: "elsewhere".into(),
+            parent: None,
+            headless: false,
+        },
+        START + 3 * MINUTE,
+    );
+    assert_eq!(log.state.sessions[alice].workspace_id, "elsewhere");
+    log.prompt(alice, START + 4 * MINUTE);
+    log.source(alice, "src/main.rs", present('b'), SourceOrigin::Read);
+
+    let window = TodayWindow {
+        from_ms: 0,
+        to_ms: WALL + 600 * MINUTE,
+    };
+    // Read from the first prompt on: the first registration is older.
+    let start = log
+        .events
+        .iter()
+        .position(|recorded| matches!(recorded.event, Event::SessionPrompted { .. }))
+        .unwrap();
+    let mut before = BTreeMap::new();
+    for recorded in &log.events[..start] {
+        session_workspaces(&mut before, &recorded.event);
+    }
+    assert_eq!(before.get(alice).map(String::as_str), Some("work"));
+    let anchor = Some(ClockAnchor {
+        generation: 1,
+        clock_ms: START,
+        wall_ms: WALL,
+    });
+    for (events, anchor, members) in [
+        (&log.events[..], None, BTreeMap::new()),
+        (&log.events[start..], anchor, before),
+    ] {
+        let none = BTreeMap::new();
+        let query = |workspace_id| ReportQuery {
+            workspace_id,
+            window,
+            events,
+            anchor,
+            earlier: false,
+            open_intents: &none,
+            session_workspaces: &members,
+        };
+        let work = report(&query("work"));
+        let old = row(&work, alice);
+        assert_eq!(
+            (old.edits_admitted, old.intents_set, old.reads_reported),
+            (1, 1, 1),
+            "{work:#?}"
+        );
+        let elsewhere = report(&query("elsewhere"));
+        let new = row(&elsewhere, alice);
+        assert_eq!(
+            (new.edits_admitted, new.intents_set, new.reads_reported),
+            (0, 0, 1),
+            "{elsewhere:#?}"
+        );
+    }
 }
