@@ -123,6 +123,262 @@ fn python_typescript_and_go_follow_their_own_export_rules() {
     assert!(Language::for_path("README.md").is_none() && Language::for_path("Makefile").is_none());
 }
 
+/// A Java source file as a Maven or Gradle project lays it out, with every
+/// kind of definition the language has. Java has no free functions: every
+/// method and constructor belongs to a type.
+const ORDERS_JAVA: &str = r#"package shop;
+
+import java.util.List;
+import java.util.*;
+import static java.util.Objects.requireNonNull;
+
+/** Places orders. */
+@Service
+public class Orders extends Base implements Placer {
+    public static final int LIMIT = 255;
+    static final String PREFIX = "o-", SUFFIX = "-x";
+    private int count;
+
+    public Orders(Cart cart) {
+        this.count = 0;
+    }
+
+    @Override
+    public Order place(Cart cart) {
+        return helper(cart);
+    }
+
+    protected <T> List<T> history(int limit) throws java.io.IOException {
+        return List.of();
+    }
+
+    private Order helper(Cart cart) {
+        return new Order(requireNonNull(cart));
+    }
+
+    void packagePrivate() {}
+
+    public enum Status {
+        OPEN,
+        CLOSED;
+
+        public boolean done() {
+            return this == CLOSED;
+        }
+    }
+
+    public record Line(String sku, int quantity) {}
+
+    public void run() {
+        Runnable task = new Runnable() {
+            public void tick() {}
+        };
+    }
+}
+
+interface Placer {
+    int MAX = 3;
+
+    Order place(Cart cart);
+
+    private void secret() {}
+}
+
+public @interface Audited {
+    String value();
+}
+"#;
+
+#[test]
+fn java_definitions_of_each_kind_with_lines_signatures_references_and_imports() {
+    let graph = extract(Language::Java, ORDERS_JAVA.as_bytes()).unwrap();
+    assert!(!graph.partial);
+    let found: Vec<(&str, SymbolKind, u32, u32, &str)> = graph
+        .symbols
+        .iter()
+        .map(|symbol| {
+            (
+                symbol.name.as_str(),
+                symbol.kind,
+                symbol.line,
+                symbol.end_line,
+                symbol.signature.as_str(),
+            )
+        })
+        .collect();
+    use SymbolKind::{Constant, Interface, Method, Type};
+    assert_eq!(
+        found,
+        [
+            // Line 9: the class starts after its doc comment and annotation.
+            (
+                "Orders",
+                Type,
+                9,
+                49,
+                "public class Orders extends Base implements Placer"
+            ),
+            ("LIMIT", Constant, 10, 10, "public static final int LIMIT"),
+            // One field, two constants.
+            ("PREFIX", Constant, 11, 11, "static final String PREFIX"),
+            ("SUFFIX", Constant, 11, 11, "static final String SUFFIX"),
+            ("Orders", Method, 14, 16, "public Orders(Cart cart)"),
+            // Line 19: after `@Override`, which is not in the signature.
+            ("place", Method, 19, 21, "public Order place(Cart cart)"),
+            (
+                "history",
+                Method,
+                23,
+                25,
+                "protected <T> List<T> history(int limit) throws java.io.IOException"
+            ),
+            ("helper", Method, 27, 29, "private Order helper(Cart cart)"),
+            ("packagePrivate", Method, 31, 31, "void packagePrivate()"),
+            ("Status", Type, 33, 40, "public enum Status"),
+            ("OPEN", Constant, 34, 34, "OPEN"),
+            ("CLOSED", Constant, 35, 35, "CLOSED"),
+            ("done", Method, 37, 39, "public boolean done()"),
+            (
+                "Line",
+                Type,
+                42,
+                42,
+                "public record Line(String sku, int quantity)"
+            ),
+            ("run", Method, 44, 48, "public void run()"),
+            ("tick", Method, 46, 46, "public void tick()"),
+            ("Placer", Interface, 51, 57, "interface Placer"),
+            ("MAX", Constant, 52, 52, "int MAX"),
+            ("place", Method, 54, 54, "Order place(Cart cart)"),
+            ("secret", Method, 56, 56, "private void secret()"),
+            ("Audited", Interface, 59, 61, "public @interface Audited"),
+        ]
+    );
+    // A definition's bytes start after its annotations and doc comment.
+    let place = &graph.symbols[5];
+    assert!(ORDERS_JAVA[place.bytes.clone()].starts_with("public Order place(Cart cart) {"));
+    assert!(ORDERS_JAVA[place.bytes.clone()].ends_with('}'));
+    assert!(refers(&graph, "helper") && refers(&graph, "Cart") && refers(&graph, "requireNonNull"));
+    assert!(
+        graph.references.iter().all(|r| r.name != "packagePrivate"),
+        "a definition's own name is not a reference to it"
+    );
+    let imports: Vec<&str> = graph.imports.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(
+        imports,
+        [
+            "java.util.List",
+            "java.util.*",
+            "java.util.Objects.requireNonNull"
+        ]
+    );
+
+    // module-info.java declares a module.
+    let module = extract(
+        Language::Java,
+        b"module shop.core {\n    requires java.sql;\n    exports shop;\n}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        names(&module),
+        [("shop.core", SymbolKind::Module, true)],
+        "{module:?}"
+    );
+    assert_eq!(module.symbols[0].signature, "module shop.core");
+    assert_eq!(
+        Language::for_path("src/main/java/shop/Orders.java"),
+        Some(Language::Java)
+    );
+    assert_eq!(Language::Java.name(), "java");
+}
+
+#[test]
+fn java_exports_what_another_package_can_reach() {
+    let graph = extract(Language::Java, ORDERS_JAVA.as_bytes()).unwrap();
+    let exported = |name: &str, line: u32| {
+        graph
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == name && symbol.line == line)
+            .unwrap_or_else(|| panic!("{name} at {line}"))
+            .exported
+    };
+    // `public` and `protected` are reachable from another package.
+    assert!(exported("Orders", 9) && exported("Orders", 14) && exported("place", 19));
+    assert!(
+        exported("history", 23),
+        "protected reaches subclasses elsewhere"
+    );
+    assert!(exported("LIMIT", 10) && exported("Status", 33) && exported("Line", 42));
+    // Package-private and private are not.
+    assert!(!exported("PREFIX", 11) && !exported("SUFFIX", 11));
+    assert!(!exported("helper", 27) && !exported("packagePrivate", 31));
+    assert!(!exported("Placer", 51), "a package-private interface");
+    // Enum constants are public; an interface's members are public unless
+    // declared private.
+    assert!(exported("OPEN", 34) && exported("CLOSED", 35));
+    assert!(exported("MAX", 52) && exported("place", 54));
+    assert!(!exported("secret", 56));
+    // A method of an anonymous class is no one's interface.
+    assert!(!exported("tick", 46));
+}
+
+#[test]
+fn a_java_rewrap_or_annotation_is_not_a_signature_change_and_a_type_change_is() {
+    let changed = |before: &str, after: &str| {
+        let before = extract(Language::Java, before.as_bytes()).unwrap();
+        let after = extract(Language::Java, after.as_bytes()).unwrap();
+        diff(&before, &after)
+    };
+    let one_line = "public class Orders {\n    public Order place(Cart cart, Coupon coupon, int quantity) {\n        return null;\n    }\n}\n";
+    // google-java-format wraps a long parameter list after the opening
+    // parenthesis with a continuation indent. Java allows no trailing comma
+    // in a parameter list.
+    let wrapped = "public class Orders {\n  public Order place(\n      Cart cart,\n      Coupon coupon,\n      int quantity) {\n    return null;\n  }\n}\n";
+    assert_eq!(changed(one_line, wrapped), [], "google-java-format");
+    // An annotation is not part of the signature.
+    let annotated = "public class Orders {\n    @Deprecated\n    @Override public Order place(Cart cart, Coupon coupon, int quantity) {\n        return null;\n    }\n}\n";
+    assert_eq!(changed(one_line, annotated), [], "annotation");
+    // A parameter's type is.
+    let retyped = "public class Orders {\n    public Order place(Basket cart, Coupon coupon, int quantity) {\n        return null;\n    }\n}\n";
+    assert_eq!(
+        changed(one_line, retyped),
+        [langspan_graph::SymbolChange {
+            name: "place".into(),
+            kind: SymbolKind::Method,
+            change: Change::SignatureChanged {
+                before: "public Order place(Cart cart, Coupon coupon, int quantity)".into(),
+                after: "public Order place(Basket cart, Coupon coupon, int quantity)".into(),
+            },
+        }]
+    );
+    // The issue's example: a parameter added.
+    let before = "public class Orders {\n    public Order place(Cart cart) { return null; }\n}\n";
+    let after = "public class Orders {\n    public Order place(Cart cart, Coupon coupon) { return null; }\n}\n";
+    assert_eq!(
+        changed(before, after)[0].change,
+        Change::SignatureChanged {
+            before: "public Order place(Cart cart)".into(),
+            after: "public Order place(Cart cart, Coupon coupon)".into(),
+        }
+    );
+    // A body edit and a private method's change are not interface changes.
+    let body = "public class Orders {\n    public Order place(Cart cart) { return cart.order(); }\n    private void hidden(int a) {}\n}\n";
+    let body_after = "public class Orders {\n    public Order place(Cart cart) { return null; }\n    private void hidden(long a) {}\n}\n";
+    assert_eq!(changed(body, body_after), []);
+}
+
+#[test]
+fn a_java_file_that_does_not_parse_is_indexed_as_far_as_it_parsed() {
+    let graph = extract(
+        Language::Java,
+        b"public class Ok {\n    public void fine() {}\n}\nclass Broken {\n    void half( {{{\n",
+    )
+    .unwrap();
+    assert!(graph.partial);
+    assert!(graph.symbols.iter().any(|symbol| symbol.name == "fine"));
+}
+
 #[test]
 fn a_signature_change_a_removal_and_a_rename_are_told_apart_from_a_body_edit() {
     let version = |source: &str| extract(Language::Rust, source.as_bytes()).unwrap();
@@ -252,6 +508,7 @@ fn broken_oversized_and_hostile_input_is_bounded_and_never_panics() {
         Language::TypeScript,
         Language::Tsx,
         Language::Go,
+        Language::Java,
     ] {
         extract(language, &[0xff, 0xfe, 0x00, b'{', 0x80]).unwrap();
         extract(language, b"").unwrap();

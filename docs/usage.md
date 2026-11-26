@@ -945,7 +945,10 @@ already waiting when the coordinator starts is timed from that start.
 ## Look up symbols and affected files
 
 The source index finds definitions and name mentions in Rust, Python,
-TypeScript/JavaScript (including TSX/JSX), and Go. It updates after complete Git
+TypeScript/JavaScript (including TSX/JSX), Go and Java; `langspan doctor`
+lists them. A Java definition is exported when another package can reach it:
+`public` or `protected`, or a member of an interface that is not `private`.
+It updates after complete Git
 scans and can lag changes on disk. Replace `PROJECT` with a registered workspace,
 `upload` with the name to look up, and `src/api.rs` with the file to inspect:
 
@@ -1021,7 +1024,7 @@ not be read in full, so an empty or short answer is weak. Ask which ones:
 partial (2): "src/legacy/parse.rs" (since 3h), "web/src/app.tsx" (since 10m)
 waiting (1): "src/api.rs"
 too large (1): "src/generated/schema.rs"
-not indexed, other languages: .java 10, .rb 3
+not indexed, other languages: .kt 10, .rb 3
 ```
 
 The lists are `partial` (a syntax error or a bound reached, with since when),
