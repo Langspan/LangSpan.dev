@@ -176,7 +176,9 @@ acknowledgement. Four choices were needed:
   `today` (`Placement`, shared), from the same newest 50,000 events; a
   window reaching past them says `truncated` with `covered_from_ms`. An
   intent set before the window and still open when its session ends inside
-  it counts as left open. At most 16 sessions are listed, earliest first;
+  it counts as left open, even when it was set before the events read: the
+  store folds the older intent events, found through a partial index, into
+  the set of sessions holding one where the read starts. At most 16 sessions are listed, earliest first;
   host totals include every session. The MCP text, labelled as data, is at
   most 2,400 bytes, dropping session rows last first.
 

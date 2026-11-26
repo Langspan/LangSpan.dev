@@ -11,6 +11,7 @@ use langspan_core::{
     shrink_status, status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -53,6 +54,30 @@ const ANCHOR_LOOKUP: &str = concat!(
     "SELECT event_json FROM events WHERE seq < ?1 AND ",
     generation_marker!(),
     " ORDER BY seq DESC LIMIT 1"
+);
+
+/// An event that sets or ends a session's intent.
+macro_rules! intent_event {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         IN ('intent_set', 'intent_ended', 'session_ended')"
+    };
+}
+
+/// A partial index of the intent events, so the report can find which
+/// sessions held an intent before the events it reads without reading the
+/// rest of the older log.
+const INTENT_EVENT_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_intent ON events(seq) WHERE ",
+    intent_event!()
+);
+
+/// The intent events before a sequence number, oldest first. Read through
+/// the partial index.
+const INTENT_EVENTS_BEFORE: &str = concat!(
+    "SELECT event_json FROM events WHERE seq < ?1 AND ",
+    intent_event!(),
+    " ORDER BY seq"
 );
 
 /// Bytes a status part adds around its text: the record's fields with the
@@ -247,6 +272,7 @@ impl Store {
         // when opened (one pass over the log), and a build without it
         // reads and writes the same rows.
         connection.execute_batch(GENERATION_MARKER_INDEX)?;
+        connection.execute_batch(INTENT_EVENT_INDEX)?;
 
         let state = Self::recover(&connection)?;
         let generation = state
@@ -1077,6 +1103,19 @@ impl Store {
         Ok((events, anchor, earlier))
     }
 
+    /// The sessions holding an intent just before sequence number `seq`,
+    /// from the intent events before it.
+    fn open_intents_before(&self, seq: u64) -> StoreResult<BTreeSet<String>> {
+        let mut statement = self.connection.prepare(INTENT_EVENTS_BEFORE)?;
+        let mut rows = statement.query([i64::try_from(seq)?])?;
+        let mut open = BTreeSet::new();
+        while let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            langspan_core::open_intents(&mut open, &serde_json::from_str(&json)?);
+        }
+        Ok(open)
+    }
+
     /// The coordination report (roadmap H8): the newest `TODAY_EVENTS`
     /// events at most, placed in wall time as `today` places them, counted
     /// by the core. Reads only; it writes nothing and acknowledges no
@@ -1086,6 +1125,7 @@ impl Store {
             return Ok(refused);
         }
         let (events, anchor, earlier) = self.newest_events()?;
+        let open_intents = self.open_intents_before(events.first().map_or(0, |first| first.seq))?;
         let mut report = langspan_core::report(
             &self.state,
             &ReportQuery {
@@ -1097,6 +1137,7 @@ impl Store {
                 events: &events,
                 anchor,
                 earlier,
+                open_intents: &open_intents,
             },
         );
         report.shrink_until(|report| {
@@ -1518,6 +1559,119 @@ mod tests {
         assert!(
             plan.iter()
                 .any(|step| step.contains("events_generation_marker")),
+            "{plan:?}"
+        );
+    }
+
+    /// Review 4703461855: an intent set before the newest `TODAY_EVENTS`
+    /// events, whose session ends inside the window, is counted as left
+    /// open. Real SQLite: the intent is only in the older part of the log.
+    #[test]
+    fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-report-intent-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let run = |store: &mut Store, id: &str, command: Command| {
+            let now = crate::clock::now_ms();
+            store.execute(id, &command, &command, now).unwrap();
+        };
+        run(
+            &mut store,
+            "w",
+            Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: "/repos/work".into(),
+            },
+        );
+        for session in ["claude-code.alice", "claude-code.filler"] {
+            run(
+                &mut store,
+                &format!("s-{session}"),
+                Command::SessionRegister {
+                    session_id: session.into(),
+                    workspace_id: "work".into(),
+                    parent: None,
+                    headless: false,
+                },
+            );
+        }
+        run(
+            &mut store,
+            "i",
+            Command::IntentSet {
+                session_id: "claude-code.alice".into(),
+                paths: vec!["src/lib.rs".into()],
+                summary: "rework the parser".into(),
+            },
+        );
+        let from_ms = wall_now_ms();
+        // Enough events after the intent that it is not among those read.
+        let generation = store.state.generation;
+        let filler: Vec<Event> = (0..TODAY_EVENTS)
+            .map(|_| Event::SessionSeen {
+                session_id: "claude-code.filler".into(),
+                at_ms: crate::clock::now_ms(),
+                generation,
+            })
+            .collect();
+        store.commit(&filler, None).unwrap();
+        // A prompt carries a time of its own, which places the end after it.
+        run(
+            &mut store,
+            "p",
+            Command::SessionPrompt {
+                session_id: "claude-code.alice".into(),
+                summary: "carry on".into(),
+                line_digests: Vec::new(),
+            },
+        );
+        run(
+            &mut store,
+            "e",
+            Command::SessionEnd {
+                session_id: "claude-code.alice".into(),
+            },
+        );
+        let outcome = store.report("work", from_ms, wall_now_ms() + 1).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let Outcome::Report { report } = outcome else {
+            panic!("{outcome:?}");
+        };
+        let alice = report
+            .sessions
+            .iter()
+            .find(|row| row.session_id == "claude-code.alice")
+            .unwrap_or_else(|| panic!("{report:#?}"));
+        assert_eq!(alice.counts.intents_left_open, 1, "{report:#?}");
+    }
+
+    /// The intent lookup reads only intent events, not the rest of the log.
+    #[test]
+    fn the_intent_lookup_reads_only_intent_events() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-intent-plan-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let plan: Vec<String> = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {INTENT_EVENTS_BEFORE}"))
+            .unwrap()
+            .query_map([1_000_000i64], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            plan.iter().any(|step| step.contains("events_intent")),
             "{plan:?}"
         );
     }

@@ -31,7 +31,7 @@ pub use recall::{
 };
 pub use report::{
     OTHER_HOST, REPORT_SESSIONS, Report, ReportCounts, ReportHost, ReportQuery, ReportSession,
-    host_kind, report,
+    host_kind, open_intents, report,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,

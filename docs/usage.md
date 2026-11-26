@@ -916,7 +916,7 @@ Each row counts recorded events in the window:
   ([ADR 0011](adr/0011-shell-writes.md)).
 - `reads_reported`: completed reads the host reported.
 - `intents_set`, `intents_ended` and `intents_left_open` (sessions that ended
-  with an intent still set).
+  with an intent still set, including an intent set before the events read).
 - `refusals`: `write_refused` events by kind, as `today` counts them.
 - `retried_unchanged`: refusals followed by an admission of the same
   session's identical tool call (same input digest), under a new tool-call

@@ -1,9 +1,11 @@
 //! The coordination report (roadmap H8) from decided events, with every
 //! time injected on the daemon's clock and on the wall clock.
+use std::collections::BTreeSet;
+
 use langspan_core::{
     ClockAnchor, Command, Event, FileKind, FileState, ObservedFile, Outcome, REPORT_SESSIONS,
     RecordedEvent, RefusalKind, Report, ReportCounts, ReportQuery, SourceOrigin, State,
-    TodayWindow, ToolIdentity, apply, decide, report,
+    TodayWindow, ToolIdentity, apply, decide, open_intents, report,
 };
 
 /// 2026-11-25T00:00:00Z, the wall time the daemon's clock reads `START` at.
@@ -171,6 +173,7 @@ impl Log {
                 events: &self.events,
                 anchor: None,
                 earlier,
+                open_intents: &BTreeSet::new(),
             },
         )
     }
@@ -291,6 +294,66 @@ fn a_session_that_ends_with_its_intent_set_leaves_one_open() {
     let report = log.report_from(WALL + 10 * MINUTE, false);
     let a = row(&report, alice);
     assert_eq!((a.intents_set, a.intents_left_open), (0, 1), "{report:#?}");
+}
+
+/// Review 4703461855: an intent set before the events read, whose session
+/// ends inside the window, is still left open. The window starts after the
+/// first event read, so the report is not truncated and the older events
+/// are only needed for the intent.
+#[test]
+fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
+    let alice = "claude-code.alice";
+    let mut log = Log::ready(&[alice]);
+    log.run(
+        "i-a",
+        Command::IntentSet {
+            session_id: alice.into(),
+            paths: vec!["src/lib.rs".into()],
+            summary: "rework the parser".into(),
+        },
+        START + MINUTE,
+    );
+    log.prompt(alice, START + 5 * MINUTE);
+    log.prompt(alice, START + 30 * MINUTE);
+    log.run(
+        "e-a",
+        Command::SessionEnd {
+            session_id: alice.into(),
+        },
+        START + 30 * MINUTE,
+    );
+    // Read from the first prompt on, as if the log held only that many.
+    let start = log
+        .events
+        .iter()
+        .position(|recorded| matches!(recorded.event, Event::SessionPrompted { .. }))
+        .unwrap();
+    let mut before = BTreeSet::new();
+    for recorded in &log.events[..start] {
+        open_intents(&mut before, &recorded.event);
+    }
+    assert!(before.contains(alice), "{before:?}");
+    let cut = report(
+        &log.state,
+        &ReportQuery {
+            workspace_id: "work",
+            window: TodayWindow {
+                from_ms: WALL + 10 * MINUTE,
+                to_ms: WALL + 600 * MINUTE,
+            },
+            events: &log.events[start..],
+            anchor: Some(ClockAnchor {
+                generation: 1,
+                clock_ms: START,
+                wall_ms: WALL,
+            }),
+            earlier: true,
+            open_intents: &before,
+        },
+    );
+    assert!(!cut.truncated, "{cut:#?}");
+    let a = row(&cut, alice);
+    assert_eq!((a.intents_set, a.intents_left_open), (0, 1), "{cut:#?}");
 }
 
 #[test]
@@ -533,6 +596,7 @@ fn the_window_leaves_out_older_events_and_says_what_it_covered() {
                 wall_ms: WALL,
             }),
             earlier: true,
+            open_intents: &BTreeSet::new(),
         },
     );
     assert!(cut.truncated, "{cut:#?}");
