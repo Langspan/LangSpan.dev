@@ -136,13 +136,34 @@ fn find(lines: &[&str]) -> Result<Option<(usize, usize)>, String> {
     Ok(found)
 }
 
+/// How many leading lines are YAML front matter: a first line `---`, up to
+/// and including the next `---` line. A rule file's host reads its settings
+/// (`globs`, `alwaysApply`) only there, so the block goes after it. A closing
+/// line without a newline cannot be followed by the block without changing
+/// the owner's bytes, and is refused.
+fn front_matter(lines: &[&str]) -> Result<usize, String> {
+    let fence = |line: &&str| line.trim_end_matches(['\n', '\r']) == "---";
+    if !lines.first().is_some_and(fence) {
+        return Ok(0);
+    }
+    match lines.iter().skip(1).position(fence) {
+        None => Ok(0),
+        Some(index) if !lines[index + 1].ends_with('\n') => Err(format!(
+            "the front matter's closing line {} has no newline after it; add one so the block can follow the front matter",
+            index + 2
+        )),
+        Some(index) => Ok(index + 2),
+    }
+}
+
 /// The file's content with the block written (`install`) or removed, from
 /// what it holds now (`None`: absent). `Ok(None)` means the file should not
 /// exist. Outside LangSpan's block nothing changes.
 ///
-/// A new block goes at the top, followed by one blank line, so that an
-/// agent reads it first and so that removing it gives back the owner's
-/// bytes exactly, whatever the file's last line was.
+/// A new block goes at the top, after any front matter, followed by one
+/// blank line, so that an agent reads it first, the host still finds the
+/// front matter first, and removing it gives back the owner's bytes
+/// exactly, whatever the file's last line was.
 pub fn plan(existing: Option<&str>, install: bool) -> Result<Option<String>, String> {
     let text = existing.unwrap_or("");
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
@@ -150,11 +171,16 @@ pub fn plan(existing: Option<&str>, install: bool) -> Result<Option<String>, Str
     let planned = match (found, install) {
         (Some(_), true) | (None, false) => return Ok(existing.map(str::to_owned)),
         (None, true) if text.is_empty() => block(),
-        (None, true) => format!("{}\n{text}", block()),
+        (None, true) => {
+            let top = front_matter(&lines).map_err(|e| format!("{e}; nothing was changed"))?;
+            let (front, rest) = lines.split_at(top);
+            format!("{}{}\n{}", front.concat(), block(), rest.concat())
+        }
         (Some((start, end)), false) => {
             let mut after = end + 1;
             // The blank line install put after a block at the top.
-            if start == 0 && matches!(lines.get(after), Some(&"\n" | &"\r\n")) {
+            let top = front_matter(&lines[..start]).unwrap_or(0);
+            if start == top && matches!(lines.get(after), Some(&"\n" | &"\r\n")) {
                 after += 1;
             }
             format!("{}{}", lines[..start].concat(), lines[after..].concat())

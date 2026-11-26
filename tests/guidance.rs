@@ -282,6 +282,49 @@ fn a_file_in_a_subdirectory_of_the_repository_is_supported() {
     assert_eq!(repo.read("pkg/AGENTS.md"), OWNER);
 }
 
+#[test]
+fn a_rule_files_front_matter_stays_first_when_the_block_is_installed() {
+    let repo = Repo::new("front-matter");
+    std::fs::create_dir_all(repo.path(".cursor/rules")).unwrap();
+    let file = ".cursor/rules/style.mdc";
+    let front = "---\ndescription: \"House style\"\nglobs: src/**/*.rs\nalwaysApply: false\n---\n";
+    let body = "Use tabs.\r\n\nRun make test.";
+    let owner = format!("{front}{body}");
+    repo.write(file, &owner);
+    let block = printed_block();
+    ok(&repo.guidance(&["install", "--file", file, "--apply"]));
+    let installed = repo.read(file);
+    // The rule's metadata is still the file's first lines, so the host still
+    // reads `globs` and `alwaysApply`; the block follows it.
+    assert_eq!(installed, format!("{front}{block}\n{body}"), "{installed}");
+    let again = ok(&repo.guidance(&["install", "--file", file, "--apply"]));
+    assert!(again.contains("already"), "{again}");
+    ok(&repo.guidance(&["remove", "--file", file, "--apply"]));
+    assert_eq!(repo.read(file), owner);
+
+    // CRLF front matter, and front matter with nothing after it.
+    for (front, body) in [
+        ("---\r\nalwaysApply: true\r\n---\r\n", "Text\r\n"),
+        ("---\nalwaysApply: true\n---\n", ""),
+    ] {
+        let owner = format!("{front}{body}");
+        repo.write(file, &owner);
+        ok(&repo.guidance(&["install", "--file", file, "--apply"]));
+        let installed = repo.read(file);
+        assert_eq!(installed, format!("{front}{block}\n{body}"), "{installed}");
+        ok(&repo.guidance(&["remove", "--file", file, "--apply"]));
+        assert_eq!(repo.read(file), owner);
+    }
+
+    // Front matter whose closing line has no newline cannot take the block
+    // after it without changing the owner's bytes: refused, file unchanged.
+    let unterminated = "---\nalwaysApply: true\n---";
+    repo.write(file, unterminated);
+    let error = failed(&repo.guidance(&["install", "--file", file, "--apply"]));
+    assert!(error.contains("front matter"), "{error}");
+    assert_eq!(repo.read(file), unterminated);
+}
+
 /// The block's bullet that starts with `lead`, up to the next bullet.
 fn bullet(block: &str, lead: &str) -> String {
     let start = block

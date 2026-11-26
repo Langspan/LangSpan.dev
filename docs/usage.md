@@ -525,14 +525,17 @@ markers.
 ./target/release/langspan guidance remove --root /path/to/checkout --file AGENTS.md --apply
 ```
 
-`install` writes the block at the top of the file, followed by one blank
-line, between the lines `<!-- langspan:begin -->` and `<!-- langspan:end -->`;
+`install` writes the block at the top of the file, after any YAML front
+matter (a first line `---` up to the next `---` line, which a rule file's
+host reads its settings from), followed by one blank line, between the lines `<!-- langspan:begin -->` and `<!-- langspan:end -->`;
 every other byte of the file is kept. Without `--apply` it prints the lines
 it would add (`+`) or take out (`-`) and changes nothing. Installing again
 leaves the one block where it is, also where the owner moved it. `remove`
-takes out only the block, and the blank line after it when it is at the top,
-so the file is back to its earlier bytes; a file that held only the block is
-removed. A missing file is created only with `--create`. A block whose text
+takes out only the block, and the blank line after it when it is at the top
+or right after the front matter, so the file is back to its earlier bytes; a file that held only the block is
+removed. A missing file is created only with `--create`. Front matter whose
+closing `---` is the file's last line without a newline is refused, since the
+block could not follow it without changing that line. A block whose text
 LangSpan did not write (edited by hand, or from another version), a marker
 without its partner, a second block, or a changed marker line stops `install`
 and `remove` before anything is written, naming the lines. `--file` is a path

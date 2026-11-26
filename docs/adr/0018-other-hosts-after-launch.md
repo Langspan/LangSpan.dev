@@ -82,7 +82,8 @@ nothing is held or refused through the text.
   rule's front matter.
 - `langspan guidance install --root DIR --file FILE [--create] [--apply]`
   writes the block between `<!-- langspan:begin -->` and
-  `<!-- langspan:end -->`, at the top of the file with one blank line after
+  `<!-- langspan:end -->`, at the top of the file (after any YAML front
+  matter, so a rules file keeps its settings) with one blank line after
   it, so that removing it restores the earlier bytes whatever the file's last
   line was. A dry run, the default, prints the added and removed lines.
   Installing again leaves the one block where it is. `guidance remove … --apply`
