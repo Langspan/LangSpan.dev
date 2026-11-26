@@ -723,6 +723,12 @@ fn visit(
     None
 }
 
+/// Whether two signatures are one interface by `comparable`'s rule: they
+/// differ at most in formatting.
+pub fn same_signature(one: &str, other: &str) -> bool {
+    comparable(one) == comparable(other)
+}
+
 /// How one exported symbol differs between two versions of a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {

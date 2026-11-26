@@ -92,10 +92,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   check flaky WORKSPACE [--name NAME] | --forget TEST [--name NAME] --request-id ID
                                  Tests that flipped on unchanged code (two results on
                                  one tree, no write between); --forget clears one
-  integrate check WORKSPACE --onto BRANCH --name NAME BRANCH... -- COMMAND...
+  integrate check WORKSPACE --onto BRANCH --name NAME [--symbols] BRANCH...
+       -- COMMAND...
                                  Combine branches onto the remote's BRANCH without
                                  touching your checkout, run the command on that exact
-                                 result, and record it. Reports conflicts instead
+                                 result, and record it. Reports conflicts instead.
+                                 --symbols also names definitions the branches changed
+                                 in ways that disagree (advisory; never the result)
   land WORKSPACE --onto BRANCH --name NAME BRANCH... [--apply] [--session ID]
        [--wait-s N] [--check-again -- COMMAND...]
                                  Push that combined result, only if check NAME passed
@@ -1950,6 +1953,7 @@ fn evidence(
                 .map(|_| langspan::landing::command_id(command)),
             tests,
             rerun: None,
+            symbol_findings: None,
         },
     )?;
     if json {
@@ -2402,6 +2406,10 @@ fn integrate(
         )
     });
     let check_again = options.remove("--check-again").is_some();
+    let symbols = options.remove("--symbols").is_some();
+    if landing.is_some() && symbols {
+        return Err("--symbols is valid only for `integrate check`".into());
+    }
     if landing.is_none() && options.contains_key("--wait-s") {
         return Err("--wait-s is valid only for `land`".into());
     }
@@ -2417,6 +2425,7 @@ fn integrate(
     let check = Check {
         argv: command.to_vec(),
         timeout_s,
+        symbols,
     };
     let Some(apply) = landing else {
         if check_again {
@@ -2454,6 +2463,19 @@ fn integrate(
                         combined.tree
                     ),
                     CheckResult::Inconclusive {} => print_inconclusive(&name, inconclusive),
+                }
+                if let Some(found) = &check.symbol_findings {
+                    println!("Definition findings (found by name; advisory):");
+                    let lines = langspan::definitions::lines(found);
+                    if lines.is_empty() {
+                        println!(
+                            "- none in the {} changed files indexed",
+                            found.files_indexed
+                        );
+                    }
+                    for line in lines {
+                        println!("- {line}");
+                    }
                 }
             }
         }
@@ -4697,7 +4719,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             "--apply" => apply = true,
             // Flags, kept with the options so that only the commands that take
             // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
-            // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
+            // `land`: `--check-again`; `integrate check`: `--symbols`;
+            // `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
             // `graph symbol`: `--detail`, `--rank`, `--renamed`; `brief`: `--recent`;
             // `setup`: `--yes`; `guidance install`: `--create`).
@@ -4705,6 +4728,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--allow-network"
             | "--demo"
             | "--check-again"
+            | "--symbols"
             | "--publish-as-branch"
             | "--mine"
             | "--detail"

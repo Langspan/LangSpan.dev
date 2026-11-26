@@ -482,6 +482,26 @@ the calling process.
 | Denial of service | Git steps have a 120 s deadline each; the check command has its own limit (30 minutes by default on the CLI, at most 3600 s) and is killed at it with its whole process group. A temporary worktree is removed on every path, including failure. A push turn lasts one attempt's budget (Git steps, snapshots, the check limit, and 60 s) and is renewed before every attempt and every push, so a crashed landing blocks its target only until that deadline, and a daemon restart ends every turn. A same-user process can hold a turn and renew it indefinitely; that blocks landing through LangSpan, never a plain `git push`. A landing that finds the turn taken waits in line for at most its `--wait-s` (default 240 s, at most 3600 s; `wait_s` for MCP) and then exits 7, having fetched and pushed nothing; `--wait-s 0` returns at once. The line holds at most 8 landings per target (a ninth is told the line is full, exit 7), each asks every 0.5 s and writes one event about every 7.5 s while it waits, and one that stops asking for 15 s (killed, suspended) is dropped, so a dead waiter holds up the line for at most 15 s. A daemon restart empties every line. A same-user process can fill the line or stay at its head by asking; as with holding the turn, that blocks landing through LangSpan, never a plain `git push`. Each ask is a request with a receipt, so a long wait adds up to two small receipt rows a second to the store. Rename detection is bounded at 1000 files per side; conflict detail reads at most 8 files of at most 1 MiB, within the same 120 s Git deadline. |
 | Elevation of privilege | The check command runs with the owner's privileges, because the owner ran it, or because an agent the owner runs called `langspan_integrate_check`. **That MCP tool is a new trust boundary:** whatever can call LangSpan's MCP tools can run any program as the owner, with the owner's environment, in a temporary checkout. This grants nothing an agent with a shell tool lacks, but it is a second way to run commands, and a host's permission prompt for MCP tools is the only gate on it; an owner who does not want agents to run commands this way should deny `langspan_integrate_check` in the host's settings. `langspan_land` with `apply` pushes, as the owner, with the owner's Git credentials and pre-push hooks, only what the remote accepts without force and only a tree with a passing check; an agent can therefore publish combined work to the target branch without asking, and the host's permission prompt is again the gate. Neither tool rewrites or intercepts the owner's own `git push`. Repository content in a combined checkout is the branches' own code: running a check on a teammate's branch runs that branch's code, as running its tests always does. Tool results contain repository text (paths, branch names) as data. |
 
+Definition findings (`integrate check --symbols`, `symbols` on
+`langspan_integrate_check`; ADR 0020, D9) widen two boundaries. First, the
+branches' changed source is parsed by Tree-sitter in the calling process:
+each file is read from Git's object database with its size checked before it
+is read (at most 1 MiB, the source index's own bound), a file holding a NUL
+byte is skipped, at most 1000 changed files per branch are looked at, and the
+whole step stops at 10 seconds (Git steps also have their 120 s deadline);
+past that the findings are skipped with a note and the check runs as without
+them. Nothing is written: not `graph.sqlite3`, the checkout, the index or a
+ref. Second, **findings are repository text relayed to an agent and kept in
+the event log** (prompt injection, disclosure): a branch chooses its
+definitions' names and signatures and its paths. Each text is passed through
+secret redaction, has control characters replaced and is cut to 256 bytes;
+at most 32 findings are kept, and the daemon refuses a record whose findings
+break those bounds or that is not a combined check. Signatures are what the
+source index already stores and briefs; a secret in a signature would be
+shown to whoever ran the check, who could already read the branch. Findings
+are advisory: they never change a check's result or what `land` requires, so a
+branch cannot use them to pass or block a landing.
+
 ## Automatic checks after a session's writes
 
 [ADR 0030](../adr/0030-automatic-checks-after-write-batches.md) makes the

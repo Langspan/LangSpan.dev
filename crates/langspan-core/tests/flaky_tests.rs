@@ -157,6 +157,7 @@ fn record_as(
             inputs: Vec::new(),
             result,
             duration_ms: 900,
+            symbol_findings: None,
             report: Some(Box::new(CheckReport {
                 session_ids: vec!["alice".into()],
                 tail: "test net::times_out ... FAILED".into(),
@@ -418,6 +419,7 @@ fn results_of_two_commands_that_share_a_summary_are_not_compared() {
             inputs: Vec::new(),
             result: CheckResult::Passed {},
             duration_ms: 1,
+            symbol_findings: None,
             report: None,
             tests: None,
             rerun: None,
@@ -725,6 +727,7 @@ fn test_results_are_bounded_and_belong_to_a_conclusive_working_tree_check() {
                     inputs: Vec::new(),
                     result,
                     duration_ms: 1,
+                    symbol_findings: None,
                     report: None,
                     tests: Some(tests),
                     rerun: None,

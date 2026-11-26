@@ -104,7 +104,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [D4: Show the history of a definition](https://github.com/Langspan/LangSpan.dev/issues/53): an agent cannot see who changed a definition recently, why, or who reverted the same change. Built as `langspan graph history` and `langspan_history`; a real-host run remains.
 - [D6: Index more languages, one grammar at a time](https://github.com/Langspan/LangSpan.dev/issues/55): Java and C# are indexed; Ruby and C++ repositories get no source-index answers or interface notices.
 - [D8: Report where the index is blind](https://github.com/Langspan/LangSpan.dev/issues/57): an empty impact answer does not say which files the index could not read. Built as `graph blind-spots` and `coverage.blind_in_scope`; a real-host run remains.
-- [D9: Check a combination at the level of definitions](https://github.com/Langspan/LangSpan.dev/issues/58): a clean Git merge can pair a changed signature with a new call in the old shape.
+- [D9: Check a combination at the level of definitions](https://github.com/Langspan/LangSpan.dev/issues/58): a clean Git merge can pair a changed signature with a new call in the old shape. Built as `integrate check --symbols` and `symbols` on `langspan_integrate_check`; a real-host run remains.
 - [D10: Offer live activity as an MCP resource](https://github.com/Langspan/LangSpan.dev/issues/59): a live view of who is doing what takes three tool calls, and there is no resource to read.
 
 ## E. Memory and messages
