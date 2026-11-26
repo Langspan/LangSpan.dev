@@ -387,8 +387,17 @@ file's in-flight set. Signatures are compared by their tokens as a reformat
 is ([ADR 0011](0011-shell-writes.md)): spacing between tokens aside, but a
 string literal's whitespace counts. Every indexed language is split into
 words, Go and Java by the TypeScript rules, so removing spacing never joins
-two tokens (`chan int` is not `chanint`). A blob Git does not give (a timeout, a
-missing object) leaves the file uncompared, and a later pass tries again. A
+two tokens (`chan int` is not `chanint`). Every outcome of reading a file
+for the index or for this comparison is terminal for that version or tried
+again with a bound. A `HEAD` blob over the parse bound, or one that does not
+parse completely, says nothing and is remembered until the file or `HEAD`
+changes. A working file or blob that could not be read for now (removed,
+changed, not a regular file or not readable since the scan, or a timeout or
+missing object in Git) is tried again after a wait that doubles from one
+pass up to 32, and given up on for that version after 10 failures. Versions
+not tried yet are read before any retry, so files that keep failing never
+take a pass's budget from the others. The retries live in `graph.sqlite3`
+(`retries`, with each workspace's pass count in `passes`). A
 file new since `HEAD` puts all its
 exports in it. The set lives in `graph.sqlite3` (`inflight` and
 `inflight_files`, the latter with the indexed digest and `HEAD` blob it was
