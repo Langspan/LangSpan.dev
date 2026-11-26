@@ -474,7 +474,11 @@ the protocol stays at version 3. Tests:
 `tests/graph.rs`, and
 `another_worktrees_files_are_added_to_a_held_notice_once_each_up_to_the_cap`
 and `files_found_for_a_replaced_notice_change_nothing_when_replayed` in
-`crates/langspan-core/tests/elsewhere.rs`.
+`crates/langspan-core/tests/elsewhere.rs`. A file written after the change
+was committed on its worktree's branch is listed the same way (issue #217,
+`a_caller_written_after_a_committed_rename_is_listed_on_its_notice`); how
+long such a change alerts at write time is in
+[ADR 0029](0029-break-alerts-at-write-time.md).
 
 **Export and import (added later, roadmap D5).** `langspan graph export
 WORKSPACE --out FILE` writes what the index holds for the workspace's

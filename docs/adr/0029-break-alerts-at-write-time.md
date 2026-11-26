@@ -111,6 +111,8 @@ any parameter shape not listed has no count, and its notice cannot alert.
 - the session that last reported editing the file (the notice's `by_session`,
   a correlation as in ADR 0008) is another session, registered in this
   generation, not reported exited or ended;
+- for another worktree's notice, Git decides the two rules above instead
+  (added later, issue #217; see "Committed, unmerged changes" below);
 - the session has not already been alerted to this notice;
 - the change is to a function or method: a signature change with a count, a
   rename or a removal;
@@ -136,6 +138,42 @@ line names the worktree after the file, for example
 `which was renamed to "load_config" in "src/config.rs" in worktree "/repos/app-tree" by claude-code.alice 1m ago`.
 Without this, a session in another worktree learned of the change only from a
 later prompt briefing, after it had written the call (issue #194).
+
+**Committed, unmerged changes (added later, issue #217).** Once the changing
+session commits on its own branch, the change is still on its way to every
+other worktree of the repository: it reaches a peer only when the peer's
+branch takes the commit. A session that ends after committing, as a session
+that finishes its task does, leaves the change exactly as much in flight. So
+for a notice of another worktree, the daemon asks Git where the change
+stands against the asking session's checkout:
+
+- **Uncommitted**: the notice's file differs from its worktree's `HEAD`
+  (staged counts as uncommitted). The rules above apply unchanged: within the
+  horizon, while the session is live.
+- **Unmerged**: the file equals its worktree's `HEAD`, and the newest commit
+  of that `HEAD` touching the file (`rev-list -1 HEAD -- PATH`) is not an
+  ancestor of the asking checkout's `HEAD` (`merge-base --is-ancestor`). The
+  change counts at any age and after its session has ended, still within this
+  daemon generation and once per notice per session.
+- **Merged**: that commit is an ancestor of the asking checkout's `HEAD`. The
+  notice is retired for that session: it is never alerted to, whatever the
+  other rules say.
+
+The core decides from these answers; it never runs Git. Before looking up any
+name, the daemon asks `standing_questions` for the notices of other worktrees
+that the write's calls name and that could count if committed, at most 8 per
+write, each workspace's newest first, and gives Git at most 250 ms for them
+all, four read-only processes per notice under `--no-optional-locks`. The
+working file is hashed as raw bytes (`hash-object --no-filters`), so no
+repository-configured filter runs; a symbolic link or other non-regular file
+is not hashed. A notice Git does not answer for (a timeout, a failure, a file
+that never was in a commit) keeps the uncommitted rules, and the failure is
+logged at info level. Notices of the session's own workspace are never asked
+about. Using the newest commit that touches the file means a later commit of
+that file, not yet merged, keeps an earlier merged change counting: it errs
+toward telling. A squash or rebase merge writes new commits, so a change
+merged that way is not seen as merged and counts until the generation ends.
+The prompt briefings of ADR 0008 and the `elsewhere` list are unchanged.
 
 For a signature change, a call to that name whose count does not fit is a
 break. A call through a receiver fits the count without the receiver; any
@@ -243,7 +281,9 @@ Any failure is a note in the diagnostic, never a decision.
   `a_second_same_named_definition_coming_or_going_is_not_a_changed_signature_at_the_write`
   in `tests/break_alerts.rs`).
 - A notice attributed to no session (the file was changed outside any
-  reported edit), or to a session that ended, does not alert.
+  reported edit) does not alert, nor does an uncommitted one whose session
+  ended. A committed, unmerged change of another worktree alerts after its
+  session ended (issue #217).
 - Calls already in the file are checked only for `Write` and `Add File`,
   which rewrite every line.
 - A notice is recorded in one physical workspace, as in ADR 0008. Its write

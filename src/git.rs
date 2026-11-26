@@ -250,6 +250,86 @@ fn owner_ssh(cwd: &Path, deadline: Instant) -> Result<bool, String> {
     Ok(status.success() && !value.trim_ascii().is_empty())
 }
 
+/// Where the version of `path` in the worktree at `changed` stands against
+/// the checkout at `base` (issue #217): `Uncommitted` while the working file
+/// differs from that worktree's `HEAD`; otherwise the newest commit of its
+/// `HEAD` that touches `path` is `Merged` when `base`'s `HEAD` contains it
+/// (`merge-base --is-ancestor`) and `Unmerged` when not. The file is hashed
+/// as its raw bytes (`hash-object --no-filters`), so no repository-configured
+/// filter runs. At most four read-only Git processes, all within `deadline`.
+pub fn standing(
+    changed: &Path,
+    path: &str,
+    base: &Path,
+    deadline: Instant,
+) -> Result<langspan_core::Standing, String> {
+    use langspan_core::Standing;
+    // A path for Git's own syntax only: relative, no option or revision
+    // punctuation Git would read as something else.
+    if path.is_empty() || path.starts_with(['-', '/']) || path.contains(['\n', '\0']) {
+        return Err("not a worktree-relative path".into());
+    }
+    let object = |bytes: Vec<u8>| -> Result<String, String> {
+        let text = String::from_utf8(bytes).map_err(|_| "Git object ID is not UTF-8")?;
+        let id = text.trim_end_matches('\n');
+        if (id.len() == 40 || id.len() == 64) && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            Ok(id.to_owned())
+        } else {
+            Err("Git did not answer with an object ID".into())
+        }
+    };
+    let (status, committed) = run_with_env(
+        changed,
+        &["rev-parse", "--verify", "--quiet", &format!("HEAD:{path}")],
+        &[],
+        deadline,
+        256,
+    )?;
+    let committed = if status.success() {
+        Some(object(committed)?)
+    } else if status.code() == Some(1) {
+        None
+    } else {
+        return Err("Git could not read the worktree's HEAD".into());
+    };
+    let working = match fs::symlink_metadata(changed.join(path)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("cannot read the worktree's file: {error}")),
+        // `hash-object` would follow a symbolic link, and a device or FIFO
+        // has no content to compare.
+        Ok(metadata) if !metadata.is_file() => {
+            return Err("the worktree's file is not a regular file".into());
+        }
+        Ok(_) => Some(object(output(
+            changed,
+            &["hash-object", "--no-filters", "--", path],
+            deadline,
+            256,
+        )?)?),
+    };
+    if committed != working {
+        return Ok(Standing::Uncommitted);
+    }
+    let commit = object(output(
+        changed,
+        &["rev-list", "-1", "HEAD", "--", path],
+        deadline,
+        256,
+    )?)?;
+    let (status, _) = run_with_env(
+        base,
+        &["merge-base", "--is-ancestor", &commit, "HEAD"],
+        &[],
+        deadline,
+        256,
+    )?;
+    match status.code() {
+        Some(0) => Ok(Standing::Merged),
+        Some(1) => Ok(Standing::Unmerged),
+        _ => Err("Git could not compare the commit with the checkout's HEAD".into()),
+    }
+}
+
 /// Exit status, standard output and standard error of one Git process.
 pub type Ran = (std::process::ExitStatus, Vec<u8>, Vec<u8>);
 
@@ -387,5 +467,139 @@ fn drain(
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(format!("cannot read Git output: {e}")),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::standing;
+    use langspan_core::Standing;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+        time::{Duration, Instant},
+    };
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A repository on `main` with `a.rs` and `b.rs` committed, and a linked
+    /// worktree of it on `feature`. Removed when dropped.
+    struct Repo {
+        base: PathBuf,
+    }
+
+    impl Repo {
+        fn new(name: &str) -> Self {
+            let base = fs::canonicalize(std::env::temp_dir())
+                .unwrap()
+                .join(format!("ls-standing-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            let main = base.join("main");
+            fs::create_dir_all(&main).unwrap();
+            fs::write(main.join("a.rs"), "pub fn a() {}\n").unwrap();
+            fs::write(main.join("b.rs"), "pub fn b() {}\n").unwrap();
+            git(&main, &["init", "--quiet", "--initial-branch=main"]);
+            git(&main, &["add", "."]);
+            git(&main, &["commit", "--quiet", "-m", "init"]);
+            let tree = base.join("tree");
+            git(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "feature",
+                    tree.to_str().unwrap(),
+                ],
+            );
+            Self { base }
+        }
+        fn main(&self) -> PathBuf {
+            self.base.join("main")
+        }
+        fn tree(&self) -> PathBuf {
+            self.base.join("tree")
+        }
+        fn of(&self, path: &str) -> Result<Standing, String> {
+            standing(
+                &self.tree(),
+                path,
+                &self.main(),
+                Instant::now() + Duration::from_secs(10),
+            )
+        }
+    }
+
+    impl Drop for Repo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    #[test]
+    fn a_change_is_uncommitted_then_unmerged_then_merged() {
+        let repo = Repo::new("cycle");
+        let tree = repo.tree();
+        // Unchanged since the common commit: already in the base.
+        assert_eq!(repo.of("a.rs"), Ok(Standing::Merged));
+        fs::write(tree.join("a.rs"), "pub fn renamed() {}\n").unwrap();
+        assert_eq!(repo.of("a.rs"), Ok(Standing::Uncommitted));
+        // Staged is not committed.
+        git(&tree, &["add", "a.rs"]);
+        assert_eq!(repo.of("a.rs"), Ok(Standing::Uncommitted));
+        git(&tree, &["commit", "--quiet", "-m", "rename"]);
+        assert_eq!(repo.of("a.rs"), Ok(Standing::Unmerged));
+        // A later commit of another file leaves the file's commit as it is.
+        fs::write(tree.join("b.rs"), "pub fn b(x: u8) {}\n").unwrap();
+        git(&tree, &["commit", "--quiet", "-am", "b"]);
+        assert_eq!(repo.of("a.rs"), Ok(Standing::Unmerged));
+        // Merging the branch into the base puts the commit in its HEAD.
+        git(&repo.main(), &["merge", "--quiet", "--no-edit", "feature"]);
+        assert_eq!(repo.of("a.rs"), Ok(Standing::Merged));
+    }
+
+    #[test]
+    fn a_new_or_deleted_file_is_judged_by_its_commit() {
+        let repo = Repo::new("files");
+        let tree = repo.tree();
+        // Never committed.
+        fs::write(tree.join("new.rs"), "pub fn new() {}\n").unwrap();
+        assert_eq!(repo.of("new.rs"), Ok(Standing::Uncommitted));
+        // Deleted and not committed.
+        fs::remove_file(tree.join("b.rs")).unwrap();
+        assert_eq!(repo.of("b.rs"), Ok(Standing::Uncommitted));
+        // Deleted and committed: judged by the deleting commit.
+        git(&tree, &["commit", "--quiet", "-am", "remove b"]);
+        assert_eq!(repo.of("b.rs"), Ok(Standing::Unmerged));
+        // A path that never existed has no commit to compare.
+        assert!(repo.of("never.rs").is_err());
+    }
+
+    #[test]
+    fn a_path_git_would_read_as_something_else_is_refused() {
+        let repo = Repo::new("paths");
+        for path in ["", "-a.rs", "/a.rs", "a\n.rs"] {
+            assert!(repo.of(path).is_err(), "{path:?}");
+        }
+        // A symbolic link is not followed.
+        std::os::unix::fs::symlink("/etc/hosts", repo.tree().join("link.rs")).unwrap();
+        assert!(repo.of("link.rs").is_err());
+        // A deadline already past runs nothing.
+        assert!(standing(&repo.tree(), "a.rs", &repo.main(), Instant::now()).is_err());
     }
 }

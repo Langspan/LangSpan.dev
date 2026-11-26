@@ -86,7 +86,12 @@ served by three rows:
   [issue #194](https://github.com/Langspan/LangSpan.dev/issues/194) reads the
   notices of every worktree of the session's repository and judges each in
   its own worktree's index. The notice also lists the other worktrees' files
-  that mention the old name.
+  that mention the old name. Since
+  [issue #217](https://github.com/Langspan/LangSpan.dev/issues/217), Git
+  decides how long such a change is in flight: once committed on its
+  worktree's branch, it alerts until the peer's `HEAD` contains the commit
+  (`merge-base --is-ancestor`), even after its session ended, and never
+  after ([ADR 0029](0029-break-alerts-at-write-time.md)).
 
 **The semantic index never leaves the machine.** Cross-machine publications
 ([ADR 0006](0006-remote-awareness-through-git-refs.md)) carry activity
