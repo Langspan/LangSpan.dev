@@ -39,6 +39,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "langspan_land",
     "langspan_land_cancel",
     "langspan_land_queue",
+    "langspan_message_status",
     "langspan_my_changes",
     "langspan_recall",
     "langspan_recap",
@@ -269,6 +270,17 @@ struct ShowMessageArgs {
     workspace_id: String,
     /// The ID a briefing line names after "(cut; langspan messages show --".
     message_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MessageStatusArgs {
+    workspace_id: String,
+    /// The message's ID, as its send returned it, or "last" for the newest
+    /// message `session_id` sent.
+    message_id: String,
+    /// The sending session, for "last"; absent means the owner's newest.
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1180,6 +1192,7 @@ impl McpAdapter {
                 max_peers: args.max_peers,
                 deliver: true,
                 mid_turn: false,
+                mcp: true,
             },
         )
         .await
@@ -1295,6 +1308,25 @@ impl McpAdapter {
             Command::ShowMessage {
                 workspace_id: args.workspace_id,
                 message_id: args.message_id,
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Which sessions were given a message this session sent, by its ID or \"last\" for this session's newest (pass `session_id`). Returns `state` (`pending`, `done`, `retracted`, `dropped`) and up to 64 `recipients`, each `delivered`, `pending` or `ended` (the session ended before it was given it), with `age_ms` and `via` (`briefing`, `mid_turn`, `mcp_brief`, `ack`) once delivered; `partial` when part of the record is no longer kept. Delivered means the text was placed in the session's context, not that the model read or acted on it. A pending handoff lists no recipient. A read: nothing is recorded or delivered. Local only.",
+        annotations(read_only_hint = true)
+    )]
+    async fn langspan_message_status(
+        &self,
+        Parameters(args): Parameters<MessageStatusArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.forward(
+            "mcp-message-status".into(),
+            Command::MessageStatus {
+                workspace_id: args.workspace_id,
+                from: args.session_id,
+                message_id: (args.message_id != "last").then_some(args.message_id),
             },
         )
         .await
@@ -1613,6 +1645,7 @@ mod tests {
             "langspan_land_queue",
             "langspan_my_changes",
             "langspan_show_message",
+            "langspan_message_status",
             "langspan_flaky_tests",
             "langspan_recall",
             "langspan_today",

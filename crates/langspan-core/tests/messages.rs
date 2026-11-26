@@ -69,6 +69,7 @@ fn brief(session: &str, deliver: bool, mid_turn: bool) -> Command {
         max_peers: 4,
         deliver,
         mid_turn,
+        mcp: false,
     }
 }
 
@@ -481,7 +482,17 @@ fn replaying_the_persisted_events_reproduces_the_same_state() {
     let mut forged = held[0].clone();
     forged.message_id = "forged".into();
     forged.text = "two\nlines".into();
-    assert!(apply(&mut replayed, &Event::MessageSent { message: forged }).is_err());
+    assert!(
+        apply(
+            &mut replayed,
+            &Event::MessageSent {
+                message: forged,
+                at_ms: None,
+                generation: None,
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -554,6 +565,7 @@ mod headless_handoffs {
                 max_peers: 4,
                 deliver: false,
                 mid_turn: false,
+                mcp: false,
             },
             "look",
             0,
@@ -1109,7 +1121,7 @@ mod retraction {
             apply(&mut replayed, &event).unwrap();
         }
         assert_eq!(replayed, state);
-        assert!(log.iter().any(|event| matches!(event, Event::MessageSent { message } if message.message_id == "m1")),
+        assert!(log.iter().any(|event| matches!(event, Event::MessageSent { message, .. } if message.message_id == "m1")),
             "the original stays in the event log");
         // `status --all` reads the history and the withdrawals still owed.
         assert!(state.retracted_notices.contains_key("carol"));
@@ -1124,6 +1136,16 @@ mod retraction {
         forged.message_id = "forged".into();
         forged.acknowledged.clear();
         forged.retracted = true;
-        assert!(apply(&mut replayed, &Event::MessageSent { message: forged }).is_err());
+        assert!(
+            apply(
+                &mut replayed,
+                &Event::MessageSent {
+                    message: forged,
+                    at_ms: None,
+                    generation: None,
+                }
+            )
+            .is_err()
+        );
     }
 }
