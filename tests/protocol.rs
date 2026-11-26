@@ -1065,13 +1065,23 @@ fn earlier_counts(wire: &[u8]) -> Result<usize, serde_json::Error> {
 fn v5_report_response_and_its_version_4_and_3_forms_match_the_golden_vectors() {
     let wire = include_bytes!("../fixtures/report-response-v5.json");
     let mut response: Response = serde_json::from_slice(wire).unwrap();
-    assert_eq!(response.version, PROTOCOL_VERSION);
+    assert_eq!(response.version, 5);
     let langspan_core::Outcome::Report { report } = &response.outcome else {
         panic!("{response:?}");
     };
     assert_eq!(report.sessions[0].counts.refusal_outcomes["adapted"], 1);
     assert_eq!(report.hosts[0].counts.refusal_outcomes["adapted"], 1);
-    assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
+    assert_eq!(encode_for(5, &response).unwrap(), wire);
+    // Version 6 changed landings only: its report is the version 5 form.
+    response.version = PROTOCOL_VERSION;
+    assert_eq!(
+        String::from_utf8(encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap(),
+        String::from_utf8_lossy(wire).replacen(
+            "\"version\":5",
+            &format!("\"version\":{PROTOCOL_VERSION}"),
+            1
+        )
+    );
     assert!(
         earlier_counts(wire).is_err(),
         "an earlier build cannot read version 5 counts"
@@ -1398,4 +1408,123 @@ fn a_version_3_reply_leaves_out_an_inflight_renames_old_name() {
     assert!(
         matches!(&current.outcome, Outcome::GraphInflight { inflight: read, .. } if read == &[inflight])
     );
+}
+
+/// A landing as a build before roadmap F5 reads it: no `rebased` and no
+/// `adapted`, and every other field.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct EarlierLanding {
+    landing_id: String,
+    workspace_id: String,
+    onto: String,
+    commit_oid: String,
+    tree_oid: String,
+    inputs: Vec<String>,
+    check_id: String,
+}
+
+fn rebased_landing() -> langspan_core::Landing {
+    langspan_core::Landing {
+        landing_id: "land-1".into(),
+        workspace_id: "app".into(),
+        onto: "main".into(),
+        commit_oid: "c".repeat(40),
+        tree_oid: "d".repeat(40),
+        inputs: vec!["e".repeat(40)],
+        check_id: "check-1".into(),
+        rebased: vec![langspan_core::Rewritten {
+            from: "e".repeat(40),
+            to: "c".repeat(40),
+        }],
+        adapted: vec!["f".repeat(40)],
+    }
+}
+
+/// Version 6 (roadmap F5, review comment 4712442596): a landing carries
+/// `rebased` and `adapted`. To a client of version 5, 4 or 3 the same
+/// answer is encoded without them, so an earlier build, which reads a
+/// landing with `deny_unknown_fields`, still reads the whole answer.
+#[test]
+fn v6_landed_response_and_its_earlier_forms_match_the_golden_vectors() {
+    use langspan_core::Outcome;
+    let wire = include_bytes!("../fixtures/landed-response-v6.json");
+    let mut response: Response = serde_json::from_slice(wire).unwrap();
+    assert_eq!(response.version, PROTOCOL_VERSION);
+    assert_eq!(
+        response.outcome,
+        Outcome::Landed {
+            landing: rebased_landing()
+        }
+    );
+    assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
+    let earlier_reads = |wire: &[u8]| {
+        let value: serde_json::Value = serde_json::from_slice(wire).unwrap();
+        serde_json::from_value::<EarlierLanding>(value["outcome"]["landing"].clone()).is_ok()
+    };
+    assert!(!earlier_reads(wire), "an earlier build cannot read it");
+
+    let earlier = include_bytes!("../fixtures/landed-response-v5.json");
+    for version in [5, 4, OLDEST_PROTOCOL_VERSION] {
+        response.version = version;
+        let reply = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
+        let expected = String::from_utf8_lossy(earlier).replacen(
+            "\"version\":5",
+            &format!("\"version\":{version}"),
+            1,
+        );
+        assert_eq!(reply, expected, "version {version}");
+        assert!(earlier_reads(reply.as_bytes()), "version {version}");
+    }
+    // The earlier form is only for that reply: the response is unchanged.
+    assert!(
+        String::from_utf8(encode(&response).unwrap())
+            .unwrap()
+            .contains("rebased")
+    );
+}
+
+/// A request to record a rebased or adapted landing needs version 6: an
+/// earlier daemon refuses its fields as unreadable, and that is too late
+/// once the push is done. A landing that rewrote nothing fits every version.
+#[test]
+fn recording_a_rebased_or_adapted_landing_fits_only_version_6() {
+    use langspan::protocol::fits;
+    let wire = include_bytes!("../fixtures/record-landing-request-v6.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(request.version, PROTOCOL_VERSION);
+    assert_eq!(encode(&request).unwrap(), wire);
+    let with = |rebased: bool, adapted: bool| {
+        let mut command = request.command.clone();
+        let Command::RecordLanding {
+            rebased: r,
+            adapted: a,
+            ..
+        } = &mut command
+        else {
+            panic!("{request:?}");
+        };
+        assert_eq!((r.len(), a.len()), (1, 1));
+        if !rebased {
+            r.clear();
+        }
+        if !adapted {
+            a.clear();
+        }
+        command
+    };
+    for (rebased, adapted) in [(true, true), (true, false), (false, true)] {
+        let command = with(rebased, adapted);
+        assert!(fits(PROTOCOL_VERSION, &command));
+        for version in [5, 4, OLDEST_PROTOCOL_VERSION] {
+            assert!(
+                !fits(version, &command),
+                "version {version}, rebased {rebased}, adapted {adapted}"
+            );
+        }
+    }
+    for version in [PROTOCOL_VERSION, 5, 4, OLDEST_PROTOCOL_VERSION] {
+        assert!(fits(version, &with(false, false)), "version {version}");
+    }
 }

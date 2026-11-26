@@ -238,96 +238,6 @@ fn unmarked_codex_commands_remain_user_owned() {
     assert_eq!(serialized(&removed), serialized(&original));
 }
 
-#[test]
-fn gemini_registration_names_its_hooks_and_times_them_in_milliseconds() {
-    let gemini = install::Vendor::Gemini;
-    let registration = registration("/opt/langspan", "/installed project");
-    let planned = install::plan_for(gemini, None, Some(&registration)).unwrap();
-    let hooks = planned["hooks"].as_object().unwrap();
-    let events: Vec<_> = hooks.keys().collect();
-    assert_eq!(
-        events,
-        [
-            "BeforeTool",
-            "AfterTool",
-            "SessionStart",
-            "BeforeAgent",
-            "SessionEnd"
-        ]
-    );
-    for (event, groups) in hooks {
-        assert_eq!(groups.as_array().unwrap().len(), 1);
-        match event.as_str() {
-            "BeforeTool" => assert_eq!(
-                groups[0]["matcher"],
-                "^(write_file|replace|run_shell_command)$"
-            ),
-            "AfterTool" => assert_eq!(
-                groups[0]["matcher"],
-                "^(write_file|replace|run_shell_command|read_file)$"
-            ),
-            _ => assert!(groups[0].get("matcher").is_none(), "{event}"),
-        }
-        let hook = &groups[0]["hooks"][0];
-        assert_eq!(hook["name"], "langspan");
-        assert_eq!(hook["type"], "command");
-        assert_eq!(hook["timeout"], 5000, "Gemini CLI reads milliseconds");
-        assert!(install::is_managed_for(gemini, hook));
-        assert!(!install::is_managed_for(install::Vendor::ClaudeCode, hook));
-        assert!(hook["command"].as_str().unwrap().contains(
-            "hook gemini-cli --state-dir '/state' --workspace 'demo' --root '/installed project'"
-        ));
-    }
-}
-
-#[test]
-fn gemini_install_is_idempotent_and_remove_restores_the_owners_settings() {
-    let gemini = install::Vendor::Gemini;
-    let original: Value = serde_json::from_str(
-        r#"{"general":{"vimMode":true},"hooks":{"BeforeTool":[{"matcher":"write_file","hooks":[{"name":"guard","type":"command","command":"/x/guard.sh","timeout":2000}]}]},"mcpServers":{"docs":{"command":"npx","args":["docs"],"env":{"TOKEN":"$DOCS_TOKEN"}}}}"#,
-    )
-    .unwrap();
-    let first = registration("/opt/langspan", "/root");
-    let installed = install::plan_for(gemini, Some(original.clone()), Some(&first)).unwrap();
-    assert_eq!(
-        installed["hooks"]["BeforeTool"][0], original["hooks"]["BeforeTool"][0],
-        "the owner's hook stays first and unchanged"
-    );
-    assert_eq!(installed["mcpServers"], original["mcpServers"]);
-    let repeated = install::plan_for(gemini, Some(installed.clone()), Some(&first)).unwrap();
-    assert_eq!(serialized(&repeated), serialized(&installed));
-    // Another host's install in the same file is not Gemini's to remove.
-    let with_claude = install::plan(Some(installed), Some(&first)).unwrap();
-    let removed = install::plan_for(gemini, Some(with_claude), None).unwrap();
-    assert_eq!(
-        serialized(&install::plan(Some(removed), None).unwrap()),
-        serialized(&original)
-    );
-}
-
-#[test]
-fn a_gemini_install_path_with_a_dollar_sign_is_refused() {
-    // Gemini CLI expands `$NAME` in every settings string.
-    for (executable, root) in [("/opt/$HOME/langspan", "/root"), ("/opt/langspan", "/r$x")] {
-        let error = install::plan_for(
-            install::Vendor::Gemini,
-            None,
-            Some(&registration(executable, root)),
-        )
-        .unwrap_err();
-        assert!(error.contains("would expand the `$`"), "{error}");
-    }
-    // The other hosts run the quoted command as it is.
-    assert!(
-        install::plan_for(
-            install::Vendor::Codex,
-            None,
-            Some(&registration("/opt/$HOME/langspan", "/root"))
-        )
-        .is_ok()
-    );
-}
-
 #[cfg(unix)]
 mod filesystem {
     use super::*;
@@ -549,7 +459,7 @@ fn the_presence_options_are_installed_recognised_replaced_and_removed() {
         install::Vendor::ClaudeCode,
         install::Vendor::Codex,
         install::Vendor::Cursor,
-        install::Vendor::Gemini,
+        install::Vendor::Antigravity,
     ] {
         let installed = install::plan_for(vendor, None, Some(&unseen)).unwrap();
         let text = installed.to_string();

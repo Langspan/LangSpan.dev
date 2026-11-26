@@ -477,9 +477,9 @@ function duration(ms) {
 const short = (oid) => str(oid).slice(0, 12);
 const branch = (ref) => str(ref).replace(/^refs\/heads\//, '');
 const quoted = (text) => '“' + text + '”';
-const HOSTS = { 'claude-code': 'Claude Code', codex: 'Codex', 'gemini-cli': 'Gemini CLI', cursor: 'Cursor' };
+const HOSTS = { 'claude-code': 'Claude Code', codex: 'Codex', cursor: 'Cursor', antigravity: 'Antigravity' };
 const hostName = (host) => HOSTS[str(host)] || str(host) || 'Agent';
-const initials = (host) => ({ 'claude-code': 'CC', codex: 'CX', 'gemini-cli': 'GM', cursor: 'CU' })[str(host)] || str(host).slice(0, 2).toUpperCase() || '?';
+const initials = (host) => ({ 'claude-code': 'CC', codex: 'CX', cursor: 'CU', antigravity: 'AG' })[str(host)] || str(host).slice(0, 2).toUpperCase() || '?';
 function splitPath(path) {
   const cut = path.lastIndexOf('/');
   return cut < 0 ? ['', path] : [path.slice(0, cut + 1), path.slice(cut + 1)];

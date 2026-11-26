@@ -91,7 +91,8 @@ stderr and to `daemon.log` in the state directory. Set
 `LANGSPAN_AUTOSTART=off` to turn this off. The coordinator started this way
 keeps only the environment it needs (`HOME`, `PATH`, the locale, `XDG_*`, the
 host configuration directories `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
-`GEMINI_CLI_HOME`, the SSH agent socket and the desktop session variables),
+`GEMINI_CLI_HOME`, kept for removing an earlier Gemini CLI install, the SSH
+agent socket and the desktop session variables),
 not a host's API keys. A relative host configuration directory is made
 absolute against the caller's working directory, since the coordinator runs
 in `/`. The login service sets `PATH` to the one setup ran
@@ -154,18 +155,16 @@ With the default host configuration locations, installation updates:
 | Claude Code | `~/.claude/settings.json` | `mcpServers.langspan` in `~/.claude.json` |
 | Codex | `~/.codex/hooks.json` | A marked `[mcp_servers.langspan]` table in `~/.codex/config.toml` |
 | Cursor (built from documentation, not yet verified on a real Cursor) | `~/.cursor/hooks.json` | `mcpServers.langspan` in `~/.cursor/mcp.json` |
-| Gemini CLI (built from documentation, not yet verified on a real Gemini CLI) | `~/.gemini/settings.json` | `mcpServers.langspan` in the same file |
-| Antigravity (built from documentation, not yet verified on a real Antigravity) | `~/.gemini/config/hooks.json` | `mcpServers.langspan` in `~/.gemini/config/mcp_config.json` |
+| Antigravity (verified on a real Antigravity CLI 1.5.14) | `~/.gemini/config/hooks.json` | `mcpServers.langspan` in `~/.gemini/config/mcp_config.json` |
 
 By default, the installer selects hosts whose configuration directory exists.
-Gemini CLI and Antigravity, which share `~/.gemini`, are installed only when
-named: `--hosts gemini-cli`, `--hosts antigravity` (or
-`--hosts claude-code,codex,cursor,gemini-cli,antigravity`);
-`CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME` are honored. Gemini CLI
-keeps hooks and MCP servers in one file, so LangSpan plans both together and
-writes that file once; its dry run shows only LangSpan's entries, because the
-rest of the file can hold MCP server credentials. A path containing `$` is
-refused for Gemini CLI, which expands `$NAME` in its settings. The generated hooks and MCP entries carry the same
+Antigravity, whose `~/.gemini` other Google tools also use, is installed only
+when named: `--hosts antigravity` (or
+`--hosts claude-code,codex,cursor,antigravity`); `CLAUDE_CONFIG_DIR` and
+`CODEX_HOME` are honored. LangSpan no longer supports Gemini CLI; to remove an
+earlier install, see
+[Removing an earlier Gemini CLI install](#removing-an-earlier-gemini-cli-install).
+The generated hooks and MCP entries carry the same
 explicit state directory. Other settings and hooks are preserved. An existing
 `langspan` MCP entry the installer does not recognize stops installation before
 any file is written. Codex runs new or changed hooks only after you review and
@@ -199,9 +198,8 @@ LangSpan hooks, so its edits are neither checked nor shown to other sessions.
 `name`, `config_dir`, `present` (its configuration directory exists; `null`
 with an `error` when it could not be looked at), `user_install` (`none`,
 `current`, `outdated`, `other_state_dir` or `unknown`) and `next_step`, the
-install command, where one is proposed. It only reads. Gemini CLI and
-Antigravity are listed but never proposed: install them by naming them, as
-above.
+install command, where one is proposed. It only reads. Antigravity is listed
+but never proposed: install it by naming it, as above.
 
 The coordinator checks the same at start and then every hour
 (`host_check_ms` in `config.json`). A host that is present, has no user-level
@@ -301,17 +299,13 @@ the project your agent is editing:
 ./target/release/langspan hooks install claude-code --workspace demo --root /path/to/checkout
 ./target/release/langspan hooks install codex --workspace demo --root /path/to/checkout
 ./target/release/langspan hooks install cursor --workspace demo --root /path/to/checkout
-./target/release/langspan hooks install gemini-cli --workspace demo --root /path/to/checkout
 ./target/release/langspan hooks install antigravity --workspace demo --root /path/to/checkout
 ```
 
 These commands are dry runs. Once reviewed, add `--apply` to write the entries.
 The Claude installer uses `.claude/settings.local.json`; Codex uses
-`.codex/hooks.json`; Gemini CLI uses `.gemini/settings.json`, which Gemini loads
-only in a folder it trusts (Gemini CLI: built from documentation, not yet
-verified on a real Gemini CLI; [ADR 0033](adr/0033-gemini-cli-adapter.md)). All three include session-start and prompt briefing hooks as well
-as the supported edit hooks; Claude Code, Gemini CLI and Codex also have
-session-end handling. Claude Code and Codex get end-of-reply handling
+`.codex/hooks.json`. Both include session-start and prompt briefing hooks as well
+as the supported edit hooks, and session-end handling. Claude Code and Codex get end-of-reply handling
 (`Stop`), and Claude Code also gets `StopFailure`, `SubagentStop` and
 `PostToolBatch` ([ADR 0027](adr/0027-turn-and-batch-events.md)). Existing unrelated settings and hooks are preserved. The
 host's own folder and hook trust requirements still apply. For Codex, review the
@@ -376,7 +370,6 @@ Remove the managed entries with the matching vendor:
 ./target/release/langspan hooks remove claude-code --root /path/to/checkout --apply
 ./target/release/langspan hooks remove codex --root /path/to/checkout --apply
 ./target/release/langspan hooks remove cursor --root /path/to/checkout --apply
-./target/release/langspan hooks remove gemini-cli --root /path/to/checkout --apply
 ./target/release/langspan hooks remove antigravity --root /path/to/checkout --apply
 ```
 
@@ -409,7 +402,7 @@ install for the same host and state directory. Claude Code runs both that
 install and the main checkout's there, so the main checkout's hook logs
 `deferred_to_worktree` and does nothing else. Codex 0.171.0 runs only the
 main checkout's hooks there, so that hook coordinates the session under the
-worktree install's workspace ID instead; Cursor, Gemini CLI and Antigravity,
+worktree install's workspace ID instead; Cursor and Antigravity,
 whose behavior there has not been observed, are treated the same way, so an event
 is never left undecided. `langspan doctor --root DIR` names each linked
 worktree whose install the host will not run, and fails when nothing covers
@@ -418,34 +411,16 @@ it. The per-host rules are in
 
 See [Claude adapter decisions](adr/0002-claude-code-adapter.md),
 [Codex contract coverage](evidence/m3-codex/README.md) and the
-[Gemini CLI adapter](adr/0033-gemini-cli-adapter.md) for the exact boundary.
-
-### Gemini CLI
-
-The Gemini CLI adapter follows Gemini CLI 0.70.0's documentation and source; no
-live Gemini session has run through it yet. It installs these hooks, each
-named `langspan` with a 5,000 ms timeout:
-
-| Event | Matcher | What LangSpan does |
-| --- | --- | --- |
-| `BeforeTool` | `write_file`, `replace`, `run_shell_command` | Admission; a conflict or stale source is `{"decision":"deny"}` with a labelled reason |
-| `AfterTool` | the same, and `read_file` | Records the result, the version read, or the shell command's changes; may add news to the tool result |
-| `SessionStart`, `BeforeAgent` | none | Registers the session and adds the briefing as context |
-| `SessionEnd` | none | Marks the session ended (Gemini does not wait for it) |
-
-Sessions appear as `gemini.<session_id>`. Gemini gives a tool call no ID, so
-LangSpan numbers calls by session, tool and target; two calls on the same
-target running at once can be counted as one. `read_many_files` is not
-recorded as a read, and subagents cannot be told apart from their session.
-Gemini reads `.gemini/settings.json` only from the directory it was started
-in, so a project install covers sessions started at the checkout's root. [ADR 0033](adr/0033-gemini-cli-adapter.md) lists
-these limits.
+[Antigravity adapter](adr/0035-antigravity-adapter.md) for the exact boundary.
 
 ### Antigravity
 
-The Antigravity adapter is built from Antigravity's documentation and
-corrected against the events of a real Antigravity 1.5.14 run; a repeat run
-with these corrections is pending. `hooks install antigravity` writes
+Antigravity is LangSpan's Google host. The adapter is verified on a real
+Antigravity CLI (`agy`) 1.5.14: edit admission, a harmless command, conflict
+and stale-source refusals, and the install with `doctor`
+([issue #110 evidence](https://github.com/Langspan/LangSpan.dev/issues/110#issuecomment-7182408496)).
+Linked worktrees, subagents and mixed-host runs are not yet observed.
+`hooks install antigravity` writes
 `.agents/hooks.json` and registers `langspan mcp` in `.agents/mcp_config.json`;
 `install --hosts antigravity` writes `~/.gemini/config/hooks.json` and
 `~/.gemini/config/mcp_config.json`. An empty `mcp_config.json`, which
@@ -482,8 +457,39 @@ Antigravity has no session-end event, and its `Stop` requires a decision, so
 neither is registered. An `edit_file` or `replace_file_content` holds the
 region it replaces; `write_to_file` and `multi_replace_file_content` hold the
 whole file.
-[ADR 0035](adr/0035-antigravity-adapter.md) lists the sources and what the
-documentation leaves unverified.
+
+Two limits apply on Antigravity. `admit --ttl-ms` is capped at 60 seconds. A
+resumed conversation (`--conversation`) sends no `SessionStart`, so its first
+`PreInvocation` registers it.
+[ADR 0035](adr/0035-antigravity-adapter.md) lists the sources, the real-host
+evidence and what is still unverified.
+
+### Removing an earlier Gemini CLI install
+
+LangSpan no longer supports Gemini CLI: Google deprecated it in favor of the
+Antigravity CLI. To remove LangSpan's entries from an earlier install, run
+these commands. Without `--apply`, each one previews its change:
+
+```sh
+./target/release/langspan uninstall --hosts gemini-cli --apply
+./target/release/langspan hooks remove gemini-cli --root /path/to/checkout --apply
+```
+
+`uninstall --hosts gemini-cli` removes LangSpan's user-level hooks and its
+`langspan` MCP server entry from `~/.gemini/settings.json`
+(`$GEMINI_CLI_HOME/.gemini/settings.json` when `GEMINI_CLI_HOME` is set), and
+LangSpan's marked skill section from `~/.gemini/GEMINI.md`. `hooks remove
+gemini-cli` removes LangSpan's project hooks from `.gemini/settings.json`.
+Every other byte of these files stays. `langspan doctor` reports leftover
+LangSpan Gemini CLI hooks or MCP entries as FIX, with the command that removes
+them.
+
+Until you remove them, LangSpan's leftover Gemini CLI hooks do nothing: the
+hook prints `{}`, so Gemini CLI's own approval decides, and it records nothing
+and starts no coordinator. At session start it prints one line on stderr that
+says how to remove the hook. This compatibility path is kept for one release.
+`hooks install gemini-cli` and `install --hosts gemini-cli` are refused.
+[ADR 0033](adr/0033-gemini-cli-adapter.md) records the removal.
 
 ### The LangSpan skill
 
@@ -506,15 +512,15 @@ use `status`, `commit --mine`, `integrate check` and `land` (or the matching
 | --- | --- | --- |
 | Claude Code | The skill `~/.claude/skills/langspan/SKILL.md` | `langspan uninstall --apply` |
 | Codex | A marked section of `~/.codex/AGENTS.md` | `langspan uninstall --apply` |
-| Gemini CLI | A marked section of `~/.gemini/GEMINI.md` | `langspan uninstall --apply --hosts gemini-cli` |
 | Cursor | The project rule `.cursor/rules/langspan.mdc` | `langspan hooks remove cursor --root DIR --apply` |
 | Antigravity | The rule `~/.gemini/config/rules/langspan.md` (`--hosts antigravity`), or the project rule `.agents/rules/langspan.md` (`hooks install antigravity --skill`), with `trigger: always_on` | `langspan uninstall --apply --hosts antigravity`, or `langspan hooks remove antigravity --root DIR --apply` |
 
-Antigravity also reads `~/.gemini/GEMINI.md`, so with the Gemini CLI skill
-installed as well it reads the skill twice.
+An earlier Gemini CLI install may have written a LangSpan section to
+`~/.gemini/GEMINI.md`, which Antigravity also reads. `langspan uninstall
+--hosts gemini-cli --apply` removes that section.
 
-`CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME` move these files as
-they move the hooks. In `AGENTS.md` and `GEMINI.md`, every line outside
+`CLAUDE_CONFIG_DIR` and `CODEX_HOME` move these files as they move the hooks.
+In `AGENTS.md` and `GEMINI.md`, every line outside
 LangSpan's section is left as it is, and a file that held only the section is
 removed with it. An existing `SKILL.md` or `langspan.mdc` that LangSpan did not
 write, or a section whose markers are broken, stops the install before any
@@ -551,7 +557,7 @@ text is [`src/guidance.md`](../src/guidance.md), at most 1,500 bytes with its
 markers.
 
 ```sh
-./target/release/langspan guidance                              # print it (also --format gemini or cursor-rules)
+./target/release/langspan guidance                              # print it (also --format cursor-rules)
 ./target/release/langspan guidance install --root /path/to/checkout --file AGENTS.md          # dry run: the diff
 ./target/release/langspan guidance install --root /path/to/checkout --file AGENTS.md --apply
 ./target/release/langspan guidance remove --root /path/to/checkout --file AGENTS.md --apply
@@ -575,7 +581,6 @@ inside `--root` (no `..`, no absolute path, no folder that leads outside it
 through a symlink), and the file itself must not be a symlink. Nothing is
 committed: the change is in the working tree for the owner to review.
 
-`--format gemini` prints the same Markdown for `GEMINI.md`;
 `--format cursor-rules` adds a Cursor rule's front matter
 (`alwaysApply: true`), for saving as a file under `.cursor/rules/`. `install`
 writes the Markdown block only. Nothing is held or refused through any of
@@ -683,19 +688,19 @@ Turn it on with either install:
 
 ```sh
 langspan hooks install claude-code --workspace app --root . --outline-reads on --apply
-langspan install --hosts claude-code,gemini-cli --outline-reads on --apply
+langspan install --hosts claude-code,cursor --outline-reads on --apply
 ```
 
-It is built for Claude Code (`PreToolUse` on `Read`), Gemini CLI (`BeforeTool`
-on `read_file`) and Cursor (`preToolUse` on `Read`); the option adds that read
+It is built for Claude Code (`PreToolUse` on `Read`) and Cursor (`preToolUse`
+on `Read`); the option adds that read
 tool to the host's pre-tool matcher. Codex reads through shell commands and
 Antigravity is not covered, so the option changes nothing there. No host has
 yet been observed asking for a line range after an outline.
 
 A read is outlined only when all of these hold:
 
-- It names no part of the file: no `offset`, `limit`, `start_line`,
-  `end_line` or `pages`. A read of part of a file is never refused.
+- It names no part of the file: no `offset`, `limit` or
+  `pages`. A read of part of a file is never refused.
 - The file has at least `outline_min_lines` lines (default 1,500) or
   `outline_min_bytes` bytes (default 64 KiB), set in
   [`config.json`](#configuration-and-limits), and at most the index's 1 MiB.
@@ -853,7 +858,7 @@ A session that has read and searched but not written yet is still shown: its
 peer line ends with where it is looking, for example
 `task: "Rework token refresh"; looking at "src/auth.rs", "src/session.rs";`.
 This presence comes from Claude Code `Read` and `Grep`, Cursor `Read` and
-`Grep`, Gemini CLI `read_file`, and on every host the files a shell command
+`Grep`, and on every host the files a shell command
 reads: each operand of `cat`, `head`, `tail`, `less`, `more`, `wc`, `nl`,
 `ls`, `stat`, `file`, `diff`, `tree` or `du`, and the operands after the
 pattern of a `grep`, `egrep`, `fgrep` or `rg` whose options are all flags
@@ -1570,8 +1575,9 @@ previous hook event or prompt.
 A share is always shown beside the count it is out of (`9 of 41`); no field
 is a bare rate. A field a host cannot report is shown as `-` and listed under
 `not_reported` in that host's total (Codex: `reads_reported`), so its zero is
-not read as behavior. Hosts are `claude-code`, `codex`, `cursor`, `gemini`
-and `other` (a session whose ID names none of them). The counts say nothing
+not read as behavior. Hosts are `claude-code`, `codex`, `cursor`
+and `other` (a session whose ID names none of them, earlier Gemini CLI
+sessions included). The counts say nothing
 about time or rework saved.
 
 Without `--since` the report covers every recorded event; events are placed
@@ -1971,7 +1977,7 @@ says some were left out. Other machines are not covered: a teammate's
 publication carries paths only ([ADR 0006](adr/0006-remote-awareness-through-git-refs.md)).
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
-Code), an `apply_patch` (Codex) or a `replace` or `write_file` (Gemini CLI) is
+Code) or an `apply_patch` (Codex) is
 admitted, or a Claude Code or Codex shell command writes one file whole with a
 quoted heredoc (`cat > app/x.py <<'EOF'`), the hook parses the calls in the
 text it writes. If a call's argument count does not fit a function signature
@@ -1988,9 +1994,7 @@ removed. A rename or removal is told only while the index reads every
 supported file in full, since a name missing from a file it cannot read is
 not gone. Calls are matched by name, so a different function of the same name
 can be named. A type or order change that keeps the count is left to the
-prompt notice. Gemini CLI reads no context before a tool runs, so its write's calls
-are found before the write and checked after it: the alert is added to the
-write's result, and a write that fails is not told and uses up nothing.
+prompt notice.
 Cursor writes are not checked until a real Cursor's `Write` input has been
 captured into the repository. Nothing is checked until
 the index has a complete scan of the workspace, and the hook's diagnostic
@@ -2143,12 +2147,80 @@ file a build tool creates, is the usual cause: commit the file on the branch or
 add it to `.gitignore`, then run the check again under a new request ID. The
 paths are the repository's text, redacted and without control characters.
 
+`integrate check --symbols` (`symbols: true` on `langspan_integrate_check`)
+also compares the branches' definitions before the command runs. For each
+branch, the files it changed in an indexed language (up to 1000, each up to
+1 MiB) are read from Git's object database at the branch and where it started
+from the target, and indexed in memory; `graph.sqlite3`, the checkout and the
+refs are not written. The record's `symbol_findings` holds at most 32 findings,
+each a name match between two branches:
+
+- `both_changed`: both branches changed one definition's signature, in the
+  same file, to different signatures.
+- `changed_and_called`: one branch changed a signature, and another added a
+  call whose argument count fits the old signature but not the new one (the
+  rule of the write-time break alert, ADR 0029). `args` is the call's count
+  and `takes` the new signature's.
+- `removed_and_used`: one branch removed or renamed (`renamed_to`) an
+  exported definition, and another added a line that mentions its name.
+
+A branch that itself changes or adds a definition of that name is not told
+about it. Each finding gives the branch, path and line on both sides; `more`
+counts the findings past 32, and `files_indexed` and `files_skipped` say what
+was read. Findings are advisory: they never change the check's result, its exit
+code or what `land` requires. If indexing takes more than 10 seconds or Git
+fails, `note` says the findings were skipped, and the check runs as without
+`--symbols`. A retry of the same request returns the recorded findings.
+
+```text
+$ langspan integrate check app --onto main --name unit --symbols feat/sync feat/import -- cargo test
+...
+unit passed on the combined tree 7ac1...
+Definition findings (found by name; advisory):
+- changed_and_called: "save" now takes 2 arguments (feat/sync, "src/store.rs":40); feat/import calls it with 1 at "src/import.rs":18
+```
+
 Combining always follows renames, whatever `merge.renames` is set to: when the
 target renamed a file after a branch started, the branch's edits to the old name
 are combined into the new file, and the result's `renames` (and the printed
 output) says which. Inexact renames are looked for among at most 1000 files on
-each side; exact renames are always found. Combining is a merge, never a rebase:
-the branches' commits are pushed as they are (see ADR 0007). Check commands run with your
+each side; exact renames are always found. By default combining is a merge:
+the branches' commits are pushed as they are (see ADR 0007).
+
+When the target renamed a function in the same file after a branch started
+(same body, new name), and the branch's added lines still mention the old
+name, `integrate check` and `land` list it in `identifier_renames`: `from`,
+`to`, the defining `path`, and each use as a path and line in the branch's own
+version (at most 16 renames and 32 uses each). Names are matched as whole
+words, not resolved. `identifier_renames_incomplete` says when they could not
+all be looked for, for example because a changed source file does not parse.
+
+```sh
+langspan land app --onto main --name tests my-branch --apply --adapt-renames --check-again -- cargo test
+langspan land app --onto main --name tests my-branch --apply --rebase --check-again -- cargo test
+```
+
+`--adapt-renames` adds one commit on top of your branch, without checking it
+out, that replaces each listed use of the old name with the new one, and lands
+that tree only on its own passing check. The result's `adapted` names the
+commit; your branch is not changed, so fetch that commit to keep it. When the
+rewrite is not certain (for example, your branch already mentions the new name,
+changed the old definition, or the target still defines the old name
+elsewhere), nothing is rewritten or pushed: the result is `not_adapted`, exit
+code 2, with the reason, and each rename's `uncertain` says why.
+
+`--rebase` replays your branch's commits onto the target instead of merging,
+for linear history: the new commits keep their author, date and message, only
+the final tree is checked, and `rebased` lists each original and new commit. A
+commit whose replay conflicts stops the landing as `not_combinable` with that
+`commit` and its hunks; a branch with merge commits, even one that would
+fast-forward, or a landing with more than 64 commits to replay across all its
+branches, is `not_rebased`. Landing the same branch again afterwards finds its
+changes on the target and reports nothing to land. Neither flag ever forces a
+push or changes your checkout. Both also work on `integrate check`, so a check
+recorded with the same flags is the evidence a later `land` with them uses;
+through MCP, pass `rebase` and `adapt_renames` to `langspan_integrate_check`
+and then to `langspan_land`. Check commands run with your
 environment; environment identity and ignored files are outside the record.
 A check's recorded command line is redacted like its output: a `--token`
 value or a key-shaped argument is stored and shown as `[redacted]`, while the
@@ -2173,7 +2245,7 @@ langspan check auto WORKSPACE --off
 
 After a session writes files and reaches the end of a tool batch (Claude
 Code's `PostToolBatch`) or of its reply (`Stop` on Claude Code and Codex), the
-daemon runs the command. The hook never waits for it. Cursor and Gemini CLI
+daemon runs the command. The hook never waits for it. Cursor and Antigravity
 have no such event hooked, so their sessions start no automatic check. The daemon waits until
 the workspace's sessions have paused for `auto_check_debounce_ms` (default
 2000) and at most 30 s, so a burst of batches runs one check, then takes the
@@ -2303,7 +2375,7 @@ run); a runner LangSpan does not recognise teaches nothing.
 
 When several sessions work in one checkout they share one Git index, and a
 commit takes whole files. The shell pre-tool hook (Claude Code and Codex
-`Bash`, Cursor `Shell`, Gemini CLI `run_shell_command`) holds a command that
+`Bash`, Cursor `Shell`) holds a command that
 would stage or commit another live session's uncommitted changes: `git add -A`, `git add .`,
 `git add -u`, `git add PATH…`, `git commit -a`, `git commit PATH…`, or a plain
 `git commit` while the index already holds such changes. The reason names the
@@ -2350,7 +2422,7 @@ committed through Git; that hunk is then named, with the reason. A
 formatter that only reflows lines keeps each line with the session that wrote
 it; one that joins two sessions' lines into one makes a hunk whose owner is
 not known, and the command refuses. Run from an agent's shell (Claude Code
-`Bash`, Codex `Bash`, Cursor `Shell`, Gemini CLI `run_shell_command`), the
+`Bash`, Codex `Bash`, Cursor `Shell`), the
 session is the one running the command; from a terminal, pass `--session` (a
 briefing says "Your session ID is …"). It looks for the running command in its own state directory, so
 with hooks installed under `--state-dir`, pass the same `--state-dir`; when
@@ -2544,7 +2616,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
 | `langspan_history` | A definition's recorded interface changes, newest first, with the last reported editor, its task line, nearby notes and messages, and changes back to an earlier signature; at most 50 |
 | `langspan_check_write` | Before a write on a host without hooks: per path, its holder, other sessions' recent lines and whether it is stale; per symbol, a peer's recent signature change, removal or body lines, matched by name; records nothing |
-| `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
+| `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result. With `symbols`, also name definitions the branches changed in ways that disagree (advisory) |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |
 | `langspan_flaky_tests` | Read which tests are known to flip on unchanged code, with runs, flips and the age of the last flip |
@@ -2703,12 +2775,17 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol is version 5 and the SQLite schema marker version 4
-(retention). The daemon also answers version 4 clients, without the
-`refusal_outcomes` that version 5 added to a report's counts, and version 3
-clients, without that field and without the rename fields version 4 added. A
-client asks a daemon of an earlier build again in the version that daemon
-names. Upgrade the daemon and clients together. Earlier persisted
+The current wire protocol is version 6 and the SQLite schema marker version 4
+(retention). The daemon also answers version 5 clients, without the
+`rebased` and `adapted` that version 6 added to a landing; version 4
+clients, also without the `refusal_outcomes` that version 5 added to a
+report's counts and the `interface_notice_ids` it added to a briefing; and
+version 3 clients, also without the rename fields
+version 4 added. A client asks a daemon of an earlier build again in the
+version that daemon names. A `--rebase` or `--adapt-renames` landing that
+an earlier daemon could not record stops before it pushes, with nothing
+pushed: restart the daemon after upgrading. Upgrade the daemon and clients
+together. Earlier persisted
 records remain readable; a build older than the marker refuses the file.
 
 ### Mixed versions after an upgrade

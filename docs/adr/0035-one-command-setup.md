@@ -64,7 +64,9 @@ installed into rather than the defaults. The unit refuses one holding a
 control character, a quote, a backslash, `%` or `$` instead of dropping it,
 since dropping it would point the checks at another directory. A coordinator
 started on demand keeps the same three, also made absolute against its
-caller's working directory, since it runs in `/`.
+caller's working directory, since it runs in `/`. Gemini CLI support was
+removed ([ADR 0033](0033-gemini-cli-adapter.md)); `GEMINI_CLI_HOME` is kept
+so that removing an earlier Gemini CLI install reads the right directory.
 Every manager command is bounded to 10 seconds. Linux
 without a reachable user manager (`systemctl --user show` fails), another
 platform, or `--home` (a home that is not the login user's) gets no service;

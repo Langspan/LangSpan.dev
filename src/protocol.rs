@@ -1,15 +1,17 @@
-//! Version 5 of the local IPC contract. One bounded JSON line per connection.
+//! Version 6 of the local IPC contract. One bounded JSON line per connection.
 
 use langspan_core::{Command, Outcome};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader, Read};
 
-/// Version 5 is version 4 with roadmap H9's `refusal_outcomes` in a
-/// report's counts and issue #214's `interface_notice_ids` in a briefing.
-/// Version 4 is version 3 with roadmap D7's rename fields
-/// in interface changes, history entries and in-flight symbols. Requests
-/// are the same in all three.
-pub const PROTOCOL_VERSION: u16 = 5;
+/// Version 6 is version 5 with roadmap F5's `rebased` and `adapted` in a
+/// landing and in the request that records one (`fits`). Version 5 is
+/// version 4 with roadmap H9's `refusal_outcomes` in a report's counts and
+/// issue #214's `interface_notice_ids` in a briefing. Version 4 is version
+/// 3 with roadmap D7's rename fields in interface changes, history entries
+/// and in-flight symbols. Apart from recording a rebased or adapted
+/// landing, requests are the same in all four.
+pub const PROTOCOL_VERSION: u16 = 6;
 /// The earliest version the daemon still answers, in that version's shape
 /// (`encode_for`), so that a client of an earlier build keeps working after
 /// the daemon is upgraded.
@@ -24,17 +26,65 @@ pub fn answers(version: u16) -> bool {
 /// versions read report counts, interface changes and history entries with
 /// `deny_unknown_fields`, so an answer carrying a field a later version
 /// added would fail to read as a whole: theirs is encoded in their
-/// version's shape (`protocol_4_shape`, then `protocol_3_shape`).
+/// version's shape (`protocol_5_shape`, `protocol_4_shape`, then
+/// `protocol_3_shape`).
 pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::Error> {
     if version >= PROTOCOL_VERSION {
         return encode(response);
     }
     let mut value = serde_json::to_value(response)?;
-    protocol_4_shape(&mut value);
+    protocol_5_shape(&mut value);
+    if version < 5 {
+        protocol_4_shape(&mut value);
+    }
     if version < 4 {
         protocol_3_shape(&mut value);
     }
     encode(&value)
+}
+
+/// The first version that can record a rebased or adapted landing.
+const REWRITES_SINCE: u16 = 6;
+
+/// Whether a daemon answering `version` reads `command` as it is. An
+/// earlier daemon refuses a request to record a landing with `rebased` or
+/// `adapted` commits as unreadable, which is too late once the push is
+/// done, so a landing asks this before it pushes (roadmap F5).
+pub fn fits(version: u16, command: &Command) -> bool {
+    match command {
+        Command::RecordLanding {
+            rebased, adapted, ..
+        } => version >= REWRITES_SINCE || (rebased.is_empty() && adapted.is_empty()),
+        _ => true,
+    }
+}
+
+/// Why a request that does not fit a daemon of `version` is not sent.
+pub fn older_daemon(version: u16) -> String {
+    format!(
+        "the running daemon speaks protocol version {version}, which cannot record a rebased or adapted landing; restart the daemon after upgrading LangSpan"
+    )
+}
+
+/// The fields version 6 added to a landing (`Landing`: the only objects of
+/// the protocol with both `landing_id` and `check_id`).
+const LANDING_FIELDS_SINCE_6: [&str; 2] = ["rebased", "adapted"];
+
+/// `value` without the fields version 6 added.
+fn protocol_5_shape(value: &mut serde_json::Value) {
+    use serde_json::Value;
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(protocol_5_shape),
+        Value::Object(fields) => {
+            if fields.contains_key("landing_id") && fields.contains_key("check_id") {
+                for key in LANDING_FIELDS_SINCE_6 {
+                    fields.shift_remove(key);
+                }
+            }
+            fields.values_mut().for_each(protocol_5_shape);
+        }
+        _ => {}
+    }
 }
 
 /// The field version 5 added to a report's counts (`ReportCounts`: the only

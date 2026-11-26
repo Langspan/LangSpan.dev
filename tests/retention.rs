@@ -1716,6 +1716,7 @@ fn a_compaction_keeps_the_retained_tests_and_write_history() {
             inputs: Vec::new(),
             result: CheckResult::Failed { exit_code: 101 },
             duration_ms: 900,
+            symbol_findings: None,
             report: None,
             writes_before: Some(0),
             command_id: Some("c".repeat(64)),

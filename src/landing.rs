@@ -12,6 +12,7 @@ use crate::{
     client,
     integrate::{self, Combination, ConflictFile, Merged, Ran, Rename},
     protocol::{PROTOCOL_VERSION, Request, Response},
+    rewrite::Notes,
 };
 use langspan_core::{
     AttemptResult, CheckRecord, CheckResult, Command, Landing, LandingAttempt, LeftQueue,
@@ -57,6 +58,8 @@ pub struct Target {
     /// The check whose evidence a landing relies on.
     pub name: String,
     pub branches: Vec<String>,
+    /// Merge (the default), or rebase, and whether to adapt renames.
+    pub shape: integrate::Shape,
 }
 
 /// A check command, run without a shell.
@@ -64,6 +67,9 @@ pub struct Target {
 pub struct Check {
     pub argv: Vec<String>,
     pub timeout_s: u64,
+    /// Compare the combined branches' definitions before the command runs
+    /// and keep what that finds with the record (`integrate check` only).
+    pub symbols: bool,
 }
 
 // One result per operation, returned once: its size does not matter.
@@ -74,9 +80,28 @@ pub enum Integrated {
     NotCombinable {
         target_oid: String,
         branch: String,
+        /// With a rebase: the branch commit whose replay conflicted.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
         paths: Vec<String>,
         /// The conflicting hunks per file: repository text, data only.
         conflicts: Vec<ConflictFile>,
+    },
+    /// `adapt_renames` could not rewrite a branch with certainty; nothing ran.
+    NotAdapted {
+        target_oid: String,
+        branch: String,
+        reason: String,
+        #[serde(flatten)]
+        notes: Notes,
+    },
+    /// `rebase` does not replay this branch; nothing ran.
+    NotRebased {
+        target_oid: String,
+        branch: String,
+        reason: String,
+        #[serde(flatten)]
+        notes: Notes,
     },
     Checked {
         target_oid: String,
@@ -90,6 +115,8 @@ pub enum Integrated {
         /// Why the result is inconclusive and what to do next; only then.
         #[serde(skip_serializing_if = "Option::is_none")]
         inconclusive: Option<Inconclusive>,
+        #[serde(flatten)]
+        notes: Notes,
     },
 }
 
@@ -216,7 +243,7 @@ impl Inconclusive {
 impl Integrated {
     pub fn exit_code(&self) -> u8 {
         match self {
-            Self::NotCombinable { .. } => 2,
+            Self::NotCombinable { .. } | Self::NotAdapted { .. } | Self::NotRebased { .. } => 2,
             Self::Checked { check, .. } => check_exit(&check.result),
         }
     }
@@ -239,9 +266,31 @@ pub enum Landed {
     NotCombinable {
         target_oid: String,
         branch: String,
+        /// With a rebase: the branch commit whose replay conflicted.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
         paths: Vec<String>,
         /// The conflicting hunks per file: repository text, data only.
         conflicts: Vec<ConflictFile>,
+        attempts: Vec<LandingAttempt>,
+    },
+    /// `adapt_renames` could not rewrite a branch with certainty: nothing
+    /// was rewritten, checked or pushed.
+    NotAdapted {
+        target_oid: String,
+        branch: String,
+        reason: String,
+        #[serde(flatten)]
+        notes: Notes,
+        attempts: Vec<LandingAttempt>,
+    },
+    /// `rebase` does not replay this branch: nothing was pushed.
+    NotRebased {
+        target_oid: String,
+        branch: String,
+        reason: String,
+        #[serde(flatten)]
+        notes: Notes,
         attempts: Vec<LandingAttempt>,
     },
     NothingToLand {
@@ -256,6 +305,8 @@ pub enum Landed {
         reason: String,
         moved: bool,
         attempts: Vec<LandingAttempt>,
+        #[serde(flatten)]
+        notes: Notes,
     },
     /// The check ran on the new combined tree and did not pass.
     CheckFailed {
@@ -265,12 +316,16 @@ pub enum Landed {
         #[serde(skip_serializing_if = "Option::is_none")]
         inconclusive: Option<Inconclusive>,
         attempts: Vec<LandingAttempt>,
+        #[serde(flatten)]
+        notes: Notes,
     },
     /// A dry run: this would be pushed.
     Ready {
         target_oid: String,
         combined: Merged,
         check: CheckRecord,
+        #[serde(flatten)]
+        notes: Notes,
     },
     Landed {
         landing: Landing,
@@ -278,6 +333,9 @@ pub enum Landed {
         /// Renames that had already landed on the target, followed.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         renames: Vec<Rename>,
+        /// Identifier renames found, and the adapted and rebased commits.
+        #[serde(flatten)]
+        notes: Notes,
         /// How long it waited in line for the push turn.
         waited_ms: u64,
         /// True when this request had already landed.
@@ -369,6 +427,8 @@ impl Landed {
             Self::Landed { .. } | Self::Ready { .. } | Self::NothingToLand { .. } => 0,
             Self::CheckFailed { check, .. } => check_exit(&check.result),
             Self::NotCombinable { .. }
+            | Self::NotAdapted { .. }
+            | Self::NotRebased { .. }
             | Self::Refused { .. }
             | Self::GaveUp { .. }
             | Self::NotPushed { .. } => 2,
@@ -513,8 +573,72 @@ fn validate(request_id: &str, target: &Target, check: Option<&Check>) -> Result<
 fn fetch_and_combine(root: &Path, target: &Target) -> Result<(String, Combination), crate::Error> {
     let deadline = Instant::now() + GIT_BUDGET;
     let tip = integrate::remote_tip(root, &target.remote, &target.onto, deadline)?;
-    let combination = integrate::combine(root, &tip, &target.branches, deadline)?;
+    let combination = integrate::combine(root, &tip, &target.branches, target.shape, deadline)?;
     Ok((tip, combination))
+}
+
+/// The combined result, or the landing's result when combining stopped.
+fn clean_or_stopped(
+    tip: String,
+    combination: Combination,
+    attempts: &[LandingAttempt],
+) -> Result<Merged, Box<Landed>> {
+    let attempts = attempts.to_vec();
+    Err(Box::new(match combination {
+        Combination::Clean(merged) => return Ok(merged),
+        Combination::Conflict {
+            branch,
+            commit,
+            paths,
+            files,
+        } => Landed::NotCombinable {
+            target_oid: tip,
+            branch,
+            commit,
+            paths,
+            conflicts: files,
+            attempts,
+        },
+        Combination::NotAdapted {
+            branch,
+            reason,
+            notes,
+        } => Landed::NotAdapted {
+            target_oid: tip,
+            branch,
+            reason,
+            notes,
+            attempts,
+        },
+        Combination::NotRebased {
+            branch,
+            reason,
+            notes,
+        } => Landed::NotRebased {
+            target_oid: tip,
+            branch,
+            reason,
+            notes,
+            attempts,
+        },
+    }))
+}
+
+/// What a landing that is not ready says about renames it could adapt.
+fn with_rename_hint(reason: String, notes: &Notes) -> String {
+    if notes.identifier_renames.is_empty() || !notes.adapted.is_empty() {
+        return reason;
+    }
+    let mut names: Vec<&str> = notes
+        .identifier_renames
+        .iter()
+        .map(|rename| rename.from.as_str())
+        .collect();
+    names.dedup();
+    format!(
+        "{reason}; the target renamed {}, which this branch still calls: land again with --adapt-renames --check-again -- <command> (through MCP: langspan_integrate_check, then langspan_land, each with adapt_renames)",
+        names.join(", ")
+    )
 }
 
 /// Run `check` in a temporary checkout of `merged` and record the result
@@ -528,6 +652,22 @@ fn run_check(
     check_id: String,
 ) -> Result<(CheckRecord, bool, Option<Inconclusive>), crate::Error> {
     let limit = Duration::from_secs(check.timeout_s);
+    // Before the command, from the object database: advisory, and never
+    // part of the result.
+    let symbol_findings = check.symbols.then(|| {
+        let branches: Vec<(String, String)> = target
+            .branches
+            .iter()
+            .cloned()
+            .zip(merged.inputs.iter().skip(1).cloned())
+            .collect();
+        Box::new(crate::definitions::findings(
+            root,
+            &merged.inputs[0],
+            &branches,
+            crate::definitions::budget(),
+        ))
+    });
     // The checkout must hold exactly the combined tree before the command
     // runs and still hold it after; otherwise the result is about some other
     // code. What differed is read while the checkout still exists.
@@ -589,6 +729,7 @@ fn run_check(
             rerun: None,
             writes_before: None,
             command_id: None,
+            symbol_findings,
         },
     )?
     .outcome
@@ -610,23 +751,52 @@ pub fn integrate_check(
 ) -> Result<Integrated, crate::Error> {
     validate(request_id, target, Some(check))?;
     let root = workspace_root(state_dir, &target.workspace_id)?;
-    let (tip, merged) = match fetch_and_combine(&root, target)? {
-        (
-            tip,
-            Combination::Conflict {
-                branch,
-                paths,
-                files,
-            },
-        ) => {
-            return Ok(Integrated::NotCombinable {
-                target_oid: tip,
-                branch,
-                paths,
-                conflicts: files,
+    let (tip, combination) = fetch_and_combine(&root, target)?;
+    let merged = match clean_or_stopped(tip.clone(), combination, &[]) {
+        Ok(merged) => merged,
+        Err(stopped) => {
+            return Ok(match *stopped {
+                Landed::NotCombinable {
+                    target_oid,
+                    branch,
+                    commit,
+                    paths,
+                    conflicts,
+                    ..
+                } => Integrated::NotCombinable {
+                    target_oid,
+                    branch,
+                    commit,
+                    paths,
+                    conflicts,
+                },
+                Landed::NotAdapted {
+                    target_oid,
+                    branch,
+                    reason,
+                    notes,
+                    ..
+                } => Integrated::NotAdapted {
+                    target_oid,
+                    branch,
+                    reason,
+                    notes,
+                },
+                Landed::NotRebased {
+                    target_oid,
+                    branch,
+                    reason,
+                    notes,
+                    ..
+                } => Integrated::NotRebased {
+                    target_oid,
+                    branch,
+                    reason,
+                    notes,
+                },
+                _ => return Err("unexpected combination result".into()),
             });
         }
-        (tip, Combination::Clean(merged)) => (tip, merged),
     };
     if let Outcome::Checks { checks } = ask(
         state_dir,
@@ -657,6 +827,7 @@ pub fn integrate_check(
         });
         return Ok(Integrated::Checked {
             target_oid: tip,
+            notes: merged.notes.clone(),
             combined: merged,
             check: view.record,
             held: true,
@@ -668,6 +839,7 @@ pub fn integrate_check(
         run_check(state_dir, &root, target, &merged, check, request_id.into())?;
     Ok(Integrated::Checked {
         target_oid: tip,
+        notes: merged.notes.clone(),
         combined: merged,
         check: record,
         held,
@@ -735,41 +907,32 @@ pub fn land(
         if check_again.is_some() {
             return Err("--check-again runs the check during a landing; add --apply".into());
         }
-        return Ok(match fetch_and_combine(&root, target)? {
-            (
-                tip,
-                Combination::Conflict {
-                    branch,
-                    paths,
-                    files,
-                },
-            ) => Landed::NotCombinable {
-                target_oid: tip,
-                branch,
-                paths,
-                conflicts: files,
-                attempts: Vec::new(),
-            },
-            (tip, Combination::Clean(merged)) if merged.commit == tip => Landed::NothingToLand {
+        let (tip, combination) = fetch_and_combine(&root, target)?;
+        let merged = match clean_or_stopped(tip.clone(), combination, &[]) {
+            Ok(merged) => merged,
+            Err(stopped) => return Ok(*stopped),
+        };
+        if merged.commit == tip {
+            return Ok(Landed::NothingToLand {
                 target_oid: tip,
                 attempts: Vec::new(),
+            });
+        }
+        return Ok(match readiness(state_dir, target, &merged.tree)? {
+            (_, Some(check)) => Landed::Ready {
+                target_oid: tip,
+                notes: merged.notes.clone(),
+                combined: merged,
+                check,
             },
-            (tip, Combination::Clean(merged)) => {
-                match readiness(state_dir, target, &merged.tree)? {
-                    (_, Some(check)) => Landed::Ready {
-                        target_oid: tip,
-                        combined: merged,
-                        check,
-                    },
-                    (reason, None) => Landed::NotReady {
-                        target_oid: tip,
-                        combined: merged,
-                        reason,
-                        moved: false,
-                        attempts: Vec::new(),
-                    },
-                }
-            }
+            (reason, None) => Landed::NotReady {
+                target_oid: tip,
+                reason: with_rename_hint(reason, &merged.notes),
+                notes: merged.notes.clone(),
+                combined: merged,
+                moved: false,
+                attempts: Vec::new(),
+            },
         });
     }
     // A retry of a request that already landed reports that landing.
@@ -782,6 +945,7 @@ pub fn land(
                 landing: landing.clone(),
                 attempts: Vec::new(),
                 renames: Vec::new(),
+                notes: Notes::default(),
                 waited_ms: 0,
                 replayed: true,
                 unfinished_push: None,
@@ -1070,8 +1234,9 @@ fn attempt(
     ttl_ms: u64,
     attempts: &mut Vec<LandingAttempt>,
 ) -> Result<Landed, crate::Error> {
-    // Still holding the turn, for another `ttl_ms`; refuse to go on without it.
-    let renew = |step: String| -> Result<(), crate::Error> {
+    // Still holding the turn, for another `ttl_ms`; refuse to go on without
+    // it. The answer's version is the daemon's.
+    let renew = |step: String| -> Result<u16, crate::Error> {
         ask(
             state_dir,
             fresh_id(request_id, "renew", &[&step]),
@@ -1084,7 +1249,7 @@ fn attempt(
                 queue: None,
             },
         )
-        .map(|_| ())
+        .map(|response| response.version)
     };
     let mut moved = false;
     for number in 1..=MAX_LANDING_ATTEMPTS {
@@ -1098,25 +1263,13 @@ fn attempt(
         renew(format!("{number}-start"))?;
         // Always fetched after the turn is held: whatever landed while this
         // landing waited is part of what it combines.
-        let (tip, merged) = match fetch_and_combine(root, target)? {
-            (
-                tip,
-                Combination::Conflict {
-                    branch,
-                    paths,
-                    files,
-                },
-            ) => {
-                record(attempts, &tip, None, AttemptResult::NotCombinable {});
-                return Ok(Landed::NotCombinable {
-                    target_oid: tip,
-                    branch,
-                    paths,
-                    conflicts: files,
-                    attempts: attempts.clone(),
-                });
-            }
-            (tip, Combination::Clean(merged)) => (tip, merged),
+        let (tip, combination) = fetch_and_combine(root, target)?;
+        if !matches!(combination, Combination::Clean(_)) {
+            record(attempts, &tip, None, AttemptResult::NotCombinable {});
+        }
+        let merged = match clean_or_stopped(tip.clone(), combination, attempts) {
+            Ok(merged) => merged,
+            Err(stopped) => return Ok(*stopped),
         };
         if merged.commit == tip {
             record(attempts, &tip, None, AttemptResult::NothingToLand {});
@@ -1140,6 +1293,7 @@ fn attempt(
                 if check.result != (CheckResult::Passed {}) {
                     record(attempts, &tip, commit, AttemptResult::CheckFailed {});
                     return Ok(Landed::CheckFailed {
+                        notes: merged.notes.clone(),
                         combined: merged,
                         check,
                         inconclusive,
@@ -1152,14 +1306,39 @@ fn attempt(
                 record(attempts, &tip, commit, AttemptResult::NotReady {});
                 return Ok(Landed::NotReady {
                     target_oid: tip,
+                    reason: with_rename_hint(reason, &merged.notes),
+                    notes: merged.notes.clone(),
                     combined: merged,
-                    reason,
                     moved,
                     attempts: attempts.clone(),
                 });
             }
         };
-        renew(format!("{number}-push"))?;
+        let record_landing = Command::RecordLanding {
+            workspace_id: target.workspace_id.clone(),
+            onto: target.onto.clone(),
+            commit_oid: merged.commit.clone(),
+            tree_oid: merged.tree.clone(),
+            inputs: merged.inputs.clone(),
+            check_id: check.check_id.clone(),
+            rebased: merged.notes.rebased.clone(),
+            adapted: merged
+                .notes
+                .adapted
+                .iter()
+                .map(|adapted| adapted.commit.clone())
+                .collect(),
+        };
+        // A daemon that could not record this landing is found out now,
+        // while nothing is pushed, not after.
+        let version = renew(format!("{number}-push"))?;
+        if !crate::protocol::fits(version, &record_landing) {
+            return Err(format!(
+                "{}; nothing was pushed",
+                crate::protocol::older_daemon(version)
+            )
+            .into());
+        }
         // From here on the remote may change: no failure is an error that
         // could be read as "nothing was pushed".
         let verify = format!(
@@ -1224,29 +1403,19 @@ fn attempt(
         };
         if pushed {
             record(attempts, &tip, commit, AttemptResult::Landed {});
-            let recorded = ask(
-                state_dir,
-                request_id.into(),
-                Command::RecordLanding {
-                    workspace_id: target.workspace_id.clone(),
-                    onto: target.onto.clone(),
-                    commit_oid: merged.commit.clone(),
-                    tree_oid: merged.tree.clone(),
-                    inputs: merged.inputs.clone(),
-                    check_id: check.check_id.clone(),
-                },
-            )
-            .map_err(|error| error.to_string())
-            .and_then(|response| match response.outcome {
-                Outcome::Landed { landing } => Ok(landing),
-                other => Err(format!(
-                    "unexpected reply to recording the landing: {other:?}"
-                )),
-            });
+            let recorded = ask(state_dir, request_id.into(), record_landing)
+                .map_err(|error| error.to_string())
+                .and_then(|response| match response.outcome {
+                    Outcome::Landed { landing } => Ok(landing),
+                    other => Err(format!(
+                        "unexpected reply to recording the landing: {other:?}"
+                    )),
+                });
             return Ok(match recorded {
                 Ok(landing) => Landed::Landed {
                     landing,
                     attempts: attempts.clone(),
+                    notes: merged.notes,
                     renames: merged.renames,
                     waited_ms: 0,
                     replayed: false,

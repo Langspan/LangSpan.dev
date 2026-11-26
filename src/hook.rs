@@ -170,10 +170,6 @@ pub struct Operation {
     /// (Claude Code, Codex). The break check runs before the write only
     /// then: an alert the model never reads would still use up its notice.
     pub pre_tool_context: bool,
-    /// The host reads no pre-tool context but adds post-tool context to the
-    /// tool's result (Gemini CLI). The write's calls are found before it and
-    /// kept; they are checked, and any alert given, after it succeeds.
-    pub breaks_after: bool,
 }
 
 /// What the pre-tool run of a write does about breaks (ADR 0029).
@@ -182,8 +178,6 @@ enum BreakCheck {
     Off,
     /// Check now and tell in the pre-tool reply.
     Now,
-    /// Find the calls now and keep them for the post-tool run.
-    Keep,
 }
 
 /// The command of a shell call, as the host sent it.
@@ -342,20 +336,13 @@ pub fn execute(operation: Operation, config: &Config, deadline: Instant) -> Repl
             operation.paths,
             (&operation.edits, &operation.contents),
             operation.snapshot_unknown,
-            match (operation.pre_tool_context, operation.breaks_after) {
-                (true, _) => BreakCheck::Now,
-                (false, true) => BreakCheck::Keep,
-                (false, false) => BreakCheck::Off,
+            if operation.pre_tool_context {
+                BreakCheck::Now
+            } else {
+                BreakCheck::Off
             },
         ),
-        Phase::Post(result) => session.post(
-            &ids,
-            &identity,
-            operation.paths,
-            result,
-            files,
-            operation.breaks_after,
-        ),
+        Phase::Post(result) => session.observe(&ids, &identity, operation.paths, result, files),
         Phase::Read => session.read(&ids, files),
         Phase::ShellPre {
             unknown,
@@ -685,8 +672,7 @@ pub fn lifecycle_event(
     let event: LifecycleEvent = serde_json::from_slice(body).ok()?;
     let kind = match event.hook_event_name.as_str() {
         "SessionStart" => LifecycleKind::Start,
-        // Gemini CLI calls the prompt event BeforeAgent.
-        "UserPromptSubmit" | "BeforeAgent" => LifecycleKind::Prompt {
+        "UserPromptSubmit" => LifecycleKind::Prompt {
             prompt: event.prompt.clone(),
         },
         "SessionEnd" => LifecycleKind::End,
@@ -3328,21 +3314,16 @@ fn adopted_workspace_id(config: &Config, root: &Path, deadline: Instant) -> Opti
 /// that the host would also run here, if there is one. Looked for at every
 /// directory from `cwd` up to the repository root, at the main checkout (where
 /// Claude Code keeps a worktree's local settings) and, for Claude Code, at the
-/// directory the session started in; for Gemini CLI and Antigravity, only at
-/// `cwd`. A file that cannot be read safely means no decision, not a guess.
+/// directory the session started in; for Antigravity, only at `cwd`. A file
+/// that cannot be read safely means no decision, not a guess.
 fn project_install(
     vendor: crate::install::Vendor,
     cwd: &Path,
     git: &crate::git::Identity,
 ) -> Result<Option<PathBuf>, Reply> {
-    // Gemini CLI reads project settings only from the directory it was
-    // started in, which is the event's cwd. Antigravity reads
-    // `.agents/hooks.json` at the workspace root, which its adapter passes
-    // as the cwd.
-    if matches!(
-        vendor,
-        crate::install::Vendor::Gemini | crate::install::Vendor::Antigravity
-    ) {
+    // Antigravity reads `.agents/hooks.json` at the workspace root, which
+    // its adapter passes as the cwd.
+    if vendor == crate::install::Vendor::Antigravity {
         let path = cwd.join(vendor.project_hook_files()[0]);
         return covered(vendor, path);
     }
@@ -3717,9 +3698,6 @@ impl Session<'_> {
                     let alert = match break_check {
                         BreakCheck::Off => None,
                         BreakCheck::Now => self.break_alert(ids, &keys, edits, contents),
-                        BreakCheck::Keep => self
-                            .keep_calls(ids, &keys, edits, contents)
-                            .map(|note| (None, note)),
                     };
                     if let Some(alert) = alert {
                         add_alert(&mut reply, "PreToolUse", alert);
@@ -3963,39 +3941,6 @@ impl Session<'_> {
         }
     }
 
-    /// The post-tool run of a write. With `breaks_after`, the calls its
-    /// pre-tool run kept are taken whatever the result, and checked only
-    /// when the write succeeded and was observed with the input they were
-    /// kept from. An input changed after admission (a Gemini edit the user
-    /// changes in its confirmation dialog keeps its call ID) is observed as
-    /// a mismatch: the kept calls may not be what was written, so they are
-    /// dropped unchecked and no notice is used up on them.
-    fn post(
-        &mut self,
-        ids: &Identities,
-        operation: &langspan_core::ToolIdentity,
-        keys: Vec<String>,
-        result: ToolResult,
-        files: Vec<langspan_core::ObservedFile>,
-        breaks_after: bool,
-    ) -> Reply {
-        let kept = breaks_after
-            .then(|| crate::break_calls::take(&self.config.state_dir, &ids.operation_id))
-            .flatten()
-            .filter(|calls| !calls.is_empty());
-        let mut reply = self.observe(ids, operation, keys, result, files);
-        if let Some(calls) = kept
-            && result == ToolResult::Succeeded
-            && !matches!(
-                reply.coverage,
-                "timeout" | "unavailable" | "unknown" | "unsupported" | "observed_mismatch"
-            )
-        {
-            add_alert(&mut reply, "PostToolUse", self.checked_calls(ids, calls));
-        }
-        reply
-    }
-
     fn observe(
         &mut self,
         ids: &Identities,
@@ -4182,32 +4127,6 @@ impl Session<'_> {
             Err(note) => Some((None, note)),
             Ok(calls) if calls.is_empty() => None,
             Ok(calls) => Some(self.checked_calls(ids, calls)),
-        }
-    }
-
-    /// The break check's first half, for a host that is told after the
-    /// write (`BreakCheck::Keep`): the calls are found against the file as
-    /// it is before the write, and kept for the post-tool run. `None` when
-    /// the write has no call to check; otherwise a note for the diagnostic.
-    fn keep_calls(
-        &self,
-        ids: &Identities,
-        keys: &[String],
-        edits: &[(String, crate::regions::Edit)],
-        contents: &[(String, String)],
-    ) -> Option<String> {
-        match self.written_calls(keys, edits, contents) {
-            Err(note) => Some(note),
-            Ok(calls) if calls.is_empty() => None,
-            Ok(calls) => Some(
-                match crate::break_calls::keep(&self.config.state_dir, &ids.operation_id, &calls) {
-                    Ok(()) => format!(
-                        "break check: {} call(s) kept for the tool's result",
-                        calls.len()
-                    ),
-                    Err(error) => format!("break check unavailable: calls not kept: {error}"),
-                },
-            ),
         }
     }
 
@@ -4420,9 +4339,8 @@ pub fn shell_operation(
         contents: Vec::new(),
         // The context carries a formatter notice, and a break alert for a
         // quoted heredoc's calls (`shell_pre`).
-        pre_tool_context,
         // A shell write's calls are checked only before it runs.
-        breaks_after: false,
+        pre_tool_context,
     }
 }
 
@@ -4517,9 +4435,9 @@ pub fn search(
 }
 
 /// The tool-input fields by which a read names a line range or a part of
-/// the file: Claude Code's and Cursor's `offset` and `limit`, Gemini CLI's
-/// `offset`, `limit`, `start_line` and `end_line`, Claude Code's `pages`.
-const READ_RANGE_FIELDS: [&str; 5] = ["offset", "limit", "start_line", "end_line", "pages"];
+/// the file: Claude Code's and Cursor's `offset` and `limit`, Claude Code's
+/// `pages`.
+const READ_RANGE_FIELDS: [&str; 3] = ["offset", "limit", "pages"];
 
 /// The most an outline's text takes (roadmap A11).
 pub const OUTLINE_LIMIT: usize = 2400;

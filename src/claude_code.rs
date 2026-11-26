@@ -202,7 +202,6 @@ pub fn run_until(input: impl Read, config: &Config, deadline: Instant) -> Reply 
             // A `Write`'s content is in `edits`.
             contents: Vec::new(),
             pre_tool_context: true,
-            breaks_after: false,
         },
         &config,
         deadline,

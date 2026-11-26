@@ -44,7 +44,7 @@ owner-only socket can still send the command.
 `Edit`, `Write`, `apply_patch` or attributed shell write) marks its session
 as having written since its last boundary. A Claude Code `PostToolBatch` or a
 `Stop`/`StopFailure`/`SubagentStop`, or a Codex `Stop`, is that boundary
-(Cursor and Gemini CLI register no end-of-batch or end-of-reply event, so
+(Cursor and Antigravity register no end-of-batch or end-of-reply event, so
 their sessions' writes start no check): the
 core's answer to `observe_tool_batch` and `session_stop` now says whether the
 session wrote (`wrote`), and the boundary clears the mark. So a batch of reads
@@ -428,7 +428,7 @@ does next.
 
 ## Consequences and limits
 
-- Only Claude Code and Codex sessions start a check. A Cursor or Gemini CLI
+- Only Claude Code and Codex sessions start a check. A Cursor or Antigravity
   session's writes are marked but never reach a boundary, so they start
   nothing and receive no result; the owner's `check run` still covers them.
 - The check runs **outside the agent's host**: not in its sandbox, not

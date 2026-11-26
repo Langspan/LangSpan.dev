@@ -1,8 +1,42 @@
 # ADR 0033: Gemini CLI as a third host
 
-**Status:** Implementation decision, 24 November 2026. The adapter follows
-Gemini CLI 0.70.0's documentation and source. No live Gemini session has run
-through it yet (see [Evidence](#evidence)).
+**Status:** Removed, 26 November 2026 (issue #246). Google deprecated Gemini
+CLI in favor of the Antigravity CLI (`agy`) in May 2026, and Gemini CLI
+stopped serving most users in June 2026. Antigravity is LangSpan's Google host
+([ADR 0035](0035-antigravity-adapter.md)). The adapter never ran in a live
+Gemini session. One release keeps a compatibility path so that existing
+installs keep working and can be removed; see [Removal](#removal).
+
+The adapter was an implementation decision of 24 November 2026, built from
+Gemini CLI 0.70.0's documentation and source. The sections after Removal
+record that decision as it was made; none of them describes current support.
+
+## Removal
+
+LangSpan no longer installs, coordinates or briefs Gemini CLI sessions. The
+adapter (`src/gemini.rs`), its contract fixtures, its tests and its capture
+script are removed. For one release, LangSpan keeps this compatibility path:
+
+- `langspan hook gemini-cli` (also `hook gemini`) does nothing. It prints `{}`,
+  which gives no decision, so Gemini CLI's own approval decides. It exits 0,
+  starts no coordinator and records nothing. On a `SessionStart` event, it
+  prints one line on stderr that says Gemini CLI support was removed and how
+  to remove the hook.
+- `langspan hooks remove gemini-cli --root DIR [--apply]` removes LangSpan's
+  project hooks from `.gemini/settings.json`.
+- `langspan uninstall --hosts gemini-cli [--apply]` removes LangSpan's
+  user-level hooks and its `langspan` MCP server entry from
+  `~/.gemini/settings.json` (`$GEMINI_CLI_HOME/.gemini/settings.json` when
+  set), and LangSpan's marked skill section from `~/.gemini/GEMINI.md`. Every
+  other byte stays. LangSpan still reads `GEMINI_CLI_HOME` for this reason.
+- `hooks install gemini-cli` and `install --hosts gemini-cli` are refused with
+  a message that says support was removed.
+- `langspan doctor` reports leftover LangSpan Gemini CLI hooks or MCP entries,
+  at project and user level, as FIX, with the command that removes them.
+
+`langspan guidance` no longer has a `gemini` format, `langspan hosts` no
+longer lists Gemini CLI, and `langspan report` counts earlier Gemini CLI
+sessions as `other`.
 
 ## Context
 
@@ -43,7 +77,7 @@ Git blob hash):
 
 ## Decision
 
-**Events.** `src/gemini.rs` is the adapter. It maps Gemini events onto the
+**Events.** `src/gemini.rs` was the adapter. It mapped Gemini events onto the
 lifecycle the other hosts share:
 
 | Gemini CLI event | LangSpan |
@@ -149,19 +183,21 @@ Verified:
 - The installed CLI is 0.70.0 (`gemini --version`). Its `gemini hooks --help`
   lists only `migrate`; `gemini mcp add --help` shows `--scope user|project`.
 - The documentation and source above, read for this version.
-- The contract fixtures in `fixtures/gemini-cli-contract/` follow those
-  shapes, and tests run them through the real hook executable, daemon and Git.
+- The contract fixtures in `fixtures/gemini-cli-contract/` followed those
+  shapes, and tests ran them through the real hook executable, daemon and Git.
+  Both were removed with the adapter.
 
 Not verified: a live Gemini session. Headless runs on this machine stopped
 before any hook fired. Gemini's account sign-in is rejected ("This client is no
 longer supported for Gemini Code Assist for individuals"), and no Vertex AI
-settings are in effect. LangSpan does not change a host's sign-in. The fixtures
-README lists the capture steps to run once the CLI can sign in.
+settings were in effect. LangSpan does not change a host's sign-in. No live
+session ran before the adapter was removed.
 
 ## Consequences
 
 - A third host in `Vendor`, the installer, `doctor` and the hook command, with
-  no change to the wire protocol or the store.
+  no change to the wire protocol or the store. After the removal, only the
+  compatibility path in [Removal](#removal) remains.
 - The shared lifecycle accepts `BeforeAgent` as the prompt event.
 - Small marker files under the state directory are a new piece of local state.
   They hold no content: only a digest of the tool and its target.

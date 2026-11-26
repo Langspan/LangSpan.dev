@@ -23,6 +23,10 @@ const CAPTURED_ROOT: &str = "/work/repo";
 /// `PreToolUse`'s answer when LangSpan has no objection: Antigravity 1.5.14
 /// reads `{}` there as a refusal.
 const ALLOW: &str = r#"{"decision":"allow"}"#;
+/// What `install` and `hooks install` say Antigravity's verification is
+/// (issue #195): the host version, and that a resumed conversation sends no
+/// SessionStart.
+const VERIFIED_NOTE: &str = "Antigravity: verified on a real host, Antigravity CLI (agy) 1.5.14 (ADR 0035): admission, conflict and stale-source refusals, and an allowed harmless command. A resumed conversation sends no SessionStart; its first prompt registers it.";
 const CALC: &str = "def add(a, b):\n    return a + b\n\n\ndef multiply(a, b):\n    return a * b\n";
 const MAIN: &str = "from calc import add, multiply\n\n\ndef main():\n    print(add(2, 3))\n    print(multiply(2, 3))\n\n\nif __name__ == \"__main__\":\n    main()\n";
 
@@ -561,10 +565,9 @@ fn project_install_round_trips_hooks_mcp_and_rule_keeping_the_owners_bytes() {
     assert!(!root.join(".agents/rules/langspan.md").exists());
 
     let applied = hooks(&state, &root, "install", &["--skill", "--apply"]);
-    assert!(
-        applied.contains("not yet verified on a real Antigravity"),
-        "{applied}"
-    );
+    // Issue #195: the real-host run on agy 1.5.14, and its known limit.
+    assert!(applied.contains(VERIFIED_NOTE), "{applied}");
+    assert!(!applied.contains("not yet verified"), "{applied}");
     let installed: Value =
         serde_json::from_str(&fs::read_to_string(root.join(".agents/hooks.json")).unwrap())
             .unwrap();
@@ -690,8 +693,12 @@ fn doctor_reports_the_project_antigravity_install() {
     assert!(line.starts_with("ok "), "{line}");
     assert!(line.contains("4 event(s)"), "{line}");
     assert!(
-        line.contains("not yet verified on a real Antigravity"),
+        line.contains("Antigravity: hooks verified on a real host, agy 1.5.14 (ADR 0035)"),
         "{line}"
+    );
+    assert!(
+        !text.contains("not yet verified on a real Antigravity"),
+        "{text}"
     );
     for expected in [
         "antigravity: MCP server `langspan` registered in",
@@ -1175,7 +1182,7 @@ fn user_install_round_trips_the_global_files_and_doctor_reports_them() {
     let state = base.join("state");
     let home_arg = home.to_str().unwrap();
 
-    // Not chosen unless named: `~/.gemini` is shared with Gemini CLI.
+    // Not chosen unless named: other tools also make `~/.gemini`.
     fs::create_dir_all(home.join(".claude")).unwrap();
     let default = langspan(&state, &["install", "--home", home_arg]);
     assert!(!default.contains("mcp_config.json"), "{default}");
@@ -1192,10 +1199,8 @@ fn user_install_round_trips_the_global_files_and_doctor_reports_them() {
             "--apply",
         ],
     );
-    assert!(
-        applied.contains("not yet verified on a real Antigravity"),
-        "{applied}"
-    );
+    assert!(applied.contains(VERIFIED_NOTE), "{applied}");
+    assert!(!applied.contains("not yet verified"), "{applied}");
     let installed: Value =
         serde_json::from_str(&fs::read_to_string(config.join("hooks.json")).unwrap()).unwrap();
     let command = installed["langspan"]["PreToolUse"][0]["hooks"][0]["command"]
@@ -1210,7 +1215,7 @@ fn user_install_round_trips_the_global_files_and_doctor_reports_them() {
         serde_json::from_str(&fs::read_to_string(config.join("mcp_config.json")).unwrap()).unwrap();
     assert_eq!(mcp["mcpServers"]["langspan"]["args"][0], "mcp");
     assert!(config.join("rules/langspan.md").is_file());
-    // Gemini CLI's own files are not touched.
+    // Gemini CLI's files, from an earlier install, are not written.
     assert!(!home.join(".gemini/settings.json").exists());
     assert!(!home.join(".gemini/GEMINI.md").exists());
 

@@ -359,31 +359,6 @@ fn a_file_that_differs_from_its_indexed_version_is_read_without_refusal() {
     }
 }
 
-/// Gemini CLI's `BeforeTool` on `read_file`, from its contract fixture
-/// (`fixtures/gemini-cli-contract/after-read-file.json` before the tool
-/// ran), answered in Gemini's `decision` shape. Not yet run on a real host.
-#[test]
-fn gemini_cli_is_outlined_once_in_its_own_shape() {
-    let world = World::new();
-    let mut event: Value = serde_json::from_str(include_str!(
-        "../fixtures/gemini-cli-contract/after-read-file.json"
-    ))
-    .unwrap();
-    event["hook_event_name"] = json!("BeforeTool");
-    event["cwd"] = json!(world.work());
-    event["tool_input"] = json!({"file_path": world.file()});
-    event.as_object_mut().unwrap().remove("tool_response");
-    let (first, coverage) = world.host("gemini-cli", &event);
-    assert_eq!(coverage, "outlined");
-    assert_eq!(first["decision"], "deny", "{first}");
-    let reason = first["reason"].as_str().unwrap();
-    assert!(reason.len() <= 2400 && reason.ends_with(ENDING), "{reason}");
-    let (again, coverage) = world.host("gemini-cli", &event);
-    assert_eq!((again, coverage.as_str()), (json!({}), "outline_shown"));
-    event["tool_input"] = json!({"file_path": world.file(), "offset": 10, "limit": 20});
-    assert_eq!(world.host("gemini-cli", &event).1, "read_range");
-}
-
 /// Cursor's `preToolUse` on `Read`, from its constructed fixture
 /// (`fixtures/cursor-constructed/post-read.json` before the tool ran),
 /// answered in Cursor's `permission` shape. Not yet run on a real host.

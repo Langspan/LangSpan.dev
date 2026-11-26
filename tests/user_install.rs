@@ -704,196 +704,6 @@ fn a_user_install_registers_the_end_of_reply_events_and_doctor_names_any_left_ou
     );
 }
 
-/// Gemini CLI's user settings, with a credential in an MCP server's `env`
-/// that a dry run must not print.
-const GEMINI_SETTINGS: &str = r#"{
-  "general": {
-    "vimMode": true
-  },
-  "hooks": {
-    "BeforeTool": [
-      {
-        "matcher": "write_file",
-        "hooks": [
-          {
-            "name": "guard",
-            "type": "command",
-            "command": "/x/guard.sh",
-            "timeout": 2000
-          }
-        ]
-      }
-    ]
-  },
-  "mcpServers": {
-    "docs": {
-      "command": "npx",
-      "args": [
-        "docs"
-      ],
-      "env": {
-        "DOCS_TOKEN": "not-a-real-token-but-shaped-like-one"
-      }
-    }
-  }
-}
-"#;
-
-#[test]
-fn gemini_settings_get_hooks_and_the_mcp_server_in_one_guarded_write_and_lose_them_exactly() {
-    let mut home = Home::new();
-    let settings = home.write(".gemini/settings.json", GEMINI_SETTINGS);
-    // Without `--hosts`, Gemini CLI is not chosen: its adapter is not yet
-    // verified on a live session, and other tools also make `~/.gemini`.
-    assert!(!home.langspan(&["install"]).status.success());
-    let dry = home.ok(&["install", "--hosts", "gemini-cli"]);
-    assert!(dry.contains("Dry run; nothing was written"), "{dry}");
-    assert!(dry.contains("LangSpan's hook on 5 event(s)"), "{dry}");
-    assert!(dry.contains(r#""mcpServers": { "langspan""#), "{dry}");
-    assert!(
-        !dry.contains("not-a-real-token"),
-        "the owner's settings are not shown: {dry}"
-    );
-    assert!(!home.home().join(".claude").exists() && !home.home().join(".codex").exists());
-    assert_eq!(fs::read_to_string(&settings).unwrap(), GEMINI_SETTINGS);
-
-    let applied = home.ok(&["install", "--hosts", "gemini-cli", "--apply"]);
-    assert_eq!(
-        applied.matches("Wrote").count(),
-        1,
-        "one file, one write: {applied}"
-    );
-    let installed = fs::read_to_string(&settings).unwrap();
-    let value: Value = serde_json::from_str(&installed).unwrap();
-    assert_eq!(value["general"]["vimMode"], true);
-    assert_eq!(
-        value["hooks"]["BeforeTool"][0]["hooks"][0]["command"],
-        "/x/guard.sh"
-    );
-    assert_eq!(
-        value["mcpServers"]["docs"]["env"]["DOCS_TOKEN"],
-        "not-a-real-token-but-shaped-like-one"
-    );
-    assert_eq!(
-        value["mcpServers"]["langspan"]["args"],
-        json!(["mcp", "--state-dir", home.state_dir()])
-    );
-    assert!(value["mcpServers"]["langspan"].get("trust").is_none());
-    let again = home.ok(&["install", "--hosts", "gemini-cli", "--apply"]);
-    assert_eq!(again.matches("already matches").count(), 1, "{again}");
-    assert_eq!(fs::read_to_string(&settings).unwrap(), installed);
-
-    // The installed command, run as Gemini CLI runs it, coordinates the
-    // repository it is started in and always answers with a JSON object.
-    home.start();
-    let repo = home.repo("project");
-    let command = home.installed_command(".gemini/settings.json", "BeforeTool");
-    let event = json!({
-        "session_id": "00000000-0000-4000-8000-0000000000e2",
-        "transcript_path": "", "cwd": repo, "hook_event_name": "BeforeTool",
-        "timestamp": "2026-11-24T23:15:02.000Z", "tool_name": "write_file",
-        "tool_input": {"file_path": repo.join("src/a.rs"), "content": "fn b() {}\n"},
-    });
-    let (stdout, coverage) = home.run_hook(&command, &repo, &event);
-    assert_eq!((coverage.as_str(), stdout.as_str()), ("admitted", "{}"));
-    let report = String::from_utf8(home.langspan(&["doctor"]).stdout).unwrap();
-    assert!(
-        report.contains("ok gemini-cli: user-level hooks installed"),
-        "{report}"
-    );
-    assert!(
-        report.contains("ok gemini-cli: MCP server `langspan` registered"),
-        "{report}"
-    );
-
-    home.ok(&["uninstall", "--hosts", "gemini-cli", "--apply"]);
-    assert_eq!(
-        fs::read_to_string(&settings).unwrap(),
-        GEMINI_SETTINGS,
-        "uninstall restores the file exactly"
-    );
-    let nothing = home.ok(&["uninstall", "--hosts", "gemini-cli", "--apply"]);
-    assert_eq!(nothing.matches("already matches").count(), 1, "{nothing}");
-
-    // An entry the owner changed after install is theirs: an uninstall dry
-    // run keeps it and does not print it.
-    home.ok(&["install", "--hosts", "gemini-cli", "--apply"]);
-    let mut value: Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
-    value["mcpServers"]["langspan"]["env"] = json!({"SECRET": "owner-added-secret"});
-    fs::write(
-        &settings,
-        serde_json::to_string_pretty(&value).unwrap() + "\n",
-    )
-    .unwrap();
-    let dry = home.ok(&["uninstall", "--hosts", "gemini-cli"]);
-    assert!(
-        dry.contains("kept as it is: LangSpan did not write it"),
-        "{dry}"
-    );
-    assert!(!dry.contains("owner-added-secret"), "{dry}");
-
-    // A `langspan` server LangSpan did not write stops the install.
-    let foreign = Home::new();
-    let path = foreign.write(
-        ".gemini/settings.json",
-        r#"{"mcpServers":{"langspan":{"httpUrl":"https://example.invalid/mcp"}}}"#,
-    );
-    let before = fs::read_to_string(&path).unwrap();
-    let output = foreign.langspan(&["install", "--hosts", "gemini-cli", "--apply"]);
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("not written by LangSpan"),
-        "{output:?}"
-    );
-    assert_eq!(fs::read_to_string(&path).unwrap(), before);
-}
-
-#[test]
-fn a_gemini_user_hook_defers_only_to_project_settings_gemini_loads() {
-    let mut home = Home::new();
-    home.write(".gemini/settings.json", "{}\n");
-    home.ok(&["install", "--hosts", "gemini-cli", "--apply"]);
-    home.start();
-    let command = home.installed_command(".gemini/settings.json", "BeforeTool");
-    let repo = home.repo("project");
-    let project = Process::new(env!("CARGO_BIN_EXE_langspan"))
-        .env("LANGSPAN_AUTOSTART", "off")
-        .args([
-            "hooks",
-            "install",
-            "gemini-cli",
-            "--workspace",
-            "covered",
-            "--root",
-        ])
-        .arg(&repo)
-        .arg("--state-dir")
-        .arg(home.state_dir())
-        .arg("--apply")
-        .output()
-        .unwrap();
-    assert!(project.status.success(), "{project:?}");
-    let event = |cwd: &Path, n: u32| {
-        json!({
-            "session_id": format!("00000000-0000-4000-8000-0000000000f{n}"),
-            "transcript_path": "", "cwd": cwd, "hook_event_name": "BeforeTool",
-            "timestamp": "2026-11-24T23:15:02.000Z", "tool_name": "write_file",
-            "tool_input": {"file_path": repo.join("src/a.rs"), "content": "x\n"},
-        })
-    };
-    // Started at the root, Gemini loads the project hook: the user hook steps aside.
-    let (stdout, coverage) = home.run_hook(&command, &repo, &event(&repo, 1));
-    assert_eq!(
-        (coverage.as_str(), stdout.as_str()),
-        ("deferred_to_project", "{}")
-    );
-    // Started in a subdirectory, Gemini reads only that directory's
-    // settings, so the project hook does not run and the user hook does.
-    let sub = repo.join("src");
-    let (stdout, coverage) = home.run_hook(&command, &sub, &event(&sub, 2));
-    assert_eq!((coverage.as_str(), stdout.as_str()), ("admitted", "{}"));
-}
-
 /// A Homebrew-shaped prefix under the test's base: the binary in a versioned
 /// keg, with the `opt` and `bin` links Homebrew makes pointing at it.
 fn brew_keg(base: &Path, version: &str) -> PathBuf {
@@ -983,20 +793,17 @@ fn a_homebrew_install_names_the_stable_opt_path_and_survives_an_upgrade() {
 }
 
 const OWNER_AGENTS: &str = "# My Codex notes\n\nPrefer small commits.\n";
-const OWNER_GEMINI: &str = "# My Gemini notes\n\nAnswer briefly.\n";
-const SKILL_HOSTS: &str = "claude-code,codex,gemini-cli";
+const SKILL_HOSTS: &str = "claude-code,codex";
 
 impl Home {
     fn skill_files(&self) -> Vec<(PathBuf, Option<String>)> {
         [
             ".claude/skills/langspan/SKILL.md",
             ".codex/AGENTS.md",
-            ".gemini/GEMINI.md",
             ".claude/settings.json",
             ".claude.json",
             ".codex/hooks.json",
             ".codex/config.toml",
-            ".gemini/settings.json",
         ]
         .iter()
         .map(|relative| {
@@ -1016,7 +823,6 @@ fn the_skill_is_written_only_when_asked_reported_by_doctor_and_removed_exactly()
     let home = Home::new();
     home.claude_and_codex();
     home.write(".codex/AGENTS.md", OWNER_AGENTS);
-    home.write(".gemini/GEMINI.md", OWNER_GEMINI);
     let skill_md = home.home().join(".claude/skills/langspan/SKILL.md");
 
     // Off by default: an install without --skill neither shows nor writes it.
@@ -1027,7 +833,7 @@ fn the_skill_is_written_only_when_asked_reported_by_doctor_and_removed_exactly()
         OWNER_AGENTS
     );
     let text = home.doctor_lines();
-    for host in ["claude-code", "codex", "gemini-cli"] {
+    for host in ["claude-code", "codex"] {
         assert!(
             text.contains(&format!("ok {host}: the LangSpan skill is not installed")),
             "{text}"
@@ -1037,13 +843,12 @@ fn the_skill_is_written_only_when_asked_reported_by_doctor_and_removed_exactly()
 
     // A dry run shows each host's form and its size, and writes nothing.
     let dry = home.ok(&["install", "--skill", "--hosts", SKILL_HOSTS]);
-    for vendor in [Vendor::ClaudeCode, Vendor::Codex, Vendor::Gemini] {
+    for vendor in [Vendor::ClaudeCode, Vendor::Codex] {
         let path = skill::path(
             vendor,
             &home.home().join(match vendor {
                 Vendor::ClaudeCode => ".claude",
-                Vendor::Codex => ".codex",
-                _ => ".gemini",
+                _ => ".codex",
             }),
         );
         assert!(
@@ -1064,16 +869,11 @@ fn the_skill_is_written_only_when_asked_reported_by_doctor_and_removed_exactly()
         fs::metadata(&skill_md).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    for (relative, owner, vendor) in [
-        (".codex/AGENTS.md", OWNER_AGENTS, Vendor::Codex),
-        (".gemini/GEMINI.md", OWNER_GEMINI, Vendor::Gemini),
-    ] {
-        let text = fs::read_to_string(home.home().join(relative)).unwrap();
-        assert!(text.starts_with(owner), "{text}");
-        assert!(text.ends_with(&skill::render(vendor)), "{text}");
-    }
+    let text = fs::read_to_string(home.home().join(".codex/AGENTS.md")).unwrap();
+    assert!(text.starts_with(OWNER_AGENTS), "{text}");
+    assert!(text.ends_with(&skill::render(Vendor::Codex)), "{text}");
     let text = home.doctor_lines();
-    for host in ["claude-code", "codex", "gemini-cli"] {
+    for host in ["claude-code", "codex"] {
         assert!(
             text.contains(&format!(
                 "ok {host}: the LangSpan skill is installed and up to date"
@@ -1082,7 +882,7 @@ fn the_skill_is_written_only_when_asked_reported_by_doctor_and_removed_exactly()
         );
     }
     let again = home.ok(&["install", "--skill", "--hosts", SKILL_HOSTS, "--apply"]);
-    assert_eq!(again.matches("already matches").count(), 8, "{again}");
+    assert_eq!(again.matches("already matches").count(), 6, "{again}");
 
     // A copy that differs from this version's is named, and replaced.
     let installed = fs::read_to_string(&skill_md).unwrap();
@@ -1097,7 +897,7 @@ fn the_skill_is_written_only_when_asked_reported_by_doctor_and_removed_exactly()
     assert_eq!(fs::read_to_string(&skill_md).unwrap(), installed);
 
     // Uninstall shows, then removes, exactly what was written: the owner's
-    // own text in AGENTS.md and GEMINI.md stays byte for byte.
+    // own text in AGENTS.md stays byte for byte.
     let dry = home.ok(&["uninstall", "--hosts", SKILL_HOSTS]);
     assert!(
         dry.contains(&format!("{} would be removed.", skill_md.display())),
@@ -1112,10 +912,6 @@ fn the_skill_is_written_only_when_asked_reported_by_doctor_and_removed_exactly()
     assert_eq!(
         fs::read_to_string(home.home().join(".codex/AGENTS.md")).unwrap(),
         OWNER_AGENTS
-    );
-    assert_eq!(
-        fs::read_to_string(home.home().join(".gemini/GEMINI.md")).unwrap(),
-        OWNER_GEMINI
     );
     // Removing what install wrote leaves nothing to remove.
     let nothing = home.ok(&["uninstall", "--hosts", SKILL_HOSTS, "--apply"]);
@@ -1161,28 +957,21 @@ fn a_skill_file_langspan_did_not_write_stops_the_install_and_is_kept() {
 fn guidance_files_that_are_symlinks_do_not_stop_uninstall_and_are_left_alone() {
     let home = Home::new();
     home.claude_and_codex();
-    // The owner keeps both guidance files in their dotfiles, linked in.
+    // The owner keeps the guidance file in their dotfiles, linked in.
     let dotfiles = home.base.join("dotfiles");
     fs::create_dir_all(&dotfiles).unwrap();
-    for (relative, owner, name) in [
-        (".codex/AGENTS.md", OWNER_AGENTS, "AGENTS.md"),
-        (".gemini/GEMINI.md", OWNER_GEMINI, "GEMINI.md"),
-    ] {
-        let target = dotfiles.join(name);
-        fs::write(&target, owner).unwrap();
-        let link = home.home().join(relative);
-        fs::create_dir_all(link.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-    }
+    let target = dotfiles.join("AGENTS.md");
+    fs::write(&target, OWNER_AGENTS).unwrap();
+    let link = home.home().join(".codex/AGENTS.md");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
     home.ok(&["install", "--hosts", SKILL_HOSTS, "--apply"]);
     let text = home.doctor_lines();
-    for host in ["codex", "gemini-cli"] {
-        assert!(
-            text.contains(&format!("ok {host}: ")) && text.contains("is a symlink"),
-            "{text}"
-        );
-        assert!(!text.contains(&format!("FIX {host}: ")), "{text}");
-    }
+    assert!(
+        text.contains("ok codex: ") && text.contains("is a symlink"),
+        "{text}"
+    );
+    assert!(!text.contains("FIX codex: "), "{text}");
 
     let removed = home.ok(&["uninstall", "--hosts", SKILL_HOSTS, "--apply"]);
     assert!(!removed.contains("AGENTS.md"), "{removed}");
@@ -1193,14 +982,8 @@ fn guidance_files_that_are_symlinks_do_not_stop_uninstall_and_are_left_alone() {
                 .contains("langspan"),
         "the hooks were removed"
     );
-    for (relative, owner, name) in [
-        (".codex/AGENTS.md", OWNER_AGENTS, "AGENTS.md"),
-        (".gemini/GEMINI.md", OWNER_GEMINI, "GEMINI.md"),
-    ] {
-        let link = home.home().join(relative);
-        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
-        assert_eq!(fs::read_to_string(dotfiles.join(name)).unwrap(), owner);
-    }
+    assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+    assert_eq!(fs::read_to_string(&target).unwrap(), OWNER_AGENTS);
 
     // Writing the skill through a symlink is still refused.
     let output = home.langspan(&["install", "--skill", "--hosts", "codex", "--apply"]);
@@ -1336,7 +1119,7 @@ fn cursor_gets_the_skill_as_a_project_rule_that_hooks_remove_takes_away() {
     );
 }
 
-const HOSTS: [&str; 4] = ["claude-code", "codex", "cursor", "gemini-cli"];
+const HOSTS: [&str; 4] = ["claude-code", "codex", "cursor", "antigravity"];
 
 #[test]
 fn uninstall_removes_the_files_install_created_in_an_empty_home_for_every_host() {
@@ -1395,6 +1178,25 @@ const CURSOR_MCP: &str = r#"{
 }
 "#;
 
+/// An owner's hook definition in Antigravity's `hooks.json`.
+const ANTIGRAVITY_HOOKS: &str = r#"{
+  "format-on-save": {
+    "PostToolUse": [
+      {
+        "matcher": "edit_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/x/format.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+"#;
+
 #[test]
 fn uninstall_keeps_files_that_held_the_owners_entries_byte_for_byte_for_every_host() {
     for host in HOSTS {
@@ -1413,7 +1215,8 @@ fn uninstall_keeps_files_that_held_the_owners_entries_byte_for_byte_for_every_ho
                 home.write(".cursor/mcp.json", CURSOR_MCP);
             }
             _ => {
-                home.write(".gemini/settings.json", GEMINI_SETTINGS);
+                home.write(".gemini/config/hooks.json", ANTIGRAVITY_HOOKS);
+                home.write(".gemini/config/mcp_config.json", CURSOR_MCP);
             }
         }
         let before = contents(&home.home());
@@ -1536,7 +1339,8 @@ fn hosts_reports_a_host_added_after_install_and_changes_nothing() {
     let home = Home::new();
     home.claude_and_codex();
     home.ok(&["install", "--hosts", "claude-code", "--apply"]);
-    // Installed afterwards: Cursor, and Gemini CLI and Antigravity directories.
+    // Installed afterwards: Cursor and Antigravity, and Gemini CLI's
+    // settings, whose support is removed.
     fs::create_dir(home.home().join(".cursor")).unwrap();
     home.write(".gemini/settings.json", "{}\n");
     home.write(".gemini/config/hooks.json", "{}\n");
@@ -1559,12 +1363,17 @@ fn hosts_reports_a_host_added_after_install_and_changes_nothing() {
     assert_eq!(host(&report, "claude-code")["next_step"], Value::Null);
     assert_eq!(host(&report, "codex")["present"], true);
     assert_eq!(host(&report, "codex")["user_install"], "none");
-    // Gemini CLI is reported, but proposed only when the owner names it.
-    let gemini = host(&report, "gemini-cli");
-    assert_eq!(gemini["present"], true, "{report}");
-    assert_eq!(gemini["user_install"], "none", "{report}");
-    assert_eq!(gemini["next_step"], Value::Null, "{report}");
-    // So is Antigravity, whose files are under `~/.gemini/config`.
+    // Gemini CLI is no longer a host LangSpan knows.
+    assert!(
+        report["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|each| each["name"] != "gemini-cli"),
+        "{report}"
+    );
+    // Antigravity, whose files are under `~/.gemini/config`, is reported but
+    // proposed only when the owner names it.
     let antigravity = host(&report, "antigravity");
     assert_eq!(antigravity["present"], true, "{report}");
     assert_eq!(antigravity["user_install"], "none", "{report}");
@@ -1670,8 +1479,8 @@ fn the_daemon_notes_an_uninstalled_host_once_until_it_is_installed() {
         }
     };
     let state = held(true);
-    // Gemini CLI and Antigravity are never proposed unless named; installed
-    // hosts are covered.
+    // Antigravity is never proposed unless named, Gemini CLI never;
+    // installed hosts are covered.
     assert_eq!(
         state.uninstalled_hosts.keys().collect::<Vec<_>>(),
         ["cursor"]
