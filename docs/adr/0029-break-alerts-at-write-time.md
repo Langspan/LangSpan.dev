@@ -105,8 +105,9 @@ any parameter shape not listed has no count, and its notice cannot alert.
 
 **Which notices.** The core decides, from its own state and the index:
 
-- the notice is in the session's workspace, from this daemon generation,
-  within the briefing horizon (30 minutes);
+- the notice is in the session's workspace or in another worktree of its
+  repository (added later, issue #194), from this daemon generation, within
+  the briefing horizon (30 minutes);
 - the session that last reported editing the file (the notice's `by_session`,
   a correlation as in ADR 0008) is another session, registered in this
   generation, not reported exited or ended;
@@ -124,6 +125,17 @@ any parameter shape not listed has no count, and its notice cannot alert.
   or too large is not gone, so no rename or removal is told until then. The daemon looks up only names
   that appear in both the write and such a notice, and a renamed function's
   new name, usually none.
+
+**Another worktree's change (added later, issue #194).** A notice of another
+worktree of the session's repository is judged in that worktree's index,
+with that worktree's coverage, and never in the session's own: the session's
+checkout still defines the old name until the branches meet, and that is the
+break being told. A worktree whose index has no complete scan contributes
+nothing; the answer's coverage is still the asking workspace's. The alert's
+line names the worktree after the file, for example
+`which was renamed to "load_config" in "src/config.rs" in worktree "/repos/app-tree" by claude-code.alice 1m ago`.
+Without this, a session in another worktree learned of the change only from a
+later prompt briefing, after it had written the call (issue #194).
 
 For a signature change, a call to that name whose count does not fit is a
 break. A call through a receiver fits the count without the receiver; any
@@ -234,7 +246,11 @@ Any failure is a note in the diagnostic, never a decision.
   reported edit), or to a session that ended, does not alert.
 - Calls already in the file are checked only for `Write` and `Add File`,
   which rewrite every line.
-- Notices stay within one physical workspace, as in ADR 0008.
+- A notice is recorded in one physical workspace, as in ADR 0008. Its write
+  check reaches sessions in other worktrees of the same repository on this
+  machine (issue #194), never another repository or another machine. Each
+  break of the `check_calls` answer has an optional `worktree`, the root of
+  the worktree whose change it is, when that is not the asking session's.
 - Two new commands (`check_calls`, answered by the daemon and never
   recorded; `acknowledge_interface`), one new event (`interface_alerted`), an
   outcome, and two optional fields on an interface change (`before_arity`,
@@ -322,6 +338,15 @@ type and bodiless pairs never linked; `crates/langspan-core/tests/renames.rs`
 the shape of a `renamed` change; `src/graph.rs` a rename through a real index
 pass and an index from before body digests; and `src/breaks.rs` the rename and
 removal lines and their bounds.
+For issue #194, `tests/graph.rs` has two sessions in two worktrees of one
+repository: Alice renames `parse_config` in a linked worktree and saves, and
+Bob's `Write` in the main checkout that calls `parse_config` gets the alert
+naming the rename and the worktree, once
+(`a_peers_rename_in_another_worktree_is_told_at_the_write_that_calls_the_old_name`).
+`crates/langspan-core/tests/elsewhere.rs` covers judging the change in its
+own worktree's index: no alert without that index or with a partial one,
+none for a session of another repository, and no worktree named for a
+session of the worktree that made it.
 `src/shell.rs` covers the heredoc forms read and refused, `src/break_calls.rs`
 the kept calls (owner-only, read once, a malformed file is nothing), and
 `src/cursor.rs` that a captured Cursor `Write` fixture is named by
