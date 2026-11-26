@@ -76,10 +76,18 @@ const FILES: &[(&str, &str)] = &[
         "cmd/main.go",
         "package main\n\nfunc main() {\n\tEncode(1)\n}\n",
     ),
+    (
+        "shop/Orders.java",
+        "package shop;\n\npublic class Orders {\n    public Orders() {}\n\n    public Order place(Cart cart) {\n        return null;\n    }\n}\n",
+    ),
+    (
+        "shop/Checkout.java",
+        "package shop;\n\nclass Checkout {\n    Order submit(Orders orders, Cart cart) {\n        return orders.place(cart);\n    }\n}\n",
+    ),
 ];
 
 impl World {
-    /// A repository with the four languages' files, or with `git: false`
+    /// A repository with each indexed language's files, or with `git: false`
     /// a plain directory, which is never scanned or indexed.
     fn new(git_repo: bool) -> Self {
         let base = fs::canonicalize(std::env::temp_dir())
@@ -469,6 +477,67 @@ fn python_typescript_and_go_calls_are_checked_through_both_hosts() {
         context.contains(r#""func Encode(value, base int) int""#),
         "{context}"
     );
+}
+
+/// Roadmap D6, Java: the issue's example. A peer adds a parameter to a
+/// public method; a write that keeps the one-argument call is told.
+#[test]
+fn a_java_method_call_that_no_longer_fits_is_told_at_the_write() {
+    let w = World::new(true);
+    w.wait_for_index();
+    w.rewrites(
+        "alice",
+        "a1",
+        "shop/Orders.java",
+        "package shop;\n\npublic class Orders {\n    public Orders(Store store) {}\n\n    public Order place(Cart cart, Coupon coupon) {\n        return null;\n    }\n}\n",
+    );
+    w.wait_for_notice("place", "Coupon coupon");
+    w.wait_for_notice("Orders", "Store store");
+    let edit = w.claude(
+        "bob",
+        "b1",
+        "Edit",
+        json!({"file_path": w.work().join("shop/Checkout.java"),
+               "old_string": "        return orders.place(cart);\n",
+               "new_string": "        Order order = orders.place(cart);\n        return order;\n"}),
+        "PreToolUse",
+    );
+    let context = alert(&edit);
+    assert!(
+        context.contains(r#""shop/Checkout.java":5 calls "place" with 1 argument"#),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#""public Order place(Cart cart, Coupon coupon)""#),
+        "{context}"
+    );
+    // A constructor call is a call of the type's name. Carol, since one
+    // notice is told to a session once.
+    let created = w.writes(
+        "carol",
+        "c1",
+        "shop/Shop.java",
+        "package shop;\n\nclass Shop {\n    Orders open() {\n        return new Orders();\n    }\n}\n",
+    );
+    let context = alert(&created);
+    assert!(
+        context.contains(r#""shop/Shop.java":5 calls "Orders" with 0 arguments"#),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#""public Orders(Store store)""#),
+        "{context}"
+    );
+    // A call with the new count is not told.
+    quiet(&w.claude(
+        "bob",
+        "b3",
+        "Edit",
+        json!({"file_path": w.work().join("shop/Checkout.java"),
+               "old_string": "        return orders.place(cart);\n",
+               "new_string": "        return orders.place(cart, null);\n"}),
+        "PreToolUse",
+    ));
 }
 
 #[test]

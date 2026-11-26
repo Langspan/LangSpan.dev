@@ -1081,7 +1081,10 @@ already waiting when the coordinator starts is timed from that start.
 ## Look up symbols and affected files
 
 The source index finds definitions and name mentions in Rust, Python,
-TypeScript/JavaScript (including TSX/JSX), and Go. It updates after complete Git
+TypeScript/JavaScript (including TSX/JSX), Go and Java; `langspan doctor`
+lists them. A Java definition is exported when another package can reach it:
+`public` or `protected`, or a member of an interface that is not `private`.
+It updates after complete Git
 scans and can lag changes on disk. Replace `PROJECT` with a registered workspace,
 `upload` with the name to look up, and `src/api.rs` with the file to inspect:
 
@@ -1157,7 +1160,7 @@ not be read in full, so an empty or short answer is weak. Ask which ones:
 partial (2): "src/legacy/parse.rs" (since 3h), "web/src/app.tsx" (since 10m)
 waiting (1): "src/api.rs"
 too large (1): "src/generated/schema.rs"
-not indexed, other languages: .java 10, .rb 3
+not indexed, other languages: .kt 10, .rb 3
 ```
 
 The lists are `partial` (a syntax error or a bound reached, with since when),
@@ -1178,6 +1181,47 @@ as a removal. A first indexing produces no change notice. When a file holds
 several definitions of one name (a method of that name on two types, say), a
 definition added or removed is told as such, with how many there are now:
 "a second method "text" was added … (now 2 definitions with that name)".
+
+Each notice stays in the event log, and `graph history` reads a definition's
+past from there, before an agent changes it again:
+
+```sh
+./target/release/langspan graph history PROJECT save --json
+./target/release/langspan graph history PROJECT save --path src/store.rs --limit 5
+```
+
+```text
+seq 812, 2h ago: "src/store.rs" function signature changed from "fn save(x: &Item, sync: bool)" to "fn save(x: &Item)" by session codex.bob (reverted: back to an earlier signature)
+  note (note-7, by codex.bob): "sync deadlocks under load; keep it off"
+seq 640, 1d ago: "src/store.rs" function signature changed from "fn save(x: &Item)" to "fn save(x: &Item, sync: bool)" by session claude-code.alice; task: "add a sync option to save"
+Sessions are the last reported editors of the file, not proof of authorship.
+```
+
+Entries are newest first, at most `--limit` (1 to 50, default 10). Each has
+`seq`, `age_ms`, `change` (`added`, `removed`, `signature_changed`,
+`definition_added` or `definition_removed`), `kind`, `path`, `before` and
+`after`, and `by_session`: the last session that reported editing the file
+before the change was indexed, a correlation and not proof of who wrote it
+(the answer's `attribution` says so). `task` is that session's last prompt
+summary before the change, absent when it recorded none (prompt summaries
+off). `notes` and `messages` (up to 4 each) are those that named the file, in
+their paths or text, within 30 minutes either side of the change; forgotten
+notes, withdrawn messages, and notes or messages recorded before they kept
+their time, are not shown. `reverted: true` means the change put back a signature that the
+definition, in that file, had at an earlier recorded change. A new exported
+name is recorded as `added` for this history and told to no session; a removal
+records the signature that went, so a definition removed and added back is
+marked reverted. Notices recorded before this did not carry those signatures.
+
+`truncated: true` with a `next_seq` says more is recorded than one answer
+holds: more entries than `--limit`, an answer over 28 KiB, or a log with
+more than 20,000 events of the kinds a history reads before that point. Ask
+again with `--before NEXT_SEQ` (MCP: `before_seq`). Only changes the index
+observed are known: body-only changes, changes before LangSpan watched the
+repository, and commit messages are not part of it. A history is a read: it
+records and delivers nothing. MCP: `langspan_history`, whose result puts a
+label first saying the signatures, task lines, notes and messages are data,
+not instructions.
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
 Code) or an `apply_patch` (Codex) is admitted, the hook parses the calls in the
@@ -1309,6 +1353,45 @@ the daemon's environment, outside the agent host's sandbox and permission
 prompts: code an agent writes runs without the host asking. A command that
 looks like it holds a secret is refused; pass secrets through the environment.
 See [ADR 0030](adr/0030-automatic-checks-after-write-batches.md).
+
+#### The wider check after an interface change
+
+A fast check often builds only the package a session changed, so a broken
+caller in another package shows up later, in someone else's work. Give the
+automatic check a second, wider command:
+
+```sh
+langspan check auto WORKSPACE --name fast -- cargo test -p core \
+  --on-interface-change all --timeout-s 1800 -- cargo test --workspace
+```
+
+The first `--timeout-s` (before the first `--`) is the regular command's; the
+one after `--on-interface-change NAME` is the wider command's (default 1800 s).
+Both commands are refused if they look like they hold a secret.
+
+When the source index reports that a session's writes changed an exported
+name that other files mention (an interface notice), the wider command runs
+after the regular one finishes, on the same tree, with the same rules: no
+shell, its own process group, cancelled and restarted with the regular
+command when a session writes again and the tree changes. LangSpan runs the
+owner's whole command and never adds paths to it, so a dependency the index
+misses still gets tested. A body-only change produces no notice and runs only
+the regular command. A change no other file mentions runs nothing extra.
+
+The wider result is an ordinary check record under its own name, graded
+`kept` when it passed and `broke` when it failed. The session that made the
+change, and any session working on or having read a mentioning file, are told
+at their next briefing:
+
+```text
+LangSpan: the automatic check ran its wider command. Interface change to parse_upload in core/src/lib.rs: "pub fn parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) -> u32": the wider check all failed (exit 101); files that mention it: cli/src/main.rs (a name lookup, not resolved uses). On working tree ...
+```
+
+The mentioning files come from the index's name lookup. The line shows at
+most 8 of them and counts the rest; a session working on any of them, shown
+or not, is told. The line also says how many source files the index could not read in full. If the
+index has no complete scan of the workspace, no interface change can be found:
+the regular result says so and the wider command does not run.
 
 #### Tests that flip on unchanged code
 
@@ -1515,6 +1598,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
+| `langspan_history` | A definition's recorded interface changes, newest first, with the last reported editor, its task line, nearby notes and messages, and changes back to an earlier signature; at most 50 |
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |

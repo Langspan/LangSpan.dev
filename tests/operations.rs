@@ -174,6 +174,12 @@ fn doctor_names_each_thing_that_is_not_working_and_stops_when_it_is_fixed() {
         text.contains("FIX Coordinator not reachable") && text.contains("langspan daemon"),
         "{text}"
     );
+    // The indexed languages are a fact of this build, known without a
+    // coordinator.
+    assert!(
+        text.contains("ok Source index languages: rust, python, typescript, tsx, go, java."),
+        "{text}"
+    );
     assert!(
         text.contains("claude-code hooks are not installed"),
         "{text}"
