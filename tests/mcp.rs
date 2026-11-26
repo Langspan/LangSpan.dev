@@ -211,6 +211,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_report"
                 | "langspan_land_queue"
                 | "langspan_flaky_tests"
+                | "langspan_policy"
                 | "langspan_check_write"
         ) {
             assert!(

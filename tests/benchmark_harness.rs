@@ -100,3 +100,8 @@ fn dry_run_records_an_ignored_option() {
         Some("a_dry_run_records_an_option_its_arm_ignores"),
     );
 }
+
+#[test]
+fn holder_wait_comparison() {
+    python_suite("test_holder_wait.py", None);
+}

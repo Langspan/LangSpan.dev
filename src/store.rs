@@ -872,6 +872,8 @@ impl Store {
                 | Command::TurnQueue { .. }
                 | Command::Recap { .. }
                 | Command::Recall { .. }
+                | Command::Policy { .. }
+                | Command::Holders { .. }
                 | Command::Today { .. }
                 | Command::Report { .. }
                 | Command::Count { .. }
@@ -1014,6 +1016,8 @@ impl Store {
             | Command::WorkspaceList { .. }
             | Command::WorkspaceRemove { apply: false, .. }
             | Command::Recap { .. }
+            | Command::Policy { .. }
+            | Command::Holders { .. }
             | Command::Recall { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
                     Outcome::Workspaces { workspaces, next } => workspace_page(workspaces, next),
@@ -1142,7 +1146,7 @@ impl Store {
         let page = i64::try_from(DASHBOARD_ITEMS / 2 + 1)?;
         let window = i64::from(DENIAL_WINDOW);
         let mut statement = self.connection.prepare(
-            "SELECT command_json, outcome_json FROM receipts
+            "SELECT command_json, outcome_json, request_id FROM receipts
              WHERE rowid > (SELECT coalesce(max(rowid), 0) FROM receipts) - ?1
                AND json_extract(outcome_json, '$.type') = 'conflict'
              ORDER BY rowid DESC LIMIT ?2",
@@ -1150,6 +1154,17 @@ impl Store {
         let mut rows = statement.query(params![window, page])?;
         let mut conflicts = Vec::new();
         while let Some(row) = rows.next()? {
+            // A conflict the hook waited out and then admitted (ADR 0036)
+            // was never a refusal.
+            let waited: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM receipts WHERE request_id = ?1
+                   AND json_extract(outcome_json, '$.type') = 'admitted')",
+                [crate::wait::admission_id(&row.get::<_, String>(2)?)],
+                |found| found.get(0),
+            )?;
+            if waited {
+                continue;
+            }
             // A receipt this build cannot read is no denial it can show.
             let (Ok(command), Ok(outcome)) = (
                 serde_json::from_str::<Command>(&row.get::<_, String>(0)?),

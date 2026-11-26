@@ -83,8 +83,10 @@ symbol publication is not a released capability. See
   authoritative. A hold does not establish cross-file semantic compatibility.
 - Refusals for stale source, active overlaps and unsafe commit requests have
   different purposes. An agent can reread, retry or choose another task.
-  Do not promise automatic waiting on active edit holds; see
-  [B28: coordination policy](https://github.com/Langspan/LangSpan.dev/issues/171).
+  Waiting on an active edit hold is an opt-in workspace policy, off by
+  default: a wait lasts at most part of one hook call and admits only an
+  unchanged file. Do not promise an edit queue or that waiting reduces stops;
+  see [B28: coordination policy](https://github.com/Langspan/LangSpan.dev/issues/171).
 - Native Claude Code and Codex observations, real two-machine briefing delivery,
   scripted coordinator tests, and authored illustrations are different kinds
   of evidence. Cursor and Gemini CLI adapters have no retained live-host verification.
