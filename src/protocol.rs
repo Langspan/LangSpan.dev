@@ -1,20 +1,24 @@
-//! Version 5 of the local IPC contract. One bounded JSON line per connection.
+//! Version 6 of the local IPC contract. One bounded JSON line per connection.
 
-use langspan_core::{Command, ContextUse, Event, Outcome, RecordedEvent, SessionActivity};
+use langspan_core::{
+    Command, ContextUse, Event, Outcome, RecordedEvent, SessionActivity, StatusRecord,
+};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader, Read};
 
-/// Version 5 is version 4 with issue #222's briefing memory and context
+/// Version 6 is version 5 with issue #222's briefing memory and context
 /// measurement: a session activity's `told`, `told_at_ms` and `context`, a
 /// briefing's `unchanged`, a briefing delivery's `told` and `told_at_ms`,
 /// and the `context_added` and `told_forgotten` events (with the
-/// `forget_told` request that records the second); and with roadmap H9's
-/// `refusal_outcomes` in a report's counts. Version 4 is version 3 with
-/// roadmap D7's rename fields in interface changes, history entries and
-/// in-flight symbols. Requests of an earlier version are requests of this
-/// one.
-pub const PROTOCOL_VERSION: u16 = 5;
-/// The version before `PROTOCOL_VERSION`, answered in its own shape.
+/// `forget_told` request that records the second). Version 5 is version 4
+/// with roadmap H9's `refusal_outcomes` in a report's counts. Version 4 is
+/// version 3 with roadmap D7's rename fields in interface changes, history
+/// entries and in-flight symbols. Requests of an earlier version are
+/// requests of this one.
+pub const PROTOCOL_VERSION: u16 = 6;
+/// Roadmap H9's version, answered in its own shape.
+pub const PROTOCOL_VERSION_5: u16 = 5;
+/// Roadmap D7's version, answered in its own shape.
 pub const PROTOCOL_VERSION_4: u16 = 4;
 /// The earliest version the daemon still answers, in that version's shape
 /// (`encode_for`), so that a client of an earlier build keeps working after
@@ -30,32 +34,62 @@ pub fn answers(version: u16) -> bool {
 /// earlier version read the objects later versions extended with
 /// `deny_unknown_fields`, so an answer carrying a field they lack would fail
 /// to read as a whole: theirs is encoded without what later versions added
-/// (`protocol_4_outcome` and `protocol_4_shape`, then `protocol_3_shape`).
+/// (`protocol_5_outcome`, then `protocol_4_shape`, then `protocol_3_shape`).
+/// A state record given in parts is encoded by `encode_record_for` before
+/// it is cut.
 pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::Error> {
     if version >= PROTOCOL_VERSION {
         return encode(response);
     }
     let mut earlier = response.clone();
-    protocol_4_outcome(&mut earlier.outcome);
+    protocol_5_outcome(&mut earlier.outcome);
     let mut value = serde_json::to_value(&earlier)?;
-    protocol_4_shape(&mut value);
-    if version < PROTOCOL_VERSION_4 {
-        protocol_3_shape(&mut value);
-    }
+    earlier_shape(version, &mut value);
     encode(&value)
 }
 
-/// `outcome` without issue #222's part of version 5 (`protocol_4_shape`
-/// removes H9's). Every field it added is skipped
-/// when empty, so emptying it leaves it out; the `context_added` and
-/// `told_forgotten` events, which version 4 has no variant for, are left
-/// out of an event page.
-fn protocol_4_outcome(outcome: &mut Outcome) {
-    fn activity(activity: &mut SessionActivity) {
-        activity.told = Vec::new();
-        activity.told_at_ms = 0;
-        activity.context = ContextUse::default();
+/// `record`'s JSON as a client of `version` reads it: the text the store
+/// cuts into parts when the record is too large for a page. Parts are
+/// pieces of text, so `encode_for` cannot reshape them; the store gives
+/// each client the parts of its own version's record.
+pub fn encode_record_for(version: u16, record: &StatusRecord) -> Result<String, crate::Error> {
+    if version >= PROTOCOL_VERSION {
+        return Ok(serde_json::to_string(record)?);
     }
+    let mut earlier = record.clone();
+    if let StatusRecord::Activity { activity, .. } = &mut earlier {
+        protocol_5_activity(activity);
+    }
+    let mut value = serde_json::to_value(&earlier)?;
+    earlier_shape(version, &mut value);
+    Ok(serde_json::to_string(&value)?)
+}
+
+/// `value` without the fields versions after `version` added to it, up to
+/// version 5.
+fn earlier_shape(version: u16, value: &mut serde_json::Value) {
+    if version < PROTOCOL_VERSION_5 {
+        protocol_4_shape(value);
+    }
+    if version < PROTOCOL_VERSION_4 {
+        protocol_3_shape(value);
+    }
+}
+
+/// `activity` without what version 6 added. Every such field is skipped
+/// when empty, so emptying it leaves it out.
+fn protocol_5_activity(activity: &mut SessionActivity) {
+    activity.told = Vec::new();
+    activity.told_at_ms = 0;
+    activity.context = ContextUse::default();
+}
+
+/// `outcome` without what version 6 (issue #222) added. Every field it
+/// added is skipped when empty, so emptying it leaves it out; the
+/// `context_added` and `told_forgotten` events, which version 5 has no
+/// variant for, are left out of an event page.
+fn protocol_5_outcome(outcome: &mut Outcome) {
+    let activity = protocol_5_activity;
     fn events(events: &mut Vec<RecordedEvent>) {
         events.retain(|recorded| {
             !matches!(
@@ -93,8 +127,7 @@ fn protocol_4_outcome(outcome: &mut Outcome) {
 /// `edits_admitted` and `retried_unchanged`).
 const COUNTS_FIELD_SINCE_5: &str = "refusal_outcomes";
 
-/// `value` without H9's part of version 5 (`protocol_4_outcome` removes
-/// issue #222's).
+/// `value` without the field version 5 added.
 fn protocol_4_shape(value: &mut serde_json::Value) {
     use serde_json::Value;
     match value {

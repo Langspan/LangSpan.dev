@@ -495,3 +495,83 @@ fn a_typical_session_stays_within_the_context_budget_per_turn_and_status_shows_i
     assert!(line.contains(&format!("{per_turn} bytes")), "{line}");
     assert!(line.contains("tokens"), "{line}");
 }
+
+/// Review comment 4712860167: a client of an earlier build reads state
+/// records with `deny_unknown_fields`, including a record too large for its
+/// page, which comes as parts of its JSON. The daemon encodes those parts
+/// in the client's version too: joined, the activity a version 5, 4 or 3
+/// client reads has none of the briefing memory or context version 6 added,
+/// while a version 6 client's has them.
+#[test]
+fn an_earlier_client_reads_activity_given_in_parts_without_the_fields_version_6_added() {
+    let f = Fixture::new();
+    two_peers_at_work(&f);
+    // Long paths Alice has read make her activity larger than a small page.
+    for n in 0..8 {
+        let file = format!("{}{n}.txt", "long-name-".repeat(20));
+        fs::write(f.root().join(&file), "hello\n").unwrap();
+        f.read(ALICE, &format!("alice-read-{n}"), &file);
+    }
+    f.start_session(ALICE);
+    f.prompt(ALICE);
+    let alice = format!("claude-code.{ALICE}");
+    for version in [
+        langspan::protocol::PROTOCOL_VERSION_5,
+        langspan::protocol::PROTOCOL_VERSION_4,
+        langspan::protocol::OLDEST_PROTOCOL_VERSION,
+        PROTOCOL_VERSION,
+    ] {
+        let joined = joined_parts(&f, version);
+        let record = joined
+            .iter()
+            .find(|record| record["kind"] == "activity" && record["key"] == alice.as_str())
+            .unwrap_or_else(|| panic!("version {version}: Alice's activity in parts: {joined:?}"));
+        let fields = record["activity"].as_object().unwrap();
+        for field in ["told", "told_at_ms", "context"] {
+            assert_eq!(
+                fields.contains_key(field),
+                version == PROTOCOL_VERSION,
+                "version {version}, {field}: {record}"
+            );
+        }
+    }
+}
+
+/// Every record a client of `version` reads in parts, with the smallest
+/// page, joined as its JSON.
+fn joined_parts(f: &Fixture, version: u16) -> Vec<Value> {
+    let mut joined = Vec::new();
+    let mut part = String::new();
+    let mut after = None;
+    for page in 0..10_000 {
+        let request = Request {
+            version,
+            request_id: format!("parts-{version}-{page}"),
+            command: Command::StatusRecords {
+                after: after.clone(),
+                page_bytes: Some(langspan::store::MIN_PAGE_BYTES as u32),
+            },
+        };
+        let response = client::call(&f.state_dir(), &request).unwrap();
+        assert_eq!(response.version, version);
+        let Outcome::StatusRecords { records, next } = response.outcome else {
+            panic!("{:?}", response.outcome);
+        };
+        for record in records {
+            if let langspan_core::StatusRecord::Part { text, offset, last } = record {
+                if offset == 0 {
+                    part.clear();
+                }
+                part.push_str(&text);
+                if last {
+                    joined.push(serde_json::from_str(&std::mem::take(&mut part)).unwrap());
+                }
+            }
+        }
+        match next {
+            Some(cursor) => after = Some(cursor),
+            None => return joined,
+        }
+    }
+    panic!("status pages did not end");
+}

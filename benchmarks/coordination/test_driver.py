@@ -220,6 +220,59 @@ class DriverUnitTests(Temporary):
                 "status": "not_applicable", "turns": None, "bytes": None, "bytes_per_turn": None,
                 "estimated_tokens_per_turn": None, "largest_turn_bytes": None})
 
+    @staticmethod
+    def parts(record, *cuts):
+        """RECORD's JSON as the status parts the store gives, cut at CUTS."""
+        text = json.dumps(record)
+        bounds = [0, *cuts, len(text)]
+        return [{"kind": "part", "text": text[start:end], "offset": start, "last": end == len(text)}
+                for start, end in zip(bounds, bounds[1:])]
+
+    def test_an_activity_record_given_in_parts_is_joined_before_its_context_is_read(self):
+        """Review comment 4712860177: an activity record larger than a status
+        page comes as parts of its JSON. They are joined, as the CLI's own
+        reader joins them, so the session's context is measured, not read as
+        none added."""
+        context = {"turns": 2, "bytes": 1001, "largest_turn_bytes": 900, "turn_bytes": 0}
+        session = {"kind": "session", "key": "claude-code.a", "session": {"workspace_id": "bench-s1"}}
+        activity = {"kind": "activity", "key": "claude-code.a",
+                    "activity": {"known": [{"path": "p" * 512}] * 4, "context": context}}
+        cut = self.parts(activity, 100, 1500)
+        # One part per page, and a part and whole records sharing a page.
+        other = [{"kind": "session", "key": "claude-code.b", "session": {"workspace_id": "bench-s2"}},
+                 {"kind": "activity", "key": "claude-code.b", "activity": {"context": dict(context, bytes=99)}}]
+        reader = driver.StatusReader()
+        for page in ([session, cut[0]], [cut[1]], [cut[2], *other]):
+            reader.add(page)
+        state = reader.state()
+        self.assertEqual(state["activity"]["claude-code.a"]["context"], context)
+        record = self.context_record("langspan", state)
+        self.assertEqual(record["context_added"]["status"], "reported")
+        self.assertEqual(record["context_added"]["bytes"], 1100)
+
+        # A record that changed while its parts were read starts again at offset 0.
+        changed = dict(activity, activity=dict(activity["activity"], context=dict(context, bytes=2002)))
+        reader = driver.StatusReader()
+        reader.add([session, cut[0], *self.parts(changed, 200)])
+        self.assertEqual(reader.state()["activity"]["claude-code.a"]["context"]["bytes"], 2002)
+        # A record begun and then given whole is the whole one.
+        reader = driver.StatusReader()
+        reader.add([cut[0], activity])
+        self.assertEqual(reader.state()["activity"]["claude-code.a"]["context"], context)
+
+        # A gap, a part holding a part, a record that never ends and one
+        # beyond the bound are refused: the context is then unknown, never zero.
+        for pages in ([[cut[0], cut[2]]],
+                      [self.parts({"kind": "part", "text": "{}", "offset": 0, "last": True})],
+                      [[session, cut[0]]],
+                      [[{"kind": "part", "text": "x" * (driver.MAX_STATUS_RECORD_BYTES + 1),
+                         "offset": 0, "last": False}]]):
+            reader = driver.StatusReader()
+            with self.assertRaises(ValueError, msg=pages):
+                for page in pages:
+                    reader.add(page)
+                reader.state()
+
     def guard(self, script, arm="worktrees", timeout=30):
         """Run SCRIPT as the session's agent through the tool guard, as
         `driver.py session` does; returns its exit code and transcript."""

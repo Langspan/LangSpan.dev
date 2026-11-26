@@ -51,6 +51,8 @@ GIT_SECONDS = 60
 ORACLE_SECONDS = 300
 EVENT_PAGE = 500
 MAX_EVENT_PAGES = 200
+# The largest state record joined from its parts, as the CLI's reader bounds it.
+MAX_STATUS_RECORD_BYTES = 8 * 1024 * 1024
 # A stream-json transcript holds every message and tool result.
 TRANSCRIPT_BYTES = 64 * 1024 * 1024
 MAX_HOOK_INPUT = 64 * 1024 * 1024
@@ -541,6 +543,55 @@ def install_skill(langspan, state_dir, clones, work):
         shutil.copyfile(skill, target / "SKILL.md")
 
 
+class StatusReader:
+    """The sessions and activity of `status --all` pages, added in order.
+    A record too large for a page comes as `part` records of its JSON, in
+    order from `offset`, the last with `last`: they are joined into that
+    record before it is read, as the CLI's own reader (`client::read_all`)
+    joins them. A part at offset 0 starts its record again, and a whole
+    record after a begun one replaces it: the record changed meanwhile."""
+
+    def __init__(self):
+        self.sessions, self.activity, self.part = {}, {}, None
+
+    def add(self, records):
+        for record in records:
+            if isinstance(record, dict) and record.get("kind") == "part":
+                record = self.join(record)
+                if record is None:
+                    continue
+            else:
+                self.part = None
+            kind = record.get("kind") if isinstance(record, dict) else None
+            if kind in ("session", "activity") and isinstance(record.get("key"), str):
+                (self.sessions if kind == "session" else self.activity)[record["key"]] = record.get(kind)
+
+    def join(self, part):
+        """The record PART completes, or None while more of it is to come."""
+        text, offset, last = part.get("text"), part.get("offset"), part.get("last")
+        if not isinstance(text, str) or not isinstance(offset, int) or not isinstance(last, bool):
+            raise ValueError("a malformed status record part: %s" % json.dumps(part)[:500])
+        if offset == 0:
+            self.part = ""
+        elif self.part is None or len(self.part.encode("utf-8")) != offset:
+            raise ValueError("a status record part starts at byte %d, but %d byte(s) of it were read"
+                             % (offset, len((self.part or "").encode("utf-8"))))
+        self.part += text
+        if len(self.part.encode("utf-8")) > MAX_STATUS_RECORD_BYTES:
+            raise ValueError("a status record is larger than %d bytes" % MAX_STATUS_RECORD_BYTES)
+        if not last:
+            return None
+        record, self.part = json.loads(self.part), None
+        if not isinstance(record, dict) or record.get("kind") == "part":
+            raise ValueError("a status record's parts do not join into a record")
+        return record
+
+    def state(self):
+        if self.part is not None:
+            raise ValueError("the status pages ended inside a record's parts")
+        return {"sessions": self.sessions, "activity": self.activity}
+
+
 class Coordinator:
     """One LangSpan daemon, in its own process group."""
 
@@ -591,7 +642,7 @@ class Coordinator:
         """The coordinator's sessions and their activity, by session ID,
         from every page of `status --all`: unlike `status`, it keeps a
         session that ended long ago."""
-        state, after = {"sessions": {}, "activity": {}}, None
+        reader, after = StatusReader(), None
         for _ in range(MAX_EVENT_PAGES):
             page = json.loads(langspan_cli(self.langspan, self.state_dir, "status", "--all", "--json",
                                            *(("--after", after) if after else ())))
@@ -599,13 +650,10 @@ class Coordinator:
             records = outcome.get("records") if isinstance(outcome, dict) else None
             if not isinstance(records, list):
                 raise ValueError("a status page without records: %s" % json.dumps(page)[:500])
-            for record in records:
-                kind = record.get("kind") if isinstance(record, dict) else None
-                if kind in ("session", "activity") and isinstance(record.get("key"), str):
-                    state["sessions" if kind == "session" else "activity"][record["key"]] = record.get(kind)
+            reader.add(records)
             after = outcome.get("next")
             if not after:
-                return state
+                return reader.state()
         raise RuntimeError("the coordinator's state has more than %d pages" % MAX_EVENT_PAGES)
 
     def stop(self):

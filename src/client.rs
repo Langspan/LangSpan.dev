@@ -301,10 +301,10 @@ mod unix {
             assert!(error.contains("retry with the same request_id"), "{error}");
         }
 
-        /// Roadmap D7 (review comment 4707749784), issue #222 (review
-        /// comment 4711375982) and H9 (review comment 4711096877): a daemon
-        /// of an earlier build answers only protocol version 3, or only up
-        /// to 4. It refuses this build's version in its own, as that build
+        /// Roadmap D7 (review comment 4707749784), H9 (review comment
+        /// 4711096877) and issue #222 (review comments 4711375982 and
+        /// 4712860167): a daemon of an earlier build answers only protocol
+        /// version 3, or only up to 4 or 5. It refuses this build's version in its own, as that build
         /// does, and the client asks again once in that version, with the
         /// same request, and reads that answer.
         #[test]
@@ -312,6 +312,7 @@ mod unix {
             for version in [
                 crate::protocol::OLDEST_PROTOCOL_VERSION,
                 crate::protocol::PROTOCOL_VERSION_4,
+                crate::protocol::PROTOCOL_VERSION_5,
             ] {
                 ask_an_earlier_daemon(version);
             }

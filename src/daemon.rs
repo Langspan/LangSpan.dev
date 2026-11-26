@@ -3549,6 +3549,19 @@ mod unix {
         };
         match store.execute(&request_id, &command, &prepared, now_ms()) {
             Ok(mut execution) => {
+                // A record given in parts is cut from its JSON in the
+                // client's version, which the reply's own reshaping cannot
+                // reach (review comment 4712860167).
+                if version < PROTOCOL_VERSION
+                    && let Command::StatusRecords { after, page_bytes } = &command
+                    && matches!(execution.outcome, Outcome::StatusRecords { .. })
+                {
+                    execution.outcome =
+                        store.status_page(after.as_deref(), *page_bytes, |record| {
+                            protocol::encode_record_for(version, record)
+                                .map_err(|error| error.to_string())
+                        });
+                }
                 if let Outcome::Dashboard { dashboard } = &mut execution.outcome {
                     complete_dashboard(dashboard, store.state(), graph);
                 }
