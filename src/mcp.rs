@@ -111,8 +111,9 @@ impl ToolList {
 /// Whether `host`'s hooks have reported, within `quiet_ms` of `now_ms`, for
 /// the workspace that holds `cwd`, in the daemon's current generation. The
 /// workspace is the registered one whose root is the deepest ancestor of (or
-/// equal to) `cwd`. A hook event is what advances a session's activity: an
-/// edit observed after a tool call, or a prompt. Sessions are told apart by
+/// equal to) `cwd`. Any hook run counts: an edit observed after a tool call,
+/// a prompt, or a recorded hook run (`SessionSeen`) from a session that only
+/// reads or runs commands. Sessions are told apart by
 /// host through the prefix of their ID (`claude-code.`, `codex.`). Anything
 /// not known answers `false`, so every tool is listed.
 pub fn hooks_reporting(
@@ -153,8 +154,8 @@ pub fn hooks_reporting(
                 .get(&session.session_id)
                 .is_some_and(|activity| {
                     activity.generation == state.generation
-                        && activity.last_ms > 0
-                        && now_ms.saturating_sub(activity.last_ms) < quiet_ms
+                        && activity.last_seen_ms() > 0
+                        && now_ms.saturating_sub(activity.last_seen_ms()) < quiet_ms
                 })
     })
 }
@@ -1989,6 +1990,89 @@ mod tests {
             "claude-code",
             Path::new("/r"),
             2_000,
+            quiet
+        ));
+    }
+
+    /// A session whose hooks keep running while it only reads or runs
+    /// commands records `SessionSeen`, which advances the hook-run time but
+    /// not the activity time. That still counts as its hooks reporting.
+    #[test]
+    fn hook_runs_without_edits_or_prompts_count_as_hooks_reporting() {
+        use super::hooks_reporting as reporting;
+        use langspan_core::{Command, Event, Outcome, State, apply, decide};
+        use std::path::Path;
+        fn run(state: &mut State, id: &str, command: Command, now: u64) {
+            let decision = decide(state, &command, id, now);
+            assert!(
+                !matches!(decision.outcome, Outcome::Error { .. }),
+                "{:?}",
+                decision.outcome
+            );
+            for event in &decision.events {
+                apply(state, event).unwrap();
+            }
+        }
+        let quiet = super::HOOK_QUIET_MS;
+        let mut state = State::default();
+        apply(&mut state, &Event::Booted { generation: 1 }).unwrap();
+        run(
+            &mut state,
+            "workspace",
+            Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: "/r".into(),
+            },
+            0,
+        );
+        run(
+            &mut state,
+            "register",
+            Command::SessionRegister {
+                session_id: "claude-code.reader".into(),
+                workspace_id: "work".into(),
+                parent: None,
+                headless: false,
+            },
+            0,
+        );
+        // Only hook runs, never a prompt or an edit.
+        let at = 5 * quiet;
+        run(
+            &mut state,
+            "seen",
+            Command::SessionSeen {
+                session_id: "claude-code.reader".into(),
+            },
+            at,
+        );
+        assert_eq!(state.activity["claude-code.reader"].last_hook_ms, at);
+        assert!(reporting(
+            &state,
+            "claude-code",
+            Path::new("/r"),
+            at + 1,
+            quiet
+        ));
+        // A prompt long ago, then only hook runs: still reporting.
+        state
+            .activity
+            .get_mut("claude-code.reader")
+            .unwrap()
+            .last_ms = 1;
+        assert!(reporting(
+            &state,
+            "claude-code",
+            Path::new("/r"),
+            at + quiet - 1,
+            quiet
+        ));
+        // Once the hook runs stop for the whole period, it is not.
+        assert!(!reporting(
+            &state,
+            "claude-code",
+            Path::new("/r"),
+            at + quiet,
             quiet
         ));
     }
