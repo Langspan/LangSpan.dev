@@ -1,10 +1,19 @@
 """The seeded task families of the coordination benchmark.
 
-Each task is the prompt one agent session receives, plus what the oracle
-needs to judge the integrated result: the code units the task owns (to find
+Each task is what one agent session is asked to do, plus what the oracle
+needs to judge the combined result: the code units the task owns (to find
 duplicate work), the calls and expected results that show it done, and the
-fixed edits the stand-in agent makes in a dry run. Nothing here is shown to
-an agent except `prompt` and, in the awareness-only arm, peers' `summary`.
+edits the stand-in agent makes in a dry run. A session is shown its own
+`task` line and `details`; in the awareness-only arm it is also shown its
+peers' `task` and `details`. In the LangSpan arm, LangSpan shares each
+session's `task` line, which is why that line names everything a peer
+needs to know: the interface or setting the task changes.
+
+The stand-in has two edit lists. `ignore` is what a session does knowing
+nothing of its peers. `follow` is what the task's details ask for once the
+session knows of the peer work that `trigger` (a regular expression over
+the information its arm gave it) recognizes. A task without a trigger does
+the same either way.
 """
 
 import json
@@ -28,18 +37,17 @@ CONFIG_USERS = ("shelf/config.py", "shelf/report.py", "shelf/cli.py", "shelf/res
 
 RENAME = {
     "id": "rename",
-    "summary": "renames parse_config in shelf/config.py to load_config and updates every caller",
-    "prompt": (
-        "Rename the function `parse_config` in `shelf/config.py` to `load_config`, and update "
-        "every caller in the `shelf` package to use the new name. Remove the old name "
-        "completely: do not keep `parse_config` as an alias or a wrapper."
-    ),
+    "task": ("Rename the function `parse_config` in `shelf/config.py` to `load_config`, and update "
+             "every caller in the `shelf` package to use the new name."),
+    "details": "Remove the old name completely: do not keep `parse_config` as an alias or a wrapper.",
     "owns": ["shelf/config.py::parse_config", "shelf/config.py::load_config"],
     "standin": {
-        "naive": [{"op": "replace", "paths": list(CONFIG_USERS), "old": OLD_NAME, "new": NEW_NAME, "all": True}],
-        "coordinated": [{"op": "replace", "paths": list(CONFIG_USERS), "old": OLD_NAME, "new": NEW_NAME, "all": True}],
+        "ignore": [{"op": "replace", "paths": list(CONFIG_USERS), "old": OLD_NAME, "new": NEW_NAME, "all": True}],
+        "follow": [{"op": "replace", "paths": list(CONFIG_USERS), "old": OLD_NAME, "new": NEW_NAME, "all": True}],
     },
 }
+# Peer work that renames the parser: both names in one line of a peer's task.
+RENAME_TRIGGER = r"\b%s\b[^\n]*\b%s\b" % (OLD_NAME, NEW_NAME)
 
 # (module, function, parameters, what it returns, body over `config`, checks)
 FEATURES = (
@@ -81,20 +89,20 @@ def feature_task(module, function, parameters, returns, body, checks):
     path = "shelf/features/%s.py" % module
     return {
         "id": "feature-" + module,
-        "summary": "adds %s() in %s, which parses the configuration" % (function, path),
-        "prompt": (
-            "Add a module `%s` with a function `%s(%s)` that returns %s. Parse the configuration "
-            "text with the package's existing configuration parser in `shelf/config.py`; do not write "
-            "a second parser. Add a unit test for it in `tests/test_%s.py`."
-            % (path, function, parameters, returns, module)
+        "task": "Add a module `%s` with a function `%s(%s)` that returns %s." % (path, function, parameters, returns),
+        "details": (
+            "Parse the configuration text with the package's configuration parser in `shelf/config.py`; "
+            "do not write a second parser. If another session renames that parser, call it by its new "
+            "name. Add a unit test for it in `tests/test_%s.py`." % module
         ),
         "owns": [path],
         "module": "shelf.features." + module,
         "function": function,
         "checks": checks,
+        "trigger": RENAME_TRIGGER,
         "standin": {
-            "naive": [{"op": "write", "path": path, "content": feature_source(function, parameters, body, OLD_NAME)}],
-            "coordinated": [{"op": "write", "path": path, "content": feature_source(function, parameters, body, NEW_NAME)}],
+            "ignore": [{"op": "write", "path": path, "content": feature_source(function, parameters, body, OLD_NAME)}],
+            "follow": [{"op": "write", "path": path, "content": feature_source(function, parameters, body, NEW_NAME)}],
         },
     }
 
@@ -120,50 +128,73 @@ CONTRADICTIONS = (
 
 
 def contradiction_task(key, old, side):
+    """One side of a pair. The details define the reconciliation the oracle
+    checks: when a peer needs a different value of the same default, the
+    shared default stays as it is and each function gets its own value in
+    its own module."""
     module, function, value, why = side
     path = "shelf/%s.py" % module
     return {
         "id": "%s-%s" % (key, function),
         "pair": key,
-        "summary": "changes how %s() in %s uses the %s default" % (function, path, key),
-        "prompt": (
-            "%s. `%s()` in `%s` takes this value from the `%s` default in `shelf/settings.py`, "
-            "which is %s today. Change that default so that `%s()` uses %s."
-            % (why, function, path, key, json.dumps(old), function, json.dumps(value))
+        "task": "Make `%s()` in `%s` use %s as its `%s` setting." % (function, path, json.dumps(value), key),
+        "details": (
+            "%s. `%s()` reads `%s` from `DEFAULTS` in `shelf/settings.py`, where it is %s today; other "
+            "functions read it too. If another session's task sets `%s` to a different value, leave the "
+            "default unchanged and give `%s()` the value %s in `%s` itself. Otherwise change the default "
+            "to %s."
+            % (why, function, key, json.dumps(old), key, function, json.dumps(value), path, json.dumps(value))
         ),
         "owns": ["%s::%s" % (path, function)],
         "function": function,
         "module": "shelf." + module,
+        "key": key,
+        "old": old,
         "value": value,
+        "trigger": r"\b%s\b" % key,
         "standin": {
-            "naive": [{"op": "replace", "paths": ["shelf/settings.py"],
-                       "old": "%s: %s," % (json.dumps(key), json.dumps(old)),
-                       "new": "%s: %s," % (json.dumps(key), json.dumps(value))}],
-            "coordinated": [{"op": "replace", "paths": [path],
-                             "old": "DEFAULTS[%s]" % json.dumps(key), "new": json.dumps(value)}],
+            "ignore": [{"op": "replace", "paths": ["shelf/settings.py"],
+                        "old": "%s: %s," % (json.dumps(key), json.dumps(old)),
+                        "new": "%s: %s," % (json.dumps(key), json.dumps(value))}],
+            "follow": [{"op": "replace", "paths": [path],
+                        "old": "DEFAULTS[%s]" % json.dumps(key), "new": json.dumps(value)}],
         },
     }
 
 
 CONTROL = {
     "id": "control-slug",
-    "summary": "adds slugify() in shelf/text.py, unrelated to any other task",
-    "prompt": (
-        "Add a module `shelf/text.py` with a function `slugify(name)` that lowercases `name`, "
-        "replaces each run of characters other than letters and digits with one hyphen, and strips "
-        "hyphens from both ends. Add a unit test for it in `tests/test_text.py`."
+    "task": "Add a module `shelf/text.py` with a function `slugify(name)`.",
+    "details": (
+        "`slugify` lowercases `name`, replaces each run of characters other than letters and digits "
+        "with one hyphen, and strips hyphens from both ends. Add a unit test for it in `tests/test_text.py`."
     ),
     "owns": ["shelf/text.py"],
     "module": "shelf.text",
     "function": "slugify",
     "checks": [(["Fresh Pears!"], "fresh-pears"), (["  a--b  "], "a-b")],
     "standin": {
-        "naive": [{"op": "write", "path": "shelf/text.py", "content": (
+        "ignore": [{"op": "write", "path": "shelf/text.py", "content": (
             "import re\n\n\ndef slugify(name):\n"
             "    return re.sub(r\"[^a-z0-9]+\", \"-\", name.lower()).strip(\"-\")\n")}],
     },
 }
-CONTROL["standin"]["coordinated"] = CONTROL["standin"]["naive"]
+CONTROL["standin"]["follow"] = CONTROL["standin"]["ignore"]
+
+# What a successful combined result is, per family. The README and every
+# prompt state it; the oracle checks exactly this.
+SUCCESS = {
+    "rename_vs_new_caller": (
+        "the combined tree has `load_config` and no `parse_config`, every caller in the package "
+        "uses `load_config`, every new feature module calls `load_config` and works, and the "
+        "package's tests pass"
+    ),
+    "contradictory_defaults": (
+        "each function returns the value its task asked for, every shared default in "
+        "`shelf/settings.py` that two tasks wanted changed to different values is unchanged, and "
+        "the package's tests pass"
+    ),
+}
 
 
 def assign(family, sessions, seed):
