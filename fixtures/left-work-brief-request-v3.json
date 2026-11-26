@@ -1,0 +1,1 @@
+{"version":3,"request_id":"brief-2","command":{"op":"brief","session_id":"claude-code.bob","max_peers":6,"deliver":true,"left":["claude-code.alice"]}}

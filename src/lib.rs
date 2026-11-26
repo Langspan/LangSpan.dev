@@ -1,5 +1,6 @@
 //! LangSpan adapters. The domain crate has no dependency on these modules.
 
+pub mod adopt;
 pub mod auto_check;
 pub mod autostart;
 mod break_calls;
@@ -63,5 +64,6 @@ pub mod journal;
 pub mod spool;
 
 pub mod graph;
+pub mod index_file;
 pub mod integrate;
 pub mod landing;
