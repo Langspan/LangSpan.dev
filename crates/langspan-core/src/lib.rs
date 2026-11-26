@@ -13,6 +13,7 @@ mod recall;
 mod status;
 mod status_line;
 mod today;
+mod workspaces;
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
@@ -39,6 +40,9 @@ pub use today::{
     OpenAdmission, OpenCheck, OpenIntent, OpenMessage, TODAY_EVENTS, TODAY_FILES, TODAY_OPEN,
     TODAY_SESSIONS, Today, TodayChecks, TodayLandings, TodayOpen, TodayQuery, TodaySession,
     TodayWindow, today,
+};
+pub use workspaces::{
+    MAX_ENDING_SESSIONS, MAX_WORKSPACE_PAGE, WorkspaceEnding, WorkspaceKept, WorkspaceSummary,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1530,6 +1534,12 @@ pub const MESSAGE_LINE_LIMIT: usize = 700;
 /// every message selected for a briefing fits its text and none is
 /// acknowledged without being shown.
 pub const MESSAGE_BRIEF_BYTES: usize = 1500;
+/// The longest line an adapter renders for an uncoordinated change, before
+/// its ellipsis. A briefing that carries one takes this line, plus its
+/// ellipsis and newline, out of `MESSAGE_BRIEF_BYTES`: both are delivered
+/// once, so every message and withdrawal selected beside it must still be
+/// shown.
+pub const UNCOORDINATED_LINE_LIMIT: usize = 700;
 /// Bytes of a withdrawn message's text quoted when its readers are told.
 pub const RETRACTED_TEXT_BYTES: usize = 120;
 
@@ -1611,6 +1621,11 @@ pub struct Briefing {
     /// read or edited a file there. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkout_changes: Vec<CheckoutNotice>,
+    /// Changes on disk in this checkout that no session reported, with the
+    /// Codex sessions that may have run without LangSpan's hooks. Each is
+    /// delivered once. Newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncoordinated: Vec<UncoordinatedNotice>,
     /// Results of the automatic check run after this session's writes, not
     /// yet delivered. Each is delivered once. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1678,6 +1693,10 @@ pub struct State {
     /// Checkout changes per workspace, newest first, at most `MAX_CHECKOUTS`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub checkouts: BTreeMap<String, Vec<CheckoutChange>>,
+    /// Uncoordinated changes per workspace, newest first, at most
+    /// `MAX_UNCOORDINATED`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub uncoordinated: BTreeMap<String, Vec<UncoordinatedChange>>,
     /// The automatic check per workspace, for the workspaces where the owner
     /// turned one on.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1701,6 +1720,14 @@ pub struct State {
     /// line (roadmap H2). Derived on replay; not part of the status reply.
     #[serde(skip)]
     pub refusals: Vec<RecentRefusal>,
+    /// How many times each workspace ID has been moved or removed: its
+    /// registration revision. With the root it names one registration, so
+    /// what was derived outside the log during an earlier one (the source
+    /// index, a worker's report) is started again or refused, even after a
+    /// switch back to an earlier root. Derived on replay; not part of the
+    /// status reply.
+    #[serde(skip)]
+    pub workspace_revisions: BTreeMap<String, u32>,
     /// Writes recorded per workspace since the event log was replayed: the
     /// write generation a check run takes before its tree and carries with
     /// its test results (`record_check.writes_before`). Derived on replay;
@@ -1749,6 +1776,48 @@ pub struct CheckoutChange {
     pub generation: u64,
 }
 
+/// Uncoordinated changes kept per workspace.
+pub const MAX_UNCOORDINATED: usize = 4;
+/// Changed files one uncoordinated change keeps, at most.
+pub const MAX_UNCOORDINATED_FILES: usize = 8;
+/// Codex sessions one uncoordinated change names, at most.
+pub const MAX_UNCOORDINATED_SESSIONS: usize = 2;
+/// Changed files one scan reports for comparison, at most.
+pub const MAX_UNCOORDINATED_OBSERVED: usize = 256;
+/// The host name that starts a Codex session's ID (`codex.<host session>`).
+pub const CODEX_HOST: &str = "codex";
+
+/// Files a scan saw change in one physical workspace that no session of it
+/// reported, while Codex sessions are registered there (issue #129). Codex
+/// trusts project hooks by the exact path of their file, so a session resumed
+/// under another path for the same directory runs none of them. The sessions
+/// named are the likely cause, not a proven author: a hand edit looks the same.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UncoordinatedChange {
+    pub change_id: String,
+    pub workspace_id: String,
+    /// The Codex sessions registered here, most recently active first.
+    pub sessions: Vec<String>,
+    /// The versions the scan saw, sorted by path.
+    pub files: Vec<ObservedFile>,
+    pub at_ms: u64,
+    pub generation: u64,
+    /// Sessions this change was delivered to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivered: Vec<String>,
+}
+
+/// An uncoordinated change as one session's briefing carries it: the files
+/// still at a version no session has reported.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UncoordinatedNotice {
+    pub sessions: Vec<String>,
+    pub paths: Vec<String>,
+    pub age_ms: u64,
+}
+
 /// A checkout change as one session's briefing carries it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1788,6 +1857,19 @@ pub enum Event {
     },
     WorkspaceRegistered {
         workspace: Workspace,
+    },
+    /// The owner rebound the workspace to another checkout root (roadmap
+    /// G6). Everything kept under its ID stays; file versions recorded
+    /// under `from_root` are dropped. Local only.
+    WorkspaceMoved {
+        workspace: Workspace,
+        from_root: String,
+    },
+    /// The owner took the workspace out of coordination (roadmap G6): it,
+    /// its sessions and everything derived for them leave the state. The
+    /// events before this one stay in the log. Local only.
+    WorkspaceRemoved {
+        workspace_id: String,
     },
     SessionRegistered {
         session: Session,
@@ -2041,6 +2123,17 @@ pub enum Event {
     CheckoutChanged {
         change: CheckoutChange,
     },
+    /// A scan saw files change that no session reported, with Codex
+    /// sessions registered in the checkout (issue #129).
+    UncoordinatedChanged {
+        change: UncoordinatedChange,
+    },
+    /// A briefing carried this uncoordinated change to this session.
+    UncoordinatedDelivered {
+        workspace_id: String,
+        change_id: String,
+        session_id: String,
+    },
     /// A host check found this host present and not covered by any
     /// LangSpan install. Recorded once; repeated only after a
     /// `HostCleared`.
@@ -2126,6 +2219,38 @@ pub enum Command {
         workspace_id: String,
         root: String,
         verified_overlaps: Vec<String>,
+    },
+    /// Read-only: one page of the registered workspaces with what each
+    /// holds, in ID order, after the workspace ID `after` (from the first
+    /// when absent). The daemon's store also bounds each page's bytes.
+    WorkspaceList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
+    /// Rebind the workspace to `root`: a checkout the owner moved (the old
+    /// root is gone), or with `switch` another checkout of the same
+    /// repository. The daemon checks the filesystem and Git before the core
+    /// decides; an owner command only, never an MCP tool.
+    WorkspaceMove {
+        workspace_id: String,
+        root: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        switch: bool,
+    },
+    /// Prepared adapter input only, as `WorkspaceRegisterVerified`: the
+    /// receipt stores the original `WorkspaceMove`.
+    #[serde(skip_serializing)]
+    WorkspaceMoveVerified {
+        workspace_id: String,
+        root: String,
+        verified_overlaps: Vec<String>,
+    },
+    /// Take the workspace out of coordination. Without `apply`, a read that
+    /// says what would end and changes nothing.
+    WorkspaceRemove {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        apply: bool,
     },
     SessionRegister {
         session_id: String,
@@ -2419,6 +2544,14 @@ pub enum Command {
         to_head: Option<String>,
         files: u32,
     },
+    /// Files a scan saw change outside a checkout change, at their new
+    /// versions. The core keeps those no session of the workspace reported
+    /// and names its Codex sessions (issue #129). Internal to the daemon's
+    /// scan, like `ObserveDisk`.
+    ObserveUncoordinated {
+        workspace_id: String,
+        files: Vec<ObservedFile>,
+    },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
     /// earlier check and absent here are cleared.
@@ -2651,6 +2784,21 @@ enum CommandWire {
     WorkspaceRegister {
         workspace_id: String,
         root: String,
+    },
+    WorkspaceList {
+        #[serde(default)]
+        after: Option<String>,
+    },
+    WorkspaceMove {
+        workspace_id: String,
+        root: String,
+        #[serde(default)]
+        switch: bool,
+    },
+    WorkspaceRemove {
+        workspace_id: String,
+        #[serde(default)]
+        apply: bool,
     },
     SessionRegister {
         session_id: String,
@@ -2942,6 +3090,14 @@ enum CommandWire {
         to_head: Option<String>,
         files: u32,
     },
+    /// Files a scan saw change outside a checkout change, at their new
+    /// versions. The core keeps those no session of the workspace reported
+    /// and names its Codex sessions (issue #129). Internal to the daemon's
+    /// scan, like `ObserveDisk`.
+    ObserveUncoordinated {
+        workspace_id: String,
+        files: Vec<ObservedFile>,
+    },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
     /// earlier check and absent here are cleared.
@@ -3165,6 +3321,23 @@ impl<'de> Deserialize<'de> for Command {
 pub enum Outcome {
     Workspace {
         workspace: Workspace,
+    },
+    Workspaces {
+        workspaces: Vec<WorkspaceSummary>,
+        /// The cursor for the next page (`after`), when more remain.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+    },
+    WorkspaceMoved {
+        workspace: Workspace,
+        from_root: String,
+        kept: WorkspaceKept,
+    },
+    /// `applied` is false for a dry run: nothing ended.
+    WorkspaceRemoval {
+        workspace_id: String,
+        applied: bool,
+        ending: WorkspaceEnding,
     },
     Session {
         session: Session,
@@ -3413,6 +3586,12 @@ pub enum Outcome {
     CheckoutObserved {
         change: CheckoutChange,
     },
+    /// The Codex sessions named and the files kept; both empty when every
+    /// change was explained or nothing new was recorded.
+    UncoordinatedObserved {
+        sessions: Vec<String>,
+        paths: Vec<String>,
+    },
     Recap {
         recap: Recap,
     },
@@ -3549,6 +3728,25 @@ fn decide_checked(
                 outcome: Outcome::Workspace { workspace },
             })
         }
+        Command::WorkspaceList { after } => {
+            let (workspaces, next) = workspaces::list(state, after.as_deref())?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Workspaces { workspaces, next },
+            })
+        }
+        Command::WorkspaceMove {
+            workspace_id, root, ..
+        } => workspaces::decide_move(state, workspace_id, root, &[], now_ms),
+        Command::WorkspaceMoveVerified {
+            workspace_id,
+            root,
+            verified_overlaps,
+        } => workspaces::decide_move(state, workspace_id, root, verified_overlaps, now_ms),
+        Command::WorkspaceRemove {
+            workspace_id,
+            apply,
+        } => workspaces::decide_remove(state, workspace_id, *apply, now_ms),
         Command::SessionRegister {
             session_id,
             workspace_id,
@@ -4970,6 +5168,7 @@ fn decide_checked(
             // out, and any message at all makes this briefing new.
             briefing.changed = signature != previous
                 || !briefing.messages.is_empty()
+                || !briefing.uncoordinated.is_empty()
                 || !briefing.retracted.is_empty()
                 || !briefing.checks.is_empty();
             let mut events = Vec::new();
@@ -5000,6 +5199,15 @@ fn decide_checked(
                     session_id: session_id.clone(),
                     check_id: notice.check_id.clone(),
                 }));
+                events.extend(
+                    uncoordinated_owed(state, session_id, now_ms).map(|(change, _)| {
+                        Event::UncoordinatedDelivered {
+                            workspace_id: change.workspace_id.clone(),
+                            change_id: change.change_id.clone(),
+                            session_id: session_id.clone(),
+                        }
+                    }),
+                );
             }
             Ok(Decision {
                 events,
@@ -5293,6 +5501,71 @@ fn decide_checked(
                     change: change.clone(),
                 }],
                 outcome: Outcome::CheckoutObserved { change },
+            })
+        }
+        Command::ObserveUncoordinated {
+            workspace_id,
+            files,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            if files.is_empty() || files.len() > MAX_UNCOORDINATED_OBSERVED {
+                return Err(error(
+                    "invalid_path",
+                    &format!(
+                        "An uncoordinated change names 1 to {MAX_UNCOORDINATED_OBSERVED} changed files"
+                    ),
+                ));
+            }
+            let files = normalized_files(files)?;
+            // A file under an admitted edit is that edit's, whose report has
+            // not arrived yet; a version a session reported is explained.
+            let unexplained: Vec<ObservedFile> = files
+                .into_iter()
+                .filter(|file| {
+                    !leased(state, workspace_id, &file.path, now_ms)
+                        && !explained(state, workspace_id, file)
+                })
+                .take(MAX_UNCOORDINATED_FILES)
+                .collect();
+            // A Codex session already named in a notice still held is not
+            // named again: one notice per session until it ages out.
+            let named: BTreeSet<&str> = held_uncoordinated(state, workspace_id, now_ms)
+                .flat_map(|change| change.sessions.iter().map(String::as_str))
+                .collect();
+            let sessions = if unexplained.is_empty() {
+                Vec::new()
+            } else {
+                codex_sessions(state, workspace_id)
+                    .into_iter()
+                    .filter(|session| !named.contains(session.as_str()))
+                    .take(MAX_UNCOORDINATED_SESSIONS)
+                    .collect()
+            };
+            if sessions.is_empty() {
+                return Ok(Decision {
+                    events: Vec::new(),
+                    outcome: Outcome::UncoordinatedObserved {
+                        sessions: Vec::new(),
+                        paths: Vec::new(),
+                    },
+                });
+            }
+            let change = UncoordinatedChange {
+                change_id: request_id.into(),
+                workspace_id: workspace_id.clone(),
+                sessions: sessions.clone(),
+                files: unexplained,
+                at_ms: now_ms,
+                generation: state.generation,
+                delivered: Vec::new(),
+            };
+            validate_uncoordinated(state, &change)?;
+            Ok(Decision {
+                outcome: Outcome::UncoordinatedObserved {
+                    sessions,
+                    paths: change.files.iter().map(|file| file.path.clone()).collect(),
+                },
+                events: vec![Event::UncoordinatedChanged { change }],
             })
         }
         Command::Recap { workspace_id } => {
@@ -6844,8 +7117,17 @@ fn brief(
         .cloned()
         .collect();
     // Withdrawals first, then messages owed to this session, each newest
-    // first, as many as the text of one briefing is sure to hold; the rest
-    // wait for the next one. The first always fits.
+    // first, as many as the text of one briefing is sure to hold beside an
+    // owed uncoordinated change, whose line is reserved; the rest wait for
+    // the next one. The first always fits.
+    let uncoordinated: Vec<UncoordinatedNotice> = uncoordinated_owed(state, session_id, now_ms)
+        .map(|(_, notice)| notice)
+        .collect();
+    let message_bytes = if uncoordinated.is_empty() {
+        MESSAGE_BRIEF_BYTES
+    } else {
+        MESSAGE_BRIEF_BYTES - (UNCOORDINATED_LINE_LIMIT + 4)
+    };
     let mut bytes = 0;
     let retracted: Vec<RetractedMessage> = state
         .retracted_notices
@@ -6856,7 +7138,7 @@ fn brief(
         .take(BRIEF_MESSAGES)
         .take_while(|retracted| {
             bytes += retracted_cost(retracted);
-            bytes <= MESSAGE_BRIEF_BYTES
+            bytes <= message_bytes
         })
         .cloned()
         .collect();
@@ -6876,7 +7158,7 @@ fn brief(
         .take(BRIEF_MESSAGES)
         .take_while(|message| {
             bytes += message_cost(message);
-            bytes <= MESSAGE_BRIEF_BYTES
+            bytes <= message_bytes
         })
         .map(|message| Message {
             acknowledged: Vec::new(),
@@ -6997,6 +7279,7 @@ fn brief(
             messages,
             retracted,
             checkout_changes,
+            uncoordinated,
             // One result per briefing, the newest: it always fits the
             // rendered text, and each delivered one is removed, so the rest
             // follow at the next briefings.
@@ -7010,6 +7293,149 @@ fn brief(
         },
         fingerprint(&signature),
     ))
+}
+
+/// Whether an active, unexpired lease of this workspace holds `path`.
+fn leased(state: &State, workspace_id: &str, path: &str, now_ms: u64) -> bool {
+    state.leases.values().any(|lease| {
+        lease.workspace_id == workspace_id
+            && lease.status == LeaseStatus::Active
+            && lease.generation == state.generation
+            && lease.expires_at_ms > now_ms
+            && lease.paths.iter().any(|held| held == path)
+    })
+}
+
+/// Whether a session of this workspace reported reading or writing the file
+/// at this version.
+fn explained(state: &State, workspace_id: &str, file: &ObservedFile) -> bool {
+    state
+        .sessions
+        .values()
+        .filter(|session| session.workspace_id == workspace_id)
+        .filter_map(|session| state.activity.get(&session.session_id))
+        .any(|activity| {
+            activity
+                .known
+                .iter()
+                .any(|known| known.path == file.path && known.state == file.state)
+        })
+}
+
+/// The Codex sessions registered in this workspace in this generation, most
+/// recently active first. An ended or exited one is kept: Codex reports no
+/// session end, and a resumed session is a new process.
+fn codex_sessions(state: &State, workspace_id: &str) -> Vec<String> {
+    let mut sessions: Vec<(u64, &str)> = state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.workspace_id == workspace_id
+                && session.generation == state.generation
+                && session
+                    .session_id
+                    .split_once('.')
+                    .is_some_and(|(host, _)| host == CODEX_HOST)
+        })
+        .map(|session| {
+            let last = state
+                .activity
+                .get(&session.session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map_or(0, |activity| activity.last_ms);
+            (last, session.session_id.as_str())
+        })
+        .collect();
+    sessions.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    sessions.into_iter().map(|(_, id)| id.to_owned()).collect()
+}
+
+/// The files of an uncoordinated change that are still at a version no
+/// session of its workspace reported: a report arriving after the scan
+/// explains the rest.
+fn still_unexplained(state: &State, change: &UncoordinatedChange) -> Vec<String> {
+    change
+        .files
+        .iter()
+        .filter(|file| !explained(state, &change.workspace_id, file))
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+/// This workspace's uncoordinated changes of this generation, within the
+/// briefing horizon, with a file still unexplained. Newest first.
+fn held_uncoordinated<'a>(
+    state: &'a State,
+    workspace_id: &str,
+    now_ms: u64,
+) -> impl Iterator<Item = &'a UncoordinatedChange> {
+    state
+        .uncoordinated
+        .get(workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter(move |change| {
+            change.generation == state.generation
+                && now_ms.saturating_sub(change.at_ms) <= BRIEF_HORIZON_MS
+                && !still_unexplained(state, change).is_empty()
+        })
+}
+
+/// The uncoordinated change owed to this session's next briefing, the
+/// newest, with the notice it carries: one always fits the rendered text, and
+/// each is delivered once, so the rest follow at the next briefings.
+fn uncoordinated_owed<'a>(
+    state: &'a State,
+    session_id: &'a str,
+    now_ms: u64,
+) -> impl Iterator<Item = (&'a UncoordinatedChange, UncoordinatedNotice)> {
+    let workspace = state
+        .sessions
+        .get(session_id)
+        .map_or("", |session| session.workspace_id.as_str());
+    held_uncoordinated(state, workspace, now_ms)
+        .filter(move |change| !change.delivered.iter().any(|held| held == session_id))
+        .take(1)
+        .map(move |change| {
+            (
+                change,
+                UncoordinatedNotice {
+                    sessions: change.sessions.clone(),
+                    paths: still_unexplained(state, change),
+                    age_ms: now_ms.saturating_sub(change.at_ms),
+                },
+            )
+        })
+}
+
+fn validate_uncoordinated(state: &State, change: &UncoordinatedChange) -> Result<(), CoreError> {
+    validate_fact_header(
+        state,
+        &change.change_id,
+        &change.workspace_id,
+        change.generation,
+    )?;
+    if change.files.is_empty()
+        || change.files.len() > MAX_UNCOORDINATED_FILES
+        || normalized_files(&change.files)? != change.files
+        || change.sessions.is_empty()
+        || change.sessions.len() > MAX_UNCOORDINATED_SESSIONS
+        || change.sessions.iter().any(|session| {
+            state
+                .sessions
+                .get(session)
+                .is_none_or(|known| known.workspace_id != change.workspace_id)
+        })
+    {
+        return Err(error(
+            "invalid_event",
+            &format!(
+                "An uncoordinated change names 1 to {MAX_UNCOORDINATED_FILES} sorted, unique files and 1 to {MAX_UNCOORDINATED_SESSIONS} sessions of its workspace"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether the session wrote a file since its last tool batch or stop.
@@ -7579,6 +8005,13 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 .workspaces
                 .insert(workspace.workspace_id.clone(), workspace.clone());
         }
+        Event::WorkspaceMoved {
+            workspace,
+            from_root,
+        } => workspaces::apply_moved(state, workspace, from_root)?,
+        Event::WorkspaceRemoved { workspace_id } => {
+            workspaces::apply_removed(state, workspace_id)?;
+        }
         Event::SessionRegistered { session } => {
             validate_session_registration(state, session)?;
             state
@@ -8127,6 +8560,42 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 .or_default();
             changes.insert(0, change.clone());
             changes.truncate(MAX_CHECKOUTS);
+        }
+        Event::UncoordinatedChanged { change } => {
+            validate_uncoordinated(state, change)?;
+            if !change.delivered.is_empty() {
+                return Err(error(
+                    "invalid_event",
+                    "A new uncoordinated change has not been delivered to any session",
+                ));
+            }
+            let changes = state
+                .uncoordinated
+                .entry(change.workspace_id.clone())
+                .or_default();
+            changes.insert(0, change.clone());
+            changes.truncate(MAX_UNCOORDINATED);
+        }
+        Event::UncoordinatedDelivered {
+            workspace_id,
+            change_id,
+            session_id,
+        } => {
+            if known_session(state, session_id)?.workspace_id != *workspace_id {
+                return Err(error(
+                    "invalid_event",
+                    "An uncoordinated change is delivered to a session of its workspace",
+                ));
+            }
+            // A change already truncated away has nothing left to mark.
+            if let Some(change) = state
+                .uncoordinated
+                .get_mut(workspace_id)
+                .and_then(|changes| changes.iter_mut().find(|c| c.change_id == *change_id))
+                && !change.delivered.contains(session_id)
+            {
+                change.delivered.push(session_id.clone());
+            }
         }
         Event::InterfaceChanged { notice } => {
             validate_notice(notice)?;

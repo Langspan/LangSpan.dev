@@ -20,6 +20,22 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  is refused without --allow-network; from a phone, use
                                  an SSH tunnel or a VPN to this machine instead
   workspace add ID ROOT          Register a physical workspace
+  workspace list [--after ID]    Every workspace: root and whether it exists, current
+                                 sessions, notes, pending messages, check records,
+                                 automatic check and remote sharing; a page at a
+                                 time, in ID order, naming the next page's command
+  workspace move ID NEW_ROOT [--switch] --request-id ID
+                                 Rebind a workspace to a checkout you moved (the old
+                                 root is gone), or with --switch to another checkout of
+                                 the same repository. Notes, messages, checks,
+                                 landings and settings are kept. Prints the project
+                                 hook installs to rerun; edits no host configuration
+  workspace remove ID [--apply] [--request-id ID]
+                                 Dry run: what would end. With --apply, take the
+                                 workspace out of status, recap, briefings and the
+                                 dashboard; its events stay. Refused while a session
+                                 holds an admission there, a landing holds or waits
+                                 for its push turn, or remote sharing is on
   session start ID WORKSPACE      Register or reattach a logical session
   session attach-pid SESSION PID  Observe an owned process incarnation (Linux, macOS)
   intent set SESSION PATH...     Declare work; optional --summary TEXT
@@ -553,6 +569,15 @@ fn hooks(
     if vendor == install::Vendor::Cursor && install {
         println!(
             "Cursor: built from documentation, not yet verified on a real Cursor (ADR 0032). Cursor runs project hooks only in a trusted workspace. These files hold paths on this machine; Cursor's project files are often committed, so keep LangSpan's entries out of a commit."
+        );
+    }
+    if vendor == install::Vendor::Codex && install {
+        // Codex trusts project hooks by the exact path of their file: a
+        // session resumed under another path for the same directory runs
+        // none of them (issue #129).
+        println!(
+            "Codex: start and resume Codex in '{}', the resolved root with no symbolic links. Codex trusts a project's hooks only at the exact path they were trusted at, so a session started or resumed under another path for the same directory (a symbolic link, or /tmp for /private/tmp on macOS) runs none of LangSpan's hooks, without a warning.",
+            root.display()
         );
     }
     if vendor == install::Vendor::Gemini && install {
@@ -2997,9 +3022,10 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     {
         return hooks(vendor, *action == "install", state_dir, &mut options, apply);
     }
-    if apply {
+    let removes_workspace = matches!(words.as_slice(), ["workspace", "remove", _]);
+    if apply && !removes_workspace {
         return Err(
-            "--apply is valid only for `install`, `uninstall`, `hooks install|remove` and `land`"
+            "--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land` and `workspace remove`"
                 .into(),
         );
     }
@@ -3056,6 +3082,19 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             ["workspace", "add", id, root] => Command::WorkspaceRegister {
                 workspace_id: (*id).into(),
                 root: (*root).into(),
+            },
+            ["workspace", "list"] => Command::WorkspaceList {
+                after: options.remove("--after"),
+            },
+            ["workspace", "move", id, root] => Command::WorkspaceMove {
+                workspace_id: (*id).into(),
+                // The daemon runs elsewhere: a relative root is this shell's.
+                root: std::path::absolute(root)?.to_string_lossy().into_owned(),
+                switch: options.remove("--switch").is_some(),
+            },
+            ["workspace", "remove", id] => Command::WorkspaceRemove {
+                workspace_id: (*id).into(),
+                apply,
             },
             ["session", "start", id, workspace] => Command::SessionRegister {
                 session_id: (*id).into(),
@@ -3263,6 +3302,8 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::ShowMessage { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
+                | Command::WorkspaceList { .. }
+                | Command::WorkspaceRemove { apply: false, .. }
         ) {
             options
                 .remove("--request-id")
@@ -3302,6 +3343,14 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         println!("{}", serde_json::to_string(&response)?);
     } else {
         print_human(&response, &state_dir)?;
+        if let Outcome::WorkspaceMoved {
+            workspace,
+            from_root,
+            ..
+        } = &response.outcome
+        {
+            print_project_hook_reruns(&state_dir, workspace, from_root);
+        }
     }
     Ok(match response.outcome {
         Outcome::Error { .. } => 1,
@@ -3352,6 +3401,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--detail"
             | "--all"
             | "--skill"
+            | "--switch"
             | "--off" => {
                 if options.insert(arg.clone(), String::new()).is_some() {
                     return Err(format!("duplicate option {arg}").into());
@@ -3437,6 +3487,62 @@ fn print_symbol_detail(symbol: &langspan_core::SymbolRef) {
     }
 }
 
+/// After `workspace move`: the hosts whose project-level hooks, in the new
+/// checkout or the old one, still name the old root for this workspace and
+/// state directory, with the command that installs them for the new root.
+/// Host configuration is never edited here. User-level hooks need nothing:
+/// they adopt the moved ID from the new root on their next event.
+fn print_project_hook_reruns(
+    state_dir: &std::path::Path,
+    workspace: &langspan_core::Workspace,
+    from_root: &str,
+) {
+    use langspan::install::{self, Vendor};
+    let canonical =
+        |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let state = canonical(state_dir);
+    let dirs = [
+        std::path::Path::new(&workspace.root),
+        std::path::Path::new(from_root),
+    ];
+    let hosts: Vec<Vendor> = Vendor::ALL
+        .into_iter()
+        .filter(|vendor| {
+            dirs.iter()
+                .flat_map(|dir| {
+                    vendor
+                        .project_hook_files()
+                        .iter()
+                        .map(|file| dir.join(file))
+                })
+                .filter_map(|path| install::read(&path).ok().flatten())
+                .any(|settings| {
+                    install::managed_hooks(&settings, |_| true)
+                        .iter()
+                        .filter_map(|hook| install::parse_project_hook(*vendor, hook))
+                        .any(|registration| {
+                            registration.workspace_id == workspace.workspace_id
+                                && canonical(&registration.state_dir) == state
+                                && registration.root != std::path::Path::new(&workspace.root)
+                        })
+                })
+        })
+        .collect();
+    if hosts.is_empty() {
+        return;
+    }
+    println!("Project hooks name the old root; rerun:");
+    for vendor in hosts {
+        println!(
+            "  langspan hooks install {} --workspace {} --root {} --state-dir {} --apply",
+            vendor.name(),
+            install::quote(&workspace.workspace_id),
+            install::quote(&workspace.root),
+            install::quote(&state.to_string_lossy()),
+        );
+    }
+}
+
 fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), langspan::Error> {
     if response.replayed {
         println!(
@@ -3449,6 +3555,85 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             "Workspace {} registered at {:?}.",
             workspace.workspace_id, workspace.root
         ),
+        Outcome::Workspaces { workspaces, next } => {
+            if workspaces.is_empty() {
+                println!("No workspaces are registered.");
+            }
+            for workspace in workspaces {
+                let mut extras = Vec::new();
+                if workspace.auto_check {
+                    extras.push(", automatic check on");
+                }
+                if workspace.remote_sharing {
+                    extras.push(", remote sharing on");
+                }
+                println!(
+                    "{} {:?}{}: {} current sessions, {} notes, {} pending messages, {} check records{}",
+                    workspace.workspace_id,
+                    workspace.root,
+                    if workspace.root_exists {
+                        ""
+                    } else {
+                        " (root missing)"
+                    },
+                    workspace.sessions_current,
+                    workspace.notes,
+                    workspace.messages_pending,
+                    workspace.checks,
+                    extras.concat()
+                );
+            }
+            if let Some(next) = next {
+                println!("More: langspan workspace list --after {next}");
+            }
+        }
+        Outcome::WorkspaceMoved {
+            workspace, kept, ..
+        } => println!(
+            "Workspace {} now at {}. Kept: {} notes, {} pending messages, {} check records, {} landings.",
+            workspace.workspace_id,
+            workspace.root,
+            kept.notes,
+            kept.messages_pending,
+            kept.checks,
+            kept.landings
+        ),
+        Outcome::WorkspaceRemoval {
+            workspace_id,
+            applied,
+            ending,
+        } => {
+            let mut sessions = ending.sessions.join(", ");
+            if ending.more_sessions > 0 {
+                sessions.push_str(&format!(" and {} more", ending.more_sessions));
+            }
+            let check = ending
+                .auto_check
+                .as_ref()
+                .map(|name| format!(", the automatic check {name:?}"))
+                .unwrap_or_default();
+            let ends = format!(
+                "{} sessions{}, {} intents, {} notes, {} pending messages{check}",
+                ending.sessions.len() + ending.more_sessions as usize,
+                if sessions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({sessions})")
+                },
+                ending.intents,
+                ending.notes,
+                ending.messages_pending,
+            );
+            if *applied {
+                println!(
+                    "Workspace {workspace_id} removed. Ended: {ends}. Its history stays in `langspan events`."
+                );
+            } else {
+                println!(
+                    "Dry run, nothing changed. Removing workspace {workspace_id} would end: {ends}. Its history would stay in `langspan events`. Add --apply to remove it."
+                );
+            }
+        }
         Outcome::Session { session } => println!(
             "Session {} attached to {} in generation {}.",
             session.session_id, session.workspace_id, session.generation
@@ -3962,6 +4147,11 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 change.to_head.as_deref(),
                 change.files
             )
+        ),
+        Outcome::UncoordinatedObserved { sessions, paths } => println!(
+            "Uncoordinated change recorded: sessions {}; files {}.",
+            sessions.join(", "),
+            paths.join(", ")
         ),
         Outcome::Today { today } => {
             println!(

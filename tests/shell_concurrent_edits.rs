@@ -1326,3 +1326,122 @@ fn the_same_shell_change_made_again_after_a_revert_is_still_the_sessions() {
     assert_eq!(git(&f.work(), &["show", "HEAD:a.txt"]), "a line\nmore\n");
     assert_eq!(f.status(), "");
 }
+
+/// Alice's shell command that rewrites `file` in place with `sed script`.
+/// The loop makes its write set unknown, as a formatter's is.
+fn sed_command(f: &Fixture, file: &str, script: &str) -> String {
+    format!(
+        "for f in {file}; do sed '{script}' $f > '{0}' && cat '{0}' > $f; done",
+        f.base.join("rewritten").display()
+    )
+}
+
+/// Issue #158: Bob writes `file` as `written`, and Alice's command changes
+/// only whitespace in it, giving `changed`, a change that matters in that
+/// file's language. With or without Bob's command running alongside, it is
+/// no reformat: no line keeps Bob as its author, so his `commit --mine`
+/// takes none of it, and Alice is not credited with Bob's file either.
+fn a_whitespace_change_that_matters_is_not_its_writers(
+    file: &str,
+    written: &str,
+    script: &str,
+    changed: &str,
+) {
+    for overlapped in [false, true] {
+        let f = Fixture::new();
+        f.write(BOB, "bob-1", file, written);
+        let bob_command = overlapped.then(|| f.start_held(BOB, "bob-2", "true"));
+        let post = f.run_shell(ALICE, "alice-1", &sed_command(&f, file, script));
+        assert_eq!(fs::read_to_string(f.work().join(file)).unwrap(), changed);
+        assert_eq!(post.coverage, "contested", "{overlapped}: {post:?}");
+        assert!(
+            !post.detail.contains("keep the authors"),
+            "{overlapped}: {post:?}"
+        );
+        assert!(f.credited(ALICE, "Bash").is_empty(), "{overlapped}");
+        if let Some((bob, command)) = bob_command {
+            bob.release();
+            f.bash(BOB, "PostToolUse", "bob-2", &command);
+        }
+
+        let ran = f.commit_mine(BOB, "bob-3", "Bob: his file");
+        assert!(!ran.status.success(), "{overlapped}: {}", said(&ran));
+        assert!(said(&ran).contains(file), "{overlapped}: {}", said(&ran));
+        assert_eq!(f.head_files(), "start\n\na.txt\nb.txt\n", "{overlapped}");
+        assert_eq!(fs::read_to_string(f.work().join(file)).unwrap(), changed);
+    }
+}
+
+/// Issue #158: re-indenting Bob's Python moves `finish()` into the `if`.
+#[test]
+fn reindenting_another_sessions_python_block_is_not_credited_to_its_writer() {
+    a_whitespace_change_that_matters_is_not_its_writers(
+        "app.py",
+        "def run(ready):\n    if ready:\n        start()\n    finish()\n",
+        "s/^    finish/        finish/",
+        "def run(ready):\n    if ready:\n        start()\n        finish()\n",
+    );
+}
+
+/// Issue #158: re-indenting Bob's YAML moves the `ports` list under
+/// `defaults`.
+#[test]
+fn reindenting_another_sessions_yaml_list_is_not_credited_to_its_writer() {
+    a_whitespace_change_that_matters_is_not_its_writers(
+        "config.yml",
+        "defaults:\n  retries: 3\nports:\n  - 80\n",
+        "3,4s/^/  /",
+        "defaults:\n  retries: 3\n  ports:\n    - 80\n",
+    );
+}
+
+/// Issue #158: the spaces inside a Rust string literal are its content.
+#[test]
+fn respacing_a_string_in_another_sessions_rust_is_not_credited_to_its_writer() {
+    a_whitespace_change_that_matters_is_not_its_writers(
+        "src/greet.rs",
+        "pub fn greet() -> &'static str {\n    \"hello world\"\n}\n",
+        "s/hello world/hello  world/",
+        "pub fn greet() -> &'static str {\n    \"hello  world\"\n}\n",
+    );
+}
+
+/// Issue #158: a Python call only re-wrapped inside its parentheses, with
+/// no block re-indented, is a reformat: its lines stay Bob's, so Alice is
+/// credited with none of them and Bob's `commit --mine` commits them all.
+#[test]
+fn rewrapping_a_call_in_another_sessions_python_keeps_its_writer() {
+    let f = Fixture::new();
+    f.write(
+        BOB,
+        "bob-1",
+        "app.py",
+        "def run():\n    result = compute(first_argument, second_argument)\n    return result\n",
+    );
+    let wrapped = "def run():\n    result = compute(\n        first_argument, second_argument\n    )\n    return result\n";
+    let post = f.run_shell(
+        ALICE,
+        "alice-1",
+        &sed_command(
+            &f,
+            "app.py",
+            "s/compute(first_argument, second_argument)/compute(\\\n        first_argument, second_argument\\\n    )/",
+        ),
+    );
+    assert_eq!(
+        fs::read_to_string(f.work().join("app.py")).unwrap(),
+        wrapped
+    );
+    assert_eq!(post.coverage, "contested", "{post:?}");
+    assert!(
+        post.detail
+            .contains("1 of them keep the authors of the lines the command only reformatted"),
+        "{post:?}"
+    );
+    assert!(f.credited(ALICE, "Bash").is_empty());
+
+    let ran = f.commit_mine(BOB, "bob-2", "Bob: wrapped");
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(git(&f.work(), &["show", "HEAD:app.py"]), wrapped);
+    assert_eq!(f.status(), "");
+}
