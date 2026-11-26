@@ -535,6 +535,40 @@ A value the run did not measure is `null`, never zero. In the arms without
 LangSpan, `refusals.status`, `coordinator_scans.status` and
 `context_added.status` are `not_applicable`.
 
+## Refuse against wait on a current holder
+
+`holder_wait.py` compares the two conflict policies of
+[ADR 0036](../../docs/adr/0036-coordination-policies.md) on the
+`same-file-current-holder` scenario ([SCENARIOS.md](SCENARIOS.md)) as two
+LangSpan arms: `langspan_refuse` (`policy set ... conflict refuse`, the
+default) and `langspan_wait` (`policy set ... conflict wait`). Two sessions
+share one checkout of the fixture, and each adds one setting to
+`shelf/settings.py`; the second starts `--stagger-s` seconds after the first
+(default 5). A run is accepted when both settings are in `DEFAULTS` and every
+fixture setting is kept. Each run starts from a fresh fixture, coordinator
+and state directory, and appends one line to `OUT/runs.jsonl` whatever
+happened (`completed`, `failed`, `timed_out` or `error`): the policy table,
+each session's exit status, the refusals, waits and settled outcomes from the
+event log, and the elapsed time.
+
+```sh
+python3 benchmarks/coordination/holder_wait.py --arm langspan_refuse --agent claude \
+  --runs 10 --out runs/holder --langspan target/release/langspan
+python3 benchmarks/coordination/holder_wait.py --arm langspan_wait --agent claude \
+  --runs 10 --out runs/holder --langspan target/release/langspan
+python3 benchmarks/coordination/holder_wait.py --summarize runs/holder
+```
+
+`--summarize` reports per arm the runs by status, the runs that met a holder,
+the stop rate among those (a session whose refusal was settled as `stopped`),
+retries (`retried_admitted`), refusals, waits, and the median elapsed time and
+time to the admitted retry, each with its sample size. `--agent claude` runs
+real Claude Code sessions under the operator's own sign-in with the same
+permission settings as `driver.py`: prompts stay on and nobody answers them.
+`--agent standin` (the default) drives the real hook executable with a
+scripted pair and makes no model call; its runs check the harness and are
+labeled as such in the summary. No real-agent run is retained yet.
+
 ## Arms in owner manifests
 
 The runner accepts the three arms above and three more. `no_tool` and

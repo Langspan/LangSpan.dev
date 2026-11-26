@@ -273,12 +273,15 @@ fn is_blank(line: &str) -> bool {
 }
 
 /// Lines directly above a definition that belong to it: attributes,
-/// decorators and comments, with no blank line between.
+/// decorators and comments, with no blank line between. A C# attribute
+/// (`[Obsolete]`) is a whole line in brackets, so a statement such as
+/// JavaScript's `[a, b] = f();` is not one.
 fn leading(line: &str) -> bool {
-    let line = line.trim_start();
+    let line = line.trim();
     ["#", "@", "//", "/*", "*"]
         .iter()
         .any(|prefix| line.starts_with(prefix))
+        || (line.starts_with('[') && line.ends_with(']'))
 }
 
 struct Definition<'a> {
@@ -609,6 +612,62 @@ public class Orders {
             ["Orders::count"]
         );
         assert_eq!(java(&replace("package shop;", "package store;")), None);
+    }
+
+    #[test]
+    fn a_csharp_method_holds_its_attributes_and_doc_comment() {
+        const CSHARP: &str = "namespace Shop;
+
+public class Orders
+{
+    /// <summary>Places one order.</summary>
+    [Obsolete]
+    public Order Place(Cart cart)
+    {
+        return null;
+    }
+
+    private int Count()
+    {
+        return 0;
+    }
+}
+";
+        let csharp = |edit: &Edit| {
+            locate("src/Shop/Orders.cs", CSHARP.as_bytes(), edit).map(|located| keys(&located))
+        };
+        assert_eq!(
+            csharp(&replace("return null;", "return new Order();")).unwrap(),
+            ["Orders::Place"]
+        );
+        assert_eq!(
+            csharp(&replace("[Obsolete]", "[Obsolete(\"no\")]")).unwrap(),
+            ["Orders::Place"]
+        );
+        assert_eq!(
+            csharp(&replace("Places one order.", "Places an order.")).unwrap(),
+            ["Orders::Place"]
+        );
+        assert_eq!(
+            csharp(&replace("return 0;", "return 1;")).unwrap(),
+            ["Orders::Count"]
+        );
+        assert_eq!(
+            csharp(&replace("namespace Shop;", "namespace Store;")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_bracketed_statement_above_a_function_is_not_its_attribute() {
+        const SCRIPT: &str =
+            "let a, b;\n[a, b] = pair();\nexport function run() {\n  return a;\n}\n";
+        let located = locate(
+            "web/run.ts",
+            SCRIPT.as_bytes(),
+            &replace("[a, b] = pair();", "[b, a] = pair();"),
+        );
+        assert_eq!(located, None, "a statement outside any definition");
     }
 
     #[test]
