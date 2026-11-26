@@ -87,6 +87,7 @@ fn notice(
                 path: path.into(),
                 changes,
                 dependents: vec![],
+                elsewhere: vec![],
                 by_session: Some(by.into()),
                 at_ms,
                 generation: 1,

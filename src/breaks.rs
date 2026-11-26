@@ -230,23 +230,23 @@ fn layout(breaks: &[CallBreak]) -> Option<(String, Vec<usize>)> {
             call.line,
             quoted(&call.name)
         );
+        // A change made in another worktree of the repository names it.
+        let file = match &found.worktree {
+            Some(root) => format!("{} in worktree {}", quoted(&found.defined_in), quoted(root)),
+            None => quoted(&found.defined_in),
+        };
         let said = match (found.change.as_str(), &found.after_name, found.after_arity) {
             ("renamed", Some(to), _) => format!(
-                "{site}, which was renamed to {} in {} {by}: {}.",
+                "{site}, which was renamed to {} in {file} {by}: {}.",
                 quoted(to),
-                quoted(&found.defined_in),
                 quoted(&found.after),
             ),
             // A notice recorded before removals kept their signature has none.
             ("removed", _, _) if found.before.is_empty() => {
-                format!(
-                    "{site}, which was removed from {} {by}.",
-                    quoted(&found.defined_in)
-                )
+                format!("{site}, which was removed from {file} {by}.")
             }
             ("removed", _, _) => format!(
-                "{site}, which was removed from {} {by}; it was {}.",
-                quoted(&found.defined_in),
+                "{site}, which was removed from {file} {by}; it was {}.",
                 quoted(&found.before),
             ),
             (_, _, Some(after_arity)) => {
@@ -260,12 +260,11 @@ fn layout(breaks: &[CallBreak]) -> Option<(String, Vec<usize>)> {
                     ""
                 };
                 format!(
-                    "{site} with {} argument{}; it now takes {}{receiver}: {} in {}, changed {by} from {}{before}.",
+                    "{site} with {} argument{}; it now takes {}{receiver}: {} in {file}, changed {by} from {}{before}.",
                     call.args,
                     if call.args == 1 { "" } else { "s" },
                     takes(&after_arity),
                     quoted(&found.after),
-                    quoted(&found.defined_in),
                     quoted(&found.before),
                 )
             }
@@ -308,6 +307,7 @@ mod tests {
             },
             change: change.into(),
             defined_in: "app/users.py".into(),
+            worktree: None,
             by_session: "claude-code.alice".into(),
             before: before.into(),
             after: after_name

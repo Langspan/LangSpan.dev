@@ -80,9 +80,13 @@ served by three rows:
   in another worktree learns of in-flight signatures before they are
   committed. The benchmark gives each session its own worktree, and notices
   stay within one physical workspace today, so the benchmark's LangSpan
-  condition sees the rename only through a cross-worktree row. C7 as written
-  covers added and changed signatures; it must also carry removals and
-  renames to serve this family.
+  condition sees the rename only through a cross-worktree row. C7 covers
+  added and changed signatures. Removals and renames reach other worktrees
+  through the B9 and B10 write check, which since
+  [issue #194](https://github.com/Langspan/LangSpan.dev/issues/194) reads the
+  notices of every worktree of the session's repository and judges each in
+  its own worktree's index. The notice also lists the other worktrees' files
+  that mention the old name.
 
 [B26 (#39)](https://github.com/Langspan/LangSpan.dev/issues/39) serves the
 same family on a host without hooks: the agent asks before it writes
