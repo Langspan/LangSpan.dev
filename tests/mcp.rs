@@ -196,6 +196,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_impact"
                 | "langspan_blind_spots"
                 | "langspan_recap"
+                | "langspan_show_message"
                 | "langspan_recall"
                 | "langspan_today"
                 | "langspan_land_queue"
@@ -875,6 +876,120 @@ async fn stdio_symbol_with_detail_returns_calls_and_callers_by_name() {
     disconnect(client).await;
 }
 
+#[tokio::test]
+async fn stdio_show_message_returns_the_whole_text_after_acknowledgement() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let workspace = directory.workspace();
+    let _daemon = Daemon::start(&state_dir).await;
+    let registered = call_ipc(
+        &state_dir,
+        "workspace",
+        Operation::WorkspaceRegister {
+            workspace_id: "workspace".into(),
+            root: workspace.to_string_lossy().into_owned(),
+        },
+    )
+    .await;
+    assert!(matches!(registered.outcome, Outcome::Workspace { .. }));
+    let session = call_ipc(
+        &state_dir,
+        "session",
+        Operation::SessionRegister {
+            session_id: "agent-b".into(),
+            workspace_id: "workspace".into(),
+            parent: None,
+            headless: false,
+        },
+    )
+    .await;
+    assert!(matches!(session.outcome, Outcome::Session { .. }));
+    let text = "\"é".repeat(133);
+    let paths: Vec<String> = (0..8).map(|n| format!("src/{n}.rs")).collect();
+    let sent = call_ipc(
+        &state_dir,
+        "m-9",
+        Operation::SendMessage {
+            workspace_id: "workspace".into(),
+            from: None,
+            to: Some("agent-b".into()),
+            text: text.clone(),
+            paths: paths.clone(),
+        },
+    )
+    .await;
+    assert!(matches!(sent.outcome, Outcome::MessageSent { .. }));
+    let acknowledged = call_ipc(
+        &state_dir,
+        "ack",
+        Operation::AckMessage {
+            session_id: "agent-b".into(),
+            message_id: "m-9".into(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        acknowledged.outcome,
+        Outcome::MessageAcknowledged {
+            acknowledged: true,
+            ..
+        }
+    ));
+
+    let client = connect(&state_dir).await;
+    let shown = response(
+        call_tool(
+            &client,
+            "langspan_show_message",
+            json!({"workspace_id": "workspace", "message_id": "m-9"}),
+        )
+        .await,
+    );
+    let Outcome::MessageShown { message } = shown.outcome else {
+        panic!("{shown:?}");
+    };
+    assert_eq!(
+        (message.text, message.paths, message.from, message.retracted),
+        (text, paths, None, false)
+    );
+    let unknown = call_tool(
+        &client,
+        "langspan_show_message",
+        json!({"workspace_id": "workspace", "message_id": "m-404"}),
+    )
+    .await;
+    assert_eq!(unknown.is_error, Some(true));
+    assert_eq!(
+        unknown.structured_content.unwrap()["outcome"]["code"],
+        "unknown_message"
+    );
+    // A message is found only in the workspace it was sent in.
+    let elsewhere = directory.0.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let registered = call_ipc(
+        &state_dir,
+        "elsewhere",
+        Operation::WorkspaceRegister {
+            workspace_id: "elsewhere".into(),
+            root: elsewhere.to_string_lossy().into_owned(),
+        },
+    )
+    .await;
+    assert!(matches!(registered.outcome, Outcome::Workspace { .. }));
+    let other = call_tool(
+        &client,
+        "langspan_show_message",
+        json!({"workspace_id": "elsewhere", "message_id": "m-9"}),
+    )
+    .await;
+    assert_eq!(other.is_error, Some(true));
+    assert_eq!(
+        other.structured_content.unwrap()["outcome"]["code"],
+        "unknown_message"
+    );
+    disconnect(client).await;
+}
+
 /// `langspan_impact` with `depth` through a real MCP client, daemon,
 /// indexer and Git repository (roadmap D2).
 #[tokio::test]
@@ -967,5 +1082,80 @@ async fn stdio_impact_with_depth_returns_levels_by_name() {
     .await;
     let text = serde_json::to_string(&refused.structured_content).unwrap();
     assert!(text.contains("depth must be between 1 and 3"), "{text}");
+    disconnect(client).await;
+}
+
+#[tokio::test]
+async fn stdio_retract_message_withdraws_the_callers_newest_message() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let workspace = directory.workspace();
+    let _daemon = Daemon::start(&state_dir).await;
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"w", "workspace_id":"workspace", "root":workspace}),
+        )
+        .await,
+    );
+    for session in ["agent-a", "agent-b"] {
+        response(
+            call_tool(
+                &client,
+                "langspan_session_register",
+                json!({"request_id":format!("r-{session}"), "session_id":session,
+                       "workspace_id":"workspace"}),
+            )
+            .await,
+        );
+    }
+    for id in ["m-1", "m-2"] {
+        response(
+            call_tool(
+                &client,
+                "langspan_send_message",
+                json!({"request_id":id, "workspace_id":"workspace", "session_id":"agent-a",
+                       "to":"agent-b", "text":id, "paths":[]}),
+            )
+            .await,
+        );
+    }
+    let refused = call_tool(
+        &client,
+        "langspan_retract_message",
+        json!({"request_id":"x-1", "workspace_id":"workspace", "session_id":"agent-b",
+               "message_id":"m-1"}),
+    )
+    .await;
+    assert_eq!(refused.is_error, Some(true));
+    let refused: Response =
+        serde_json::from_value(refused.structured_content.expect("domain error envelope"))
+            .expect("shared domain response");
+    assert!(
+        matches!(&refused.outcome, Outcome::Error { code, .. } if code == "not_sender"),
+        "{refused:?}"
+    );
+    let withdrawn = response(
+        call_tool(
+            &client,
+            "langspan_retract_message",
+            json!({"request_id":"x-2", "workspace_id":"workspace", "session_id":"agent-a",
+                   "message_id":"last"}),
+        )
+        .await,
+    );
+    let Outcome::MessageRetracted {
+        message_id,
+        withdrawn_unread,
+        told_to_disregard,
+    } = &withdrawn.outcome
+    else {
+        panic!("{withdrawn:?}");
+    };
+    assert_eq!(message_id, "m-2");
+    assert_eq!(withdrawn_unread, &["agent-b"]);
+    assert!(told_to_disregard.is_empty());
     disconnect(client).await;
 }

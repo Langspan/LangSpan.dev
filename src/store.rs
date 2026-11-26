@@ -89,6 +89,31 @@ fn part_end(text: &str, start: usize, room: usize) -> usize {
     end
 }
 
+/// A `workspace list` page within `PAGE_BUDGET_BYTES`: the core bounds it
+/// by count, and a root can be 4 KiB, so it may end sooner here, with the
+/// cursor moved back to its last workspace. It always keeps one, which a
+/// root's bound lets fit.
+fn workspace_page(
+    mut workspaces: Vec<langspan_core::WorkspaceSummary>,
+    mut next: Option<String>,
+) -> Outcome {
+    let mut bytes = 0usize;
+    let keep = workspaces
+        .iter()
+        .take_while(|workspace| {
+            let size = serde_json::to_vec(workspace).map_or(usize::MAX, |json| json.len() + 1);
+            let first = bytes == 0;
+            bytes = bytes.saturating_add(size);
+            first || bytes <= PAGE_BUDGET_BYTES
+        })
+        .count();
+    if keep < workspaces.len() {
+        workspaces.truncate(keep);
+        next = workspaces.last().map(|last| last.workspace_id.clone());
+    }
+    Outcome::Workspaces { workspaces, next }
+}
+
 /// Identifies one record's JSON across pages, so that a page resumes inside
 /// a record only if the record has not changed. Not a security control: a
 /// mismatch (or a different build) starts the record again from its start.
@@ -112,7 +137,19 @@ pub struct Execution {
 pub struct Store {
     connection: Connection,
     state: State,
+    tap: Option<Tap>,
 }
+
+/// Events committed since the tap was last drained that its filter keeps,
+/// at most `TAP_LIMIT`: a consumer reads facts already recorded, after they
+/// are durable, and never changes what is committed.
+struct Tap {
+    keep: fn(&Event) -> bool,
+    events: Vec<Event>,
+}
+
+/// The most events a tap holds between drains; later ones are not kept.
+const TAP_LIMIT: usize = 64;
 
 /// A check record written before check commands were redacted can still
 /// hold a command line as typed. It is redacted wherever it is read back:
@@ -216,7 +253,11 @@ impl Store {
             .generation
             .checked_add(1)
             .ok_or("authority generation exhausted; refusing to reuse a generation")?;
-        let mut store = Self { connection, state };
+        let mut store = Self {
+            connection,
+            state,
+            tap: None,
+        };
         // The generation's clock against the wall clock, so times can be
         // placed on a day (the status line and `today`).
         let anchor = ClockAnchor {
@@ -236,6 +277,23 @@ impl Store {
 
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    /// From now on, keep each committed event `keep` accepts, for
+    /// `take_tapped`. Events replayed when the store opened are not kept.
+    pub fn tap(&mut self, keep: fn(&Event) -> bool) {
+        self.tap = Some(Tap {
+            keep,
+            events: Vec::new(),
+        });
+    }
+
+    /// The events kept since the last call, oldest first.
+    pub fn take_tapped(&mut self) -> Vec<Event> {
+        self.tap
+            .as_mut()
+            .map(|tap| std::mem::take(&mut tap.events))
+            .unwrap_or_default()
     }
 
     pub fn refresh(&mut self, now_ms: u64) -> StoreResult<()> {
@@ -316,6 +374,9 @@ impl Store {
                 })?;
         let scan_id = format!("scan-{}-{sequence}", self.state.generation);
         let mut commands = Vec::new();
+        // Files whose content changed since a complete earlier scan, at their
+        // new versions: the core keeps those no session reported (issue #129).
+        let mut content_changes = Vec::new();
         // Several changed files back at their committed version at once,
         // with HEAD where it was: a reset, stash or checkout of files.
         let restored = changes
@@ -357,11 +418,20 @@ impl Store {
             } else {
                 None
             };
+            let after = observed_file_state(change.after.as_ref())?;
+            if before.as_ref().is_some_and(|before| *before != after)
+                && content_changes.len() < langspan_core::MAX_UNCOORDINATED_OBSERVED
+            {
+                content_changes.push(langspan_core::ObservedFile {
+                    path: change.path.clone(),
+                    state: after.clone(),
+                });
+            }
             commands.push(Command::ObserveDisk {
                 workspace_id: workspace_id.into(),
                 path: change.path,
                 before,
-                after: observed_file_state(change.after.as_ref())?,
+                after,
                 related_operation_ids: Vec::new(),
             });
         }
@@ -386,6 +456,7 @@ impl Store {
             }
         }
         let facts = commands.len();
+        let mut checkout_changed = false;
         // The checkout changed under the sessions in it: another branch, a
         // HEAD that moved with files no session put there, or a bulk
         // restore. A commit moves HEAD without changing any file, or with
@@ -406,7 +477,16 @@ impl Store {
                     to_head: snapshot.head.clone(),
                     files: file_changes,
                 });
+                checkout_changed = true;
             }
+        }
+        // Changed files no checkout change accounts for. Which of them no
+        // session reported, and whom to name, is the core's decision.
+        if !checkout_changed && !content_changes.is_empty() {
+            commands.push(Command::ObserveUncoordinated {
+                workspace_id: workspace_id.into(),
+                files: content_changes,
+            });
         }
         // Worktrees of one repository share a Git common directory. Only its
         // digest is recorded; it groups workspaces without merging them.
@@ -476,6 +556,7 @@ impl Store {
                 | Command::Changes { .. }
                 | Command::RemoteOutbox { .. }
                 | Command::RemoteSent { .. }
+                | Command::ShowMessage { .. }
                 | Command::CheckStatus { .. }
                 | Command::FlakyTests { .. }
                 | Command::LandingReadiness { .. }
@@ -485,6 +566,8 @@ impl Store {
                 | Command::Today { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
+                | Command::WorkspaceList { .. }
+                | Command::WorkspaceRemove { apply: false, .. }
         ) {
             return Ok(None);
         }
@@ -586,9 +669,12 @@ impl Store {
             | Command::LandingReadiness { .. }
             | Command::TurnQueue { .. }
             | Command::StatusLine { .. }
+            | Command::WorkspaceList { .. }
+            | Command::WorkspaceRemove { apply: false, .. }
             | Command::Recap { .. }
             | Command::Recall { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
+                    Outcome::Workspaces { workspaces, next } => workspace_page(workspaces, next),
                     // A recap or a recall must fit one frame with room for
                     // the envelope.
                     Outcome::Recap { mut recap } => {
@@ -625,11 +711,27 @@ impl Store {
                 workspace_id,
                 limit,
             } => self.sent(workspace_id, *limit)?,
+            Command::ShowMessage {
+                workspace_id,
+                message_id,
+            } => self.show_message(workspace_id, message_id)?,
             Command::Changes {
                 workspace_id,
                 after,
                 limit,
             } => self.changes(workspace_id, *after, *limit)?,
+            // A hook run inside the interval writes nothing, not even a
+            // receipt, so a burst of them costs no storage (roadmap J12).
+            Command::SessionSeen { .. } => {
+                let decision = decide(&self.state, prepared, request_id, now_ms);
+                if !decision.events.is_empty() {
+                    self.commit(
+                        &decision.events,
+                        Some((request_id, original, &decision.outcome)),
+                    )?;
+                }
+                decision.outcome
+            }
             _ => {
                 let decision = decide(&self.state, prepared, request_id, now_ms);
                 self.commit(
@@ -760,10 +862,11 @@ impl Store {
 
     /// One page of state records from `after`, within `budget` bytes
     /// (`PAGE_BUDGET_BYTES` unless the reader asked for less, never under
-    /// `MIN_PAGE_BYTES`). A record that fits a page is never split; one that
-    /// does not (an entry at its limits can be larger than a frame) is given
-    /// as parts of its JSON, so that every valid state can be read. A page
-    /// holds at least one record or part when any remain.
+    /// `MIN_PAGE_BYTES`; `workspace_page` bounds a `workspace list` page by
+    /// `PAGE_BUDGET_BYTES`). A record that fits a page is never split; one
+    /// that does not (an entry at its limits can be larger than a frame) is
+    /// given as parts of its JSON, so that every valid state can be read. A
+    /// page holds at least one record or part when any remain.
     fn status_records(&self, after: Option<&str>, budget: usize) -> Outcome {
         let (mut resume, records) = match status_records(&self.state, after) {
             Ok(read) => read,
@@ -1008,6 +1111,104 @@ impl Store {
         Ok(Outcome::RemoteSent { sent, more })
     }
 
+    /// One message as it was sent, read from its `message_sent` event, so
+    /// it is there after every recipient has acknowledged it and the
+    /// projection has dropped it, and marked retracted when a later
+    /// `message_retracted` event withdrew it. Read-only and never recorded. Messages
+    /// are rare, so the scan reads few rows past the cheap prefix test; a
+    /// sent message is at most 400 bytes of text and 8 paths, so the answer
+    /// fits a frame.
+    fn show_message(&self, workspace_id: &str, message_id: &str) -> StoreResult<Outcome> {
+        if !self.state.workspaces.contains_key(workspace_id) {
+            return Ok(Outcome::Error {
+                code: "unknown_workspace".into(),
+                message: format!(
+                    "no workspace {workspace_id:?} is registered; `langspan status` lists them"
+                ),
+            });
+        }
+        if let Err(error) = langspan_core::validate_request_id(message_id) {
+            return Ok(Outcome::Error {
+                code: error.code,
+                message: error.message,
+            });
+        }
+        let stored: Option<(i64, String)> = self
+            .connection
+            .query_row(
+                r#"SELECT seq, event_json FROM events
+                 WHERE event_json LIKE '{"type":"message_sent",%'
+                   AND json_valid(event_json)
+                   AND json_extract(event_json, '$.type') = 'message_sent'
+                   AND json_extract(event_json, '$.message.workspace_id') = ?1
+                   AND json_extract(event_json, '$.message.message_id') = ?2
+                 ORDER BY seq DESC LIMIT 1"#,
+                params![workspace_id, message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((sent_seq, stored)) = stored else {
+            // Retention deletes the oldest events. Once any were deleted, an
+            // ID not found may be a message whose event went with them, and
+            // the log cannot tell that from one never sent: say so plainly.
+            if let Some(first_kept) = self.first_kept_event()? {
+                return Ok(Outcome::Error {
+                    code: "message_not_kept".into(),
+                    message: format!(
+                        "message {message_id:?} is not in the event log of workspace {workspace_id:?}, which keeps events from sequence {first_kept} on; if it was sent before then, its full text is no longer kept. `langspan recap {workspace_id}` lists the messages still pending"
+                    ),
+                });
+            }
+            return Ok(Outcome::Error {
+                code: "unknown_message".into(),
+                message: format!(
+                    "no message {message_id:?} was sent in workspace {workspace_id:?}; `langspan recap {workspace_id}` lists the messages still pending"
+                ),
+            });
+        };
+        let Event::MessageSent { mut message } = serde_json::from_str(&stored)? else {
+            return Err("a message_sent row holds another event".into());
+        };
+        // A withdrawal is its own later event; the sent one never changes.
+        message.retracted = self.connection.query_row(
+            r#"SELECT EXISTS (SELECT 1 FROM events
+                 WHERE seq > ?1
+                   AND event_json LIKE '{"type":"message_retracted",%'
+                   AND json_valid(event_json)
+                   AND json_extract(event_json, '$.type') = 'message_retracted'
+                   AND json_extract(event_json, '$.workspace_id') = ?2
+                   AND json_extract(event_json, '$.message_id') = ?3)"#,
+            params![sent_seq, workspace_id, message_id],
+            |row| row.get(0),
+        )?;
+        Ok(Outcome::MessageShown {
+            message: message.into(),
+        })
+    }
+
+    /// `Some(N)` once events before sequence N have been deleted (by
+    /// retention): the first kept event is past 1, or every row is gone
+    /// while the sequence counter has advanced. `None` while the log is
+    /// whole.
+    fn first_kept_event(&self) -> StoreResult<Option<i64>> {
+        let first: Option<i64> =
+            self.connection
+                .query_row("SELECT MIN(seq) FROM events", [], |row| row.get(0))?;
+        let counter: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'events'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(match (first, counter) {
+            (Some(first), _) if first > 1 => Some(first),
+            (None, Some(last)) if last > 0 => Some(last + 1),
+            _ => None,
+        })
+    }
+
     fn changes(&self, workspace_id: &str, after: u64, limit: u32) -> StoreResult<Outcome> {
         if !self.state.workspaces.contains_key(workspace_id) {
             return Ok(Outcome::Error {
@@ -1089,6 +1290,20 @@ impl Store {
                 "INSERT INTO events(event_json) VALUES (?1)",
                 [serde_json::to_string(event)?],
             )?;
+            // The last scan was of the old checkout: the next scan of the
+            // new root starts a fresh baseline, so files that differ between
+            // the two checkouts are not reported as changes.
+            if let Event::WorkspaceMoved {
+                workspace: langspan_core::Workspace { workspace_id, .. },
+                ..
+            }
+            | Event::WorkspaceRemoved { workspace_id } = event
+            {
+                transaction.execute(
+                    "DELETE FROM git_snapshots WHERE workspace_id = ?1",
+                    [workspace_id],
+                )?;
+            }
         }
         if let Some((request_id, command, outcome)) = receipt {
             transaction.execute(
@@ -1109,6 +1324,17 @@ impl Store {
         }
         transaction.commit()?;
         self.state = next_state;
+        if let Some(tap) = &mut self.tap {
+            let room = TAP_LIMIT.saturating_sub(tap.events.len());
+            let keep = tap.keep;
+            tap.events.extend(
+                events
+                    .iter()
+                    .filter(|event| keep(event))
+                    .take(room)
+                    .cloned(),
+            );
+        }
         Ok(())
     }
 

@@ -10,6 +10,8 @@ The implementation is a headless tool that fits existing agent sessions, with CL
 
 Before any change, read and follow [docs/engineering.md](docs/engineering.md). It is the shared engineering framework for every agent and person working here. This file supplies project context and navigation; the engineering practices live in that one document.
 
+Write docs, comments, CLI messages, commits and pull request text to [docs/writing-style.md](docs/writing-style.md).
+
 ## What to work on
 
 Every capability still to build is a GitHub issue labelled `roadmap` ([the list](https://github.com/Langspan/LangSpan.dev/issues?q=label%3Aroadmap)); the issue is the item's full specification and names the ADR that decides it. [docs/roadmap.md](docs/roadmap.md) is a short index of those issues by area. Take work from there: pick an issue whose ADR says it is planned or whose condition for revisiting has been met, read the issue and that ADR, and propose any change of decision as an ADR change in the same pull request. A pull request that finishes a capability says "Fixes #N" for its issue and removes its line from the index; a decision that changes updates the issue and the ADR.
@@ -34,6 +36,7 @@ The broader product proof is two developers' existing agents coordinating across
 
 - [docs/mission.md](docs/mission.md): mission, problem, hypothesis, intended workflow and team-level success criteria.
 - [README.md](README.md): product overview and repository entry point.
+- [docs/positioning.md](docs/positioning.md): canonical public messaging and claim boundaries.
 - [docs/usage.md](docs/usage.md): setup, native hooks, CLI, MCP and configuration.
 - [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md): what is built, retained evidence and pending acceptance.
 - [docs/roadmap.md](docs/roadmap.md): the launch bar and an index of the [roadmap issues](https://github.com/Langspan/LangSpan.dev/issues?q=label%3Aroadmap), which hold each item's specification.

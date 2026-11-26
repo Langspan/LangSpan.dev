@@ -524,6 +524,92 @@ fn stash_and_reset_hard_are_checkout_changes_and_a_commit_is_not() {
     assert_eq!(reset[0].to_branch.as_deref(), Some("refs/heads/main"));
 }
 
+/// Issue #129: a Codex session resumed under another path for the same
+/// directory runs none of LangSpan's hooks. A real scan that sees a file
+/// change no session reported records it once, naming the Codex session; a
+/// reported write and a checkout change are not uncoordinated.
+#[test]
+fn a_real_change_no_session_reported_names_the_registered_codex_session() {
+    let fixture = Fixture::new();
+    for file in ["a.txt", "b.txt"] {
+        fixture.write(file, b"one");
+    }
+    fixture.commit();
+    let mut store = fixture.store();
+    let uncoordinated = |store: &Store| {
+        store
+            .state()
+            .uncoordinated
+            .get("work")
+            .cloned()
+            .unwrap_or_default()
+    };
+    store.record_scan("work", &fixture.scan(), 1).unwrap();
+    // No Codex session yet: an unreported change names nobody.
+    fixture.write("a.txt", b"by hand");
+    store.record_scan("work", &fixture.scan(), 2).unwrap();
+    assert!(uncoordinated(&store).is_empty());
+
+    let codex = "codex.0198c0de-0000-7000-8000-000000000001";
+    let register = Command::SessionRegister {
+        session_id: codex.into(),
+        workspace_id: "work".into(),
+        parent: None,
+        headless: false,
+    };
+    store.execute("s", &register, &register, 3).unwrap();
+
+    // A write the session reported is coordinated.
+    fixture.write("b.txt", b"reported");
+    let version = fixture.scan().files["b.txt"].clone();
+    let written = Command::ObserveSource {
+        session_id: codex.into(),
+        files: vec![langspan_core::ObservedFile {
+            path: "b.txt".into(),
+            state: FileState::Present {
+                digest: version.digest.unwrap(),
+                kind: FileKind::Regular,
+            },
+        }],
+        origin: langspan_core::SourceOrigin::Write,
+    };
+    let outcome = store.execute("w", &written, &written, 4).unwrap().outcome;
+    assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+    store.record_scan("work", &fixture.scan(), 5).unwrap();
+    assert!(uncoordinated(&store).is_empty());
+
+    // An edit with no hook event behind it names the Codex session.
+    fixture.write("a.txt", b"no hook ran");
+    store.record_scan("work", &fixture.scan(), 6).unwrap();
+    let recorded = uncoordinated(&store);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0].sessions, [codex]);
+    assert_eq!(
+        recorded[0]
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        ["a.txt"]
+    );
+
+    // A checkout change explains its own files.
+    drop(store);
+    let mut store = Store::open(&fixture.database).unwrap();
+    store.execute("s2", &register, &register, 7).unwrap();
+    store.record_scan("work", &fixture.scan(), 8).unwrap();
+    git(&fixture.root, &["checkout", "--quiet", "--", "."]);
+    store.record_scan("work", &fixture.scan(), 9).unwrap();
+    let generation = store.state().generation;
+    assert!(
+        uncoordinated(&store)
+            .iter()
+            .all(|change| change.generation != generation),
+        "{:?}",
+        uncoordinated(&store)
+    );
+}
+
 /// Found by Linux CI on PR #30: a session edits a file, the edit lands
 /// before any scan sees the file changed, then the edit is committed. The
 /// next scan sees HEAD moved and the file changed, as a checkout would look,
