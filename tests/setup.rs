@@ -90,6 +90,23 @@ impl Base {
         walk(&self.home(), &mut out);
         out
     }
+    /// The snapshot without the files a running coordinator keeps writing
+    /// on its own (its stores and its log): what setup itself wrote.
+    fn snapshot_of_setup(&self) -> Vec<(PathBuf, Vec<u8>)> {
+        let coordinator_owned = |path: &Path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("state.sqlite3")
+                        || name.starts_with("graph.sqlite3")
+                        || name == "daemon.log"
+                })
+        };
+        self.snapshot()
+            .into_iter()
+            .filter(|(path, _)| !coordinator_owned(path))
+            .collect()
+    }
 }
 
 impl Drop for Base {
@@ -172,8 +189,12 @@ fn setup_yes_without_a_service_starts_a_coordinator_and_a_second_run_changes_not
             .join(".claude/skills/langspan/SKILL.md")
             .is_file()
     );
-    assert_eq!(daemons_for(&base.0).len(), 1, "{shown}");
-    let before = base.snapshot();
+    let coordinator = daemons_for(&base.0);
+    assert_eq!(coordinator.len(), 1, "{shown}");
+    // The coordinator keeps recording on its own after setup returns (its
+    // first host check, its source index, liveness), so its stores are left
+    // out; that the second run kept the same coordinator is checked instead.
+    let before = base.snapshot_of_setup();
     let again = base.run(&["setup", "--home", &home, "--yes"], None);
     let shown = text(&again);
     assert!(again.status.success(), "{shown}");
@@ -182,8 +203,8 @@ fn setup_yes_without_a_service_starts_a_coordinator_and_a_second_run_changes_not
         "{shown}"
     );
     assert!(!shown.contains("Wrote "), "{shown}");
-    assert_eq!(base.snapshot(), before, "{shown}");
-    assert_eq!(daemons_for(&base.0).len(), 1);
+    assert_eq!(base.snapshot_of_setup(), before, "{shown}");
+    assert_eq!(daemons_for(&base.0), coordinator, "{shown}");
 }
 
 #[test]
