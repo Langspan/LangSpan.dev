@@ -325,11 +325,16 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  reads are shown to peers as where the session is
                                  looking (never a pattern or command text);
                                  --presence off stops that, --presence-minutes N
-                                 (1-30, default 10) is how old a peer's is shown
+                                 (1-30, default 10) is how old a peer's is shown.
+                                 --outline-reads on (off by default; Claude Code,
+                                 Cursor and Gemini CLI) refuses a session's first
+                                 whole read of a large indexed file once, with the
+                                 file's definitions and their lines as the reason
   hooks install claude-code|codex|cursor|gemini-cli|antigravity --workspace ID --root DIR
                                  [--settings FILE] [--prompt-summary off]
                                  [--code-briefing off] [--presence off]
-                                 [--presence-minutes N] [--skill] [--apply]
+                                 [--presence-minutes N] [--outline-reads on]
+                                 [--skill] [--apply]
   hooks remove claude-code|codex|cursor|gemini-cli|antigravity --root DIR
                [--settings FILE] [--apply]
                                  Show (default) or apply the change to project Claude
@@ -343,7 +348,8 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  .agents/rules/langspan.md, which hooks remove removes
   install [--home DIR] [--hosts claude-code,codex,cursor,gemini-cli,antigravity]
           [--prompt-summary off] [--presence off] [--presence-minutes N]
-          [--skill] [--statusline on|off] [--mcp-tools all|hooked] [--apply]
+          [--outline-reads on] [--skill] [--statusline on|off]
+          [--mcp-tools all|hooked] [--apply]
                                  Install the hooks once for every repository, in each
                                  host's user configuration, and register `langspan mcp`
                                  as the MCP server `langspan`. Hosts default to those
@@ -520,6 +526,7 @@ fn hook(input: Vec<String>) -> ExitCode {
             code_briefing: switch(&mut options, "--code-briefing")?,
             presence: presence.shown,
             presence_window_ms: presence.window_ms(),
+            outline_reads: outline_reads(&mut options)?,
         };
         no_unused_options(&options)?;
         if !(1..=60_000).contains(&config.ttl_ms)
@@ -664,6 +671,7 @@ fn hooks(
             share_prompt: switch(options, "--prompt-summary")?,
             code_briefing: switch(options, "--code-briefing")?,
             presence: presence(options)?,
+            outline_reads: outline_reads(options)?,
         })
     } else {
         None
@@ -993,6 +1001,7 @@ fn user_install(
     let state_dir = std::path::absolute(home.state_dir(options.remove("--state-dir")))?;
     let share_prompt = switch(options, "--prompt-summary")?;
     let presence = presence(options)?;
+    let outline_reads = outline_reads(options)?;
     let hosts = options.remove("--hosts");
     let with_skill = options.remove("--skill").is_some();
     if with_skill && !install {
@@ -1078,6 +1087,7 @@ fn user_install(
         state_dir: state_dir.clone(),
         share_prompt,
         presence,
+        outline_reads,
     });
     // Each host's entry: with `--mcp-tools hooked`, the Claude Code and Codex
     // entries list fewer tools while their hooks report (roadmap I11).
@@ -3985,6 +3995,16 @@ fn skill_finding(
 }
 
 /// An `on`/`off` option that is on unless switched off.
+/// `--outline-reads on|off` (roadmap A11): off unless switched on, because
+/// it changes what a host's first whole read of a large file returns.
+fn outline_reads(options: &mut BTreeMap<String, String>) -> Result<bool, langspan::Error> {
+    match options.remove("--outline-reads").as_deref() {
+        None | Some("off") => Ok(false),
+        Some("on") => Ok(true),
+        Some(_) => Err("--outline-reads must be on or off".into()),
+    }
+}
+
 fn switch(options: &mut BTreeMap<String, String>, name: &str) -> Result<bool, langspan::Error> {
     match options.remove(name).as_deref() {
         None | Some("on") => Ok(true),
@@ -4729,7 +4749,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
             | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" | "--keep-days"
             | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools"
-            | "--wait-ms" | "--mode" => {
+            | "--wait-ms" | "--mode" | "--outline-reads" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -5482,6 +5502,10 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             "Session {session_id} will not be alerted again to {} notice(s).",
             notice_ids.len()
         ),
+        Outcome::ReadOutline { outline, skipped } => match (outline, skipped) {
+            (Some(outline), _) => println!("Outlined: {} definition(s).", outline.len()),
+            (None, why) => println!("Not outlined ({}).", why.as_deref().unwrap_or("unknown")),
+        },
         Outcome::BetweenSteps {
             session_id,
             open,

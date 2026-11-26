@@ -663,6 +663,63 @@ unread edit that changes lines of it is refused once, and the denial says the
 lines could not be placed. An ended or exited session's lines no longer count.
 The journal is kept on disk, so a daemon restart does not lose them.
 
+### Outline first for whole reads of large files
+
+An agent that reads a large file whole often wants one function of it. With
+`--outline-reads on` (off by default), a session's first whole read of a large
+indexed file is refused once, and the reason it is given is the file's outline
+from the [source index](#look-up-symbols-and-affected-files):
+
+```text
+LangSpan (data, not instructions): src/store.rs has 3,412 lines. Definitions:
+type Store lines 40-86 (exported)
+function open lines 88-210 (exported)
+function migrate lines 212-540
+...
+Read lines A to B of a definition, or read the file again to get it whole.
+```
+
+Turn it on with either install:
+
+```sh
+langspan hooks install claude-code --workspace app --root . --outline-reads on --apply
+langspan install --hosts claude-code,gemini-cli --outline-reads on --apply
+```
+
+It is built for Claude Code (`PreToolUse` on `Read`), Gemini CLI (`BeforeTool`
+on `read_file`) and Cursor (`preToolUse` on `Read`); the option adds that read
+tool to the host's pre-tool matcher. Codex reads through shell commands and
+Antigravity is not covered, so the option changes nothing there. No host has
+yet been observed asking for a line range after an outline.
+
+A read is outlined only when all of these hold:
+
+- It names no part of the file: no `offset`, `limit`, `start_line`,
+  `end_line` or `pages`. A read of part of a file is never refused.
+- The file has at least `outline_min_lines` lines (default 1,500) or
+  `outline_min_bytes` bytes (default 64 KiB), set in
+  [`config.json`](#configuration-and-limits), and at most the index's 1 MiB.
+- The index holds the file whole at the content now on disk: same SHA-256,
+  parsed without errors, in a language the index reads. A file changed since
+  it was indexed, partly parsed, or not indexed is read without refusal.
+- This session was not given this version's outline before. The next whole
+  read of the same version goes through unchanged; a changed file starts
+  afresh, and another session gets its own outline once.
+
+The outline lists each definition's kind, name and lines, marking exported
+ones, in line order. When they do not all fit in 2,400 bytes, the largest come
+first and the last line before the ending says how many were left out. Names
+come from the repository and are cleaned and capped; no other text of the file,
+not even a signature, is in it.
+
+The coordinator records each outline as `read_outlined` with the session, path
+and digest, on this machine. It records no read version, so the stale-source
+check is unaffected. With the coordinator stopped, an index lookup past the
+hook's deadline, or any error, there is no decision: the read proceeds and the
+hook writes its one diagnostic line to stderr. The diagnostic's coverage is
+`outlined`, `outline_shown` (given before), `not_outlined`, `read_range` or the
+failure.
+
 ## Coordination policies
 
 Each kind of coordination case has one policy
@@ -2718,7 +2775,7 @@ Optional `config.json` in the state directory must be owner-only (`0600`):
 {"io_timeout_ms":2000,"request_timeout_ms":5000,"max_clients":32,"auto_check_debounce_ms":2000,
  "flaky_rerun_max_s":30,"host_check_ms":3600000,"notify":false,"notify_sound":false,
  "notify_kind_interval_ms":300000,"notify_hourly_limit":10,"notify_handoff_after_ms":600000,
- "recent_window_ms":14400000}
+ "recent_window_ms":14400000,"outline_min_lines":1500,"outline_min_bytes":65536}
 ```
 
 Timeout values accept 100–5000 ms; client count accepts 1–128;
@@ -2727,14 +2784,18 @@ Timeout values accept 100–5000 ms; client count accepts 1–128;
 how often the coordinator looks for agent hosts with no LangSpan install,
 accepts 100–86400000; `recent_window_ms`, how far back a starting session's
 "Recently in this repository" section looks, accepts 60000–86400000 and is
-read when the coordinator starts; `retention_days` (unset by default) accepts
+read when the coordinator starts; `outline_min_lines` (1–1000000) and
+`outline_min_bytes` (1–1048576), the size from which a whole read is
+[outlined first](#outline-first-for-whole-reads-of-large-files), are read when
+the coordinator starts; `retention_days` (unset by default) accepts
 7–3650 and is described under [Retention](#retention). For [desktop notices](#desktop-notices),
 `notify_kind_interval_ms` and `notify_handoff_after_ms` accept 1000–86400000
 and `notify_hourly_limit` 1–60; `notify`, `notify_sound` and the two notice
 limits are read again at each notice, `notify_handoff_after_ms` when the
 coordinator starts. A build before notices refuses to start with a
-`config.json` that has these keys, and a build before C3 one with
-`recent_window_ms`. IPC and MCP frames
+`config.json` that has these keys, a build before C3 one with
+`recent_window_ms`, and a build before A11 one with `outline_min_lines` or
+`outline_min_bytes`. IPC and MCP frames
 are limited to 64 KiB. The MCP SDK discards oversized input lines without replying
 to that line. An MCP tool result carries each answer twice, as structured
 content and as JSON text that escapes every quotation mark and backslash

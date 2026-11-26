@@ -1791,6 +1791,30 @@ impl Index {
         self.symbols_where("s.name = ?2", workspace_id, name, limit + 1)
     }
 
+    /// The definitions of `path` for its outline (roadmap A11), in line
+    /// order, at most `limit + 1` so truncation shows: only when the index
+    /// holds that file whole at `digest`. `None` when it holds another
+    /// version, a partial parse, or no row for it.
+    pub fn outline(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        digest: &str,
+        limit: u32,
+    ) -> Result<Option<Vec<SymbolRef>>, Failure> {
+        let whole: bool = self
+            .connection
+            .prepare_cached(
+                "SELECT count(*) > 0 FROM files WHERE workspace_id = ?1 AND path = ?2
+                 AND digest = ?3 AND partial = 0",
+            )?
+            .query_row(params![workspace_id, path, digest], |row| row.get(0))?;
+        if !whole {
+            return Ok(None);
+        }
+        Ok(Some(self.symbols_in(workspace_id, path, limit + 1)?))
+    }
+
     /// Definitions in the file `path`, in line order, at most `limit`.
     pub fn symbols_in(
         &self,
@@ -2911,6 +2935,37 @@ mod review_regressions {
         assert_eq!((spots.totals.waiting, coverage.blind_in_scope), (1, 1));
         pass(&dir, &mut index, &[changed, fixed, CALLER]);
         assert!(blind(&index, &dir.0, 10).0.waiting.is_empty());
+    }
+
+    /// Roadmap A11: an outline is only of the version the index holds whole.
+    #[test]
+    fn an_outline_is_only_of_the_whole_indexed_version() {
+        let (dir, mut index) = setup("outline");
+        let api = ("src/api.rs", "pub fn upload() {}\nfn helper() {}\n");
+        pass(&dir, &mut index, &[api, BROKEN]);
+        let digest = |text: &str| crate::sha256::hex(&crate::sha256::digest(text.as_bytes()));
+        let outline = index
+            .outline("w", "src/api.rs", &digest(api.1), 10)
+            .unwrap();
+        let names: Vec<_> = outline
+            .unwrap()
+            .into_iter()
+            .map(|symbol| (symbol.name, symbol.exported))
+            .collect();
+        assert_eq!(names, [("upload".into(), true), ("helper".into(), false)]);
+        // The file on disk differs from its indexed version.
+        let changed = digest("pub fn upload(x: u8) {}\n");
+        assert_eq!(
+            index.outline("w", "src/api.rs", &changed, 10).unwrap(),
+            None
+        );
+        // A partial parse, and a file the index has no row for.
+        let broken = digest(BROKEN.1);
+        assert_eq!(index.outline("w", BROKEN.0, &broken, 10).unwrap(), None);
+        assert_eq!(
+            index.outline("w", "src/none.rs", &broken, 10).unwrap(),
+            None
+        );
     }
 
     #[test]

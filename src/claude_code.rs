@@ -124,6 +124,13 @@ pub fn run_until(input: impl Read, config: &Config, deadline: Instant) -> Reply 
         (Some(READ_TOOL), crate::hook::Phase::Post(ToolResult::Succeeded)) => {
             crate::hook::Phase::Read
         }
+        (Some(READ_TOOL), crate::hook::Phase::Pre) => {
+            let reply = pre_read(event, config, deadline);
+            return Reply {
+                detail: format!("{} ({} ms)", reply.detail, started.elapsed().as_millis()),
+                ..reply
+            };
+        }
         (Some(READ_TOOL), _) => {
             return Reply::none("unsupported", "only a completed Read is recorded");
         }
@@ -204,6 +211,57 @@ pub fn run_until(input: impl Read, config: &Config, deadline: Instant) -> Reply 
         detail: format!("{} ({} ms)", reply.detail, started.elapsed().as_millis()),
         ..reply
     }
+}
+
+/// A `Read` about to run: with `--outline-reads on`, a whole read of a
+/// large indexed file is refused once with its outline (roadmap A11).
+/// Anything else is no decision.
+fn pre_read(event: HostEvent, config: &Config, deadline: Instant) -> Reply {
+    if !config.outline_reads {
+        return Reply::none("unsupported", "only a completed Read is recorded");
+    }
+    let (Some(host_session), Some(tool_use_id)) =
+        (event.session_id.as_deref(), event.tool_use_id.as_deref())
+    else {
+        return Reply::none(
+            "unsupported",
+            "missing host tool-call identity; no ID generated",
+        );
+    };
+    if !valid_host_id(host_session) {
+        return Reply::none(
+            "unsupported",
+            "host session or tool-call identity is outside supported grammar",
+        );
+    }
+    let (host_session, parent) = match identity(host_session, event.agent_id.as_deref()) {
+        Ok(identity) => identity,
+        Err(reply) => return reply,
+    };
+    let Some(input) = event.tool_input.as_ref() else {
+        return Reply::none("unsupported", "tool input missing");
+    };
+    let Some(file_path) = input.get("file_path").and_then(serde_json::Value::as_str) else {
+        return Reply::none("unsupported", "tool input names no file");
+    };
+    let config = match crate::hook::resolve_workspace(config, event.cwd.as_deref(), deadline) {
+        Ok(config) => config,
+        Err(reply) => return reply,
+    };
+    let key = match file_key(&config.root, event.cwd.as_deref(), file_path) {
+        Ok(key) => key,
+        Err(error) => return Reply::none("unsupported", error),
+    };
+    crate::hook::outline_read(
+        SOURCE,
+        &host_session,
+        parent.as_deref(),
+        tool_use_id,
+        &key,
+        input,
+        &config,
+        deadline,
+    )
 }
 
 /// Cursor runs the hooks in Claude Code's settings files with its own

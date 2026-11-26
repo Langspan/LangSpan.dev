@@ -130,7 +130,7 @@ fn parse(
             "supported tools are write_file, replace, read_file and run_shell_command",
         ));
     }
-    if reads && pre {
+    if reads && pre && !config.outline_reads {
         return Err(Reply::none(
             "unsupported",
             "only a completed read_file is recorded",
@@ -155,6 +155,27 @@ fn parse(
         .and_then(|response| response.get("error"))
         .is_some_and(|error| !error.is_null());
     let config = hook::resolve_workspace(config, Some(&cwd), deadline)?;
+    // With `--outline-reads on`, a whole read of a large indexed file is
+    // refused once with its outline (roadmap A11). It is a call of its own,
+    // whose AfterTool, if it runs, records the read as before.
+    if reads && pre {
+        let file_path = input
+            .get("file_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Reply::none("unsupported", "tool input names no file"))?;
+        let key = hook::file_key(&config.root, Some(&cwd), file_path)
+            .map_err(|error| Reply::none("unsupported", error))?;
+        return Err(hook::outline_read(
+            SOURCE,
+            &host_session,
+            None,
+            &format!("gr{}", new_nonce()),
+            &key,
+            &input,
+            &config,
+            deadline,
+        ));
+    }
     // A read has no BeforeTool, so each completed one is a call of its own.
     let tool_use_id = call_id(&config.state_dir, &host_session, tool, &input, pre || reads)
         .map_err(|error| {
@@ -442,6 +463,7 @@ mod tests {
                 code_briefing: true,
                 presence: true,
                 presence_window_ms: langspan_core::PRESENCE_WINDOW_MS,
+                outline_reads: false,
                 vendor: crate::install::Vendor::Gemini,
                 user_level: false,
             }

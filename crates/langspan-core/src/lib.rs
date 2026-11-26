@@ -595,6 +595,36 @@ pub struct SessionActivity {
     /// started from one template apart (issue #114). Never the words.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub line_digests: Vec<String>,
+    /// File versions whose whole read this session was given an outline
+    /// for instead (roadmap A11), newest first, one per path, at most
+    /// `MAX_OUTLINED`. Its next whole read of the same version goes through.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outlined: Vec<OutlinedRead>,
+}
+
+/// A file version a session was given an outline of (roadmap A11).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OutlinedRead {
+    pub path: String,
+    pub digest: String,
+}
+
+/// How many outlined file versions a session keeps. One past it is
+/// forgotten, and its next whole read is outlined again.
+pub const MAX_OUTLINED: usize = 64;
+
+/// One definition in a file's outline (roadmap A11): what the source index
+/// holds, without its signature or any other text of the file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OutlineEntry {
+    pub name: String,
+    pub kind: String,
+    /// One-based, inclusive.
+    pub line: u32,
+    pub end_line: u32,
+    pub exported: bool,
 }
 
 /// How a session came to look at a path, for presence (roadmap A13).
@@ -3160,6 +3190,14 @@ pub enum Event {
         notice_ids: Vec<String>,
         via: NoticeVia,
     },
+    /// The session's whole read of this file version was refused once with
+    /// an outline (roadmap A11). No read version is recorded: stale checks
+    /// are unaffected.
+    ReadOutlined {
+        session_id: String,
+        path: String,
+        digest: String,
+    },
     SourceObserved {
         session_id: String,
         files: Vec<ObservedFile>,
@@ -4098,6 +4136,18 @@ pub enum Command {
         session_id: String,
         notice_ids: Vec<String>,
     },
+    /// A whole read by the session of `path`, whose content on disk has
+    /// SHA-256 `digest` and is `lines` lines and `bytes` bytes long
+    /// (roadmap A11). The daemon answers with the file's outline when the
+    /// file is large, indexed whole at that digest, and the session was not
+    /// given this version's outline before; otherwise with none.
+    OutlineRead {
+        session_id: String,
+        path: String,
+        digest: String,
+        lines: u64,
+        bytes: u64,
+    },
     Complete {
         session_id: String,
         lease_id: String,
@@ -4909,6 +4959,18 @@ enum CommandWire {
         session_id: String,
         notice_ids: Vec<String>,
     },
+    /// A whole read by the session of `path`, whose content on disk has
+    /// SHA-256 `digest` and is `lines` lines and `bytes` bytes long
+    /// (roadmap A11). The daemon answers with the file's outline when the
+    /// file is large, indexed whole at that digest, and the session was not
+    /// given this version's outline before; otherwise with none.
+    OutlineRead {
+        session_id: String,
+        path: String,
+        digest: String,
+        lines: u64,
+        bytes: u64,
+    },
     Complete {
         session_id: String,
         lease_id: String,
@@ -5522,6 +5584,15 @@ pub enum Outcome {
     InterfaceAcknowledged {
         session_id: String,
         notice_ids: Vec<String>,
+    },
+    /// The answer to `OutlineRead` (roadmap A11). `outline` is present only
+    /// when the read is to be refused once with it; `skipped` says why it
+    /// is not.
+    ReadOutline {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outline: Option<Vec<OutlineEntry>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skipped: Option<String>,
     },
     /// What a session is told between its steps (issue #214). `open` is
     /// false once the turn the asking watcher started in is over, or the
@@ -6327,6 +6398,37 @@ fn decide_checked(
                 outcome: Outcome::InterfaceAcknowledged {
                     session_id: session_id.clone(),
                     notice_ids: notice_ids.clone(),
+                },
+            })
+        }
+        // The daemon sends this only for a file it found large and indexed
+        // whole at `digest`; here the session's own record decides.
+        Command::OutlineRead {
+            session_id,
+            path,
+            digest,
+            ..
+        } => {
+            current_session(state, session_id)?;
+            validate_outlined(path, digest)?;
+            if was_outlined(state, session_id, path, digest) {
+                return Ok(Decision {
+                    events: Vec::new(),
+                    outcome: Outcome::ReadOutline {
+                        outline: None,
+                        skipped: Some("shown".into()),
+                    },
+                });
+            }
+            Ok(Decision {
+                events: vec![Event::ReadOutlined {
+                    session_id: session_id.clone(),
+                    path: path.clone(),
+                    digest: digest.clone(),
+                }],
+                outcome: Outcome::ReadOutline {
+                    outline: Some(Vec::new()),
+                    skipped: None,
                 },
             })
         }
@@ -12546,6 +12648,25 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             }
             told.truncate(MAX_TOLD_NOTICES);
         }
+        Event::ReadOutlined {
+            session_id,
+            path,
+            digest,
+        } => {
+            current_session(state, session_id)?;
+            validate_outlined(path, digest)
+                .map_err(|failure| error("invalid_event", &failure.message))?;
+            let outlined = &mut activity_mut(state, session_id).outlined;
+            outlined.retain(|held| held.path != *path);
+            outlined.insert(
+                0,
+                OutlinedRead {
+                    path: path.clone(),
+                    digest: digest.clone(),
+                },
+            );
+            outlined.truncate(MAX_OUTLINED);
+        }
         Event::BriefingDelivered {
             session_id,
             signature,
@@ -12706,6 +12827,28 @@ fn validate_alerted(notice_ids: &[String]) -> Result<(), CoreError> {
 
 /// The notices one briefing or one between-step delivery told: 1 to
 /// `BRIEF_INTERFACE_NOTICES` valid IDs (issue #214).
+fn validate_outlined(path: &str, digest: &str) -> Result<(), CoreError> {
+    validate_relative_path(path)?;
+    if !is_hex_digest(digest, 64) {
+        return Err(error(
+            "invalid_digest",
+            "A file digest must contain exactly 64 hexadecimal characters",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the session was given the outline of this file version
+/// (roadmap A11).
+pub fn was_outlined(state: &State, session_id: &str, path: &str, digest: &str) -> bool {
+    state.activity.get(session_id).is_some_and(|activity| {
+        activity
+            .outlined
+            .iter()
+            .any(|held| held.path == path && held.digest == digest)
+    })
+}
+
 fn validate_told(notice_ids: &[String]) -> Result<(), CoreError> {
     if notice_ids.is_empty() || notice_ids.len() > BRIEF_INTERFACE_NOTICES {
         return Err(error(

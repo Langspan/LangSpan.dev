@@ -538,6 +538,7 @@ mod tests {
                 code_briefing: true,
                 presence: true,
                 presence_window_ms: langspan_core::PRESENCE_WINDOW_MS,
+                outline_reads: false,
                 vendor: crate::install::Vendor::Codex,
                 user_level: false,
             }

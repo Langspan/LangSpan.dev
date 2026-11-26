@@ -102,6 +102,10 @@ mod unix {
         /// How far back a starting session's "recently in this repository"
         /// section looks (roadmap C3), within the current daemon run.
         recent_window_ms: u64,
+        /// A whole read is outlined first (roadmap A11) only of a file of at
+        /// least this many lines, or of at least `outline_min_bytes`.
+        outline_min_lines: u64,
+        outline_min_bytes: u64,
     }
     impl Default for Config {
         fn default() -> Self {
@@ -120,6 +124,8 @@ mod unix {
                 notify_handoff_after_ms: 600_000,
                 host_check_ms: 3_600_000,
                 recent_window_ms: langspan_core::RECENT_WINDOW_MS,
+                outline_min_lines: OUTLINE_MIN_LINES,
+                outline_min_bytes: OUTLINE_MIN_BYTES,
             }
         }
     }
@@ -156,13 +162,16 @@ mod unix {
                 || !(100..=86_400_000).contains(&result.host_check_ms)
                 || !(langspan_core::MIN_RECENT_WINDOW_MS..=langspan_core::MAX_RECENT_WINDOW_MS)
                     .contains(&result.recent_window_ms)
+                || !(1..=1_000_000).contains(&result.outline_min_lines)
+                || !(1..=langspan_graph::MAX_SOURCE_BYTES as u64)
+                    .contains(&result.outline_min_bytes)
                 || result.retention_days.is_some_and(|days| {
                     !(langspan_core::MIN_RETENTION_DAYS..=langspan_core::MAX_RETENTION_DAYS)
                         .contains(&days)
                 })
             {
                 return Err(
-                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000, recent_window_ms 60000..86400000, retention_days 7..3650"
+                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000, recent_window_ms 60000..86400000, outline_min_lines 1..1000000, outline_min_bytes 1..1048576, retention_days 7..3650"
                         .into(),
                 );
             }
@@ -1787,6 +1796,121 @@ mod unix {
     /// (**Target**, not measured): under 100 ms, as `check_calls` plus
     /// those bounded reads. Failure mode: an index error is a tool error;
     /// no complete scan answers for the paths only.
+    /// At most this many definitions in an outline (roadmap A11): the
+    /// largest, when a file has more. The hook's text holds fewer.
+    const OUTLINE_ENTRIES: u32 = 200;
+
+    /// A whole read of a large file (roadmap A11): its outline, when the
+    /// index holds the file whole at the digest the hook read and the
+    /// session was not given this version's outline before. Recorded as
+    /// `read_outlined` only then; every other answer records nothing.
+    fn outline_read(
+        store: &mut Store,
+        graph: Option<&crate::graph::Index>,
+        request_id: String,
+        command: Command,
+    ) -> Response {
+        let generation = store.state().generation;
+        let Command::OutlineRead {
+            session_id,
+            path,
+            digest,
+            lines,
+            bytes,
+        } = &command
+        else {
+            unreachable!("matched by the caller");
+        };
+        let answer = |outline: Option<Vec<langspan_core::OutlineEntry>>, skipped: &str| Response {
+            version: PROTOCOL_VERSION,
+            request_id: request_id.clone(),
+            replayed: false,
+            generation,
+            lease_valid: None,
+            outcome: Outcome::ReadOutline {
+                outline,
+                skipped: (!skipped.is_empty()).then(|| skipped.into()),
+            },
+        };
+        let (min_lines, min_bytes) = OUTLINE_MIN
+            .get()
+            .copied()
+            .unwrap_or((OUTLINE_MIN_LINES, OUTLINE_MIN_BYTES));
+        if *lines < min_lines && *bytes < min_bytes {
+            return answer(None, "small");
+        }
+        if langspan_core::was_outlined(store.state(), session_id, path, digest) {
+            return answer(None, "shown");
+        }
+        let Some(of) = store
+            .state()
+            .sessions
+            .get(session_id)
+            .and_then(|session| Registration::of(store.state(), &session.workspace_id))
+        else {
+            return error(
+                request_id,
+                generation,
+                "session_not_found",
+                "the session is not registered in a known workspace",
+            );
+        };
+        let found = graph.map(|graph| {
+            graph.with_coverage(&of, |graph| {
+                graph.outline(&of.workspace_id, path, digest, OUTLINE_ENTRIES)
+            })
+        });
+        let mut symbols = match found {
+            Some(Ok((Some(symbols), coverage))) if coverage.scanned && !symbols.is_empty() => {
+                symbols
+            }
+            Some(Ok(_)) | None => return answer(None, "not_indexed"),
+            Some(Err(failure)) => {
+                return error(
+                    request_id,
+                    generation,
+                    "index_unavailable",
+                    failure.to_string(),
+                );
+            }
+        };
+        // The largest definitions, back in line order.
+        if symbols.len() > OUTLINE_ENTRIES as usize {
+            symbols.sort_by_key(|symbol| {
+                (
+                    std::cmp::Reverse(symbol.end_line.saturating_sub(symbol.line)),
+                    symbol.line,
+                )
+            });
+            symbols.truncate(OUTLINE_ENTRIES as usize);
+            symbols.sort_by_key(|symbol| (symbol.line, symbol.end_line));
+        }
+        let entries = symbols
+            .into_iter()
+            .map(|symbol| langspan_core::OutlineEntry {
+                name: symbol.name,
+                kind: symbol.kind,
+                line: symbol.line,
+                end_line: symbol.end_line,
+                exported: symbol.exported,
+            })
+            .collect();
+        match store.execute(&request_id, &command, &command, now_ms()) {
+            Ok(execution) => match execution.outcome {
+                Outcome::ReadOutline {
+                    outline: Some(_), ..
+                } if !execution.replayed => answer(Some(entries), ""),
+                Outcome::ReadOutline { .. } => answer(None, "shown"),
+                outcome @ Outcome::Error { .. } => Response {
+                    outcome,
+                    ..answer(None, "")
+                },
+                _ => answer(None, "shown"),
+            },
+            Err(e) => error(request_id, generation, "storage_error", e.to_string()),
+        }
+    }
+
     fn check_write(
         store: &Store,
         graph: Option<&crate::graph::Index>,
@@ -2143,6 +2267,7 @@ mod unix {
         let config =
             Config::read(&directory).map_err(|e| format!("read daemon configuration: {e}"))?;
         let _ = RECENT_WINDOW_MS.set(config.recent_window_ms);
+        let _ = OUTLINE_MIN.set((config.outline_min_lines, config.outline_min_bytes));
         local::private_file(&directory.join("state.sqlite3"), true)?;
         for name in ["state.sqlite3-wal", "state.sqlite3-shm"] {
             local::check_existing_file(&directory.join(name))?;
@@ -3043,6 +3168,11 @@ mod unix {
     static STARTED_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     /// The configured `recent_window_ms`, set once at start.
     static RECENT_WINDOW_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    /// `outline_min_lines` and `outline_min_bytes`, set once at start.
+    static OUTLINE_MIN: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
+    /// The defaults of `outline_min_lines` and `outline_min_bytes`.
+    const OUTLINE_MIN_LINES: u64 = 1500;
+    const OUTLINE_MIN_BYTES: u64 = 64 * 1024;
     /// A workspace scanned less than this long ago is not moved up again.
     const URGENT_AFTER: Duration = Duration::from_secs(5);
 
@@ -3425,6 +3555,9 @@ mod unix {
         }
         if let Command::CheckCalls { session_id, calls } = &command {
             return check_calls(store, graph, request_id, session_id, calls);
+        }
+        if let Command::OutlineRead { .. } = &command {
+            return outline_read(store, graph, request_id, command);
         }
         if let Command::CheckWrite {
             session_id,

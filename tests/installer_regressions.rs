@@ -10,6 +10,7 @@ fn registration(executable: &str, root: &str) -> Registration {
         share_prompt: true,
         code_briefing: true,
         presence: install::Presence::default(),
+        outline_reads: false,
     }
 }
 

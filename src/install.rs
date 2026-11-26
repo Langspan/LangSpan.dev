@@ -20,6 +20,12 @@ pub const MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash";
 /// session saw can be compared when it later edits the file, and a Read or
 /// Grep shows peers where the session is looking (roadmap A13).
 pub const POST_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash|Read|Grep";
+/// `PreToolUse` with `--outline-reads on`: a `Read` too, so a whole read of a
+/// large file can be outlined first (roadmap A11).
+pub const OUTLINE_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash|Read";
+/// The same for Gemini CLI's `BeforeTool` and Cursor's `preToolUse`.
+pub const GEMINI_OUTLINE_MATCHER: &str = "^(write_file|replace|run_shell_command|read_file)$";
+pub const CURSOR_OUTLINE_MATCHER: &str = "^(Write|Delete|Shell|Read)$";
 pub const CODEX_EVENTS: [&str; 2] = ["PreToolUse", "PostToolUse"];
 pub const CODEX_MATCHER: &str = "^(apply_patch|Bash)$";
 pub const GEMINI_EVENTS: [&str; 2] = ["BeforeTool", "AfterTool"];
@@ -171,6 +177,18 @@ impl Vendor {
         match self {
             Self::Codex if event == "SessionEnd" => CODEX_SESSION_END_TIMEOUT_SECONDS,
             _ => HOST_TIMEOUT_SECONDS,
+        }
+    }
+
+    /// The matcher of one event's group. With `--outline-reads on`
+    /// (roadmap A11), the pre-tool matcher of Claude Code, Cursor and
+    /// Gemini CLI names their read tool too.
+    fn matcher_for(self, event: &str, outline_reads: bool) -> &'static str {
+        match (self, event, outline_reads) {
+            (Self::ClaudeCode, "PreToolUse", true) => OUTLINE_MATCHER,
+            (Self::Cursor, "preToolUse", true) => CURSOR_OUTLINE_MATCHER,
+            (Self::Gemini, "BeforeTool", true) => GEMINI_OUTLINE_MATCHER,
+            _ => self.matcher(event),
         }
     }
 
@@ -329,6 +347,9 @@ pub struct Registration {
     /// Where this session looks is shown to peers; false adds `--presence
     /// off`, and a window other than the default adds `--presence-minutes`.
     pub presence: Presence,
+    /// True adds `--outline-reads on` (roadmap A11), and the host's read
+    /// tool to its pre-tool matcher.
+    pub outline_reads: bool,
 }
 
 /// The presence options of an installed hook command (roadmap A13).
@@ -500,6 +521,7 @@ impl Registration {
             words.extend(["--code-briefing".into(), "off".into()]);
         }
         words.extend(self.presence.words());
+        words.extend(outline_words(self.outline_reads));
         words.join(" ")
     }
 }
@@ -543,6 +565,8 @@ pub struct UserRegistration {
     pub state_dir: PathBuf,
     pub share_prompt: bool,
     pub presence: Presence,
+    /// As `Registration::outline_reads`.
+    pub outline_reads: bool,
 }
 
 impl UserRegistration {
@@ -564,7 +588,17 @@ impl UserRegistration {
             words.extend(["--prompt-summary".into(), "off".into()]);
         }
         words.extend(self.presence.words());
+        words.extend(outline_words(self.outline_reads));
         words.join(" ")
+    }
+}
+
+/// The words `--outline-reads on` adds to an installed command, last.
+fn outline_words(on: bool) -> Vec<String> {
+    if on {
+        vec!["--outline-reads".into(), "on".into()]
+    } else {
+        Vec::new()
     }
 }
 
@@ -583,10 +617,12 @@ pub fn parse_user_hook(vendor: Vendor, hook: &Value) -> Option<UserRegistration>
     // Only the options this module writes, each at most once, in its order;
     // the rebuilt command below must match.
     let (mut share_prompt, mut presence) = (true, Presence::default());
+    let mut outline_reads = false;
     let mut options = &words[5..];
     while let [option, value, rest @ ..] = options {
         match (option.as_str(), value.as_str()) {
             ("--prompt-summary", "off") if share_prompt => share_prompt = false,
+            ("--outline-reads", "on") if !outline_reads => outline_reads = true,
             (option, value) if presence.parse(option, value) => {}
             _ => return None,
         }
@@ -604,6 +640,7 @@ pub fn parse_user_hook(vendor: Vendor, hook: &Value) -> Option<UserRegistration>
         state_dir: words[4].clone().into(),
         share_prompt,
         presence,
+        outline_reads,
     };
     (parsed.command_body(vendor, event.as_deref()) == body).then_some(parsed)
 }
@@ -663,9 +700,29 @@ pub fn stale_matchers(
                 // A Cursor entry is listed directly and holds its own
                 // matcher; it is its own group here (`entries_of`).
                 .filter(|group| entries_of(group).into_iter().any(&ours))
-                .any(|group| group["matcher"] != json!(vendor.matcher(event)))
+                .any(|group| {
+                    let outline = entries_of(group)
+                        .into_iter()
+                        .filter(|hook| ours(hook))
+                        .any(outline_reads_on);
+                    group["matcher"] != json!(vendor.matcher_for(event, outline))
+                })
         })
         .collect()
+}
+
+/// Whether a hook entry LangSpan wrote runs with `--outline-reads on`: the
+/// option is two words of the generated command (`outline_words`).
+fn outline_reads_on(hook: &Value) -> bool {
+    hook.get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|command| {
+            command
+                .split(' ')
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|pair| pair == ["--outline-reads", "on"])
+        })
 }
 
 /// The events an install registers that hold none of `ours` in `settings`:
@@ -761,11 +818,13 @@ pub fn parse_project_hook(vendor: Vendor, hook: &Value) -> Option<Registration> 
     // the command below also requires the order it writes them in.
     let (mut share_prompt, mut code_briefing) = (true, true);
     let mut presence = Presence::default();
+    let mut outline_reads = false;
     let mut options = &words[9..];
     while let [option, value, rest @ ..] = options {
         match (option.as_str(), value.as_str()) {
             ("--prompt-summary", "off") if share_prompt => share_prompt = false,
             ("--code-briefing", "off") if code_briefing => code_briefing = false,
+            ("--outline-reads", "on") if !outline_reads => outline_reads = true,
             (option, value) if presence.parse(option, value) => {}
             _ => return None,
         }
@@ -788,6 +847,7 @@ pub fn parse_project_hook(vendor: Vendor, hook: &Value) -> Option<Registration> 
         share_prompt,
         code_briefing,
         presence,
+        outline_reads,
     };
     let ours = parsed.command_body(vendor, event.as_deref()) == body
         && (marked
@@ -880,6 +940,7 @@ pub fn plan_for(
         command.as_ref().map(|c| c as &dyn Fn(&str) -> String),
         &|hook| is_managed_for(vendor, hook),
         false,
+        registration.is_some_and(|r| r.outline_reads),
     )
 }
 
@@ -897,6 +958,7 @@ pub fn plan_user_for(
         command.as_ref().map(|c| c as &dyn Fn(&str) -> String),
         &|hook| is_user_managed_for(vendor, hook),
         true,
+        registration.is_some_and(|r| r.outline_reads),
     )
 }
 
@@ -951,6 +1013,7 @@ fn plan_hooks(
     command: Option<&dyn Fn(&str) -> String>,
     ours: &dyn Fn(&Value) -> bool,
     user: bool,
+    outline_reads: bool,
 ) -> Result<Value, String> {
     let ours = &|hook: &Value| ours(hook) || is_watcher(vendor, hook, user, ours);
     let mut settings = match existing {
@@ -1004,7 +1067,10 @@ fn plan_hooks(
                 &mut group
             };
             if index < tool_events {
-                holder.insert("matcher".into(), vendor.matcher(event).into());
+                holder.insert(
+                    "matcher".into(),
+                    vendor.matcher_for(event, outline_reads).into(),
+                );
             }
             if vendor.flat(event) {
                 groups.push(Value::Object(entry));
@@ -1363,6 +1429,7 @@ mod tests {
             share_prompt: true,
             code_briefing: true,
             presence: Presence::default(),
+            outline_reads: false,
         }
     }
 
@@ -1614,6 +1681,7 @@ mod tests {
             state_dir: "/home/u/.local/state/langspan".into(),
             share_prompt: true,
             presence: Presence::default(),
+            outline_reads: false,
         }
     }
 
@@ -2011,6 +2079,7 @@ mod tests {
             share_prompt: true,
             code_briefing: true,
             presence: Presence::default(),
+            outline_reads: false,
         };
         for vendor in Vendor::ALL {
             let ours = |hook: &Value| is_managed_for(vendor, hook);
@@ -2028,6 +2097,59 @@ mod tests {
                 "{vendor:?}"
             );
         }
+    }
+
+    /// Roadmap A11: `--outline-reads on` is in every command, parses back,
+    /// and adds the read tool to the pre-tool matcher of the hosts that
+    /// outline; the install with it on is not stale, nor the one without.
+    #[test]
+    fn outline_reads_on_adds_the_read_tool_before_it_runs() {
+        let registration = Registration {
+            outline_reads: true,
+            ..registration("/work/repo")
+        };
+        let expected = [
+            (Vendor::ClaudeCode, "PreToolUse", OUTLINE_MATCHER),
+            (Vendor::Cursor, "preToolUse", CURSOR_OUTLINE_MATCHER),
+            (Vendor::Gemini, "BeforeTool", GEMINI_OUTLINE_MATCHER),
+        ];
+        for vendor in Vendor::ALL {
+            let ours = |hook: &Value| is_managed_for(vendor, hook);
+            let settings = plan_for(vendor, None, Some(&registration)).unwrap();
+            assert!(
+                stale_matchers(vendor, &settings, ours).is_empty(),
+                "{vendor:?}"
+            );
+            for hook in managed_hooks(&settings, ours) {
+                assert!(outline_reads_on(&hook), "{hook}");
+                assert!(parse_project_hook(vendor, &hook).unwrap().outline_reads);
+            }
+            for (host, event, matcher) in expected {
+                if host == vendor {
+                    let group = &settings[vendor.table()][event][0];
+                    assert_eq!(group["matcher"], matcher, "{vendor:?}");
+                }
+            }
+            // The same install with it off has the matcher without the read.
+            let off = plan_for(vendor, Some(settings), Some(&registration_off())).unwrap();
+            assert!(stale_matchers(vendor, &off, ours).is_empty(), "{vendor:?}");
+            assert!(!managed_hooks(&off, ours).iter().any(outline_reads_on));
+        }
+        let user = UserRegistration {
+            outline_reads: true,
+            ..user("/opt/bin/langspan")
+        };
+        let command = user.command_for_event(Vendor::ClaudeCode, Some("PreToolUse"));
+        let hook = json!({"type": "command", "command": command});
+        assert!(
+            parse_user_hook(Vendor::ClaudeCode, &hook)
+                .unwrap()
+                .outline_reads
+        );
+    }
+
+    fn registration_off() -> Registration {
+        registration("/work/repo")
     }
 
     #[test]
