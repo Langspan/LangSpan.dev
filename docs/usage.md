@@ -1378,7 +1378,37 @@ each definition also has:
 The answer has `resolution: "name"`: calls and callers are matched by name,
 not resolved, so a call of another function with the same name counts. No
 source body is returned. Definitions that would make the answer larger than
-64 KiB are left out and `truncated` is true. `references` finds mentions of the name. `impact` lists the file's
+64 KiB are left out and `truncated` is true.
+
+With `--rank` (MCP: `langspan_symbol` with `rank: true`), definitions come in
+the order a prompt's code briefing uses: a file the session named by
+`--session ID` (MCP: `session_id`) edited or read, then a file a live peer is
+editing, then exported ones, then path order. Each has `rank_reasons` and
+`dependents`: up to 5 other files that mention its name, each with its
+`mentions` count, ranked the same way and then by most mentions, with
+`dependent_count` counting them all. The rules are fixed and listed in
+[ADR 0008](adr/0008-derived-source-index.md). `--session` without `--rank` is
+refused:
+
+```text
+$ langspan graph symbol PROJECT upload --rank --session claude-code.alice
+src/store/upload.rs:14 function upload (exported) — pub fn upload(path: &Path) -> Result<()>
+  ranked by: the session edited this file; exported
+  used by: src/api/routes.rs (3 mention(s), session codex.bob is editing it), src/cli.rs (1 mention(s))
+tools/bench.rs:40 function upload — fn upload()
+  used by: src/api/routes.rs (3 mention(s), session codex.bob is editing it), src/cli.rs (1 mention(s))
+```
+
+At a prompt the code briefing ranks the same way, with the paths and
+qualifiers the prompt names (`store` in `store::upload`, `upload.rs`) ranked
+after exported definitions. The top definition comes first with why, and
+`used by` its ranked dependents:
+
+```text
+- "upload": function at "src/store/upload.rs":14, exported (you edited this file): "pub fn upload(path: &Path) -> Result<()>"; used by "src/api/routes.rs" (3, codex session bob is editing it), "src/cli.rs" (1); also function at "tools/bench.rs":40: "fn upload()"
+```
+
+`references` finds mentions of the name. `impact` lists the file's
 exports and other files mentioning those names, one level deep.
 
 With `--depth N` (1 to 3, default 1; MCP: `langspan_impact` with `depth`),
@@ -2189,7 +2219,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_events` | Read an ordered page of persisted events |
 | `langspan_changes` | Read file and local-branch observations with scan freshness |
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
-| `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check; with `renamed`, under the newest name a recorded rename leads to |
+| `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check; with `rank` and `session_id`, in the code briefing's order with each one's ranked dependents; with `renamed`, under the newest name a recorded rename leads to |
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
