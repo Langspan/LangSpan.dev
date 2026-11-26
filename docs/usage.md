@@ -1932,13 +1932,26 @@ other's lines. When another session changed the file in a write whose lines
 are not known, the session's hunks are still committed unless one of their
 lines appears in the file's changes since `HEAD` more often than the session
 wrote it, or the session's earlier write of that line may already have been
-committed through Git; that hunk is then named, with the reason. Run from an agent's shell, the session is the one running
-the command; from a terminal, pass `--session` (a briefing says "Your session
-ID is …"). It looks for the running command in its own state directory, so
+committed through Git; that hunk is then named, with the reason. A
+formatter that only reflows lines keeps each line with the session that wrote
+it; one that joins two sessions' lines into one makes a hunk whose owner is
+not known, and the command refuses. Run from an agent's shell (Claude Code
+`Bash`, Codex `Bash`, Cursor `Shell`, Gemini CLI `run_shell_command`), the
+session is the one running the command; from a terminal, pass `--session` (a
+briefing says "Your session ID is …"). It looks for the running command in its own state directory, so
 with hooks installed under `--state-dir`, pass the same `--state-dir`; when
 it finds no running session, the error names the directory it looked in and,
 if a LangSpan hook installed in the checkout names another one, that one.
-The MCP tool `langspan_commit_mine` does the same.
+The MCP tool `langspan_commit_mine` does the same, and its result holds the
+same fields as `--json` (`result`, `session_id`, `commit`, `paths`, `left`,
+`refused`, `moved`, and `index` when the shared index could not be updated),
+plus `exit_code` and `request_id`. The output lists what was left
+uncommitted and, when anything was left or refused, points to
+`langspan status --mine` for the lines still this session's. If one of your
+`pre-commit`, `prepare-commit-msg` or `commit-msg` hooks fails, nothing is
+committed and the error names that hook. With Git before 2.36, which has no
+`git hook run`, the hooks run from `core.hooksPath` or the Git directory's
+`hooks`.
 
 To see first what `commit --mine` would take:
 
