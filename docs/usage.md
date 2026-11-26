@@ -1247,6 +1247,42 @@ full counts. MCP: `langspan_blind_spots`. Read those files directly when the
 index is silent; nothing guesses what they contain. `langspan doctor` also
 says when a workspace has blind files.
 
+A large repository's first indexing takes several passes of 200 files. To
+start a new state directory or a second machine with an index another one
+already built, export it and import it there. Both are CLI-only:
+
+```sh
+./target/release/langspan graph export PROJECT --out /path/to/index.jsonl
+./target/release/langspan graph import PROJECT --in /path/to/index.jsonl
+./target/release/langspan graph import PROJECT --in /path/to/index.jsonl --apply
+```
+
+```text
+Exported 3912 files (2 partial, 9418230 bytes) from workspace PROJECT.
+Dry run: 3870 files have the same content here and can be loaded into workspace PROJECT; 42 differ or are missing here and are left to the indexer. Add --apply.
+```
+
+The export is JSON Lines: a header (`format` `langspan-source-index`, the
+index `schema`, `workspace_root` as the root's last component only, and
+`created_at` in Unix milliseconds), then one line per indexed file with its
+`path`, content `digest`, `partial`, and its `symbols`, `refs`, `imports` and
+`calls`. It holds no file content beyond signatures. The file is created
+with mode `0600` and never replaces an existing file; LangSpan does not send
+it anywhere, so you move it yourself.
+
+`graph import` is a dry run unless you add `--apply`. A file's rows are
+loaded only when the file on disk now has exactly the exported content (its
+SHA-256 equals `digest`), the last scan of this workspace lists it, and this
+index holds no version of it yet. Every other file is left to the indexer,
+and what this index already parsed is kept. Run the import soon after
+registering the workspace, before the indexer reaches most files. An import
+is a first indexing: it records no interface notice. The file can be at most
+256 MiB. A header of another format or index schema refuses the whole
+import and leaves the index unchanged; a line over a parse bound (2,000
+symbols, 20,000 references, 500 imports, 20,000 calls, a 128-byte name or a
+240-byte signature) or otherwise malformed is skipped and counted. An
+export or import may take up to 100 s, during which indexing waits.
+
 When an indexed export disappears or its signature changes, relevant sessions
 receive an interface notice at their next prompt. The notice names files they
 work on or have read that mention the changed name. Notices stay within one
