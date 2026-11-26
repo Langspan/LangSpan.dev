@@ -3040,7 +3040,7 @@ fn a_protocol_3_client_reads_answers_after_a_rename_and_a_file_move() {
     // At least the status notices and both histories.
     assert!(read >= 4, "too few interface changes were read: {read}");
 
-    // This build's clients ask in version 4 and get every field.
+    // A client of version 4 (or later) gets every rename field.
     let current = w.raw(&json!({"version": 4, "request_id": "current", "command": commands[2]}));
     assert_eq!(current["version"], 4, "{current:#}");
     let entry = &current["outcome"]["history"]["entries"][0];

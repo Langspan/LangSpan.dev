@@ -294,8 +294,8 @@ is not among the events read. An outcome not settled yet is counted as
 - *Derived, not stored.* The issue proposed a `refusal_settled` event
   appended by the daemon. The outcomes are instead computed by the core, in
   the report's one pass over the events it already reads (`Settler` in
-  `crates/langspan-core/src/refusal_outcome.rs`). No event, schema or wire
-  change is needed beyond the new count field. No pending state lives in the
+  `crates/langspan-core/src/refusal_outcome.rs`). No event or schema change
+  is needed. No pending state lives in the
   daemon, so a restart settles nothing on its own and needs no `restart`
   reason: a refusal before a restart is settled by the events after it,
   placed in wall time by their generation's anchors. A restart ends every
@@ -319,6 +319,22 @@ is not among the events read. An outcome not settled yet is counted as
   setting; tests shorten it with an undocumented environment variable that
   can only shorten it.
 - *Held commits* open no outcome: no write answers them.
+- *Wire protocol version 5.* A CLI or MCP adapter of an earlier build reads a
+  report's counts with `deny_unknown_fields`, so an answer carrying the new
+  field would fail to read as a whole. The protocol is version 5 instead. The
+  daemon answers a version 4 or version 3 request in that version, with the
+  counts' `refusal_outcomes` left out (`protocol_4_shape` in
+  `src/protocol.rs`, applied before version 3's shape). Requests are the
+  same in all three. A version 5 client refused with `unsupported_version` by
+  a daemon of an earlier build asks once more in the version that daemon
+  answered in. Tests:
+  `clients_of_protocol_4_and_3_get_reports_without_refusal_outcomes`
+  (`tests/refusal_outcomes.rs`),
+  `v5_report_response_and_its_version_4_and_3_forms_match_the_golden_vectors`
+  (`tests/protocol.rs`, against `fixtures/report-response-v5.json` and
+  `fixtures/report-response-v4.json`) and
+  `a_daemon_of_an_earlier_build_is_asked_again_in_its_version`
+  (`src/client.rs`, for a daemon of version 4 and of version 3).
 
 Nothing reaches a model, and nothing is held or refused because of an
 outcome. The cost is bounded by the events the report already reads. Tests:

@@ -358,3 +358,90 @@ fn a_codex_identical_retry_is_unknown_read_and_a_changed_one_adapted() {
         &json!({"adapted": 1, "unknown_read": 1})
     );
 }
+
+impl Fixture {
+    /// One request written to the daemon's socket as it is, as a client of
+    /// any build would send it.
+    fn raw(&self, request: &Value) -> Value {
+        use std::io::{BufRead, BufReader};
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(self.base.join("state/daemon.sock")).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        writeln!(stream, "{request}").unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+    /// The report of `work`, asked for in protocol `version`.
+    fn report_in(&self, version: u16) -> Value {
+        self.raw(&json!({
+            "version": version, "request_id": format!("report-{version}"),
+            "command": {"op": "report", "workspace_id": "work", "from_ms": 0},
+        }))
+    }
+}
+
+/// The fields of a report's counts before protocol version 5: a client of
+/// version 3 or 4 reads them with `deny_unknown_fields`.
+const COUNTS_BEFORE_5: [&str; 10] = [
+    "edits_admitted",
+    "edits_base_unknown",
+    "shell_writes_after",
+    "reads_reported",
+    "intents_set",
+    "intents_ended",
+    "intents_left_open",
+    "refusals",
+    "retried_unchanged",
+    "briefings_delivered",
+];
+
+/// Every `counts` object of a report answer: each session's and each host's.
+fn every_counts(reply: &Value) -> Vec<&Value> {
+    let report = &reply["outcome"]["report"];
+    ["sessions", "hosts"]
+        .iter()
+        .flat_map(|list| report[*list].as_array().unwrap())
+        .map(|row| &row["counts"])
+        .collect()
+}
+
+/// Review comment 4711096877: a CLI or MCP adapter of an earlier build reads
+/// a report's counts with `deny_unknown_fields`, so an answer carrying
+/// `refusal_outcomes` would fail to read as a whole. Protocol version 5 adds
+/// the field; clients of versions 4 and 3 get the report without it, in
+/// their own version, with every other figure the same.
+#[test]
+fn clients_of_protocol_4_and_3_get_reports_without_refusal_outcomes() {
+    let f = Fixture::new();
+    stale_refusal(&f);
+    let current = f.report_in(langspan::protocol::PROTOCOL_VERSION);
+    assert_eq!(current["version"], 5, "{current:#}");
+    let with = every_counts(&current);
+    assert!(
+        with.iter()
+            .any(|counts| counts["refusal_outcomes"] == json!({"pending": 1})),
+        "{current:#}"
+    );
+    for version in [4, 3] {
+        let reply = f.report_in(version);
+        assert_eq!(reply["version"], version, "{reply:#}");
+        assert_eq!(reply["outcome"]["type"], "report", "{reply:#}");
+        let counts = every_counts(&reply);
+        assert_eq!(counts.len(), with.len(), "{reply:#}");
+        for (old, new) in counts.iter().zip(&with) {
+            let keys: Vec<&str> = old
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(keys, COUNTS_BEFORE_5, "version {version}: {reply:#}");
+            let mut stripped = (*new).clone();
+            stripped.as_object_mut().unwrap().remove("refusal_outcomes");
+            assert_eq!(*old, &stripped, "version {version}");
+        }
+    }
+}

@@ -972,7 +972,7 @@ fn v3_index_export_and_import_match_the_committed_golden_vectors() {
 fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() {
     let wire = include_bytes!("../fixtures/rename-history-response-v4.json");
     let mut response: Response = serde_json::from_slice(wire).unwrap();
-    assert_eq!(response.version, PROTOCOL_VERSION);
+    assert_eq!(response.version, 4);
     let langspan_core::Outcome::History { history } = &response.outcome else {
         panic!("{response:?}");
     };
@@ -981,6 +981,8 @@ fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() 
         history.entries[1].before_path.as_deref(),
         Some("app/old_users.py")
     );
+    // Version 5 added nothing to a history answer: versions 4 and 5 agree.
+    assert_eq!(encode_for(4, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
 
     response.version = OLDEST_PROTOCOL_VERSION;
@@ -994,6 +996,76 @@ fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() 
         String::from_utf8(encode(&response).unwrap())
             .unwrap()
             .contains("before_path")
+    );
+}
+
+/// A report's counts as a build before protocol version 5 reads them.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct EarlierCounts {
+    edits_admitted: u32,
+    edits_base_unknown: u32,
+    shell_writes_after: u32,
+    reads_reported: u32,
+    intents_set: u32,
+    intents_ended: u32,
+    intents_left_open: u32,
+    refusals: std::collections::BTreeMap<String, u32>,
+    retried_unchanged: u32,
+    briefings_delivered: u32,
+}
+
+/// Every `counts` object of a report answer, as an earlier build reads it.
+fn earlier_counts(wire: &[u8]) -> Result<usize, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_slice(wire)?;
+    let report = &value["outcome"]["report"];
+    let mut read = 0;
+    for list in ["hosts", "sessions"] {
+        for row in report[list].as_array().unwrap() {
+            serde_json::from_value::<EarlierCounts>(row["counts"].clone())?;
+            read += 1;
+        }
+    }
+    Ok(read)
+}
+
+/// Version 5 (roadmap H9, review comment 4711096877): a report answer's
+/// counts carry `refusal_outcomes`. To a version 4 or version 3 client the
+/// same answer is encoded without it, so an earlier build, which reads the
+/// counts with `deny_unknown_fields`, still reads the whole answer.
+#[test]
+fn v5_report_response_and_its_version_4_and_3_forms_match_the_golden_vectors() {
+    let wire = include_bytes!("../fixtures/report-response-v5.json");
+    let mut response: Response = serde_json::from_slice(wire).unwrap();
+    assert_eq!(response.version, PROTOCOL_VERSION);
+    let langspan_core::Outcome::Report { report } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(report.sessions[0].counts.refusal_outcomes["adapted"], 1);
+    assert_eq!(report.hosts[0].counts.refusal_outcomes["adapted"], 1);
+    assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
+    assert!(
+        earlier_counts(wire).is_err(),
+        "an earlier build cannot read version 5 counts"
+    );
+
+    let earlier = include_bytes!("../fixtures/report-response-v4.json");
+    response.version = 4;
+    assert_eq!(encode_for(4, &response).unwrap(), earlier);
+    assert_eq!(earlier_counts(earlier).unwrap(), 2);
+    // Version 3 has the version 4 form of a report.
+    response.version = OLDEST_PROTOCOL_VERSION;
+    let oldest = encode_for(OLDEST_PROTOCOL_VERSION, &response).unwrap();
+    assert_eq!(
+        String::from_utf8(oldest).unwrap(),
+        String::from_utf8_lossy(earlier).replacen(r#""version":4"#, r#""version":3"#, 1)
+    );
+    // The earlier form is only for that reply: the response is unchanged.
+    assert!(
+        String::from_utf8(encode(&response).unwrap())
+            .unwrap()
+            .contains("refusal_outcomes")
     );
 }
 
