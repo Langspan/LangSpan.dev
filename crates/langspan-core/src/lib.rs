@@ -1553,13 +1553,17 @@ pub const MAX_RENAME_HOPS: usize = 8;
 
 /// The renames that took `name` to its newest name in `workspace_id`, in
 /// order, at most `MAX_RENAME_HOPS`; `None` when no rename of it is
-/// recorded. A hop back to a name already passed ends the chain.
+/// recorded. Each hop after the first is of the first one's kind, so an
+/// unrelated definition's rename never continues the chain. A hop back to a
+/// name already passed ends the chain.
 pub fn renamed_to(state: &State, workspace_id: &str, name: &str) -> Option<Vec<Rename>> {
     let renames = state.renames.get(workspace_id)?;
     let mut hops: Vec<Rename> = Vec::new();
     let mut current = name;
     while hops.len() < MAX_RENAME_HOPS {
-        let Some(hop) = renames.iter().find(|rename| rename.name == current) else {
+        let Some(hop) = renames.iter().find(|rename| {
+            rename.name == current && hops.first().is_none_or(|first| first.kind == rename.kind)
+        }) else {
             break;
         };
         if hop.after_name == name || hops.iter().any(|seen| seen.name == hop.after_name) {
@@ -7933,7 +7937,8 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
 }
 
 /// What a notice's renames and moves change in the state (roadmap D7). A
-/// rename is remembered under its old name; a name that comes back as the
+/// rename is remembered under its old name and kind, replacing an earlier
+/// rename of that name and kind; a name that comes back as the
 /// same kind (added, or the new name of another rename) is forgotten as
 /// renamed. A file moved
 /// whole takes its notes along: each note about the old path is about the
@@ -7956,7 +7961,7 @@ fn follow_renames(state: &mut State, notice: &InterfaceNotice) {
             renames.retain(|rename| rename.name != *back || rename.kind != change.kind);
         }
         if let ("renamed", Some(to), false) = (change.change.as_str(), &change.after_name, moved) {
-            renames.retain(|rename| rename.name != change.name);
+            renames.retain(|rename| rename.name != change.name || rename.kind != change.kind);
             renames.insert(
                 0,
                 Rename {

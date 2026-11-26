@@ -1519,7 +1519,9 @@ The answer's `renamed` lists the recorded renames followed, oldest first
 defined again since, gets the answer it gets without the flag, with no
 `renamed`. Defined again means the index holds an exported definition of the
 old name with the renamed one's kind, in any file, including one indexed for
-the first time; a chain stops at the first old name defined again. The daemon keeps the 256 newest renames per workspace, rebuilt
+the first time; a chain stops at the first old name defined again. Each
+rename after the first is of the first one's kind, so a method's rename never
+continues a function's chain. The daemon keeps the 256 newest renames per workspace, rebuilt
 from the event log when it starts; an older rename, or one whose event a
 compaction removed, is not followed.
 

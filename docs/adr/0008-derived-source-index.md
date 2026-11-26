@@ -270,7 +270,8 @@ cursor, so every page follows the same lineage.
 A notice's request ID includes the index pass that found it, so a move or
 content change that repeats an earlier one (`a → b → a → b`) is recorded
 again, and a redelivery of one notice is still a replay.
-`graph symbol OLD --renamed` follows recorded renames to the newest name. A
+`graph symbol OLD --renamed` follows recorded renames of one kind to the
+newest name. A
 rename across files other than such a move is never inferred.
 Earlier builds read interface changes and history entries with
 `deny_unknown_fields`, and status, briefings, recaps, history and the

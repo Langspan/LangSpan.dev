@@ -386,6 +386,75 @@ fn a_rename_is_followed_to_its_newest_name_and_forgotten_when_the_name_returns()
     assert!(state.renames.is_empty());
 }
 
+/// Review finding on #203: function `fetch_user` became `load_user`, then
+/// an unrelated method `load_user` became `read_user`. The function's chain
+/// ends at `load_user`; the method's rename is never a hop of it, and
+/// neither rename replaces the other.
+#[test]
+fn a_rename_chain_keeps_to_the_first_renames_kind() {
+    let mut state = ready();
+    let method = InterfaceChange {
+        name: "load_user".into(),
+        kind: "method".into(),
+        before: Some("def load_user(self, id)".into()),
+        after: Some("def read_user(self, id)".into()),
+        after_name: Some("read_user".into()),
+        before_name: Some("load_user".into()),
+        ..renamed()
+    };
+    for (id, change) in [("n1", renamed()), ("n2", method)] {
+        for event in observed(&state, "app/users.py", change, id).0 {
+            apply(&mut state, &event).unwrap();
+        }
+    }
+    let hops = |name| -> Vec<(String, String, String)> {
+        renamed_to(&state, "work", name)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|hop| (hop.kind, hop.name, hop.after_name))
+            .collect()
+    };
+    assert_eq!(
+        hops("fetch_user"),
+        [("function".into(), "fetch_user".into(), "load_user".into())]
+    );
+    assert_eq!(
+        hops("load_user"),
+        [("method".into(), "load_user".into(), "read_user".into())]
+    );
+}
+
+/// A method's rename of a name does not replace a function's rename of the
+/// same name: function `fetch_user` became `load_user`, then `get_user`,
+/// and a method `load_user` became `read_user` after both.
+#[test]
+fn a_rename_of_another_kind_keeps_a_chains_hop() {
+    let mut state = ready();
+    let rename = |kind: &str, from: &str, to: &str| InterfaceChange {
+        name: from.into(),
+        kind: kind.into(),
+        after_name: Some(to.into()),
+        before_name: Some(from.into()),
+        ..renamed()
+    };
+    for (id, change) in [
+        ("n1", rename("function", "fetch_user", "load_user")),
+        ("n2", rename("function", "load_user", "get_user")),
+        ("n3", rename("method", "load_user", "read_user")),
+    ] {
+        for event in observed(&state, "app/users.py", change, id).0 {
+            apply(&mut state, &event).unwrap();
+        }
+    }
+    let hops = renamed_to(&state, "work", "fetch_user").unwrap();
+    assert_eq!(
+        hops.iter()
+            .map(|hop| (hop.kind.as_str(), hop.after_name.as_str()))
+            .collect::<Vec<_>>(),
+        [("function", "load_user"), ("function", "get_user")]
+    );
+}
+
 fn notice(id: &str, path: &str, change: InterfaceChange) -> Event {
     Event::InterfaceChanged {
         notice: InterfaceNotice {
