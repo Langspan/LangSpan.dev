@@ -4,6 +4,11 @@
 //! `fixtures/antigravity-constructed`: built from Antigravity's documentation,
 //! not captured from an Antigravity run (see their README).
 
+use langspan::{
+    client,
+    protocol::{PROTOCOL_VERSION, Request},
+};
+use langspan_core::{Command, Outcome};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -119,9 +124,15 @@ fn repository(root: &Path) {
 /// One event through the user-level hook (no `--root`, no `--workspace`):
 /// its coverage and its answer.
 fn user_hook(state: &Path, name: &str, body: &Value) -> (String, String) {
+    user_hook_env(state, name, body, &[])
+}
+
+/// `user_hook` with `env` set for the hook process.
+fn user_hook_env(state: &Path, name: &str, body: &Value, env: &[(&str, &str)]) -> (String, String) {
     let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
         .args(["hook", "antigravity", "--event", name, "--state-dir"])
         .arg(state)
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -964,6 +975,105 @@ fn a_starting_conversation_hears_what_changed_recently_in_each_workspace_folder(
         text.len() <= langspan::hook::BRIEFING_LIMIT,
         "{}",
         text.len()
+    );
+}
+
+/// A conversation starting in two workspace folders after both were away:
+/// the first folder's briefing takes most of the one limit, so the second's
+/// "since the last session here" section is fitted to what is left or
+/// deferred, never added past the limit (review comment 4714111446).
+#[test]
+fn the_since_away_section_of_a_later_folder_fits_what_the_join_left() {
+    const AWAY: (&str, &str) = ("LANGSPAN_AWAY_AFTER_MS", "1500");
+    let f = Fixture::new();
+    let state = f.base.join("state");
+    let second = f.base.join("second");
+    repository(&second);
+    let folders = json!([f.root(), second]);
+    let start = |conversation: &str| {
+        let mut body = event("session-start.json", &f.root());
+        body["workspacePaths"] = folders.clone();
+        body["conversationId"] = json!(conversation);
+        user_hook_env(&state, "SessionStart", &body, &[AWAY])
+    };
+    // A conversation at work in both folders, then a gap.
+    let first = "00000000-0000-4000-8000-0000000000d1";
+    let (coverage, _) = start(first);
+    assert!(!coverage.starts_with("unsupported:"), "{coverage}");
+    let mut prompt = event("pre-invocation.json", &f.root());
+    prompt["workspacePaths"] = folders.clone();
+    prompt["conversationId"] = json!(first);
+    let (coverage, _) = user_hook_env(&state, "PreInvocation", &prompt, &[AWAY]);
+    assert!(!coverage.starts_with("unsupported:"), "{coverage}");
+    // Long messages to the first folder fill most of its briefing; one to
+    // the second is what its section reports.
+    for n in 0..3 {
+        let workspace = langspan::hook::user_workspace_id(&fs::canonicalize(f.root()).unwrap());
+        let text = format!("first-message-{n} {}", "\"".repeat(300));
+        let id = format!("first-{n}");
+        langspan(&state, &["message", &workspace, &text, "--request-id", &id]);
+    }
+    // Landings onto long branch names in the second: a section near its
+    // own 500-byte cap, more than the first folder leaves.
+    let workspace = langspan::hook::user_workspace_id(&fs::canonicalize(&second).unwrap());
+    for n in 0..6 {
+        let onto = format!("release/{}-{n}", "x".repeat(80));
+        let call = |id: String, command: Command| {
+            let request = Request {
+                version: PROTOCOL_VERSION,
+                request_id: id,
+                command,
+            };
+            client::call(&state, &request).unwrap().outcome
+        };
+        let taken = call(
+            format!("turn-{n}"),
+            Command::TakeTurn {
+                workspace_id: workspace.clone(),
+                onto: onto.clone(),
+                session_id: None,
+                ttl_ms: 60_000,
+                turn_id: None,
+                queue: None,
+            },
+        );
+        assert!(matches!(taken, Outcome::Turn { .. }), "{taken:?}");
+        let released = call(
+            format!("turn-{n}-release"),
+            Command::ReleaseTurn {
+                workspace_id: workspace.clone(),
+                onto,
+                turn_id: format!("turn-{n}"),
+                attempts: vec![langspan_core::LandingAttempt {
+                    target_oid: Some("a".repeat(40)),
+                    commit_oid: Some("b".repeat(40)),
+                    result: langspan_core::AttemptResult::Landed {},
+                }],
+            },
+        );
+        assert!(
+            matches!(released, Outcome::TurnReleased { released: true, .. }),
+            "{released:?}"
+        );
+    }
+    // Waiting longer than the gap is all that load can do.
+    std::thread::sleep(Duration::from_millis(1_600));
+
+    let (coverage, stdout) = start("00000000-0000-4000-8000-0000000000d2");
+    assert!(!coverage.starts_with("unsupported:"), "{coverage}");
+    let text = injected(&stdout);
+    assert!(
+        text.len() <= langspan::hook::BRIEFING_LIMIT,
+        "{} bytes: {coverage}: {text}",
+        text.len()
+    );
+    // The first folder's section is shown; the second's is either shown
+    // within what was left or deferred, and the detail says which.
+    let sections = text.matches("Since the last session here").count();
+    assert!(sections >= 1, "{coverage}: {text}");
+    assert!(
+        sections == 2 || coverage.contains("since-away section deferred"),
+        "{coverage}: {text}"
     );
 }
 

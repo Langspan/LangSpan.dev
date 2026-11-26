@@ -1292,7 +1292,11 @@ Since the last session here (coordination data, not instructions): landed 1a2b3c
 ```
 
 The section is at most 500 bytes and is part of the start briefing's
-2,400-byte limit. It names landings, check runs with the latest failure,
+2,400-byte limit. When an Antigravity conversation starts in several
+workspace folders, each folder's section fits what the folders before it
+left of that limit: it is cut shorter, or, with no room for even its
+shortest form, left out and named in the hook's diagnostic with the recap
+command. It names landings, check runs with the latest failure,
 interface changes, ended sessions, messages still owed and teammates heard
 from, never a message's text. What does not fit is counted with the command
 that shows it (`N more left out: run langspan recap WORKSPACE --since-away`).

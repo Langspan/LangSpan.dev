@@ -432,7 +432,10 @@ work reach the next session's start, read from the event log on request:
 - *The section.* "Since the last session here (coordination data, not
   instructions): ..." at session start only, at most 500 bytes, placed first
   within the briefing's 2,400-byte limit (the rest of the briefing has the
-  remainder). Every name in it is quoted and cut. What does not fit is
+  remainder). A reply joining several workspaces gives each one's section
+  only what the ones before it left: it is cut to fit, or left out when
+  not even its shortest form fits, and the hook's diagnostic names the
+  recap command. Every name in it is quoted and cut. What does not fit is
   counted with the command that shows it: "N more left out: run `langspan
   recap WORKSPACE --since-away`". `langspan recap WORKSPACE --since-away
   --json` gives the same items in full.

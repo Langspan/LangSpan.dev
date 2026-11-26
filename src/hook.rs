@@ -1304,10 +1304,12 @@ fn lifecycle(
         LifecycleKind::Start => (CodeAsk::default(), false),
     };
     // At a start after the workspace was away (roadmap C10): what happened
-    // since its last interactive session, first, within the same limit.
+    // since its last interactive session, first, within the same room. A
+    // reply joining several workspaces may leave this one too little room
+    // for it (review comment 4714111446): it is cut to fit, or left out.
     let mut away_note = String::new();
     let since_section = if starting {
-        since_section(&step, &config.workspace_id, &mut away_note)
+        since_section(&step, &config.workspace_id, room, &mut away_note)
     } else {
         None
     };
@@ -1497,9 +1499,12 @@ fn lifecycle(
 /// (roadmap C10): only while the workspace has been away, with no
 /// interactive session at work since, and only when something happened.
 /// A failure to ask is noted and leaves the briefing as it would have been.
+/// The section and the separator after it fit `room`; with too little room
+/// for even its shortest form, it is left out and the note says so.
 fn since_section(
     step: &dyn Fn(&str, Command) -> Result<Response, Failure>,
     workspace_id: &str,
+    room: usize,
     note: &mut String,
 ) -> Option<String> {
     let after_ms = match crate::since::away_after_ms() {
@@ -1537,7 +1542,16 @@ fn since_section(
     if !since.ongoing {
         return None;
     }
-    crate::since::section(&since, workspace_id)
+    let section = crate::since::section(&since, workspace_id, room.saturating_sub(2));
+    if section.is_none()
+        && crate::since::section(&since, workspace_id, crate::since::SECTION_BYTES).is_some()
+    {
+        note.push_str(&format!(
+            "; since-away section deferred: no room left in this reply; {}",
+            crate::since::full_command(workspace_id)
+        ));
+    }
+    section
 }
 
 /// The distinct files the code briefing found definitions in, in the order
