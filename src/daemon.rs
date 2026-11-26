@@ -99,6 +99,9 @@ mod unix {
         /// How often the agent hosts on this machine are checked for a
         /// LangSpan install (roadmap A7). The first check is at start.
         host_check_ms: u64,
+        /// How far back a starting session's "recently in this repository"
+        /// section looks (roadmap C3), within the current daemon run.
+        recent_window_ms: u64,
     }
     impl Default for Config {
         fn default() -> Self {
@@ -116,6 +119,7 @@ mod unix {
                 notify_hourly_limit: 10,
                 notify_handoff_after_ms: 600_000,
                 host_check_ms: 3_600_000,
+                recent_window_ms: langspan_core::RECENT_WINDOW_MS,
             }
         }
     }
@@ -150,13 +154,15 @@ mod unix {
                 || !(1..=60).contains(&result.notify_hourly_limit)
                 || !(1000..=86_400_000).contains(&result.notify_handoff_after_ms)
                 || !(100..=86_400_000).contains(&result.host_check_ms)
+                || !(langspan_core::MIN_RECENT_WINDOW_MS..=langspan_core::MAX_RECENT_WINDOW_MS)
+                    .contains(&result.recent_window_ms)
                 || result.retention_days.is_some_and(|days| {
                     !(langspan_core::MIN_RETENTION_DAYS..=langspan_core::MAX_RETENTION_DAYS)
                         .contains(&days)
                 })
             {
                 return Err(
-                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000, retention_days 7..3650"
+                    "config limits: io_timeout_ms/request_timeout_ms 100..5000, max_clients 1..128, remote_pass_ms 200..600000, auto_check_debounce_ms 50..60000, flaky_rerun_max_s 0..3600, notify_kind_interval_ms 1000..86400000, notify_hourly_limit 1..60, notify_handoff_after_ms 1000..86400000, host_check_ms 100..86400000, recent_window_ms 60000..86400000, retention_days 7..3650"
                         .into(),
                 );
             }
@@ -719,10 +725,19 @@ mod unix {
             max_peers,
             deliver,
             mid_turn,
+            recent,
+            recent_window_ms,
             mcp,
         } = command
         else {
             return command.clone();
+        };
+        // The window is the daemon's configuration, whatever a client
+        // sent (roadmap C3).
+        let recent_window_ms = if *recent {
+            RECENT_WINDOW_MS.get().copied()
+        } else {
+            *recent_window_ms
         };
         let inflight = graph
             .zip(langspan_core::briefing_concern(state, session_id, now_ms()))
@@ -751,6 +766,8 @@ mod unix {
             max_peers: *max_peers,
             deliver: *deliver,
             mid_turn: *mid_turn,
+            recent: *recent,
+            recent_window_ms,
             mcp: *mcp,
             inflight,
         }
@@ -969,6 +986,7 @@ mod unix {
             .map_err(|error| format!("another daemon may own this state directory: {error}"))?;
         let config =
             Config::read(&directory).map_err(|e| format!("read daemon configuration: {e}"))?;
+        let _ = RECENT_WINDOW_MS.set(config.recent_window_ms);
         local::private_file(&directory.join("state.sqlite3"), true)?;
         for name in ["state.sqlite3-wal", "state.sqlite3-shm"] {
             local::check_existing_file(&directory.join(name))?;
@@ -1824,6 +1842,8 @@ mod unix {
     }
     /// When this daemon started, on the same clock, for the uptime shown.
     static STARTED_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    /// The configured `recent_window_ms`, set once at start.
+    static RECENT_WINDOW_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     /// A workspace scanned less than this long ago is not moved up again.
     const URGENT_AFTER: Duration = Duration::from_secs(5);
 

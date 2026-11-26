@@ -63,6 +63,7 @@ impl Fixture {
     fn start(&mut self) {
         self.child = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -130,6 +131,7 @@ impl Fixture {
     }
     fn hook(&self, event: &Value) -> HookRun {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.state_dir())
             .args(["--workspace", "demo", "--root"])
@@ -403,6 +405,7 @@ fn unavailable_coordination_and_unsupported_calls_get_no_decision() {
         );
     }
     let mut malformed = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["hook", "claude-code", "--state-dir"])
         .arg(f.state_dir())
         .args(["--workspace", "demo", "--root"])

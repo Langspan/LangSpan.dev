@@ -74,6 +74,7 @@ impl Fixture {
         git(&work, &["add", "."]);
         git(&work, &["commit", "-q", "-m", "start"]);
         let daemon = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["daemon", "--state-dir"])
             .arg(base.join("state"))
             .stdout(Stdio::null())
@@ -108,6 +109,7 @@ impl Fixture {
 
     fn hook(&self, event: Value) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.state())
             .args(["--workspace", "work", "--root"])
