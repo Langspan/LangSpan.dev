@@ -43,6 +43,8 @@ pub mod cursor;
 
 pub mod gemini;
 
+pub mod antigravity;
+
 pub mod process;
 
 pub mod observer;

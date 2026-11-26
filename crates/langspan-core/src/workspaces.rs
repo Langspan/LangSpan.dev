@@ -369,6 +369,7 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
         state.activity.remove(session);
         state.check_notices.remove(session);
         state.retracted_notices.remove(session);
+        state.presence.remove(session);
     }
     // A withdrawal names its workspace; one owed to a session of another
     // workspace goes too, so it cannot outlive the messages it withdraws.
@@ -391,6 +392,7 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
     state.notes.remove(id);
     state.messages.remove(id);
     state.message_history.remove(id);
+    state.dropped_messages.remove(id);
     state.scan_failures.remove(id);
     state.scan_coverage.remove(id);
     state.checkouts.remove(id);

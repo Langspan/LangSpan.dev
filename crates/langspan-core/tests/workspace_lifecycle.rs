@@ -149,6 +149,7 @@ fn ready() -> State {
                 name: "test".into(),
                 argv: vec!["cargo".into(), "test".into()],
                 timeout_s: 60,
+                on_interface_change: None,
             },
             5,
         ),
@@ -566,6 +567,7 @@ fn a_removed_workspace_leaves_status_and_briefings_and_its_id_can_start_again() 
             max_peers: 8,
             deliver: true,
             mid_turn: false,
+            mcp: false,
         },
         11,
     );
@@ -578,6 +580,7 @@ fn a_removed_workspace_leaves_status_and_briefings_and_its_id_can_start_again() 
             max_peers: 8,
             deliver: false,
             mid_turn: false,
+            mcp: false,
         },
         11,
     ) else {
@@ -614,6 +617,7 @@ fn a_removed_workspace_forgets_its_message_history_and_withdrawal_notices() {
         max_peers: 8,
         deliver: true,
         mid_turn: false,
+        mcp: false,
     };
     run(&mut state, "brief-bob", brief("bob"), 3);
     let Outcome::MessageRetracted { .. } = run(
@@ -699,6 +703,32 @@ fn a_move_or_removal_drops_the_old_checkouts_uncoordinated_changes() {
         assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
         assert!(!state.uncoordinated.contains_key("work"), "{command:?}");
     }
+}
+
+/// A session's presence setting (roadmap A13) ends with its workspace, as
+/// its activity does: a session registered again under the same ID shows
+/// its reads by default, not as the removed session chose.
+#[test]
+fn a_removed_workspace_forgets_its_sessions_presence_settings() {
+    let mut state = ready();
+    let outcome = run(
+        &mut state,
+        "presence",
+        Command::SetPresence {
+            session_id: "alice".into(),
+            shown: false,
+            window_ms: langspan_core::PRESENCE_WINDOW_MS,
+        },
+        6,
+    );
+    assert!(matches!(outcome, Outcome::Presence { .. }), "{outcome:?}");
+    assert!(state.presence.contains_key("alice"));
+    run(&mut state, "rm", remove(true), 10);
+    assert!(
+        !state.presence.contains_key("alice"),
+        "{:?}",
+        state.presence
+    );
 }
 
 #[test]

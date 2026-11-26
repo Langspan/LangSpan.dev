@@ -355,7 +355,7 @@ pub fn lines(today: &Today, since: &Since, month: Option<&str>) -> Vec<String> {
     }
     if today.truncated {
         lines.push(format!(
-            "Truncated: summarised from the newest {} events only.",
+            "Truncated: the window reaches before the oldest event summarised (at most the newest {} are read, and retention may have removed older ones).",
             langspan_core::TODAY_EVENTS
         ));
     }

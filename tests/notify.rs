@@ -456,11 +456,14 @@ fn a_failed_automatic_check_and_a_waiting_handoff_each_get_a_notice() {
                     inputs: Vec::new(),
                     result,
                     duration_ms: 10,
-                    report: Some(CheckReport {
+                    report: Some(Box::new(CheckReport {
                         session_ids: vec![session.clone()],
                         tail: "assertion failed".into(),
                         timed_out_s: None,
-                    }),
+                        interface: None,
+                        index_incomplete: false,
+                        dependent_paths: Vec::new(),
+                    })),
                     tests: None,
                     rerun: None,
                     writes_before: None,

@@ -135,11 +135,24 @@ impl Month {
         // local date for every zone (offsets are within 14 hours) and every
         // change of up to two hours.
         let first_noon = u64::try_from(first * DAY_MS + DAY_MS / 2).ok()?;
-        let offset = i64::from(ask(first_noon)?) * 60_000;
+        let mut offset = i64::from(ask(first_noon)?) * 60_000;
         let mut starts = Vec::new();
         for day in first..=first + self.days() {
+            // Each date's noon at the offset found there, not the first
+            // day's: after a date-line change the old offset's noon falls on
+            // another date. Two passes settle any single change; a date the
+            // zone skipped keeps a neighbor's noon, and `dedup` drops it.
             // 1970-01-01 east of UTC would be before the epoch: start at it.
-            let noon = u64::try_from((day * DAY_MS + DAY_MS / 2 - offset).max(0)).ok()?;
+            let noon_at = |offset: i64| u64::try_from((day * DAY_MS + DAY_MS / 2 - offset).max(0));
+            let mut noon = noon_at(offset).ok()?;
+            for _ in 0..2 {
+                let found = i64::from(ask(noon)?) * 60_000;
+                if found == offset {
+                    break;
+                }
+                offset = found;
+                noon = noon_at(offset).ok()?;
+            }
             // `local_midnight_ms` falls back to UTC or another sampled
             // offset when a lookup fails; `failed` refuses that fallback.
             starts.push(local_day::local_midnight_ms(noon, &mut ask));
@@ -411,6 +424,30 @@ mod tests {
                 if calls > answered { None } else { new_york(at) }
             });
             assert!(partial.is_none(), "after {answered} answers: {partial:?}");
+        }
+    }
+
+    #[test]
+    fn a_month_across_a_date_line_change_ends_at_the_next_months_first_midnight() {
+        // December 2011 in Apia: -10:00 until 2011-12-30T10:00:00Z, +14:00
+        // after, so local December 30 never happened.
+        let change = 1_325_239_200_000;
+        let apia = |at: u64| Some(if at < change { -600 } else { 840 });
+        let december = Month::parse("2011-12").unwrap();
+        let expected_first = 1_322_733_600_000; // 2011-12-01T10:00:00Z
+        let expected_end = 1_325_325_600_000; // 2012-01-01 00:00 at +14:00
+        for starts in [
+            december.day_starts(apia).unwrap(),
+            local_day::with_offsets(Some("Pacific/Apia"), |offset_at| {
+                december.day_starts(offset_at)
+            })
+            .unwrap(),
+        ] {
+            assert_eq!(starts.len(), 31, "{starts:?}");
+            assert_eq!(starts[0], expected_first);
+            assert_eq!(starts[30], expected_end);
+            let lengths: Vec<u64> = starts.windows(2).map(|pair| pair[1] - pair[0]).collect();
+            assert!(lengths.iter().all(|&ms| ms == 24 * HOUR), "{lengths:?}");
         }
     }
 

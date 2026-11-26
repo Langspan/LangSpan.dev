@@ -26,6 +26,20 @@ pub struct Response {
     pub outcome: Outcome,
 }
 
+impl Response {
+    /// The same response carrying another outcome: an answer cut to fit.
+    pub fn with_outcome(&self, outcome: Outcome) -> Self {
+        Self {
+            version: self.version,
+            request_id: self.request_id.clone(),
+            replayed: self.replayed,
+            generation: self.generation,
+            lease_valid: self.lease_valid,
+            outcome,
+        }
+    }
+}
+
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, crate::Error> {
     let mut bytes = serde_json::to_vec(value)?;
     if bytes.len() >= MAX_FRAME_BYTES {

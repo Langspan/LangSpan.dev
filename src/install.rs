@@ -17,8 +17,9 @@ pub const EVENTS: [&str; 3] = ["PreToolUse", "PostToolUse", "PostToolUseFailure"
 /// literal and compared before and after ([ADR 0011](../docs/adr/0011-shell-writes.md)).
 pub const MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash";
 /// After the tool ran, a completed Read is also reported, so the version a
-/// session saw can be compared when it later edits the file.
-pub const POST_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash|Read";
+/// session saw can be compared when it later edits the file, and a Read or
+/// Grep shows peers where the session is looking (roadmap A13).
+pub const POST_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash|Read|Grep";
 pub const CODEX_EVENTS: [&str; 2] = ["PreToolUse", "PostToolUse"];
 pub const CODEX_MATCHER: &str = "^(apply_patch|Bash)$";
 pub const GEMINI_EVENTS: [&str; 2] = ["BeforeTool", "AfterTool"];
@@ -28,13 +29,25 @@ pub const GEMINI_POST_MATCHER: &str = "^(write_file|replace|run_shell_command|re
 /// Gemini CLI names each hook; the name is shown in `/hooks` and is what
 /// `hooksConfig.disabled` lists.
 pub const GEMINI_HOOK_NAME: &str = "langspan";
+/// Antigravity's tool hooks (<https://antigravity.google/docs/hooks/>), matched
+/// by regular expression on the tool name ([ADR 0035](../docs/adr/0035-antigravity-adapter.md)).
+pub const ANTIGRAVITY_EVENTS: [&str; 2] = ["PreToolUse", "PostToolUse"];
+/// Antigravity 1.5.14 edits with `edit_file` and reads with `read_file`; the
+/// documented names stay in case another version uses them. These name the
+/// adapter's `EDIT_TOOLS`, `SHELL_TOOL` and `READ_TOOLS`, which a test checks.
+pub const ANTIGRAVITY_MATCHER: &str =
+    "^(edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command)$";
+pub const ANTIGRAVITY_POST_MATCHER: &str = "^(edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command|read_file|view_file)$";
+/// Antigravity's `hooks.json` maps hook names to definitions. LangSpan's
+/// entries are kept in the definition of this name.
+pub const ANTIGRAVITY_HOOK_NAME: &str = "langspan";
 /// Cursor's tool hooks, matched by tool type
 /// (<https://cursor.com/docs/agent/hooks>, "Matcher"). `afterFileEdit`,
 /// `beforeShellExecution` and `afterShellExecution` are not used: per the
 /// documentation they carry no tool-call ID to join a call's two halves.
 pub const CURSOR_EVENTS: [&str; 3] = ["preToolUse", "postToolUse", "postToolUseFailure"];
 pub const CURSOR_MATCHER: &str = "^(Write|Delete|Shell)$";
-pub const CURSOR_POST_MATCHER: &str = "^(Write|Delete|Shell|Read)$";
+pub const CURSOR_POST_MATCHER: &str = "^(Write|Delete|Shell|Read|Grep)$";
 const CURSOR_PROJECT_MARK: &str = "LANGSPAN_MANAGED=cursor:v1 ";
 const CURSOR_USER_MARK: &str = "LANGSPAN_MANAGED=cursor:user:v1 ";
 /// The `hooks.json` schema version Cursor documents ("use `1`").
@@ -52,11 +65,18 @@ pub enum Vendor {
     Codex,
     Cursor,
     Gemini,
+    Antigravity,
 }
 
 impl Vendor {
     /// Every host, in the order help text and checks list them.
-    pub const ALL: [Self; 4] = [Self::ClaudeCode, Self::Codex, Self::Cursor, Self::Gemini];
+    pub const ALL: [Self; 5] = [
+        Self::ClaudeCode,
+        Self::Codex,
+        Self::Cursor,
+        Self::Gemini,
+        Self::Antigravity,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -64,6 +84,7 @@ impl Vendor {
             Self::Codex => "codex",
             Self::Cursor => "cursor",
             Self::Gemini => "gemini-cli",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -74,8 +95,30 @@ impl Vendor {
 
     /// Cursor lists hook entries directly under each event. Claude Code,
     /// Codex and Gemini CLI nest them in groups that carry the matcher.
-    fn flat(self) -> bool {
-        self == Self::Cursor
+    /// Antigravity nests them for its tool events and lists them directly
+    /// under its other events.
+    fn flat(self, event: &str) -> bool {
+        match self {
+            Self::Cursor => true,
+            Self::Antigravity => !ANTIGRAVITY_EVENTS.contains(&event),
+            _ => false,
+        }
+    }
+
+    /// The key of the object that maps each event to its hooks: `hooks`, or
+    /// for Antigravity, whose file maps hook names to definitions, LangSpan's
+    /// own definition.
+    fn table(self) -> &'static str {
+        match self {
+            Self::Antigravity => ANTIGRAVITY_HOOK_NAME,
+            _ => "hooks",
+        }
+    }
+
+    /// Antigravity's events do not name themselves, so each of its commands
+    /// carries `--event NAME`.
+    pub fn names_event(self) -> bool {
+        self == Self::Antigravity
     }
 
     fn events(self) -> &'static [&'static str] {
@@ -84,6 +127,7 @@ impl Vendor {
             Self::Codex => &CODEX_EVENTS,
             Self::Cursor => &CURSOR_EVENTS,
             Self::Gemini => &GEMINI_EVENTS,
+            Self::Antigravity => &ANTIGRAVITY_EVENTS,
         }
     }
 
@@ -92,7 +136,9 @@ impl Vendor {
     /// Codex has no StopFailure or PostToolBatch, and its SubagentStop names
     /// a subagent whose tool events carry the parent's session ID, which this
     /// adapter does not cover. Cursor's and Gemini CLI's end-of-reply events
-    /// are not registered until they are checked on a real host.
+    /// are not registered until they are checked on a real host. Antigravity
+    /// has no session-end event, and its `Stop` requires a decision, so it
+    /// is not registered either (ADR 0035).
     fn lifecycle_events(self) -> &'static [&'static str] {
         match self {
             Self::ClaudeCode => &[
@@ -107,6 +153,7 @@ impl Vendor {
             Self::Codex => &["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"],
             Self::Cursor => &["sessionStart", "beforeSubmitPrompt", "sessionEnd"],
             Self::Gemini => &["SessionStart", "BeforeAgent", "SessionEnd"],
+            Self::Antigravity => &["SessionStart", "PreInvocation"],
         }
     }
 
@@ -136,6 +183,8 @@ impl Vendor {
             Self::Cursor => CURSOR_MATCHER,
             Self::Gemini if event == "AfterTool" => GEMINI_POST_MATCHER,
             Self::Gemini => GEMINI_MATCHER,
+            Self::Antigravity if event == "PostToolUse" => ANTIGRAVITY_POST_MATCHER,
+            Self::Antigravity => ANTIGRAVITY_MATCHER,
         }
     }
 
@@ -148,6 +197,7 @@ impl Vendor {
             Self::Codex => " # langspan-managed:codex:v1",
             Self::Cursor => " # langspan-managed:cursor:v1",
             Self::Gemini => " # langspan-managed:gemini-cli:v1",
+            Self::Antigravity => " # langspan-managed:antigravity:v1",
         }
     }
 
@@ -159,6 +209,7 @@ impl Vendor {
             Self::Codex => " # langspan-managed:codex:user:v1",
             Self::Cursor => " # langspan-managed:cursor:user:v1",
             Self::Gemini => " # langspan-managed:gemini-cli:user:v1",
+            Self::Antigravity => " # langspan-managed:antigravity:user:v1",
         }
     }
 
@@ -193,6 +244,18 @@ impl Vendor {
             Self::Codex => &[".codex/hooks.json"],
             Self::Cursor => &[".cursor/hooks.json"],
             Self::Gemini => &[".gemini/settings.json"],
+            Self::Antigravity => &[".agents/hooks.json"],
+        }
+    }
+
+    /// The project file the host reads MCP servers from, relative to a
+    /// project root, where `hooks install` registers `langspan mcp` beside
+    /// the hooks. The other hosts' MCP servers are registered at user level.
+    pub fn project_mcp_file(self) -> Option<&'static str> {
+        match self {
+            Self::Cursor => Some(".cursor/mcp.json"),
+            Self::Antigravity => Some(".agents/mcp_config.json"),
+            _ => None,
         }
     }
 
@@ -209,7 +272,7 @@ impl Vendor {
             // project hooks run; the worktree's own never do.
             Self::Codex => WorktreeHooks::MainOnly,
             // No run in a linked worktree has been retained.
-            Self::Cursor | Self::Gemini => WorktreeHooks::Unconfirmed,
+            Self::Cursor | Self::Gemini | Self::Antigravity => WorktreeHooks::Unconfirmed,
         }
     }
 
@@ -218,7 +281,7 @@ impl Vendor {
         match self {
             Self::ClaudeCode => Some("Claude Code 2.1.330"),
             Self::Codex => Some("Codex 0.171.0"),
-            Self::Cursor | Self::Gemini => None,
+            Self::Cursor | Self::Gemini | Self::Antigravity => None,
         }
     }
 
@@ -263,6 +326,78 @@ pub struct Registration {
     pub share_prompt: bool,
     /// False adds `--code-briefing off` to the installed command.
     pub code_briefing: bool,
+    /// Where this session looks is shown to peers; false adds `--presence
+    /// off`, and a window other than the default adds `--presence-minutes`.
+    pub presence: Presence,
+}
+
+/// The presence options of an installed hook command (roadmap A13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Presence {
+    /// False: the session's reads, searches and shell paths are never shown.
+    pub shown: bool,
+    /// How old a peer's presence the session is shown; `None` is the
+    /// default, `PRESENCE_MINUTES`.
+    pub minutes: Option<u64>,
+}
+
+/// The presence window, in minutes, when none is given.
+pub const PRESENCE_MINUTES: u64 = langspan_core::PRESENCE_WINDOW_MS / 60_000;
+
+impl Default for Presence {
+    fn default() -> Self {
+        Self {
+            shown: true,
+            minutes: None,
+        }
+    }
+}
+
+impl Presence {
+    /// How old a peer's presence the session is shown, in milliseconds.
+    pub fn window_ms(self) -> u64 {
+        self.minutes.unwrap_or(PRESENCE_MINUTES) * 60_000
+    }
+
+    /// `--presence-minutes`: 1 to 30, the briefing horizon. The default
+    /// is written as no option at all.
+    pub fn minutes(value: &str) -> Result<Option<u64>, String> {
+        match value.parse::<u64>() {
+            Ok(PRESENCE_MINUTES) => Ok(None),
+            Ok(minutes @ 1..=30) => Ok(Some(minutes)),
+            _ => Err("--presence-minutes must be a whole number of minutes from 1 to 30".into()),
+        }
+    }
+
+    fn words(self) -> Vec<String> {
+        let mut words = Vec::new();
+        if !self.shown {
+            words.extend(["--presence".into(), "off".into()]);
+        }
+        if let Some(minutes) = self.minutes {
+            words.extend(["--presence-minutes".into(), minutes.to_string()]);
+        }
+        words
+    }
+
+    /// Take one presence option of an installed command, in the order
+    /// `words` writes them; false for anything else.
+    fn parse(&mut self, option: &str, value: &str) -> bool {
+        match (option, value) {
+            ("--presence", "off") if self.shown && self.minutes.is_none() => {
+                self.shown = false;
+                true
+            }
+            ("--presence-minutes", value) if self.minutes.is_none() => match Self::minutes(value) {
+                Ok(Some(minutes)) => {
+                    self.minutes = Some(minutes);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
 }
 
 /// Whether two paths name the same directory: compared in canonical form,
@@ -339,29 +474,66 @@ impl Registration {
     }
 
     pub fn command_for(&self, vendor: Vendor) -> String {
-        vendor.mark(&self.command_body(vendor), false)
+        self.command_for_event(vendor, None)
     }
 
-    fn command_body(&self, vendor: Vendor) -> String {
-        let mut words = vec![
-            quote(&self.executable.to_string_lossy()),
-            "hook".into(),
-            vendor.name().into(),
+    /// The command for one event. Only a host whose events do not name
+    /// themselves (`Vendor::names_event`) carries the event in it.
+    pub fn command_for_event(&self, vendor: Vendor, event: Option<&str>) -> String {
+        vendor.mark(&self.command_body(vendor, event), false)
+    }
+
+    fn command_body(&self, vendor: Vendor, event: Option<&str>) -> String {
+        let mut words = head(&self.executable, vendor, event);
+        words.extend([
             "--state-dir".into(),
             quote(&self.state_dir.to_string_lossy()),
             "--workspace".into(),
             quote(&self.workspace_id),
             "--root".into(),
             quote(&self.root.to_string_lossy()),
-        ];
+        ]);
         if !self.share_prompt {
             words.extend(["--prompt-summary".into(), "off".into()]);
         }
         if !self.code_briefing {
             words.extend(["--code-briefing".into(), "off".into()]);
         }
+        words.extend(self.presence.words());
         words.join(" ")
     }
+}
+
+/// The words every generated command begins with: the executable, `hook`,
+/// the host and, for a host whose events do not name themselves, `--event`.
+fn head(executable: &Path, vendor: Vendor, event: Option<&str>) -> Vec<String> {
+    let mut words = vec![
+        quote(&executable.to_string_lossy()),
+        "hook".into(),
+        vendor.name().into(),
+    ];
+    if let Some(event) = event.filter(|_| vendor.names_event()) {
+        words.extend(["--event".into(), event.into()]);
+    }
+    words
+}
+
+/// The words of a command without its `--event NAME`, and that event. The
+/// event is required, and must be one the host is registered for, exactly
+/// for a host whose commands carry it. `None`: the words are not ours.
+fn split_event(vendor: Vendor, mut words: Vec<String>) -> Option<(Vec<String>, Option<String>)> {
+    if !vendor.names_event() {
+        return Some((words, None));
+    }
+    if words.len() < 5
+        || words[3] != "--event"
+        || !vendor.hook_events().contains(&words[4].as_str())
+    {
+        return None;
+    }
+    let event = words.remove(4);
+    words.remove(3);
+    Some((words, Some(event)))
 }
 
 /// A user-level registration: no workspace and no root. The hook resolves
@@ -370,24 +542,28 @@ pub struct UserRegistration {
     pub executable: PathBuf,
     pub state_dir: PathBuf,
     pub share_prompt: bool,
+    pub presence: Presence,
 }
 
 impl UserRegistration {
     pub fn command_for(&self, vendor: Vendor) -> String {
-        vendor.mark(&self.command_body(vendor), true)
+        self.command_for_event(vendor, None)
     }
 
-    fn command_body(&self, vendor: Vendor) -> String {
-        let mut words = vec![
-            quote(&self.executable.to_string_lossy()),
-            "hook".into(),
-            vendor.name().into(),
+    pub fn command_for_event(&self, vendor: Vendor, event: Option<&str>) -> String {
+        vendor.mark(&self.command_body(vendor, event), true)
+    }
+
+    fn command_body(&self, vendor: Vendor, event: Option<&str>) -> String {
+        let mut words = head(&self.executable, vendor, event);
+        words.extend([
             "--state-dir".into(),
             quote(&self.state_dir.to_string_lossy()),
-        ];
+        ]);
         if !self.share_prompt {
             words.extend(["--prompt-summary".into(), "off".into()]);
         }
+        words.extend(self.presence.words());
         words.join(" ")
     }
 }
@@ -400,21 +576,36 @@ pub fn parse_user_hook(vendor: Vendor, hook: &Value) -> Option<UserRegistration>
     }
     let command = hook.get("command").and_then(Value::as_str)?;
     let body = vendor.unmark(command, true)?;
-    let words = words(body)?;
-    let share_prompt = match &words[..] {
-        [_, _, _, _, _] => true,
-        [_, _, _, _, _, option, value] if option == "--prompt-summary" && value == "off" => false,
-        _ => return None,
-    };
-    if words[1] != "hook" || words[2] != vendor.name() || words[3] != "--state-dir" {
+    let (words, event) = split_event(vendor, words(body)?)?;
+    if words.len() < 5 {
+        return None;
+    }
+    // Only the options this module writes, each at most once, in its order;
+    // the rebuilt command below must match.
+    let (mut share_prompt, mut presence) = (true, Presence::default());
+    let mut options = &words[5..];
+    while let [option, value, rest @ ..] = options {
+        match (option.as_str(), value.as_str()) {
+            ("--prompt-summary", "off") if share_prompt => share_prompt = false,
+            (option, value) if presence.parse(option, value) => {}
+            _ => return None,
+        }
+        options = rest;
+    }
+    if !options.is_empty()
+        || words[1] != "hook"
+        || words[2] != vendor.name()
+        || words[3] != "--state-dir"
+    {
         return None;
     }
     let parsed = UserRegistration {
         executable: words[0].clone().into(),
         state_dir: words[4].clone().into(),
         share_prompt,
+        presence,
     };
-    (parsed.command_body(vendor) == body).then_some(parsed)
+    (parsed.command_body(vendor, event.as_deref()) == body).then_some(parsed)
 }
 
 pub fn is_user_managed_for(vendor: Vendor, hook: &Value) -> bool {
@@ -422,11 +613,12 @@ pub fn is_user_managed_for(vendor: Vendor, hook: &Value) -> bool {
 }
 
 /// Every hook entry in a settings value that `ours` recognises: inside a
-/// group's `hooks` (Claude Code, Codex) or listed directly (Cursor).
+/// group's `hooks` (Claude Code, Codex) or listed directly (Cursor), in the
+/// `hooks` table or in Antigravity's `langspan` hook definition.
 pub fn managed_hooks(settings: &Value, ours: impl Fn(&Value) -> bool) -> Vec<Value> {
-    settings["hooks"]
-        .as_object()
+    ["hooks", ANTIGRAVITY_HOOK_NAME]
         .into_iter()
+        .filter_map(|table| settings[table].as_object())
         .flatten()
         .flat_map(|(_, groups)| groups.as_array().into_iter().flatten())
         .flat_map(entries_of)
@@ -444,6 +636,38 @@ fn entries_of(group: &Value) -> Vec<&Value> {
     }
 }
 
+/// Whether the settings switch LangSpan's hooks off as a whole: an
+/// Antigravity hook definition runs none of its hooks with `"enabled": false`.
+pub fn switched_off(vendor: Vendor, settings: &Value) -> bool {
+    vendor == Vendor::Antigravity && settings[vendor.table()]["enabled"] == json!(false)
+}
+
+/// The tool events whose group holding one of `ours` matches other tools
+/// than this version's install names: written by an earlier version, or
+/// changed by hand. Such an install misses tools LangSpan handles, as the
+/// first Antigravity install missed `edit_file` and `read_file`.
+pub fn stale_matchers(
+    vendor: Vendor,
+    settings: &Value,
+    ours: impl Fn(&Value) -> bool,
+) -> Vec<&'static str> {
+    vendor
+        .events()
+        .iter()
+        .copied()
+        .filter(|event| {
+            settings[vendor.table()][*event]
+                .as_array()
+                .into_iter()
+                .flatten()
+                // A Cursor entry is listed directly and holds its own
+                // matcher; it is its own group here (`entries_of`).
+                .filter(|group| entries_of(group).into_iter().any(&ours))
+                .any(|group| group["matcher"] != json!(vendor.matcher(event)))
+        })
+        .collect()
+}
+
 /// The events an install registers that hold none of `ours` in `settings`:
 /// left out by an install from an earlier version, or removed by hand.
 pub fn missing_events(
@@ -455,7 +679,7 @@ pub fn missing_events(
         .hook_events()
         .into_iter()
         .filter(|event| {
-            !settings["hooks"][*event]
+            !settings[vendor.table()][*event]
                 .as_array()
                 .into_iter()
                 .flatten()
@@ -529,18 +753,20 @@ pub fn parse_project_hook(vendor: Vendor, hook: &Value) -> Option<Registration> 
         Some(body) => (body, true),
         None => (command, false),
     };
-    let words = words(body)?;
+    let (words, event) = split_event(vendor, words(body)?)?;
     if words.len() < 9 {
         return None;
     }
     // Only the opt-outs this module writes, each at most once. Rebuilding
     // the command below also requires the order it writes them in.
     let (mut share_prompt, mut code_briefing) = (true, true);
+    let mut presence = Presence::default();
     let mut options = &words[9..];
     while let [option, value, rest @ ..] = options {
         match (option.as_str(), value.as_str()) {
             ("--prompt-summary", "off") if share_prompt => share_prompt = false,
             ("--code-briefing", "off") if code_briefing => code_briefing = false,
+            (option, value) if presence.parse(option, value) => {}
             _ => return None,
         }
         options = rest;
@@ -561,8 +787,9 @@ pub fn parse_project_hook(vendor: Vendor, hook: &Value) -> Option<Registration> 
         root: words[8].clone().into(),
         share_prompt,
         code_briefing,
+        presence,
     };
-    let ours = parsed.command_body(vendor) == body
+    let ours = parsed.command_body(vendor, event.as_deref()) == body
         && (marked
             || vendor == Vendor::ClaudeCode
                 && Path::new(&words[0]).file_name().and_then(|n| n.to_str()) == Some("langspan"));
@@ -596,7 +823,7 @@ fn remove_managed(
     ours: &dyn Fn(&Value) -> bool,
 ) -> usize {
     let mut removed = 0;
-    let Some(Value::Object(hooks)) = settings.get_mut("hooks") else {
+    let Some(Value::Object(hooks)) = settings.get_mut(vendor.table()) else {
         return 0;
     };
     for event in vendor.hook_events() {
@@ -604,7 +831,7 @@ fn remove_managed(
             continue;
         };
         let before_event = removed;
-        if vendor.flat() {
+        if vendor.flat(event) {
             let before = groups.len();
             groups.retain(|hook| !ours(hook));
             removed += before - groups.len();
@@ -629,7 +856,7 @@ fn remove_managed(
         // Cursor's `version` stays: LangSpan cannot tell whether it added it.
         // A user-level file left holding only it is removed by `uninstall`
         // (`json_left_empty`).
-        settings.shift_remove("hooks");
+        settings.shift_remove(vendor.table());
     }
     removed
 }
@@ -646,10 +873,11 @@ pub fn plan_for(
     existing: Option<Value>,
     registration: Option<&Registration>,
 ) -> Result<Value, String> {
+    let command = registration.map(|r| move |event: &str| r.command_for_event(vendor, Some(event)));
     plan_hooks(
         vendor,
         existing,
-        registration.map(|r| r.command_for(vendor)),
+        command.as_ref().map(|c| c as &dyn Fn(&str) -> String),
         &|hook| is_managed_for(vendor, hook),
     )
 }
@@ -661,18 +889,20 @@ pub fn plan_user_for(
     existing: Option<Value>,
     registration: Option<&UserRegistration>,
 ) -> Result<Value, String> {
+    let command = registration.map(|r| move |event: &str| r.command_for_event(vendor, Some(event)));
     plan_hooks(
         vendor,
         existing,
-        registration.map(|r| r.command_for(vendor)),
+        command.as_ref().map(|c| c as &dyn Fn(&str) -> String),
         &|hook| is_user_managed_for(vendor, hook),
     )
 }
 
+/// `command` gives the generated command for each event.
 fn plan_hooks(
     vendor: Vendor,
     existing: Option<Value>,
-    command: Option<String>,
+    command: Option<&dyn Fn(&str) -> String>,
     ours: &dyn Fn(&Value) -> bool,
 ) -> Result<Value, String> {
     let mut settings = match existing {
@@ -680,40 +910,47 @@ fn plan_hooks(
         Some(Value::Object(map)) => map,
         Some(_) => return Err("settings file must contain a JSON object".into()),
     };
-    if let Some(hooks) = settings.get("hooks")
+    let table = vendor.table();
+    if let Some(hooks) = settings.get(table)
         && !hooks.is_object()
     {
-        return Err("settings `hooks` must be a JSON object; nothing was changed".into());
+        return Err(format!(
+            "settings `{table}` must be a JSON object; nothing was changed"
+        ));
     }
     if vendor == Vendor::Gemini
-        && let Some(command) = &command
-        && command.contains('$')
+        && let Some(command) = command
+        && let Some(text) = vendor
+            .hook_events()
+            .into_iter()
+            .map(command)
+            .find(|text| text.contains('$'))
     {
-        return Err(unexpandable(command));
+        return Err(unexpandable(&text));
     }
     // Retain existing key positions when replacing a registration. Removal
     // prunes only containers emptied by our own entries, using ordered removal.
     remove_managed(vendor, &mut settings, command.is_none(), ours);
     if let Some(command) = command {
-        if vendor.flat() && !settings.contains_key("version") {
+        if vendor == Vendor::Cursor && !settings.contains_key("version") {
             settings.insert("version".into(), json!(CURSOR_CONFIG_VERSION));
         }
         let hooks = settings
-            .entry("hooks")
+            .entry(table)
             .or_insert_with(|| Value::Object(Map::new()))
             .as_object_mut()
-            .ok_or("settings `hooks` must be a JSON object")?;
+            .ok_or_else(|| format!("settings `{table}` must be a JSON object"))?;
         let tool_events = vendor.events().len();
         for (index, event) in vendor.hook_events().into_iter().enumerate() {
             let groups = hooks
                 .entry(event)
                 .or_insert_with(|| Value::Array(Vec::new()))
                 .as_array_mut()
-                .ok_or_else(|| format!("settings `hooks.{event}` must be an array"))?;
-            let mut entry = vendor.hook_entry(event, command.clone());
+                .ok_or_else(|| format!("settings `{table}.{event}` must be an array"))?;
+            let mut entry = vendor.hook_entry(event, command(event));
             // Cursor puts the matcher on the entry; the others on its group.
             let mut group = Map::new();
-            let holder = if vendor.flat() {
+            let holder = if vendor.flat(event) {
                 &mut entry
             } else {
                 &mut group
@@ -721,7 +958,7 @@ fn plan_hooks(
             if index < tool_events {
                 holder.insert("matcher".into(), vendor.matcher(event).into());
             }
-            if vendor.flat() {
+            if vendor.flat(event) {
                 groups.push(Value::Object(entry));
             } else {
                 group.insert("hooks".into(), Value::Array(vec![Value::Object(entry)]));
@@ -761,6 +998,30 @@ fn settings_metadata(path: &Path) -> Result<Option<fs::Metadata>, crate::Error> 
 
 pub fn read(path: &Path) -> Result<Option<Value>, crate::Error> {
     parse_json(path, read_bytes(path)?.as_deref())
+}
+
+/// Read `vendor`'s MCP configuration file, as `parse_mcp_json` does.
+pub fn read_mcp(vendor: Vendor, path: &Path) -> Result<Option<Value>, crate::Error> {
+    parse_mcp_json(vendor, path, read_bytes(path)?.as_deref())
+}
+
+/// `bytes` of `vendor`'s MCP configuration file as JSON. Antigravity leaves
+/// its `mcp_config.json` empty, at project and at user level (1.5.14), so an
+/// empty or blank one is the empty configuration, `{}`. Any other host's,
+/// and any other bytes, are parsed as `parse_json` does.
+pub fn parse_mcp_json(
+    vendor: Vendor,
+    path: &Path,
+    bytes: Option<&[u8]>,
+) -> Result<Option<Value>, crate::Error> {
+    match bytes {
+        Some(bytes)
+            if vendor == Vendor::Antigravity && bytes.iter().all(u8::is_ascii_whitespace) =>
+        {
+            Ok(Some(json!({})))
+        }
+        bytes => parse_json(path, bytes),
+    }
 }
 
 /// `bytes` read from `path` as JSON.
@@ -881,7 +1142,7 @@ pub fn json_left_empty(vendor: Vendor, bytes: &[u8]) -> bool {
         return false;
     };
     map.is_empty()
-        || vendor.flat()
+        || vendor == Vendor::Cursor
             && map.len() == 1
             && map.get("version") == Some(&json!(CURSOR_CONFIG_VERSION))
 }
@@ -1049,6 +1310,7 @@ mod tests {
             root: root.into(),
             share_prompt: true,
             code_briefing: true,
+            presence: Presence::default(),
         }
     }
 
@@ -1299,6 +1561,7 @@ mod tests {
             executable: executable.into(),
             state_dir: "/home/u/.local/state/langspan".into(),
             share_prompt: true,
+            presence: Presence::default(),
         }
     }
 
@@ -1380,12 +1643,33 @@ mod tests {
             share_prompt: false,
             ..user("/opt/it's/langspan")
         };
-        for registration in [user("/opt/bin/langspan"), private] {
+        let unseen = UserRegistration {
+            share_prompt: false,
+            presence: Presence {
+                shown: false,
+                minutes: Some(3),
+            },
+            ..user("/opt/bin/langspan")
+        };
+        let window = UserRegistration {
+            presence: Presence {
+                shown: true,
+                minutes: Some(30),
+            },
+            ..user("/opt/bin/langspan")
+        };
+        assert!(
+            unseen
+                .command_for(Vendor::ClaudeCode)
+                .contains("--prompt-summary off --presence off --presence-minutes 3 #")
+        );
+        for registration in [user("/opt/bin/langspan"), private, unseen, window] {
             for vendor in [Vendor::ClaudeCode, Vendor::Codex] {
                 let hook = json!({"type": "command", "command": registration.command_for(vendor)});
                 let parsed = parse_user_hook(vendor, &hook).unwrap();
                 assert_eq!(parsed.executable, registration.executable);
                 assert_eq!(parsed.share_prompt, registration.share_prompt);
+                assert_eq!(parsed.presence, registration.presence);
                 let other = if vendor == Vendor::Codex {
                     Vendor::ClaudeCode
                 } else {
@@ -1399,6 +1683,12 @@ mod tests {
             body.to_owned(),
             format!("{body} # langspan-managed:claude-code:v1"),
             format!("{body} --ttl-ms 1 # langspan-managed:claude-code:user:v1"),
+            // Presence options only in the order and form install writes.
+            format!("{body} --presence-minutes 3 --presence off # langspan-managed:claude-code:user:v1"),
+            format!("{body} --presence-minutes 10 # langspan-managed:claude-code:user:v1"),
+            format!("{body} --presence-minutes 31 # langspan-managed:claude-code:user:v1"),
+            format!("{body} --presence on # langspan-managed:claude-code:user:v1"),
+            format!("{body} --presence off --presence off # langspan-managed:claude-code:user:v1"),
             format!("{body} && rm -rf / # langspan-managed:claude-code:user:v1"),
             "'/opt/bin/langspan' hook codex --state-dir '/s' # langspan-managed:claude-code:user:v1".into(),
         ] {
@@ -1624,6 +1914,191 @@ mod tests {
                 Vendor::Cursor,
                 &json!({"type": "command", "command": other})
             ));
+        }
+    }
+
+    #[test]
+    fn antigravity_matchers_name_exactly_the_tools_its_adapter_handles() {
+        use crate::antigravity::{EDIT_TOOLS, READ_TOOLS, SHELL_TOOL};
+        let pre: Vec<&str> = EDIT_TOOLS.iter().copied().chain([SHELL_TOOL]).collect();
+        let post: Vec<&str> = pre.iter().copied().chain(READ_TOOLS).collect();
+        assert_eq!(ANTIGRAVITY_MATCHER, format!("^({})$", pre.join("|")));
+        assert_eq!(ANTIGRAVITY_POST_MATCHER, format!("^({})$", post.join("|")));
+    }
+
+    #[test]
+    fn an_empty_antigravity_mcp_config_is_the_empty_configuration() {
+        let path = Path::new("/work/repo/.agents/mcp_config.json");
+        for bytes in [&b""[..], b"\n", b"  \r\n\t"] {
+            assert_eq!(
+                parse_mcp_json(Vendor::Antigravity, path, Some(bytes)).unwrap(),
+                Some(json!({}))
+            );
+            // Only Antigravity leaves it empty; another host's is still JSON.
+            let error = parse_mcp_json(Vendor::Cursor, path, Some(bytes)).unwrap_err();
+            assert!(error.to_string().contains("not valid JSON"), "{error}");
+        }
+        assert_eq!(
+            parse_mcp_json(Vendor::Antigravity, path, None).unwrap(),
+            None
+        );
+        assert!(parse_mcp_json(Vendor::Antigravity, path, Some(b"{")).is_err());
+        assert_eq!(
+            parse_mcp_json(Vendor::Antigravity, path, Some(br#"{"mcpServers":{}}"#)).unwrap(),
+            Some(json!({"mcpServers": {}}))
+        );
+    }
+
+    #[test]
+    fn a_matcher_other_than_this_versions_is_stale_for_its_event_only() {
+        let registration = Registration {
+            executable: "/opt/bin/langspan".into(),
+            state_dir: "/state".into(),
+            workspace_id: "demo".into(),
+            root: "/work/repo".into(),
+            share_prompt: true,
+            code_briefing: true,
+            presence: Presence::default(),
+        };
+        for vendor in Vendor::ALL {
+            let ours = |hook: &Value| is_managed_for(vendor, hook);
+            let mut settings = plan_for(vendor, None, Some(&registration)).unwrap();
+            assert!(
+                stale_matchers(vendor, &settings, ours).is_empty(),
+                "{vendor:?}"
+            );
+            let event = vendor.events()[0];
+            let group = &mut settings[vendor.table()][event][0];
+            group["matcher"] = json!("^(nothing)$");
+            assert_eq!(
+                stale_matchers(vendor, &settings, ours),
+                [event],
+                "{vendor:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn antigravity_entries_live_in_their_own_named_definition_and_name_their_event() {
+        // Antigravity's hooks.json maps hook names to definitions; the owner's
+        // definition is a sibling of LangSpan's and is never touched.
+        let original = json!({
+            "format-on-save": {
+                "PostToolUse": [{"matcher": "write_to_file", "hooks": [{"command": "./fmt.sh"}]}],
+                "Stop": [{"type": "command", "command": "./say.sh"}],
+            },
+        });
+        let vendor = Vendor::Antigravity;
+        let project = plan_for(vendor, Some(original.clone()), Some(&registration("/r"))).unwrap();
+        let keys: Vec<_> = project.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["format-on-save", ANTIGRAVITY_HOOK_NAME]);
+        assert_eq!(project["format-on-save"], original["format-on-save"]);
+        assert!(project.get("hooks").is_none(), "no `hooks` table");
+        let ours = &project[ANTIGRAVITY_HOOK_NAME];
+        let registered: Vec<_> = ours.as_object().unwrap().keys().collect();
+        assert_eq!(registered, vendor.hook_events());
+        for (event, matcher) in [
+            ("PreToolUse", Some(ANTIGRAVITY_MATCHER)),
+            ("PostToolUse", Some(ANTIGRAVITY_POST_MATCHER)),
+            ("SessionStart", None),
+            ("PreInvocation", None),
+        ] {
+            // Tool events nest their handlers in a matcher group; the others
+            // list the handler directly.
+            let entry = match matcher {
+                Some(matcher) => {
+                    assert_eq!(ours[event][0]["matcher"], matcher, "{event}");
+                    &ours[event][0]["hooks"][0]
+                }
+                None => {
+                    assert!(ours[event][0].get("hooks").is_none(), "{event}");
+                    &ours[event][0]
+                }
+            };
+            assert_eq!(entry["type"], "command", "{event}");
+            assert_eq!(entry["timeout"], 5, "{event}: seconds");
+            let command = entry["command"].as_str().unwrap();
+            assert!(
+                command.contains(&format!(" hook antigravity --event {event} --state-dir ")),
+                "{command}"
+            );
+            assert!(
+                command.ends_with(" # langspan-managed:antigravity:v1"),
+                "{command}"
+            );
+            assert!(is_managed_for(vendor, entry), "{event}");
+            assert!(!is_managed_for(Vendor::Gemini, entry), "{event}");
+        }
+        for event in ["Stop", "PostInvocation", "SessionEnd"] {
+            assert!(ours.get(event).is_none(), "{event} is not registered");
+        }
+        assert!(missing_events(vendor, &project, |hook| is_managed_for(vendor, hook)).is_empty());
+        assert_eq!(
+            managed_hooks(&project, |hook| is_managed_for(vendor, hook)).len(),
+            4
+        );
+        let again = plan_for(vendor, Some(project.clone()), Some(&registration("/r"))).unwrap();
+        assert_eq!(
+            again, project,
+            "reinstalling replaces rather than duplicates"
+        );
+
+        // Both levels in one file, each removed on its own; nothing of ours
+        // is left, not even an empty definition.
+        let both = plan_user_for(
+            vendor,
+            Some(project.clone()),
+            Some(&user("/opt/bin/langspan")),
+        )
+        .unwrap();
+        assert_eq!(
+            managed_hooks(&both, |hook| is_user_managed_for(vendor, hook)).len(),
+            4
+        );
+        assert_eq!(
+            plan_user_for(vendor, Some(both.clone()), None).unwrap(),
+            project
+        );
+        assert_eq!(plan_for(vendor, Some(project), None).unwrap(), original);
+        let fresh = plan_for(vendor, None, Some(&registration("/r"))).unwrap();
+        assert_eq!(plan_for(vendor, Some(fresh), None).unwrap(), json!({}));
+        assert!(plan_for(vendor, Some(json!({"langspan": []})), None).is_err());
+    }
+
+    #[test]
+    fn an_antigravity_command_is_ours_only_with_an_event_it_is_registered_for() {
+        let vendor = Vendor::Antigravity;
+        let project = registration("/r").command_for_event(vendor, Some("PreToolUse"));
+        let user_level = user("/opt/bin/langspan").command_for_event(vendor, Some("SessionStart"));
+        assert!(is_managed_for(
+            vendor,
+            &json!({"type": "command", "command": project})
+        ));
+        assert!(is_user_managed_for(
+            vendor,
+            &json!({"type": "command", "command": user_level})
+        ));
+        assert_eq!(
+            executable_of(vendor, &project),
+            Some(PathBuf::from("/opt/bin/langspan"))
+        );
+        // Other hosts never carry the event.
+        assert_eq!(
+            registration("/r").command_for_event(Vendor::Cursor, Some("preToolUse")),
+            registration("/r").command_for(Vendor::Cursor)
+        );
+        for command in [
+            // No event, an event LangSpan does not register, or one elsewhere.
+            registration("/r").command_for(vendor),
+            project.replace("--event PreToolUse", "--event Stop"),
+            project.replace("--event PreToolUse ", "") + " --event PreToolUse",
+            user_level.replace("--event SessionStart", "--event"),
+        ] {
+            let hook = json!({"type": "command", "command": command});
+            assert!(
+                !is_managed_for(vendor, &hook) && !is_user_managed_for(vendor, &hook),
+                "{command}"
+            );
         }
     }
 

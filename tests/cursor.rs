@@ -399,7 +399,7 @@ fn install_writes_hooks_and_mcp_beside_the_users_own_and_removes_only_its_own() 
     };
     for (event, matcher) in [
         ("preToolUse", Some("^(Write|Delete|Shell)$")),
-        ("postToolUse", Some("^(Write|Delete|Shell|Read)$")),
+        ("postToolUse", Some("^(Write|Delete|Shell|Read|Grep)$")),
         ("postToolUseFailure", Some("^(Write|Delete|Shell)$")),
         ("sessionStart", None),
         ("beforeSubmitPrompt", None),

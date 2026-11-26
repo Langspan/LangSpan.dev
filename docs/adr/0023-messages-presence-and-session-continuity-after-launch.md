@@ -21,7 +21,7 @@ events and can follow them.
 
 | Row | Capability | LangSpan today | Decision and reason |
 | --- | --- | --- | --- |
-| A13 | Reads, greps and shell calls shown to peers as presence | Reads recorded as versions only | Not now. Adds briefing volume without evidence it changes decisions |
+| A13 | Reads, greps and shell calls shown to peers as presence | Reads recorded as versions only | Built 25 November 2026 ([issue #18](https://github.com/Langspan/LangSpan.dev/issues/18)), ahead of the condition below: presence, see [ADR 0004](0004-automatic-peer-briefing.md). To limit the volume, it is at most 4 paths per peer, dropped first at the cap, and never news mid-turn. Not yet run on a host |
 | A14 | Briefing for a repository first reached mid-session | Workspace from the event's working directory | Not now |
 | A15 | Mid-turn delivery on Codex | Next prompt only | Not now. Waits for confirmation that Codex honours added context on PostToolUse |
 | A16 | Instant message push into an open session | Next hook | Not now. Uses a host messaging socket: a new trust boundary |
@@ -38,8 +38,8 @@ events and can follow them.
 | E9 | Messages across machines | Local only | Not now. Could ride the Git-ref transport (ADR 0006), which would widen its payload and needs that ADR's review |
 | D10 | `list_activity` and an MCP activity resource an agent can read (added by the second review) | MCP tools `langspan_status`, `langspan_changes`, `langspan_events` | Not now. The tools answer the same reads; a resource adds a surface no host has been shown to use |
 | E11 | Retract a sent message, telling readers to disregard it (added by the second review) | `langspan messages retract`, MCP `langspan_retract_message` | Built 25 November 2026 ([issue #66](https://github.com/Langspan/LangSpan.dev/issues/66)), ahead of the condition below: a `message_retracted` event that briefings, the recap and the dashboard honour, see [ADR 0009](0009-agent-messages-and-handoff.md). Not yet run on a host |
-| E12 | Delivery and seen receipts the sender can ask for (added by the second review) | Acknowledgements are kept and counted on the local page | Not now. The data is partly there; a sender query follows E11, since both read the same message state |
-| E13 | Show a shortened message in full (added by the second review) | None | Not now. Messages are capped at 400 bytes when sent, so a delivered line is cut only when quoting takes it past 700 bytes |
+| E12 | Delivery and seen receipts the sender can ask for (added by the second review) | `langspan messages status`, MCP `langspan_message_status`: each recipient `delivered` (with `via` and age), `pending` or `ended` | Built 26 November 2026 ([issue #67](https://github.com/Langspan/LangSpan.dev/issues/67)), ahead of the condition below: delivery receipts only, read-only, from core state and the event log; see "Delivery status (E12)" in [ADR 0009](0009-agent-messages-and-handoff.md). No "seen" state: delivered means placed in context, not acted on. Not yet run on a host |
+| E13 | Show a shortened message in full (added by the second review) | A cut line ends with `… (cut; langspan messages show -- WORKSPACE ID)` within its 700 bytes; `langspan messages show` and MCP `langspan_show_message` return the message as sent, read-only, from its `message_sent` event | Built 25 November 2026 ([issue #68](https://github.com/Langspan/LangSpan.dev/issues/68)), ahead of the condition below: no new event or storage, and `retracted` reports a later E11 withdrawal; see [ADR 0009](0009-agent-messages-and-handoff.md). Not yet run on a host. Recorded condition: messages are capped at 400 bytes when sent, so a delivered line is cut only when quoting takes it past 700 bytes |
 
 ## Note search (E2)
 
