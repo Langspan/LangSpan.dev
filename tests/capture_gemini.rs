@@ -6,12 +6,14 @@
 //! only: the real one needs an account, and the script stops before any
 //! other command.
 
+use serde_json::Value;
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::{fs::PermissionsExt, net::UnixStream},
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Child, Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/capture-gemini.sh");
@@ -147,4 +149,170 @@ fn the_gemini_capture_never_approves_automatically() {
     for line in runs {
         assert!(line.contains("gemini --approval-mode default"), "{line}");
     }
+}
+
+/// A relative `GEMINI_CLI_HOME`, `LANGSPAN_STATE_DIR` or `XDG_STATE_HOME`
+/// names a directory under the caller's working directory, yet Gemini CLI,
+/// its hooks and the steps run from other directories. The script makes each
+/// absolute before the first `gemini` runs, so the sign-in probe reads the
+/// signed-in home, and the hooks in the throwaway repository and the steps
+/// reach the coordinator that `langspan status` checked.
+#[test]
+fn the_gemini_capture_resolves_relative_homes_before_changing_directory() {
+    let base = scratch("ready", 0);
+    fs::create_dir(base.0.join("gemini-home")).unwrap();
+    // The stand-in records what Gemini CLI would see, outside the home.
+    let seen = base.0.join("seen");
+    let stub = [
+        "#!/bin/sh",
+        "[ \"$1 $2 $3\" = '--approval-mode default -p' ] || exit 99",
+        &format!(
+            "printf '%s\\n' \"$(pwd -P)\" \"$GEMINI_CLI_HOME\" \"$LANGSPAN_STATE_DIR\" \"$XDG_STATE_HOME\" > '{}'",
+            seen.display()
+        ),
+        "echo ready",
+        "",
+    ]
+    .join("\n");
+    fs::write(base.0.join("bin/gemini"), stub).unwrap();
+    let path = format!(
+        "{}:{}",
+        base.0.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let run = Command::new("bash")
+        .arg(SCRIPT)
+        .arg("out")
+        .env("PATH", path)
+        .env("LANGSPAN", env!("CARGO_BIN_EXE_langspan"))
+        .env("GEMINI_CLI_HOME", "gemini-home")
+        .env("LANGSPAN_STATE_DIR", "state")
+        .env("XDG_STATE_HOME", "./xdg")
+        .env("LANGSPAN_AUTOSTART", "off")
+        .current_dir(&base.0)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    // Past the sign-in probe: it stops at the coordinator check instead.
+    assert!(!stderr.contains("not signed in"), "{stderr}");
+    assert!(stderr.contains("start the coordinator first"), "{stderr}");
+    let base_path = fs::canonicalize(&base.0).unwrap();
+    let seen = fs::read_to_string(&seen).unwrap();
+    let lines: Vec<&str> = seen.lines().collect();
+    assert_eq!(lines.len(), 4, "{seen}");
+    let home = Path::new(lines[1]);
+    assert!(home.is_absolute(), "{seen}");
+    for dir in [lines[0], lines[1]] {
+        assert_eq!(
+            fs::canonicalize(dir).unwrap(),
+            base_path.join("gemini-home"),
+            "{seen}"
+        );
+    }
+    for (line, name) in [(lines[2], "state"), (lines[3], "xdg")] {
+        let resolved = Path::new(line);
+        assert!(resolved.is_absolute(), "{name}: {seen}");
+        assert_eq!(
+            fs::canonicalize(resolved.parent().unwrap()).unwrap(),
+            base_path,
+            "{name}: {seen}"
+        );
+        assert_eq!(resolved.file_name().unwrap(), name, "{name}: {seen}");
+    }
+    assert!(!base.0.join("out").exists());
+    assert!(!base.0.join("state").exists());
+}
+
+/// A coordinator the test starts, and stops when dropped.
+struct Daemon(Child);
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn daemon(state: &Path) -> Daemon {
+    let child = Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .args(["daemon", "--state-dir"])
+        .arg(state)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let daemon = Daemon(child);
+    let socket = state.join("daemon.sock");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while UnixStream::connect(&socket).is_err() {
+        assert!(Instant::now() < deadline, "daemon did not become ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    daemon
+}
+
+/// The steps run in a second terminal, from any directory and without the
+/// script's environment. Given a relative `LANGSPAN_STATE_DIR`, the script
+/// writes its absolute form into `peer.sh` and `step.sh`, so they reach the
+/// coordinator `langspan status` checked, and not one under the directory
+/// the person runs them from.
+#[test]
+fn the_gemini_capture_steps_reach_the_checked_coordinator_from_anywhere() {
+    let base = scratch("ready", 0);
+    let root = fs::canonicalize(&base.0).unwrap();
+    fs::create_dir(root.join("gemini-home")).unwrap();
+    let _daemon = daemon(&root.join("state"));
+    let path = format!(
+        "{}:{}",
+        root.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let run = Command::new("bash")
+        .arg(SCRIPT)
+        .arg("out")
+        .env("PATH", &path)
+        .env("HOME", &root)
+        .env("LANGSPAN", env!("CARGO_BIN_EXE_langspan"))
+        .env("GEMINI_CLI_HOME", "gemini-home")
+        .env("LANGSPAN_STATE_DIR", "state")
+        .env_remove("XDG_STATE_HOME")
+        .env("LANGSPAN_AUTOSTART", "off")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    // Everything is set up; it stops where a person would press Enter.
+    assert!(stderr.contains("run this at a terminal"), "{stderr}");
+    let out = root.join("out");
+    let state = root.join("state");
+    for script in ["peer.sh", "step.sh"] {
+        let text = fs::read_to_string(out.join(script)).unwrap();
+        assert!(
+            text.contains(&format!("export LANGSPAN_STATE_DIR='{}'", state.display())),
+            "{script}: {text}"
+        );
+    }
+    // From another directory, with no state directory in the environment.
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    let snap = Command::new("bash")
+        .arg(out.join("step.sh"))
+        .args(["snap", "probe"])
+        .env("PATH", &path)
+        .env("HOME", &root)
+        .env_remove("LANGSPAN_STATE_DIR")
+        .env_remove("XDG_STATE_HOME")
+        .env("LANGSPAN_AUTOSTART", "off")
+        .current_dir(&elsewhere)
+        .output()
+        .unwrap();
+    assert!(snap.status.success(), "{snap:?}");
+    let status = fs::read_to_string(out.join("status-probe.json")).unwrap();
+    let status: Value = serde_json::from_str(&status).unwrap_or_else(|error| panic!("{error}: {status}"));
+    // The script's workspace, and the session `peer.sh` started, are both
+    // on that coordinator.
+    for name in ["capture-repo-", "capture-peer-repo-"] {
+        assert!(status.to_string().contains(name), "{name}: {status}");
+    }
+    assert!(!elsewhere.join("state").exists());
 }

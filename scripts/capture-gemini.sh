@@ -16,7 +16,9 @@
 # interactively in that repository with `--approval-mode default`. The person
 # trusts the folder and the new hooks, types the prompts this script prints,
 # and approves each edit by hand with "Allow once". Between prompts they run
-# OUT/step.sh in a second terminal:
+# OUT/step.sh in a second terminal. A relative GEMINI_CLI_HOME,
+# LANGSPAN_STATE_DIR or XDG_STATE_HOME is made absolute first, and the steps
+# carry the state directory, so they reach the same coordinator from anywhere:
 #
 #   prompt 1  a question with no tool: the BeforeAgent briefing names the
 #             peer's task line;
@@ -48,6 +50,15 @@ if [ -z "${GEMINI_CLI_HOME:-}" ] || [ ! -d "$GEMINI_CLI_HOME" ]; then
   echo "set GEMINI_CLI_HOME to an existing directory kept for captures, and sign in there by running \`gemini\` yourself" >&2
   exit 1
 fi
+# Gemini CLI, its hooks in the throwaway repository and the steps run from
+# other directories: a relative home or state directory would name another
+# one there. Make each absolute, from this directory, before anything moves.
+absolute() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$PWD" "$1" ;; esac; }
+for name in GEMINI_CLI_HOME LANGSPAN_STATE_DIR XDG_STATE_HOME; do
+  if [ -n "${!name:-}" ]; then
+    export "$name=$(absolute "${!name}")"
+  fi
+done
 
 # Signed in, or nothing is written. Gemini CLI has no status command: a
 # one-word prompt, in the default approval mode, in which no tool runs
@@ -68,6 +79,18 @@ CAPTURE="$DIR/capture"
 case "$CAPTURE" in
   *[\'\"\\\|\&]*) echo "choose an OUT without quotes, backslashes, | or &" >&2; exit 1 ;;
 esac
+# The steps run in a second terminal, without this environment: they name
+# the same state directory, so they reach the coordinator checked above.
+STATE_ENV=
+for name in LANGSPAN_STATE_DIR XDG_STATE_HOME; do
+  if [ -n "${!name:-}" ]; then
+    case "${!name}" in
+      *[\'\\]*) echo "choose a $name without quotes or backslashes" >&2; exit 1 ;;
+    esac
+    STATE_ENV="${STATE_ENV}export $name='${!name}'
+"
+  fi
+done
 # One run, one workspace and one set of sessions: a second run never reuses the first's.
 RUN=$(basename "$REPO" | tr -c 'A-Za-z0-9\n' '-')
 WORKSPACE="capture-$RUN"
@@ -93,6 +116,7 @@ cat > "$DIR/peer.sh" <<EOF
 # One Claude Code hook event from the peer session capture-peer-$RUN.
 set -euo pipefail
 umask 077
+$STATE_ENV
 printf '{"session_id":"capture-peer-$RUN","cwd":"$REPO","hook_event_name":"%s"%s}' "\$1" "\$2" |
   '$LANGSPAN' hook claude-code --workspace '$WORKSPACE' --root '$REPO'
 EOF
@@ -105,6 +129,7 @@ cat > "$DIR/step.sh" <<EOF
 # Usage: bash '$DIR/step.sh' hold|peer|snap NAME
 set -euo pipefail
 umask 077
+$STATE_ENV
 snap() { '$LANGSPAN' status --json > '$DIR/'"status-\$1.json" 2>&1 || echo "langspan status failed; see $DIR/status-\$1.json"; }
 case "\${1:-}" in
   hold)
@@ -162,7 +187,9 @@ whenever Gemini CLI asks to run a tool, choose "Allow once", never an
 
 Press Enter to start Gemini CLI.
 EOF
-read -r _ </dev/tty
+# Gemini CLI runs interactively: a person types the prompts at a terminal.
+[ -t 0 ] || { echo "run this at a terminal: Gemini CLI needs one for the prompts" >&2; exit 1; }
+read -r _
 
 (cd "$REPO" && gemini --approval-mode default) || echo "Gemini CLI ended with an error; the events up to it are kept"
 

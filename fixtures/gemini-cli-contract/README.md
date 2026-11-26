@@ -40,7 +40,9 @@ GEMINI_CLI_HOME=DIR bash scripts/capture-gemini.sh OUT
 ```
 
 `DIR` is a Gemini CLI home kept for captures, already signed in by running
-`gemini` there. The script stops, writing nothing, unless Gemini CLI answers a
+`gemini` there. A relative `DIR`, `LANGSPAN_STATE_DIR` or `XDG_STATE_HOME`
+is taken from the directory the script starts in, and the steps it writes
+name the same state directory, so they work from any terminal. The script stops, writing nothing, unless Gemini CLI answers a
 one-word prompt from that home. It then makes a throwaway repository under
 `OUT` with LangSpan's project hooks and `LANGSPAN_CAPTURE_DIR` set, and starts
 Gemini CLI there interactively with `--approval-mode default`. It prints four
