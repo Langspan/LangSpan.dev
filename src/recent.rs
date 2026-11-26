@@ -315,6 +315,7 @@ mod tests {
                     change: "signature_changed".into(),
                     before: Some("fn save(x: &Item)".into()),
                     after: Some("fn save(x: &Item, sync: bool)".into()),
+                    after_name: None,
                     before_arity: None,
                     after_arity: None,
                     before_count: None,
@@ -384,6 +385,33 @@ mod tests {
                 assert_eq!(unshown, total + 5);
             }
         }
+    }
+
+    #[test]
+    fn a_rename_reads_as_a_rename_in_the_section_and_the_briefing() {
+        let mut recent = example();
+        let rename = InterfaceChange {
+            name: "save".into(),
+            kind: "function".into(),
+            change: "renamed".into(),
+            before: Some("fn save(x: &Item)".into()),
+            after: Some("fn store(x: &Item)".into()),
+            after_name: Some("store".into()),
+            before_arity: None,
+            after_arity: None,
+            before_count: None,
+            after_count: None,
+        };
+        let expected = "function \"save\" was renamed to \"store\": \"fn store(x: &Item)\"";
+        assert_eq!(interface_change_text(&rename), expected);
+        recent.interface_changes[0].changes = vec![rename];
+        let (text, _) = render(&recent, LIMIT);
+        assert!(
+            text.contains(&format!(
+                "- Interface change in \"src/store.rs\", 1h ago: {expected}; files mentioning it"
+            )),
+            "{text}"
+        );
     }
 
     #[test]

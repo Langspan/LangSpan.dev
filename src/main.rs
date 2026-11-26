@@ -5187,6 +5187,12 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                         )
                     }
                     "removed" => format!("{} removed or renamed", entry.kind),
+                    "renamed" => format!(
+                        "{} renamed from {} to {}",
+                        entry.kind,
+                        quoted(&entry.before)?,
+                        quoted(&entry.after)?
+                    ),
                     "definition_added" => {
                         format!("{} definition {} added", entry.kind, quoted(&entry.after)?)
                     }

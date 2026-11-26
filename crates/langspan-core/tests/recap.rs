@@ -371,6 +371,7 @@ fn change(change: &str, before: Option<&str>, after: Option<&str>) -> InterfaceC
         after_arity: None,
         before_count: None,
         after_count: None,
+        after_name: None,
     }
 }
 

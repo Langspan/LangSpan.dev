@@ -1644,6 +1644,7 @@ fn signature_change(name: &str, before: &str, after: &str) -> InterfaceChange {
         change: "signature_changed".into(),
         before: Some(before.into()),
         after: Some(after.into()),
+        after_name: None,
         before_arity: None,
         after_arity: None,
         before_count: None,

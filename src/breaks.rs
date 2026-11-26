@@ -223,32 +223,56 @@ fn layout(breaks: &[CallBreak]) -> Option<(String, Vec<usize>)> {
     let mut shown = Vec::new();
     for (index, found) in breaks.iter().enumerate() {
         let call = &found.call;
-        let before = match found.before_arity {
-            Some(arity) => format!(" (took {})", takes(&arity)),
-            None => String::new(),
-        };
-        let receiver = if found.after_arity.receiver && call.member {
-            " besides the receiver"
-        } else {
-            ""
-        };
-        let mut line = truncate(
-            &format!(
-                "- {}:{} calls {} with {} argument{}; it now takes {}{receiver}: {} in {}, changed by {} {} from {}{before}.",
-                quoted(&call.path),
-                call.line,
-                quoted(&call.name),
-                call.args,
-                if call.args == 1 { "" } else { "s" },
-                takes(&found.after_arity),
-                quoted(&found.after),
+        let by = format!("by {} {}", clean(&found.by_session, 120), age(found.age_ms));
+        let site = format!(
+            "- {}:{} calls {}",
+            quoted(&call.path),
+            call.line,
+            quoted(&call.name)
+        );
+        let said = match (found.change.as_str(), &found.after_name, found.after_arity) {
+            ("renamed", Some(to), _) => format!(
+                "{site}, which was renamed to {} in {} {by}: {}.",
+                quoted(to),
                 quoted(&found.defined_in),
-                clean(&found.by_session, 120),
-                age(found.age_ms),
+                quoted(&found.after),
+            ),
+            // A notice recorded before removals kept their signature has none.
+            ("removed", _, _) if found.before.is_empty() => {
+                format!(
+                    "{site}, which was removed from {} {by}.",
+                    quoted(&found.defined_in)
+                )
+            }
+            ("removed", _, _) => format!(
+                "{site}, which was removed from {} {by}; it was {}.",
+                quoted(&found.defined_in),
                 quoted(&found.before),
             ),
-            ALERT_LINE_LIMIT,
-        );
+            (_, _, Some(after_arity)) => {
+                let before = match found.before_arity {
+                    Some(arity) => format!(" (took {})", takes(&arity)),
+                    None => String::new(),
+                };
+                let receiver = if after_arity.receiver && call.member {
+                    " besides the receiver"
+                } else {
+                    ""
+                };
+                format!(
+                    "{site} with {} argument{}; it now takes {}{receiver}: {} in {}, changed {by} from {}{before}.",
+                    call.args,
+                    if call.args == 1 { "" } else { "s" },
+                    takes(&after_arity),
+                    quoted(&found.after),
+                    quoted(&found.defined_in),
+                    quoted(&found.before),
+                )
+            }
+            // Not a break this build can say.
+            _ => continue,
+        };
+        let mut line = truncate(&said, ALERT_LINE_LIMIT);
         line.push('\n');
         if text.len() + line.len() + 40 > ALERT_LIMIT {
             continue;
@@ -271,6 +295,63 @@ fn layout(breaks: &[CallBreak]) -> Option<(String, Vec<usize>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn found(change: &str, after_name: Option<&str>, before: &str) -> CallBreak {
+        CallBreak {
+            notice_id: format!("n-{change}"),
+            call: CallSite {
+                path: "app/views.py".into(),
+                line: 31,
+                name: "fetch_user".into(),
+                args: 1,
+                member: false,
+            },
+            change: change.into(),
+            defined_in: "app/users.py".into(),
+            by_session: "claude-code.alice".into(),
+            before: before.into(),
+            after: after_name
+                .map(|name| format!("def {name}(id)"))
+                .unwrap_or_default(),
+            after_name: after_name.map(Into::into),
+            before_arity: None,
+            after_arity: None,
+            age_ms: 120_000,
+        }
+    }
+
+    #[test]
+    fn a_rename_and_a_removal_are_one_bounded_line_each() {
+        let text = render(&[
+            found("renamed", Some("load_user"), "def fetch_user(id)"),
+            found("removed", None, "def fetch_user(id)"),
+            found("removed", None, ""),
+        ])
+        .unwrap();
+        let lines: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(
+            lines,
+            [
+                r#"- "app/views.py":31 calls "fetch_user", which was renamed to "load_user" in "app/users.py" by claude-code.alice 2m ago: "def load_user(id)"."#,
+                r#"- "app/views.py":31 calls "fetch_user", which was removed from "app/users.py" by claude-code.alice 2m ago; it was "def fetch_user(id)"."#,
+                r#"- "app/views.py":31 calls "fetch_user", which was removed from "app/users.py" by claude-code.alice 2m ago."#,
+            ]
+        );
+        // Hostile names and signatures stay one quoted line within bounds.
+        let long = format!("x\n{}", "y".repeat(400));
+        let mut hostile = found("renamed", Some(&long), &long);
+        hostile.after = long.clone();
+        let text = render(&[hostile.clone(), hostile.clone(), hostile]).unwrap();
+        assert!(text.len() <= ALERT_LIMIT, "{}", text.len());
+        assert!(
+            text.lines()
+                .skip(1)
+                .all(|line| line.len() <= ALERT_LINE_LIMIT)
+        );
+        assert!(!text.contains("x\ny"), "{text}");
+        // A signature change without a new count is not a break to say.
+        assert!(render(&[found("signature_changed", None, "def f(a)")]).is_none());
+    }
 
     fn edit(old: &str, new: &str, all: bool) -> Replacement {
         Replacement {

@@ -1436,17 +1436,23 @@ pub struct BlindSpots {
 pub struct InterfaceChange {
     pub name: String,
     pub kind: String,
-    /// `added`, `removed`, `signature_changed`, `definition_added` or
-    /// `definition_removed`. `added` is a new exported name with its
+    /// `added`, `removed`, `signature_changed`, `renamed`, `definition_added`
+    /// or `definition_removed`. `added` is a new exported name with its
     /// signature in `after`: kept in the log for a definition's history
     /// (roadmap D4), never held for briefings. A removal recorded since
-    /// then carries the removed signature in `before`. The last two mean only the number of
+    /// then carries the removed signature in `before`. `renamed` means the
+    /// only definition of `name` went and one with the same body and the
+    /// same signature but for the name came as `after_name`. The last two mean only the number of
     /// definitions sharing the name and kind changed: `after` (added) or
     /// `before` (removed) holds the signatures that came or went, and the
     /// counts say how many there were and are.
     pub change: String,
     pub before: Option<String>,
     pub after: Option<String>,
+    /// The new name, for `renamed` only (roadmap B10). Absent from notices
+    /// recorded before renames were told apart from removals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_name: Option<String>,
     /// Parameter counts of `before` and `after`, when each is exactly one
     /// function's signature (ADR 0029). Absent from notices recorded
     /// before they were kept.
@@ -1505,20 +1511,28 @@ pub struct CallSite {
     pub member: bool,
 }
 
-/// A written call whose argument count does not fit a signature another
-/// live session just changed. A name match, not a resolved call.
+/// A written call that another live session's recent change makes wrong: its
+/// argument count does not fit the new signature, or the function it names
+/// was renamed or removed. A name match, not a resolved call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CallBreak {
     pub notice_id: String,
     pub call: CallSite,
+    /// The interface change: `signature_changed`, `renamed` or `removed`.
+    pub change: String,
     /// The file whose exported signature changed.
     pub defined_in: String,
     pub by_session: String,
     pub before: String,
+    /// Empty for `removed`.
     pub after: String,
+    /// The new name, for `renamed` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_name: Option<String>,
     pub before_arity: Option<Arity>,
-    pub after_arity: Arity,
+    /// Always present for `signature_changed`.
+    pub after_arity: Option<Arity>,
     pub age_ms: u64,
 }
 
@@ -6967,40 +6981,49 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
             Some(&change.name),
             change.before.as_ref(),
             change.after.as_ref(),
+            change.after_name.as_ref(),
         ];
         let counts = match (change.before_count, change.after_count) {
             (Some(before), Some(after)) => Some((before, after)),
             (None, None) => None,
             _ => Some((0, 0)),
         };
-        // A count change names its counts, in the direction it says, and
-        // carries the signatures that came or went; nothing else has
-        // counts.
-        let shaped = match (change.change.as_str(), counts) {
-            ("removed" | "signature_changed", None) => true,
-            // A new export: its signature, and no parameter counts.
-            ("added", None) => {
-                change.before.is_none()
-                    && change.after.is_some()
-                    && change.before_arity.is_none()
-                    && change.after_arity.is_none()
-            }
-            ("definition_added", Some((before, after))) => {
-                before >= 1
-                    && before < after
-                    && after <= MAX_DEFINITION_COUNT
-                    && change.before.is_none()
-                    && change.after.is_some()
-            }
-            ("definition_removed", Some((before, after))) => {
-                after >= 1
-                    && after < before
-                    && before <= MAX_DEFINITION_COUNT
-                    && change.before.is_some()
-                    && change.after.is_none()
-            }
-            _ => false,
+        // Only a rename has a new name, other than the old one, and both
+        // signatures. A count change names its counts, in the direction it
+        // says, and carries the signatures that came or went; nothing else
+        // has counts.
+        let renamed = change.change == "renamed";
+        let named = match &change.after_name {
+            Some(to) => renamed && !to.is_empty() && to.len() <= 128 && *to != change.name,
+            None => !renamed,
         };
+        let shaped = named
+            && match (change.change.as_str(), counts) {
+                ("removed" | "signature_changed", None) => true,
+                ("renamed", None) => change.before.is_some() && change.after.is_some(),
+                // A new export: its signature, and no parameter counts.
+                ("added", None) => {
+                    change.before.is_none()
+                        && change.after.is_some()
+                        && change.before_arity.is_none()
+                        && change.after_arity.is_none()
+                }
+                ("definition_added", Some((before, after))) => {
+                    before >= 1
+                        && before < after
+                        && after <= MAX_DEFINITION_COUNT
+                        && change.before.is_none()
+                        && change.after.is_some()
+                }
+                ("definition_removed", Some((before, after))) => {
+                    after >= 1
+                        && after < before
+                        && before <= MAX_DEFINITION_COUNT
+                        && change.before.is_some()
+                        && change.after.is_none()
+                }
+                _ => false,
+            };
         if change.name.is_empty()
             || change.name.len() > 128
             || !shaped
@@ -7012,7 +7035,7 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         {
             return Err(error(
                 "invalid_notice",
-                "An interface change has a name, a kind, `added`, `removed`, `signature_changed`, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
+                "An interface change has a name, a kind, `added`, `removed`, `signature_changed`, `renamed` with a different `after_name` of at most 128 bytes, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
             ));
         }
     }
@@ -10377,15 +10400,16 @@ pub fn validate_calls(calls: &[CallSite]) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Signature changes to functions that another live session of this
-/// session's workspace made, in this generation and within the briefing
-/// horizon, that this session has not been alerted to: `(notice, change,
-/// after's arity, the peer)`. Newest notice first.
+/// Changes to functions that another live session of this session's
+/// workspace made, in this generation and within the briefing horizon, that
+/// this session has not been alerted to: `(notice, change, the peer)`. A
+/// signature change counts only with the new parameter count; a rename and
+/// a removal always count. Newest notice first.
 fn alertable<'a>(
     state: &'a State,
     session_id: &str,
     now_ms: u64,
-) -> Result<Vec<(&'a InterfaceNotice, &'a InterfaceChange, Arity, &'a str)>, CoreError> {
+) -> Result<Vec<(&'a InterfaceNotice, &'a InterfaceChange, &'a str)>, CoreError> {
     let me = current_session(state, session_id)?;
     let alerted = state
         .activity
@@ -10426,12 +10450,14 @@ fn alertable<'a>(
             continue;
         }
         for change in &notice.changes {
-            if let (true, Some(arity)) = (
-                change.change == "signature_changed"
-                    && matches!(change.kind.as_str(), "function" | "method"),
-                change.after_arity,
-            ) {
-                found.push((notice, change, arity, peer));
+            let alerts = match change.change.as_str() {
+                "signature_changed" => change.after_arity.is_some(),
+                "renamed" => change.after_name.is_some(),
+                "removed" => true,
+                _ => false,
+            };
+            if alerts && matches!(change.kind.as_str(), "function" | "method") {
+                found.push((notice, change, peer));
             }
         }
     }
@@ -10439,8 +10465,8 @@ fn alertable<'a>(
 }
 
 /// The names among `calls` that a write check must look up in the index:
-/// those of a change it could alert to. Usually none, and then nothing is
-/// looked up.
+/// those of a change it could alert to, and a renamed function's new name.
+/// Usually none, and then nothing is looked up.
 pub fn call_candidates(
     state: &State,
     session_id: &str,
@@ -10450,50 +10476,85 @@ pub fn call_candidates(
     validate_calls(calls)?;
     Ok(alertable(state, session_id, now_ms)?
         .into_iter()
-        .filter(|(_, change, _, _)| calls.iter().any(|call| call.name == change.name))
-        .map(|(_, change, _, _)| change.name.clone())
+        .filter(|(_, change, _)| calls.iter().any(|call| call.name == change.name))
+        .flat_map(|(_, change, _)| [&change.name].into_iter().chain(&change.after_name))
+        .cloned()
         .collect())
 }
 
-/// The calls that do not fit a changed signature, at most
-/// `MAX_CALL_BREAKS`, from notices this session was not alerted to. A
-/// change counts only while `current` (the index's definitions of the
-/// called names) still holds its new signature in its file, so a notice
-/// the index has moved past is never used. Pure; the caller records the
-/// alert.
+/// The calls a peer's recent change makes wrong, at most `MAX_CALL_BREAKS`,
+/// from notices this session was not alerted to. `current` holds the
+/// index's definitions of every candidate name (`call_candidates`), and a
+/// change counts only while it is still true there, so a notice the index
+/// has moved past is never used:
+///
+/// - a signature change, while its file holds the new signature; a call
+///   whose count does not fit it breaks;
+/// - a rename, while its file holds the new name's signature and no
+///   definition of the old name is left anywhere; every call of the old
+///   name breaks;
+/// - a removal, while no definition of the name is left anywhere; every
+///   call of it breaks.
+///
+/// "No definition left anywhere" is read from the index, so a rename or a
+/// removal counts only when `index_complete`: the index reads every
+/// supported file of the workspace at its current content
+/// (`GraphCoverage::blind_in_scope` is zero). A name moved into a file not
+/// indexed yet, partial or too large is otherwise missing from `current`
+/// without being gone.
+///
+/// A same-count change is not alerted: calls are matched by name, and
+/// without the argument types at a call site nothing tells a right call
+/// from a wrong one (ADR 0029). Pure; the caller records the alert.
 pub fn call_breaks(
     state: &State,
     session_id: &str,
     calls: &[CallSite],
     current: &[SymbolRef],
+    index_complete: bool,
     now_ms: u64,
 ) -> Result<Vec<CallBreak>, CoreError> {
     validate_calls(calls)?;
+    let gone = |name: &str| index_complete && !current.iter().any(|symbol| symbol.name == name);
+    let holds = |path: &str, name: &str, signature: &str| {
+        current.iter().any(|symbol| {
+            symbol.path == path && symbol.name == name && symbol.signature == signature
+        })
+    };
     let mut breaks = Vec::new();
-    for (notice, change, arity, peer) in alertable(state, session_id, now_ms)? {
+    for (notice, change, peer) in alertable(state, session_id, now_ms)? {
         let after = change.after.as_deref().unwrap_or("");
-        let still = current.iter().any(|symbol| {
-            symbol.path == notice.path && symbol.name == change.name && symbol.signature == after
-        });
-        if !still {
-            continue;
-        }
-        for call in calls
-            .iter()
-            .filter(|call| call.name == change.name && !arity.fits(call.args, call.member))
-        {
+        // `Some`: a call breaks when its count does not fit; `None`: every
+        // call of the name breaks.
+        let fit: Option<Arity> = match change.change.as_str() {
+            "signature_changed" => match change.after_arity {
+                Some(arity) if holds(&notice.path, &change.name, after) => Some(arity),
+                _ => continue,
+            },
+            "renamed" => match &change.after_name {
+                Some(to) if holds(&notice.path, to, after) && gone(&change.name) => None,
+                _ => continue,
+            },
+            "removed" if gone(&change.name) => None,
+            _ => continue,
+        };
+        for call in calls.iter().filter(|call| {
+            call.name == change.name && fit.is_none_or(|arity| !arity.fits(call.args, call.member))
+        }) {
             if breaks.len() == MAX_CALL_BREAKS {
                 return Ok(breaks);
             }
             breaks.push(CallBreak {
                 notice_id: notice.notice_id.clone(),
                 call: call.clone(),
+                change: change.change.clone(),
                 defined_in: notice.path.clone(),
                 by_session: peer.to_owned(),
                 before: change.before.clone().unwrap_or_default(),
                 after: after.to_owned(),
+                after_name: change.after_name.clone(),
                 before_arity: change.before_arity,
-                after_arity: arity,
+                after_arity: change.after_arity,
                 age_ms: now_ms.saturating_sub(notice.at_ms),
             });
         }

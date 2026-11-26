@@ -231,7 +231,14 @@ A session whose own or read files are among them is told at its next prompt,
 with the before and after signatures and the session that last reported
 editing the file. Bodies are not compared: a change of behaviour behind an
 unchanged signature is not reported. A rename is reported as a removal; no
-link to the new name is claimed. A first indexing reports nothing, and a
+link to the new name is claimed, unless nothing but the name changed (added
+25 November 2026, roadmap B10): the only exported function or method of a
+name went and the only one of a new name came in the same file transition,
+with the same kind, the same signature apart from the name and the same body
+digest. That is one `renamed` change under the old name, with the new name
+in `after_name`, told as "function "scale" was renamed to "zoom": …"
+([ADR 0029](0029-break-alerts-at-write-time.md) has the rule and its limits).
+A removal now also carries the signature it had. A first indexing reports nothing, and a
 version that parsed only partly is not trusted to say a symbol is gone.
 
 Signatures are compared in a normalised form and shown as written (added 24

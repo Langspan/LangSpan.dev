@@ -919,11 +919,19 @@ mod unix {
                 );
             }
         };
-        let breaks =
-            match langspan_core::call_breaks(store.state(), session_id, calls, &current, now) {
-                Ok(breaks) => breaks,
-                Err(e) => return error(request_id, generation, &e.code, e.message),
-            };
+        // An absent name is gone only when the index reads every file.
+        let complete = coverage.blind_in_scope == 0;
+        let breaks = match langspan_core::call_breaks(
+            store.state(),
+            session_id,
+            calls,
+            &current,
+            complete,
+            now,
+        ) {
+            Ok(breaks) => breaks,
+            Err(e) => return error(request_id, generation, &e.code, e.message),
+        };
         // Only the notices the hook's alert will show are recorded: one
         // left out for room stays to be told at a later write. The hook
         // lays the alert out with the same function.
