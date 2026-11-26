@@ -141,8 +141,9 @@ pub struct Today {
     pub checks: TodayChecks,
     pub landings: TodayLandings,
     pub open: TodayOpen,
-    /// The window holds more than `TODAY_EVENTS` events (or reaches before
-    /// them): the summary is of the newest ones only.
+    /// The window reaches before the oldest event read: it holds more than
+    /// `TODAY_EVENTS` events, or retention removed its older part. The
+    /// summary is of the events read only.
     pub truncated: bool,
     /// Events read that have no wall time: written by a build before
     /// generations were anchored. They are in no count.
@@ -159,7 +160,8 @@ pub struct TodayQuery<'a> {
     /// The anchor of the generation the first event belongs to, when it was
     /// anchored and the anchor precedes it.
     pub anchor: Option<ClockAnchor>,
-    /// The log holds events older than the first one given.
+    /// The log holds, or held before retention removed them, events older
+    /// than the first one given.
     pub earlier: bool,
     /// The daemon's clock now, for what is still held.
     pub now_ms: u64,
