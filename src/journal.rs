@@ -351,6 +351,14 @@ fn blob(state_dir: &Path, digest: &str) -> Option<Vec<u8>> {
     (sha256::hex(&sha256::digest(&bytes)) == digest).then_some(bytes)
 }
 
+/// A workspace file's version and content (`None` when it does not exist),
+/// or `None` when it is not a regular file within the bound. A symbolic
+/// link at the path itself is not read.
+pub(crate) fn current_file(root: &Path, path: &str) -> Option<(FileState, Option<Vec<u8>>)> {
+    let content = read_file(root, path)?;
+    Some((state_of(content.as_deref()), content))
+}
+
 /// A workspace file's content, `Some(None)` when it does not exist, `None`
 /// when it is not a regular file within the bound.
 fn read_file(root: &Path, path: &str) -> Option<Option<Vec<u8>>> {
