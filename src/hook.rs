@@ -1811,6 +1811,10 @@ fn interface_line(cause: &langspan_core::InterfaceCause) -> String {
     let what = match change.change.as_str() {
         "removed" => "removed or renamed".to_owned(),
         "signature_changed" => format!("{} -> {}", quoted(&change.before), quoted(&change.after)),
+        // Roadmap D7: a definition moved with its whole file.
+        "renamed" if change.before_path.is_some() => {
+            format!("moved with its file from {}", quoted(&change.before_path))
+        }
         "renamed" => format!(
             "renamed, {} -> {}",
             quoted(&change.before),
@@ -2001,11 +2005,20 @@ fn definitions_text(change: &langspan_core::InterfaceChange) -> String {
 pub(crate) fn interface_change_text(change: &langspan_core::InterfaceChange) -> String {
     match (&change.before, &change.after) {
         _ if change.before_count.is_some() => definitions_text(change),
+        // Roadmap D7: a definition moved with its whole file.
+        (_, Some(after)) if change.change == "renamed" && change.before_path.is_some() => format!(
+            "{} {} moved with its file from {}: {}",
+            clean(&change.kind, 16),
+            quoted(&change.name),
+            quoted(change.before_path.as_deref().unwrap_or_default()),
+            quoted(after)
+        ),
         (_, Some(after)) if change.change == "renamed" => format!(
-            "{} {} was renamed to {}: {}",
+            "{} {} was renamed to {}{}: {}",
             clean(&change.kind, 16),
             quoted(&change.name),
             quoted(change.after_name.as_deref().unwrap_or_default()),
+            langspan_core::rename_evidence_words(change.evidence.as_deref()),
             quoted(after)
         ),
         (Some(before), Some(after)) => format!(
@@ -5027,6 +5040,9 @@ mod briefing_text {
                     before: Some("b".repeat(240)),
                     after: Some("a".repeat(240)),
                     after_name: None,
+                    before_name: None,
+                    evidence: None,
+                    before_path: None,
                     before_arity: None,
                     after_arity: None,
                     before_count: None,
@@ -5056,6 +5072,9 @@ mod briefing_text {
                 before: Some("def fetch_user(id)".into()),
                 after: Some("def load_user(id)".into()),
                 after_name: Some("load_user".into()),
+                before_name: None,
+                evidence: None,
+                before_path: None,
                 before_arity: None,
                 after_arity: None,
                 before_count: None,
@@ -5065,6 +5084,7 @@ mod briefing_text {
             age_ms: 1,
         }];
         let text = render_briefing(&full);
+        // A rename recorded before its evidence was kept reads as before.
         assert!(
             text.contains(
                 r#"function "fetch_user" was renamed to "load_user": "def load_user(id)""#
@@ -5072,6 +5092,46 @@ mod briefing_text {
             "{text}"
         );
         assert!(!text.contains("changed from"), "{text}");
+    }
+
+    /// Roadmap D7: a rename says what links the two names, and a definition
+    /// that moved with its file says where from.
+    #[test]
+    fn a_rename_says_its_evidence_and_a_moved_file_says_where_it_was() {
+        use langspan_core::InterfaceChange;
+        let rename = |evidence: &str| InterfaceChange {
+            name: "fetch_user".into(),
+            kind: "function".into(),
+            change: "renamed".into(),
+            before: Some("def fetch_user(id)".into()),
+            after: Some("def load_user(id)".into()),
+            after_name: Some("load_user".into()),
+            before_name: Some("fetch_user".into()),
+            evidence: Some(evidence.into()),
+            before_path: None,
+            before_arity: None,
+            after_arity: None,
+            before_count: None,
+            after_count: None,
+        };
+        assert_eq!(
+            interface_change_text(&rename("same_body")),
+            r#"function "fetch_user" was renamed to "load_user" (same body): "def load_user(id)""#
+        );
+        assert_eq!(
+            interface_change_text(&rename("same_signature")),
+            r#"function "fetch_user" was renamed to "load_user" (same signature): "def load_user(id)""#
+        );
+        let moved = InterfaceChange {
+            after: Some("def fetch_user(id)".into()),
+            after_name: Some("fetch_user".into()),
+            before_path: Some("app/old_users.py".into()),
+            ..rename("file_moved")
+        };
+        assert_eq!(
+            interface_change_text(&moved),
+            r#"function "fetch_user" moved with its file from "app/old_users.py": "def fetch_user(id)""#
+        );
     }
 
     #[test]
@@ -5087,6 +5147,9 @@ mod briefing_text {
                 before: (!added).then(|| signature.clone()).flatten(),
                 after: added.then_some(signature).flatten(),
                 after_name: None,
+                before_name: None,
+                evidence: None,
+                before_path: None,
                 before_arity: None,
                 after_arity: None,
                 before_count: Some(before),
@@ -5888,11 +5951,14 @@ mod code_briefing_text {
             before_count: None,
             after_count: None,
             after_name: None,
+            before_name: None,
+            evidence: None,
+            before_path: None,
         };
         let mut notice = failed_check("error[E0061]: this function takes 1 argument");
         notice.name = "all".into();
         notice.interface_grade = Some(langspan_core::InterfaceGrade::Broke);
-        notice.interface = Some(langspan_core::InterfaceCause {
+        notice.interface = Some(Box::new(langspan_core::InterfaceCause {
             path: "core/src/lib.rs".into(),
             change: change(
                 "pub fn parse_upload(a: u32, b: u32) -> u32",
@@ -5902,7 +5968,7 @@ mod code_briefing_text {
             dependents: vec!["cli/src/main.rs".into(), "web/client.ts".into()],
             more_dependents: 0,
             blind_files: 0,
-        });
+        }));
         let text = render_checks(std::slice::from_ref(&notice));
         assert!(
             text.contains(r#"Interface change to parse_upload in core/src/lib.rs: "pub fn parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) -> u32": the wider check all failed (exit 101); files that mention it: cli/src/main.rs, web/client.ts (a name lookup, not resolved uses)."#),
@@ -5928,7 +5994,7 @@ mod code_briefing_text {
         );
         // At the bounds: long signatures, eight long paths, more of both.
         let long = "x".repeat(256);
-        notice.interface = Some(langspan_core::InterfaceCause {
+        notice.interface = Some(Box::new(langspan_core::InterfaceCause {
             path: "p/".repeat(100),
             change: change(&long, &long),
             more_changes: 15,
@@ -5937,7 +6003,7 @@ mod code_briefing_text {
                 .collect(),
             more_dependents: 24,
             blind_files: 3,
-        });
+        }));
         let text = render_checks(std::slice::from_ref(&notice));
         assert!(text.len() <= CHECKS_LIMIT, "{}", text.len());
         assert!(text.contains("15 more changes"), "{text}");

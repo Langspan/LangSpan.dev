@@ -76,6 +76,15 @@ pub struct HistoryEntry {
     pub before: Option<String>,
     /// Absent for a removal.
     pub after: Option<String>,
+    /// For a rename: the new name, what links the two names, and for a file
+    /// moved whole, where it was (roadmap D7). Absent otherwise, and from
+    /// renames recorded before each was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_path: Option<String>,
     /// The last session that reported editing the file. A correlation, not
     /// proof of who made the change.
     pub by_session: Option<String>,
@@ -157,8 +166,49 @@ fn apart(a: Stamp, b: Stamp, anchors: &[ClockAnchor]) -> Option<u64> {
     Some(wall(a)?.abs_diff(wall(b)?))
 }
 
-fn names_file(paths: &[String], text: &str, path: &str) -> bool {
-    paths.iter().any(|named| named == path) || text.contains(path)
+fn names_file(paths: &[String], text: &str, names: &BTreeSet<&str>) -> bool {
+    paths.iter().any(|named| names.contains(named.as_str()))
+        || names.iter().any(|name| text.contains(name))
+}
+
+/// Each file moved whole in `events` (roadmap D7): the old path and the
+/// new one, from the `file_moved` renames of the workspace's notices.
+fn moves<'a>(events: &[&'a RecordedEvent], workspace_id: &str) -> Vec<(&'a str, &'a str)> {
+    events
+        .iter()
+        .filter_map(|recorded| match &recorded.event {
+            Event::InterfaceChanged { notice } if notice.workspace_id == workspace_id => {
+                Some(notice)
+            }
+            _ => None,
+        })
+        .flat_map(|notice| {
+            notice
+                .changes
+                .iter()
+                .filter(|change| change.evidence.as_deref() == Some(crate::FILE_MOVED))
+                .filter_map(|change| change.before_path.as_deref())
+                .map(|from| (from, notice.path.as_str()))
+        })
+        .collect()
+}
+
+/// Every path `path` was known by through `moves`: itself, and each path a
+/// move led from or to, transitively.
+fn lineage<'a>(moves: &[(&'a str, &'a str)], path: &'a str) -> BTreeSet<&'a str> {
+    let mut names = BTreeSet::from([path]);
+    loop {
+        let before = names.len();
+        for &(from, to) in moves {
+            if names.contains(from) || names.contains(to) {
+                names.insert(from);
+                names.insert(to);
+            }
+        }
+        if names.len() == before {
+            return names;
+        }
+    }
 }
 
 /// The recorded changes of `query.name`, including a rename to it, newest
@@ -186,6 +236,10 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
     }
     let mut events: Vec<&RecordedEvent> = query.events.iter().collect();
     events.sort_by_key(|recorded| recorded.seq);
+    // A file moved whole keeps its history: asked about by its new path,
+    // what was recorded under the old one is included (roadmap D7).
+    let moves = moves(&events, query.workspace_id);
+    let asked = query.path.map(|path| lineage(&moves, path));
 
     // Every change of the name, oldest first.
     let mut found: Vec<(u64, &InterfaceNotice, &InterfaceChange)> = Vec::new();
@@ -194,7 +248,9 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
             continue;
         };
         if notice.workspace_id != query.workspace_id
-            || query.path.is_some_and(|path| notice.path != path)
+            || asked
+                .as_ref()
+                .is_some_and(|paths| !paths.contains(notice.path.as_str()))
         {
             continue;
         }
@@ -279,6 +335,8 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
                     _ => None,
                 })
         });
+        // A note or message about the file under any of its paths.
+        let file = lineage(&moves, &notice.path);
         let mut notes: Vec<HistoryNote> = Vec::new();
         let mut messages: Vec<HistoryMessage> = Vec::new();
         for recorded in &events {
@@ -288,7 +346,7 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
                         && notes.len() < HISTORY_RELATED
                         && !forgotten.contains(note.note_id.as_str())
                         && !notes.iter().any(|held| held.note_id == note.note_id)
-                        && names_file(&note.paths, &note.text, &notice.path)
+                        && names_file(&note.paths, &note.text, &file)
                         && near(*when) =>
                 {
                     notes.push(HistoryNote {
@@ -307,7 +365,7 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
                     && !messages
                         .iter()
                         .any(|held| held.message_id == message.message_id)
-                    && names_file(&message.paths, &message.text, &notice.path)
+                    && names_file(&message.paths, &message.text, &file)
                     && near(
                         at_ms
                             .zip(*generation)
@@ -332,6 +390,9 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
             path: notice.path.clone(),
             before: change.before.clone(),
             after: change.after.clone(),
+            after_name: change.after_name.clone(),
+            evidence: change.evidence.clone(),
+            before_path: change.before_path.clone(),
             by_session: notice.by_session.clone(),
             task,
             notes,

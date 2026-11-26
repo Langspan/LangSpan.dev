@@ -2028,3 +2028,237 @@ fn a_renamed_definition_is_in_its_new_names_history_too() {
         "{found:#}"
     );
 }
+
+/// Roadmap D7: a rename with an unchanged body is told to the session whose
+/// file calls the old name, with both names and the evidence, and is
+/// recorded so in the old name's history.
+#[test]
+fn a_rename_with_an_unchanged_body_names_both_names_and_its_evidence_to_a_dependent() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    // Alice works on main.rs, which calls upload.
+    let main = fs::read_to_string(w.work().join("src/main.rs")).unwrap();
+    w.edits("alice", "a1", "src/main.rs", &format!("{main}// touched\n"));
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &original.replace("pub fn upload(", "pub fn send("),
+    );
+    let context = told(
+        &w,
+        "alice",
+        r#"function "upload" was renamed to "send" (same body): "pub fn send(path: &str) -> bool""#,
+    );
+    assert!(context.contains("claude-code.bob"), "{context}");
+    assert!(!context.contains("removed or renamed"), "{context}");
+    let found = history(&w, "upload", 1);
+    let entry = &found["entries"][0];
+    assert_eq!(
+        (&entry["change"], &entry["after_name"], &entry["evidence"]),
+        (&json!("renamed"), &json!("send"), &json!("same_body")),
+        "{found:#}"
+    );
+}
+
+/// Roadmap D7: a rename that also changed the body, at the same lines, is a
+/// `same_signature` rename.
+#[test]
+fn a_rename_with_a_changed_body_and_the_same_parameters_is_a_same_signature_rename() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &original
+            .replace("pub fn upload(", "pub fn send(")
+            .replace("!path.is_empty()", "path.len() > 1"),
+    );
+    let found = history(&w, "upload", 1);
+    let entry = &found["entries"][0];
+    assert_eq!(
+        (&entry["change"], &entry["after_name"], &entry["evidence"]),
+        (&json!("renamed"), &json!("send"), &json!("same_signature")),
+        "{found:#}"
+    );
+    let (code, text) = w.cli(&["graph", "history", "app", "upload"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains(r#"function renamed from "pub fn upload(path: &str) -> bool" to "pub fn send(path: &str) -> bool" (same signature)"#),
+        "{text}"
+    );
+}
+
+/// Roadmap D7: `graph symbol OLD --renamed` answers with the definition
+/// under its new name, and says which rename led there.
+#[test]
+fn a_symbol_lookup_with_renamed_follows_a_rename_to_the_new_name() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &original.replace("pub fn upload(", "pub fn send("),
+    );
+    history(&w, "upload", 1);
+    // Without the flag, the old name has no function (only `mod upload`).
+    let plain = w.graph("symbol", "upload");
+    assert_eq!(upload_function(&plain), None, "{plain:#}");
+    assert!(plain.get("renamed").is_none(), "{plain:#}");
+    let (code, text) = w.cli(&["graph", "symbol", "app", "upload", "--renamed", "--json"]);
+    assert_eq!(code, 0, "{text}");
+    let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+    assert_eq!(
+        outcome["renamed"],
+        json!([{"name": "upload", "after_name": "send", "kind": "function",
+                "path": "src/upload.rs", "evidence": "same_body",
+                "after": "pub fn send(path: &str) -> bool"}]),
+        "{outcome:#}"
+    );
+    assert_eq!(outcome["symbols"][0]["name"], "send", "{outcome:#}");
+    assert_eq!(
+        outcome["symbols"][0]["path"], "src/upload.rs",
+        "{outcome:#}"
+    );
+    let (code, text) = w.cli(&["graph", "symbol", "app", "upload", "--renamed"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains(r#""upload" was renamed to "send" in "src/upload.rs" (same body)"#),
+        "{text}"
+    );
+    // A name never renamed answers as without the flag.
+    let gate = w
+        .cli(&["graph", "symbol", "app", "gate", "--renamed", "--json"])
+        .1;
+    let gate = serde_json::from_str::<Value>(&gate).unwrap()["outcome"].clone();
+    assert!(gate.get("renamed").is_none(), "{gate:#}");
+    assert_eq!(gate["symbols"][0]["name"], "gate", "{gate:#}");
+}
+
+/// Roadmap D7: after `git mv src/upload.rs src/transfer.rs`, the file's
+/// notes and its definitions' history are found under the new path.
+#[test]
+fn a_git_mv_keeps_notes_and_history_under_the_new_path() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let (code, text) = w.cli(&[
+        "remember",
+        "app",
+        "upload must stay idempotent",
+        "src/upload.rs",
+        "--request-id",
+        "note-upload",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    let original = fs::read_to_string(w.work().join("src/upload.rs")).unwrap();
+    w.edits(
+        "bob",
+        "b1",
+        "src/upload.rs",
+        &original.replace("upload(path: &str)", "upload(path: &str, retries: u32)"),
+    );
+    history(&w, "upload", 1);
+    git(&w.work(), &["mv", "src/upload.rs", "src/transfer.rs"]);
+
+    let deadline = Instant::now() + WAIT;
+    let found = loop {
+        let (_, text) = w.cli(&[
+            "graph",
+            "history",
+            "app",
+            "upload",
+            "--path",
+            "src/transfer.rs",
+            "--json",
+        ]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome["history"]["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.len() >= 2)
+        {
+            break outcome["history"].clone();
+        }
+        assert!(Instant::now() < deadline, "never saw the move: {outcome:#}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let entries: Vec<(Value, Value, Value)> = found["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| {
+            (
+                entry["path"].clone(),
+                entry["change"].clone(),
+                entry["evidence"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            (
+                json!("src/transfer.rs"),
+                json!("renamed"),
+                json!("file_moved")
+            ),
+            (
+                json!("src/upload.rs"),
+                json!("signature_changed"),
+                Value::Null
+            ),
+        ],
+        "{found:#}"
+    );
+    assert_eq!(found["entries"][0]["before_path"], "src/upload.rs");
+    // The note on the old path is with both changes, and on the definition.
+    for entry in 0..2 {
+        assert_eq!(
+            found["entries"][entry]["notes"][0]["note_id"], "note-upload",
+            "{found:#}"
+        );
+    }
+    let detail = w.detail("upload under its new path", "upload", |outcome| {
+        upload_function(outcome).is_some_and(|symbol| symbol["path"] == "src/transfer.rs")
+    });
+    assert_eq!(
+        upload_function(&detail).unwrap()["notes"],
+        json!([{"id": "note-upload", "text": "upload must stay idempotent"}]),
+        "{detail:#}"
+    );
+    let (code, text) = w.cli(&[
+        "graph",
+        "history",
+        "app",
+        "upload",
+        "--path",
+        "src/transfer.rs",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains(r#""src/transfer.rs" function "pub fn upload(path: &str, retries: u32) -> bool" moved with its file from "src/upload.rs""#),
+        "{text}"
+    );
+    // Nothing reads as removed.
+    let all = history(&w, "upload", 2);
+    assert!(
+        all["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["change"] != "removed"),
+        "{all:#}"
+    );
+}

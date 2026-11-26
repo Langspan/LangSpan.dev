@@ -61,6 +61,35 @@ pub struct Notice {
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
+/// The exported signatures a version gives one name and kind, as a notice
+/// shows several: each as written, joined by " | ", as many as fit a
+/// notice's 256 bytes (one signature is at most 240), so that they never
+/// make the core refuse the notice and the changes in it.
+fn written(graph: &FileGraph, name: &str, kind: SymbolKind) -> Option<String> {
+    let mut signatures: Vec<&str> = graph
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.exported && symbol.name == name && symbol.kind == kind)
+        .map(|symbol| symbol.signature.as_str())
+        .filter(|signature| !signature.chars().any(char::is_control))
+        .collect();
+    signatures.sort_unstable();
+    signatures.dedup();
+    let mut shown = String::new();
+    for signature in signatures {
+        let joined = if shown.is_empty() {
+            signature.to_owned()
+        } else {
+            format!("{shown} | {signature}")
+        };
+        if joined.len() > 256 {
+            break;
+        }
+        shown = joined;
+    }
+    (!shown.is_empty()).then_some(shown)
+}
+
 impl Index {
     /// The single writer. A file from another schema version is discarded
     /// and rebuilt: it holds nothing that cannot be derived again.
@@ -131,13 +160,25 @@ impl Index {
         // and an addition as a rename (roadmap B10). Added without a schema
         // change: a baseline from before has none, so its next change is
         // told as a removal and an addition, as it was.
-        let has_block: bool = connection.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('baselines') WHERE name = 'block_digest'",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_block {
-            connection.execute_batch("ALTER TABLE baselines ADD COLUMN block_digest TEXT;")?;
+        // The first and last line of each baseline definition, which link a
+        // removal and an addition with a changed body as a rename (roadmap
+        // D7). Added the same way: a baseline from before has none, so its
+        // next such change is told as a removal and an addition.
+        for (column, kind) in [
+            ("block_digest", "TEXT"),
+            ("line", "INTEGER"),
+            ("end_line", "INTEGER"),
+        ] {
+            let has: bool = connection.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('baselines') WHERE name = ?1",
+                [column],
+                |row| row.get(0),
+            )?;
+            if !has {
+                connection.execute_batch(&format!(
+                    "ALTER TABLE baselines ADD COLUMN {column} {kind};"
+                ))?;
+            }
         }
         Ok(Self {
             connection,
@@ -184,7 +225,7 @@ impl Index {
             return Ok(None);
         };
         let mut statement = self.connection.prepare_cached(
-            "SELECT name, kind, signature, block_digest FROM baselines
+            "SELECT name, kind, signature, block_digest, line, end_line FROM baselines
              WHERE workspace_id = ?1 AND path = ?2",
         )?;
         let symbols = statement
@@ -193,8 +234,9 @@ impl Index {
                     name: row.get(0)?,
                     kind: SymbolKind::parse(&row.get::<_, String>(1)?)
                         .unwrap_or(SymbolKind::Function),
-                    line: 0,
-                    end_line: 0,
+                    // 0: not recorded, which links nothing.
+                    line: row.get::<_, Option<u32>>(4)?.unwrap_or(0),
+                    end_line: row.get::<_, Option<u32>>(5)?.unwrap_or(0),
                     signature: row.get(2)?,
                     exported: true,
                     bytes: 0..0,
@@ -233,38 +275,10 @@ impl Index {
                     && arity.max.is_none_or(|max| max <= langspan_core::MAX_ARITY)
             })
         };
-        // The exported signatures a version gives one name and kind, as a
-        // notice shows several: each as written, joined by " | ", as many as
-        // fit a notice's 256 bytes (one signature is at most 240), so that
-        // they never make the core refuse the notice and the changes in it.
-        let written = |graph: &FileGraph, name: &str, kind| {
-            let mut signatures: Vec<&str> = graph
-                .symbols
-                .iter()
-                .filter(|symbol| symbol.exported && symbol.name == name && symbol.kind == kind)
-                .map(|symbol| symbol.signature.as_str())
-                .filter(|signature| !signature.chars().any(char::is_control))
-                .collect();
-            signatures.sort_unstable();
-            signatures.dedup();
-            let mut shown = String::new();
-            for signature in signatures {
-                let joined = if shown.is_empty() {
-                    signature.to_owned()
-                } else {
-                    format!("{shown} | {signature}")
-                };
-                if joined.len() > 256 {
-                    break;
-                }
-                shown = joined;
-            }
-            (!shown.is_empty()).then_some(shown)
-        };
         let changes: Vec<InterfaceChange> = langspan_graph::diff(&before, after)
             .into_iter()
             .map(|change| {
-                let mut after_name = None;
+                let (mut after_name, mut evidence) = (None, None);
                 let (label, before, after, number) = match change.change {
                     // The signature that went, for a definition's history
                     // (roadmap D4) to see it come back and for a write
@@ -279,8 +293,14 @@ impl Index {
                         ("signature_changed", Some(before), Some(after), None)
                     }
                     // Told at a write calling the old name (roadmap B10).
-                    Change::Renamed { to, before, after } => {
+                    Change::Renamed {
+                        to,
+                        before,
+                        after,
+                        evidence: why,
+                    } => {
                         after_name = Some(to);
+                        evidence = Some(why.name().to_owned());
                         ("renamed", Some(before), Some(after), None)
                     }
                     // Only how many definitions share the name changed: no
@@ -324,6 +344,7 @@ impl Index {
                     }
                 };
                 InterfaceChange {
+                    before_name: after_name.is_some().then(|| change.name.clone()),
                     name: change.name,
                     kind: change.kind.name().into(),
                     change: label.into(),
@@ -334,6 +355,8 @@ impl Index {
                     before,
                     after,
                     after_name,
+                    evidence,
+                    before_path: None,
                 }
             })
             .take(langspan_core::NOTICE_CHANGES)
@@ -347,6 +370,103 @@ impl Index {
             before_digest,
             digest,
             dependents: self.dependents(workspace_id, path, &names)?,
+            changes,
+        }))
+    }
+
+    /// Files moved whole in this scan (roadmap D7), old path to new, found as
+    /// Git finds an exact rename: a removed path whose indexed content
+    /// parsed cleanly, and a path new to the index with exactly that
+    /// content and the same language. A content shared by two removed or
+    /// two new paths links none of them, and a file changed as well as
+    /// moved is not found: both stay a removal and a first indexing.
+    fn moves(
+        &self,
+        workspace_id: &str,
+        indexed: &BTreeMap<String, (Option<String>, Option<String>)>,
+        removed: &[String],
+        files: &BTreeMap<String, String>,
+    ) -> Result<BTreeMap<String, String>, Failure> {
+        let mut gone: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for path in removed {
+            let Some((Some(digest), _)) = indexed.get(path) else {
+                continue;
+            };
+            let clean: Option<Option<String>> = self
+                .connection
+                .query_row(
+                    "SELECT baseline_digest FROM files WHERE workspace_id = ?1 AND path = ?2",
+                    params![workspace_id, path],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if clean.flatten().as_ref() == Some(digest) {
+                gone.entry(digest).or_default().push(path);
+            }
+        }
+        let mut came: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (path, digest) in files
+            .iter()
+            .filter(|(path, _)| !indexed.contains_key(*path))
+        {
+            came.entry(digest).or_default().push(path);
+        }
+        let mut moved = BTreeMap::new();
+        for (digest, from) in gone {
+            if let ([from], Some([to])) = (from.as_slice(), came.get(digest).map(Vec::as_slice))
+                && Language::for_path(from).is_some()
+                && Language::for_path(from) == Language::for_path(to)
+            {
+                moved.insert((*from).to_owned(), (*to).to_owned());
+            }
+        }
+        Ok(moved)
+    }
+
+    /// The notice for a file moved whole from `from` to `to`: each exported
+    /// definition, by name and kind, kept its name and signature and moved
+    /// with it, for the files that mention it.
+    fn moved_notice(
+        &self,
+        workspace_id: &str,
+        from: &str,
+        to: &str,
+        (digest, before): (String, FileGraph),
+    ) -> Result<Option<Notice>, Failure> {
+        let mut seen = BTreeSet::new();
+        let changes: Vec<InterfaceChange> = before
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.exported && seen.insert((symbol.name.as_str(), symbol.kind)))
+            .filter_map(|symbol| {
+                let signature = written(&before, &symbol.name, symbol.kind)?;
+                Some(InterfaceChange {
+                    name: symbol.name.clone(),
+                    kind: symbol.kind.name().into(),
+                    change: "renamed".into(),
+                    before: Some(signature.clone()),
+                    after: Some(signature),
+                    after_name: Some(symbol.name.clone()),
+                    before_name: Some(symbol.name.clone()),
+                    evidence: Some(langspan_core::FILE_MOVED.into()),
+                    before_path: Some(from.into()),
+                    before_arity: None,
+                    after_arity: None,
+                    before_count: None,
+                    after_count: None,
+                })
+            })
+            .take(langspan_core::NOTICE_CHANGES)
+            .collect();
+        if changes.is_empty() {
+            return Ok(None);
+        }
+        let names: Vec<&str> = changes.iter().map(|change| change.name.as_str()).collect();
+        Ok(Some(Notice {
+            path: to.into(),
+            dependents: self.dependents(workspace_id, from, &names)?,
+            digest: format!("moved from {from}"),
+            before_digest: digest,
             changes,
         }))
     }
@@ -463,7 +583,7 @@ impl Index {
         // Each path's indexed digest, and the scanned digest at which it was
         // found too large to parse: that version is not tried again.
         type Indexed = BTreeMap<String, (Option<String>, Option<String>)>;
-        let indexed: Indexed = {
+        let mut indexed: Indexed = {
             let mut statement = self.connection.prepare_cached(
                 "SELECT path, digest, oversize_digest FROM files WHERE workspace_id = ?1",
             )?;
@@ -475,25 +595,49 @@ impl Index {
         };
         // A deleted or renamed file removes everything it exported. Say so,
         // with the files that still mention those names, before forgetting it.
-        let removed = |path: &&String| !files.contains_key(*path) && !unobserved.contains(*path);
+        // A file moved whole keeps it all under its new path instead.
+        let removed: Vec<String> = indexed
+            .keys()
+            .filter(|path| !files.contains_key(*path) && !unobserved.contains(*path))
+            .cloned()
+            .collect();
+        let moved = self.moves(workspace_id, &indexed, &removed, files)?;
         let mut notices = Vec::new();
-        for path in indexed.keys().filter(removed) {
-            if let Some(baseline) = self.baseline(workspace_id, path)? {
-                notices.extend(self.notice(
+        for path in &removed {
+            let Some(baseline) = self.baseline(workspace_id, path)? else {
+                continue;
+            };
+            notices.extend(match moved.get(path) {
+                Some(to) => self.moved_notice(workspace_id, path, to, baseline)?,
+                None => self.notice(
                     workspace_id,
                     path,
                     baseline,
                     ("deleted".into(), &FileGraph::default()),
-                )?);
-            }
+                )?,
+            });
         }
         let transaction = self.connection.transaction()?;
-        for path in indexed.keys().filter(removed) {
+        for path in &removed {
             for table in ["files", "symbols", "refs", "imports", "baselines", "calls"] {
-                transaction.execute(
-                    &format!("DELETE FROM {table} WHERE workspace_id = ?1 AND path = ?2"),
-                    params![workspace_id, path],
-                )?;
+                match moved.get(path) {
+                    Some(to) => transaction.execute(
+                        &format!(
+                            "UPDATE {table} SET path = ?3 WHERE workspace_id = ?1 AND path = ?2"
+                        ),
+                        params![workspace_id, path, to],
+                    )?,
+                    None => transaction.execute(
+                        &format!("DELETE FROM {table} WHERE workspace_id = ?1 AND path = ?2"),
+                        params![workspace_id, path],
+                    )?,
+                };
+            }
+        }
+        // A moved file's content is indexed already, under its new path.
+        for (from, to) in &moved {
+            if let Some(version) = indexed.remove(from) {
+                indexed.insert(to.clone(), version);
             }
         }
         for (path, digest) in files {
@@ -611,14 +755,17 @@ impl Index {
                 for symbol in graph.symbols.iter().filter(|symbol| symbol.exported) {
                     transaction.execute(
                         "INSERT INTO baselines(workspace_id, path, name, kind, signature,
-                            block_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            block_digest, line, end_line)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         params![
                             workspace_id,
                             path,
                             symbol.name,
                             symbol.kind.name(),
                             symbol.signature,
-                            symbol.block_digest
+                            symbol.block_digest,
+                            symbol.line,
+                            symbol.end_line
                         ],
                     )?;
                 }
@@ -2282,6 +2429,179 @@ mod review_regressions {
         );
         assert!(change[0].after_arity.is_some());
         assert_eq!(notices[0].dependents, ["src/main.rs"]);
+        // Roadmap D7: what links the two, and the old name.
+        assert_eq!(
+            (
+                change[0].evidence.as_deref(),
+                change[0].before_name.as_deref()
+            ),
+            (Some("same_body"), Some("fetch_user"))
+        );
+    }
+
+    #[test]
+    fn a_rename_with_a_changed_body_at_the_same_lines_is_a_same_signature_rename() {
+        let (dir, mut index) = setup("same-signature");
+        let caller = ("src/main.rs", "fn main() { api::fetch_user(1); }\n");
+        let before = (
+            "src/api.rs",
+            "pub fn fetch_user(id: u32) -> u32 {\n    id\n}\n",
+        );
+        pass(&dir, &mut index, &[before, caller]);
+        let after = (
+            "src/api.rs",
+            "pub fn load_user(id: u32) -> u32 {\n    id + 1\n}\n",
+        );
+        let notices = pass(&dir, &mut index, &[after, caller]);
+        let change = &notices[0].changes;
+        assert_eq!(change.len(), 1, "{change:?}");
+        assert_eq!(
+            (
+                change[0].change.as_str(),
+                change[0].after_name.as_deref(),
+                change[0].evidence.as_deref()
+            ),
+            ("renamed", Some("load_user"), Some("same_signature"))
+        );
+    }
+
+    #[test]
+    fn an_index_from_before_baseline_lines_tells_a_same_signature_rename_as_a_removal() {
+        let (dir, mut index) = setup("lines");
+        let before = (
+            "src/api.rs",
+            "pub fn fetch_user(id: u32) -> u32 {\n    id\n}\n",
+        );
+        pass(&dir, &mut index, &[before, CALLER]);
+        // The baselines as the build before roadmap D7 wrote them.
+        index
+            .connection
+            .execute_batch(
+                "ALTER TABLE baselines DROP COLUMN line;
+                 ALTER TABLE baselines DROP COLUMN end_line;",
+            )
+            .unwrap();
+        drop(index);
+        let mut index = Index::open(&dir.0.join("graph.sqlite3")).unwrap();
+        let after = (
+            "src/api.rs",
+            "pub fn load_user(id: u32) -> u32 {\n    id + 1\n}\n",
+        );
+        let notices = pass(&dir, &mut index, &[after, CALLER]);
+        let labels: Vec<&str> = notices[0]
+            .changes
+            .iter()
+            .map(|change| change.change.as_str())
+            .collect();
+        assert_eq!(labels, ["removed", "added"], "{notices:?}");
+    }
+
+    /// Roadmap D7: a file Git would call renamed (exactly the same content
+    /// at a new path, in one scan) keeps its definitions under the new path.
+    #[test]
+    fn a_file_moved_whole_keeps_its_definitions_under_the_new_path() {
+        let (dir, mut index) = setup("moved");
+        let api = "pub fn upload() {}\npub fn gate() {}\n";
+        pass(&dir, &mut index, &[("src/api.rs", api), CALLER]);
+        fs::remove_file(dir.0.join("src/api.rs")).unwrap();
+        let notices = pass(&dir, &mut index, &[("src/client.rs", api), CALLER]);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].path, "src/client.rs");
+        assert_eq!(notices[0].dependents, ["src/main.rs"]);
+        let mut moved: Vec<String> = notices[0]
+            .changes
+            .iter()
+            .map(|change| {
+                format!(
+                    "{} {} {:?} {:?} {:?}",
+                    change.name,
+                    change.change,
+                    change.after_name,
+                    change.evidence,
+                    change.before_path
+                )
+            })
+            .collect();
+        moved.sort();
+        let row = |name: &str| {
+            format!(r#"{name} renamed Some("{name}") Some("file_moved") Some("src/api.rs")"#)
+        };
+        assert_eq!(moved, [row("gate"), row("upload")]);
+        // Nothing is left under the old path, and the new path is not parsed
+        // again: its baseline came with it.
+        let symbols = index.symbol("w", "upload", 10).unwrap();
+        assert_eq!(
+            symbols
+                .iter()
+                .map(|symbol| symbol.path.as_str())
+                .collect::<Vec<_>>(),
+            ["src/client.rs"]
+        );
+        // The next change compares with the moved baseline.
+        let notices = pass(
+            &dir,
+            &mut index,
+            &[
+                (
+                    "src/client.rs",
+                    "pub fn upload(x: u8) {}\npub fn gate() {}\n",
+                ),
+                CALLER,
+            ],
+        );
+        assert_eq!(
+            notices[0].changes[0].change, "signature_changed",
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn a_move_that_cannot_be_told_from_a_delete_and_an_add_is_reported_as_one() {
+        let api = "pub fn upload() {}\npub fn gate() {}\n";
+        // Changed as well as moved: a removal, and a first indexing.
+        let (dir, mut index) = setup("moved-changed");
+        pass(&dir, &mut index, &[("src/api.rs", api), CALLER]);
+        fs::remove_file(dir.0.join("src/api.rs")).unwrap();
+        let changed = "pub fn upload() {}\npub fn gate() {}\npub fn more() {}\n";
+        let notices = pass(&dir, &mut index, &[("src/client.rs", changed), CALLER]);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].path, "src/api.rs");
+        assert!(
+            notices[0].changes.iter().all(|c| c.change == "removed"),
+            "{notices:?}"
+        );
+        // Two new files with the old content: which one it moved to cannot
+        // be told.
+        let (dir, mut index) = setup("moved-twice");
+        pass(&dir, &mut index, &[("src/api.rs", api), CALLER]);
+        fs::remove_file(dir.0.join("src/api.rs")).unwrap();
+        let notices = pass(
+            &dir,
+            &mut index,
+            &[("src/a.rs", api), ("src/b.rs", api), CALLER],
+        );
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].path, "src/api.rs");
+        assert!(notices[0].changes.iter().all(|c| c.change == "removed"));
+        // Two removed files with the same content and one new one: likewise.
+        let (dir, mut index) = setup("moved-from-two");
+        pass(
+            &dir,
+            &mut index,
+            &[("src/a.rs", api), ("src/b.rs", api), CALLER],
+        );
+        fs::remove_file(dir.0.join("src/a.rs")).unwrap();
+        fs::remove_file(dir.0.join("src/b.rs")).unwrap();
+        let notices = pass(&dir, &mut index, &[("src/api.rs", api), CALLER]);
+        let paths: Vec<&str> = notices.iter().map(|notice| notice.path.as_str()).collect();
+        assert_eq!(paths, ["src/a.rs", "src/b.rs"], "{notices:?}");
+        // Another language at the new path is not the same file.
+        let (dir, mut index) = setup("moved-language");
+        pass(&dir, &mut index, &[("src/api.rs", api), CALLER]);
+        fs::remove_file(dir.0.join("src/api.rs")).unwrap();
+        let notices = pass(&dir, &mut index, &[("src/api.go", api), CALLER]);
+        assert_eq!(notices[0].path, "src/api.rs", "{notices:?}");
+        assert_eq!(notices[0].changes[0].change, "removed");
     }
 
     #[test]
@@ -2292,11 +2612,14 @@ mod review_regressions {
             "pub fn fetch_user(id: u32) -> u32 {\n    id\n}\n",
         );
         pass(&dir, &mut index, &[before, CALLER]);
-        // The baselines as an earlier build wrote them: no block digests.
+        // The baselines as an earlier build wrote them: no block digests,
+        // and no lines (roadmap D7).
         index
             .connection
             .execute_batch(
                 "ALTER TABLE baselines DROP COLUMN block_digest;
+                 ALTER TABLE baselines DROP COLUMN line;
+                 ALTER TABLE baselines DROP COLUMN end_line;
                  INSERT INTO files(workspace_id, path, scan_digest) VALUES ('w', 'kept', 'x');",
             )
             .unwrap();

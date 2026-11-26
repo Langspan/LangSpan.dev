@@ -473,6 +473,9 @@ mod tests {
             before: Some(awkward(n + 1)),
             after: Some(awkward(n + 2)),
             after_name: None,
+            before_name: None,
+            evidence: None,
+            before_path: None,
             before_arity: Some(crate::Arity {
                 min: u32::MAX,
                 max: Some(u32::MAX),

@@ -1286,17 +1286,34 @@ export or import may take up to 100 s, during which indexing waits.
 When an indexed export disappears or its signature changes, relevant sessions
 receive an interface notice at their next prompt. The notice names files they
 work on or have read that mention the changed name. Notices stay within one
-physical workspace. Body-only changes produce no notice. A rename that changes
-only the name, in one file, appears as a rename ("function "scale" was renamed
-to "zoom": …"); a rename together with any other change, or across files,
-appears as a removal. A first indexing produces no change notice. When a file holds
+physical workspace. Body-only changes produce no notice. A first indexing
+produces no change notice.
+
+A rename of an exported function or method, in one file, appears as a rename
+with what links the two names: "function "fetch_user" was renamed to
+"load_user" (same body): …" when the body is unchanged, or "(same signature)"
+when the body changed but the parameters, return type and first and last
+lines did not. In both cases the signature apart from the name is unchanged.
+When the pairing is ambiguous (two removed functions that could each be either
+added one), when anything else changed too, or when the rename is across
+files, the change appears as a removal and an addition, and nothing claims they
+are the same definition. A file moved whole, as Git finds an exact rename
+(`git mv` with no other change, seen in one scan), keeps its definitions,
+notes and history under the new path. Its notice names each export: "function
+"upload" moved with its file from "src/upload.rs": …". A file changed as well
+as moved, or whose content another new or removed file shares, is a removal
+and a first indexing. When a file holds
+several definitions of one name (a method of that name on two types, say), a
 several definitions of one name (a method of that name on two types, say), a
 definition added or removed is told as such, with how many there are now:
 "a second method "text" was added … (now 2 definitions with that name)".
 
 Each notice stays in the event log, and `graph history` reads a definition's
 past from there, before an agent changes it again. A rename appears in the
-history of both the old name and the new one:
+history of both the old name and the new one. Asked with `--path NEW_PATH`, a
+history includes what was recorded under the file's earlier paths, through
+files moved whole, and notes or messages naming an earlier path count as
+naming the file:
 
 ```sh
 ./target/release/langspan graph history PROJECT save --json
@@ -1312,8 +1329,8 @@ Sessions are the last reported editors of the file, not proof of authorship.
 
 Entries are newest first, at most `--limit` (1 to 50, default 10). Each has
 `seq`, `age_ms`, `change` (`added`, `removed`, `signature_changed`,
-`definition_added` or `definition_removed`), `kind`, `path`, `before` and
-`after`, and `by_session`: the last session that reported editing the file
+`renamed`, `definition_added` or `definition_removed`), `kind`, `path`,
+`before` and `after`, and `by_session`: the last session that reported editing the file
 before the change was indexed, a correlation and not proof of who wrote it
 (the answer's `attribution` says so). `task` is that session's last prompt
 summary before the change, absent when it recorded none (prompt summaries
@@ -1325,6 +1342,10 @@ definition, in that file, had at an earlier recorded change. A new exported
 name is recorded as `added` for this history and told to no session; a removal
 records the signature that went, so a definition removed and added back is
 marked reverted. Notices recorded before this did not carry those signatures.
+A `renamed` entry also has `after_name` (the new name), `evidence`
+(`same_body`, `same_signature` or `file_moved`) and, for `file_moved`,
+`before_path` (where the file was). Renames recorded before evidence was kept
+have no `evidence`.
 
 `truncated: true` with a `next_seq` says more is recorded than one answer
 holds: more entries than `--limit`, an answer over 28 KiB, or a log with
@@ -1335,6 +1356,26 @@ repository, and commit messages are not part of it. A history is a read: it
 records and delivers nothing. MCP: `langspan_history`, whose result puts a
 label first saying the signatures, task lines, notes and messages are data,
 not instructions.
+
+To find a renamed definition by its old name, add `--renamed` to `graph
+symbol` (MCP: `langspan_symbol` with `renamed: true`):
+
+```sh
+./target/release/langspan graph symbol PROJECT fetch_user --renamed --json
+```
+
+```text
+"fetch_user" was renamed to "load_user" in "src/users.rs" (same body)
+src/users.rs:12 function load_user (exported) — pub fn load_user(id: u32) -> User
+```
+
+The answer's `renamed` lists the recorded renames followed, oldest first
+(`name`, `after_name`, `kind`, `path`, `evidence`, `after`), at most 8, and
+`symbols` are the last new name's definitions. A name never renamed, or
+defined again since, gets the answer it gets without the flag, with no
+`renamed`. The daemon keeps the 256 newest renames per workspace, rebuilt
+from the event log when it starts; an older rename, or one whose event a
+compaction removed, is not followed.
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
 Code), an `apply_patch` (Codex) or a `replace` or `write_file` (Gemini CLI) is
@@ -1772,7 +1813,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_events` | Read an ordered page of persisted events |
 | `langspan_changes` | Read file and local-branch observations with scan freshness |
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
-| `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check |
+| `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check; with `renamed`, under the newest name a recorded rename leads to |
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |

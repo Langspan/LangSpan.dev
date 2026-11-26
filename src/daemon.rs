@@ -567,10 +567,24 @@ mod unix {
         let graph = graph.ok_or("the index is not available yet; try again shortly")?;
         let failed = |error: Box<dyn std::error::Error + Send + Sync>| error.to_string();
         let detail = matches!(command, Command::GraphSymbol { detail: true, .. });
+        // Roadmap D7: an old name asked for with `--renamed` is looked up
+        // under the newest name its recorded renames lead to.
+        let renamed = match command {
+            Command::GraphSymbol {
+                name,
+                renamed: true,
+                ..
+            } => langspan_core::renamed_to(state, workspace_id, name),
+            _ => None,
+        };
         let started = Instant::now();
         let ((mut symbols, mut references, levels), coverage) = graph
             .with_coverage(&of, |graph| match command {
                 Command::GraphSymbol { name, .. } => {
+                    let name = renamed
+                        .as_ref()
+                        .and_then(|hops| hops.last())
+                        .map_or(name, |hop| &hop.after_name);
                     let mut symbols = graph.symbol(workspace_id, name, limit)?;
                     if detail {
                         for symbol in symbols.iter_mut().take(limit as usize) {
@@ -615,6 +629,7 @@ mod unix {
             coverage,
             truncated,
             levels,
+            renamed,
         })
     }
 
@@ -3069,6 +3084,7 @@ mod unix {
                     coverage,
                     truncated: true,
                     levels: None,
+                    renamed: None,
                 },
             };
             protocol::encode(&response).expect("fits one frame");
@@ -3108,6 +3124,7 @@ mod unix {
                     coverage,
                     truncated: true,
                     levels: Some(levels),
+                    renamed: None,
                 },
             };
             protocol::encode(&response).expect("fits one frame");

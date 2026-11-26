@@ -4,7 +4,7 @@
 
 use langspan::{
     client,
-    protocol::{PROTOCOL_VERSION, Request},
+    protocol::{PROTOCOL_VERSION, Request, Response},
 };
 use langspan_core::{Command, Outcome, State};
 use serde_json::{Value, json};
@@ -1203,6 +1203,9 @@ fn a_busy_hour(f: &Fixture) {
                     before: Some("fn save(x: u32)".into()),
                     after: Some("fn save(x: u32, sync: bool)".into()),
                     after_name: None,
+                    before_name: None,
+                    evidence: None,
+                    before_path: None,
                     before_arity: None,
                     after_arity: None,
                     before_count: None,
@@ -1763,4 +1766,93 @@ fn a_shell_command_that_reads_files_is_presence_on_every_host() {
     ] {
         assert!(!output.contains(PATTERN), "{output}");
     }
+}
+
+/// Wait until the index holds an exported `name` in `path`.
+fn indexed(f: &Fixture, name: &str, path: &str) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let answer = client::call(
+            &f.state_dir(),
+            &Request {
+                version: PROTOCOL_VERSION,
+                request_id: "symbol".into(),
+                command: Command::GraphSymbol {
+                    workspace_id: "work".into(),
+                    name: name.into(),
+                    limit: 10,
+                    detail: false,
+                    blind_in_scope: true,
+                    renamed: false,
+                },
+            },
+        );
+        if let Ok(Response {
+            outcome: Outcome::Graph { symbols, .. },
+            ..
+        }) = &answer
+            && symbols.iter().any(|symbol| symbol.path == path)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{name} never indexed: {answer:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Roadmap D7, the issue's example: a Claude Code session renames
+/// `fetch_user` to `load_user` with an unchanged body, and a Codex session
+/// whose file calls the old name is told both names at its next prompt.
+#[test]
+fn a_codex_session_is_told_both_names_of_a_rename_a_claude_session_made() {
+    let mut f = Fixture::new();
+    let root = f.root();
+    fs::write(
+        root.join("src/users.py"),
+        "def fetch_user(id):\n    return id + 1\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/api.py"), "hello\nfetch_user(1)\n").unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "--quiet", "-m", "users"]);
+    f.start();
+    f.prompt("claude-code", ALICE, "Rename the user loader", &[]);
+    f.prompt("codex", BOB, "Wire the API", &[]);
+    // Bob works on the file that calls fetch_user.
+    f.codex_edit(BOB, "bob-1", &root, "src/api.py", true);
+    fs::write(root.join("src/api.py"), "hi\nfetch_user(1)\n").unwrap();
+    indexed(&f, "fetch_user", "src/users.py");
+
+    claude_writes(
+        &f,
+        ALICE,
+        "alice-1",
+        "src/users.py",
+        "def load_user(id):\n    return id + 1\n",
+    );
+    let expected =
+        r#"function "fetch_user" was renamed to "load_user" (same body): "def load_user(id)""#;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let context = loop {
+        if let Some(context) = f
+            .prompt("codex", BOB, "carry on", &[])
+            .context
+            .filter(|context| context.contains("Interface change"))
+        {
+            break context;
+        }
+        assert!(Instant::now() < deadline, "bob was never told");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(context.contains(expected), "{context}");
+    assert!(context.contains(r#""src/users.py""#), "{context}");
+    assert!(context.contains(r#""src/api.py""#), "{context}");
+    assert!(
+        context.contains(&format!("claude-code.{ALICE}")),
+        "{context}"
+    );
+    assert!(!context.contains("removed or renamed"), "{context}");
 }

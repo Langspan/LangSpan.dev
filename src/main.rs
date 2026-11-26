@@ -109,7 +109,9 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Stop the waiting landing ID; it pushes nothing
   graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go, Java)
                                  [--detail]: with its body digest, calls, callers
-                                 by name, notes on its file and last check
+                                 by name, notes on its file and last check;
+                                 [--renamed]: under the newest name a recorded
+                                 rename of NAME leads to
   graph references WORKSPACE NAME  Where a name is mentioned
   graph impact WORKSPACE PATH    What a file exports and which files mention those names.
                                  [--depth N]: 1 to 3 levels, each the files that
@@ -2937,6 +2939,7 @@ fn doctor(
                         limit: 1,
                         detail: false,
                         blind_in_scope: true,
+                        renamed: false,
                     },
                 ) {
                     let behind = coverage.indexable_files - coverage.current_files;
@@ -3911,6 +3914,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                         limit,
                         detail: options.remove("--detail").is_some(),
                         blind_in_scope: true,
+                        renamed: options.remove("--renamed").is_some(),
                     },
                     "references" => Command::GraphReferences {
                         workspace_id,
@@ -4203,13 +4207,14 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             // them accept them (`dashboard`: `--open`, `--allow-network`;
             // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
-            // `graph symbol`: `--detail`; `brief`: `--recent`).
+            // `graph symbol`: `--detail`, `--renamed`; `brief`: `--recent`).
             "--open"
             | "--allow-network"
             | "--check-again"
             | "--publish-as-branch"
             | "--mine"
             | "--detail"
+            | "--renamed"
             | "--recent"
             | "--all"
             | "--skill"
@@ -4900,8 +4905,19 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             coverage,
             truncated,
             levels,
+            renamed,
             ..
         } => {
+            // Roadmap D7: the renames followed, names and path quoted.
+            for hop in renamed.iter().flatten() {
+                println!(
+                    "{} was renamed to {} in {}{}",
+                    serde_json::to_string(&hop.name)?,
+                    serde_json::to_string(&hop.after_name)?,
+                    serde_json::to_string(&hop.path)?,
+                    langspan_core::rename_evidence_words(hop.evidence.as_deref())
+                );
+            }
             for symbol in symbols {
                 println!(
                     "{}:{} {} {}{} — {}",
@@ -5290,11 +5306,19 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                         )
                     }
                     "removed" => format!("{} removed or renamed", entry.kind),
+                    // Roadmap D7: a definition moved with its whole file.
+                    "renamed" if entry.before_path.is_some() => format!(
+                        "{} {} moved with its file from {}",
+                        entry.kind,
+                        quoted(&entry.after)?,
+                        quoted(&entry.before_path)?
+                    ),
                     "renamed" => format!(
-                        "{} renamed from {} to {}",
+                        "{} renamed from {} to {}{}",
                         entry.kind,
                         quoted(&entry.before)?,
-                        quoted(&entry.after)?
+                        quoted(&entry.after)?,
+                        langspan_core::rename_evidence_words(entry.evidence.as_deref())
                     ),
                     "definition_added" => {
                         format!("{} definition {} added", entry.kind, quoted(&entry.after)?)

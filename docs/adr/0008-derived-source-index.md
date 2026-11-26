@@ -241,6 +241,28 @@ in `after_name`, told as "function "scale" was renamed to "zoom": …"
 A removal now also carries the signature it had. A first indexing reports nothing, and a
 version that parsed only partly is not trusted to say a symbol is gone.
 
+Rename tracking (added 26 November 2026, roadmap D7) widens the link and
+records why it was made. A rename's `evidence` is `same_body` (the rule
+above), `same_signature` (a changed body, but the same signature apart from
+the name and the same first and last line; each baseline definition now keeps
+its lines in two nullable columns, so an index from before stays and tells
+its next such change as a removal and an addition) or `file_moved`. A
+removed definition's candidates are the added ones of its kind with the same
+signature apart from the name and its body digest or its lines; a pair is
+linked only when each is the other's one candidate. The notice says the
+evidence: "function "fetch_user" was renamed to "load_user" (same body)".
+A file moved whole is found as Git finds an exact rename: in one scan, a
+removed path whose indexed content parsed cleanly and a path new to the index
+with exactly that content and the same language, neither content shared by
+another removed or new path. Its rows move to the new path and are not parsed
+again, and one notice at the new path lists each export as `renamed` with
+`file_moved`, the same name and its old path in `before_path`. A file changed
+as well as moved stays a removal and a first indexing: similarity is not
+scored. The coordinator moves notes on the old path to the new one, and
+`graph history --path NEW` includes what was recorded under earlier paths.
+`graph symbol OLD --renamed` follows recorded renames to the newest name. A
+rename across files other than such a move is never inferred.
+
 Signatures are compared in a normalised form and shown as written (added 24
 November 2026, backlog item 15). The comparison removes whitespace next to
 punctuation and drops a trailing comma before a closing bracket or at the end,
