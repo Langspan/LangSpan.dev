@@ -317,3 +317,231 @@ fn the_gemini_capture_steps_reach_the_checked_coordinator_from_anywhere() {
     }
     assert!(!elsewhere.join("state").exists());
 }
+
+/// `langspan` against the coordinator in `state`.
+fn cli(state: &Path, args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .args(args)
+        .env("LANGSPAN_STATE_DIR", state)
+        .env("LANGSPAN_AUTOSTART", "off")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{:?}: {}{}",
+        &args[..2],
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// More than one `langspan events` page of events, by sessions named
+/// `{prefix}-N` in workspace `{prefix}`, rooted at `base/{prefix}`: each
+/// admission names 40 long paths.
+fn fill_a_page(state: &Path, base: &Path, prefix: &str) {
+    let root = base.join(prefix);
+    fs::create_dir(&root).unwrap();
+    cli(
+        state,
+        &[
+            "workspace",
+            "add",
+            prefix,
+            &root.display().to_string(),
+            "--request-id",
+            &format!("{prefix}-workspace"),
+        ],
+    );
+    for n in 0..12 {
+        let session = format!("{prefix}.{prefix}-{n}");
+        cli(
+            state,
+            &[
+                "session",
+                "start",
+                &session,
+                prefix,
+                "--request-id",
+                &format!("{prefix}-start-{n}"),
+            ],
+        );
+        let paths: Vec<String> = (0..40)
+            .map(|p| format!("{prefix}/{n}/{p}/{}.txt", "x".repeat(160)))
+            .collect();
+        let mut args = vec!["admit", session.as_str()];
+        args.extend(paths.iter().map(String::as_str));
+        let request = format!("{prefix}-admit-{n}");
+        args.extend(["--ttl-ms", "60000", "--request-id", &request]);
+        cli(state, &args);
+    }
+}
+
+/// Run the script in `root` against the coordinator in `state`, up to where
+/// a person would press Enter, writing `root/out`.
+fn set_up(root: &Path, state: &Path) {
+    let run = Command::new("bash")
+        .arg(SCRIPT)
+        .arg("out")
+        .env("PATH", test_path(root))
+        .env("HOME", root)
+        .env("LANGSPAN", env!("CARGO_BIN_EXE_langspan"))
+        .env("GEMINI_CLI_HOME", "gemini-home")
+        .env("LANGSPAN_STATE_DIR", state)
+        .env_remove("XDG_STATE_HOME")
+        .env("LANGSPAN_AUTOSTART", "off")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("run this at a terminal"),
+        "{:?} {stderr}",
+        run.status
+    );
+}
+
+fn test_path(root: &Path) -> String {
+    format!(
+        "{}:{}",
+        root.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// `step.sh` with `args`, from `root`, as a second terminal runs it: without
+/// the script's state directory in the environment.
+fn step(root: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("bash");
+    command
+        .arg(root.join("out/step.sh"))
+        .args(args)
+        .env("PATH", test_path(root))
+        .env("HOME", root)
+        .env_remove("LANGSPAN_STATE_DIR")
+        .env_remove("XDG_STATE_HOME")
+        .env("LANGSPAN_AUTOSTART", "off")
+        .current_dir(root);
+    command
+}
+
+/// `step.sh hold` and `step.sh peer` each record what they set up: the
+/// hold's admission takes a request id, as every coordinator mutation
+/// does, and a refusal is reported rather than dropped.
+#[test]
+fn the_gemini_capture_hold_and_peer_steps_reach_the_coordinator() {
+    let base = scratch("ready", 0);
+    let root = fs::canonicalize(&base.0).unwrap();
+    fs::create_dir(root.join("gemini-home")).unwrap();
+    let state = root.join("state");
+    let _daemon = daemon(&state);
+    set_up(&root, &state);
+    let out = root.join("out");
+
+    // `hold` sleeps past the lease once it has taken it: stop it there.
+    let mut hold = step(&root, &["hold"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let held = out.join("status-after-hold.json");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !held.exists() {
+        if let Some(status) = hold.try_wait().unwrap() {
+            panic!(
+                "hold ended first, {status}: {}",
+                fs::read_to_string(out.join("hold.txt")).unwrap_or_default()
+            );
+        }
+        assert!(Instant::now() < deadline, "hold took no lease");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = hold.kill();
+    let _ = hold.wait();
+    // The snapshot is written once `admit` has returned successfully.
+    let status = cli(&state, &["status", "--json"]);
+    assert!(status.contains(".holder"), "{status}");
+    assert!(status.contains("notes.txt"), "{status}");
+
+    let peer = step(&root, &["peer"]).output().unwrap();
+    assert!(peer.status.success(), "{peer:?}");
+    for written in ["peer-PreToolUse.json", "peer-PostToolUse.json"] {
+        assert!(out.join(written).exists(), "{written}");
+    }
+    let saved = step(&root, &["events"]).output().unwrap();
+    assert!(saved.status.success(), "{saved:?}");
+    let events = fs::read_to_string(out.join("events.txt")).unwrap();
+    // The hold's lease, under its own request id, and the peer's write,
+    // refused while that lease lasts (the person waits it out) and then seen.
+    assert!(
+        events.contains(r#""type":"lease_granted""#) && events.contains("-hold-"),
+        "{events}"
+    );
+    assert!(events.contains(r#""type":"write_refused""#), "{events}");
+    assert!(events.contains(r#""type":"source_observed""#), "{events}");
+}
+
+/// Every sequence recorded so far, read a page at a time.
+fn sequences(state: &Path) -> Vec<u64> {
+    let mut all = Vec::new();
+    loop {
+        let after = all.last().copied().unwrap_or(0).to_string();
+        let page = cli(state, &["events", "--after", &after, "--limit", "1000"]);
+        let before = all.len();
+        all.extend(
+            page.lines()
+                .map(|line| line.split(' ').next().unwrap().parse::<u64>().unwrap()),
+        );
+        if all.len() == before {
+            return all;
+        }
+    }
+}
+
+/// The coordinator already holds more than a page of other history when the
+/// capture starts, and the capture's own events fill more than a page too.
+/// `step.sh events`, which the script runs after `/quit`, saves exactly the
+/// events recorded since the script started, every page of them: not the
+/// coordinator's oldest page.
+#[test]
+fn the_gemini_capture_saves_its_own_events_past_older_history_and_one_page() {
+    let base = scratch("ready", 0);
+    let root = fs::canonicalize(&base.0).unwrap();
+    fs::create_dir(root.join("gemini-home")).unwrap();
+    let state = root.join("state");
+    let _daemon = daemon(&state);
+    fill_a_page(&state, &root, "older");
+    let before = sequences(&state);
+    set_up(&root, &state);
+    // What the person's Gemini CLI session would add, more than a page.
+    fill_a_page(&state, &root, "during");
+    let all = sequences(&state);
+
+    let out = root.join("out");
+    let saved = step(&root, &["events"]).output().unwrap();
+    assert!(saved.status.success(), "{saved:?}");
+    let events = fs::read_to_string(out.join("events.txt")).unwrap();
+    // One page holds at most 48 KiB of events.
+    assert!(events.len() > 48 * 1024, "{} bytes", events.len());
+    let seqs: Vec<u64> = events
+        .lines()
+        .map(|line| line.split(' ').next().unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(seqs, all[before.len()..], "{events}");
+    for line in events.lines() {
+        let (_, event) = line.split_once(' ').unwrap();
+        serde_json::from_str::<Value>(event).unwrap_or_else(|error| panic!("{error}: {line}"));
+    }
+    // The capture's setup, and the last event, are there; older history is not.
+    assert!(events.contains("capture-peer-repo-"));
+    assert!(events.contains("during-11"));
+    assert!(!events.contains("older-"));
+    assert_eq!(
+        fs::metadata(out.join("events.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}

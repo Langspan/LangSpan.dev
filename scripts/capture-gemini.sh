@@ -32,8 +32,10 @@
 #             completes the admission;
 #   /quit     SessionEnd, if Gemini CLI sends it.
 #
-# Raw events go to OUT/capture (0600), and `langspan status` and `events`
-# after each step to OUT/*.json. They contain local paths and model text:
+# Raw events go to OUT/capture (0600), `langspan status` after each step to
+# OUT/status-*.json, and at the end every coordinator event recorded since
+# the script started, page after page, to OUT/events.txt (one line each: its
+# sequence, then the event as JSON). They contain local paths and model text:
 # clean them before committing them under fixtures/gemini-cli-<version>/.
 set -euo pipefail
 # The hook writes raw events as they arrive: owner-only from the start.
@@ -69,6 +71,26 @@ if ! answer=$(cd "$GEMINI_CLI_HOME" && gemini --approval-mode default -p 'Reply 
   exit 1
 fi
 "$LANGSPAN" status --json >/dev/null 2>&1 || { echo "start the coordinator first: $LANGSPAN daemon" >&2; exit 1; }
+
+# `langspan events` reads oldest first, a bounded page at a time: one line
+# per event, its sequence and then the event as JSON. Print the pages after
+# sequence $1 up to the last event, and that last sequence on fd 3.
+pages() {
+  local after=$1 page
+  while :; do
+    page=$("$LANGSPAN" events --after "$after" --limit 1000) || { echo "langspan events --after $after failed: $page" >&2; return 1; }
+    [ -n "$page" ] || break
+    printf '%s\n' "$page"
+    after=$(printf '%s\n' "$page" | tail -n 1)
+    after=${after%% *}
+    case "$after" in
+      '' | *[!0-9]*) echo "langspan events printed a line without a sequence" >&2; return 1 ;;
+    esac
+  done
+  printf '%s' "$after" >&3
+}
+# Every event this capture records comes after this one.
+START=$(pages 0 3>&1 >/dev/null) || exit 1
 
 mkdir -p "$DIR"
 DIR=$(cd "$DIR" && pwd -P)
@@ -108,7 +130,9 @@ git -C "$REPO" -c user.name=capture -c user.email=capture@example.invalid commit
 sed -i.bak "s|\"command\": \"'|\"command\": \"LANGSPAN_CAPTURE_DIR='$CAPTURE' '|" "$REPO/.gemini/settings.json"
 rm "$REPO/.gemini/settings.json.bak"
 grep -q LANGSPAN_CAPTURE_DIR "$REPO/.gemini/settings.json" || { echo "could not set LANGSPAN_CAPTURE_DIR in $REPO/.gemini/settings.json" >&2; exit 1; }
-"$LANGSPAN" workspace add "$WORKSPACE" "$REPO" --request-id "$WORKSPACE-workspace" >/dev/null
+# The coordinator states a refusal on stdout: show it, do not drop it.
+added=$("$LANGSPAN" workspace add "$WORKSPACE" "$REPO" --request-id "$WORKSPACE-workspace") ||
+  { echo "langspan workspace add failed: $added" >&2; exit 1; }
 
 # The peer: a Claude Code session whose task line the briefing should carry.
 cat > "$DIR/peer.sh" <<EOF
@@ -126,15 +150,20 @@ bash "$DIR/peer.sh" UserPromptSubmit ',"prompt":"capture-peer task: append a pee
 # The steps the person runs in a second terminal, between prompts.
 cat > "$DIR/step.sh" <<EOF
 #!/usr/bin/env bash
-# Usage: bash '$DIR/step.sh' hold|peer|snap NAME
+# Usage: bash '$DIR/step.sh' hold|peer|snap NAME|events
 set -euo pipefail
 umask 077
 $STATE_ENV
+LANGSPAN='$LANGSPAN'
+$(declare -f pages)
 snap() { '$LANGSPAN' status --json > '$DIR/'"status-\$1.json" 2>&1 || echo "langspan status failed; see $DIR/status-\$1.json"; }
 case "\${1:-}" in
   hold)
-    '$LANGSPAN' session start '$WORKSPACE.holder' '$WORKSPACE' --request-id '$WORKSPACE-holder' >/dev/null
-    '$LANGSPAN' admit '$WORKSPACE.holder' notes.txt --ttl-ms 60000 > '$DIR/hold.txt'
+    started=\$('$LANGSPAN' session start '$WORKSPACE.holder' '$WORKSPACE' --request-id '$WORKSPACE-holder') ||
+      { echo "langspan session start failed: \$started" >&2; exit 1; }
+    # A new request each time: a second hold is a new admission, not a replay.
+    '$LANGSPAN' admit '$WORKSPACE.holder' notes.txt --ttl-ms 60000 --request-id "$WORKSPACE-hold-\$(date +%s)-\$\$" > '$DIR/hold.txt' ||
+      { echo "langspan admit failed: \$(cat '$DIR/hold.txt')" >&2; exit 1; }
     snap after-hold
     echo "notes.txt is held for 60 s from now. Send prompt 2 in Gemini CLI at once."
     sleep 62
@@ -146,7 +175,12 @@ case "\${1:-}" in
     snap after-peer
     echo "The peer wrote notes.txt. Go on to prompt 4." ;;
   snap) snap "\${2:?usage: step.sh snap NAME}" ;;
-  *) echo "usage: bash '$DIR/step.sh' hold|peer|snap NAME" >&2; exit 2 ;;
+  events)
+    # This capture's events, every page of them: from the sequence recorded
+    # before setup, not the coordinator's oldest.
+    pages '$START' >'$DIR/events.txt' 3>/dev/null
+    echo "Saved the events after sequence $START to $DIR/events.txt." ;;
+  *) echo "usage: bash '$DIR/step.sh' hold|peer|snap NAME|events" >&2; exit 2 ;;
 esac
 EOF
 
@@ -194,7 +228,7 @@ read -r _
 (cd "$REPO" && gemini --approval-mode default) || echo "Gemini CLI ended with an error; the events up to it are kept"
 
 "$LANGSPAN" status --json > "$DIR/status-after-quit.json" 2>&1 || echo "langspan status failed; see $DIR/status-after-quit.json"
-"$LANGSPAN" events --json --limit 1000 > "$DIR/events.json" 2>&1 || echo "langspan events failed; see $DIR/events.json"
+bash "$DIR/step.sh" events || echo "langspan events failed; run bash '$DIR/step.sh' events again"
 chmod 600 "$CAPTURE"/* "$DIR"/*.json "$DIR"/*.txt 2>/dev/null || true
 echo "== $(find "$CAPTURE" -type f | wc -l | tr -d ' ') event(s) in $CAPTURE"
 echo "Clean them (home paths, transcript_path, model text beyond the prompts) before committing them under fixtures/gemini-cli-<version>/."
