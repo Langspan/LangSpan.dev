@@ -1839,3 +1839,656 @@ fn a_hunk_with_a_line_no_session_wrote_next_to_another_sessions_is_still_refused
     assert!(f.head_files().contains("list"));
     assert_eq!(f.read("list.md"), content);
 }
+
+// ---------------------------------------------------------------------------
+// Other hosts (issue #26): each host's own edit and shell events, through the
+// real hook executable, mark the running `commit --mine` call, so the
+// session is found without --session.
+// ---------------------------------------------------------------------------
+
+const CODEX: &str = "00000000-0000-4000-8000-000000000001";
+const GEMINI: &str = "00000000-0000-4000-8000-0000000000e1";
+const CURSOR: &str = "00000000-0000-4000-8000-0000000000c1";
+
+/// A host's run of the hook: its coverage.
+#[derive(Debug)]
+struct HostRun {
+    coverage: String,
+}
+
+impl Fixture {
+    /// The hook as `vendor`'s configuration runs it, with `event`.
+    fn host(&self, vendor: &str, event: &Value) -> HostRun {
+        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
+            .args(["hook", vendor, "--state-dir"])
+            .arg(self.state())
+            .args(["--workspace", "work", "--root"])
+            .arg(self.work())
+            .args(["--budget-ms", "4000"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(event.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(0), "{stderr}");
+        let diagnostic: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+        HostRun {
+            coverage: diagnostic["coverage"].as_str().unwrap().into(),
+        }
+    }
+
+    /// Run `command` in the checkout as a host's shell tool would, between
+    /// the host's pre and post events, which `event(pre)` builds.
+    fn host_shell(&self, vendor: &str, event: impl Fn(bool) -> Value, command: &str) -> Output {
+        let pre = self.host(vendor, &event(true));
+        assert!(!pre.coverage.starts_with("denied"), "{pre:?}");
+        let output = Process::new("/bin/sh")
+            .env("LANGSPAN_AUTOSTART", "off")
+            .args(["-c", command])
+            .current_dir(self.work())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        let post = self.host(vendor, &event(false));
+        assert!(!post.coverage.starts_with("denied"), "{post:?}");
+        output
+    }
+
+    /// `commit --mine --json`, as an agent's shell runs it: no --session.
+    fn commit_mine_json(&self, message: &str) -> String {
+        format!("{} --json", self.commit_mine_command(message))
+    }
+
+    /// A Codex `apply_patch` replacing line `old` of shared.txt with `new`.
+    fn codex_patch(&self, call: &str, old: &str, new: &str) {
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: shared.txt\n@@\n-{old}\n+{new}\n*** End Patch"
+        );
+        let event = |phase: &str| {
+            let mut event = json!({
+                "session_id": CODEX, "turn_id": "turn-1", "transcript_path": null,
+                "cwd": self.work(), "hook_event_name": phase, "model": "example-model",
+                "permission_mode": "default", "tool_name": "apply_patch",
+                "tool_use_id": call, "tool_input": {"command": patch},
+            });
+            if phase == "PostToolUse" {
+                event["tool_response"] =
+                    json!("Success. Updated the following files:\nM shared.txt\n");
+            }
+            event
+        };
+        let pre = self.host("codex", &event("PreToolUse"));
+        assert_eq!(pre.coverage, "admitted", "{pre:?}");
+        let content = self.read("shared.txt");
+        let replaced = content.replacen(&format!("{old}\n"), &format!("{new}\n"), 1);
+        assert_ne!(content, replaced, "shared.txt lacks {old:?}");
+        fs::write(self.work().join("shared.txt"), replaced).unwrap();
+        let post = self.host("codex", &event("PostToolUse"));
+        assert_eq!(post.coverage, "observed", "{post:?}");
+    }
+
+    /// A Codex shell call (`exec_command`, whose hook events say `Bash`).
+    fn codex_shell(&self, call: &str, command: &str) -> Output {
+        let event = |pre: bool| {
+            json!({
+                "session_id": CODEX, "turn_id": "turn-1", "transcript_path": null,
+                "cwd": self.work(),
+                "hook_event_name": if pre { "PreToolUse" } else { "PostToolUse" },
+                "model": "example-model", "permission_mode": "default",
+                "tool_name": "Bash", "tool_use_id": call,
+                "tool_input": {"command": command},
+            })
+        };
+        self.host_shell("codex", event, command)
+    }
+}
+
+/// shared.txt with line 18 changed by `by_18`, and with line 2 changed by
+/// `by_2` as well.
+fn line_2_and_18(by_2: &str, by_18: &str) -> (String, String) {
+    let only_18 = numbered().replace("line 18\n", &format!("line 18, by {by_18}\n"));
+    let both = only_18.replace("line 2\n", &format!("line 2, by {by_2}\n"));
+    (only_18, both)
+}
+
+fn stdout_of(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// Acceptance: a Codex session runs `langspan commit --mine -m "x"` in its
+/// shell and commits only its hunks in a file both sessions changed; the
+/// other session's hunk is still in the working tree and not staged.
+#[test]
+fn a_codex_shell_commit_mine_commits_only_its_hunk_of_a_file_both_changed() {
+    let f = Fixture::new();
+    f.edit(
+        ALICE,
+        "alice-1",
+        "shared.txt",
+        "line 2\n",
+        "line 2, by Alice\n",
+    );
+    f.codex_patch("codex-1", "line 18", "line 18, by Codex");
+    let (only_codex, both) = line_2_and_18("Alice", "Codex");
+    assert_eq!(f.read("shared.txt"), both);
+
+    let ran = f.codex_shell("codex-2", &f.commit_mine_json("x"));
+    assert!(ran.status.success(), "{}", said(&ran));
+    let report: Value = serde_json::from_str(&stdout_of(&ran)).unwrap();
+    assert_eq!(report["result"], "committed", "{report}");
+    assert_eq!(report["session_id"], format!("codex.{CODEX}"), "{report}");
+    assert_eq!(report["paths"], json!(["shared.txt"]), "{report}");
+    assert_eq!(
+        report["left"],
+        json!([{"path": "shared.txt", "sessions": [format!("claude-code.{ALICE}")]}]),
+        "{report}"
+    );
+    assert_eq!(report["refused"], json!([]), "{report}");
+    assert_eq!(report["moved"], false, "{report}");
+
+    assert_eq!(git(&f.work(), &["show", "HEAD:shared.txt"]), only_codex);
+    assert_eq!(git(&f.work(), &["log", "-1", "--format=%s"]), "x\n");
+    // Alice's hunk: still in the working tree, and not staged.
+    assert_eq!(f.read("shared.txt"), both);
+    assert_eq!(f.status(), " M shared.txt\n");
+    assert_eq!(git(&f.work(), &["diff", "--cached"]), "");
+    let left = git(&f.work(), &["diff", "-U0"]);
+    assert!(left.contains("+line 2, by Alice"), "{left}");
+    assert!(!left.contains("Codex"), "{left}");
+}
+
+/// The text output lists what was left and points to `status --mine` for
+/// the lines still uncommitted.
+#[test]
+fn commit_mine_text_lists_what_was_left_and_points_to_status_mine() {
+    let f = Fixture::new();
+    f.edit(
+        ALICE,
+        "alice-1",
+        "shared.txt",
+        "line 2\n",
+        "line 2, by Alice\n",
+    );
+    f.codex_patch("codex-1", "line 18", "line 18, by Codex");
+    let ran = f.codex_shell("codex-2", &f.commit_mine_command("x"));
+    let stdout = stdout_of(&ran);
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert!(
+        stdout.contains(&format!(
+            "Left as they are, uncommitted: shared.txt (claude-code.{ALICE})"
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains("langspan status --mine"), "{stdout}");
+}
+
+/// Acceptance: a Gemini CLI `run_shell_command` call to `langspan commit
+/// --mine` without --session finds its session.
+#[test]
+fn a_gemini_shell_commit_mine_without_a_session_finds_its_own() {
+    let f = Fixture::new();
+    f.edit(BOB, "bob-1", "shared.txt", "line 2\n", "line 2, by Bob\n");
+    let path = f.work().join("shared.txt");
+    let input = json!({
+        "file_path": path, "instruction": "Change line 18.",
+        "old_string": "line 18\n", "new_string": "line 18, by Gemini\n",
+    });
+    let replace = |phase: &str| {
+        let mut event = json!({
+            "session_id": GEMINI, "transcript_path": "/dev/null", "cwd": f.work(),
+            "hook_event_name": phase, "timestamp": "2026-11-24T23:15:02.000Z",
+            "tool_name": "replace", "tool_input": input,
+        });
+        if phase == "AfterTool" {
+            event["tool_response"] = json!({"llmContent": "Successfully modified file."});
+        }
+        event
+    };
+    let before = f.host("gemini-cli", &replace("BeforeTool"));
+    assert_eq!(before.coverage, "admitted", "{before:?}");
+    let content = f.read("shared.txt");
+    fs::write(
+        &path,
+        content.replacen("line 18\n", "line 18, by Gemini\n", 1),
+    )
+    .unwrap();
+    let after = f.host("gemini-cli", &replace("AfterTool"));
+    assert_eq!(after.coverage, "observed", "{after:?}");
+    let (only_gemini, both) = line_2_and_18("Bob", "Gemini");
+
+    let command = f.commit_mine_json("Gemini: line 18");
+    let shell = |pre: bool| {
+        let mut event = json!({
+            "session_id": GEMINI, "transcript_path": "/dev/null", "cwd": f.work(),
+            "hook_event_name": if pre { "BeforeTool" } else { "AfterTool" },
+            "timestamp": "2026-11-24T23:15:04.000Z", "tool_name": "run_shell_command",
+            "tool_input": {"command": command, "description": "Commit my changes."},
+        });
+        if !pre {
+            event["tool_response"] = json!({"llmContent": "Output: done", "returnDisplay": "done"});
+        }
+        event
+    };
+    let ran = f.host_shell("gemini-cli", shell, &command);
+    assert!(ran.status.success(), "{}", said(&ran));
+    let report: Value = serde_json::from_str(&stdout_of(&ran)).unwrap();
+    assert_eq!(report["result"], "committed", "{report}");
+    assert_eq!(report["session_id"], format!("gemini.{GEMINI}"), "{report}");
+    assert_eq!(git(&f.work(), &["show", "HEAD:shared.txt"]), only_gemini);
+    assert_eq!(f.read("shared.txt"), both);
+    assert_eq!(f.status(), " M shared.txt\n");
+}
+
+impl Fixture {
+    /// A Cursor event of `tool` with `input`.
+    fn cursor_event(&self, phase: &str, tool: &str, call: &str, input: Value) -> Value {
+        json!({
+            "conversation_id": CURSOR, "generation_id": "00000000-0000-4000-8000-0000000000e1",
+            "model": "default", "session_id": CURSOR, "hook_event_name": phase,
+            "cursor_version": "1.7.2", "workspace_roots": [self.work()],
+            "user_email": null, "transcript_path": null, "tool_name": tool,
+            "tool_input": input, "tool_use_id": call, "cwd": self.work(),
+        })
+    }
+
+    /// A Cursor `Write` of `file` with `content`.
+    fn cursor_write(&self, call: &str, file: &str, content: &str) {
+        let path = self.work().join(file);
+        let input = json!({"file_path": path, "content": content});
+        let pre = self.host(
+            "cursor",
+            &self.cursor_event("preToolUse", "Write", call, input.clone()),
+        );
+        assert_eq!(pre.coverage, "admitted", "{pre:?}");
+        fs::write(&path, content).unwrap();
+        let post = self.host(
+            "cursor",
+            &self.cursor_event("postToolUse", "Write", call, input),
+        );
+        assert_eq!(post.coverage, "observed", "{post:?}");
+    }
+
+    /// A Cursor `Shell` call of `command`.
+    fn cursor_shell(&self, call: &str, command: &str) -> Output {
+        let event = |pre: bool| {
+            let input = json!({"command": command, "cwd": self.work()});
+            if pre {
+                return self.cursor_event("preToolUse", "Shell", call, input);
+            }
+            let mut event = self.cursor_event("postToolUse", "Shell", call, input);
+            event["tool_output"] = json!("{\"output\":\"\",\"exitCode\":0}");
+            event["duration"] = json!(20);
+            event
+        };
+        self.host_shell("cursor", event, command)
+    }
+}
+
+/// Acceptance: a Cursor MCP call to `langspan_commit_mine` returns the same
+/// result fields as the CLI `--json`, here the CLI from a Cursor `Shell`
+/// call that names no session.
+#[tokio::test]
+async fn a_cursor_mcp_commit_mine_returns_the_cli_json_fields() {
+    use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+    let f = Fixture::new();
+    // Alice changes line 2; the Cursor session changes line 18 and writes a
+    // new file.
+    f.edit(
+        ALICE,
+        "alice-1",
+        "shared.txt",
+        "line 2\n",
+        "line 2, by Alice\n",
+    );
+    let (only_cursor, both) = line_2_and_18("Alice", "Cursor");
+    // Cursor reads the file Alice changed before it writes it.
+    let mut read = f.cursor_event(
+        "postToolUse",
+        "Read",
+        "cursor-0",
+        json!({"file_path": f.work().join("shared.txt")}),
+    );
+    read["tool_output"] = json!("{}");
+    assert_eq!(f.host("cursor", &read).coverage, "read_recorded");
+    f.cursor_write("cursor-1", "shared.txt", &both);
+    f.cursor_write("cursor-2", "cursor-1.txt", "Cursor's first\n");
+
+    // The CLI, from Cursor's shell, without --session.
+    let ran = f.cursor_shell("cursor-3", &f.commit_mine_json("Cursor: first"));
+    assert!(ran.status.success(), "{}", said(&ran));
+    let cli: Value = serde_json::from_str(&stdout_of(&ran)).unwrap();
+    assert_eq!(cli["result"], "committed", "{cli}");
+    assert_eq!(cli["session_id"], format!("cursor.{CURSOR}"), "{cli}");
+    assert_eq!(cli["paths"], json!(["shared.txt", "cursor-1.txt"]), "{cli}");
+    assert_eq!(git(&f.work(), &["show", "HEAD:shared.txt"]), only_cursor);
+
+    // Cursor writes again, and commits through its MCP registration.
+    f.cursor_write("cursor-4", "cursor-2.txt", "Cursor's second\n");
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command
+        .env("LANGSPAN_AUTOSTART", "off")
+        .arg("mcp")
+        .arg("--state-dir")
+        .arg(f.state())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null");
+    let client = ().serve(TokioChildProcess::new(command).unwrap()).await.unwrap();
+    let request = CallToolRequestParams::new("langspan_commit_mine").with_arguments(
+        json!({
+            "request_id": "cursor-commit-1", "workspace_id": "work",
+            "session_id": format!("cursor.{CURSOR}"), "message": "Cursor: second",
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let result = tokio::time::timeout(Duration::from_secs(60), client.call_tool(request))
+        .await
+        .unwrap()
+        .unwrap();
+    client.cancel().await.unwrap();
+    assert_eq!(result.is_error, Some(false), "{result:?}");
+    let mcp = result.structured_content.unwrap();
+    assert_eq!(mcp["result"], "committed", "{mcp}");
+    assert_eq!(mcp["paths"], json!(["cursor-2.txt"]), "{mcp}");
+
+    // Every field of the CLI's JSON, each with the same type; the MCP
+    // result adds only its exit code and request ID.
+    let cli = cli.as_object().unwrap();
+    let mcp = mcp.as_object().unwrap();
+    for (key, value) in cli {
+        let other = &mcp[key];
+        assert_eq!(
+            std::mem::discriminant(value),
+            std::mem::discriminant(other),
+            "{key}: CLI {value}, MCP {other}"
+        );
+    }
+    let extra: Vec<&String> = mcp.keys().filter(|key| !cli.contains_key(*key)).collect();
+    assert_eq!(extra, ["exit_code", "request_id"]);
+    for key in ["session_id", "left", "refused", "moved"] {
+        assert_eq!(cli[key], mcp[key], "{key}");
+    }
+    assert_eq!(mcp["exit_code"], 0);
+    assert_eq!(f.status(), " M shared.txt\n");
+}
+
+/// Acceptance: a failing owner hook commits nothing, and the reply says
+/// which hook refused.
+#[test]
+fn each_failing_commit_hook_is_named_and_nothing_is_committed() {
+    for hook in ["pre-commit", "prepare-commit-msg", "commit-msg"] {
+        let f = Fixture::new();
+        f.hooks(&[(hook, "echo 'hook said no' >&2; exit 1")]);
+        f.edit(
+            ALICE,
+            "alice-1",
+            "shared.txt",
+            "line 2\n",
+            "line 2, by Alice\n",
+        );
+        f.codex_patch("codex-1", "line 18", "line 18, by Codex");
+        let index = fs::read(f.work().join(".git/index")).unwrap();
+        let ran = f.codex_shell("codex-2", &f.commit_mine_command("x"));
+        assert!(!ran.status.success(), "{hook}");
+        let text = String::from_utf8_lossy(&ran.stderr).into_owned();
+        assert!(
+            text.contains(&format!("the {hook} hook refused the commit")),
+            "{hook}: {text}"
+        );
+        assert!(text.contains("nothing was committed"), "{hook}: {text}");
+        // The hook's own words reach the caller.
+        assert!(text.contains("hook said no"), "{hook}: {text}");
+        assert_eq!(f.subjects(), "start\n", "{hook}");
+        assert_eq!(
+            fs::read(f.work().join(".git/index")).unwrap(),
+            index,
+            "{hook}"
+        );
+        assert_eq!(f.status(), " M shared.txt\n", "{hook}");
+    }
+}
+
+impl Fixture {
+    /// A directory holding a `git` that answers `git hook` as Git before
+    /// 2.36 does, logging each such call to `old-git.log`, and passes
+    /// everything else to the real Git.
+    fn old_git(&self) -> PathBuf {
+        let real = std::env::var_os("PATH")
+            .and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|dir| dir.join("git"))
+                    .find(|git| git.is_file())
+            })
+            .expect("git on PATH");
+        let dir = self.base.join("old-git");
+        fs::create_dir_all(&dir).unwrap();
+        let log = self.base.join("old-git.log");
+        let script = format!(
+            r#"#!/bin/sh
+skip=
+for arg in "$@"; do
+  if [ -n "$skip" ]; then skip=; continue; fi
+  case "$arg" in
+    -C|-c) skip=1 ;;
+    -*) ;;
+    hook) echo "$*" >> '{log}'
+          echo "git: 'hook' is not a git command. See 'git --help'." >&2
+          exit 1 ;;
+    *) break ;;
+  esac
+done
+exec '{real}' "$@"
+"#,
+            log = log.display(),
+            real = real.display()
+        );
+        let shim = dir.join("git");
+        fs::write(&shim, script).unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        dir
+    }
+
+    /// `commit --mine` for `session` with `first` ahead of PATH.
+    fn commit_mine_with_path(&self, session: &str, message: &str, first: &Path) -> Output {
+        let path = std::env::join_paths(
+            std::iter::once(first.to_path_buf())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
+            .env("PATH", path)
+            .arg("--state-dir")
+            .arg(self.state())
+            .args([
+                "commit",
+                "--mine",
+                "--session",
+                &format!("claude-code.{session}"),
+            ])
+            .arg("--root")
+            .arg(self.work())
+            .args(["-m", message])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap()
+    }
+
+    /// Install `hooks` in the Git directory's own `hooks`.
+    fn git_dir_hooks(&self, hooks: &[(&str, &str)]) {
+        let dir = self.work().join(".git/hooks");
+        fs::create_dir_all(&dir).unwrap();
+        for (name, body) in hooks {
+            let path = dir.join(name);
+            fs::write(&path, format!("#!/bin/sh\nset -e\n{body}\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+}
+
+/// Acceptance: the Git hook fallback for Git before 2.36. With no `git hook
+/// run`, the hooks run from the Git directory's `hooks` or from
+/// `core.hooksPath`, with the private index and the message file, and a
+/// refusal there commits nothing.
+#[test]
+fn without_git_hook_run_the_owners_hooks_run_from_the_hooks_directory() {
+    for configured in [false, true] {
+        let f = Fixture::new();
+        let seen = f.base.join("seen");
+        // pre-commit records that its index holds the session's change;
+        // the message hooks get the message file and may rewrite it.
+        let pre_commit = format!(
+            "test -n \"$GIT_INDEX_FILE\"\ngit show :shared.txt | grep -c 'by Alice' > '{}'",
+            seen.display()
+        );
+        let hooks = [
+            ("pre-commit", pre_commit.as_str()),
+            (
+                "prepare-commit-msg",
+                "test \"$2\" = message\nprintf 'prepared\\n' >> \"$1\"",
+            ),
+            (
+                "commit-msg",
+                "printf '\\nChecked-by: commit-msg\\n' >> \"$1\"",
+            ),
+        ];
+        if configured {
+            f.hooks(&hooks);
+        } else {
+            f.git_dir_hooks(&hooks);
+        }
+        f.edit(
+            ALICE,
+            "alice-1",
+            "shared.txt",
+            "line 2\n",
+            "line 2, by Alice\n",
+        );
+        f.edit(BOB, "bob-1", "shared.txt", "line 18\n", "line 18, by Bob\n");
+
+        let output = f.commit_mine_with_path(ALICE, "Alice", &f.old_git());
+        let case = format!("core.hooksPath set: {configured}");
+        assert!(output.status.success(), "{case}: {}", said(&output));
+        let log = fs::read_to_string(f.base.join("old-git.log")).unwrap_or_default();
+        assert!(
+            log.contains("hook run"),
+            "{case}: no git hook call: {log:?}"
+        );
+        assert_eq!(fs::read_to_string(&seen).unwrap(), "1\n", "{case}");
+        assert_eq!(
+            git(&f.work(), &["log", "-1", "--format=%B"]),
+            "Alice\nprepared\n\nChecked-by: commit-msg\n\n",
+            "{case}"
+        );
+        assert_eq!(
+            git(&f.work(), &["show", "HEAD:shared.txt"]),
+            numbered().replace("line 2\n", "line 2, by Alice\n"),
+            "{case}"
+        );
+        assert_eq!(f.status(), " M shared.txt\n", "{case}");
+    }
+
+    // A refusal from the hooks directory stops the commit.
+    let f = Fixture::new();
+    f.git_dir_hooks(&[("pre-commit", "echo 'old hook said no' >&2\nexit 1")]);
+    f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
+    let output = f.commit_mine_with_path(ALICE, "Alice", &f.old_git());
+    let text = said(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains("the pre-commit hook refused the commit"),
+        "{text}"
+    );
+    assert!(text.contains("old hook said no"), "{text}");
+    assert_eq!(f.subjects(), "start\n");
+    assert_eq!(f.status(), " M a.txt\n");
+}
+
+/// A formatter one session runs over a file both changed reflows both
+/// sessions' lines. Each reformatted line stays with the session that wrote
+/// it: `commit --mine` commits the runner's own reformatted hunk and leaves
+/// the other session's, reformatted, unstaged.
+#[test]
+fn a_formatter_reflowing_both_sessions_lines_in_one_file_commits_only_the_runners() {
+    let f = Fixture::new();
+    f.edit(
+        ALICE,
+        "alice-1",
+        "shared.txt",
+        "line 2\n",
+        "fn alice(a,b) {}\n",
+    );
+    f.edit(BOB, "bob-1", "shared.txt", "line 18\n", "fn bob(c,d) {}\n");
+    // A space after every comma, as a code formatter puts one.
+    let scratch = f.base.join("formatted");
+    let command = format!(
+        "sed 's/,\\([^ ]\\)/, \\1/g' shared.txt > '{0}' && cat '{0}' > shared.txt",
+        scratch.display()
+    );
+    let (_, ran) = f.bash_call(ALICE, "alice-2", &command);
+    assert!(ran.unwrap().status.success());
+    let formatted = f.read("shared.txt");
+    assert!(
+        formatted.contains("fn alice(a, b) {}\nline 3"),
+        "{formatted}"
+    );
+    assert!(
+        formatted.contains("fn bob(c, d) {}\nline 19"),
+        "{formatted}"
+    );
+
+    let output = f.commit_mine(ALICE, "Alice: formatted");
+    assert!(output.status.success(), "{}", said(&output));
+    assert_eq!(
+        git(&f.work(), &["show", "HEAD:shared.txt"]),
+        numbered().replace("line 2\n", "fn alice(a, b) {}\n")
+    );
+    assert_eq!(f.read("shared.txt"), formatted);
+    assert_eq!(f.status(), " M shared.txt\n");
+    let left = git(&f.work(), &["diff", "-U0"]);
+    assert!(left.contains("+fn bob(c, d) {}"), "{left}");
+    assert!(!left.contains("alice"), "{left}");
+}
+
+/// A formatter that joins one session's line with another's makes a line
+/// neither wrote. `commit --mine` cannot tell whose it is: it refuses,
+/// naming the file, and commits and stages nothing.
+#[test]
+fn a_formatter_joining_two_sessions_lines_into_one_is_refused_not_guessed() {
+    let f = Fixture::new();
+    f.edit(ALICE, "alice-1", "shared.txt", "line 10\n", "alice(a,\n");
+    f.edit(BOB, "bob-1", "shared.txt", "line 11\n", "b) // Bob\n");
+    // Joins a line that ends in a comma with the next one.
+    let command = "sed -e ':a' -e '/,$/N; s/,\\n/, /; ta' shared.txt > joined.tmp && cat joined.tmp > shared.txt && rm joined.tmp";
+    let (_, ran) = f.bash_call(ALICE, "alice-2", command);
+    assert!(ran.unwrap().status.success());
+    let joined = f.read("shared.txt");
+    assert!(
+        joined.contains("line 9\nalice(a, b) // Bob\nline 12"),
+        "{joined}"
+    );
+    let index = fs::read(f.work().join(".git/index")).unwrap();
+
+    let output = f.commit_mine(ALICE, "Alice");
+    let text = said(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("nothing was committed"), "{text}");
+    assert!(text.contains("shared.txt"), "{text}");
+    assert_eq!(f.subjects(), "start\n");
+    assert_eq!(fs::read(f.work().join(".git/index")).unwrap(), index);
+    assert_eq!(f.read("shared.txt"), joined);
+}

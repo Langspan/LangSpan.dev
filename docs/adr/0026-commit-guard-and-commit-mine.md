@@ -5,8 +5,12 @@
 the attribution of edits to sessions in ADR 0002, ADR 0004 and ADR 0011.
 Roadmap rows B6 and B7, the shared-index guard and `commit --mine`.
 Tested with the real daemon, Git, hook executable, CLI and MCP adapter
-(`tests/commit_guard.rs`); not yet observed with a real Claude Code or Codex
-session.
+(`tests/commit_guard.rs`), with each host's own edit and shell events for
+Claude Code, Codex, Cursor and Gemini CLI (issue #26). A real Codex session
+ran `commit --mine` from its shell
+([Codex real-host evidence](../evidence/codex-real-host/README.md), section
+6); the Claude Code run is not yet retained as evidence, and Cursor and
+Gemini CLI have not run it on a real host.
 
 ## Context
 
@@ -238,6 +242,30 @@ character (test
 A retry is safe without a receipt: what was committed is no longer
 uncommitted.
 
+Every host's shell tool reaches that marking through the same shell
+operation (`hook::shell_operation`): Claude Code `Bash`, Codex `Bash` (its
+`exec_command`), Cursor `Shell`, Gemini CLI `run_shell_command` and
+Antigravity's shell tool; the tests cover the first four. Their MCP registrations call the same
+`langspan_commit_mine`, whose result holds the CLI's `--json` fields plus
+`exit_code` and `request_id`. When anything is left or refused, the text
+output ends by pointing to `langspan status --mine`, which lists the lines
+still this session's (issue #26). Tests in `tests/commit_guard.rs`:
+`a_codex_shell_commit_mine_commits_only_its_hunk_of_a_file_both_changed`,
+`a_gemini_shell_commit_mine_without_a_session_finds_its_own`,
+`a_cursor_mcp_commit_mine_returns_the_cli_json_fields`,
+`each_failing_commit_hook_is_named_and_nothing_is_committed` and
+`commit_mine_text_lists_what_was_left_and_points_to_status_mine`.
+
+A formatter run over a file both sessions changed reflows each session's
+lines in place: each reformatted line stays the session's that wrote it, so
+`commit --mine` takes the runner's reformatted hunk and leaves the other's
+(test
+`a_formatter_reflowing_both_sessions_lines_in_one_file_commits_only_the_runners`).
+A reflow that joins one session's line with another's makes a line neither
+wrote; its hunk is not known, and `commit --mine` refuses with nothing
+committed (test
+`a_formatter_joining_two_sessions_lines_into_one_is_refused_not_guessed`).
+
 A failed Git step, in `commit --mine` or in the guard's own reads, is
 reported with the step, its exit status and Git's standard error as
 `git::said` gives it (the last six lines, at most 1 KiB, control characters
@@ -276,8 +304,11 @@ Claude Code run calling it before `commit --mine` is still to be retained.
 ## Never covered
 
 - The hook fallback for Git before 2.36 (running files from the hooks
-  directory) is not exercised by the tests, which run Git 2.56. Hooks run
-  twice when the branch moves during the first attempt.
+  directory) is tested with a `git` on `PATH` that answers `git hook` as
+  Git before 2.36 does and passes every other command to the installed Git
+  (test `without_git_hook_run_the_owners_hooks_run_from_the_hooks_directory`),
+  not with a real Git before 2.36. Hooks run twice when the branch moves
+  during the first attempt.
 - Line keys are content only, per file, kept for a week. After a commit
   LangSpan did not make, an old claim stays: a later identical line written
   by someone else in that file counts as the earlier writer's too, so it can
