@@ -20,9 +20,10 @@ use langspan_core::{
 };
 use std::{collections::BTreeSet, path::Path, time::Instant};
 
-/// The journal facts for `session_id`'s trail, read until `deadline`. Past
-/// it, what was read is sent with `partial` set: the trail then has the
-/// edited paths the coordinator recorded, without the rest.
+/// The journal facts for `session_id`'s trail, read until `deadline` and cut
+/// to `FACTS_BYTES`. Past either, what was read is sent with `partial` set:
+/// the trail then has the edited paths the coordinator recorded, without
+/// the rest.
 pub fn facts(
     state_dir: &Path,
     root: &Path,
@@ -34,7 +35,9 @@ pub fn facts(
         no_task: !share_prompt,
         ..TrailFacts::default()
     };
-    let entries: Vec<journal::Entry> = journal::entries(state_dir, root)
+    let (entries, complete) = journal::entries_until(state_dir, root, deadline);
+    facts.partial = !complete;
+    let entries: Vec<journal::Entry> = entries
         .into_iter()
         .filter(|entry| is_own(session_id, &entry.session_id))
         .collect();
@@ -91,7 +94,27 @@ pub fn facts(
             facts.uncommitted.push((*path).to_owned());
         }
     }
+    fit(&mut facts);
     facts
+}
+
+/// Serialized bytes of a session end's facts, at most: half a frame, which
+/// leaves the request ID, session ID and envelope room to spare.
+const FACTS_BYTES: usize = crate::protocol::MAX_FRAME_BYTES / 2;
+
+/// Drop the oldest files from `facts` until they serialize within
+/// `FACTS_BYTES`, marking what is left partial: an end that does not fit a
+/// frame would not be sent at all.
+fn fit(facts: &mut TrailFacts) {
+    let size = |facts: &TrailFacts| serde_json::to_vec(facts).map_or(usize::MAX, |b| b.len());
+    while size(facts) > FACTS_BYTES {
+        facts.partial = true;
+        if let Some(file) = facts.edited.pop() {
+            facts.uncommitted.retain(|path| *path != file.path);
+        } else if facts.uncommitted.pop().is_none() {
+            return;
+        }
+    }
 }
 
 /// Consecutive line numbers as one-based ranges.
@@ -369,6 +392,105 @@ mod tests {
         assert!(text.len() <= TRAIL_BYTES, "{} bytes: {text}", text.len());
         assert!(text.lines().count() <= 3, "{text}");
         assert!(text.contains("and 48 more"), "{text}");
+    }
+
+    /// A session end carrying `facts`, as the end hook frames it.
+    fn end_frame(facts: &TrailFacts) -> Result<Vec<u8>, crate::Error> {
+        crate::protocol::encode(&crate::protocol::Request {
+            version: crate::protocol::PROTOCOL_VERSION,
+            request_id: "r".repeat(128),
+            command: langspan_core::Command::SessionEnd {
+                session_id: format!("claude-code.{}", "s".repeat(116)),
+                trail: Some(facts.clone()),
+            },
+        })
+    }
+
+    /// The most files of the longest paths, each edited and uncommitted,
+    /// with every range: `quote` paths escape to twice their bytes.
+    fn largest_facts(quote: bool) -> TrailFacts {
+        let path = |n: usize| {
+            let part = if quote { "\"" } else { "d" };
+            format!("{}/{n:03}.rs", part.repeat(500))
+        };
+        let ranges: Vec<LineRange> = (0..TRAIL_RANGES as u32)
+            .map(|n| LineRange {
+                start_line: 4_000_000_000 + n * 10,
+                end_line: 4_000_000_005 + n * 10,
+            })
+            .collect();
+        TrailFacts {
+            edited: (0..MAX_TRAIL_FACTS)
+                .map(|n| TrailFile {
+                    path: path(n),
+                    lines: ranges.clone(),
+                    more_lines: true,
+                })
+                .collect(),
+            uncommitted: (0..MAX_TRAIL_FACTS).map(path).collect(),
+            no_task: true,
+            partial: false,
+        }
+    }
+
+    #[test]
+    fn facts_past_the_frame_are_cut_to_the_newest_files_and_marked_partial() {
+        for quote in [false, true] {
+            let mut facts = largest_facts(quote);
+            assert!(end_frame(&facts).is_err(), "the scenario exceeds a frame");
+            fit(&mut facts);
+            assert!(end_frame(&facts).is_ok());
+            assert!(facts.partial);
+            assert!(serde_json::to_vec(&facts).unwrap().len() <= FACTS_BYTES);
+            // The newest files are kept, in order, in both lists.
+            let all = largest_facts(quote);
+            assert!(!facts.edited.is_empty());
+            assert_eq!(facts.edited[..], all.edited[..facts.edited.len()]);
+            assert_eq!(
+                facts.uncommitted[..],
+                all.uncommitted[..facts.uncommitted.len()]
+            );
+            assert!(
+                facts
+                    .uncommitted
+                    .iter()
+                    .all(|path| facts.edited.iter().any(|file| &file.path == path))
+            );
+        }
+    }
+
+    #[test]
+    fn an_end_whose_deadline_passes_before_the_journal_is_read_sends_partial_facts() {
+        let base = std::env::temp_dir().join(format!("ls-trail-deadline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (state, root) = (base.join("state"), base.join("root"));
+        std::fs::create_dir_all(&root).unwrap();
+        crate::local::private_directory(&state).unwrap();
+        for index in 0..200 {
+            let path = format!("src/m{index}.rs");
+            journal::write_for_test(&state, &root, &format!("op-{index}"), "a", &path);
+        }
+        journal::entry_reads();
+        let facts = facts(&state, &root, "a", true, Instant::now());
+        let reads = journal::entry_reads();
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(reads, 0, "no entry is read past the deadline");
+        assert!(facts.partial);
+        assert!(facts.edited.is_empty() && facts.uncommitted.is_empty());
+    }
+
+    #[test]
+    fn facts_within_the_frame_are_left_as_they_are() {
+        let mut facts = largest_facts(false);
+        facts.edited.truncate(4);
+        facts.uncommitted.truncate(4);
+        let before = facts.clone();
+        fit(&mut facts);
+        assert_eq!(facts, before);
+        // The budget holds on an empty end too.
+        let mut empty = TrailFacts::default();
+        fit(&mut empty);
+        assert_eq!(empty, TrailFacts::default());
     }
 
     #[test]

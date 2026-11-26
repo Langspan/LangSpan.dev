@@ -155,9 +155,12 @@ The end hook adds what only the line journal on this machine knows: for each
 journaled file of the session and its subagents, where the lines it wrote
 are in the file now (at most 4 ranges per file), and whether they are still
 among the file's uncommitted changes. It reads the journal within half the
-hook's remaining time. Past that, it sends what it has with `partial` set,
-and the trail still has the task line and the edited paths the coordinator
-recorded. Line numbers and paths only: no line text, no file content.
+hook's remaining time, newest entries first, and keeps these facts within
+32 KiB serialized, half a request frame, dropping the oldest files first.
+Past either bound, it sends what it has with `partial` set, so the end is
+always sent, and the trail still has the task line and the edited paths the
+coordinator recorded. Line numbers and paths only: no line text, no file
+content.
 
 Nothing in a trail is model output. The hook never reads the transcript, and
 the end event's `last_assistant_message`, when a host sends one, is ignored

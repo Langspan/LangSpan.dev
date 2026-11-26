@@ -274,6 +274,27 @@ fn read_entry(path: &Path) -> Option<Entry> {
     serde_json::from_slice(&read_private(path, ENTRY_LIMIT_BYTES)?).ok()
 }
 
+/// Journal a write of `path` by `session` in the workspace at `root`, as
+/// the write hooks would: for the tests of the journal's readers.
+#[cfg(test)]
+pub(crate) fn write_for_test(
+    state_dir: &Path,
+    root: &Path,
+    operation: &str,
+    session: &str,
+    path: &str,
+) {
+    let entry = Entry {
+        session_id: session.into(),
+        path: path.into(),
+        at_ms: now_ms(),
+        after: state_of(Some(b"x\n")),
+        lines: diff_lines(b"", b"x\n"),
+        partial: false,
+    };
+    write_entry(&workspace_dir(state_dir, root), operation, &entry).unwrap();
+}
+
 /// Entry files this thread has read since the last call.
 #[cfg(test)]
 pub(crate) fn entry_reads() -> usize {
@@ -987,6 +1008,26 @@ pub fn entries(state_dir: &Path, root: &Path) -> Vec<Entry> {
     read_entries(workspace_listing(&workspace_dir(state_dir, root)))
 }
 
+/// The entries kept for the physical workspace at `root`, newest first, read
+/// until `deadline`. `false` with the entries read so far when it passed.
+pub fn entries_until(state_dir: &Path, root: &Path, deadline: Instant) -> (Vec<Entry>, bool) {
+    let mut files = workspace_listing(&workspace_dir(state_dir, root));
+    files.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
+    let now = now_ms();
+    let mut entries = Vec::new();
+    for (path, modified) in files {
+        if Instant::now() >= deadline {
+            return (entries, false);
+        }
+        if now.saturating_sub(modified) <= WEEK_MS
+            && let Some(entry) = read_entry(&path)
+        {
+            entries.push(entry);
+        }
+    }
+    (entries, true)
+}
+
 /// The entries kept for `paths` of the physical workspace at `root`: a write
 /// hook's lookup, which reads no other file's entries.
 pub fn entries_for(state_dir: &Path, root: &Path, paths: &[String]) -> Vec<Entry> {
@@ -1308,6 +1349,28 @@ mod tests {
         assert!(entries_for(&dirs.state, &dirs.root, &paths[..1]).is_empty());
         // The whole journal is still there for the commit guard.
         assert_eq!(entries(&dirs.state, &dirs.root).len(), 300);
+    }
+
+    #[test]
+    fn a_read_until_a_deadline_stops_there_and_says_it_is_incomplete() {
+        let dirs = Dirs::new("deadline");
+        let directory = workspace_dir(&dirs.state, &dirs.root);
+        let now = now_ms();
+        for index in 0..40 {
+            let entry = entry_of("a", &format!("src/m{index}.rs"), now);
+            write_entry(&directory, &format!("op-{index}"), &entry).unwrap();
+        }
+        reads();
+        // Past its deadline the read opens no entry and says so.
+        let (found, complete) = entries_until(&dirs.state, &dirs.root, Instant::now());
+        assert!(found.is_empty() && !complete);
+        assert_eq!(reads(), 0);
+        // In time, it reads every entry.
+        let later = Instant::now() + std::time::Duration::from_secs(60);
+        let (found, complete) = entries_until(&dirs.state, &dirs.root, later);
+        assert!(complete);
+        assert_eq!(found.len(), 40);
+        assert_eq!(reads(), 40);
     }
 
     #[test]

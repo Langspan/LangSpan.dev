@@ -1091,8 +1091,8 @@ recorded events and the line journal on this machine: never the transcript
 or the agent's last reply, never file content. A session that read and wrote
 nothing leaves no trail. The briefing shows at most three lines and 600
 bytes; paths that do not fit are counted. When the end hook cannot read the
-journal in its time, the trail says its line ranges and uncommitted files are
-not known.
+journal in its time, or its facts exceed 32 KiB, the trail says its line
+ranges and uncommitted files are not known.
 
 The session's own handoff comes before its trail. A trail follows the
 handoff rule: a subagent never takes one, and a headless `claude -p` run
