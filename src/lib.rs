@@ -2,6 +2,7 @@
 
 pub mod auto_check;
 pub mod autostart;
+mod break_calls;
 pub mod breaks;
 pub mod claude_code;
 pub mod client;

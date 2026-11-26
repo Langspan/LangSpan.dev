@@ -116,6 +116,7 @@ fn cause(dependents: &[&str]) -> InterfaceCause {
             }),
             before_count: None,
             after_count: None,
+            after_name: None,
         },
         more_changes: 0,
         dependents: dependents.iter().map(|path| (*path).to_owned()).collect(),

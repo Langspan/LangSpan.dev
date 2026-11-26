@@ -315,6 +315,7 @@ fn evidence_and_risks_are_carried_with_their_applicability() {
                 change: "signature_changed".into(),
                 before: Some("pub fn upload()".into()),
                 after: Some("pub fn upload(retries: u8)".into()),
+                after_name: None,
                 before_arity: None,
                 after_arity: None,
                 before_count: None,

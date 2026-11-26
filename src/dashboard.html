@@ -254,7 +254,7 @@ function render(d, install_advice) {
   fill('notices', d.interface_changes, (n) => add(el('li'),
     add(el('div', 'line'), el('span', 'mono chip', n.path), el('span', 'muted', 'in ' + n.workspace_id),
       el('span', 'muted', ago(n.age_ms))),
-    add(el('div', 'line'), ...n.changes.map((c) => el('span', 'mono', c.kind + ' ' + c.name + ': ' + c.change.replace('_', ' '))),
+    add(el('div', 'line'), ...n.changes.map((c) => el('span', 'mono', c.kind + ' ' + c.name + ': ' + c.change.replace('_', ' ') + (c.after_name ? ' to ' + c.after_name : ''))),
       n.more_changes > 0 ? el('span', 'muted', n.more_changes + ' more') : null),
     files('affects', n.dependents),
     n.more_dependents > 0 ? el('div', 'more', n.more_dependents + ' more affected files') : null,
