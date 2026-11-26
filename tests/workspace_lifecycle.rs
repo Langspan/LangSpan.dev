@@ -858,17 +858,24 @@ fn a_checkout_replaced_by_a_link_to_its_new_place_is_still_the_same_checkout() {
     home.ok(&["remember", "app", NOTE, "--request-id", "note"]);
     // A session there is admitted through the link.
     home.ok(&["session", "start", "s1", "app", "--request-id", "s1"]);
-    home.ok(&[
+    let admitted = home.json(&[
         "admit",
         "s1",
         "src/a.rs",
         "--ttl-ms",
-        "1",
+        "60000",
         "--request-id",
         "admit",
     ]);
-    // Let the one-millisecond admission lapse before the move.
-    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(admitted["lease_valid"], true, "{admitted}");
+    let lease = admitted["outcome"]["lease"]["lease_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{admitted}"))
+        .to_owned();
+    // Finish it before the move: a move waits for held admissions. A
+    // completion, not a lapse, so that no step depends on how fast the
+    // machine is.
+    home.ok(&["complete", "s1", &lease, "--request-id", "complete"]);
 
     // Moving to the link's target needs no --switch and records it.
     home.ok(&[
