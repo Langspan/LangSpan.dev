@@ -160,6 +160,7 @@ fn parse_event(
                 })
                 .collect(),
             pre_tool_context: true,
+            breaks_after: false,
         },
         config,
     ))
