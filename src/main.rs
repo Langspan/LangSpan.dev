@@ -94,7 +94,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Who holds BRANCH's push turn and who waits for it
   land-cancel WORKSPACE --onto BRANCH --request-id ID
                                  Stop the waiting landing ID; it pushes nothing
-  graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go)
+  graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go, Java)
                                  [--detail]: with its body digest, calls, callers
                                  by name, notes on its file and last check
   graph references WORKSPACE NAME  Where a name is mentioned
@@ -109,7 +109,15 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   graph inflight WORKSPACE       Exported names other worktrees of the repository
                                  added or changed and not committed, that this
                                  workspace's files mention or import
-  recap WORKSPACE              A bounded account of one workspace: sessions, recent
+  graph history WORKSPACE NAME [--path PATH] [--limit N] [--before SEQ]
+                                 The recorded interface changes of definitions named
+                                 NAME, newest first (--limit 1 to 50, default 10):
+                                 before and after, the last session that reported
+                                 editing the file (not proof of authorship), its task
+                                 line, notes and messages naming the file within 30
+                                 minutes, and changes back to an earlier signature.
+                                 Reads only
+  recap WORKSPACE                A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
                                  messages not yet acknowledged, then withdrawn ones
   today [WORKSPACE] [--since RFC3339]
@@ -2309,6 +2317,17 @@ fn doctor(
 ) -> Result<u8, langspan::Error> {
     let mut findings: Vec<(bool, String)> = Vec::new();
     let mut note = |ok: bool, text: String| findings.push((ok, text));
+    note(
+        true,
+        format!(
+            "Source index languages: {}. Other source files are listed by `langspan graph blind-spots`.",
+            langspan_graph::Language::ALL
+                .iter()
+                .map(|language| language.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
     // Registered workspace roots and the hosts whose sessions work in them.
     let mut in_use: Option<InUse> = None;
     // What doctor judges a workspace by must be complete, even when the
@@ -3052,6 +3071,16 @@ fn switch(options: &mut BTreeMap<String, String>, name: &str) -> Result<bool, la
     }
 }
 
+/// How long ago, for a person: seconds, minutes, hours or days.
+fn ago(ms: u64) -> String {
+    match ms / 1000 {
+        seconds @ 0..=89 => format!("{seconds}s ago"),
+        seconds @ 90..=5399 => format!("{}m ago", seconds / 60),
+        seconds @ 5400..=129_599 => format!("{}h ago", seconds / 3600),
+        seconds => format!("{}d ago", seconds / 86_400),
+    }
+}
+
 /// `--presence on|off` and `--presence-minutes N` (roadmap A13).
 fn presence(
     options: &mut BTreeMap<String, String>,
@@ -3367,6 +3396,17 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             ["graph", "inflight", workspace] => Command::GraphInflight {
                 workspace_id: (*workspace).into(),
             },
+            ["graph", "history", workspace, name] => Command::History {
+                workspace_id: (*workspace).into(),
+                name: (*name).into(),
+                path: options.remove("--path"),
+                limit: u32::try_from(number(&mut options, "--limit", 10)?)
+                    .map_err(|_| "--limit is too large")?,
+                before_seq: options
+                    .remove("--before")
+                    .map(|seq| seq.parse().map_err(|_| "--before must be an integer"))
+                    .transpose()?,
+            },
             ["graph", "blind-spots", workspace] => Command::GraphBlindSpots {
                 workspace_id: (*workspace).into(),
                 limit: u32::try_from(number(&mut options, "--limit", 50)?)
@@ -3475,6 +3515,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::MessageStatus { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
+                | Command::History { .. }
                 | Command::WorkspaceList { .. }
                 | Command::WorkspaceRemove { apply: false, .. }
         ) {
@@ -3586,7 +3627,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--max-peers" | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s"
             | "--wait-s" | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen"
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
-            | "--sound" | "--depth" | "--path" => {
+            | "--sound" | "--depth" | "--path" | "--before" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -4561,6 +4602,93 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             if recall.truncated {
                 println!("(More notes match; raise --limit, up to 50, or narrow the query.)");
             }
+        }
+        Outcome::History { history } => {
+            if history.entries.is_empty() {
+                println!(
+                    "No interface change to a definition named {} is recorded in {}.",
+                    serde_json::to_string(&history.name)?,
+                    history.workspace_id
+                );
+            }
+            // Signatures, task lines, notes and messages are repository and
+            // session text: quoted, so they read as data.
+            let quoted =
+                |text: &Option<String>| serde_json::to_string(text.as_deref().unwrap_or_default());
+            for entry in &history.entries {
+                let what = match entry.change.as_str() {
+                    "added" => format!("{} {} added", entry.kind, quoted(&entry.after)?),
+                    "removed" if entry.before.is_some() => {
+                        format!(
+                            "{} {} removed or renamed",
+                            entry.kind,
+                            quoted(&entry.before)?
+                        )
+                    }
+                    "removed" => format!("{} removed or renamed", entry.kind),
+                    "definition_added" => {
+                        format!("{} definition {} added", entry.kind, quoted(&entry.after)?)
+                    }
+                    "definition_removed" => {
+                        format!(
+                            "{} definition {} removed",
+                            entry.kind,
+                            quoted(&entry.before)?
+                        )
+                    }
+                    _ => format!(
+                        "{} signature changed from {} to {}",
+                        entry.kind,
+                        quoted(&entry.before)?,
+                        quoted(&entry.after)?
+                    ),
+                };
+                println!(
+                    "seq {}, {}: {} {what}{}{}{}",
+                    entry.seq,
+                    entry.age_ms.map_or_else(|| "age unknown".into(), ago),
+                    serde_json::to_string(&entry.path)?,
+                    entry
+                        .by_session
+                        .as_ref()
+                        .map(|session| format!(" by session {session}"))
+                        .unwrap_or_default(),
+                    if entry.reverted {
+                        " (reverted: back to an earlier signature)"
+                    } else {
+                        ""
+                    },
+                    match &entry.task {
+                        Some(task) => format!("; task: {}", serde_json::to_string(task)?),
+                        None => String::new(),
+                    }
+                );
+                for note in &entry.notes {
+                    println!(
+                        "  note ({}{}): {}",
+                        note.note_id,
+                        note.author
+                            .as_ref()
+                            .map(|author| format!(", by {author}"))
+                            .unwrap_or_default(),
+                        serde_json::to_string(&note.text)?
+                    );
+                }
+                for message in &entry.messages {
+                    println!(
+                        "  message ({}, from {}): {}",
+                        message.message_id,
+                        message.from.as_deref().unwrap_or("the owner"),
+                        serde_json::to_string(&message.text)?
+                    );
+                }
+            }
+            if let Some(next) = history.next_seq {
+                println!("(More is recorded; ask again with --before {next}.)");
+            }
+            println!(
+                "Sessions are the last reported editors of the file, not proof of authorship."
+            );
         }
         Outcome::Error { code, message } => println!("{code}: {}", serde_json::to_string(message)?),
         // The view is for the dashboard page; a terminal gets it as data.

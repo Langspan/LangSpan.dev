@@ -60,7 +60,9 @@ the signature text with a stub body: the minimum (parameters without a
 default, not variadic), the maximum (none when a parameter is variadic) and
 whether the first parameter is an explicit receiver (Rust `self`, Python
 `self` or `cls`). Python `*` and `/` markers are not parameters; a Go
-`a, b int` is two; a TypeScript `this:` parameter is never passed. Two
+`a, b int` is two; a TypeScript `this:` parameter and a Java receiver
+parameter (`Orders this`) are never passed; a Java `T... items` is variadic.
+A Java constructor's count is checked against `new T(...)`. Two
 definitions of one name in one file, a signature cut at its 240-byte bound, or
 any parameter shape not listed has no count, and its notice cannot alert.
 
@@ -175,14 +177,14 @@ alerted at another session's `Write` with both counts, signatures, file, line
 and peer; a call with the new count gets nothing; the same notice is not
 repeated to that session while a third session is still told; the changing
 session is not told; only `interface_alerted` is recorded, never the code;
-Python through a Claude Code `Edit`, TypeScript and Go through Codex patches
+Python and Java through a Claude Code `Edit`, TypeScript and Go through Codex patches
 (`Update File` and `Add File`); a Gemini CLI `replace` with the same
 broken call gets no alert and no check; and a workspace with no scan gets no alert,
 a diagnostic note and no delay beyond the budget; and when three notices'
 breaks do not all fit one alert, the ones left out are told at the next
 write with the same calls, and the ones shown are not repeated.
 `crates/langspan-graph/tests/calls.rs` covers call extraction and parameter
-counts for the four languages, `crates/langspan-core/tests/call_breaks.rs`
+counts for every indexed language, `crates/langspan-core/tests/call_breaks.rs`
 the fit rule and the bounds, and `src/breaks.rs` placing replacements and
 hunks, refusing a replacement whose result would pass the parser's bound,
 and checking a multiline call when only its argument line is written.
