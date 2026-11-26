@@ -140,7 +140,14 @@ The record's `standin_informed` says, per session, whether the information
 changed its edit. In the LangSpan arm the stand-in runs the installed hooks
 with Claude Code's event shapes around each read and edit, so the run passes
 through the real hooks, coordinators, SQLite event logs and Git-remote
-sharing.
+sharing. Unlike a host, it waits for each hook's decision past the hook's
+configured timeout, for up to 30 seconds, and then kills the hook with every
+process it started. A slow machine therefore cannot change a dry run's
+result. A hook slower than its configured timeout is logged as `late`. Each
+hook runs in a process group of its own, so when the runner stops the
+stand-in with SIGTERM, SIGINT or SIGHUP, the stand-in first kills the running
+hook's group. A SIGKILL sent to the stand-in alone can leave that hook
+running; the runner always sends SIGTERM first.
 
 The test suite runs both modes and checks that the oracle tells the arms
 apart: `follow` passes the combined test in `awareness_only` and `langspan`
