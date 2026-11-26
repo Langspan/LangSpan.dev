@@ -37,7 +37,7 @@ adapters built from documentation; briefings; source-version checks;
 with Codex `Stop` and `SessionEnd`; [line ownership](adr/0028-line-ownership.md);
 the [commit guard and `commit --mine`](adr/0026-commit-guard-and-commit-mine.md);
 [break alerts at write time](adr/0029-break-alerts-at-write-time.md) (argument
-counts only); [automatic checks after write batches](adr/0030-automatic-checks-after-write-batches.md)
+counts, renames and removals; not same-count changes); [automatic checks after write batches](adr/0030-automatic-checks-after-write-batches.md)
 (off by default, not classified); remote awareness through Git refs (with
 `--publish-as-branch`); checks and landing with the landing queue, conflict
 hunks and followed file renames ([ADR 0007](adr/0007-check-evidence-integration-and-landing.md));
@@ -365,7 +365,7 @@ and landing over MCP. No native-agent run uses these commands yet.
 | Extraction | `langspan-graph`: definitions, mentions, imports, export status and signatures for Rust, Python, TypeScript/JavaScript, Go | Name matching only. Other languages are not indexed. |
 | Index | Derived `graph.sqlite3`, keyed by workspace, path and content digest; incremental after each scan; rebuilt if deleted | Holds the files the observer's scan versioned (at most 4,096; partial scans keep the rest as last indexed); lags by one scan and one pass. |
 | Queries | `graph symbol`, `graph references`, `graph impact`; three read-only MCP tools; bounded, with coverage. `graph symbol --detail` (roadmap D1) adds each definition's body digest, calls, callers by name, notes on its file and last check, from a `calls` table at schema marker 3 | One level of impact. Callers are name matches. Detail is tested with a real daemon, Git repository and MCP client (`tests/graph.rs`, `tests/mcp.rs`); no agent has called it on a host. |
-| Notices | Removed exported symbols and changed signatures reach sessions whose files mention the name, at their next prompt | One workspace only. Renames show as removals. Bodies are not compared. |
+| Notices | Removed exported symbols and changed signatures reach sessions whose files mention the name, at their next prompt | One workspace only. A rename that changes only the name, in one file, is a `renamed` notice (roadmap B10); any other rename shows as a removal. Bodies are compared only to link a rename. |
 
 Tests: four extraction cases across the languages, including hostile and
 oversized input, and two end-to-end cases with a real daemon in which files

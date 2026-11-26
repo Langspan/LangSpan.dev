@@ -53,6 +53,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
     // and its own crate.
     let submodules = [
         include_str!("../src/classes.rs"),
+        include_str!("../src/count.rs"),
         include_str!("../src/dashboard.rs"),
         include_str!("../src/flaky.rs"),
         include_str!("../src/history.rs"),
@@ -99,6 +100,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
         modules,
         [
             "mod classes;",
+            "mod count;",
             "mod dashboard;",
             "mod flaky;",
             "mod history;",

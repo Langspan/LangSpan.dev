@@ -578,6 +578,7 @@ fn a_wider_check_is_graded_and_classified_for_each_session_it_tells() {
                         after_arity: None,
                         before_count: None,
                         after_count: None,
+                        after_name: None,
                     },
                     more_changes: 0,
                     dependents: names(&["src/bob.rs"]),

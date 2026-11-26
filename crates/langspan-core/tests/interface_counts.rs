@@ -30,6 +30,7 @@ fn change(label: &str, before: Option<&str>, after: Option<&str>) -> InterfaceCh
         change: label.into(),
         before: before.map(Into::into),
         after: after.map(Into::into),
+        after_name: None,
         before_arity: None,
         after_arity: None,
         before_count: None,

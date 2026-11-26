@@ -11,7 +11,7 @@
 use super::{Store, StoreResult, redact_event};
 use langspan_core::{
     ClockAnchor, CompactionReport, Event, KeptTests, LeaseStatus, MAX_RETENTION_DAYS,
-    MIN_RETENTION_DAYS, Outcome, RecentRefusal, State, WriteRun, apply,
+    MIN_RETENTION_DAYS, Outcome, PathRefusal, RecentRefusal, State, WriteRun, apply,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,8 @@ struct SnapshotRecord {
     clock_anchor: Option<ClockAnchor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     refusals: Vec<RecentRefusal>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    path_refusals: Vec<PathRefusal>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workspace_revisions: BTreeMap<String, u32>,
     /// The test results kept per workspace and check, for classifying a
@@ -52,6 +54,7 @@ impl SnapshotRecord {
             state: state.clone(),
             clock_anchor: state.clock_anchor,
             refusals: state.refusals.clone(),
+            path_refusals: state.path_refusals.clone(),
             workspace_revisions: state.workspace_revisions.clone(),
             kept_tests: state.kept_tests.clone(),
             first_writes: state.first_writes.clone(),
@@ -62,6 +65,7 @@ impl SnapshotRecord {
         let mut state = self.state;
         state.clock_anchor = self.clock_anchor;
         state.refusals = self.refusals;
+        state.path_refusals = self.path_refusals;
         state.workspace_revisions = self.workspace_revisions;
         state.kept_tests = self.kept_tests;
         state.first_writes = self.first_writes;

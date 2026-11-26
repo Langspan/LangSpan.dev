@@ -1226,6 +1226,7 @@ mod tests {
                 after_arity: None,
                 before_count: None,
                 after_count: None,
+                after_name: None,
             }],
             dependents: files.map(|n| format!("src/f{n}.rs")).collect(),
             by_session: "alice".into(),

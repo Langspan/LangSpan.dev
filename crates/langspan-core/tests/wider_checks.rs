@@ -116,6 +116,7 @@ fn cause(dependents: &[&str]) -> InterfaceCause {
             }),
             before_count: None,
             after_count: None,
+            after_name: None,
         },
         more_changes: 0,
         dependents: dependents.iter().map(|path| (*path).to_owned()).collect(),
@@ -405,7 +406,7 @@ fn a_reported_grade_that_disagrees_with_the_result_does_not_apply() {
         fixed: Vec::new(),
         writers: Vec::new(),
         interface_grade: grade,
-        interface: Some(cause(&["cli/src/main.rs"])),
+        interface: Some(Box::new(cause(&["cli/src/main.rs"]))),
         index_incomplete: false,
     };
     for grade in [Some(InterfaceGrade::Kept), None] {
