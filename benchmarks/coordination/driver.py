@@ -1170,12 +1170,18 @@ def session_numbers(events):
 
 def interface_notices(events):
     """Per benchmark session, how many interface notices LangSpan placed in
-    its context: another worktree's in-flight signatures (C7) and alerts
-    at write time (ADR 0029), from the coordinator's own event log."""
+    its context: another worktree's in-flight signatures (C7), alerts at
+    write time (ADR 0029) and notices told between its steps (issue #214),
+    from the coordinator's own event log. A briefing's record of the notices
+    it told is not counted, as briefings were not counted before it."""
     numbers, counts = session_numbers(events), {}
     for record in events:
         event = record.get("event", {})
-        items = {"inflight_delivered": "keys", "interface_alerted": "notice_ids"}.get(event.get("type"))
+        kind = event.get("type")
+        if kind == "interface_notices_told" and event.get("via") != "between_steps":
+            continue
+        items = {"inflight_delivered": "keys", "interface_alerted": "notice_ids",
+                 "interface_notices_told": "notice_ids"}.get(kind)
         session = numbers.get(event.get("session_id")) if items else None
         if session is not None and isinstance(event.get(items), list):
             counts[session] = counts.get(session, 0) + len(event[items])

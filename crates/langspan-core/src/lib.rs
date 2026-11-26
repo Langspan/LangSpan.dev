@@ -553,6 +553,14 @@ pub struct SessionActivity {
     /// first, at most `MAX_ALERTED`. Each is alerted once (ADR 0029).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alerted: Vec<String>,
+    /// Interface notices told to this session by a briefing or between
+    /// steps, newest first, at most `MAX_TOLD_NOTICES` (issue #214).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices_told: Vec<ToldNotice>,
+    /// Replies the session finished in this generation: a between-step
+    /// watcher started in one turn stops once this moves (issue #214).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub stops: u64,
     /// In-flight signatures told to this session, newest first, at most
     /// `MAX_INFLIGHT_TOLD` (roadmap C7).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1688,6 +1696,31 @@ pub const MAX_CALL_SITES: usize = 64;
 pub const MAX_CALL_BREAKS: usize = 8;
 /// Notices remembered as alerted per session.
 pub const MAX_ALERTED: usize = 64;
+/// Notices remembered as told per session, by a briefing or between steps
+/// (issue #214). A briefing tells at most `BRIEF_INTERFACE_NOTICES` at once.
+pub const MAX_TOLD_NOTICES: usize = 64;
+/// Interface notices one briefing or one between-step delivery tells.
+pub const BRIEF_INTERFACE_NOTICES: usize = 4;
+
+/// How an interface notice reached a session's context (issue #214).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeVia {
+    /// In a briefing at a session's start, a prompt, after a tool call or
+    /// from `langspan_brief`.
+    Briefing,
+    /// While the session's turn ran, through a host's documented
+    /// between-step mechanism, with no hook call of the session's own.
+    BetweenSteps,
+}
+
+/// An interface notice a session was told, and how.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToldNotice {
+    pub notice_id: String,
+    pub via: NoticeVia,
+}
 
 /// An exported symbol of a file changed between two indexed versions, with
 /// the files that mention the name. A rename shows as a removal.
@@ -3100,6 +3133,14 @@ pub enum Event {
         session_id: String,
         notice_ids: Vec<String>,
     },
+    /// These interface notices were placed in the session's context, by a
+    /// briefing or between its steps (issue #214). Each is told once
+    /// between steps, and one told there is left out of later briefings.
+    InterfaceNoticesTold {
+        session_id: String,
+        notice_ids: Vec<String>,
+        via: NoticeVia,
+    },
     SourceObserved {
         session_id: String,
         files: Vec<ObservedFile>,
@@ -4014,6 +4055,17 @@ pub enum Command {
         session_id: String,
         notice_ids: Vec<String>,
     },
+    /// The interface notices owed to a running session that no briefing or
+    /// earlier delivery told it, for a host's between-step mechanism
+    /// (issue #214). Records only what it tells. `stops` is the count an
+    /// earlier answer gave: once the session finished a reply since, its
+    /// turn is over and nothing is told. Never the session at work: a
+    /// waiting watcher does not count as activity.
+    BetweenSteps {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stops: Option<u64>,
+    },
     Complete {
         session_id: String,
         lease_id: String,
@@ -4798,6 +4850,17 @@ enum CommandWire {
         session_id: String,
         notice_ids: Vec<String>,
     },
+    /// The interface notices owed to a running session that no briefing or
+    /// earlier delivery told it, for a host's between-step mechanism
+    /// (issue #214). Records only what it tells. `stops` is the count an
+    /// earlier answer gave: once the session finished a reply since, its
+    /// turn is over and nothing is told. Never the session at work: a
+    /// waiting watcher does not count as activity.
+    BetweenSteps {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stops: Option<u64>,
+    },
     Complete {
         session_id: String,
         lease_id: String,
@@ -5408,6 +5471,16 @@ pub enum Outcome {
     InterfaceAcknowledged {
         session_id: String,
         notice_ids: Vec<String>,
+    },
+    /// What a session is told between its steps (issue #214). `open` is
+    /// false once the turn the asking watcher started in is over, or the
+    /// session ended; `stops` is the reference for its next ask.
+    BetweenSteps {
+        session_id: String,
+        open: bool,
+        stops: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        interface_changes: Vec<InterfaceImpact>,
     },
     Error {
         code: String,
@@ -6169,6 +6242,50 @@ fn decide_checked(
                 outcome: Outcome::InterfaceAcknowledged {
                     session_id: session_id.clone(),
                     notice_ids: notice_ids.clone(),
+                },
+            })
+        }
+        Command::BetweenSteps { session_id, stops } => {
+            let me = known_session(state, session_id)?;
+            let activity = state
+                .activity
+                .get(session_id)
+                .filter(|activity| activity.generation == state.generation);
+            let now_stops = activity.map_or(0, |activity| activity.stops);
+            // The watcher's turn is over once a reply finished after its
+            // first ask; an ended or earlier-generation session has none.
+            let open = me.generation == state.generation
+                && !activity.is_some_and(|activity| activity.ended)
+                && stops.is_none_or(|stops| stops == now_stops);
+            let (notice_ids, interface_changes): (Vec<String>, Vec<InterfaceImpact>) = if open {
+                let alerted = activity.map_or(&[][..], |activity| activity.alerted.as_slice());
+                let concerned = concerned_paths(state, session_id, now_ms);
+                interface_impacts(state, me, &concerned, now_ms)
+                    .filter(|(id, _)| {
+                        !alerted.contains(id)
+                            && !told_notices(state, session_id).any(|told| told.notice_id == *id)
+                    })
+                    .take(BRIEF_INTERFACE_NOTICES)
+                    .unzip()
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            let events = if notice_ids.is_empty() {
+                Vec::new()
+            } else {
+                vec![Event::InterfaceNoticesTold {
+                    session_id: session_id.clone(),
+                    notice_ids,
+                    via: NoticeVia::BetweenSteps,
+                }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::BetweenSteps {
+                    session_id: session_id.clone(),
+                    open,
+                    stops: now_stops,
+                    interface_changes,
                 },
             })
         }
@@ -7071,7 +7188,7 @@ fn decide_checked(
                 }
                 _ => &[],
             };
-            let (mut briefing, signature, inflight_keys) =
+            let (mut briefing, signature, inflight_keys, notice_ids) =
                 brief(state, session_id, *max_peers, !*mid_turn, now_ms, inflight)?;
             briefing.left_work = left_work(state, session_id, left)?;
             // Not part of the signature: a prompt's briefing never carries
@@ -7146,6 +7263,20 @@ fn decide_checked(
                     events.push(Event::InflightDelivered {
                         session_id: session_id.clone(),
                         keys: inflight_keys,
+                    });
+                }
+                // Shown to the session only when the briefing is placed in
+                // its context: a changed one, or one it asked for itself.
+                // A notice told before is not recorded twice.
+                let newly_told: Vec<String> = notice_ids
+                    .into_iter()
+                    .filter(|id| !told_notices(state, session_id).any(|told| told.notice_id == *id))
+                    .collect();
+                if (briefing.changed || *mcp) && !newly_told.is_empty() {
+                    events.push(Event::InterfaceNoticesTold {
+                        session_id: session_id.clone(),
+                        notice_ids: newly_told,
+                        via: NoticeVia::Briefing,
                     });
                 }
                 events.extend(
@@ -9129,7 +9260,7 @@ fn brief(
     handoffs: bool,
     now_ms: u64,
     inflight: &[InflightSymbol],
-) -> Result<(Briefing, String, Vec<String>), CoreError> {
+) -> Result<(Briefing, String, Vec<String>, Vec<String>), CoreError> {
     let me = current_session(state, session_id)?;
     let repository = state
         .workspace_git
@@ -9442,35 +9573,15 @@ fn brief(
     });
     remote.truncate(BRIEF_PATHS);
     let concerned = concerned_paths(state, session_id, now_ms);
-    let interface_changes: Vec<InterfaceImpact> = state
-        .interface_notices
-        .get(&me.workspace_id)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        .iter()
-        .filter(|notice| {
-            notice.generation == state.generation
-                && now_ms.saturating_sub(notice.at_ms) <= BRIEF_HORIZON_MS
-                && notice.by_session.as_deref() != Some(session_id)
-        })
-        .filter_map(|notice| {
-            let affected: Vec<String> = notice
-                .dependents
-                .iter()
-                .filter(|path| concerned.contains(*path))
-                .take(BRIEF_PATHS)
-                .cloned()
-                .collect();
-            (!affected.is_empty()).then(|| InterfaceImpact {
-                path: notice.path.clone(),
-                by_session: notice.by_session.clone(),
-                changes: notice.changes.clone(),
-                affected,
-                age_ms: now_ms.saturating_sub(notice.at_ms),
+    // A notice already told between steps is not told again (issue #214).
+    let (notice_ids, interface_changes): (Vec<String>, Vec<InterfaceImpact>) =
+        interface_impacts(state, me, &concerned, now_ms)
+            .filter(|(id, _)| {
+                !told_notices(state, session_id)
+                    .any(|told| told.notice_id == *id && told.via == NoticeVia::BetweenSteps)
             })
-        })
-        .take(4)
-        .collect();
+            .take(BRIEF_INTERFACE_NOTICES)
+            .unzip();
     // Notes about the whole workspace, or about a file this session works on.
     let notes: Vec<Note> = state
         .notes
@@ -9764,6 +9875,7 @@ fn brief(
         },
         signature,
         inflight_keys,
+        notice_ids,
     ))
 }
 
@@ -10135,6 +10247,62 @@ fn concerned_paths(state: &State, id: &str, now_ms: u64) -> BTreeSet<String> {
             .map(|version| version.path.clone()),
     );
     concerned
+}
+
+/// The interface notices of `me`'s workspace, in the order they are held, that touch
+/// `concerned` (the files `me` works on or has read), within the briefing
+/// horizon and not of `me`'s own making: each notice's ID and what a
+/// briefing shows of it. One rule for the briefing and for between-step
+/// delivery (issue #214).
+fn interface_impacts<'a>(
+    state: &'a State,
+    me: &'a Session,
+    concerned: &'a BTreeSet<String>,
+    now_ms: u64,
+) -> impl Iterator<Item = (String, InterfaceImpact)> + 'a {
+    state
+        .interface_notices
+        .get(&me.workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter(move |notice| {
+            notice.generation == state.generation
+                && now_ms.saturating_sub(notice.at_ms) <= BRIEF_HORIZON_MS
+                && notice.by_session.as_deref() != Some(me.session_id.as_str())
+        })
+        .filter_map(move |notice| {
+            let affected: Vec<String> = notice
+                .dependents
+                .iter()
+                .filter(|path| concerned.contains(*path))
+                .take(BRIEF_PATHS)
+                .cloned()
+                .collect();
+            (!affected.is_empty()).then(|| {
+                (
+                    notice.notice_id.clone(),
+                    InterfaceImpact {
+                        path: notice.path.clone(),
+                        by_session: notice.by_session.clone(),
+                        changes: notice.changes.clone(),
+                        affected,
+                        age_ms: now_ms.saturating_sub(notice.at_ms),
+                    },
+                )
+            })
+        })
+}
+
+/// The interface notices told to `session_id` in this generation (issue
+/// #214), newest first.
+fn told_notices<'a>(state: &'a State, session_id: &str) -> impl Iterator<Item = &'a ToldNotice> {
+    state
+        .activity
+        .get(session_id)
+        .filter(|activity| activity.generation == state.generation)
+        .into_iter()
+        .flat_map(|activity| &activity.notices_told)
 }
 
 /// The running sessions of the workspace, in this daemon's lifetime, that
@@ -11420,10 +11588,11 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                     "A stop record must belong to the current daemon generation",
                 ));
             }
-            // Only the mark: a boundary does not bring an ended session back
-            // or start an activity record.
+            // Only the mark and the count: a boundary does not bring an
+            // ended session back or start an activity record.
             if let Some(activity) = state.activity.get_mut(session_id) {
                 activity.wrote_since_boundary = false;
+                activity.stops = activity.stops.saturating_add(1);
             }
         }
         Event::ToolBatchObserved {
@@ -12242,6 +12411,34 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 alerted.insert(0, id.clone());
             }
             alerted.truncate(MAX_ALERTED);
+        }
+        Event::InterfaceNoticesTold {
+            session_id,
+            notice_ids,
+            via,
+        } => {
+            current_session(state, session_id)?;
+            if notice_ids.is_empty() || notice_ids.len() > BRIEF_INTERFACE_NOTICES {
+                return Err(error(
+                    "invalid_event",
+                    "A delivery tells 1 to 4 interface notices",
+                ));
+            }
+            notice_ids
+                .iter()
+                .try_for_each(|id| validate_request_id(id))?;
+            let told = &mut activity_mut(state, session_id).notices_told;
+            told.retain(|held| !notice_ids.contains(&held.notice_id));
+            for id in notice_ids.iter().rev() {
+                told.insert(
+                    0,
+                    ToldNotice {
+                        notice_id: id.clone(),
+                        via: *via,
+                    },
+                );
+            }
+            told.truncate(MAX_TOLD_NOTICES);
         }
         Event::BriefingDelivered {
             session_id,

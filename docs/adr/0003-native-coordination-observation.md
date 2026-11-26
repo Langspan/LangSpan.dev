@@ -444,3 +444,8 @@ timeouts. Useful integrated completion, unnecessary denials, missed stale writes
 human intervention and observation coverage matter in addition to hook latency.
 Remote publication, full change/check records, code graphs, Windows transport,
 platform release commitments and the licence remain outside this local slice.
+
+Codex has no between-step delivery (issue #214). Its hooks run at a session's
+start, a prompt, a tool call and a reply's end, so an interface notice reaches
+a Codex session at its next hook call. The Claude Code watcher is described in
+[ADR 0002](0002-claude-code-adapter.md).

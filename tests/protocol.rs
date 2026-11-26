@@ -1074,6 +1074,47 @@ fn v4_trail_requests_and_listing_match_the_committed_golden_vectors() {
     assert_eq!(encode(&response).unwrap(), wire);
 }
 
+/// Issue #214: a between-step watcher's ask and the answer that tells it a
+/// notice. `stops` is absent from a first ask.
+#[test]
+fn v4_between_steps_request_and_outcome_match_the_committed_golden_vectors() {
+    use langspan_core::Outcome;
+    let wire = include_bytes!("../fixtures/between-steps-request-v4.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::BetweenSteps {
+            session_id: "claude-code.alice".into(),
+            stops: Some(3),
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    let first: Request = serde_json::from_str(
+        r#"{"version":4,"request_id":"w","command":{"op":"between_steps","session_id":"claude-code.alice"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        first.command,
+        Command::BetweenSteps { stops: None, .. }
+    ));
+
+    let wire = include_bytes!("../fixtures/between-steps-response-v4.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let Outcome::BetweenSteps {
+        open,
+        stops,
+        interface_changes,
+        ..
+    } = &response.outcome
+    else {
+        panic!("{response:?}");
+    };
+    assert!(*open);
+    assert_eq!(*stops, 3);
+    assert_eq!(interface_changes[0].affected, ["src/main.rs"]);
+    assert_eq!(encode(&response).unwrap(), wire);
+}
+
 /// Roadmap C9: a version 3 client reads briefings and recaps with
 /// `deny_unknown_fields`, so its answer carries no trail.
 #[test]

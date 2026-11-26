@@ -129,3 +129,4 @@ A capture must confirm:
 - The supported tools give whole-file admission only. Cursor's Write states a whole file, so two sessions editing different functions of one file conflict where Claude Code's `Edit` would not.
 - If Cursor changes its transport, ID format or reply schema, the adapter fails toward no decision. It never fails toward a denial or an approval, except where Cursor itself blocks a reply it cannot read, and the adapter sends only documented fields.
 - Until a capture exists, the README, usage guide, installer and `doctor` all qualify Cursor as "built from documentation, not yet verified on a real Cursor".
+- No between-step delivery (issue #214): the hooks above run at a session's start, a prompt and a tool call, so an interface notice reaches a Cursor session at its next hook call. Claude Code's between-step watcher, which Cursor runs from Claude Code's settings files, ends at once on a Cursor event.

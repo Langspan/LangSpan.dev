@@ -271,6 +271,13 @@ core does with an eight-hour gap.
 - The briefing reaches the model at session start, at each prompt and, for
   Claude Code, after each completed tool call when it changed. A Codex
   session learns of mid-turn work at its next prompt.
+- On Claude Code an interface notice can also reach a session between its
+  steps, with no hook call of its own ([ADR 0002](0002-claude-code-adapter.md),
+  issue #214). A briefing placed in context records the interface notices it
+  told (`interface_notices_told`, `via: briefing`), and one told between steps
+  is left out of every later briefing, so no notice is told twice through the
+  two paths. A notice a briefing told can still appear in a later briefing
+  that is delivered because something else in it changed, as before.
 - A new workspace has no repository record until its first complete scan
   (nominally within N × 2 s for N workspaces). Until then a worktree peer is not
   briefed. A workspace whose scan cannot complete is never grouped.

@@ -2154,6 +2154,34 @@ fn render_comparison(notice: &langspan_core::CheckNotice) -> Option<String> {
     (!sentences.is_empty()).then(|| sentences.join("\n"))
 }
 
+/// One interface change that touches the session's own files, as a
+/// briefing and a between-step delivery (issue #214) both show it: one
+/// line of at most `PEER_LINE_LIMIT` bytes, every repository value cleaned
+/// and quoted.
+pub(crate) fn interface_impact_line(impact: &langspan_core::InterfaceImpact) -> String {
+    let changes: Vec<String> = impact.changes.iter().map(interface_change_text).collect();
+    let by = impact
+        .by_session
+        .as_deref()
+        .map(|session| format!(" (last edited by session {})", clean(session, 48)))
+        .unwrap_or_default();
+    truncate(
+        &format!(
+            "Interface change in {}{by}, {}: {}. Your files that mention these names (a name match, not a checked use): {}",
+            quoted(&impact.path),
+            age(impact.age_ms),
+            changes.join("; "),
+            impact
+                .affected
+                .iter()
+                .map(|path| quoted(path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        PEER_LINE_LIMIT,
+    )
+}
+
 pub(crate) fn quoted(text: &str) -> String {
     format!("{:?}", clean(text, SUMMARY_LIMIT))
 }
@@ -2584,22 +2612,7 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
         }
     }
     for impact in &briefing.interface_changes {
-        let changes: Vec<String> = impact.changes.iter().map(interface_change_text).collect();
-        let by = impact
-            .by_session
-            .as_deref()
-            .map(|session| format!(" (last edited by session {})", clean(session, 48)))
-            .unwrap_or_default();
-        let line = truncate(
-            &format!(
-                "Interface change in {}{by}, {}: {}. Your files that mention these names (a name match, not a checked use): {}",
-                quoted(&impact.path),
-                age(impact.age_ms),
-                changes.join("; "),
-                list(&impact.affected)
-            ),
-            PEER_LINE_LIMIT,
-        );
+        let line = interface_impact_line(impact);
         // Notices share the cap with everything else: one that does not
         // fit is counted, not cut and not allowed to push the text over.
         if text.len() + line.len() + footer.len() + 96 > limit {

@@ -446,7 +446,7 @@ fn hook(input: Vec<String>) -> ExitCode {
             default(info);
         }));
     }
-    let result = (|| -> Result<(), langspan::Error> {
+    let result = (|| -> Result<u8, langspan::Error> {
         let ParsedOptions {
             args, mut options, ..
         } = parse_options(input)?;
@@ -490,6 +490,24 @@ fn hook(input: Vec<String>) -> ExitCode {
                 }
             };
         let presence = presence(&mut options)?;
+        // The between-step watcher (issue #214): Claude Code only.
+        let watcher = match options.remove("--mode") {
+            None => false,
+            Some(mode)
+                if mode == langspan::between_steps::MODE
+                    && vendor == langspan::install::Vendor::ClaudeCode =>
+            {
+                true
+            }
+            Some(mode) => {
+                return Err(format!(
+                    "--mode {mode:?} is not a hook mode for {}; only claude-code takes --mode {}",
+                    vendor.name(),
+                    langspan::between_steps::MODE
+                )
+                .into());
+            }
+        };
         let config = langspan::claude_code::Config {
             state_dir: state_dir(&mut options)?,
             workspace_id,
@@ -511,6 +529,28 @@ fn hook(input: Vec<String>) -> ExitCode {
         }
         let deadline = std::time::Instant::now() + config.budget;
         let input = langspan::hook::read_stdin_until(deadline);
+        // A watcher starts no coordinator and writes nothing to stdout. On
+        // exit 2 its stderr is the notice Claude Code shows the model, so
+        // the log line is written only when it does not wake the session.
+        if watcher {
+            let watched = match &input {
+                Ok(bytes) => langspan::between_steps::watch(bytes, &config),
+                Err(error) => langspan::between_steps::Watched {
+                    exit: 0,
+                    stderr: String::new(),
+                    detail: error.to_string(),
+                },
+            };
+            if watched.exit == langspan::between_steps::WAKE {
+                eprint!("{}", watched.stderr);
+                return Ok(langspan::between_steps::WAKE);
+            }
+            eprintln!(
+                "{}",
+                serde_json::json!({"level":"info","event":"langspan_between_steps","detail":watched.detail})
+            );
+            return Ok(0);
+        }
         // At most half of what is left, so the event itself keeps the rest.
         let now = std::time::Instant::now();
         start_coordinator(
@@ -580,11 +620,12 @@ fn hook(input: Vec<String>) -> ExitCode {
             "{}",
             serde_json::json!({"level":"info","event":"langspan_hook","coverage":reply.coverage,"detail":reply.detail})
         );
-        Ok(())
+        Ok(0)
     })();
     match result {
-        Ok(()) => ExitCode::SUCCESS,
-        // Exit 1 is a non-blocking error for Claude Code; this adapter never exits 2.
+        Ok(code) => ExitCode::from(code),
+        // Exit 1 is a non-blocking error for Claude Code. Only the background
+        // between-step watcher exits 2, to wake the model (above).
         Err(error) => {
             if let Some(fallback) = fallback {
                 print!("{fallback}");
@@ -4688,7 +4729,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
             | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" | "--keep-days"
             | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools"
-            | "--wait-ms" => {
+            | "--wait-ms" | "--mode" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -5440,6 +5481,16 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         } => println!(
             "Session {session_id} will not be alerted again to {} notice(s).",
             notice_ids.len()
+        ),
+        Outcome::BetweenSteps {
+            session_id,
+            open,
+            interface_changes,
+            ..
+        } => println!(
+            "Session {session_id}: {} interface notice(s) told between steps; turn {}.",
+            interface_changes.len(),
+            if *open { "open" } else { "over" }
         ),
         Outcome::GraphContext { matches, coverage } => {
             for context in matches {
