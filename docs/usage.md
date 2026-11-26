@@ -93,7 +93,9 @@ keeps only the environment it needs (`HOME`, `PATH`, the locale, `XDG_*`, the
 host configuration directories `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
 `GEMINI_CLI_HOME`, the SSH agent socket and the desktop session variables),
 not a host's API keys. The login service sets `PATH` to the one setup ran
-with, so automatic checks find the same tools.
+with, so automatic checks find the same tools, and keeps any of
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME` set then, so its host
+checks read the directories setup installed into.
 [ADR 0035](adr/0035-one-command-setup.md) records the details.
 
 To run it in the foreground instead, from the LangSpan repository root:

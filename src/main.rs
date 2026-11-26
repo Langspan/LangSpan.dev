@@ -1242,7 +1242,7 @@ fn plan_service(
     if let Err(reason) = service::manager_available(manager) {
         return Ok(ServicePlan::None(reason));
     }
-    let text = manager.render(executable, state_dir, std::env::var("PATH").ok().as_deref())?;
+    let text = manager.render(executable, state_dir, &|name| std::env::var(name).ok())?;
     if existing.as_deref() == Some(text.as_str()) && service::running(manager) {
         return Ok(ServicePlan::Unchanged(path));
     }

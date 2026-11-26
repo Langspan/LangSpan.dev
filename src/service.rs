@@ -23,6 +23,9 @@ pub const UNIT: &str = "langspan.service";
 pub const MARKER: &str = "Written by `langspan setup`; `langspan uninstall --apply` removes it.";
 /// The bound on one service-manager command.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// The host directory overrides a service keeps from setup's environment,
+/// the ones `UserHome::files` reads. Directory names only, never a secret.
+const HOST_DIRS: [&str; 3] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME"];
 /// The largest service file read.
 const MAX_FILE_BYTES: u64 = 64 << 10;
 
@@ -62,19 +65,42 @@ impl Manager {
     }
 
     /// The service file's text for `executable` and `state_dir`, both
-    /// absolute. `search_path` is the `PATH` setup runs with: the service
-    /// keeps its usable directories (see `service_path`), so a check the
-    /// coordinator runs finds the same tools as one run from that shell.
+    /// absolute. `env` reads the environment setup runs with. The service
+    /// keeps the usable directories of its `PATH` (see `service_path`), so a
+    /// check the coordinator runs finds the same tools as one run from that
+    /// shell, and each host directory override in `HOST_DIRS`, so the
+    /// coordinator's host checks read the directories setup installed into.
     pub fn render(
         self,
         executable: &Path,
         state_dir: &Path,
-        search_path: Option<&str>,
+        env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<String, crate::Error> {
-        let search_path = search_path.and_then(service_path);
+        let mut environment = Vec::new();
+        if let Some(path) = env("PATH").as_deref().and_then(service_path) {
+            environment.push(("PATH", path));
+        }
+        for name in HOST_DIRS {
+            let Some(value) = env(name).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            // `UserHome` takes a relative override as setup's working
+            // directory resolves it; the service runs in `/`.
+            let absolute = std::path::absolute(&value)?;
+            let value = absolute
+                .to_str()
+                .ok_or_else(|| format!("{name}={} is not valid UTF-8", absolute.display()))?;
+            if self == Manager::Systemd && !unit_value(value) {
+                return Err(format!(
+                    "cannot write a systemd unit with {name}={value}: it holds a control character, a quote, `\\`, `%` or `$`, which systemd would expand; choose another directory, then run setup again"
+                )
+                .into());
+            }
+            environment.push((name, value.to_owned()));
+        }
         match self {
-            Manager::Launchd => launch_agent(executable, state_dir, search_path.as_deref()),
-            Manager::Systemd => systemd_unit(executable, state_dir, search_path.as_deref()),
+            Manager::Launchd => launch_agent(executable, state_dir, &environment),
+            Manager::Systemd => systemd_unit(executable, state_dir, &environment),
         }
     }
 
@@ -104,19 +130,25 @@ impl Manager {
 fn launch_agent(
     executable: &Path,
     state_dir: &Path,
-    search_path: Option<&str>,
+    environment: &[(&str, String)],
 ) -> Result<String, crate::Error> {
     let exe = xml_escape(text_of(executable)?);
     let dir = xml_escape(text_of(state_dir)?);
     let log = xml_escape(text_of(&state_dir.join(crate::autostart::LOG))?);
-    let environment = search_path
-        .map(|path| {
-            format!(
-                "\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>{}</string>\n\t</dict>\n",
-                xml_escape(path)
-            )
-        })
-        .unwrap_or_default();
+    let environment = if environment.is_empty() {
+        String::new()
+    } else {
+        let entries: String = environment
+            .iter()
+            .map(|(name, value)| {
+                format!(
+                    "\t\t<key>{name}</key>\n\t\t<string>{}</string>\n",
+                    xml_escape(value)
+                )
+            })
+            .collect();
+        format!("\t<key>EnvironmentVariables</key>\n\t<dict>\n{entries}\t</dict>\n")
+    };
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -156,15 +188,16 @@ fn launch_agent(
 fn systemd_unit(
     executable: &Path,
     state_dir: &Path,
-    search_path: Option<&str>,
+    environment: &[(&str, String)],
 ) -> Result<String, crate::Error> {
     let exe = unit_word(executable)?;
     let dir = unit_word(state_dir)?;
     let log_path = state_dir.join(crate::autostart::LOG);
     let log = unit_word(&log_path)?;
-    let environment = search_path
-        .map(|path| format!("Environment=\"PATH={path}\"\n"))
-        .unwrap_or_default();
+    let environment: String = environment
+        .iter()
+        .map(|(name, value)| format!("Environment=\"{name}={value}\"\n"))
+        .collect();
     Ok(format!(
         "# {MARKER}
 [Unit]
@@ -192,14 +225,17 @@ WantedBy=default.target
 fn service_path(search_path: &str) -> Option<String> {
     let kept: Vec<&str> = search_path
         .split(':')
-        .filter(|dir| {
-            dir.starts_with('/')
-                && !dir
-                    .chars()
-                    .any(|c| c.is_control() || matches!(c, '"' | '\'' | '\\' | '%' | '$'))
-        })
+        .filter(|dir| dir.starts_with('/') && unit_value(dir))
         .collect();
     (!kept.is_empty()).then(|| kept.join(":"))
+}
+
+/// Whether systemd reads `value` unchanged inside a quoted
+/// `Environment="NAME=value"`: no control character, quote, `\`, `%` or `$`.
+fn unit_value(value: &str) -> bool {
+    !value
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '"' | '\'' | '\\' | '%' | '$'))
 }
 
 fn text_of(path: &Path) -> Result<&str, crate::Error> {
@@ -445,13 +481,17 @@ pub fn running(manager: Manager) -> bool {
 mod tests {
     use super::*;
 
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
     #[test]
     fn launch_agent_runs_the_daemon_at_login_and_after_a_failure() {
         let text = Manager::Launchd
             .render(
                 Path::new("/opt/bin/langspan"),
                 Path::new("/srv/a & b/.local/state/langspan"),
-                None,
+                &no_env,
             )
             .unwrap();
         let expected = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -494,7 +534,7 @@ mod tests {
     #[test]
     fn launch_agent_escapes_markup_in_paths() {
         let text = Manager::Launchd
-            .render(Path::new("/x/<y>/langspan"), Path::new("/s/'q\""), None)
+            .render(Path::new("/x/<y>/langspan"), Path::new("/s/'q\""), &no_env)
             .unwrap();
         assert!(text.contains("<string>/x/&lt;y&gt;/langspan</string>"));
         assert!(text.contains("<string>/s/&apos;q&quot;</string>"));
@@ -510,7 +550,7 @@ mod tests {
             .render(
                 Path::new("/opt/bin/langspan"),
                 Path::new("/home/u/.local/state/langspan"),
-                None,
+                &no_env,
             )
             .unwrap();
         assert!(text.starts_with("# Written by `langspan setup`"));
@@ -530,7 +570,7 @@ mod tests {
     fn systemd_unit_refuses_paths_systemd_would_change() {
         for dir in ["/a b", "/a%h", "/a$HOME", "/a\"b", "/a\\b", "/a\nb"] {
             let error = Manager::Systemd
-                .render(Path::new("/opt/langspan"), Path::new(dir), None)
+                .render(Path::new("/opt/langspan"), Path::new(dir), &no_env)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -540,7 +580,7 @@ mod tests {
         }
         assert!(
             Manager::Systemd
-                .render(Path::new("relative/langspan"), Path::new("/s"), None)
+                .render(Path::new("relative/langspan"), Path::new("/s"), &no_env)
                 .is_err()
         );
     }
@@ -548,8 +588,9 @@ mod tests {
     #[test]
     fn both_services_keep_the_tool_search_path_setup_ran_with() {
         let search = "/home/u/.cargo/bin:relative/bin:/opt/a b/bin:/x/%h:/y/$HOME:/usr/bin";
+        let env = |name: &str| (name == "PATH").then(|| search.to_owned());
         let launchd = Manager::Launchd
-            .render(Path::new("/opt/langspan"), Path::new("/s"), Some(search))
+            .render(Path::new("/opt/langspan"), Path::new("/s"), &env)
             .unwrap();
         assert!(
             launchd.contains(
@@ -558,7 +599,7 @@ mod tests {
             "{launchd}"
         );
         let systemd = Manager::Systemd
-            .render(Path::new("/opt/langspan"), Path::new("/s"), Some(search))
+            .render(Path::new("/opt/langspan"), Path::new("/s"), &env)
             .unwrap();
         assert!(
             systemd.contains("Environment=\"PATH=/home/u/.cargo/bin:/opt/a b/bin:/usr/bin\"\n"),
@@ -572,11 +613,79 @@ mod tests {
         for manager in [Manager::Launchd, Manager::Systemd] {
             for search in [None, Some(""), Some("relative:/a\"b")] {
                 let text = manager
-                    .render(Path::new("/opt/langspan"), Path::new("/s"), search)
+                    .render(
+                        Path::new("/opt/langspan"),
+                        Path::new("/s"),
+                        &|name: &str| search.filter(|_| name == "PATH").map(str::to_owned),
+                    )
                     .unwrap();
                 assert!(!text.contains("PATH"), "{search:?}: {text}");
             }
         }
+    }
+
+    #[test]
+    fn both_services_keep_the_host_directories_setup_installed_into() {
+        let env = |name: &str| match name {
+            "PATH" => Some("/usr/bin".to_owned()),
+            "CLAUDE_CONFIG_DIR" => Some("/cfg/claude & co".to_owned()),
+            "CODEX_HOME" => Some("/cfg/codex".to_owned()),
+            "GEMINI_CLI_HOME" => Some(String::new()),
+            "ANTHROPIC_API_KEY" => Some("secret".to_owned()),
+            _ => None,
+        };
+        let launchd = Manager::Launchd
+            .render(Path::new("/opt/langspan"), Path::new("/s"), &env)
+            .unwrap();
+        assert!(
+            launchd.contains(
+                "\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>/usr/bin</string>\n\t\t<key>CLAUDE_CONFIG_DIR</key>\n\t\t<string>/cfg/claude &amp; co</string>\n\t\t<key>CODEX_HOME</key>\n\t\t<string>/cfg/codex</string>\n\t</dict>\n"
+            ),
+            "{launchd}"
+        );
+        let systemd_env = |name: &str| match name {
+            "CLAUDE_CONFIG_DIR" => Some("/cfg/claude co".to_owned()),
+            "CODEX_HOME" => Some("/cfg/codex".to_owned()),
+            _ => None,
+        };
+        let systemd = Manager::Systemd
+            .render(Path::new("/opt/langspan"), Path::new("/s"), &systemd_env)
+            .unwrap();
+        assert!(
+            systemd.contains(
+                "Environment=\"CLAUDE_CONFIG_DIR=/cfg/claude co\"\nEnvironment=\"CODEX_HOME=/cfg/codex\"\n"
+            ),
+            "{systemd}"
+        );
+        for text in [&launchd, &systemd] {
+            assert!(!text.contains("GEMINI_CLI_HOME"), "{text}");
+            assert!(!text.contains("secret"), "{text}");
+        }
+        // A directory systemd would expand is refused, not dropped: the
+        // service would otherwise read another directory than setup used.
+        let error = Manager::Systemd
+            .render(
+                Path::new("/opt/langspan"),
+                Path::new("/s"),
+                &|name: &str| (name == "CODEX_HOME").then(|| "/cfg/$HOME".to_owned()),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("CODEX_HOME"), "{error}");
+        // A relative directory is resolved where setup runs, as install
+        // resolved it.
+        let relative = Manager::Launchd
+            .render(
+                Path::new("/opt/langspan"),
+                Path::new("/s"),
+                &|name: &str| (name == "CODEX_HOME").then(|| "rel/codex".to_owned()),
+            )
+            .unwrap();
+        let absolute = std::path::absolute("rel/codex").unwrap();
+        assert!(
+            relative.contains(&format!("<string>{}</string>", absolute.display())),
+            "{relative}"
+        );
     }
 
     #[test]
