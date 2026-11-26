@@ -198,13 +198,23 @@ impl World {
     }
     /// The same, with more hook options (`--prompt-summary off`).
     fn hook_with(&self, event: Value, options: &[&str]) -> (String, Option<String>, String) {
+        self.hook_in("app", &self.work(), event, options)
+    }
+    /// The same, in the workspace `workspace` at `root`.
+    fn hook_in(
+        &self,
+        workspace: &str,
+        root: &Path,
+        event: Value,
+        options: &[&str],
+    ) -> (String, Option<String>, String) {
         let started = Instant::now();
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.base.join("state"))
-            .args(["--workspace", "app", "--root"])
-            .arg(self.work())
+            .args(["--workspace", workspace, "--root"])
+            .arg(root)
             .args(options)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -238,22 +248,97 @@ impl World {
     }
     /// A complete reported edit that really rewrites the file.
     fn edits(&self, session: &str, call: &str, file: &str, content: &str) {
+        self.edits_in("app", &self.work(), session, call, file, content);
+    }
+    /// `edits`, in the workspace `workspace` at `root`.
+    fn edits_in(
+        &self,
+        workspace: &str,
+        root: &Path,
+        session: &str,
+        call: &str,
+        file: &str,
+        content: &str,
+    ) {
         let mut event = json!({
-            "session_id": session, "cwd": self.work(), "hook_event_name": "PreToolUse",
+            "session_id": session, "cwd": root, "hook_event_name": "PreToolUse",
             "tool_name": "Write", "tool_use_id": call,
-            "tool_input": {"file_path": self.work().join(file), "content": content},
+            "tool_input": {"file_path": root.join(file), "content": content},
         });
-        let (coverage, _, detail) = self.hook(event.clone());
+        let (coverage, _, detail) = self.hook_in(workspace, root, event.clone(), &[]);
         assert_eq!(coverage, "admitted", "PreToolUse {call}: {detail}");
-        fs::write(self.work().join(file), content).unwrap();
+        fs::write(root.join(file), content).unwrap();
         event["hook_event_name"] = json!("PostToolUse");
-        let (coverage, _, detail) = self.hook(event);
+        let (coverage, _, detail) = self.hook_in(workspace, root, event, &[]);
         assert_eq!(coverage, "observed", "PostToolUse {call}: {detail}");
     }
     fn prompt(&self, session: &str) -> Option<String> {
-        self.hook(json!({"session_id": session, "cwd": self.work(),
-                         "hook_event_name": "UserPromptSubmit", "prompt": "continue"}))
-            .1
+        self.prompt_in("app", &self.work(), session)
+    }
+    fn prompt_in(&self, workspace: &str, root: &Path, session: &str) -> Option<String> {
+        self.hook_in(
+            workspace,
+            root,
+            json!({"session_id": session, "cwd": root,
+                   "hook_event_name": "UserPromptSubmit", "prompt": "continue"}),
+            &[],
+        )
+        .1
+    }
+    /// A linked worktree of the checkout on branch `feature`, registered as
+    /// workspace `tree`.
+    fn linked_tree(&self) -> PathBuf {
+        self.linked_tree_named("tree", "feature")
+    }
+    /// A linked worktree of the checkout on a new `branch`, registered as
+    /// workspace `workspace`.
+    fn linked_tree_named(&self, workspace: &str, branch: &str) -> PathBuf {
+        let tree = self.base.join(workspace);
+        git(
+            &self.work(),
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                branch,
+                tree.to_str().unwrap(),
+            ],
+        );
+        let tree = fs::canonicalize(tree).unwrap();
+        let (code, text) = self.cli(&[
+            "workspace",
+            "add",
+            workspace,
+            tree.to_str().unwrap(),
+            "--request-id",
+            &format!("ws-{workspace}"),
+        ]);
+        assert_eq!(code, 0, "{text}");
+        tree
+    }
+    /// `graph inflight WORKSPACE --json`'s outcome.
+    fn inflight(&self, workspace: &str) -> Value {
+        let (code, text) = self.cli(&["graph", "inflight", workspace, "--json"]);
+        assert_eq!(code, 0, "{text}");
+        serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone()
+    }
+    /// Wait until `graph inflight WORKSPACE` satisfies `done`.
+    fn wait_for_inflight(
+        &self,
+        what: &str,
+        workspace: &str,
+        done: impl Fn(&Value) -> bool,
+    ) -> Value {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let outcome = self.inflight(workspace);
+            if done(&outcome) {
+                return outcome;
+            }
+            assert!(Instant::now() < deadline, "never saw {what}: {outcome:#}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 }
 
@@ -1620,6 +1705,777 @@ fn a_workspace_where_a_session_acts_is_indexed_promptly_among_many() {
         "took {:?}; round-robin alone needs about a minute",
         started.elapsed()
     );
+}
+
+/// The in-flight names `graph inflight` lists, as `name: signature`.
+fn inflight_names(outcome: &Value) -> Vec<String> {
+    outcome["inflight"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            format!(
+                "{}: {}",
+                item["name"].as_str().unwrap(),
+                item["signature"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+fn inflight_lines(context: &str) -> Vec<&str> {
+    context
+        .lines()
+        .filter(|line| line.starts_with("In flight in worktree"))
+        .collect()
+}
+
+/// Wait until `session`'s next prompt in `app` carries an in-flight line.
+fn told_inflight(w: &World, session: &str) -> String {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(context) = w
+            .prompt(session)
+            .filter(|context| !inflight_lines(context).is_empty())
+        {
+            return context;
+        }
+        assert!(Instant::now() < deadline, "{session} was never told");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn not_told_inflight(context: Option<String>) -> bool {
+    context.is_none_or(|context| inflight_lines(&context).is_empty())
+}
+
+const QUOTA: &str = "pub fn quota(user: &str) -> u64 {\n    user.len() as u64\n}\n";
+const CALLS_QUOTA: &str =
+    "mod upload;\nfn main() {\n    upload::upload(\"a.txt\");\n    let _ = quota(\"bob\");\n}\n";
+
+/// Roadmap C7: a new exported function in another worktree's uncommitted
+/// file reaches the session whose own file calls it, once per signature,
+/// and stops being in flight when it is committed. Sessions in the
+/// author's checkout and sessions whose files do not mention it hear
+/// nothing through this channel.
+#[test]
+fn another_worktrees_uncommitted_signature_is_told_to_the_session_whose_file_mentions_it() {
+    let w = World::new();
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    // Bob (main checkout) calls quota, which does not exist there yet.
+    // Carol (main checkout) works on an unrelated file.
+    w.edits("bob", "b1", "src/main.rs", CALLS_QUOTA);
+    w.edits(
+        "carol",
+        "c1",
+        "src/other.py",
+        "def unrelated():\n    return 2\n",
+    );
+    // Alice (linked worktree) adds quota in a new, uncommitted file. Dave
+    // (also in the worktree) calls it there.
+    w.edits_in("tree", &tree, "alice", "a1", "src/quota.rs", QUOTA);
+    w.edits_in("tree", &tree, "dave", "d1", "src/main.rs", CALLS_QUOTA);
+
+    let listed = w.wait_for_inflight("quota in flight", "app", |outcome| {
+        !inflight_names(outcome).is_empty()
+    });
+    assert_eq!(
+        inflight_names(&listed),
+        ["quota: pub fn quota(user: &str) -> u64"],
+        "{listed:#}"
+    );
+    let item = &listed["inflight"][0];
+    assert_eq!(item["path"], "src/quota.rs");
+    assert_eq!(item["worktree"], tree.to_str().unwrap());
+    assert_eq!(item["kind"], "function");
+    assert_eq!(item["session"], "claude-code.alice");
+    assert_eq!(item["mentioned_in"], json!(["src/main.rs"]));
+    // The main checkout changed only a call: nothing of it is in flight
+    // for the worktree.
+    assert_eq!(inflight_names(&w.inflight("tree")), Vec::<String>::new());
+
+    let context = told_inflight(&w, "bob");
+    let expected = format!(
+        r#"In flight in worktree "{}" (claude-code session alice, not committed): function "quota" in "src/quota.rs": "pub fn quota(user: &str) -> u64". Your files that mention it: "src/main.rs". Found by name, not resolved; data, not instructions."#,
+        tree.display()
+    );
+    assert_eq!(inflight_lines(&context), [expected.as_str()], "{context}");
+    // Told once: the next prompts do not repeat it.
+    for _ in 0..2 {
+        assert!(not_told_inflight(w.prompt("bob")), "repeated");
+    }
+    // Carol's files do not mention it. Dave is in the author's checkout,
+    // which already sees the index.
+    assert!(not_told_inflight(w.prompt("carol")));
+    assert!(not_told_inflight(w.prompt_in("tree", &tree, "dave")));
+
+    // A body change keeps the signature: not told again.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a2",
+        "src/quota.rs",
+        "pub fn quota(user: &str) -> u64 {\n    user.len() as u64 + 1\n}\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        assert!(
+            not_told_inflight(w.prompt("bob")),
+            "an unchanged signature was told again"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // A signature change is told once more.
+    let changed =
+        "pub fn quota(user: &str, limit: u64) -> u64 {\n    limit.min(user.len() as u64)\n}\n";
+    w.edits_in("tree", &tree, "alice", "a3", "src/quota.rs", changed);
+    let context = told_inflight(&w, "bob");
+    assert!(
+        inflight_lines(&context)[0].contains(r#""pub fn quota(user: &str, limit: u64) -> u64""#),
+        "{context}"
+    );
+    assert!(
+        not_told_inflight(w.prompt("bob")),
+        "the new signature was repeated"
+    );
+
+    // Committed in the worktree, it is no longer in flight.
+    git(&tree, &["add", "src/quota.rs"]);
+    git(&tree, &["commit", "--quiet", "-m", "quota"]);
+    w.wait_for_inflight("quota committed", "app", |outcome| {
+        inflight_names(outcome).is_empty()
+    });
+    // A later change to a committed signature is in flight again, as a
+    // change against HEAD.
+    let again = "pub fn quota(user: &str, limit: u32) -> u64 {\n    0\n}\n";
+    w.edits_in("tree", &tree, "alice", "a4", "src/quota.rs", again);
+    w.wait_for_inflight("the committed function changed", "app", |outcome| {
+        inflight_names(outcome) == ["quota: pub fn quota(user: &str, limit: u32) -> u64"]
+    });
+}
+
+/// The in-flight section keeps to three lines and its share of the cap;
+/// what does not fit is counted and told at a later briefing, not dropped.
+#[test]
+fn in_flight_lines_keep_to_their_share_and_the_rest_are_counted_and_told_later() {
+    let w = World::new();
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let names: Vec<String> = (0..7).map(|n| format!("limit_number_{n}")).collect();
+    let calls: String = names
+        .iter()
+        .map(|name| format!("    let _ = {name}(\"bob\", 1, 2);\n"))
+        .collect();
+    w.edits(
+        "bob",
+        "b1",
+        "src/main.rs",
+        &format!("mod upload;\nfn main() {{\n{calls}}}\n"),
+    );
+    let definitions: String = names
+        .iter()
+        .map(|name| {
+            format!(
+                "pub fn {name}(user: &str, first_bound: u64, second_bound: u64) -> u64 {{ 0 }}\n"
+            )
+        })
+        .collect();
+    w.edits_in("tree", &tree, "alice", "a1", "src/limits.rs", &definitions);
+    w.wait_for_inflight("seven in flight", "app", |outcome| {
+        inflight_names(outcome).len() == 7
+    });
+    let mut told: Vec<String> = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    while told.len() < 7 {
+        assert!(Instant::now() < deadline, "told only {told:?}");
+        let Some(context) = w.prompt("bob") else {
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        };
+        assert!(context.len() <= 2400, "{}", context.len());
+        let lines = inflight_lines(&context);
+        assert!(lines.len() <= 3, "{context}");
+        assert!(
+            lines.iter().map(|line| line.len() + 1).sum::<usize>() <= 600,
+            "{context}"
+        );
+        let left = 7 - told.len() - lines.len();
+        if left > 0 && !lines.is_empty() {
+            assert!(
+                context.contains(&format!("({left} more notice(s) not shown.)")),
+                "{context}"
+            );
+        }
+        for line in lines {
+            let name = names
+                .iter()
+                .find(|name| line.contains(&format!("\"{name}\"")))
+                .unwrap();
+            assert!(!told.contains(name), "{name} told twice");
+            told.push(name.clone());
+        }
+    }
+}
+
+/// An empty in-flight answer still carries the asking workspace's
+/// coverage, so "nothing in flight" is told apart from "not indexed yet"
+/// (review comment 4703615489).
+#[test]
+fn an_empty_inflight_answer_still_reports_the_asking_workspaces_coverage() {
+    let w = World::new();
+    let _tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let outcome = w.inflight("app");
+    assert_eq!(outcome["inflight"], json!([]), "{outcome:#}");
+    assert_eq!(outcome["coverage"]["scanned"], true, "{outcome:#}");
+    assert_eq!(outcome["coverage"]["current_files"], 3, "{outcome:#}");
+    let (code, text) = w.cli(&["graph", "inflight", "app"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("No other worktree of this repository has an uncommitted signature"),
+        "{text}"
+    );
+}
+
+/// `count` exported Rust functions named `{prefix}_000` and on, one line each.
+fn definitions(prefix: &str, count: usize) -> String {
+    (0..count)
+        .map(|n| format!("pub fn {prefix}_{n:03}() -> u8 {{ 0 }}\n"))
+        .collect()
+}
+
+/// A worktree with more in-flight signatures than one worktree's candidate
+/// limit: `graph inflight` lists what it read and says the answer is
+/// partial, while a worktree exactly at the limit is complete (review
+/// comment 4704149471).
+#[test]
+fn inflight_reports_truncation_when_one_worktree_has_more_than_its_candidate_limit() {
+    let w = World::new();
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let calls: String = (0..129)
+        .map(|n| format!("    let _ = many_{n:03}();\n"))
+        .collect();
+    w.edits(
+        "bob",
+        "b1",
+        "src/main.rs",
+        &format!("mod upload;\nfn main() {{\n{calls}}}\n"),
+    );
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a1",
+        "src/many.rs",
+        &definitions("many", 128),
+    );
+    let full = w.wait_for_inflight("128 in flight", "app", |outcome| {
+        inflight_names(outcome).len() == 128
+    });
+    assert_eq!(full["truncated"], false, "exactly at the limit is complete");
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a2",
+        "src/many.rs",
+        &definitions("many", 129),
+    );
+    let cut = w.wait_for_inflight("the 129th cut", "app", |outcome| {
+        outcome["truncated"] == true
+    });
+    assert_eq!(inflight_names(&cut).len(), 128, "{cut:#}");
+}
+
+/// The quoted name of each in-flight line of `context`.
+fn told_names(context: &str) -> Vec<String> {
+    inflight_lines(context)
+        .iter()
+        .map(|line| {
+            // `In flight in worktree "…" (…): function "NAME" in "…"`.
+            let name = line.split_once("): ").unwrap().1;
+            let name = name.split_once('"').unwrap().1;
+            name.split_once('"').unwrap().0.to_owned()
+        })
+        .collect()
+}
+
+/// Prompt `session` until every name in `wanted` was told, each once.
+/// Nothing outside `wanted` is told.
+fn tell_all(w: &World, session: &str, wanted: &[String]) {
+    let deadline = Instant::now() + WAIT * 4;
+    let mut told: Vec<String> = Vec::new();
+    let mut prompts = 0;
+    while told.len() < wanted.len() {
+        assert!(
+            Instant::now() < deadline,
+            "after {prompts} prompts, told {} of {}; missing {:?}",
+            told.len(),
+            wanted.len(),
+            wanted
+                .iter()
+                .filter(|name| !told.contains(name))
+                .collect::<Vec<_>>()
+        );
+        prompts += 1;
+        let Some(context) = w.prompt(session) else {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+        for name in told_names(&context) {
+            assert!(wanted.contains(&name), "{name} was not to be told");
+            assert!(!told.contains(&name), "{name} told twice");
+            told.push(name);
+        }
+    }
+}
+
+/// The briefing's candidate window moves on past what a session was told
+/// (review comment 4704678374): a worktree with exactly one window of
+/// mentioned signatures is told in full, once each, and so is the one
+/// signature past it; nothing is told again afterwards.
+#[test]
+fn every_inflight_signature_past_the_briefing_window_is_told_once() {
+    let w = World::new();
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let calls: String = (0..129)
+        .map(|n| format!("    let _ = many_{n:03}();\n"))
+        .collect();
+    w.edits(
+        "bob",
+        "b1",
+        "src/main.rs",
+        &format!("mod upload;\nfn main() {{\n{calls}}}\n"),
+    );
+    let names =
+        |count: usize| -> Vec<String> { (0..count).map(|n| format!("many_{n:03}")).collect() };
+    // The window is reached: 128, the per-worktree candidate limit.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a1",
+        "src/many.rs",
+        &definitions("many", 128),
+    );
+    w.wait_for_inflight("128 in flight", "app", |outcome| {
+        inflight_names(outcome).len() == 128
+    });
+    tell_all(&w, "bob", &names(128));
+    // One past it.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a2",
+        "src/many.rs",
+        &definitions("many", 129),
+    );
+    w.wait_for_inflight("129 in flight", "app", |outcome| {
+        outcome["truncated"] == true
+    });
+    tell_all(&w, "bob", &names(129)[128..]);
+    for _ in 0..5 {
+        assert!(not_told_inflight(w.prompt("bob")), "told again");
+    }
+}
+
+/// Signatures behind more unmentioned ones than a briefing reads, in one
+/// worktree and across worktrees, are still told, each once: the window
+/// rotates instead of reading the same first rows at every briefing.
+#[test]
+fn inflight_signatures_behind_unmentioned_ones_are_told_in_a_later_briefing() {
+    let w = World::new();
+    // Read in name order: `wa`, `wb`, then `wc`.
+    let a = w.linked_tree_named("wa", "feature-a");
+    let b = w.linked_tree_named("wb", "feature-b");
+    let c = w.linked_tree_named("wc", "feature-c");
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    w.edits(
+        "bob",
+        "b1",
+        "src/main.rs",
+        "mod upload;\nfn main() {\n    let _ = alpha_wanted();\n    let _ = wanted_000();\n}\n",
+    );
+    // 200 names nothing mentions, then the one bob calls.
+    let alpha = format!(
+        "{}pub fn alpha_wanted() -> u8 {{ 0 }}\n",
+        definitions("alpha", 200)
+    );
+    w.edits_in("wa", &a, "alice", "a1", "src/a.rs", &alpha);
+    w.edits_in(
+        "wb",
+        &b,
+        "carol",
+        "c1",
+        "src/b.rs",
+        &definitions("beta", 200),
+    );
+    w.edits_in(
+        "wc",
+        &c,
+        "dave",
+        "d1",
+        "src/c.rs",
+        &definitions("wanted", 1),
+    );
+    // Until each worktree is indexed, a prompt finds less: the wait is
+    // `tell_all`'s.
+    tell_all(
+        &w,
+        "bob",
+        &["alpha_wanted".to_owned(), "wanted_000".to_owned()],
+    );
+    for _ in 0..5 {
+        assert!(not_told_inflight(w.prompt("bob")), "told again");
+    }
+}
+
+/// Worktrees left out by the candidate limit across all worktrees make the
+/// answer partial even when nothing that was read is mentioned (review
+/// comment 4704149471).
+#[test]
+fn inflight_reports_truncation_when_worktrees_are_left_out_by_the_total_candidate_limit() {
+    let w = World::new();
+    // Workspaces are read in name order: `wa` and `wb` fill the total
+    // limit with names nothing mentions, and `wc`, read last, is left out.
+    let a = w.linked_tree_named("wa", "feature-a");
+    let b = w.linked_tree_named("wb", "feature-b");
+    let c = w.linked_tree_named("wc", "feature-c");
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    w.edits(
+        "bob",
+        "b1",
+        "src/main.rs",
+        "mod upload;\nfn main() {\n    let _ = wanted_000();\n}\n",
+    );
+    w.edits_in(
+        "wa",
+        &a,
+        "alice",
+        "a1",
+        "src/a.rs",
+        &definitions("alpha", 128),
+    );
+    w.edits_in(
+        "wb",
+        &b,
+        "carol",
+        "c1",
+        "src/b.rs",
+        &definitions("beta", 128),
+    );
+    w.edits_in(
+        "wc",
+        &c,
+        "dave",
+        "d1",
+        "src/c.rs",
+        &definitions("wanted", 1),
+    );
+    let partial = w.wait_for_inflight("a partial comparison", "app", |outcome| {
+        outcome["truncated"] == true
+    });
+    assert_eq!(
+        inflight_names(&partial),
+        Vec::<String>::new(),
+        "{partial:#}"
+    );
+}
+
+/// Whitespace inside a string literal is part of a signature: a Python
+/// default that changes from "a b" to "ab" is a changed signature, while
+/// spacing between tokens still is not (review comment 4703451943).
+#[test]
+fn a_changed_string_default_is_in_flight_but_respacing_is_not() {
+    let w = World::new();
+    let work = w.work();
+    fs::write(
+        work.join("src/greet.py"),
+        "def greet(prefix=\"a b\", name=\"x\"):\n    return prefix + name\n",
+    )
+    .unwrap();
+    fs::write(
+        work.join("src/hello.py"),
+        "from greet import greet\n\ndef hello():\n    return greet()\n",
+    )
+    .unwrap();
+    git(&work, &["add", "src/greet.py", "src/hello.py"]);
+    git(&work, &["commit", "--quiet", "-m", "greet"]);
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "greet", |outcome| {
+        outcome["coverage"]["current_files"] == 5
+    });
+    // Only the spacing between tokens changes: not in flight.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a1",
+        "src/greet.py",
+        "def greet( prefix = \"a b\" , name=\"x\" ):\n    return prefix + name\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let outcome = w.inflight("app");
+        assert_eq!(
+            inflight_names(&outcome),
+            Vec::<String>::new(),
+            "{outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // The string's content changes: in flight.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a2",
+        "src/greet.py",
+        "def greet(prefix=\"ab\", name=\"x\"):\n    return prefix + name\n",
+    );
+    w.wait_for_inflight("the changed default", "app", |outcome| {
+        inflight_names(outcome) == ["greet: def greet(prefix=\"ab\", name=\"x\")"]
+    });
+}
+
+/// A Rust one-element tuple's comma is part of a signature: `(&str,)`
+/// becoming `(&str)` is in flight, while a wrapped parameter list's
+/// trailing comma and spacing still are not (review comment 4704372475).
+#[test]
+fn a_rust_one_element_tuple_becoming_a_scalar_is_in_flight() {
+    let w = World::new();
+    let work = w.work();
+    fs::write(
+        work.join("src/upload.rs"),
+        "pub fn upload(path: (&str,)) -> bool {\n    !path.0.is_empty()\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        work.join("src/main.rs"),
+        "mod upload;\nfn main() {\n    upload::upload((\"a.txt\",));\n}\n",
+    )
+    .unwrap();
+    git(&work, &["add", "src/upload.rs", "src/main.rs"]);
+    git(&work, &["commit", "--quiet", "-m", "tuple"]);
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    // Wrapped, with a trailing comma after the only parameter: not in flight.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a1",
+        "src/upload.rs",
+        "pub fn upload(\n    path: ( &str, ),\n) -> bool {\n    !path.0.is_empty()\n}\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let outcome = w.inflight("app");
+        assert_eq!(
+            inflight_names(&outcome),
+            Vec::<String>::new(),
+            "{outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // The tuple becomes a parenthesized scalar: in flight.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a2",
+        "src/upload.rs",
+        "pub fn upload(path: (&str)) -> bool {\n    !path.is_empty()\n}\n",
+    );
+    w.wait_for_inflight("the tuple became a scalar", "app", |outcome| {
+        inflight_names(outcome) == ["upload: pub fn upload(path: (&str)) -> bool"]
+    });
+}
+
+/// A Go parameter's `chan int` becoming `chanint` is a changed signature:
+/// `chanint` can be a type of its own (review comment 4704678366). Spacing
+/// between Go tokens still is not.
+#[test]
+fn a_go_channel_type_joined_into_one_name_is_in_flight() {
+    let w = World::new();
+    let work = w.work();
+    fs::write(
+        work.join("src/feed.go"),
+        "package app\n\nfunc Feed(x chan int) {\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        work.join("src/use.go"),
+        "package app\n\nfunc Use() {\n\tFeed(nil)\n}\n",
+    )
+    .unwrap();
+    git(&work, &["add", "src/feed.go", "src/use.go"]);
+    git(&work, &["commit", "--quiet", "-m", "feed"]);
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "Feed", |outcome| {
+        outcome["coverage"]["current_files"] == 5
+    });
+    // Only the spacing between tokens changes: not in flight.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a1",
+        "src/feed.go",
+        "package app\n\nfunc Feed( x   chan  int ) {\n}\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let outcome = w.inflight("app");
+        assert_eq!(
+            inflight_names(&outcome),
+            Vec::<String>::new(),
+            "{outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Two words become one: in flight.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a2",
+        "src/feed.go",
+        "package app\n\ntype chanint int\n\nfunc Feed(x chanint) {\n}\n",
+    );
+    w.wait_for_inflight("the joined channel type", "app", |outcome| {
+        inflight_names(outcome) == ["Feed: func Feed(x chanint)"]
+    });
+}
+
+/// Many long in-flight notices are trimmed to one response frame and
+/// marked truncated, not replaced by an error (review comment 4703451948).
+#[test]
+fn many_long_inflight_notices_are_trimmed_to_one_response_frame() {
+    let w = World::new();
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let names: Vec<String> = (0..128)
+        .map(|n| format!("a_rather_long_exported_function_number_{n:03}"))
+        .collect();
+    let calls: String = names
+        .iter()
+        .map(|name| format!("    let _ = {name}(\"bob\", 1, 2, 3);\n"))
+        .collect();
+    let work = w.work();
+    for file in ["first", "second", "third", "fourth"] {
+        fs::write(
+            work.join(format!("src/calls_every_limit_from_the_{file}_file.rs")),
+            format!("pub fn {file}() {{\n{calls}}}\n"),
+        )
+        .unwrap();
+    }
+    // Every caller must be indexed before the definitions change, or a
+    // notice can list fewer than the four files that mention it.
+    w.wait_for("the callers indexed", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 7
+    });
+    let parameters: String = (0..12)
+        .map(|n| format!("parameter_with_a_long_name_{n}: u64, "))
+        .collect();
+    let definitions: String = names
+        .iter()
+        .map(|name| format!("pub fn {name}(user: &str, {parameters}) -> u64 {{ 0 }}\n"))
+        .collect();
+    fs::write(
+        tree.join("src/a_module_with_a_rather_long_name_for_limits.rs"),
+        definitions,
+    )
+    .unwrap();
+    let outcome = w.wait_for_inflight("many in flight", "app", |outcome| {
+        !inflight_names(outcome).is_empty()
+    });
+    assert_eq!(outcome["truncated"], true, "{outcome:#}");
+    assert_eq!(outcome["coverage"]["current_files"], 7, "{outcome:#}");
+    let listed = inflight_names(&outcome).len();
+    assert!((1..128).contains(&listed), "{listed} listed");
+    assert_eq!(
+        outcome["inflight"][0]["mentioned_in"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4,
+        "{outcome:#}"
+    );
+}
+
+/// A HEAD version that cannot be read is compared again on a later pass,
+/// not recorded as having nothing in flight (review comment 4703451937).
+#[test]
+fn a_head_version_that_could_not_be_read_is_compared_on_a_later_pass() {
+    let w = World::new();
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    // Take HEAD's blob of src/upload.rs out of the shared object store.
+    let object = Process::new("git")
+        .arg("-C")
+        .arg(&tree)
+        .args(["rev-parse", "HEAD:src/upload.rs"])
+        .output()
+        .unwrap();
+    let object = String::from_utf8(object.stdout).unwrap().trim().to_owned();
+    let loose = w
+        .work()
+        .join(".git/objects")
+        .join(&object[..2])
+        .join(&object[2..]);
+    let aside = w.base.join("blob-aside");
+    fs::rename(&loose, &aside).unwrap();
+    let changed = "pub fn upload(path: &str) -> bool {\n    !path.is_empty()\n}\n\npub fn gate(user: &str, role: &str) -> bool {\n    user == role\n}\n";
+    w.edits_in("tree", &tree, "alice", "a1", "src/upload.rs", changed);
+    // Wait until the worktree's index holds the new signature, then for
+    // the in-flight comparison of that pass to have run and failed.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, text) = w.cli(&["graph", "symbol", "tree", "gate", "--json"]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome["symbols"][0]["signature"]
+            .as_str()
+            .is_some_and(|signature| signature.contains("role"))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never indexed: {outcome:#}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(inflight_names(&w.inflight("app")), Vec::<String>::new());
+    // The blob is back: the next pass compares the file and finds it.
+    fs::rename(&aside, &loose).unwrap();
+    w.wait_for_inflight("the changed gate", "app", |outcome| {
+        inflight_names(outcome) == ["gate: pub fn gate(user: &str, role: &str) -> bool"]
+    });
 }
 
 /// A second daemon with its own state directory on the same checkout, as a

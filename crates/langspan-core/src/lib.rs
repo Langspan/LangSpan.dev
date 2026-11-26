@@ -525,6 +525,10 @@ pub struct SessionActivity {
     /// first, at most `MAX_ALERTED`. Each is alerted once (ADR 0029).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alerted: Vec<String>,
+    /// In-flight signatures told to this session, newest first, at most
+    /// `MAX_INFLIGHT_TOLD` (roadmap C7).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inflight_told: Vec<String>,
     /// The host reported the session over. Its recent edits stay relevant to
     /// peers until they age out; they are labelled as a finished session's.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1657,6 +1661,146 @@ pub struct InterfaceImpact {
     pub age_ms: u64,
 }
 
+/// In-flight lines one briefing carries at most (roadmap C7).
+pub const INFLIGHT_LINES: usize = 3;
+/// Rendered bytes the in-flight lines of one briefing take together, at
+/// most, by `inflight_cost`: their share of the briefing cap.
+pub const INFLIGHT_BYTES: usize = 600;
+/// In-flight symbols the daemon offers one briefing, at most.
+pub const INFLIGHT_CANDIDATES: usize = 32;
+/// The asking side's files named for one in-flight symbol, at most.
+pub const INFLIGHT_MENTIONS: usize = 4;
+/// In-flight signatures remembered as told per session. The daemon's
+/// briefing window reads every in-flight row in turn, so this bounds how
+/// many signatures still in flight a session hears once each; past it the
+/// oldest is forgotten and told again.
+pub const MAX_INFLIGHT_TOLD: usize = 1024;
+
+/// An exported symbol that another worktree of the repository added, or
+/// whose signature it changed, in a file that differs from that worktree's
+/// `HEAD`: work not yet committed there (roadmap C7). Found by the daemon
+/// in its source index by name, with the asking workspace's files that
+/// mention the name or import a path ending in it or in the file's module.
+/// The signature is repository data, never instructions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InflightSymbol {
+    /// The worktree's workspace, never the asking one.
+    pub workspace_id: String,
+    pub path: String,
+    pub name: String,
+    pub kind: String,
+    pub signature: String,
+    pub mentioned_in: Vec<String>,
+}
+
+/// An in-flight symbol as a briefing or `graph inflight` tells it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InflightNotice {
+    pub path: String,
+    /// The worktree's root.
+    pub worktree: String,
+    /// The session in that worktree that most recently reported editing
+    /// `path`. A correlation, not proof of who made the change.
+    pub session: Option<String>,
+    pub name: String,
+    pub kind: String,
+    pub signature: String,
+    /// The asking side's files that mention it.
+    pub mentioned_in: Vec<String>,
+}
+
+/// What a symbol's in-flight line costs of `INFLIGHT_BYTES`: at least what
+/// an adapter renders for it, quoting included, and never more than the
+/// whole share, so the first line always fits.
+pub fn inflight_cost(notice: &InflightNotice) -> usize {
+    let quoted = |text: &str| text.len() + text.matches(['"', '\\']).count() + 4;
+    let raw = [
+        &notice.path,
+        &notice.worktree,
+        &notice.name,
+        &notice.kind,
+        &notice.signature,
+    ]
+    .into_iter()
+    .map(|text| quoted(text))
+    .sum::<usize>()
+        + notice.session.as_deref().map_or(0, quoted)
+        + notice
+            .mentioned_in
+            .iter()
+            .map(|path| quoted(path))
+            .sum::<usize>();
+    (200 + raw).min(INFLIGHT_BYTES)
+}
+
+/// One in-flight signature, as remembered once told to a session: a change
+/// of signature is a new key, so it is told again.
+fn inflight_key(item: &InflightSymbol) -> String {
+    fingerprint(&format!(
+        "{}\n{}\n{}\n{}\n{}",
+        item.workspace_id, item.path, item.kind, item.name, item.signature
+    ))
+}
+
+/// Whether this signature of `item` was already told to `session_id`.
+pub fn inflight_told(state: &State, session_id: &str, item: &InflightSymbol) -> bool {
+    state
+        .activity
+        .get(session_id)
+        .is_some_and(|activity| activity.inflight_told.contains(&inflight_key(item)))
+}
+
+/// The worktree root and reporting session of an in-flight symbol, from
+/// projected state; `None` when its workspace is not registered.
+pub fn inflight_notice(state: &State, item: &InflightSymbol) -> Option<InflightNotice> {
+    let workspace = state.workspaces.get(&item.workspace_id)?;
+    let session = state
+        .activity
+        .values()
+        .filter(|activity| activity.generation == state.generation)
+        .filter(|activity| {
+            state
+                .sessions
+                .get(&activity.session_id)
+                .is_some_and(|session| session.workspace_id == item.workspace_id)
+        })
+        .filter_map(|activity| {
+            let touch = activity
+                .touched
+                .iter()
+                .find(|touch| touch.path == item.path)?;
+            Some((touch.at_ms, &activity.session_id))
+        })
+        .max()
+        .map(|(_, session)| session.clone());
+    Some(InflightNotice {
+        path: item.path.clone(),
+        worktree: workspace.root.clone(),
+        session,
+        name: item.name.clone(),
+        kind: item.kind.clone(),
+        signature: item.signature.clone(),
+        mentioned_in: item.mentioned_in.clone(),
+    })
+}
+
+/// What a briefing of `session_id` compares in-flight work with: the
+/// session's workspace, and the files it works on or has read. `None` for
+/// a session that is not current.
+pub fn briefing_concern(
+    state: &State,
+    session_id: &str,
+    now_ms: u64,
+) -> Option<(String, BTreeSet<String>)> {
+    let me = current_session(state, session_id).ok()?;
+    Some((
+        me.workspace_id.clone(),
+        concerned_paths(state, session_id, now_ms),
+    ))
+}
+
 /// When an event that has no time of its own was decided: the daemon's
 /// clock and the generation it belongs to.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2250,6 +2394,16 @@ pub struct Briefing {
     /// name. A name match, not a resolved dependency.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interface_changes: Vec<InterfaceImpact>,
+    /// Exported symbols another worktree of the repository has added or
+    /// changed and not committed, that this session's files mention by name
+    /// (roadmap C7). Each signature is told once, at most `INFLIGHT_LINES`
+    /// within `INFLIGHT_BYTES`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inflight: Vec<InflightNotice>,
+    /// In-flight symbols owed to this session but left for a later
+    /// briefing.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_inflight: u32,
     /// Remembered notes about the workspace or about files this session
     /// works on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2665,6 +2819,12 @@ pub enum Event {
     BriefingDelivered {
         session_id: String,
         signature: String,
+    },
+    /// These in-flight signatures were placed in the session's context with
+    /// a briefing (roadmap C7). Each is told once.
+    InflightDelivered {
+        session_id: String,
+        keys: Vec<String>,
     },
     /// A write was told about these interface notices (ADR 0029).
     InterfaceAlerted {
@@ -3418,6 +3578,12 @@ pub enum Command {
         names: Vec<String>,
         limit: u32,
     },
+    /// Read-only: what other worktrees of the workspace's repository have
+    /// in flight that any of its indexed files mention (roadmap C7). Never
+    /// recorded.
+    GraphInflight {
+        workspace_id: String,
+    },
     /// Owner-only, CLI-only: write the workspace's source index to the
     /// absolute path `path` as JSON Lines, created owner-only and never over
     /// an existing file (roadmap D5). Not recorded.
@@ -3573,6 +3739,22 @@ pub enum Command {
     Adopt {
         session_id: String,
         from: String,
+    },
+    /// Prepared adapter input only, as `WorkspaceRegisterVerified`: the
+    /// receipt stores the original `Brief`. `inflight` is what the daemon's
+    /// source index found other worktrees have in flight that the session's
+    /// workspace mentions (roadmap C7).
+    #[serde(skip_serializing)]
+    BriefPrepared {
+        session_id: String,
+        max_peers: u32,
+        deliver: bool,
+        mid_turn: bool,
+        recent: bool,
+        recent_window_ms: Option<u64>,
+        mcp: bool,
+        left: Vec<String>,
+        inflight: Vec<InflightSymbol>,
     },
     /// Read-only: the bounded view of what matters now. Closed admissions
     /// are counted, not listed; the answer always fits one frame.
@@ -4069,6 +4251,12 @@ enum CommandWire {
         workspace_id: String,
         names: Vec<String>,
         limit: u32,
+    },
+    /// Read-only: what other worktrees of the workspace's repository have
+    /// in flight that any of its indexed files mention (roadmap C7). Never
+    /// recorded.
+    GraphInflight {
+        workspace_id: String,
     },
     GraphExport {
         workspace_id: String,
@@ -4606,6 +4794,14 @@ pub enum Outcome {
     GraphContext {
         matches: Vec<NameContext>,
         coverage: GraphCoverage,
+    },
+    /// What other worktrees have in flight that the workspace mentions, in
+    /// worktree, path and name order. `coverage` is the asking workspace's;
+    /// a worktree without a complete scan contributes nothing.
+    GraphInflight {
+        inflight: Vec<InflightNotice>,
+        coverage: GraphCoverage,
+        truncated: bool,
     },
     /// The source index was written to a file (roadmap D5).
     GraphExported {
@@ -6276,6 +6472,17 @@ fn decide_checked(
             recent,
             recent_window_ms,
             mcp,
+        }
+        | Command::BriefPrepared {
+            session_id,
+            max_peers,
+            deliver,
+            mid_turn,
+            left,
+            recent,
+            recent_window_ms,
+            mcp,
+            ..
         } => {
             if !(1..=MAX_BRIEF_PEERS).contains(max_peers) {
                 return Err(error(
@@ -6290,8 +6497,20 @@ fn decide_checked(
                 ));
             }
             let window = recent::window(*recent_window_ms)?;
-            let (mut briefing, signature) =
-                brief(state, session_id, *max_peers, !*mid_turn, now_ms)?;
+            let inflight = match command {
+                Command::BriefPrepared { inflight, .. } => {
+                    if inflight.len() > INFLIGHT_CANDIDATES {
+                        return Err(error(
+                            "invalid_limit",
+                            "A briefing is offered at most 32 in-flight symbols",
+                        ));
+                    }
+                    inflight.as_slice()
+                }
+                _ => &[],
+            };
+            let (mut briefing, signature, inflight_keys) =
+                brief(state, session_id, *max_peers, !*mid_turn, now_ms, inflight)?;
             briefing.left_work = left_work(state, session_id, left)?;
             // Not part of the signature: a prompt's briefing never carries
             // it, so it must not make the next one look new.
@@ -6355,6 +6574,12 @@ fn decide_checked(
                     session_id: session_id.clone(),
                     check_id: notice.check_id.clone(),
                 }));
+                if !inflight_keys.is_empty() {
+                    events.push(Event::InflightDelivered {
+                        session_id: session_id.clone(),
+                        keys: inflight_keys,
+                    });
+                }
                 events.extend(
                     uncoordinated_owed(state, session_id, now_ms).map(|(change, _)| {
                         Event::UncoordinatedDelivered {
@@ -6851,6 +7076,7 @@ fn decide_checked(
         | Command::GraphImpact { .. }
         | Command::GraphBlindSpots { .. }
         | Command::GraphContext { .. }
+        | Command::GraphInflight { .. }
         | Command::GraphExport { .. }
         | Command::GraphImport { .. }
         | Command::CheckCalls { .. } => Err(error(
@@ -8126,14 +8352,16 @@ fn live_lease(state: &State, lease: &Lease, now_ms: u64) -> bool {
 /// Returns the briefing and a signature that ignores ages, so an unchanged
 /// situation is not delivered twice.
 /// The signature leaves out messages: a delivered message is acknowledged,
-/// so its absence afterwards is not a change.
+/// so its absence afterwards is not a change. Also returns the keys of the
+/// in-flight signatures it carries, to be remembered once delivered.
 fn brief(
     state: &State,
     session_id: &str,
     max_peers: u32,
     handoffs: bool,
     now_ms: u64,
-) -> Result<(Briefing, String), CoreError> {
+    inflight: &[InflightSymbol],
+) -> Result<(Briefing, String, Vec<String>), CoreError> {
     let me = current_session(state, session_id)?;
     let repository = state
         .workspace_git
@@ -8572,7 +8800,44 @@ fn brief(
             }
         })
         .collect();
+    // In-flight signatures from other worktrees of the repository (roadmap
+    // C7), each told once. Each line is delivered once, so it is chosen
+    // only for a briefing with nothing else used up on delivery, whose
+    // text is sure to hold it; otherwise every one is counted and waits.
+    let quiet = messages.is_empty()
+        && retracted.is_empty()
+        && uncoordinated.is_empty()
+        && !state.check_notices.contains_key(session_id);
+    let owed: Vec<(String, InflightNotice)> = inflight
+        .iter()
+        .filter(|item| {
+            item.workspace_id != me.workspace_id
+                && related_workspace(state, &me.workspace_id, &item.workspace_id)
+                && !inflight_told(state, session_id, item)
+        })
+        .filter_map(|item| {
+            let key = inflight_key(item);
+            let mut notice = inflight_notice(state, item)?;
+            notice.mentioned_in.retain(|path| concerned.contains(path));
+            notice.mentioned_in.truncate(INFLIGHT_MENTIONS);
+            (!notice.mentioned_in.is_empty()).then_some((key, notice))
+        })
+        .collect();
+    let mut inflight_keys = Vec::new();
+    let mut inflight_notices = Vec::new();
+    let mut bytes = 0;
+    for (key, notice) in &owed {
+        bytes += inflight_cost(notice);
+        if !quiet || inflight_notices.len() == INFLIGHT_LINES || bytes > INFLIGHT_BYTES {
+            break;
+        }
+        inflight_keys.push(key.clone());
+        inflight_notices.push(notice.clone());
+    }
     let mut signature = String::new();
+    for key in &inflight_keys {
+        signature.push_str(&format!("inflight|{key}\n"));
+    }
     for id in &checkout_ids {
         signature.push_str(&format!("checkout|{id}\n"));
     }
@@ -8659,6 +8924,9 @@ fn brief(
             stale_reads,
             remote,
             interface_changes,
+            omitted_inflight: u32::try_from(owed.len() - inflight_notices.len())
+                .unwrap_or(u32::MAX),
+            inflight: inflight_notices,
             notes,
             messages,
             retracted,
@@ -8679,6 +8947,7 @@ fn brief(
             recent: None,
         },
         signature,
+        inflight_keys,
     ))
 }
 
@@ -11011,6 +11280,26 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 ));
             }
             activity_mut(state, session_id).briefed = Some(signature.clone());
+        }
+        Event::InflightDelivered { session_id, keys } => {
+            current_session(state, session_id)?;
+            if keys.is_empty()
+                || keys.len() > INFLIGHT_LINES
+                || keys
+                    .iter()
+                    .any(|key| key.is_empty() || key.len() > 64 || !key.is_ascii())
+            {
+                return Err(error(
+                    "invalid_event",
+                    "A delivery names 1 to 3 in-flight keys of at most 64 ASCII bytes",
+                ));
+            }
+            let told = &mut activity_mut(state, session_id).inflight_told;
+            told.retain(|held| !keys.contains(held));
+            for key in keys.iter().rev() {
+                told.insert(0, key.clone());
+            }
+            told.truncate(MAX_INFLIGHT_TOLD);
         }
         Event::DiskObserved { observation } => {
             validate_disk_observation(state, observation)?;

@@ -27,6 +27,10 @@ pub struct Snapshot {
     /// read, and why: for the index's blind-spots answer. Not persisted.
     #[serde(skip)]
     pub unread: BTreeMap<String, Unread>,
+    /// The blob at `head` of each dirty regular file that `head` holds, for
+    /// the index's in-flight comparison (roadmap C7). Not persisted.
+    #[serde(skip)]
+    pub head_objects: BTreeMap<String, String>,
 }
 
 /// Why a scan listed a working-tree file but did not read it.
@@ -258,6 +262,7 @@ pub fn scan_with_limits(
         let mut skip_clean = false;
         let mut files = BTreeMap::new();
         let mut unread = BTreeMap::new();
+        let mut head_objects = BTreeMap::new();
         for path in candidates {
             let indexed = index.get(&path);
             let mut too_large = false;
@@ -344,6 +349,14 @@ pub fn scan_with_limits(
                 observed.version.conflicted = indexed.conflicted;
             }
             observed.version.dirty = dirty;
+            if dirty
+                && observed.version.kind == FileKind::Regular
+                && let Some(head) = head_files.get(&path)
+                && head.kind == FileKind::Regular
+                && !head.gitlink
+            {
+                head_objects.insert(path.clone(), head.object.clone());
+            }
             files.insert(path, observed.version);
         }
         // Do not turn partial enumeration or index/ref movement into deletions.
@@ -363,6 +376,7 @@ pub fn scan_with_limits(
             coverage,
             unobserved,
             unread,
+            head_objects,
         })
     }
 }
