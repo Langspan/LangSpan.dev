@@ -1410,6 +1410,11 @@ pub const MESSAGE_LINE_LIMIT: usize = 700;
 /// every message selected for a briefing fits its text and none is
 /// acknowledged without being shown.
 pub const MESSAGE_BRIEF_BYTES: usize = 1500;
+/// The longest line an adapter renders for an uncoordinated change, before
+/// its ellipsis. A briefing that carries one takes this line, plus its
+/// ellipsis and newline, out of `MESSAGE_BRIEF_BYTES`: both are delivered
+/// once, so every message selected beside it must still be shown.
+pub const UNCOORDINATED_LINE_LIMIT: usize = 700;
 
 pub const MAX_NOTICES: usize = 32;
 pub const NOTICE_CHANGES: usize = 16;
@@ -6612,7 +6617,16 @@ fn brief(
         .cloned()
         .collect();
     // Messages owed to this session, newest first, as many as the text of
-    // one briefing is sure to hold; the rest wait for the next one.
+    // one briefing is sure to hold beside an owed uncoordinated change; the
+    // rest wait for the next one.
+    let uncoordinated: Vec<UncoordinatedNotice> = uncoordinated_owed(state, session_id, now_ms)
+        .map(|(_, notice)| notice)
+        .collect();
+    let message_bytes = if uncoordinated.is_empty() {
+        MESSAGE_BRIEF_BYTES
+    } else {
+        MESSAGE_BRIEF_BYTES - (UNCOORDINATED_LINE_LIMIT + 4)
+    };
     let mut bytes = 0;
     let messages: Vec<Message> = state
         .messages
@@ -6630,7 +6644,7 @@ fn brief(
         .take(BRIEF_MESSAGES)
         .take_while(|message| {
             bytes += message_cost(message);
-            bytes <= MESSAGE_BRIEF_BYTES
+            bytes <= message_bytes
         })
         .map(|message| Message {
             acknowledged: Vec::new(),
@@ -6750,9 +6764,7 @@ fn brief(
             notes,
             messages,
             checkout_changes,
-            uncoordinated: uncoordinated_owed(state, session_id, now_ms)
-                .map(|(_, notice)| notice)
-                .collect(),
+            uncoordinated,
             // One result per briefing, the newest: it always fits the
             // rendered text, and each delivered one is removed, so the rest
             // follow at the next briefings.

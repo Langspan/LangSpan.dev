@@ -313,6 +313,49 @@ fn invalid_observations_are_rejected_without_events_and_events_replay() {
     assert_eq!(other, state);
 }
 
+/// The texts of the messages a briefing carried.
+fn texts(briefing: &Briefing) -> Vec<String> {
+    briefing
+        .messages
+        .iter()
+        .map(|message| message.text.clone())
+        .collect()
+}
+
+#[test]
+fn a_briefing_with_an_uncoordinated_change_reserves_its_line_before_choosing_messages() {
+    let mut state = ready(true);
+    // Two messages at the longest rendered line: both fit a briefing alone,
+    // but not beside an uncoordinated change's line, so the second waits.
+    for (id, letter) in [("m1", "x"), ("m2", "y")] {
+        ok(run(
+            &mut state,
+            id,
+            Command::SendMessage {
+                workspace_id: "work".into(),
+                from: None,
+                to: None,
+                text: letter.repeat(langspan_core::MESSAGE_BYTES),
+                paths: Vec::new(),
+            },
+            500,
+        ));
+    }
+    recorded(observe(
+        &mut state,
+        "scan-1",
+        vec![file("src/a.rs", "a")],
+        1_000,
+    ));
+    let first = brief(&mut state, CLAUDE, "b1", 2_000);
+    assert_eq!(first.uncoordinated.len(), 1);
+    assert_eq!(first.messages.len(), 1, "{:?}", texts(&first));
+    let second = brief(&mut state, CLAUDE, "b2", 3_000);
+    assert!(second.uncoordinated.is_empty(), "told once");
+    assert_eq!(second.messages.len(), 1, "the waiting message comes next");
+    assert_ne!(texts(&first), texts(&second));
+}
+
 #[test]
 fn the_command_has_a_stable_strict_wire_vector() {
     let wire = r#"{"op":"observe_uncoordinated","workspace_id":"work","files":[{"path":"src/a.rs","state":{"type":"present","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}"#;

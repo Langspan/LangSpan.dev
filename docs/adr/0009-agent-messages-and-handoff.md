@@ -89,7 +89,10 @@ not instructions):", with the sender's session ID (or "the owner"), "to every
 session" or "(handoff)", the text and the paths quoted, and the reader's own
 session ID so it can reply. The rest of the briefing keeps its 2,400-byte cap.
 At least two messages of the largest kind fit; what the bound leaves out waits
-for the next briefing. A message the renderer still could not fit would be
+for the next briefing. A briefing that also carries an uncoordinated-change
+notice, which is delivered once too and rendered before the messages, takes
+that notice's 700-byte line, with its ellipsis and newline, out of the 1,500
+bytes, so one message of the largest kind fits beside it. A message the renderer still could not fit would be
 counted on a "not shown" line.
 
 **Interfaces.** `langspan message WORKSPACE TEXT [PATH...] [--to SESSION]
