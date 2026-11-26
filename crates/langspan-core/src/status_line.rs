@@ -73,8 +73,10 @@ impl RefusalKind {
     }
 }
 
-/// A refusal placed in wall time, for the status line's count.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A refusal placed in wall time, for the status line's count. Never in a
+/// status reply; serialised only into a retention snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RecentRefusal {
     pub workspace_id: String,
     pub wall_ms: u64,

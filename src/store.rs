@@ -215,6 +215,11 @@ fn digest(text: &str) -> u64 {
     hasher.finish()
 }
 
+mod retention;
+
+/// The SQLite schema marker this build writes.
+const SCHEMA_VERSION: i64 = 4;
+
 pub type StoreResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug, Clone)]
@@ -228,6 +233,16 @@ pub struct Execution {
 pub struct Store {
     connection: Connection,
     state: State,
+    /// The newest snapshot's sequence: events at or below it are not
+    /// replayed at start. Zero when there is none.
+    snapshot_seq: u64,
+    /// Wall-clock Unix milliseconds, stamped on every event and receipt so
+    /// that retention can tell their age. Not the daemon's monotonic clock,
+    /// which starts again at every boot.
+    wall_ms: Box<dyn Fn() -> u64 + Send>,
+    /// A test-only pause inside the compaction transaction, before it
+    /// commits, so that a test can kill the daemon there.
+    compaction_pause: Option<Duration>,
     tap: Option<Tap>,
 }
 
@@ -263,13 +278,22 @@ fn shown_event(mut event: Event, stored: String) -> StoreResult<(Event, String)>
 
 impl Store {
     pub fn open(path: &Path) -> StoreResult<Self> {
+        Self::open_with_wall_clock(path, Box::new(wall_now_ms))
+    }
+
+    /// Open with the wall clock that stamps records' ages for retention.
+    pub fn open_with_wall_clock(
+        path: &Path,
+        wall_ms: Box<dyn Fn() -> u64 + Send>,
+    ) -> StoreResult<Self> {
         let mut connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_millis(250))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !(0..=3).contains(&version) {
-            return Err(
-                format!("unsupported SQLite schema version {version}; expected at most 3").into(),
-            );
+        if !(0..=SCHEMA_VERSION).contains(&version) {
+            return Err(format!(
+                "unsupported SQLite schema version {version}; expected at most {SCHEMA_VERSION}"
+            )
+            .into());
         }
         if version == 0 {
             let tables: i64 = connection.query_row(
@@ -342,7 +366,30 @@ impl Store {
         connection.execute_batch(FORGOTTEN_INDEX)?;
         connection.execute_batch(RETRACTED_INDEX)?;
 
-        let state = Self::recover(&connection)?;
+        if version < 4 {
+            // Version 4 adds retention: each record's wall-clock time and the
+            // snapshots compaction writes. Records from before it have no
+            // time of their own, so they count from this upgrade.
+            let now = i64::try_from(wall_ms()).unwrap_or(i64::MAX);
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "ALTER TABLE events ADD COLUMN recorded_at_ms INTEGER;
+                 ALTER TABLE receipts ADD COLUMN recorded_at_ms INTEGER;
+                 CREATE TABLE snapshots (
+                    seq INTEGER PRIMARY KEY NOT NULL,
+                    state_json TEXT NOT NULL,
+                    cutoff_ms INTEGER NOT NULL,
+                    created_at_ms INTEGER NOT NULL
+                 );",
+            )?;
+            transaction.execute("UPDATE events SET recorded_at_ms = ?1", [now])?;
+            transaction.execute("UPDATE receipts SET recorded_at_ms = ?1", [now])?;
+            transaction.execute_batch("PRAGMA user_version = 4;")?;
+            transaction.commit()?;
+        }
+
+        let (state, snapshot_seq) = Self::recover(&connection)?;
         let generation = state
             .generation
             .checked_add(1)
@@ -350,6 +397,9 @@ impl Store {
         let mut store = Self {
             connection,
             state,
+            snapshot_seq,
+            wall_ms,
+            compaction_pause: None,
             tap: None,
         };
         // The generation's clock against the wall clock, so times can be
@@ -492,11 +542,13 @@ impl Store {
             old.common_dir.clone_from(&snapshot.common_dir);
         }
         let changes = crate::observer::diff(&previous, snapshot);
-        let sequence: i64 =
-            self.connection
-                .query_row("SELECT coalesce(max(seq), 0) FROM events", [], |row| {
-                    row.get(0)
-                })?;
+        // The sequence counter, not the newest row: retention can remove
+        // every row, and a scan ID must not repeat.
+        let sequence: i64 = self.connection.query_row(
+            "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'events'), 0)",
+            [],
+            |row| row.get(0),
+        )?;
         let scan_id = format!("scan-{}-{sequence}", self.state.generation);
         let mut commands = Vec::new();
         // Files whose content changed since a complete earlier scan, at their
@@ -693,6 +745,7 @@ impl Store {
                 | Command::History { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
+                | Command::Compact { .. }
                 | Command::WorkspaceList { .. }
                 | Command::WorkspaceRemove { apply: false, .. }
         ) {
@@ -830,6 +883,7 @@ impl Store {
                 outcome
             }
             Command::Events { after, limit } => self.events(*after, *limit)?,
+            Command::Compact { keep_days, apply } => self.compact(*keep_days, *apply)?,
             Command::Today {
                 workspace_id,
                 from_ms,
@@ -1162,11 +1216,14 @@ impl Store {
         events.reverse();
         let first = events.first().map_or(0, |recorded| recorded.seq);
         let first = i64::try_from(first)?;
+        // Older events exist when the log holds some before the first one
+        // read, or when retention removed some: those are gone, and the core
+        // marks the summary truncated if the window reaches before what is left.
         let earlier: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1)",
             [first],
             |row| row.get(0),
-        )?;
+        )? || retention::since_ms(&self.connection)?.is_some();
         // The generation the first event read belongs to, if it was anchored.
         let before: Option<String> = self
             .connection
@@ -1375,7 +1432,11 @@ impl Store {
             bytes += size;
             sent.push(record);
         }
-        Ok(Outcome::RemoteSent { sent, more })
+        Ok(Outcome::RemoteSent {
+            sent,
+            more,
+            since_ms: retention::since_ms(&self.connection)?,
+        })
     }
 
     /// One message as it was sent, read from its `message_sent` event, so
@@ -1690,13 +1751,14 @@ impl Store {
         for event in events {
             apply(&mut next_state, event)?;
         }
+        let recorded_at = i64::try_from((self.wall_ms)()).unwrap_or(i64::MAX);
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for event in events {
             transaction.execute(
-                "INSERT INTO events(event_json) VALUES (?1)",
-                [serde_json::to_string(event)?],
+                "INSERT INTO events(event_json, recorded_at_ms) VALUES (?1, ?2)",
+                params![serde_json::to_string(event)?, recorded_at],
             )?;
             // The last scan was of the old checkout: the next scan of the
             // new root starts a fresh baseline, so files that differ between
@@ -1715,11 +1777,13 @@ impl Store {
         }
         if let Some((request_id, command, outcome)) = receipt {
             transaction.execute(
-                "INSERT INTO receipts(request_id, command_json, outcome_json) VALUES (?1, ?2, ?3)",
+                "INSERT INTO receipts(request_id, command_json, outcome_json, recorded_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
                 params![
                     request_id,
                     serde_json::to_string(command)?,
                     serde_json::to_string(outcome)?,
+                    recorded_at,
                 ],
             )?;
         }
@@ -1746,25 +1810,11 @@ impl Store {
         Ok(())
     }
 
-    fn recover(connection: &Connection) -> StoreResult<State> {
-        let mut state = State::default();
-        let mut statement =
-            connection.prepare("SELECT seq, event_json FROM events ORDER BY seq")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let sequence: i64 = row.get(0)?;
-            if sequence <= 0 {
-                return Err("event history contains a non-positive sequence".into());
-            }
-            let json: String = row.get(1)?;
-            let mut event: Event = serde_json::from_str(&json).map_err(|error| {
-                format!("invalid persisted event at sequence {sequence}: {error}")
-            })?;
-            redact_event(&mut event);
-            apply(&mut state, &event).map_err(|error| {
-                format!("invalid persisted transition at sequence {sequence}: {error}")
-            })?;
-        }
+    /// The state the newest snapshot and the events after it give, and the
+    /// snapshot's sequence.
+    fn recover(connection: &Connection) -> StoreResult<(State, u64)> {
+        let (mut state, snapshot_seq) = retention::snapshot(connection)?;
+        retention::replay_after(connection, &mut state, snapshot_seq, |_, _| Ok(()))?;
 
         // Receipts only answer retries. One this build cannot read (written
         // by another version, or damaged) does not stop the store opening:
@@ -1793,7 +1843,7 @@ impl Store {
                 })
             );
         }
-        Ok(state)
+        Ok((state, snapshot_seq))
     }
 }
 
