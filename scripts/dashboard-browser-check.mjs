@@ -4,12 +4,13 @@
 // driven with Node's own WebSocket. No npm dependencies.
 //
 //   node scripts/dashboard-browser-check.mjs --binary target/debug/langspan \
-//     --browser /path/to/browser [--out DIR] [--axe path/to/axe.min.js]
+//     --browser /path/to/browser [--out DIR] [--axe path/to/axe.min.js] [--docs DIR]
 //   node scripts/dashboard-browser-check.mjs ... --state-dir DIR --screens-only
 //
 // Without --state-dir it builds its own coordinator in a temporary
 // directory, with hostile task, path and message text, and checks the live
-// page (polling, token, 403, 503, stale view, selection, focus and scroll
+// page (polling, token, 401, 403, a restarted dashboard, 503, stale view,
+// selection, focus and scroll
 // across refreshes) and the --demo page at 390, 768, 1024, 1280 and 1600 px
 // in the light and dark themes: no page errors, no request beyond the page's
 // own origin, no page-level horizontal overflow, and accessibility rules
@@ -98,13 +99,13 @@ async function coordinator() {
   hook(stateDir, root, 'codex', patch('22222222-0000-4000-8000-00000000000c', 'c2', HOSTILE_FILE));
   hook(stateDir, root, 'codex', patch('11111111-0000-4000-8000-00000000000b', 'c3', 'a.txt'));
   for (const command of [['message', 'work', HOSTILE, HOSTILE_FILE], ['remember', 'work', HOSTILE, HOSTILE_FILE]]) {
-    const run = spawnSync(binary, ['--state-dir', stateDir, ...command]);
+    const run = spawnSync(binary, ['--state-dir', stateDir, ...command, '--request-id', 'browser-' + command[0]]);
     if (run.status !== 0) fail(command[0] + ' failed: ' + run.stderr);
   }
   return { stateDir, daemon };
 }
-async function dashboard(stateDir, demo) {
-  const child = spawn(binary, ['dashboard', '--listen', '127.0.0.1:0', '--state-dir', stateDir, ...(demo ? ['--demo'] : [])],
+async function dashboard(stateDir, demo, listen = '127.0.0.1:0') {
+  const child = spawn(binary, ['dashboard', '--listen', listen, '--state-dir', stateDir, ...(demo ? ['--demo'] : [])],
     { stdio: ['ignore', 'pipe', 'ignore'] });
   children.push(child);
   let line = '';
@@ -174,10 +175,10 @@ async function page(b, origin) {
     await p.send('Page.navigate', { url });
     await until('the page', () => p.eval("document.readyState === 'complete'"));
   };
-  p.shot = async (file) => {
+  p.shot = async (file, maxHeight = 6000) => {
     const { cssContentSize } = await p.send('Page.getLayoutMetrics');
     const shot = await p.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true,
-      clip: { x: 0, y: 0, width: Math.ceil(cssContentSize.width), height: Math.min(Math.ceil(cssContentSize.height), 6000), scale: 1 } });
+      clip: { x: 0, y: 0, width: Math.ceil(cssContentSize.width), height: Math.min(Math.ceil(cssContentSize.height), maxHeight), scale: 1 } });
     fs.writeFileSync(path.join(out, file), Buffer.from(shot.data, 'base64'));
   };
   p.foreign = () => p.requests.filter((url) => !url.startsWith(origin + '/') && !url.startsWith('data:') && url !== 'about:blank');
@@ -254,6 +255,8 @@ async function main() {
           await until('a view', () => p.eval("document.getElementById('status-text').textContent === 'Live'"), 15000);
           await sleep(300);
           await p.shot('real-' + theme + '-' + width + '.png');
+          // A full 390 px page is too tall to read when scaled down; keep its top too.
+          if (width === 390) await p.shot('real-' + theme + '-390-top.png', 1400);
           if (!args['screens-only']) await audit(p, 'real ' + theme + ' ' + width, args.axe);
         }
       }
@@ -274,8 +277,13 @@ async function main() {
         await until('the demo', () => d.eval("!!document.querySelector('.grid')"));
         const state = await d.eval("({ theme: document.documentElement.dataset.theme, label: document.getElementById('status-text').textContent, banner: document.getElementById('banner').textContent })");
         check(state.theme === theme && state.label === 'Simulated data' && state.banner.includes('Simulated'), 'demo ' + theme + ' ' + width + ': labeled simulated, theme follows the system');
-        const inner = await d.eval("(() => { const s = document.getElementById('scope'); return s.scrollWidth > s.clientWidth || window.innerWidth >= 1024; })()");
-        check(inner, 'demo ' + theme + ' ' + width + ': a wide matrix scrolls inside its panel');
+        // The matrix either fits its panel or scrolls inside it (the audit
+        // checks that the page itself never scrolls sideways). At 390 px the
+        // demo's matrix is wider than the panel, so it must scroll there.
+        const inner = await d.eval("(() => { const s = document.getElementById('scope'); const t = s.querySelector('.grid');"
+          + " const wide = t.getBoundingClientRect().width > s.clientWidth + 1; const scrolls = getComputedStyle(s).overflowX === 'auto' && s.scrollWidth > s.clientWidth;"
+          + " return { wide, ok: !wide || scrolls }; })()");
+        check(inner.ok && (width > 390 || inner.wide), 'demo ' + theme + ' ' + width + ': the matrix ' + (inner.wide ? 'scrolls inside its panel' : 'fits its panel'));
         await d.shot('demo-' + theme + '-' + width + '.png');
         await audit(d, 'demo ' + theme + ' ' + width, args.axe);
       }
@@ -302,22 +310,34 @@ async function main() {
     await sleep(4500);
     const polledLater = await p.eval("performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/state')).length");
     check(polledLater >= polled + 2, 'live: polls /api/state about every 2 s (' + polled + ' then ' + polledLater + ')');
-    const tokenHeader = p.requests.filter((url) => url.endsWith('/api/state')).length > 0;
-    check(tokenHeader, 'live: requests /api/state without the token in its URL');
-    // Selection, focus and scroll survive refreshes.
-    const before = await p.eval("(() => { const cell = document.querySelector('.cell-button'); cell.click(); cell.focus(); document.getElementById('scope').scrollLeft = 40; return { subject: document.getElementById('inspector-subject').textContent, focus: document.activeElement.dataset.focus, left: document.getElementById('scope').scrollLeft }; })()");
+    const stateRequests = p.requests.filter((url) => url.includes('/api/state'));
+    check(stateRequests.length > 0 && stateRequests.every((url) => url === live.origin + '/api/state'),
+      'live: requests /api/state without the token in its URL');
+    // The server's answers the page depends on: no token, a wrong token, the right one.
+    const codes = await p.eval("Promise.all([fetch('/api/state'), fetch('/api/state', { headers: { 'X-LangSpan-Token': '0'.repeat(64) } }),"
+      + " fetch('/api/state', { headers: { 'X-LangSpan-Token': new URLSearchParams(location.search).get('t') } })].map((r) => r.then((x) => x.status)))");
+    check(codes.join() === '401,403,200', 'live: /api/state answers 401 without a token, 403 with a wrong one, 200 with this run\'s (' + codes.join(', ') + ')');
+    // Selection, focus and scroll survive refreshes. Focus first, as a
+    // pointer or keyboard does: the click redraws the view, and the redraw
+    // must put focus back on the redrawn cell.
+    // At 390 px the matrix is wider than its panel, so there is a scroll
+    // position to keep.
+    await p.size(390, 'light');
+    await sleep(300);
+    const before = await p.eval("(() => { const cell = document.querySelector('.cell-button'); cell.focus(); cell.click(); const s = document.getElementById('scope'); s.scrollLeft = s.scrollWidth; return { subject: document.getElementById('inspector-subject').textContent, focus: document.activeElement.dataset.focus, left: document.getElementById('scope').scrollLeft }; })()");
     await sleep(4500);
     const after = await p.eval("({ subject: document.getElementById('inspector-subject').textContent, focus: document.activeElement.dataset.focus, left: document.getElementById('scope').scrollLeft })");
     check(before.subject && before.subject === after.subject, 'live: the selection survives refreshes');
     check(before.focus && before.focus === after.focus, 'live: keyboard focus survives refreshes');
-    check(before.left === after.left, 'live: the matrix scroll position survives refreshes');
+    check(before.left > 0 && before.left === after.left, 'live: the matrix scroll position survives refreshes (' + before.left + ' then ' + after.left + ' px)');
+    await p.size(1280, 'light');
     const collapsed = await p.eval("(() => { document.querySelector('.group-button').click(); return document.querySelector('.group-button').getAttribute('aria-expanded'); })()");
     check(collapsed === 'false', 'live: a workspace group collapses');
     await p.eval("document.querySelector('.group-button').click()");
     const filtered = await p.eval("(() => { const s = document.getElementById('path-view'); s.value = 'all'; s.dispatchEvent(new Event('change')); return document.querySelectorAll('.path-head').length; })()");
     check(filtered >= 2, 'live: all observed paths widen the matrix (' + filtered + ' paths)');
     for (const theme of THEMES) {
-      for (const width of [390, 1280]) {
+      for (const width of WIDTHS) {
         await p.size(width, theme);
         await p.go(live.url);
         await until('a live view', () => p.eval("document.getElementById('status-text').textContent === 'Live'"), 15000);
@@ -343,12 +363,30 @@ async function main() {
     check(stale.banner.includes('Coordinator unavailable') && stale.banner.includes('Showing what was known') && stale.dim && stale.kept,
       'live: a 503 keeps the last view, dims it and says since when');
     await p.shot('live-stale-1280.png');
+    // The dashboard restarts with a new token on the same address: the open
+    // page's polls get 403 and it says its token is no longer valid.
+    const port = new URL(live.url).port;
+    live.child.kill('SIGKILL');
+    await new Promise((resolve) => live.child.once('exit', resolve));
+    const restarted = await dashboard(stateDir, false, '127.0.0.1:' + port);
+    check(restarted.url !== live.url, 'live: a restarted dashboard has a new token');
+    await until('the not authorized state', () => p.eval("document.getElementById('status-text').textContent === 'Not authorized'"), 15000);
+    const refused = await p.eval("({ banner: document.getElementById('banner').textContent, kept: !!document.querySelector('.grid') })");
+    check(refused.banner.includes('access token is missing or no longer valid') && refused.kept,
+      'live: a 403 says the token is no longer valid and keeps the last view');
   } finally {
     b.close();
   }
 }
 
+// --docs DIR copies the demo screenshots the documentation shows. They hold
+// only the demo's fictional data: no token, path or name from this machine.
+const DOC_SHOTS = ['demo-light-1280.png', 'demo-dark-1280.png', 'demo-light-390.png'];
 main().then(() => {
+  if (args.docs && !failures.length && !args['state-dir']) {
+    fs.mkdirSync(path.resolve(String(args.docs)), { recursive: true });
+    for (const file of DOC_SHOTS) fs.copyFileSync(path.join(out, file), path.join(path.resolve(String(args.docs)), file));
+  }
   console.log(failures.length ? failures.length + ' check(s) failed' : 'all checks passed; screenshots in ' + out);
   process.exit(failures.length ? 1 : 0);
 }, (error) => { console.error(error); process.exit(1); });
