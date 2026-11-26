@@ -137,23 +137,29 @@ pub struct ReportQuery<'a> {
     pub anchor: Option<ClockAnchor>,
     /// The log holds events older than the first one given.
     pub earlier: bool,
-    /// Sessions holding an intent just before the first event given, from
-    /// the older events `open_intents` folded. An intent set before the
-    /// events read and still open when its session ends in the window
-    /// counts as left open.
-    pub open_intents: &'a BTreeSet<String>,
+    /// Sessions holding an intent just before the first event given, each
+    /// with the workspace of its intent, from the older events
+    /// `open_intents` folded. An intent set before the events read and
+    /// still open when its session ends in the window counts as left open.
+    pub open_intents: &'a BTreeMap<String, String>,
 }
 
-/// Fold one event into the sessions holding an intent, as `apply` changes
-/// `State::intents`. The store folds the events before those it reads with
-/// this, and the report the ones it reads.
-pub fn open_intents(open: &mut BTreeSet<String>, event: &Event) {
+/// Fold one event into the sessions holding an intent (session to the
+/// intent's workspace), as `apply` changes `State::intents`. Removing a
+/// workspace ends the intents in it, as `workspaces::apply_removed` does: an
+/// intent's workspace is its session's, so this covers the intents of the
+/// workspace's sessions too. The store folds the events before those it
+/// reads with this, and the report the ones it reads.
+pub fn open_intents(open: &mut BTreeMap<String, String>, event: &Event) {
     match event {
         Event::IntentSet { intent } => {
-            open.insert(intent.session_id.clone());
+            open.insert(intent.session_id.clone(), intent.workspace_id.clone());
         }
         Event::IntentEnded { session_id } | Event::SessionEnded { session_id } => {
             open.remove(session_id);
+        }
+        Event::WorkspaceRemoved { workspace_id } => {
+            open.retain(|_, workspace| workspace != workspace_id);
         }
         _ => {}
     }
@@ -200,7 +206,7 @@ pub fn report(state: &State, query: &ReportQuery<'_>) -> Report {
     // Sessions with an intent set, from the events before those read and
     // every event read: an intent set before the window and still open when
     // the session ends in it counts.
-    let mut open: BTreeSet<String> = query.open_intents.clone();
+    let mut open: BTreeMap<String, String> = query.open_intents.clone();
     // Refused calls in the window not yet admitted: (session, input digest).
     let mut refused: BTreeSet<(String, String)> = BTreeSet::new();
     let mut undated = 0u32;
@@ -215,7 +221,7 @@ pub fn report(state: &State, query: &ReportQuery<'_>) -> Report {
                 .map(|session| session.workspace_id.as_str())
         });
         let ours = workspace == Some(query.workspace_id);
-        let was_open = session.is_some_and(|session| open.contains(session));
+        let was_open = session.is_some_and(|session| open.contains_key(session));
         open_intents(&mut open, event);
         if wall.is_none() && !matches!(event, Event::Booted { .. }) {
             undated = undated.saturating_add(1);

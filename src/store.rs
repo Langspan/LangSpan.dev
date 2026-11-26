@@ -11,7 +11,7 @@ use langspan_core::{
     shrink_status, status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -60,15 +60,18 @@ const ANCHOR_LOOKUP: &str = concat!(
 macro_rules! intent_event {
     () => {
         "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
-         IN ('intent_set', 'intent_ended', 'session_ended')"
+         IN ('intent_set', 'intent_ended', 'session_ended', 'workspace_removed')"
     };
 }
 
-/// A partial index of the intent events, so the report can find which
-/// sessions held an intent before the events it reads without reading the
-/// rest of the older log.
+/// A partial index of the intent events (and the workspace removals that
+/// end intents), so the report can find which sessions held an intent
+/// before the events it reads without reading the rest of the older log.
+/// `events_intent` was the same index without workspace removals; the new
+/// name replaces it in a database an earlier build of this index opened.
 const INTENT_EVENT_INDEX: &str = concat!(
-    "CREATE INDEX IF NOT EXISTS events_intent ON events(seq) WHERE ",
+    "DROP INDEX IF EXISTS events_intent; ",
+    "CREATE INDEX IF NOT EXISTS events_intent_state ON events(seq) WHERE ",
     intent_event!()
 );
 
@@ -1104,11 +1107,12 @@ impl Store {
     }
 
     /// The sessions holding an intent just before sequence number `seq`,
-    /// from the intent events before it.
-    fn open_intents_before(&self, seq: u64) -> StoreResult<BTreeSet<String>> {
+    /// each with its intent's workspace, from the intent events and
+    /// workspace removals before it.
+    fn open_intents_before(&self, seq: u64) -> StoreResult<BTreeMap<String, String>> {
         let mut statement = self.connection.prepare(INTENT_EVENTS_BEFORE)?;
         let mut rows = statement.query([i64::try_from(seq)?])?;
-        let mut open = BTreeSet::new();
+        let mut open = BTreeMap::new();
         while let Some(row) = rows.next()? {
             let json: String = row.get(0)?;
             langspan_core::open_intents(&mut open, &serde_json::from_str(&json)?);
@@ -1568,8 +1572,24 @@ mod tests {
     /// open. Real SQLite: the intent is only in the older part of the log.
     #[test]
     fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
+        assert_eq!(intents_left_open_after_older_log(false), 1);
+    }
+
+    /// Review 4703929181: removing the workspace ends the intent with it, so
+    /// the session registered again under the same ID and ended without a
+    /// new intent left none open, though the removal is in the older log.
+    #[test]
+    fn a_workspace_removed_before_the_events_read_ends_its_intents() {
+        assert_eq!(intents_left_open_after_older_log(true), 0);
+    }
+
+    /// Alice sets an intent, then (when `remove`) the workspace is removed
+    /// and registered again with her session, all before the newest
+    /// `TODAY_EVENTS` events; she ends her session inside the window. Her
+    /// `intents_left_open`.
+    fn intents_left_open_after_older_log(remove: bool) -> u32 {
         let directory = std::env::temp_dir().join(format!(
-            "langspan-report-intent-{}-{}",
+            "langspan-report-intent-{remove}-{}-{}",
             std::process::id(),
             wall_now_ms()
         ));
@@ -1608,6 +1628,36 @@ mod tests {
                 summary: "rework the parser".into(),
             },
         );
+        if remove {
+            run(
+                &mut store,
+                "r",
+                Command::WorkspaceRemove {
+                    workspace_id: "work".into(),
+                    apply: true,
+                },
+            );
+            run(
+                &mut store,
+                "w2",
+                Command::WorkspaceRegister {
+                    workspace_id: "work".into(),
+                    root: "/repos/work".into(),
+                },
+            );
+            for session in ["claude-code.alice", "claude-code.filler"] {
+                run(
+                    &mut store,
+                    &format!("s2-{session}"),
+                    Command::SessionRegister {
+                        session_id: session.into(),
+                        workspace_id: "work".into(),
+                        parent: None,
+                        headless: false,
+                    },
+                );
+            }
+        }
         let from_ms = wall_now_ms();
         // Enough events after the intent that it is not among those read.
         let generation = store.state.generation;
@@ -1647,7 +1697,8 @@ mod tests {
             .iter()
             .find(|row| row.session_id == "claude-code.alice")
             .unwrap_or_else(|| panic!("{report:#?}"));
-        assert_eq!(alice.counts.intents_left_open, 1, "{report:#?}");
+        assert_eq!(alice.counts.intents_set, 0, "{report:#?}");
+        alice.counts.intents_left_open
     }
 
     /// The intent lookup reads only intent events, not the rest of the log.
@@ -1671,7 +1722,7 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(&directory).unwrap();
         assert!(
-            plan.iter().any(|step| step.contains("events_intent")),
+            plan.iter().any(|step| step.contains("events_intent_state")),
             "{plan:?}"
         );
     }

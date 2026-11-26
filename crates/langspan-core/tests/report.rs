@@ -1,6 +1,6 @@
 //! The coordination report (roadmap H8) from decided events, with every
 //! time injected on the daemon's clock and on the wall clock.
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use langspan_core::{
     ClockAnchor, Command, Event, FileKind, FileState, ObservedFile, Outcome, REPORT_SESSIONS,
@@ -173,7 +173,7 @@ impl Log {
                 events: &self.events,
                 anchor: None,
                 earlier,
-                open_intents: &BTreeSet::new(),
+                open_intents: &BTreeMap::new(),
             },
         )
     }
@@ -328,11 +328,11 @@ fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
         .iter()
         .position(|recorded| matches!(recorded.event, Event::SessionPrompted { .. }))
         .unwrap();
-    let mut before = BTreeSet::new();
+    let mut before = BTreeMap::new();
     for recorded in &log.events[..start] {
         open_intents(&mut before, &recorded.event);
     }
-    assert!(before.contains(alice), "{before:?}");
+    assert!(before.contains_key(alice), "{before:?}");
     let cut = report(
         &log.state,
         &ReportQuery {
@@ -354,6 +354,96 @@ fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
     assert!(!cut.truncated, "{cut:#?}");
     let a = row(&cut, alice);
     assert_eq!((a.intents_set, a.intents_left_open), (0, 1), "{cut:#?}");
+}
+
+/// Review 4703929181: Alice sets an intent, the workspace is removed, which
+/// ends it, and is registered again with her session; she ends the session
+/// without a new intent. None is left open, whether the removal is among the
+/// events read or only in the older events `open_intents` folds.
+#[test]
+fn a_removed_workspace_ends_its_intents_for_the_report() {
+    let alice = "claude-code.alice";
+    let mut log = Log::ready(&[alice]);
+    log.run(
+        "i-a",
+        Command::IntentSet {
+            session_id: alice.into(),
+            paths: vec!["src/lib.rs".into()],
+            summary: "rework the parser".into(),
+        },
+        START + MINUTE,
+    );
+    let outcome = log.run(
+        "r-work",
+        Command::WorkspaceRemove {
+            workspace_id: "work".into(),
+            apply: true,
+        },
+        START + 2 * MINUTE,
+    );
+    assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+    log.run(
+        "w-work-again",
+        Command::WorkspaceRegister {
+            workspace_id: "work".into(),
+            root: "/repos/work".into(),
+        },
+        START + 3 * MINUTE,
+    );
+    log.register(alice, "work");
+    log.prompt(alice, START + 5 * MINUTE);
+    log.prompt(alice, START + 30 * MINUTE);
+    log.run(
+        "e-a",
+        Command::SessionEnd {
+            session_id: alice.into(),
+        },
+        START + 30 * MINUTE,
+    );
+    let anchor = Some(ClockAnchor {
+        generation: 1,
+        clock_ms: START,
+        wall_ms: WALL,
+    });
+    let window = TodayWindow {
+        from_ms: WALL + 10 * MINUTE,
+        to_ms: WALL + 600 * MINUTE,
+    };
+    let whole = report(
+        &log.state,
+        &ReportQuery {
+            workspace_id: "work",
+            window,
+            events: &log.events,
+            anchor: None,
+            earlier: false,
+            open_intents: &BTreeMap::new(),
+        },
+    );
+    assert_eq!(row(&whole, alice).intents_left_open, 0, "{whole:#?}");
+    // Read from the first prompt on: the removal is in the older events.
+    let start = log
+        .events
+        .iter()
+        .position(|recorded| matches!(recorded.event, Event::SessionPrompted { .. }))
+        .unwrap();
+    let mut before = BTreeMap::new();
+    for recorded in &log.events[..start] {
+        open_intents(&mut before, &recorded.event);
+    }
+    assert!(before.is_empty(), "{before:?}");
+    let cut = report(
+        &log.state,
+        &ReportQuery {
+            workspace_id: "work",
+            window,
+            events: &log.events[start..],
+            anchor,
+            earlier: true,
+            open_intents: &before,
+        },
+    );
+    assert_eq!(row(&cut, alice).intents_left_open, 0, "{cut:#?}");
 }
 
 #[test]
@@ -596,7 +686,7 @@ fn the_window_leaves_out_older_events_and_says_what_it_covered() {
                 wall_ms: WALL,
             }),
             earlier: true,
-            open_intents: &BTreeSet::new(),
+            open_intents: &BTreeMap::new(),
         },
     );
     assert!(cut.truncated, "{cut:#?}");
