@@ -413,6 +413,21 @@ pub fn relevant(event: &Event) -> bool {
     )
 }
 
+/// The notices for events recorded together, in order. One check record's
+/// result can be reported in several events, one per group of sessions told
+/// the same (issue #69): it raises one notice.
+pub fn notices_for(state: &State, events: &[Event]) -> Vec<Notice> {
+    let mut reported = std::collections::BTreeSet::new();
+    events
+        .iter()
+        .filter(|event| match event {
+            Event::CheckReported { notice, .. } => reported.insert(notice.check_id.as_str()),
+            _ => true,
+        })
+        .filter_map(|event| notice_for(state, event))
+        .collect()
+}
+
 /// The notice for a recorded event, if it calls for one. `state` is the
 /// state after it was applied.
 pub fn notice_for(state: &State, event: &Event) -> Option<Notice> {
@@ -638,6 +653,55 @@ mod tests {
             on: true,
             ..Settings::default()
         }
+    }
+
+    #[test]
+    fn a_record_reported_to_two_groups_of_sessions_raises_one_notice() {
+        let mut state = State::default();
+        state.checks.insert(
+            "work".into(),
+            vec![langspan_core::CheckRecord {
+                check_id: "c1".into(),
+                workspace_id: "work".into(),
+                name: "tests".into(),
+                command: "cargo test".into(),
+                tree_oid: "a".repeat(40),
+                head_oid: None,
+                inputs: Vec::new(),
+                result: CheckResult::Failed { exit_code: 101 },
+                duration_ms: 1,
+                recorded_ms: 1,
+                generation: 1,
+                changed_since: false,
+            }],
+        );
+        let report = |session: &str, check_id: &str| Event::CheckReported {
+            session_ids: vec![session.into()],
+            notice: langspan_core::CheckNotice {
+                check_id: check_id.into(),
+                name: "tests".into(),
+                tree_oid: "a".repeat(40),
+                result: CheckResult::Failed { exit_code: 101 },
+                duration_ms: 1,
+                timed_out_s: None,
+                tail: String::new(),
+                failures: Vec::new(),
+                more_failures: false,
+                baseline_check_id: None,
+                fixed: Vec::new(),
+                writers: Vec::new(),
+            },
+        };
+        let notices = notices_for(
+            &state,
+            &[report("claude-code.a", "c1"), report("codex.b", "c1")],
+        );
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].body.contains("claude-code"),
+            "{}",
+            notices[0].body
+        );
     }
 
     #[test]

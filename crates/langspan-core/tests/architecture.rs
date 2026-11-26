@@ -52,6 +52,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
     // A submodule may import only the same pure standard-library items, serde
     // and its own crate.
     let submodules = [
+        include_str!("../src/classes.rs"),
         include_str!("../src/dashboard.rs"),
         include_str!("../src/flaky.rs"),
         include_str!("../src/lines.rs"),
@@ -95,6 +96,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
     assert_eq!(
         modules,
         [
+            "mod classes;",
             "mod dashboard;",
             "mod flaky;",
             "mod lines;",

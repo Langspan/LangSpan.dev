@@ -403,6 +403,10 @@ fn a_report_that_disagrees_with_its_record_or_has_none_does_not_apply() {
         timed_out_s: None,
         tail: String::new(),
         failures: Vec::new(),
+        more_failures: false,
+        baseline_check_id: None,
+        fixed: Vec::new(),
+        writers: Vec::new(),
     };
     let report = |notice: &langspan_core::CheckNotice| Event::CheckReported {
         session_ids: vec!["alice".into()],

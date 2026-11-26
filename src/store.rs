@@ -155,7 +155,7 @@ const TAP_LIMIT: usize = 64;
 /// hold a command line as typed. It is redacted wherever it is read back:
 /// into state, into an event page and from a receipt.
 fn redact_event(event: &mut Event) {
-    if let Event::CheckRecorded { check } = event {
+    if let Event::CheckRecorded { check, .. } = event {
         crate::hook::redact_check(check);
     }
 }

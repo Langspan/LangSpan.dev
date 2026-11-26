@@ -136,8 +136,11 @@ fn every_changed_identity_field_is_an_input_mismatch_without_changing_authority(
         // The advisory record of touched paths may move; authority may not.
         let mut authority = state.clone();
         authority.activity = before.activity.clone();
-        // Counted writes mark automatic-check reruns; they grant nothing.
+        // Counted writes mark automatic-check reruns, and who wrote when
+        // marks a check's comparison with its baseline; they grant nothing.
         authority.writes = before.writes.clone();
+        authority.first_writes = before.first_writes.clone();
+        authority.write_runs = before.write_runs.clone();
         assert_eq!(authority, before, "a mismatch is evidence, never authority");
     }
 }
