@@ -37,10 +37,13 @@ import tasks as families  # noqa: E402
 ARMS = ("worktrees", "awareness_only", "langspan")
 AGENTS = ("standin", "claude")
 STANDIN_MODES = ("follow", "ignore", "hedge")
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 GIT_IDENTITY = ["-c", "user.name=Benchmark", "-c", "user.email=benchmark@example.invalid",
                 "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
 MAX_TIME_LIMIT = 3600
+# The most a staggered session waits to start. Its time limit starts when it
+# does, so the runner's bound for it is the two added.
+MAX_STAGGER = 600
 DAEMON_START_SECONDS = 15
 GIT_SECONDS = 60
 ORACLE_SECONDS = 300
@@ -98,6 +101,13 @@ PEER_GIT_RULES = tuple(
                                                        "-C ", "--git-dir", "--work-tree"))
 # No MCP server or hosted connector reaches a session.
 MCP_CONFIG = '{"mcpServers": {}}'
+# Claude Code keeps auto memory in one directory per repository, so the
+# worktrees of the LangSpan arm would share one: a channel between sessions
+# that the other arms lack. Every session turns it off, with the setting and
+# with the environment variable Claude Code reads, which also wins over a
+# setting from elsewhere.
+MEMORY_SETTINGS = '{"autoMemoryEnabled": false}'
+MEMORY_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
 # The tool guard's verdict, the last line of a transcript it checked.
 TOOL_CHECK_TYPE = "benchmark_tool_check"
 TOOL_CHECK_EXIT = 3
@@ -163,9 +173,11 @@ def prompt_for(arm, family, assigned, index):
 
 
 def make_plan(arm, family, sessions, seed, agent="standin", standin_mode=None, time_limit=1200, model=None,
-              langspan_given=False):
+              langspan_given=False, stagger=0):
     """The plan of one run. STANDIN_MODE is None when the option was not
-    given; options the arm or agent does not use are listed, not dropped."""
+    given; options the arm or agent does not use are listed, not dropped.
+    STAGGER is how many seconds the sessions other than the one whose task
+    changes an interface wait to start."""
     if arm not in ARMS:
         raise ValueError("--arm must be one of " + ", ".join(ARMS))
     if agent not in AGENTS:
@@ -183,11 +195,19 @@ def make_plan(arm, family, sessions, seed, agent="standin", standin_mode=None, t
     if agent == "standin" and model:
         ignored.append(CLAUDE_MODEL_ENV)
     assigned = families.assign(family, sessions, seed)
+    if isinstance(stagger, bool) or type(stagger) not in (int, float) or not 0 <= stagger <= MAX_STAGGER:
+        raise ValueError("--stagger must be a number of seconds from 0 to %d" % MAX_STAGGER)
+    if time_limit + stagger > MAX_TIME_LIMIT:
+        raise ValueError("--time-limit and --stagger together must be at most %d seconds" % MAX_TIME_LIMIT)
+    if stagger and families.leader(assigned) is None:
+        raise ValueError("--stagger needs a family with a task that changes an interface its peers use; "
+                         "%s has none" % family)
     return {
         "schema_version": SCHEMA_VERSION, "arm": arm, "family": family, "sessions": sessions, "seed": seed,
         "agent": agent, "standin_mode": (standin_mode or "follow") if agent == "standin" else None,
         "model": model if agent == "claude" else None, "time_limit_s": time_limit,
-        "ignored_options": ignored, "isolation": isolation(arm),
+        "ignored_options": ignored, "isolation": isolation(arm), "stagger_s": stagger,
+        "auto_memory": "off" if agent == "claude" else "not_applicable",
         "allowed_tools": list(session_tools(arm)),
         "success": families.SUCCESS[family],
         "config_users": list(families.CONFIG_USERS),
@@ -221,7 +241,7 @@ def claude_argv(executable, prompt, arm, model=None, denied_paths=()):
     file tool (Claude Code's `//` marks an absolute path)."""
     argv = [executable, "-p", prompt, "--permission-mode", "default", "--permission-prompts", "none",
             "--output-format", "stream-json", "--verbose", "--tools", ",".join(session_tools(arm)),
-            "--strict-mcp-config", "--mcp-config", MCP_CONFIG]
+            "--strict-mcp-config", "--mcp-config", MCP_CONFIG, "--settings", MEMORY_SETTINGS]
     if model:
         argv += ["--model", model]
     paths = [rule % ("/" + str(path).lstrip("/")) for path in denied_paths for rule in ("Read(/%s/**)", "Edit(/%s/**)")]
@@ -230,6 +250,59 @@ def claude_argv(executable, prompt, arm, model=None, denied_paths=()):
     argv += ["--allowedTools", *tools]
     assert not set(argv) & set(FORBIDDEN_CLAUDE_FLAGS)
     return argv
+
+
+def auto_memory_on(argv, env):
+    """Whether a Claude Code session started with ARGV and ENV keeps auto
+    memory: unless its environment or a `--settings` value turns it off."""
+    if str(env.get(MEMORY_ENV, "")).strip().lower() in ("1", "true", "yes", "on"):
+        return False
+    for position, value in enumerate(argv[:-1]):
+        if value == "--settings":
+            try:
+                settings = json.loads(argv[position + 1])
+            except ValueError:
+                continue
+            if isinstance(settings, dict) and settings.get("autoMemoryEnabled") is False:
+                return False
+    return True
+
+
+def memory_directory(arm, work, index):
+    """Where Claude Code would keep session INDEX's auto memory: one
+    directory per repository, so worktrees of one repository share it."""
+    return Path(work) / ("shared" if isolation(arm) == "worktree" else "s%d" % index)
+
+
+def shared_memory(arm, work, argvs, envs):
+    """The sessions, counted from 1, that would share an auto-memory
+    directory with another session of the trial."""
+    places = {}
+    for index, (argv, env) in enumerate(zip(argvs, envs), 1):
+        if auto_memory_on(argv, env):
+            places.setdefault(memory_directory(arm, work, index), []).append(index)
+    return sorted(index for members in places.values() if len(members) > 1 for index in members)
+
+
+def session_env(plan, environ, config_dir=None):
+    """The environment of one session: the LangSpan arm's own coordinator,
+    and for Claude Code its configuration with auto memory off."""
+    env = dict(environ)
+    if plan["arm"] == "langspan" and plan.get("langspan"):
+        # The session's own `langspan` commands must reach the coordinator
+        # its hooks name, not a default state directory.
+        env["PATH"] = str(Path(plan["langspan"]).parent) + os.pathsep + env.get("PATH", "")
+        env["LANGSPAN_STATE_DIR"] = plan["state_dir"]
+    if plan["agent"] == "claude":
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+        env[MEMORY_ENV] = "1"
+    return env
+
+
+def start_delay(plan, index):
+    """Seconds session INDEX waits to start: the stagger, unless its task
+    changes the interface its peers use."""
+    return 0 if index == families.leader(plan["tasks"]) else plan.get("stagger_s", 0)
 
 
 def mentions_langspan(name, spec):
@@ -452,21 +525,18 @@ def session_main(plan_path, index):
     """Run session INDEX's agent (the runner's agent command) through the
     tool guard."""
     plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
-    env = dict(os.environ)
-    if plan["arm"] == "langspan":
-        # The session's own `langspan` commands must reach the coordinator
-        # its hooks name, not a default state directory.
-        env["PATH"] = str(Path(plan["langspan"]).parent) + os.pathsep + env.get("PATH", "")
-        env["LANGSPAN_STATE_DIR"] = plan["state_dir"]
+    config_dir = os.environ.get(CLAUDE_CONFIG_ENV)
+    if plan["agent"] == "claude" and not config_dir:
+        print("set %s to the Claude Code configuration directory to use" % CLAUDE_CONFIG_ENV, file=sys.stderr)
+        return 2
+    env = session_env(plan, os.environ, config_dir)
+    # Under --stagger, a session whose task does not change the interface
+    # starts after the others have had that long to change it.
+    time.sleep(start_delay(plan, index))
     if plan["agent"] == "standin":
         argv = [sys.executable, "-I", "-B", str(HERE / "standin_agent.py"), str(plan_path), str(index),
                 plan["standin_mode"]]
     else:
-        config_dir = os.environ.get(CLAUDE_CONFIG_ENV)
-        if not config_dir:
-            print("set %s to the Claude Code configuration directory to use" % CLAUDE_CONFIG_ENV, file=sys.stderr)
-            return 2
-        env["CLAUDE_CONFIG_DIR"] = config_dir
         argv = claude_argv(os.environ.get(CLAUDE_BIN_ENV, "claude"), plan["prompts"][index - 1], plan["arm"],
                            plan.get("model"), peer_paths(plan["work"], plan["sessions"], index))
         argv[0] = shutil.which(argv[0], path=env["PATH"]) or argv[0]
@@ -588,10 +658,13 @@ def hook_log_main(log, command):
         call = call if isinstance(call, dict) else {}
     except ValueError:
         call = {}
+    tool_input = call.get("tool_input") if isinstance(call.get("tool_input"), dict) else {}
+    file_path = tool_input.get("file_path")
     line = json.dumps({
         "at": at, "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
         "event": call.get("hook_event_name"), "tool": call.get("tool_name"),
         "tool_use_id": call.get("tool_use_id"), "session_id": call.get("session_id"),
+        "file_path": file_path[:4096] if isinstance(file_path, str) else None,
         "exit_code": code, "stdout": stdout[:HOOK_LOG_STDOUT].decode("utf-8", "replace"),
         "stdout_truncated": len(stdout) > HOOK_LOG_STDOUT,
     }) + "\n"
@@ -889,6 +962,48 @@ def interface_notices(events):
     return counts
 
 
+WRITE_TOOLS = ("Write", "Edit", "MultiEdit")
+
+
+def hook_context(stdout):
+    """The text a hook's reply placed in the model's context, or the reply
+    itself when it is not a JSON object."""
+    try:
+        reply = json.loads(stdout)
+    except ValueError:
+        # A reply cut at the log's bound: its quotes are still escaped.
+        return stdout.replace('\\"', '"')
+    output = reply.get("hookSpecificOutput") if isinstance(reply, dict) else None
+    context = output.get("additionalContext") if isinstance(output, dict) else None
+    return context if isinstance(context, str) else ""
+
+
+def notice_before_write(task, hook_log):
+    """For a task that expects an interface notice (its `notice`), whether
+    LangSpan's hooks placed one in the session's context before its first
+    Write, Edit or MultiEdit of a file the task owns, in the order the hook
+    log records them. A notice given by that write's own hook (a break
+    alert, read with the write's result) is not before it. None when the
+    task expects no notice, or there is no hook log or no such write."""
+    if "notice" not in task or hook_log is None or not hook_log.is_file():
+        return None
+    owned = tuple("/" + unit.split("::", 1)[0] for unit in task["owns"])
+    entries = []
+    for line in hook_log.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    first = next((position for position, entry in enumerate(entries)
+                  if entry.get("event") == "PreToolUse" and entry.get("tool") in WRITE_TOOLS
+                  and str(entry.get("file_path") or "").endswith(owned)), None)
+    if first is None:
+        return None
+    return any(re.search(task["notice"], hook_context(str(entry.get("stdout") or ""))) for entry in entries[:first])
+
+
 def refusal_items(events):
     """LangSpan's refusals, each with what the same session did next."""
     items = []
@@ -995,6 +1110,7 @@ def build_record(plan, final, runner_dir, run_dir, events, started_at, total_ela
             "transcript": transcript,
             "hook_log": hook_log.name if hook_log.is_file() else None,
             "standin_informed": informed if isinstance(informed, bool) else None,
+            "notice_before_write": notice_before_write(task, hook_log) if plan["arm"] == "langspan" else None,
         })
 
     def total(field):
@@ -1022,6 +1138,8 @@ def build_record(plan, final, runner_dir, run_dir, events, started_at, total_ela
         "total_elapsed_s": total_elapsed, "time_limit_s": plan["time_limit_s"],
         "ignored_options": plan["ignored_options"],
         "isolation": isolation(plan["arm"]),
+        "stagger_s": plan.get("stagger_s", 0),
+        "auto_memory": plan.get("auto_memory", "not_applicable"),
         "tool_check": {
             "status": "failed" if failed_checks else ("passed" if checks and set(checks) == {"passed"} else "unknown"),
             "failed_sessions": failed_checks,
@@ -1140,7 +1258,8 @@ def manifest_for(plan, clones, repo):
                 ],
                 "agents": [
                     {"id": "s%d" % index, "argv": [python, "-I", "-B", driver, "session", plan["plan_path"], str(index)],
-                     "cwd": str(path), "timeout_seconds": plan["time_limit_s"], "max_output_bytes": TRANSCRIPT_BYTES}
+                     "cwd": str(path), "timeout_seconds": plan["time_limit_s"] + start_delay(plan, index),
+                     "max_output_bytes": TRANSCRIPT_BYTES}
                     for index, path in enumerate(clones, 1)
                 ],
                 "checks": [
@@ -1150,6 +1269,15 @@ def manifest_for(plan, clones, repo):
             }},
         }],
     }
+
+
+def refuse_shared_memory(plan, argvs, envs):
+    """Refuse a trial whose sessions, started with ARGVS and ENVS, would
+    keep auto memory in one directory."""
+    shared = shared_memory(plan["arm"], plan["work"], argvs, envs)
+    if shared:
+        raise Refused("sessions %s would share one Claude Code auto-memory directory, a channel between "
+                      "sessions; every session must turn auto memory off" % ", ".join(map(str, shared)))
 
 
 def preflight(args, plan):
@@ -1165,6 +1293,11 @@ def preflight(args, plan):
             raise Refused("%s has LangSpan entries that would reach every session in every arm: %s. Use a clean "
                           "Claude Code configuration (benchmarks/coordination/README.md, \"Prepare a clean agent "
                           "configuration\")." % (config_dir, "; ".join(found)))
+        work = Path(plan["work"])
+        refuse_shared_memory(plan, [
+            claude_argv(os.environ.get(CLAUDE_BIN_ENV, "claude"), "", plan["arm"], plan["model"],
+                        peer_paths(work, plan["sessions"], index)) for index in range(1, plan["sessions"] + 1)],
+            [session_env(plan, os.environ, config_dir)] * plan["sessions"])
     if plan["arm"] != "langspan":
         return None
     if args.langspan is None:
@@ -1180,7 +1313,8 @@ def run(args):
     output = args.output.resolve()
     check_output_location(output)
     plan = make_plan(args.arm, args.family, args.sessions, args.seed, args.agent, args.standin_mode, args.time_limit,
-                     model=os.environ.get(CLAUDE_MODEL_ENV) or None, langspan_given=args.langspan is not None)
+                     model=os.environ.get(CLAUDE_MODEL_ENV) or None, langspan_given=args.langspan is not None,
+                     stagger=args.stagger)
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     work = output / "work"
     runner_dir = output / "runner"
@@ -1264,6 +1398,9 @@ def main(argv=None):
     parser.add_argument("--standin-mode", choices=STANDIN_MODES,
                         help="follow (default): use what the arm tells the session; ignore: use nothing")
     parser.add_argument("--time-limit", type=float, default=1200, help="seconds per session (at most 3600)")
+    parser.add_argument("--stagger", type=float, default=0,
+                        help="start the session whose task changes an interface first, and the others this many "
+                             "seconds later (default 0: all at once; at most %d)" % MAX_STAGGER)
     parser.add_argument("--langspan", type=Path, help="the langspan binary, for the langspan arm")
     parser.add_argument("--output", type=Path, help="a new result directory; required with --run")
     parser.add_argument("--run", action="store_true", help="prepare and run; without it, only print the plan")
@@ -1274,7 +1411,7 @@ def main(argv=None):
         if not args.run:
             plan = make_plan(args.arm, args.family, args.sessions, args.seed, args.agent, args.standin_mode,
                              args.time_limit, model=os.environ.get(CLAUDE_MODEL_ENV) or None,
-                             langspan_given=args.langspan is not None)
+                             langspan_given=args.langspan is not None, stagger=args.stagger)
             print(json.dumps({"mode": "plan_only", "executed_commands": 0,
                               "ignored_options": plan["ignored_options"], "success": plan["success"],
                               "sessions": [{"session": i, "branch": b, "task": t["id"], "prompt": p}

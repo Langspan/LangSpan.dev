@@ -22,14 +22,18 @@ event log. Unlike a host, it waits for each hook's decision past the hook's
 configured timeout (see HOOK_SECONDS), so the dry run's result does not
 depend on how loaded the machine is. When a hook returns, any process it
 left in its group is killed, and a signal that stops the stand-in first
-kills the hook it is running. A ``follow`` session there first waits, within
-a bound, until LangSpan has told it every peer's task, and before it ends
-waits until every peer shows edits and LangSpan's interface notice its task
-expects (the task's ``notice``) has arrived, so that no peer acts before it
-could have been told of this one. A refused edit is read again and retried
-once, then skipped. It prints a short transcript in the shape of
-``claude -p --output-format stream-json``: a first line listing its tools,
-as Claude Code's does, and the result line last.
+kills the hook it is running. A ``follow`` session there whose task depends
+on a peer's first waits, within a bound, until LangSpan has told it every
+peer's task. Before it ends it waits until every peer shows edits and
+LangSpan's interface notice its task expects (the task's ``notice``) has
+arrived, so that no peer acts before it could have been told of this one; a
+session whose task changes an interface (``leads``) waits until every peer
+has ended, so its change stays in flight while they work. When the notice
+tells it of the change only after its edit, it makes the informed edit then.
+A refused edit is read again and retried once, then skipped. It prints a
+short transcript in the shape of ``claude -p --output-format stream-json``:
+a first line listing its tools, as Claude Code's does, and the result line
+last.
 """
 
 import json
@@ -187,7 +191,7 @@ def briefed_peers(session):
         return {}
     peers = {}
     for peer in briefing.get("peers") or []:
-        peers[str(peer.get("workspace_id"))] = {"task": peer.get("summary"),
+        peers[str(peer.get("workspace_id"))] = {"task": peer.get("summary"), "ended": peer.get("ended") is True,
                                                  "edited": bool(peer.get("editing") or peer.get("recent"))}
     return peers
 
@@ -208,13 +212,40 @@ def wait_for(session, peers_expected, ready, deadline, also=lambda: True):
     Returns what was heard."""
     heard = {}
     while True:
-        heard.update(briefed_peers(session))
+        for name, peer in briefed_peers(session).items():
+            # A peer's task line goes once it ends; keep the one heard before.
+            heard[name] = dict(peer, task=peer["task"] or heard.get(name, {}).get("task"))
         if len([name for name, peer in heard.items() if ready(peer)]) >= peers_expected and also():
             return heard
         if time.monotonic() > deadline:
             return heard
         session.read(Path("shelf") / "settings.py")
         time.sleep(POLL_SECONDS)
+
+
+def apply_edits(session, ops):
+    """Make each edit of OPS through SESSION; return the paths edited."""
+    edited = []
+    for op in ops:
+        for name in op.get("paths", [op.get("path")]):
+            path = Path(name)
+            if op["op"] == "write":
+                path.parent.mkdir(parents=True, exist_ok=True)
+                content = op["content"]
+                done = session.edit(path, "Write", {"file_path": str(path.resolve()), "content": content},
+                                    lambda: path.write_text(content, encoding="utf-8"))
+            else:
+                session.read(path)
+                before = path.read_text(encoding="utf-8")
+                if op["old"] not in before:
+                    continue
+                after = before.replace(op["old"], op["new"]) if op.get("all") else before.replace(op["old"], op["new"], 1)
+                done = session.edit(path, "Edit", {"file_path": str(path.resolve()), "old_string": op["old"],
+                                                   "new_string": op["new"], "replace_all": bool(op.get("all"))},
+                                    lambda: path.write_text(after, encoding="utf-8"))
+            if done:
+                edited.append(name)
+    return edited
 
 
 def main(argv):
@@ -232,7 +263,7 @@ def main(argv):
     hooks_file = Path(".claude/settings.local.json")
     settings = json.loads(hooks_file.read_text(encoding="utf-8")) if hooks_file.is_file() else {}
     log_path = Path(os.environ.get("LANGSPAN_BENCH_RUN_DIR", ".")) / ("standin-s%d.jsonl" % index)
-    edited, informed, heard = [], False, {}
+    informed, revised, heard = False, False, {}
     session_id = str(uuid.uuid4())
     # Claude Code's first event lists the session's tools; the tool guard checks it.
     print(json.dumps({"type": "system", "subtype": "init", "session_id": session_id, "model": "standin",
@@ -243,49 +274,47 @@ def main(argv):
         session.fire("SessionStart", source="startup")
         session.fire("UserPromptSubmit", prompt=prompt)
         sharing = bool(settings) and shutil.which("langspan") is not None
-        if mode == "follow":
-            if sharing:
-                heard = wait_for(session, plan["sessions"] - 1, lambda peer: bool(peer["task"]), deadline)
-            # The whole prompt but the session's own task counts, as it would
-            # for a real agent, so peer information leaking into the shared
-            # text shows in a dry run.
-            shared = prompt.replace(task["task"], "").replace(task["details"], "")
+        # The whole prompt but the session's own task counts, as it would
+        # for a real agent, so peer information leaking into the shared
+        # text shows in a dry run.
+        shared = prompt.replace(task["task"], "").replace(task["details"], "")
+
+        def told():
             information = "\n".join(
                 [shared] + session.context + [peer["task"] for peer in heard.values() if peer["task"]])
-            informed = "trigger" in task and re.search(task["trigger"], information) is not None
+            return "trigger" in task and re.search(task["trigger"], information) is not None
+
+        # Only a task that depends on its peers' work waits to hear of it.
+        if mode == "follow" and sharing and "trigger" in task:
+            heard = wait_for(session, plan["sessions"] - 1, lambda peer: bool(peer["task"]), deadline)
+        for name in task.get("reads", []):
+            session.read(Path(name))
+        informed = mode == "follow" and told()
         edits = "follow" if informed else ("hedge" if mode == "hedge" else "ignore")
-        for op in task["standin"][edits]:
-            for name in op.get("paths", [op.get("path")]):
-                path = Path(name)
-                if op["op"] == "write":
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    content = op["content"]
-                    done = session.edit(path, "Write", {"file_path": str(path.resolve()), "content": content},
-                                        lambda: path.write_text(content, encoding="utf-8"))
-                else:
-                    session.read(path)
-                    before = path.read_text(encoding="utf-8")
-                    if op["old"] not in before:
-                        continue
-                    after = before.replace(op["old"], op["new"]) if op.get("all") else before.replace(op["old"], op["new"], 1)
-                    done = session.edit(path, "Edit", {"file_path": str(path.resolve()), "old_string": op["old"],
-                                                       "new_string": op["new"], "replace_all": bool(op.get("all"))},
-                                        lambda: path.write_text(after, encoding="utf-8"))
-                if done:
-                    edited.append(name)
+        edited = apply_edits(session, task["standin"][edits])
         if mode == "follow" and sharing:
-            # A peer that shows edits has finished waiting for this one. A
-            # notice the task expects arrives with a later briefing.
-            notice = task.get("notice")
-            wait_for(session, plan["sessions"] - 1, lambda peer: peer["edited"], deadline,
-                     lambda: not notice or any(re.search(notice, text) for text in session.context))
+            if task.get("leads"):
+                # Peers learn of this session's change while it is in
+                # flight, so it stays until every peer has ended.
+                wait_for(session, plan["sessions"] - 1, lambda peer: peer["ended"], deadline)
+            else:
+                # A peer that shows edits has finished waiting for this one.
+                # A notice the task expects arrives with a later briefing.
+                notice = task.get("notice")
+                wait_for(session, plan["sessions"] - 1, lambda peer: peer["edited"], deadline,
+                         lambda: not notice or any(re.search(notice, text) for text in session.context))
+            if not informed and told():
+                # Told only after its edit, as by an alert at the write:
+                # an agent that follows it fixes its call.
+                informed = revised = True
+                edited += apply_edits(session, task["standin"]["follow"])
         session.fire("Stop", stop_hook_active=False)
         session.fire("SessionEnd", reason="other")
     print(json.dumps({
         "type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
         "result": "Stand-in %s edit of %s." % (mode, ", ".join(edited) or "nothing"),
         "session_id": session.session_id, "permission_denials": [],
-        "standin": {"mode": mode, "informed": informed, "peers_heard": sorted(heard),
+        "standin": {"mode": mode, "informed": informed, "revised": revised, "peers_heard": sorted(heard),
                     "hook_calls": session.calls, "late_hooks": session.late_hooks,
                     "refusals": session.refusals, "edited": edited},
     }))

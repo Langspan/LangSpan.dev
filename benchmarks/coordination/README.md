@@ -70,6 +70,14 @@ Every session, in every arm, gets the same tools and the same denials, so in
   allowed.
 - **Nobody answers a permission prompt** (`--permission-prompts none`): a call
   outside the allowed list is refused, and the record counts it by kind.
+- **No auto memory:** Claude Code keeps auto memory in one directory per
+  repository, so the LangSpan arm's worktrees of one repository would share
+  one, a channel between sessions that the other arms lack. Every session
+  turns it off with Claude Code's own `autoMemoryEnabled` setting
+  (`--settings '{"autoMemoryEnabled": false}'`) and its
+  `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` environment variable. The preflight
+  check refuses a trial whose sessions would share a memory directory, and
+  the record's `auto_memory` is `off`.
 
 The **tool guard** checks this when the session starts. The driver runs every
 session, stand-in included, through it: it passes each stream-json line on to
@@ -84,12 +92,12 @@ lists its tools fails too.
 ## Files
 
 - `driver.py`: one trial of an arm, task family, session count and seed.
-- `tasks.py`: the two task families, their prompts and what the oracle checks.
+- `tasks.py`: the three task families, their prompts and what the oracle checks.
 - `fixture/`: the fixture repository, a small Python package with its own tests.
 - `oracle.py`: the combined-integration oracle, run on the merged result.
 - `standin_agent.py`: the dry-run agent; it makes one of its task's fixed
   edits and no model call.
-- `run-record.schema.json`: the driver's run record v3.
+- `run-record.schema.json`: the driver's run record v4.
 - `runner.py`: validate-only by default; opt-in real-process execution.
 - `manifest.schema.json`: command manifest v1.
 - `manifest.template.json`: owner-filled template for the three required arms.
@@ -117,17 +125,29 @@ definition, on the merged tree, never on a branch alone.
 | --- | --- | --- | --- |
 | `rename_vs_new_caller` | One session renames `parse_config` to `load_config` across the package; each other session adds a feature module that calls the parser, and "if another session renames that parser, call it by its new name" | A new caller uses the old name: every branch passes alone, and the merge breaks | The combined tree has `load_config` and no `parse_config`, every caller in the package uses `load_config`, every new feature module calls `load_config` (not an alias) and works, and the package's tests pass |
 | `contradictory_defaults` | Each session needs its own function to use a value of one of the defaults in `shelf/settings.py`. Some defaults are wanted by two sessions at different values (a pair), others by one session alone. Each task defines what to do: "if another session's task sets the default to a different value, leave the default unchanged and give your function its value in its own module; otherwise change the default". A session may get an unrelated control task where the keys run out | A pair both change the default: Git refuses the second merge, or one requirement is silently lost. A session alone keeps the default and sets its value locally, a hedge that ignores what its task asks | Each function returns the value its task asked for; every shared default two tasks wanted changed to different values is unchanged; every shared default only one task wanted changed holds that task's value; and the package's tests pass |
+| `discovered_change` | One session, the changer, adds `expired(items, today)` in `shelf/expiry.py` and counts the days with `days_left` from `shelf/dates.py`. Each other session, a dependent, adds a feature module that counts the days with `days_left`, and "if another session changes how `days_left` is called, call it the new way". No task text says that `days_left` changes | `days_left(day)` counts from the clock, so it cannot count from `today`: the changer finds that while working and gives it a second, required parameter. A dependent still calls `days_left(day)`: every branch passes alone, and the merge breaks | `days_left` requires two arguments, with no default, alias or wrapper that keeps one-argument calls working; `shelf/orders.py`, `expired` and every new feature module call it with two arguments; every function returns what its task asked for; and the package's tests pass. A module that counts the days itself, or falls back to the one-argument call, fails |
 
 Notes a session writes in `notes/sN.md` are kept as evidence for review,
 including notes on a branch Git refuses to merge. They never change the
 verdict.
 
-A session can meet its family's success definition only by knowing its peers'
-tasks, which is what the arms differ in. Without that knowledge, a new caller
-uses the name it can see, and a contradiction task cannot tell whether its
-default has a partner: changing the default fails every pair, and keeping it
-fails every task alone. The pilot's sessions all hedged, which the earlier
-definition (pairs only) accepted in every arm.
+In the first two families, a session can meet its family's success definition
+only by knowing its peers' tasks, which is what the arms differ in. Without
+that knowledge, a new caller uses the name it can see, and a contradiction
+task cannot tell whether its default has a partner: changing the default fails
+every pair, and keeping it fails every task alone. The pilot's sessions all
+hedged, which the earlier definition (pairs only) accepted in every arm.
+
+Both of those families put the conflict in the task text: the rename session's
+task names the rename. The second pilot's `awareness_only` arm, which shares
+task text, therefore tied the `langspan` arm. In `discovered_change`, task
+text is not enough. The changer's need for the change comes from the code it
+works on, so only information from the work itself can tell a dependent:
+LangSpan's notice of the changed signature in another worktree, or its alert
+at the write of a call that no longer fits. Sharing every peer's task, as
+`awareness_only` does, says that the changer uses `days_left`, not that it
+changes it. A model can still guess that a helper that reads the clock must
+change for `expired(items, today)`; the stand-in never guesses.
 
 N is 2, 5 or 10. In `contradictory_defaults` the seed chooses the layout of
 pairs, keys alone and at most one control task. At N = 2 it is one pair, two
@@ -136,7 +156,8 @@ at least one pair and one key alone (2 pairs and 1 alone, 1 pair and 3 alone,
 or 1 pair, 2 alone and the control task); at N = 10 the five keys allow only 4
 pairs, 1 key alone and the control task. The seed also chooses which features
 or keys run, which side a key alone gets, and which session gets which task;
-the same arguments always give the same assignment.
+the same arguments always give the same assignment. `discovered_change` has
+one changer and N - 1 dependents, chosen from nine features.
 `python3 benchmarks/coordination/driver.py --arm worktrees
 --family rename_vs_new_caller --sessions 5 --seed 7` prints the plan and every
 prompt without running anything, and lists any option the arm ignores.
@@ -146,8 +167,9 @@ prompt without running anything, and lists any option the arm ignores.
 A trial first checks the agent configuration (a real run) and the
 `--langspan` binary (the LangSpan arm). A refused check writes `plan.json` and
 a `record.json` with status `refused` and the reason, prepares nothing and
-exits 2. Otherwise the trial runs the N sessions at once, each in its own
-checkout and through the tool guard, and then:
+exits 2. Otherwise the trial runs the N sessions at once (or staggered, see
+[Staggered start](#staggered-start)), each in its own checkout and through
+the tool guard, and then:
 
 1. commits whatever each session left uncommitted, and copies each checkout's
    final commit into the fixture repository as `bench/sN`;
@@ -160,6 +182,33 @@ checkout and through the tool guard, and then:
    followed them, interface notices delivered, and failed and recovered
    scans;
 6. writes `record.json`, validated against `run-record.schema.json`.
+
+### Staggered start
+
+With all sessions started at once, a change reaches its peers only after they
+have begun writing: in the second pilot, the rename landed about 15 seconds
+after the new callers started writing, so LangSpan's notice reached each one
+11 to 18 seconds after its first write. `--stagger SECONDS` starts the session
+whose task changes an interface its peers use first, the rename session or
+the changer, and every other session that many seconds later. The default is
+0, all at once. A family without such a task (`contradictory_defaults`)
+refuses the option.
+
+A delayed session's time limit starts when the session does, so its runner
+bound is `--time-limit` plus the stagger; the two together are at most 3,600
+seconds, and the stagger at most 600. The record keeps the stagger as
+`stagger_s`, and, per task in the LangSpan arm, `notice_before_write`: whether
+the session's hook log shows LangSpan's notice of the change before the
+session's first write of a file its task owns.
+
+```sh
+python3 benchmarks/coordination/driver.py --arm langspan --family discovered_change \
+  --sessions 5 --seed 1 --stagger 60 --langspan target/release/langspan \
+  --run --output /tmp/k1-stagger
+```
+
+Choose a stagger longer than the changing session takes to make its change;
+LangSpan tells peers of the change once it is on disk.
 
 ### Dry run (no model)
 
@@ -176,19 +225,28 @@ The stand-in agent makes one of the fixed edits its task defines:
   peers: the peer task text in the awareness-only prompt, or LangSpan's hook
   briefings and `langspan brief` in the LangSpan arm. When that information
   shows the peer work its task depends on, it makes the edit the task's
-  details ask for; otherwise the uninformed edit. In the LangSpan arm it
-  waits until LangSpan has told it every peer's task, and before it ends until
-  every peer shows edits and, for a new caller, until LangSpan's notice of the
-  rename has arrived. Each wait lasts at most until 30 seconds before the
-  session's `--time-limit`, so a loaded machine slows a dry run instead of
-  changing what its sessions learn.
+  details ask for; otherwise the uninformed edit. A dependent in
+  `discovered_change` first reads `shelf/dates.py` and the package's caller,
+  `shelf/orders.py`, as an agent reads how a helper is called. In the
+  LangSpan arm, a session whose task depends on a peer's waits until
+  LangSpan has told it every peer's task. Before it ends, it waits until
+  every peer shows edits and, for a new caller or a dependent, until
+  LangSpan's notice of the change has arrived; the session whose task changes
+  the interface waits until every peer has ended. Each wait lasts at most
+  until 30 seconds before the session's `--time-limit`, so a loaded machine
+  slows a dry run instead of changing what its sessions learn. When
+  LangSpan's notice or alert tells a session of the change only after its
+  edit, it makes the informed edit then, as an agent told of a broken call
+  fixes it.
 - `--standin-mode ignore` always makes the uninformed edit.
 - `--standin-mode hedge` makes the edit that holds up whatever peers do,
   without knowing: a contradiction task keeps the default and sets its value
-  locally. In `rename_vs_new_caller` it is the uninformed edit.
+  locally; a changer gives the new parameter a default, so old calls keep
+  working; a dependent counts the days itself without `days_left`. In
+  `rename_vs_new_caller` it is the uninformed edit.
 
 The record's `standin_informed` says, per session, whether the information
-changed its edit. In the LangSpan arm the stand-in runs the installed hooks
+changed its edit, before or after its first write. In the LangSpan arm the stand-in runs the installed hooks
 with Claude Code's event shapes around each read and edit, so the run passes
 through the real hooks, the coordinator and its SQLite event log. Every
 stand-in prints a first line listing its arm's tools, which the tool guard
@@ -209,13 +267,18 @@ the oracle tells the arms apart:
 - in `worktrees`, no session is informed, and `follow` fails the combined
   test as `ignore` does wherever a task depends on a peer's;
 - in `awareness_only`, the prompt's peer task text informs every session that
-  depends on a peer, and `follow` passes;
-- in `langspan`, LangSpan's briefings inform them, `follow` passes at N = 2, 5
-  and 10, and in `rename_vs_new_caller` every new caller's session receives
-  LangSpan's in-flight notice of `load_config`, in its hook log and as an
-  `inflight_delivered` event in the coordinator's log;
-- `ignore` fails in every arm, and `hedge` fails `contradictory_defaults` at
-  N = 5 in every arm, where every layout has a key alone.
+  depends on a peer in the first two families, and `follow` passes; in
+  `discovered_change` it informs none, and `follow` fails;
+- in `langspan`, LangSpan's briefings and notices inform them, `follow`
+  passes in every family at N = 2, 5 and 10, every new caller's session
+  receives LangSpan's in-flight notice of `load_config`, and every
+  dependent's session receives LangSpan's notice of `def days_left(day,
+  today)`, in its hook log and as an event in the coordinator's log;
+- with `--stagger 15`, in `discovered_change` at N = 5, every dependent starts
+  after the changer's edit, receives the notice before its first write
+  (`notice_before_write` is `true`), and writes its module once;
+- `ignore` fails in every arm, and `hedge` fails `contradictory_defaults` and
+  `discovered_change` at N = 5 in every arm.
 
 A dry run shows that the harness and the oracle work; it says nothing about
 agents.
@@ -256,8 +319,10 @@ the tool guard fails the trial if one appears.
 Only an operator starts these; the test suite never does. Each session is
 `claude -p PROMPT --permission-mode default --permission-prompts none
 --output-format stream-json --verbose --tools ... --strict-mcp-config
---mcp-config '{"mcpServers": {}}' --disallowedTools ... --allowedTools ...`,
-built by `claude_argv` in `driver.py` with the limits of
+--mcp-config '{"mcpServers": {}}' --settings '{"autoMemoryEnabled": false}'
+--disallowedTools ... --allowedTools ...`, with
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` in its environment, built by
+`claude_argv` and `session_env` in `driver.py` with the limits of
 [The same limits in every arm](#the-same-limits-in-every-arm). The allowed
 list (`CLAUDE_TOOLS`) holds reads and edits under the session's checkout, the
 fixture's tests and a few Git commands, plus a few `langspan` commands in the
@@ -287,10 +352,10 @@ model turn.
    arm records `--langspan` in `ignored_options` instead of using it.
 3. Keep every record, refused, failed and timed-out ones included.
 
-**Cost.** One trial starts N sessions at once, each bounded by `--time-limit`
-seconds (default 1,200, at most 3,600). Both families under all three arms
-cost 3 × 2 × (2 + 5) = 42 sessions per repetition at N = 2 and 5, and 102
-with N = 10 as well.
+**Cost.** One trial starts N sessions, each bounded by `--time-limit` seconds
+(default 1,200, at most 3,600). The three families under all three arms cost
+3 × 3 × (2 + 5) = 63 sessions per repetition at N = 2 and 5, and 153 with
+N = 10 as well.
 
 ### Where records go
 
@@ -307,7 +372,7 @@ with N = 10 as well.
 | `runner/RUN_ID/oracle.json` | The oracle's verdict per task |
 | `runner/RUN_ID/notes/sN/`, `runner/RUN_ID/merge-sN.log` | Each branch's notes, and each merge's output |
 | `events.jsonl`, `coordinator.log` | LangSpan arm: the coordinator's event log and its log |
-| `hooks-sN.jsonl` | LangSpan arm: every hook call of session N, with its time, event, tool call ID, exit code and what LangSpan returned (a briefing's text, a notice, a refusal) |
+| `hooks-sN.jsonl` | LangSpan arm: every hook call of session N, with its time, event, tool call ID, the file a file tool names, exit code and what LangSpan returned (a briefing's text, a notice, a refusal) |
 | `work/` | The fixture repository, each session's checkout (in the LangSpan arm, worktrees of `work/shared`) and the integration worktree |
 
 To check what LangSpan said before an action, find the action's tool call in
@@ -337,6 +402,9 @@ record under `docs/evidence/`.
 | `interface_notices` (per task) | LangSpan arm: how many interface notices the coordinator placed in the session's context, from its `inflight_delivered` (another worktree's uncommitted signatures) and `interface_alerted` events; `null` in the other arms |
 | `coordinator_scans` | LangSpan arm: each `scan_failed` and `scan_recovered` event, with the session whose worktree it concerns and the failure's detail |
 | `tokens` | The sessions' reported usage, each session's `usage` summed over its result lines, and the sessions summed only when every session reported it; otherwise `partial` or `unknown` |
+| `notice_before_write` (per task) | LangSpan arm, a new caller or a dependent: `true` when its hook log shows LangSpan's notice of the change in its context before its first `Write`, `Edit` or `MultiEdit` of a file its task owns, `false` when the notice came with that write or later, or never; `null` in the other arms, for other tasks, or when the session wrote no such file. A write through a shell command is not counted. The alert LangSpan gives at a write is read with the write's result, so it does not count as before |
+| `stagger_s` | The `--stagger` the trial ran with; 0 when every session started at once |
+| `auto_memory` | `off` for Claude Code sessions, which all run with auto memory off; `not_applicable` for the stand-in |
 | `isolation` | `worktree` in the LangSpan arm, `clone` in the others |
 | `elapsed_s`, `total_elapsed_s` | Monotonic time of the session phase, and of the whole trial |
 | `versions` | The agent CLI's `--version`, the requested model (`LANGSPAN_BENCH_MODEL`, or `null` for the configuration's default), the models sessions reported, the LangSpan commit and binary digest, Git and Python |
@@ -589,18 +657,22 @@ tests normal and failed output, parallel rendezvous, timeout/descendant
 cleanup, repetition retention, output bounds, spawn errors, argv literalness,
 the dry-run gate, metadata phases, and unknown/evidence-backed assessments.
 
-`test_driver.py` runs the whole dry-run pipeline for every arm and both
+`test_driver.py` runs the whole dry-run pipeline for every arm and all three
 families at N = 2 and N = 5 with `follow` and `ignore`, the LangSpan arm at
-N = 10 with both, and `hedge` in `contradictory_defaults` at N = 5 in every
-arm, with the expectations listed under [Dry run](#dry-run-no-model). The
+N = 10 with both, `hedge` in `contradictory_defaults` and `discovered_change`
+at N = 5 in every arm, and `discovered_change` with `--stagger 15` in the
+LangSpan arm, with the expectations listed under [Dry run](#dry-run-no-model). The
 LangSpan arm goes through the real hooks, coordinator, Unix socket and SQLite
 store. The suite also provokes a real stale-source refusal and checks that
 the record and the hook log keep it. It checks the Claude Code command line,
 the tool guard against scripts that list a cross-session tool, a hosted
 connector's tool, an MCP server, a later tool list, an unlisted call or no
 tool list, the record of a failed check, the seeded assignment and its
-layouts, that each task line names what a peer needs, prompts, each arm's
-checkouts, both oracles' success definitions, notes and merge logs kept
-across a failed merge, denial kinds, a session with two result lines, scan
-events and interface notices, and the configuration preflight's refusal and
-its record. None of this output is committed as benchmark data.
+layouts, that each task line names what a peer needs, that no
+`discovered_change` prompt in any arm names the change, prompts, each arm's
+checkouts, every family oracle's success definition and the hedges it
+refuses, notes and merge logs kept across a failed merge, denial kinds, a
+session with two result lines, scan events and interface notices, that every
+Claude Code session has auto memory off and the check that refuses shared
+memory, the stagger's validation and time limits, and the configuration
+preflight's refusal and its record. None of this output is committed as benchmark data.
