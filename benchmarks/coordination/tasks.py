@@ -206,9 +206,12 @@ CONTROL["standin"]["follow"] = CONTROL["standin"]["hedge"] = CONTROL["standin"][
 # discovered_change: no task text names the interface change. The changer's
 # task needs `days_left` in `shelf/dates.py` to count from a given day, which
 # it cannot: it reads the clock. The changer finds that while working and
-# must give it a second, required parameter. Each dependent's task calls
-# `days_left` as it is today, so only information from the work itself (an
-# interface notice or a break alert) can tell it of the change.
+# must give it a second, required parameter. `days_left` gives None once a
+# day has passed, so no arithmetic on one-argument calls recovers the count
+# from a past `today` (issue #218): the change is the only way to finish.
+# Each dependent's task calls `days_left` as it is today, so only
+# information from the work itself (an interface notice or a break alert)
+# can tell it of the change.
 CHANGED = "days_left"
 CHANGED_ARITY = 2
 DATES = "shelf/dates.py"
@@ -223,14 +226,14 @@ INTERFACE = {"module": "shelf.dates", "name": CHANGED, "arity": CHANGED_ARITY}
 EXPIRY_SOURCE = (
     "from shelf.dates import days_left\n\n\n"
     "def expired(items, today):\n"
-    "    return [name for name, day in items if days_left(day, today) < 0]\n"
+    "    return [name for name, day in items if days_left(day, today) is None]\n"
 )
 CHANGER = {
     "id": "changer-expired",
     "task": ("Add a module `shelf/expiry.py` with a function `expired(items, today)` that returns the names of "
              "the items whose best-before date is before `today`, in the order given."),
     "details": (
-        "%s; `today` is a `datetime.date`. Count the days with `days_left` in `shelf/dates.py`; do not write a "
+        "%s; `today` is a `datetime.date`, any day, past or future. Count the days with `days_left` in `shelf/dates.py`; do not write a "
         "second date helper. Add a unit test for it in `tests/test_expiry.py` that passes whatever day it runs."
         % ITEMS_ARE
     ),
@@ -266,6 +269,13 @@ CHANGER["standin"] = {
          "new": "(day - (today or datetime.date.today())).days"},
         {"op": "write", "path": "shelf/expiry.py", "content": EXPIRY_SOURCE},
     ],
+    # The third pilot's workaround: two one-argument calls and their
+    # difference, with `days_left` left as it is. It cannot find the expired
+    # items, so the task fails, and the trial is `change_not_made`.
+    "workaround": [{"op": "write", "path": "shelf/expiry.py", "content": (
+        "from shelf.dates import days_left\n\n\n"
+        "def expired(items, today):\n"
+        "    return [name for name, day in items if days_left(day) - days_left(today) < 0]\n")}],
 }
 
 # (module, function, parameters, what it returns, body with LEFT(day) where
@@ -273,31 +283,34 @@ CHANGER["standin"] = {
 DATED_FEATURES = (
     ("fresh", "fresh_items", "items",
      "the names of the items with at least 3 days left before their best-before date, in the order given",
-     "[name for name, day in items if LEFT(day) >= 3]", [([DATED_SAMPLE], ["jam"]), ([[]], [])]),
+     "[name for name, day in items if (LEFT(day) or 0) >= 3]", [([DATED_SAMPLE], ["jam"]), ([[]], [])]),
     ("soon", "expiring_soon", "items, within",
      "the names of the items whose best-before date is from today to `within` days away, in the order given",
-     "[name for name, day in items if 0 <= LEFT(day) <= within]",
+     "[name for name, day in items if LEFT(day) is not None and LEFT(day) <= within]",
      [([DATED_SAMPLE, 2], ["milk", "eggs"]), ([DATED_SAMPLE, 0], ["eggs"])]),
     ("first", "first_to_expire", "items",
-     "the name of the item with the fewest days left (the first one on a tie), or None when there are none",
-     "min(items, key=lambda item: LEFT(item[1]))[0] if items else None", [([DATED_SAMPLE], "bread"), ([[]], None)]),
+     "the name of the unexpired item with the fewest days left (first on a tie), or None if there is none",
+     "min((item for item in items if LEFT(item[1]) is not None), key=lambda item: LEFT(item[1]), "
+     "default=(None,))[0]", [([DATED_SAMPLE], "eggs"), ([[]], None)]),
     ("gone", "count_expired", "items", "how many of the items are past their best-before date",
-     "sum(1 for name, day in items if LEFT(day) < 0)", [([DATED_SAMPLE], 1), ([[]], 0)]),
-    ("left", "days_by_name", "items", "a dictionary from each item's name to the days left before its best-before date",
-     "{name: LEFT(day) for name, day in items}", [([DATED_SAMPLE], {"milk": 2, "bread": -1, "jam": 30, "eggs": 0})]),
+     "sum(1 for name, day in items if LEFT(day) is None)", [([DATED_SAMPLE], 1), ([[]], 0)]),
+    ("left", "days_by_name", "items",
+     "a dict from each item's name to the days left before its best-before date, or None once it has passed",
+     "{name: LEFT(day) for name, day in items}", [([DATED_SAMPLE], {"milk": 2, "bread": None, "jam": 30, "eggs": 0})]),
     ("urgent", "by_urgency", "items",
-     "the item names sorted by the days left before their best-before date, fewest first, ties in the order given",
-     "[name for name, day in sorted(items, key=lambda item: LEFT(item[1]))]",
+     "the item names, those past their best-before date first, then by fewest days left, ties in the order given",
+     "[name for name, day in sorted(items, key=lambda item: -1 if LEFT(item[1]) is None else LEFT(item[1]))]",
      [([DATED_SAMPLE], ["bread", "eggs", "milk", "jam"])]),
     ("last", "last_to_expire", "items",
      "the name of the item with the most days left (the first one on a tie), or None when there are none",
-     "max(items, key=lambda item: LEFT(item[1]))[0] if items else None", [([DATED_SAMPLE], "jam"), ([[]], None)]),
+     "max(items, key=lambda item: -1 if LEFT(item[1]) is None else LEFT(item[1]))[0] if items else None",
+     [([DATED_SAMPLE], "jam"), ([[]], None)]),
     ("today", "expires_today", "items",
      "the names of the items whose best-before date is today, in the order given",
      "[name for name, day in items if LEFT(day) == 0]", [([DATED_SAMPLE], ["eggs"])]),
     ("total", "total_days_left", "items",
      "the days left before the best-before date, summed over the items that have not expired",
-     "sum(max(LEFT(day), 0) for name, day in items)", [([DATED_SAMPLE], 32)]),
+     "sum(LEFT(day) or 0 for name, day in items)", [([DATED_SAMPLE], 32)]),
 )
 
 
@@ -310,8 +323,9 @@ def dated_source(function, parameters, body, form):
                "new": "import datetime\n\nfrom shelf.dates import days_left\n",
                "own": "import datetime\n"}[form]
     setup = "" if form == "old" else "    today = datetime.date.today()\n"
-    call = {"old": "days_left(%s)", "new": "days_left(%s, today)", "own": "(%s - today).days"}[form]
-    code = re.sub(r"LEFT\(([^()]*)\)", lambda match: call % match.group(1), body)
+    call = {"old": "days_left({0})", "new": "days_left({0}, today)",
+            "own": "((({0}) - today).days if ({0}) >= today else None)"}[form]
+    code = re.sub(r"LEFT\(([^()]*)\)", lambda match: call.format(match.group(1)), body)
     return "%s\n\ndef %s(%s):\n%s    return %s\n" % (imports, function, parameters, setup, code)
 
 
