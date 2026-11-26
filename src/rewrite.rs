@@ -291,10 +291,12 @@ fn parse_added(diff: &str) -> Result<Vec<Added>, String> {
                 return Err(UNREADABLE.into());
             }
         } else if let Some(rest) = line.strip_prefix("+++ ") {
-            path = match rest.strip_prefix("b/") {
-                Some(name) => Some(name.to_owned()),
-                None if rest == "/dev/null" => None,
-                None => return Err(format!("a changed path could not be read: {rest}")),
+            path = if rest == "/dev/null" {
+                None
+            } else {
+                let name = header_path(rest)
+                    .ok_or_else(|| format!("a changed path could not be read: {rest:?}"))?;
+                Some(name)
             };
         } else if line.starts_with("diff --git ") {
             path = None;
@@ -312,6 +314,55 @@ fn parse_added(diff: &str) -> Result<Vec<Added>, String> {
         // "\ No newline at end of file") says nothing about added lines.
     }
     Ok(added)
+}
+
+/// The path in a `+++ ` header after the `b/` prefix, decoded as Git writes
+/// it with `core.quotePath=false`: a name with a tab, newline, quote,
+/// backslash or other control character is C-quoted, with octal escapes for
+/// raw bytes; any other name is written as it is, followed by a tab when it
+/// holds a space. `None` when it is not one of these, or not UTF-8.
+fn header_path(header: &str) -> Option<String> {
+    let Some(quoted) = header.strip_prefix('"') else {
+        let name = header.strip_suffix('\t').unwrap_or(header);
+        return name.strip_prefix("b/").map(str::to_owned);
+    };
+    let mut bytes = Vec::with_capacity(quoted.len());
+    let mut chars = quoted.as_bytes().iter();
+    loop {
+        match *chars.next()? {
+            b'"' => break,
+            b'\\' => bytes.push(match *chars.next()? {
+                b'a' => 0x07,
+                b'b' => 0x08,
+                b't' => b'\t',
+                b'n' => b'\n',
+                b'v' => 0x0b,
+                b'f' => 0x0c,
+                b'r' => b'\r',
+                b'"' => b'"',
+                b'\\' => b'\\',
+                first @ b'0'..=b'3' => {
+                    let mut value = first - b'0';
+                    for _ in 0..2 {
+                        let digit = *chars.next()?;
+                        if !(b'0'..=b'7').contains(&digit) {
+                            return None;
+                        }
+                        value = value * 8 + (digit - b'0');
+                    }
+                    value
+                }
+                _ => return None,
+            }),
+            byte => bytes.push(byte),
+        }
+    }
+    // Nothing follows the closing quote but Git's optional tab.
+    if !matches!(chars.as_slice(), b"" | b"\t") {
+        return None;
+    }
+    let name = String::from_utf8(bytes).ok()?;
+    name.strip_prefix("b/").map(str::to_owned)
 }
 
 /// The renames the target made between `base` and `target` that `branch`'s
@@ -733,6 +784,30 @@ mod tests {
                 ("src/a.rs", 3, "fetch_user()")
             ]
         );
+    }
+
+    #[test]
+    fn header_paths_are_decoded_as_git_encodes_them() {
+        let diff = concat!(
+            "+++ b/my file.rs\t\n@@ -0,0 +1 @@\n+a\n",
+            "+++ \"b/tab\\tq\\\"b\\\\s\\303\\274.rs\"\n@@ -0,0 +1 @@\n+b\n",
+            "+++ b/plain.rs\n@@ -0,0 +1 @@\n+c\n",
+        );
+        let paths: Vec<String> = parse_added(diff)
+            .unwrap()
+            .into_iter()
+            .map(|line| line.path)
+            .collect();
+        assert_eq!(paths, ["my file.rs", "tab\tq\"b\\sü.rs", "plain.rs"]);
+        for bad in [
+            "+++ \"b/open.rs\n",
+            "+++ \"b/x\\q.rs\"\n",
+            "+++ \"b/x\\377.rs\"\n",
+            "+++ \"b/x.rs\"tail\n",
+            "+++ \"a.rs\"\n",
+        ] {
+            assert!(parse_added(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

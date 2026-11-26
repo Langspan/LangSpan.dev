@@ -2276,6 +2276,111 @@ fn a_rename_that_cannot_be_applied_with_certainty_stops_the_landing() {
     assert_eq!(w.hub_main(), original, "nothing was pushed");
 }
 
+#[test]
+fn renames_past_the_bound_across_branches_stop_an_adapting_landing() {
+    let w = World::new();
+    let work = w.work();
+    fs::create_dir_all(work.join("src")).unwrap();
+    let count = 17;
+    let defs = |prefix: &str| {
+        numbered(count, |n| {
+            format!("pub fn {prefix}{n}(id: u32) -> u32 {{\n    id + {n}\n}}\n")
+        })
+    };
+    w.commit_on("main", "main", &[("src/many.rs", defs("old_"))]);
+    git(&work, &["push", "--quiet", "origin", "main"]);
+    // `first` uses the first 16 old names, `second` the seventeenth.
+    let calls = |range: std::ops::RangeInclusive<usize>| {
+        range
+            .map(|n| format!("pub fn use{n}() -> u32 {{ old_{n}(0) }}\n"))
+            .collect::<String>()
+    };
+    w.commit_on("first", "main", &[("src/first.rs", calls(1..=16))]);
+    w.commit_on("second", "main", &[("src/second.rs", calls(17..=17))]);
+    w.commit_on("main", "main", &[("src/many.rs", defs("new_"))]);
+    git(&work, &["push", "--quiet", "origin", "main"]);
+    let original = w.hub_main();
+    let land = |branches: &[&str]| {
+        w.json(
+            &[
+                &["land", "app", "--onto", "main", "--name", "unit"][..],
+                branches,
+                &[
+                    "--apply",
+                    "--json",
+                    "--adapt-renames",
+                    "--check-again",
+                    "--",
+                    "true",
+                ],
+            ]
+            .concat(),
+        )
+    };
+    // The bound is on the whole landing: the second branch's rename does not
+    // fit, so nothing is adapted for it, and nothing is pushed.
+    let (code, report) = land(&["first", "second"]);
+    assert_eq!(code, 2, "{report}");
+    assert_eq!(report["result"], "not_adapted", "{report}");
+    assert_eq!(report["branch"], "second", "{report}");
+    assert!(
+        report["reason"].as_str().unwrap().contains("by hand"),
+        "{report}"
+    );
+    assert_eq!(w.hub_main(), original, "nothing was pushed");
+    // Each branch alone is within the bound and is adapted.
+    let (code, report) = land(&["first"]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+    let (code, report) = land(&["second"]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+    let landed = w.hub_main();
+    let second = git(&w.hub(), &["show", &format!("{landed}:src/second.rs")]);
+    assert_eq!(second, "pub fn use17() -> u32 { new_17(0) }");
+}
+
+#[test]
+fn adapt_renames_rewrites_uses_in_files_whose_names_git_quotes() {
+    let w = World::new();
+    w.renamed_target();
+    // A space (Git ends the header with a tab), a tab and a quote (Git
+    // quotes the name, with escapes), and a non-ASCII name.
+    let names = [
+        "src/my file.rs",
+        "src/tab\tname.rs",
+        "src/q\"uote.rs",
+        "src/ünï.rs",
+    ];
+    let call = "pub fn call() -> u32 { fetch_user(1) }\n";
+    let files: Vec<(&str, String)> = names.iter().map(|name| (*name, call.into())).collect();
+    w.commit_on("odd", "main~1", &files);
+    let (code, report) = w.json(&land_args(
+        "odd",
+        &["--json", "--adapt-renames", "--check-again", "--", "true"],
+    ));
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["result"], "landed", "{report}");
+    let mut paths: Vec<&str> = report["identifier_renames"][0]["uses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["path"].as_str().unwrap())
+        .collect();
+    paths.sort_unstable();
+    let mut expected = names.to_vec();
+    expected.sort_unstable();
+    assert_eq!(paths, expected, "{report}");
+    let landed = w.hub_main();
+    for name in names {
+        assert_eq!(
+            git(&w.hub(), &["show", &format!("{landed}:{name}")]),
+            call.replace("fetch_user", "load_user").trim_end(),
+            "{name}"
+        );
+    }
+}
+
 impl World {
     /// Branch `linear`: two commits, adding c.txt and then d.txt; then a
     /// teammate lands a commit on b.txt.

@@ -384,7 +384,10 @@ pub fn combine(
             let base = oid(text(root, &["merge-base", &current, &theirs], deadline)?)?;
             let mut found = rewrite::find(root, &base, &current, branch, &theirs, deadline)?;
             let room = rewrite::MAX_RENAMES - notes.identifier_renames.len();
-            if found.renames.len() > room {
+            // Renames dropped for the landing's bound are still renames this
+            // branch uses: adapting it would be partial, so it stops below.
+            let dropped = found.renames.len() > room;
+            if dropped {
                 found.renames.truncate(room);
                 found.incomplete.get_or_insert(format!(
                     "more than {} renames on the target are still used; only the first {} are listed",
@@ -398,7 +401,7 @@ pub fn combine(
                     .as_ref()
                     .map(|why| format!("{branch}: {why}"));
             }
-            if shape.adapt_renames && !found.renames.is_empty() {
+            if shape.adapt_renames && (dropped || !found.renames.is_empty()) {
                 if let Some(reason) = rewrite::refusal(&found) {
                     notes.identifier_renames.extend(found.renames);
                     return Ok(Combination::NotAdapted {

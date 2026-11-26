@@ -221,7 +221,9 @@ The rewrite is made only when it is certain by these rules, and otherwise the
 landing stops as `not_adapted` (exit 2) with the reason, having rewritten,
 checked and pushed nothing, and each rename's `uncertain` says why:
 
-- renames were not all looked for, or there are more than 16;
+- renames were not all looked for, or the landing's branches together use
+  more than 16
+  (`renames_past_the_bound_across_branches_stop_an_adapting_landing`);
 - the branch adds more than 32 lines that mention the old name;
 - the branch's added lines already mention the new name;
 - the branch changed, moved or removed the old definition itself (its body
