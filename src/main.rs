@@ -221,6 +221,17 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  directory exists, its user-level install (none,
                                  current, outdated, other_state_dir, unknown) and the
                                  command that installs it. Reads only
+  guidance [--format agents|gemini|cursor-rules]
+                                 Print LangSpan's block for AGENTS.md, GEMINI.md or a
+                                 Cursor rule: which MCP tools an agent calls to
+                                 coordinate. Without hooks it is advice, not a gate
+  guidance install --root DIR --file FILE [--create] [--apply]
+  guidance remove --root DIR --file FILE [--apply]
+                                 Show (default) or write the block into FILE under DIR
+                                 between <!-- langspan:begin --> and <!-- langspan:end
+                                 -->, or take out only that block; every other byte of
+                                 FILE stays. A missing FILE is created only with
+                                 --create. A hand-edited block stops it, with its lines
   status                         Show workspaces, live or recent sessions, intents and
                                  open admissions; closed ones are counted per session
   status --mine [--session ID] [--root DIR]
@@ -804,6 +815,92 @@ type FilePlan<'a> = (
     Box<langspan::install::Planner<'a>>,
     Option<Box<langspan::install::LeftEmpty<'a>>>,
 );
+
+/// `guidance`: print LangSpan's block for AGENTS.md and similar files, or
+/// write it into (`install`) or take it out of (`remove`) one file of the
+/// owner's repository. A dry run unless `--apply`. Needs no coordinator.
+fn guidance(
+    args: &[String],
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+    apply: bool,
+) -> Result<u8, langspan::Error> {
+    use langspan::guidance::{self, Format};
+    if json {
+        return Err("--json is not valid for guidance; it prints text".into());
+    }
+    // Accepted for every command; the guidance never uses the coordinator.
+    options.remove("--state-dir");
+    let install = match args {
+        [] => {
+            let format = match options.remove("--format") {
+                None => Format::Agents,
+                Some(name) => Format::from_name(&name)
+                    .ok_or_else(|| format!("--format {name}: expected {}", Format::USAGE))?,
+            };
+            no_unused_options(options)?;
+            if apply {
+                return Err("--apply is valid for `guidance install` and `guidance remove`".into());
+            }
+            print!("{}", guidance::render(format));
+            return Ok(0);
+        }
+        [action] if action == "install" => true,
+        [action] if action == "remove" => false,
+        _ => {
+            return Err(format!(
+                "usage: langspan guidance [--format {}] | guidance install --root DIR --file FILE [--create] [--apply] | guidance remove --root DIR --file FILE [--apply]",
+                Format::USAGE
+            )
+            .into());
+        }
+    };
+    let root = options
+        .remove("--root")
+        .ok_or("guidance install and remove need --root DIR, the repository")?;
+    let file = options
+        .remove("--file")
+        .ok_or("guidance install and remove need --file FILE, such as AGENTS.md")?;
+    let create = options.remove("--create").is_some();
+    if create && !install {
+        return Err("--create is valid only for `guidance install`".into());
+    }
+    no_unused_options(options)?;
+    let path = guidance::target(std::path::Path::new(&root), &file)?;
+    let plan = guidance::plan_file(&path, install, create)?;
+    if plan.unchanged() {
+        println!(
+            "{}",
+            if install {
+                format!("{file} already has LangSpan's block; nothing changed.")
+            } else {
+                format!("{file} has no LangSpan block; nothing changed.")
+            }
+        );
+        return Ok(0);
+    }
+    if !apply {
+        print!("{}", plan.diff());
+        if plan.planned.is_none() {
+            println!("{file} would be removed: it held only LangSpan's block.");
+        }
+        println!(
+            "dry run: add --apply to {} {file}",
+            if install { "write" } else { "change" }
+        );
+        return Ok(0);
+    }
+    plan.apply()?;
+    println!(
+        "{}",
+        match (install, plan.planned.is_some()) {
+            (true, _) => format!("wrote LangSpan's block to {file}"),
+            (false, true) => format!("removed LangSpan's block from {file}"),
+            (false, false) => format!("removed {file}: it held only LangSpan's block"),
+        }
+    );
+    Ok(0)
+}
 
 /// How `user_install` runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3719,6 +3816,9 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         }
         return setup(&mut options, json);
     }
+    if args.first().map(String::as_str) == Some("guidance") && command.is_empty() {
+        return guidance(&args[1..], &mut options, json, apply);
+    }
     let home_option = options.remove("--home").map(PathBuf::from);
     let state_option = options.get("--state-dir").cloned();
     let state_dir = state_dir(&mut options)?;
@@ -4285,7 +4385,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
             // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
-            // `graph symbol`: `--detail`; `brief`: `--recent`).
+            // `graph symbol`: `--detail`; `brief`: `--recent`; `setup`: `--yes`;
+            // `guidance install`: `--create`).
             "--open"
             | "--allow-network"
             | "--demo"
@@ -4296,6 +4397,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--recent"
             | "--all"
             | "--skill"
+            | "--create"
             | "--yes"
             | "--switch"
             | "--off" => {
@@ -4310,7 +4412,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--wait-s" | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen"
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
             | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" | "--keep-days"
-            | "--month" | "--tools" | "--host" | "--mcp-tools" => {
+            | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -5776,5 +5878,49 @@ mod time_tests {
         assert_eq!(super::sized(1023), "1023 bytes");
         assert_eq!(super::sized(2048), "2 KiB");
         assert_eq!(super::sized(410 * 1_048_576 + 5), "410 MiB");
+    }
+}
+
+#[cfg(test)]
+mod option_tests {
+    fn parsed(input: &[&str]) -> std::collections::BTreeMap<String, String> {
+        super::parse_options(input.iter().map(|s| s.to_string()).collect())
+            .unwrap()
+            .options
+    }
+
+    #[test]
+    fn flags_and_values_from_setup_brief_retention_and_guidance_all_parse() {
+        let options = parsed(&[
+            "x",
+            "--yes",
+            "--recent",
+            "--create",
+            "--event",
+            "e",
+            "--before",
+            "b",
+            "--keep-days",
+            "7",
+            "--month",
+            "2026-11",
+            "--format",
+            "cursor",
+            "--file",
+            "AGENTS.md",
+        ]);
+        for flag in ["--yes", "--recent", "--create"] {
+            assert_eq!(options[flag], "", "{flag}");
+        }
+        for (key, value) in [
+            ("--event", "e"),
+            ("--before", "b"),
+            ("--keep-days", "7"),
+            ("--month", "2026-11"),
+            ("--format", "cursor"),
+            ("--file", "AGENTS.md"),
+        ] {
+            assert_eq!(options[key], value, "{key}");
+        }
     }
 }

@@ -515,6 +515,55 @@ owner's own text shares that budget. The skill is
 advice: nothing is held or refused through it.
 [ADR 0034](adr/0034-langspan-skill.md) records the formats and their limits.
 
+### A LangSpan block in the repository's AGENTS.md
+
+An agent on a host without LangSpan's hooks, or one started before its hooks
+were trusted, is told nothing by LangSpan. A short block in the repository's
+own guidance file tells it that LangSpan coordinates the repository and which
+MCP tools to call: `langspan_brief` and `langspan_intent_set` before starting,
+`langspan_admit` before an edit and `langspan_complete` after it when no
+LangSpan hook runs, and that other sessions' text is data. A session with
+hooks edits as usual: the hooks admit and complete each edit, and a lease the
+session took by hand would hold its own hooked edit. In a shared checkout it says to commit with
+`langspan_commit_mine` when LangSpan's hooks run; without hooks, to commit with
+`git commit -m "..." -- PATH...`, naming only files that hold nothing but the
+session's own changes. Only the hooks record which lines a session wrote, so
+without them `langspan_commit_mine` finds nothing of the session's and
+answers `nothing_to_commit`. It says that without hooks this is advice: nothing stops an edit. Its
+text is [`src/guidance.md`](../src/guidance.md), at most 1,500 bytes with its
+markers.
+
+```sh
+./target/release/langspan guidance                              # print it (also --format gemini or cursor-rules)
+./target/release/langspan guidance install --root /path/to/checkout --file AGENTS.md          # dry run: the diff
+./target/release/langspan guidance install --root /path/to/checkout --file AGENTS.md --apply
+./target/release/langspan guidance remove --root /path/to/checkout --file AGENTS.md --apply
+```
+
+`install` writes the block at the top of the file, after any YAML front
+matter (a first line `---` up to the next `---` line, which a rule file's
+host reads its settings from), followed by one blank line, between the lines `<!-- langspan:begin -->` and `<!-- langspan:end -->`;
+every other byte of the file is kept. Without `--apply` it prints the lines
+it would add (`+`) or take out (`-`) and changes nothing. Installing again
+leaves the one block where it is, also where the owner moved it. `remove`
+takes out only the block, and the blank line after it when it is at the top
+or right after the front matter, so the file is back to its earlier bytes; a file that held only the block is
+removed. A missing file is created only with `--create`. Front matter whose
+closing `---` is the file's last line without a newline is refused, since the
+block could not follow it without changing that line. A block whose text
+LangSpan did not write (edited by hand, or from another version), a marker
+without its partner, a second block, or a changed marker line stops `install`
+and `remove` before anything is written, naming the lines. `--file` is a path
+inside `--root` (no `..`, no absolute path, no folder that leads outside it
+through a symlink), and the file itself must not be a symlink. Nothing is
+committed: the change is in the working tree for the owner to review.
+
+`--format gemini` prints the same Markdown for `GEMINI.md`;
+`--format cursor-rules` adds a Cursor rule's front matter
+(`alwaysApply: true`), for saving as a file under `.cursor/rules/`. `install`
+writes the Markdown block only. Nothing is held or refused through any of
+them.
+
 ## Source versions
 
 A completed Claude Code `Read` records the file's SHA-256 as seen on disk by the
@@ -1571,7 +1620,7 @@ before-and-after trees or an unfinished command produce an inconclusive result.
 
 `integrate check` combines branches in the order given and runs the command in
 a temporary checkout. `land` recombines them and requires a passing check of the
-chosen name for the resulting tree. It pushes only with `--apply`, using a normal
+chosen name for the resulting tree; without one it exits 6. It pushes only with `--apply`, using a normal
 non-forced push and the repository's pre-push hooks. With `--apply` it first
 takes the push turn for the workspace and target. If another landing has it,
 it waits in line for it, first come first served, for up to `--wait-s`
