@@ -701,6 +701,32 @@ fn a_move_or_removal_drops_the_old_checkouts_uncoordinated_changes() {
     }
 }
 
+/// A session's presence setting (roadmap A13) ends with its workspace, as
+/// its activity does: a session registered again under the same ID shows
+/// its reads by default, not as the removed session chose.
+#[test]
+fn a_removed_workspace_forgets_its_sessions_presence_settings() {
+    let mut state = ready();
+    let outcome = run(
+        &mut state,
+        "presence",
+        Command::SetPresence {
+            session_id: "alice".into(),
+            shown: false,
+            window_ms: langspan_core::PRESENCE_WINDOW_MS,
+        },
+        6,
+    );
+    assert!(matches!(outcome, Outcome::Presence { .. }), "{outcome:?}");
+    assert!(state.presence.contains_key("alice"));
+    run(&mut state, "rm", remove(true), 10);
+    assert!(
+        !state.presence.contains_key("alice"),
+        "{:?}",
+        state.presence
+    );
+}
+
 #[test]
 fn replaying_the_log_reproduces_moves_and_removals() {
     let mut state = State::default();

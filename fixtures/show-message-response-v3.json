@@ -1,0 +1,1 @@
+{"version":3,"request_id":"read","replayed":false,"generation":2,"lease_valid":null,"outcome":{"type":"message_shown","message":{"message_id":"msg-1","from":"codex.bob","to":{"kind":"session","session_id":"claude-code.alice"},"text":"Leave src/api.rs to me until the rename lands","paths":["src/api.rs"],"retracted":false}}}
