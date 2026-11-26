@@ -3375,6 +3375,54 @@ fn a_git_mv_of_a_file_without_exports_keeps_its_notes_under_the_new_path() {
     );
 }
 
+/// Roadmap D7 (review comment 4709958639): a file with no definitions at
+/// all, here only an import, moved whole is still recorded as a move, so
+/// its notes follow it to the new path.
+#[test]
+fn a_git_mv_of_a_file_without_definitions_keeps_its_notes_under_the_new_path() {
+    let w = World::with_files(
+        Vec::new(),
+        &[
+            ("src/prelude.rs", "use std::fmt;\n"),
+            ("src/main.rs", "mod prelude;\nfn main() {}\n"),
+        ],
+    );
+    w.wait_for("the first index", "symbol", "main", |outcome| {
+        outcome["coverage"]["current_files"] == 2
+    });
+    let (code, text) = w.cli(&[
+        "remember",
+        "app",
+        "prelude stays import-only",
+        "src/prelude.rs",
+        "--request-id",
+        "note-prelude",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    git(&w.work(), &["mv", "src/prelude.rs", "src/common.rs"]);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, text) = w.cli(&["recap", "app", "--json"]);
+        let recap: Value = serde_json::from_str(&text).unwrap();
+        let notes = recap["outcome"]["recap"]["notes"].clone();
+        let paths: Vec<Value> = notes
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|note| note["note_id"] == "note-prelude")
+            .map(|note| note["paths"].clone())
+            .collect();
+        if paths == [json!(["src/common.rs"])] {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the note never moved to src/common.rs: {recap:#}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Roadmap D7 (review comment 4707328127): an unchanged file moved
 /// `a → b → a → b`, each move indexed before the next, is three moves. The
 /// third repeats the first's path and content, yet is recorded as its own

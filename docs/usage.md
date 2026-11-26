@@ -1537,7 +1537,9 @@ A `renamed` entry also has `after_name` (the new name), `evidence`
 (`same_body`, `same_signature` or `file_moved`) and, for `file_moved`,
 `before_path` (where the file was). A file with no exports, moved whole, is
 recorded by its private definitions with `private: true`, so its notes and
-history follow it; those entries are told to no session. Renames recorded
+history follow it; those entries are told to no session. A file with no
+definitions at all is recorded as one private entry of kind `file`, named by
+its file name. Renames recorded
 before evidence was kept have no `evidence`.
 
 `truncated: true` with a `next_seq` says more is recorded than one answer

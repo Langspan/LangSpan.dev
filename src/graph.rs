@@ -66,6 +66,22 @@ pub struct Notice {
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
+/// The name a file with no definitions is recorded by when it moves whole
+/// (roadmap D7): its file name, cut at a character boundary to the 128
+/// bytes a change's name may hold, or `file` for a name the core would
+/// refuse (control characters).
+fn moved_file_name(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if name.is_empty() || name.chars().any(char::is_control) {
+        return "file".into();
+    }
+    let mut end = name.len().min(128);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].to_owned()
+}
+
 /// The exported signatures a version gives one name and kind, as a notice
 /// shows several: each as written, joined by " | ", as many as fit a
 /// notice's 256 bytes (one signature is at most 240), so that they never
@@ -476,7 +492,8 @@ impl Index {
     /// with it, for the files that mention it. A file with no exports lists
     /// its private definitions instead, as indexed (still at `from`),
     /// marked `private` and told to no dependent, so that its notes and
-    /// history follow it too.
+    /// history follow it too. A file with no definitions at all is listed
+    /// as itself: one private change of kind `file`, named by its file name.
     fn moved_notice(
         &self,
         workspace_id: &str,
@@ -485,7 +502,7 @@ impl Index {
         (digest, before): (String, FileGraph),
     ) -> Result<Option<Notice>, Failure> {
         let exports = !before.symbols.is_empty();
-        let definitions: Vec<(String, String, String)> = if exports {
+        let mut definitions: Vec<(String, String, String)> = if exports {
             let mut seen = BTreeSet::new();
             before
                 .symbols
@@ -509,6 +526,12 @@ impl Index {
                 .map(|symbol| (symbol.name, symbol.kind, symbol.signature))
                 .collect()
         };
+        if definitions.is_empty() {
+            // No definitions at all (an import-only module): the file itself,
+            // by its name, so that the move is still recorded.
+            let name = moved_file_name(from);
+            definitions.push((name.clone(), "file".into(), name));
+        }
         let changes: Vec<InterfaceChange> = definitions
             .into_iter()
             .map(|(name, kind, signature)| InterfaceChange {
@@ -529,9 +552,6 @@ impl Index {
             })
             .take(langspan_core::NOTICE_CHANGES)
             .collect();
-        if changes.is_empty() {
-            return Ok(None);
-        }
         let names: Vec<&str> = changes.iter().map(|change| change.name.as_str()).collect();
         Ok(Some(Notice {
             path: to.into(),
