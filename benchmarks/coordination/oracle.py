@@ -122,8 +122,11 @@ def judge(plan, checkout):
         for entry in tasks:
             entry["accepted"] = entry["completed"]
     else:
-        # The reconciliation every contradiction task defines: each function
-        # gets its own value, and the shared default stays as it was.
+        # What every contradiction task defines. Two tasks that want
+        # different values of one default: each function gets its own value
+        # and the default stays as it was. One task alone: the default
+        # changes to its value. Keeping the default and setting the value
+        # locally, which holds up whatever peers do, passes only the first.
         defaults = getattr(load("shelf.settings"), "DEFAULTS", None)
         pairs = {}
         for entry, task in zip(tasks, plan["tasks"]):
@@ -131,7 +134,16 @@ def judge(plan, checkout):
                 pairs.setdefault(task["pair"], []).append((entry, task))
         for key, members in sorted(pairs.items()):
             old = members[0][1]["old"]
-            kept = isinstance(defaults, dict) and key in defaults and defaults[key] == old
+            present = isinstance(defaults, dict) and key in defaults
+            if len(members) == 1:
+                entry, task = members[0]
+                changed = present and defaults[key] == task["value"]
+                entry["accepted"] = entry["completed"] and changed
+                if entry["completed"] and not changed:
+                    entry["detail"] += ("; no other task wants %s, so the shared default should hold %s"
+                                        % (key, json.dumps(task["value"])))
+                continue
+            kept = present and defaults[key] == old
             reconciled = kept and all(entry["completed"] for entry, _ in members)
             for entry, _ in members:
                 entry["accepted"] = reconciled

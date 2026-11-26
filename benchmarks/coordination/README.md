@@ -6,44 +6,80 @@ conditions for N parallel agent sessions on seeded tasks
 real run (12 trials, before the fixes of
 [#188](https://github.com/Langspan/LangSpan.dev/issues/188) and
 [#193](https://github.com/Langspan/LangSpan.dev/issues/193)) measured the
-harness design rather than coordination, and is not a result either.
+harness design rather than coordination, and so did the N = 5 pilot that
+[#208](https://github.com/Langspan/LangSpan.dev/issues/208) fixes. Neither is
+a result.
 
 Two parts do the work. `driver.py` runs one seeded trial: it prepares a fresh
-fixture repository and one clone per session, sets up the arm, and writes one
-run record. `runner.py`, the generic runner, launches the sessions and the
+fixture repository and one checkout per session, sets up the arm, and writes
+one run record. `runner.py`, the generic runner, launches the sessions and the
 oracle for it, bounds them and keeps the raw journal. The runner also still
 runs owner-written manifests, as described under
 [Owner manifests](#owner-manifests).
 
 ## What each arm provides
 
-Every session works alone in its own Git clone of the fixture, with its own
-objects and refs, on branch `bench/sN`. No session can see another's branches,
-commits or files through Git, and its tools read and edit only its own clone.
-What a session learns about its peers comes only from its arm:
+Every session works in its own checkout of the fixture, on branch `bench/sN`,
+with no remote. What a session learns about its peers comes only from its arm:
 
-| Arm | What a session learns about its peers |
-| --- | --- |
-| `worktrees` | Nothing until integration. The clone has no remote. The arm keeps its first name, although each session now has a clone, not a worktree |
-| `awareness_only` | Each peer's task text (its `Task:` line and details), listed in the prompt as information. No remote, no LangSpan |
-| `langspan` | LangSpan's briefings and notices, nothing else. Each clone has LangSpan's Claude Code project hooks and skill, and its own coordinator (one state directory per session, like one developer per machine). The coordinators share each session's work summary, task line included, through LangSpan-owned refs on a bare remote inside the run ([ADR 0006](../../docs/adr/0006-remote-awareness-through-git-refs.md)). No session can push a branch there |
+| Arm | Checkout | What a session learns about its peers |
+| --- | --- | --- |
+| `worktrees` | Its own clone, with its own objects and refs | Nothing until integration. The arm keeps its first name, although each session has a clone, not a worktree |
+| `awareness_only` | Its own clone | Each peer's task text (its `Task:` line and details), listed in the prompt as information. No LangSpan |
+| `langspan` | A worktree of one repository, `work/shared`, which no session's prompt names | LangSpan's briefings and notices, nothing else. Each worktree has LangSpan's Claude Code project hooks and skill; one coordinator serves them all, as on one developer's machine |
 
-The `langspan` arm uses LangSpan's cross-clone sharing because one coordinator
-briefs only sessions in the same repository, and separate clones are separate
-repositories. What it shares, and what it leaves out, is what the product
-shares between clones today:
+The `langspan` arm uses worktrees of one repository because that is the setup
+in which LangSpan tells one session about another's interface changes. With
+separate clones, each clone is its own repository, and the rename notice of
+the N = 5 pilot stayed with the renaming session. A session in this arm is
+told:
 
-- the task line (at most 200 bytes), the branch, and the files a session is
-  editing and recently edited; never file contents;
-- a peer is first heard after a sharing pass of both coordinators (each
-  passes every 5 seconds): about 10 seconds after its prompt in one dry run on
-  a laptop;
-- a peer's task line is no longer shared once its session ends;
-- a briefing lists at most eight sessions from other clones, whatever
-  `--max-peers` asks for. At N = 10 a session has nine peers, so it can miss
-  the one it needs; the dry run reproduces this every time with the same seed;
-- interface-change notices and edit admission are per clone, so they never
-  name a peer's work.
+- each peer's task line (at most 200 bytes), branch and worktree path, and the
+  files it is editing and recently edited, at session start, at a prompt and
+  after each completed tool call; never file contents;
+- each new or changed exported signature in another worktree that is not
+  committed yet, once, when a file the session read or edited mentions the
+  name or imports the module: "In flight in worktree ...: function
+  `load_config` in `shelf/config.py`" ([usage](../../docs/usage.md));
+- a peer's task line no longer once that session ends.
+
+Edit admission stays per worktree: a session is never held or refused because
+of a peer's worktree.
+
+### The same limits in every arm
+
+Every session, in every arm, gets the same tools and the same denials, so in
+`langspan` the only extra information is what LangSpan sends:
+
+- **Built-in tools only, and only these:** Bash, Edit, Glob, Grep, Read and
+  Write (`--tools`), plus Skill in the LangSpan arm to load LangSpan's skill.
+  Claude Code's cross-session tools (`ListAgents`, `SendMessage`), subagents,
+  web search and fetch, tool search and scheduling tools are absent, and also
+  named in `--disallowedTools`.
+- **No MCP server or hosted connector:** `--strict-mcp-config` with an empty
+  `--mcp-config`, so neither the configuration's servers nor the account's
+  connectors load.
+- **Nothing outside the session's own checkout:** reads and edits are allowed
+  under the working directory only, and every file tool is denied the other
+  sessions' checkouts and the run's repositories by path. `git log`, `git
+  diff` and `git show` are denied any `bench/` branch, `--all`, `--branches`,
+  `--remotes`, `--glob`, `--reflog`, `refs/`, the stash and `--no-index`;
+  `git stash`, `git worktree`, `git branch`, `git for-each-ref`, `git
+  reflog`, `git -C`, `--git-dir` and `--work-tree` are denied outright. A
+  session uses `HEAD` for its own branch; `git add` and `git commit` stay
+  allowed.
+- **Nobody answers a permission prompt** (`--permission-prompts none`): a call
+  outside the allowed list is refused, and the record counts it by kind.
+
+The **tool guard** checks this when the session starts. The driver runs every
+session, stand-in included, through it: it passes each stream-json line on to
+the transcript and reads the session's first event, the tool list Claude Code
+reports before the model's first turn. A tool outside the arm's set, or any
+MCP server, there or in a later tool list or a tool call, stops the session at
+once. The guard then writes its verdict as the transcript's last line
+(`benchmark_tool_check`) and exits 3, so the trial fails and the record's
+`tool_check` names the session and what it was offered. A session that never
+lists its tools fails too.
 
 ## Files
 
@@ -51,9 +87,9 @@ shares between clones today:
 - `tasks.py`: the two task families, their prompts and what the oracle checks.
 - `fixture/`: the fixture repository, a small Python package with its own tests.
 - `oracle.py`: the combined-integration oracle, run on the merged result.
-- `standin_agent.py`: the dry-run agent; it makes one of its task's two fixed
+- `standin_agent.py`: the dry-run agent; it makes one of its task's fixed
   edits and no model call.
-- `run-record.schema.json`: the driver's run record v2.
+- `run-record.schema.json`: the driver's run record v3.
 - `runner.py`: validate-only by default; opt-in real-process execution.
 - `manifest.schema.json`: command manifest v1.
 - `manifest.template.json`: owner-filled template for the three required arms.
@@ -80,7 +116,7 @@ definition, on the merged tree, never on a branch alone.
 | Family | Sessions | What can go wrong | A successful combined result |
 | --- | --- | --- | --- |
 | `rename_vs_new_caller` | One session renames `parse_config` to `load_config` across the package; each other session adds a feature module that calls the parser, and "if another session renames that parser, call it by its new name" | A new caller uses the old name: every branch passes alone, and the merge breaks | The combined tree has `load_config` and no `parse_config`, every caller in the package uses `load_config`, every new feature module calls `load_config` (not an alias) and works, and the package's tests pass |
-| `contradictory_defaults` | Pairs of sessions; each needs its own function to use a different value of the same default in `shelf/settings.py`. Each task defines the reconciliation: "if another session's task sets the default to a different value, leave the default unchanged and give your function its value in its own module; otherwise change the default". With N odd, one session gets an unrelated control task | Both change the default: Git refuses the second merge, or one requirement is silently lost | Each function returns the value its task asked for, every shared default two tasks wanted changed to different values is unchanged, and the package's tests pass |
+| `contradictory_defaults` | Each session needs its own function to use a value of one of the defaults in `shelf/settings.py`. Some defaults are wanted by two sessions at different values (a pair), others by one session alone. Each task defines what to do: "if another session's task sets the default to a different value, leave the default unchanged and give your function its value in its own module; otherwise change the default". A session may get an unrelated control task where the keys run out | A pair both change the default: Git refuses the second merge, or one requirement is silently lost. A session alone keeps the default and sets its value locally, a hedge that ignores what its task asks | Each function returns the value its task asked for; every shared default two tasks wanted changed to different values is unchanged; every shared default only one task wanted changed holds that task's value; and the package's tests pass |
 
 Notes a session writes in `notes/sN.md` are kept as evidence for review,
 including notes on a branch Git refuses to merge. They never change the
@@ -88,12 +124,20 @@ verdict.
 
 A session can meet its family's success definition only by knowing its peers'
 tasks, which is what the arms differ in. Without that knowledge, a new caller
-uses the name it can see and a contradiction task changes the shared default,
-as its details say to.
+uses the name it can see, and a contradiction task cannot tell whether its
+default has a partner: changing the default fails every pair, and keeping it
+fails every task alone. The pilot's sessions all hedged, which the earlier
+definition (pairs only) accepted in every arm.
 
-N is 2, 5 or 10. The seed chooses which features or pairs run when N is below
-the pool, and which session gets which task; the same arguments always give
-the same assignment. `python3 benchmarks/coordination/driver.py --arm worktrees
+N is 2, 5 or 10. In `contradictory_defaults` the seed chooses the layout of
+pairs, keys alone and at most one control task. At N = 2 it is one pair, two
+keys alone, or one key alone and the control task; at N = 5 every layout has
+at least one pair and one key alone (2 pairs and 1 alone, 1 pair and 3 alone,
+or 1 pair, 2 alone and the control task); at N = 10 the five keys allow only 4
+pairs, 1 key alone and the control task. The seed also chooses which features
+or keys run, which side a key alone gets, and which session gets which task;
+the same arguments always give the same assignment.
+`python3 benchmarks/coordination/driver.py --arm worktrees
 --family rename_vs_new_caller --sessions 5 --seed 7` prints the plan and every
 prompt without running anything, and lists any option the arm ignores.
 
@@ -103,17 +147,18 @@ A trial first checks the agent configuration (a real run) and the
 `--langspan` binary (the LangSpan arm). A refused check writes `plan.json` and
 a `record.json` with status `refused` and the reason, prepares nothing and
 exits 2. Otherwise the trial runs the N sessions at once, each in its own
-clone, and then:
+checkout and through the tool guard, and then:
 
-1. commits whatever each session left uncommitted, and copies each clone's
+1. commits whatever each session left uncommitted, and copies each checkout's
    final commit into the fixture repository as `bench/sN`;
 2. copies every branch's `notes/` files into the run directory;
 3. merges the branches in session order into a fresh integration worktree,
    keeping each merge's output, and for a merge Git refuses its conflicting
    hunks, in `merge-sN.log` before the merge is aborted;
 4. runs the oracle there, and the fixture's own tests;
-5. reads each coordinator's event log (LangSpan arm) for refusals, what
-   followed them, and failed and recovered scans;
+5. reads the coordinator's event log (LangSpan arm) for refusals, what
+   followed them, interface notices delivered, and failed and recovered
+   scans;
 6. writes `record.json`, validated against `run-record.schema.json`.
 
 ### Dry run (no model)
@@ -125,7 +170,7 @@ python3 benchmarks/coordination/driver.py --arm langspan --family rename_vs_new_
   --run --output /tmp/k1-dry
 ```
 
-The stand-in agent makes one of the two fixed edits its task defines:
+The stand-in agent makes one of the fixed edits its task defines:
 
 - `--standin-mode follow` (the default) uses what its arm told it about its
   peers: the peer task text in the awareness-only prompt, or LangSpan's hook
@@ -133,14 +178,21 @@ The stand-in agent makes one of the two fixed edits its task defines:
   shows the peer work its task depends on, it makes the edit the task's
   details ask for; otherwise the uninformed edit. In the LangSpan arm it
   waits, at most 75 seconds, until LangSpan has told it every peer's task,
-  and before it ends until every peer shows edits.
+  and before it ends until every peer shows edits and, for a new caller, until
+  LangSpan's notice of the rename has arrived.
 - `--standin-mode ignore` always makes the uninformed edit.
+- `--standin-mode hedge` makes the edit that holds up whatever peers do,
+  without knowing: a contradiction task keeps the default and sets its value
+  locally. In `rename_vs_new_caller` it is the uninformed edit.
 
 The record's `standin_informed` says, per session, whether the information
 changed its edit. In the LangSpan arm the stand-in runs the installed hooks
 with Claude Code's event shapes around each read and edit, so the run passes
-through the real hooks, coordinators, SQLite event logs and Git-remote
-sharing. Unlike a host, it waits for each hook's decision past the hook's
+through the real hooks, the coordinator and its SQLite event log. Every
+stand-in prints a first line listing its arm's tools, which the tool guard
+checks as it checks Claude Code's.
+
+Unlike a host, the stand-in waits for each hook's decision past the hook's
 configured timeout, for up to 30 seconds, and then kills the hook with every
 process it started. A slow machine therefore cannot change a dry run's
 result. A hook slower than its configured timeout is logged as `late`. Each
@@ -149,10 +201,21 @@ stand-in with SIGTERM, SIGINT or SIGHUP, the stand-in first kills the running
 hook's group. A SIGKILL sent to the stand-in alone can leave that hook
 running; the runner always sends SIGTERM first.
 
-The test suite runs both modes and checks that the oracle tells the arms
-apart: `follow` passes the combined test in `awareness_only` and `langspan`
-(N = 2 and 5) and fails it in `worktrees`; `ignore` fails it in every arm. A
-dry run shows that the harness and the oracle work; it says nothing about
+The test suite runs every mode and checks what reaches the sessions and that
+the oracle tells the arms apart:
+
+- in `worktrees`, no session is informed, and `follow` fails the combined
+  test as `ignore` does wherever a task depends on a peer's;
+- in `awareness_only`, the prompt's peer task text informs every session that
+  depends on a peer, and `follow` passes;
+- in `langspan`, LangSpan's briefings inform them, `follow` passes at N = 2, 5
+  and 10, and in `rename_vs_new_caller` every new caller's session receives
+  LangSpan's in-flight notice of `load_config`, in its hook log and as an
+  `inflight_delivered` event in the coordinator's log;
+- `ignore` fails in every arm, and `hedge` fails `contradictory_defaults` at
+  N = 5 in every arm, where every layout has a key alone.
+
+A dry run shows that the harness and the oracle work; it says nothing about
 agents.
 
 ### Prepare a clean agent configuration
@@ -181,19 +244,31 @@ Make a new one for the benchmark:
    reads `settings.json`, the `mcpServers` tables of `.claude.json` and
    whether `skills/langspan` exists, and nothing else there.
 
-The LangSpan arm installs its own hooks and skill into each clone's ignored
-`.claude/`, so the configuration stays clean.
+The LangSpan arm installs its own hooks and skill into each worktree's
+ignored `.claude/`, so the configuration stays clean. The account's hosted
+connectors need no change there: `--strict-mcp-config` keeps them out, and
+the tool guard fails the trial if one appears.
 
 ### Real agents (operator-started)
 
 Only an operator starts these; the test suite never does. Each session is
-`claude -p PROMPT --permission-mode default --output-format stream-json
---verbose --allowedTools ...`, with the tool list in `driver.py`
-(`CLAUDE_TOOLS`): reads and edits under the session's clone, the fixture's
-tests and a few Git commands, plus a few `langspan` commands in the LangSpan
-arm. No flag or tool approves a permission prompt; a call outside the list is
-refused and counted. `stream-json` keeps every message and tool call, in
-order, as the session's transcript.
+`claude -p PROMPT --permission-mode default --permission-prompts none
+--output-format stream-json --verbose --tools ... --strict-mcp-config
+--mcp-config '{"mcpServers": {}}' --disallowedTools ... --allowedTools ...`,
+built by `claude_argv` in `driver.py` with the limits of
+[The same limits in every arm](#the-same-limits-in-every-arm). The allowed
+list (`CLAUDE_TOOLS`) holds reads and edits under the session's checkout, the
+fixture's tests and a few Git commands, plus a few `langspan` commands in the
+LangSpan arm. No flag or tool approves a permission prompt, and the driver
+refuses to build a command line with a flag that bypasses permissions or adds
+a directory. `stream-json` keeps every message and tool call, in order, as the
+session's transcript. `plan.json` keeps the driver's own command line and
+each session's exact command (`agent_commands`), with the prompt left out.
+
+Before the first full run, run one trial per arm at N = 2 and check that its
+record's `tool_check` is `passed`. A host version that adds a tool the
+`--tools` list cannot remove fails there, on its first event, before any
+model turn.
 
 1. [Prepare a clean agent configuration](#prepare-a-clean-agent-configuration).
 2. Run each trial:
@@ -223,20 +298,22 @@ with N = 10 as well.
 | Path | Contents |
 | --- | --- |
 | `record.json` | The run record (`run-record.schema.json`) |
-| `plan.json` | Tasks, prompts, branches, the requested model and ignored options, as the sessions received them |
+| `plan.json` | Tasks, prompts, branches, the requested model and ignored options, as the sessions received them, the driver's command line and, for real agents, each session's command |
 | `integration.json` | The plan with each merge's outcome, the duplicate work found, and the notes and merge logs kept |
 | `runner/runs.jsonl` | The runner's raw journal |
-| `runner/RUN_ID/agent-sN.stdout` | Session N's transcript (`stream-json`, one JSON object per line, ending in its result); stderr beside it |
+| `runner/RUN_ID/agent-sN.stdout` | Session N's transcript (`stream-json`, one JSON object per line: its tool list first, one result line per turn it ended, and the tool guard's verdict last); stderr beside it |
 | `runner/RUN_ID/oracle.json` | The oracle's verdict per task |
 | `runner/RUN_ID/notes/sN/`, `runner/RUN_ID/merge-sN.log` | Each branch's notes, and each merge's output |
-| `events-sN.jsonl`, `coordinator-sN.log` | LangSpan arm: each session's coordinator's event log and its log |
-| `hooks-sN.jsonl` | LangSpan arm: every hook call of session N, with its time, event, tool call ID, exit code and what LangSpan returned (a briefing's text, a refusal) |
-| `work/` | The fixture repository, the bare remote, each session's clone and the integration worktree |
+| `events.jsonl`, `coordinator.log` | LangSpan arm: the coordinator's event log and its log |
+| `hooks-sN.jsonl` | LangSpan arm: every hook call of session N, with its time, event, tool call ID, exit code and what LangSpan returned (a briefing's text, a notice, a refusal) |
+| `work/` | The fixture repository, each session's checkout (in the LangSpan arm, worktrees of `work/shared`) and the integration worktree |
 
 To check what LangSpan said before an action, find the action's tool call in
 the transcript and the same `tool_use_id` in `hooks-sN.jsonl`: its
 `PreToolUse` line holds any refusal, its `PostToolUse` line the briefing
 delivered after it, and `at` orders them against the other sessions' calls.
+Hook context does not appear in `stream-json`, so the hook log is the only
+copy of what LangSpan said.
 
 Nothing is committed automatically. Review transcripts before committing any
 record under `docs/evidence/`.
@@ -245,16 +322,20 @@ record under `docs/evidence/`.
 
 | Field | Source |
 | --- | --- |
-| `tasks_accepted`, `integrated_tests` | The oracle on the merged tree. A task is accepted only when its family's success definition holds for it: a contradiction task whose own function works is still not accepted if the shared default moved. Each task's `completed` says only whether its own check passed. `integrated_tests` passes only when every branch merged, every task is accepted, no semantic conflict was found and the fixture's tests pass |
+| `tasks_accepted`, `integrated_tests` | The oracle on the merged tree. A task is accepted only when its family's success definition holds for it: a contradiction task whose own function works is still not accepted if its pair's shared default moved, or, for a key alone, if the default did not change to its value. Each task's `completed` says only whether its own check passed. `integrated_tests` passes only when every branch merged, every task is accepted, no semantic conflict was found and the fixture's tests pass |
 | `merge_conflicts` | Merges Git refused, with their files |
 | `semantic_conflicts` | Conflicts the oracle found in a tree Git merged cleanly: a call to a name the merged code lacks, or a pair whose changes both merged while one requirement was lost |
 | `duplicate_work` | Branches that changed a code unit (a function or a file) another session's task owns |
-| `stops`, `questions` | Each session's result line: a failed, timed-out or error result is a stop; a final answer ending in `?` is a question. Confirm them against the transcripts |
-| `permission_denials` | Calls Claude Code refused, from each result's `permission_denials`: `outside_clone` for a call aimed at a path outside the session's clone (a peer's clone, for example), `not_allowed` for any other call outside the allowed tool list, such as `sed -i` or a pipe into `head` |
-| `cost_usd`, and per task `cost_usd`, `duration_ms`, `turns` | What each session reported (`total_cost_usd`, `duration_ms`, `num_turns`); the total only when every session reported it |
+| `tool_check`, and per task `tool_check` | The tool guard's verdict from each transcript's last line: `passed`, `failed` with the tools or MCP servers that made it fail, or `unknown` when the guard wrote none (a session stopped from outside). The record's is `failed` when any session's is, with `failed_sessions`, and `passed` only when every session's is |
+| `results` (per task) | How many result lines the session's transcript has, one per turn it ended. More than one means something woke the session after its turn ended |
+| `stops`, `questions` | Each session's last result line: a failed, timed-out or error result is a stop; a final answer ending in `?` is a question. Confirm them against the transcripts |
+| `permission_denials` | Calls Claude Code refused, collected from every result line once per tool call, and classified from the tool input and Claude Code's own `permission_denied` event: `peer_checkout` for a call aimed at another session's checkout, the run's other repositories, or through Git at another session's branch, all refs or the stash; `outside_clone` for a call Claude Code refused as outside the session's own checkout, such as a scratch copy in `/tmp`; `not_allowed` for any other call outside the allowed list, such as `sed -i` or a compound command |
+| `cost_usd`, `turns`, and per task `cost_usd`, `duration_ms`, `turns` | What each session reported over all its result lines: `num_turns` and `duration_ms` summed, `total_cost_usd` from the last line (it is cumulative); the totals only when every session reported them |
 | `refusals` | LangSpan arm: each `write_refused` event, and whether the same session was admitted to those paths later (`admitted_later`) or not (`no_later_admission`) |
-| `coordinator_scans` | LangSpan arm: each `scan_failed` and `scan_recovered` event, with the session whose coordinator logged it and the failure's detail |
-| `tokens` | The sessions' reported usage, summed only when every session reported it; otherwise `partial` or `unknown` |
+| `interface_notices` (per task) | LangSpan arm: how many interface notices the coordinator placed in the session's context, from its `inflight_delivered` (another worktree's uncommitted signatures) and `interface_alerted` events; `null` in the other arms |
+| `coordinator_scans` | LangSpan arm: each `scan_failed` and `scan_recovered` event, with the session whose worktree it concerns and the failure's detail |
+| `tokens` | The sessions' reported usage, each session's `usage` summed over its result lines, and the sessions summed only when every session reported it; otherwise `partial` or `unknown` |
+| `isolation` | `worktree` in the LangSpan arm, `clone` in the others |
 | `elapsed_s`, `total_elapsed_s` | Monotonic time of the session phase, and of the whole trial |
 | `versions` | The agent CLI's `--version`, the requested model (`LANGSPAN_BENCH_MODEL`, or `null` for the configuration's default), the models sessions reported, the LangSpan commit and binary digest, Git and Python |
 | `ignored_options` | Options the run accepted but did not use: `--langspan` outside the LangSpan arm, `--standin-mode` with real agents, `LANGSPAN_BENCH_MODEL` with the stand-in |
@@ -507,15 +588,17 @@ cleanup, repetition retention, output bounds, spawn errors, argv literalness,
 the dry-run gate, metadata phases, and unknown/evidence-backed assessments.
 
 `test_driver.py` runs the whole dry-run pipeline for every arm and both
-families at N = 2 and N = 5 in both stand-in modes, and the LangSpan arm at
-N = 10 with `ignore`. A following stand-in must pass the combined test in
-`awareness_only` and `langspan` and fail it in `worktrees`; an ignoring one
-must fail it in every arm. The LangSpan arm goes through the real hooks,
-coordinators, Unix sockets, SQLite stores and Git-remote sharing. The suite
-also provokes a real stale-source refusal and checks that the record and the
-hook log keep it. It checks the Claude Code command line, the seeded
-assignment, that each task line names what a peer needs, prompts, clone
-isolation, both oracles' success definitions, notes and merge logs kept
-across a failed merge, denial kinds, session figures, scan events, and the
-preflight refusal and its record. None of this output is committed as
-benchmark data.
+families at N = 2 and N = 5 with `follow` and `ignore`, the LangSpan arm at
+N = 10 with both, and `hedge` in `contradictory_defaults` at N = 5 in every
+arm, with the expectations listed under [Dry run](#dry-run-no-model). The
+LangSpan arm goes through the real hooks, coordinator, Unix socket and SQLite
+store. The suite also provokes a real stale-source refusal and checks that
+the record and the hook log keep it. It checks the Claude Code command line,
+the tool guard against scripts that list a cross-session tool, a hosted
+connector's tool, an MCP server, a later tool list, an unlisted call or no
+tool list, the record of a failed check, the seeded assignment and its
+layouts, that each task line names what a peer needs, prompts, each arm's
+checkouts, both oracles' success definitions, notes and merge logs kept
+across a failed merge, denial kinds, a session with two result lines, scan
+events and interface notices, and the configuration preflight's refusal and
+its record. None of this output is committed as benchmark data.
