@@ -1850,10 +1850,13 @@ const CODEX: &str = "00000000-0000-4000-8000-000000000001";
 const GEMINI: &str = "00000000-0000-4000-8000-0000000000e1";
 const CURSOR: &str = "00000000-0000-4000-8000-0000000000c1";
 
-/// A host's run of the hook: its coverage.
+/// A host's run of the hook: its coverage, its detail and, for a deny, the
+/// reason in the host's own field.
 #[derive(Debug)]
 struct HostRun {
     coverage: String,
+    detail: String,
+    reason: Option<String>,
 }
 
 impl Fixture {
@@ -1883,8 +1886,20 @@ impl Fixture {
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!(output.status.code(), Some(0), "{stderr}");
         let diagnostic: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+        let reply: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
+        // Codex reads Claude Code's field, Cursor `agent_message` and Gemini
+        // CLI `reason`.
+        let reason = [
+            &reply["hookSpecificOutput"]["permissionDecisionReason"],
+            &reply["agent_message"],
+            &reply["reason"],
+        ]
+        .into_iter()
+        .find_map(|field| field.as_str().map(str::to_owned));
         HostRun {
             coverage: diagnostic["coverage"].as_str().unwrap().into(),
+            detail: diagnostic["detail"].as_str().unwrap_or_default().into(),
+            reason,
         }
     }
 
@@ -2503,4 +2518,288 @@ fn a_formatter_joining_two_sessions_lines_into_one_is_refused_not_guessed() {
     assert_eq!(f.subjects(), "start\n");
     assert_eq!(fs::read(f.work().join(".git/index")).unwrap(), index);
     assert_eq!(f.read("shared.txt"), joined);
+}
+
+// ---------------------------------------------------------------------------
+// The guard on every host's shell tool (issue #25)
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// Commit `files`, each twenty numbered lines, so that a session's later
+    /// edit of one is an uncommitted change.
+    fn commit_files(&self, files: &[&str]) {
+        for file in files {
+            let path = self.work().join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, numbered()).unwrap();
+        }
+        git(&self.work(), &["add", "--", "."]);
+        git(&self.work(), &["commit", "-q", "-m", "files"]);
+    }
+
+    /// A Gemini CLI `run_shell_command` event of `command`.
+    fn gemini_shell_event(&self, pre: bool, command: &str) -> Value {
+        let mut event = json!({
+            "session_id": GEMINI, "transcript_path": "/dev/null", "cwd": self.work(),
+            "hook_event_name": if pre { "BeforeTool" } else { "AfterTool" },
+            "timestamp": "2026-11-26T10:00:00.000Z", "tool_name": "run_shell_command",
+            "tool_input": {"command": command, "description": "Commit."},
+        });
+        if !pre {
+            event["tool_response"] = json!({"llmContent": "Output: done", "returnDisplay": "done"});
+        }
+        event
+    }
+
+    /// A Claude Code hook run with `budget_ms` as its budget.
+    fn hook_with_budget(&self, event: Value, budget_ms: u64) -> Run {
+        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
+            .args(["hook", "claude-code", "--state-dir"])
+            .arg(self.state())
+            .args(["--workspace", "work", "--root"])
+            .arg(self.work())
+            .args(["--budget-ms", &budget_ms.to_string()])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(event.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(0), "{stderr}");
+        let diagnostic: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+        Run {
+            coverage: diagnostic["coverage"].as_str().unwrap().into(),
+            detail: diagnostic["detail"].as_str().unwrap_or_default().into(),
+            reason: None,
+        }
+    }
+}
+
+/// The hold names the Claude Code session, its file and its lines, in the
+/// host's own reason field.
+fn assert_names_alices_lines(run: &HostRun) {
+    assert_eq!(run.coverage, "denied_commit", "{run:?}");
+    let reason = run.reason.as_deref().unwrap_or_default();
+    assert!(reason.contains(&format!("claude-code.{ALICE}")), "{reason}");
+    assert!(reason.contains("\"src/a.rs\" (line 2)"), "{reason}");
+    assert!(reason.contains("commit --mine"), "{reason}");
+    assert!(reason.contains("not instructions"), "{reason}");
+}
+
+/// Acceptance: on Codex, `git commit -am "x"` while a Claude Code session
+/// has uncommitted lines in `src/a.rs` is held once, naming that session,
+/// the file and the lines; the same command again commits.
+#[test]
+fn a_codex_commit_all_is_held_once_naming_the_claude_sessions_lines_and_then_commits() {
+    let f = Fixture::new();
+    f.commit_files(&["src/a.rs"]);
+    f.edit(
+        ALICE,
+        "alice-1",
+        "src/a.rs",
+        "line 2\n",
+        "line 2, by Alice\n",
+    );
+    f.codex_patch("codex-1", "line 18", "line 18, by Codex");
+    let command = "git commit -am \"x\"";
+    let event = json!({
+        "session_id": CODEX, "turn_id": "turn-1", "transcript_path": null,
+        "cwd": f.work(), "hook_event_name": "PreToolUse",
+        "model": "example-model", "permission_mode": "default",
+        "tool_name": "Bash", "tool_use_id": "codex-2",
+        "tool_input": {"command": command},
+    });
+
+    let held = f.host("codex", &event);
+    assert_names_alices_lines(&held);
+    // Nothing was staged or committed.
+    assert_eq!(f.subjects(), "files\nstart\n");
+    assert_eq!(f.status(), " M shared.txt\n M src/a.rs\n");
+
+    // The same command, run again by that session, commits: held once.
+    let mut again = event.clone();
+    again["tool_use_id"] = json!("codex-3");
+    let repeat = f.host("codex", &again);
+    assert!(!repeat.coverage.starts_with("denied"), "{repeat:?}");
+    assert!(repeat.detail.contains("told so once"), "{repeat:?}");
+    let ran = Process::new("/bin/sh")
+        .args(["-c", command])
+        .current_dir(f.work())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    again["hook_event_name"] = json!("PostToolUse");
+    f.host("codex", &again);
+    assert!(ran.status.success(), "{}", said(&ran));
+    assert_eq!(f.subjects(), "x\nfiles\nstart\n");
+    assert_eq!(f.status(), "");
+    assert_eq!(
+        f.refusals().len(),
+        1,
+        "a commit let through records nothing"
+    );
+}
+
+/// Acceptance: a Cursor `Shell` event running `git add -A` is held the same
+/// way.
+#[test]
+fn a_cursor_shell_add_all_is_held_naming_the_claude_sessions_lines() {
+    let f = Fixture::new();
+    f.commit_files(&["src/a.rs"]);
+    f.edit(
+        ALICE,
+        "alice-1",
+        "src/a.rs",
+        "line 2\n",
+        "line 2, by Alice\n",
+    );
+    f.cursor_write("cursor-1", "cursor.txt", "Cursor's file\n");
+    let input = json!({"command": "git add -A", "cwd": f.work()});
+    let held = f.host(
+        "cursor",
+        &f.cursor_event("preToolUse", "Shell", "cursor-2", input),
+    );
+    assert_names_alices_lines(&held);
+    assert_eq!(git(&f.work(), &["diff", "--cached", "--name-only"]), "");
+}
+
+/// Acceptance: a Gemini CLI `run_shell_command` event running `git commit
+/// -a` is held the same way.
+#[test]
+fn a_gemini_shell_commit_all_is_held_naming_the_claude_sessions_lines() {
+    let f = Fixture::new();
+    f.commit_files(&["src/a.rs"]);
+    f.edit(
+        ALICE,
+        "alice-1",
+        "src/a.rs",
+        "line 2\n",
+        "line 2, by Alice\n",
+    );
+    let held = f.host(
+        "gemini-cli",
+        &f.gemini_shell_event(true, "git commit -a -m 'Gemini'"),
+    );
+    assert_names_alices_lines(&held);
+    assert_eq!(f.subjects(), "files\nstart\n");
+}
+
+/// Acceptance: `git add src/b.rs`, where `src/b.rs` holds only the
+/// session's own lines, is not held while another session has uncommitted
+/// lines in `src/a.rs`.
+#[test]
+fn adding_a_path_that_holds_only_the_sessions_own_lines_is_not_held() {
+    let f = Fixture::new();
+    f.commit_files(&["src/a.rs", "src/b.rs"]);
+    f.edit(BOB, "bob-1", "src/a.rs", "line 2\n", "line 2, by Bob\n");
+    f.edit(
+        ALICE,
+        "alice-1",
+        "src/b.rs",
+        "line 5\n",
+        "line 5, by Alice\n",
+    );
+    let (run, ran) = f.bash_call(ALICE, "alice-2", "git add src/b.rs");
+    assert!(!run.coverage.starts_with("denied"), "{run:?}");
+    // Only src/b.rs's entries are read, and they are all Alice's.
+    assert!(
+        run.detail
+            .contains("no other session's uncommitted lines are journaled in what it would take"),
+        "{}",
+        run.detail
+    );
+    assert!(ran.unwrap().status.success());
+    assert_eq!(f.status(), " M src/a.rs\nM  src/b.rs\n");
+
+    // Bob's line added to src/b.rs as well: his entry is read, and the
+    // command is held.
+    f.edit(BOB, "bob-2", "src/b.rs", "line 18\n", "line 18, by Bob\n");
+    let run = f.bash(ALICE, "PreToolUse", "alice-3", "git add src/b.rs");
+    assert_eq!(run.coverage, "denied_commit", "{run:?}");
+    assert!(
+        run.reason.unwrap().contains("\"src/b.rs\" (line 18)"),
+        "held for Bob's line"
+    );
+}
+
+/// Acceptance: with 4,000 journal entries over 50 files, the guard for a
+/// commit of 2 files stays within the default hook budget (1,500 ms), and
+/// makes the whole decision each time (held once, then told so once). Each
+/// run's time is printed, one row per run; ADR 0026 records the figure.
+#[test]
+fn the_guard_for_a_two_file_commit_stays_within_the_hook_budget_over_a_large_journal() {
+    let f = Fixture::new();
+    let files: Vec<String> = (0..50).map(|n| format!("src/f{n:02}.rs")).collect();
+    let names: Vec<&str> = files.iter().map(String::as_str).collect();
+    f.commit_files(&names);
+    f.edit(
+        ALICE,
+        "alice-1",
+        "src/f00.rs",
+        "line 2\n",
+        "line 2, by Alice\n",
+    );
+    f.edit(BOB, "bob-1", "src/f01.rs", "line 5\n", "line 5, by Bob\n");
+    // Bob's other writes: 3,998 entries over the other 48 files.
+    let bob = format!("claude-code.{BOB}");
+    for n in 0..3998 {
+        let path = vec![files[2 + n % 48].clone()];
+        let operation = format!("bob-noise-{n}");
+        langspan::journal::before_edit(&f.state(), &operation, &f.work(), &path);
+        langspan::journal::record(
+            &f.state(),
+            &f.work(),
+            &bob,
+            &path,
+            langspan::journal::Origin::Edit {
+                operation_id: &operation,
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        langspan::journal::entries(&f.state(), &f.work()).len(),
+        4000
+    );
+
+    let command = "git commit -m x -- src/f00.rs src/f01.rs";
+    let mut times = Vec::new();
+    for run in 0..20 {
+        let started = Instant::now();
+        let guarded = f.hook_with_budget(
+            json!({
+                "session_id": ALICE, "cwd": f.work(), "hook_event_name": "PreToolUse",
+                "tool_name": "Bash", "tool_use_id": format!("alice-timed-{run}"),
+                "tool_input": {"command": command, "description": "test command"},
+            }),
+            1500,
+        );
+        let elapsed = started.elapsed();
+        if run == 0 {
+            assert_eq!(guarded.coverage, "denied_commit", "{guarded:?}");
+        } else {
+            assert!(guarded.detail.contains("told so once"), "{guarded:?}");
+        }
+        eprintln!("guard run {run}: {} ms", elapsed.as_millis());
+        times.push(elapsed);
+    }
+    times.sort();
+    let p95 = times[times.len() * 95 / 100 - 1];
+    eprintln!(
+        "guard p95 over {} runs: {} ms",
+        times.len(),
+        p95.as_millis()
+    );
+    assert!(p95 < Duration::from_millis(1500), "p95 {p95:?}: {times:?}");
 }
