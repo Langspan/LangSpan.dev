@@ -5,6 +5,7 @@
 import json
 import os
 from pathlib import Path
+import signal
 import tempfile
 import unittest
 
@@ -82,8 +83,12 @@ class CoordinatorLifetime(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 driver.Coordinator(str(fake), Path(temp, "state"), Path(temp, "daemon.log"))
             pid = int(pid_file.read_text())
-            with self.assertRaises(ProcessLookupError, msg="daemon %d outlived the interrupt" % pid):
+            try:
                 os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            os.kill(pid, signal.SIGKILL)  # This test leaves nothing running either.
+            self.fail("daemon %d outlived the interrupt" % pid)
 
 
 class CoordinatorSocketPath(unittest.TestCase):

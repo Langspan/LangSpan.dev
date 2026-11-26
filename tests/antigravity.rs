@@ -607,6 +607,9 @@ fn project_install_round_trips_hooks_mcp_and_rule_keeping_the_owners_bytes() {
     let mut child = Process::new("sh")
         .arg("-c")
         .arg(command)
+        // No coordinator runs for `state`, and the hook must not start one
+        // that nothing here would stop (issue #239).
+        .env("LANGSPAN_AUTOSTART", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
