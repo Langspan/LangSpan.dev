@@ -1899,7 +1899,9 @@ mod unix {
             && workspace_id.starts_with("lsh1-root-")
             && let Ok(canonical) = fs::canonicalize(root)
             && let Some(existing) = store.state().workspaces.values().find(|existing| {
-                existing.workspace_id != *workspace_id && Path::new(&existing.root) == canonical
+                existing.workspace_id != *workspace_id
+                    && (Path::new(&existing.root) == canonical
+                        || crate::observer::same_root(Path::new(&existing.root), &canonical))
             })
         {
             return Response {
@@ -2167,12 +2169,29 @@ mod unix {
                 )));
             }
         };
+        // The old root still resolves to NEW_ROOT, as when a link was left
+        // where the checkout used to be: the same checkout, moved.
+        // With or without --switch, there is nothing else to tell apart.
+        let same = old_exists && crate::observer::same_root(old, &canonical);
         match (switch, old_exists) {
+            _ if same => {}
             (false, true) => {
+                // A link at the old root, or on the way to it, names the
+                // directory it now leads to.
+                let link = match fs::canonicalize(old) {
+                    Ok(target) if target != old => format!(
+                        ", through a symbolic link, as {}, a different directory from NEW_ROOT",
+                        target.display()
+                    ),
+                    Err(_) if old.is_symlink() => {
+                        ", as a symbolic link whose target cannot be resolved".into()
+                    }
+                    _ => String::new(),
+                };
                 return Err((
                     "old_root_exists",
                     format!(
-                        "The old root {} still exists. To coordinate the checkout at NEW_ROOT under {workspace_id} instead, add --switch; to coordinate both, register NEW_ROOT with `langspan workspace add`. Nothing changed",
+                        "The old root {} still exists{link}. To coordinate the checkout at NEW_ROOT under {workspace_id} instead, add --switch; to coordinate both, register NEW_ROOT with `langspan workspace add`. Nothing changed",
                         old.display()
                     ),
                 ));
@@ -2239,12 +2258,8 @@ mod unix {
                 old.display()
             ))
         })?;
-        let object = format!("{head}^{{commit}}");
-        let arguments = [&SAFE[..], &["cat-file", "-e", &object]].concat();
-        let found = crate::git::run_with_env(new, &arguments, &[], deadline, 256)
-            .map_err(|error| refused(format!("cannot read NEW_ROOT's objects: {error}")))?
-            .0
-            .success();
+        let found = crate::observer::holds_commit(new, &head, deadline)
+            .map_err(|error| refused(format!("cannot read NEW_ROOT's objects: {error}")))?;
         if found {
             Ok(())
         } else {
@@ -2265,6 +2280,18 @@ mod unix {
                     .map_err(|e| format!("cannot resolve workspace root: {e}"))?;
                 if !canonical.is_dir() {
                     return Err("workspace root must be a directory".into());
+                }
+                // The registered root reached another way, such as through a
+                // link left where the checkout used to be: the same
+                // registration, kept as given.
+                if let Some(existing) = state.workspaces.get(workspace_id)
+                    && crate::observer::same_root(Path::new(&existing.root), &canonical)
+                {
+                    return Ok(Command::WorkspaceRegisterVerified {
+                        workspace_id: workspace_id.clone(),
+                        root: existing.root.clone(),
+                        verified_overlaps: existing.verified_overlaps.clone(),
+                    });
                 }
                 let deadline = Instant::now() + Duration::from_millis(250);
                 let verified_overlaps =
@@ -2466,7 +2493,7 @@ mod unix {
         };
         let root = Path::new(&workspace.root);
         let current_root = fs::canonicalize(root)?;
-        if current_root != root {
+        if current_root != root && !crate::observer::same_root(root, &current_root) {
             return Err("workspace root identity changed; use a new workspace registration".into());
         }
         let mut keys = paths

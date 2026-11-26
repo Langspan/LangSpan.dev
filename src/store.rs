@@ -316,7 +316,12 @@ impl Store {
             .workspaces
             .get(workspace_id)
             .ok_or("cannot store a scan for an unregistered workspace")?;
-        if workspace.root != snapshot.root {
+        if workspace.root != snapshot.root
+            && !crate::observer::same_root(
+                std::path::Path::new(&workspace.root),
+                std::path::Path::new(&snapshot.root),
+            )
+        {
             return Err("scan root differs from the registered physical workspace".into());
         }
         let limits = crate::observer::Limits::default();
@@ -360,10 +365,29 @@ impl Store {
         let previous: Option<crate::observer::Snapshot> = previous_json
             .map(|json| serde_json::from_str(&json))
             .transpose()?;
-        if previous
-            .as_ref()
-            .is_some_and(|old| old.root != snapshot.root || old.common_dir != snapshot.common_dir)
-        {
+        if previous.as_ref().is_some_and(|old| {
+            if old.root == snapshot.root && old.common_dir == snapshot.common_dir {
+                return false;
+            }
+            // Reached through a link left where the checkout used to be,
+            // both paths now name the same directories. A link to any other
+            // checkout would too, so the checkout reached must also hold the
+            // commit the previous scan saw. One bounded Git call, once per
+            // change of path: the next scan compares equal paths.
+            let same = |before: &str, now: &str| {
+                crate::observer::same_root(std::path::Path::new(before), std::path::Path::new(now))
+            };
+            !(same(&old.root, &snapshot.root)
+                && same(&old.common_dir, &snapshot.common_dir)
+                && old.head.as_deref().is_some_and(|head| {
+                    crate::observer::holds_commit(
+                        std::path::Path::new(&snapshot.root),
+                        head,
+                        std::time::Instant::now() + std::time::Duration::from_millis(500),
+                    )
+                    .unwrap_or(false)
+                }))
+        }) {
             return Err("Git identity changed since the previous scan; register the replacement as a new workspace".into());
         }
         let changes = crate::observer::diff(&previous, snapshot);
