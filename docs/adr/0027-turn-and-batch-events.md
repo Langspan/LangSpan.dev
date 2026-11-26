@@ -204,8 +204,11 @@ host shows what those events carry.
   through `langspan hook claude-code`; the same Codex session resumed to
   patch the peer's file, which is refused once and then retried; and a new
   session patching a file a CLI session holds. It saves `langspan status`
-  after each turn and `langspan events` at the end. No capture has been
-  taken with it yet.
+  after each turn and, at the end, every coordinator event the run recorded:
+  it reads the last sequence before writing anything and pages through
+  `langspan events --after` from there, so older events in a long-running
+  coordinator neither crowd out nor join the run's own
+  (`tests/capture_codex.rs`). No capture has been taken with it yet.
 - Not observed on a host: `PostToolBatch` delivering a briefing to the model,
   a `StopFailure` other than `model_not_found`, a resumed subagent, and the
   Codex snapshot on a real Codex session.

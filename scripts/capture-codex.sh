@@ -24,8 +24,9 @@
 #
 # Every Codex run uses `-s workspace-write` and the `exec` default approval
 # policy, under which Codex never asks and a refused command fails. Raw events
-# go to DIR/capture (0600), and `langspan status` and `events` after each step
-# to DIR/*.json. They contain local paths and model text: clean them before
+# go to DIR/capture (0600), `langspan status` after each turn to DIR/*.json,
+# and every coordinator event this run recorded, from its first, to
+# DIR/events.txt. They contain local paths and model text: clean them before
 # committing them under fixtures/codex-<version>/.
 set -euo pipefail
 # The hook writes raw events as they arrive: owner-only from the start.
@@ -49,6 +50,25 @@ if ! status=$(codex login status 2>&1) || ! printf '%s\n' "$status" | grep -q '^
   exit 1
 fi
 "$LANGSPAN" status --json >/dev/null 2>&1 || { echo "start the coordinator first: $LANGSPAN daemon" >&2; exit 1; }
+
+# Write every event after sequence $1 to $2, one `SEQ JSON` line each, a page
+# at a time (a page holds at most 1,000 events and 48 KiB), and print the
+# last sequence read, or $1 when there is none.
+events_after() {
+  local after=$1 page
+  : > "$2"
+  while :; do
+    page=$("$LANGSPAN" events --after "$after" --limit 1000) || return 1
+    [ -n "$page" ] || break
+    printf '%s\n' "$page" >> "$2"
+    after=${page##*$'\n'}
+    after=${after%% *}
+  done
+  printf '%s\n' "$after"
+}
+# The coordinator outlives this run and holds older events: the capture saves
+# only those after this sequence, read before the run writes anything.
+START=$(events_after 0 /dev/null) || { echo "could not read the coordinator's events" >&2; exit 1; }
 
 mkdir -p "$DIR"
 DIR=$(cd "$DIR" && pwd -P)
@@ -85,7 +105,7 @@ Trust the project when Codex asks, open /hooks, read each LangSpan hook's
 command and trust it, then quit Codex. This script trusts nothing itself.
 Press Enter here when that is done.
 EOF
-read -r _ </dev/tty
+read -r _
 
 snap() { "$LANGSPAN" "$1" --json "${@:3}" > "$DIR/$2.json" 2>&1 || echo "langspan $1 failed; see $DIR/$2.json"; }
 turn() { codex exec "$@" || echo "the turn ended with an error; the events up to it are kept"; }
@@ -120,8 +140,8 @@ echo "== turn 3: a new session patches notes.txt while another session holds it"
 "$LANGSPAN" admit "$WORKSPACE.holder" notes.txt --ttl-ms 60000 --request-id "$WORKSPACE-hold" >/dev/null
 turn -s workspace-write -C "$REPO" "Use apply_patch to change the line 'alpha' in notes.txt to 'delta'. If it is refused, do not retry. Reply with one word: done."
 snap status status-after-turn-3
-snap events events --limit 1000
+events_after "$START" "$DIR/events.txt" >/dev/null || echo "langspan events failed; $DIR/events.txt holds the pages read before it"
 
-chmod 600 "$CAPTURE"/* "$DIR"/*.json 2>/dev/null || true
+chmod 600 "$CAPTURE"/* "$DIR"/*.json "$DIR/events.txt" 2>/dev/null || true
 echo "== $(find "$CAPTURE" -type f | wc -l | tr -d ' ') event(s) in $CAPTURE"
 echo "Clean them (home paths, transcript_path, model text beyond the prompts) before committing them under fixtures/codex-<version>/."
