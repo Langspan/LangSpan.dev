@@ -5231,9 +5231,17 @@ fn decide_checked(
                 }),
                 _ => None,
             };
+            // The write generation the run took before its tree. A write
+            // recorded since, even one undone before the run (or its rerun)
+            // ended, means its results are not of unchanged code: they are
+            // checked but learned from by neither this record nor a later
+            // one, and are no baseline (a write counted between the count
+            // and the tree would be in the tree it tested).
+            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
+            let unchanged = *writes_before == Some(writes);
             let mut events = vec![Event::CheckRecorded {
                 check: check.clone(),
-                tests: kept.clone(),
+                tests: kept.clone().filter(|_| unchanged),
             }];
             // What this record teaches about tests that flip, learned on a
             // copy so that its notice is labelled with it.
@@ -5264,13 +5272,6 @@ fn decide_checked(
                     ));
                 }
             };
-            // The write generation the run took before its tree. A write
-            // recorded since, even one undone before the run (or its rerun)
-            // ended, means its results are not of unchanged code: they are
-            // checked but learned from by neither this record nor a later
-            // one.
-            let writes = state.writes.get(workspace_id).copied().unwrap_or(0);
-            let unchanged = *writes_before == Some(writes);
             let runs = tests
                 .iter()
                 .map(|results| (results, false))
@@ -9557,7 +9558,12 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 .retain(|record| !(record.name == check.name && record.tree_oid == check.tree_oid));
             records.insert(0, check.clone());
             records.truncate(MAX_CHECKS);
-            classes::keep(state, &check.workspace_id, &check.check_id, tests.as_ref());
+            // Kept only when no write was counted after the run took its
+            // count; an earlier version also stored results whose count had
+            // moved, and on replay they are no baseline either.
+            let writes = state.writes.get(&check.workspace_id).copied().unwrap_or(0);
+            let kept = tests.as_ref().filter(|tests| tests.writes_before == writes);
+            classes::keep(state, &check.workspace_id, &check.check_id, kept);
         }
         Event::AutoCheckEnabled { check } => {
             validate_auto_check(state, check)?;

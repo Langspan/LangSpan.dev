@@ -1248,7 +1248,8 @@ See [ADR 0030](adr/0030-automatic-checks-after-write-batches.md).
 A session's baseline is the newest result of the same check (name and
 whole argument list) with named tests whose tree was taken before the session's
 first write: a `check run` you made before the agents started, or an
-automatic run after another session's writes. The session's results are then
+automatic run after another session's writes. A run during which any write
+was recorded is no baseline. The session's results are then
 compared with it, test by test:
 
 ```text

@@ -249,7 +249,11 @@ first write since it registered. "Before" is decided by the workspace's
 write count (`State::writes`), never by a clock: the session's first
 recorded write notes the count just before it, and a record qualifies when
 its `writes_before` is at most that count. A record made by `check run` or
-by an earlier automatic run qualifies alike. A session with no such record
+by an earlier automatic run qualifies alike. A record keeps its results as a
+baseline only when the count is still its `writes_before` when it is
+recorded: a write counted between the run's count and its tree would be in
+the tree it tested, so a record whose count moved is no baseline, on replay
+of an older event too. A session with no such record
 has no baseline, and its results are not classified. A daemon restart
 registers a session again in place and keeps its baseline; a registration
 in another workspace starts a new one.
@@ -311,8 +315,9 @@ extra run does any work for it.
 failure new; no baseline or no names means no classes; writers between the
 two trees are named, each session never told of itself, and a write after the
 tree is not one; records and landing readiness are equal with and without
-classification; another command with the same summary is no baseline; an
-older `check_recorded` still applies; the state replays equal). Breaking the writers rule makes two of them fail. The rendered text
+classification; another command with the same summary is no baseline; a
+run whose write count moved before it was recorded is no baseline, live or
+replayed from an older event; an older `check_recorded` still applies; the state replays equal). Breaking the writers rule makes two of them fail. The rendered text
 and its bound, at the most names, writers and output it can carry, in
 `src/hook.rs`. Through the real daemon, hooks and Git in
 `tests/auto_checks.rs`: a real `cargo test` crate where the write breaks two

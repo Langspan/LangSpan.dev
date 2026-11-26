@@ -424,3 +424,105 @@ fn an_older_check_recorded_event_without_test_results_still_applies() {
     let parsed: Event = serde_json::from_value(json).unwrap();
     assert_eq!(parsed, event);
 }
+
+/// A record of check `tests` (`cargo test`) on `tree` that says its tree was
+/// taken at write count `writes_before`.
+fn record_taken_at(
+    state: &mut State,
+    id: &str,
+    tree: &str,
+    writes_before: u64,
+    tests: TestResults,
+) {
+    run(
+        state,
+        id,
+        Command::RecordCheck {
+            workspace_id: "work".into(),
+            name: "tests".into(),
+            command: "cargo test".into(),
+            tree_oid: tree.into(),
+            head_oid: None,
+            inputs: Vec::new(),
+            result: CheckResult::Failed { exit_code: 101 },
+            duration_ms: 900,
+            report: None,
+            writes_before: Some(writes_before),
+            command_id: Some("c".repeat(64)),
+            tests: Some(tests),
+            rerun: None,
+        },
+        100,
+    );
+}
+
+#[test]
+fn a_run_whose_write_count_moved_before_it_was_recorded_is_no_baseline() {
+    let mut state = ready(&["alice"]);
+    // The run takes count 0, then alice's first write breaks a test before
+    // the run takes its tree: the tree it tests already holds her write.
+    write(&mut state, "alice", "w1");
+    record_taken_at(
+        &mut state,
+        "c0",
+        &tree('a'),
+        0,
+        failing(&["parser::keeps_order"], &["parser::rejects_empty"]),
+    );
+    assert!(
+        state.kept_tests.is_empty(),
+        "kept as a baseline: {:?}",
+        state.kept_tests
+    );
+    write(&mut state, "alice", "w2");
+    record(
+        &mut state,
+        "c1",
+        &tree('b'),
+        Some(failing(
+            &["parser::keeps_order"],
+            &["parser::rejects_empty"],
+        )),
+        &["alice"],
+    );
+    let notice = notice(&state, "alice");
+    assert_eq!(notice.baseline_check_id, None);
+    assert_eq!(classes(notice), [("parser::keeps_order".into(), None)]);
+    assert_eq!(replayed().kept_tests, state.kept_tests);
+}
+
+#[test]
+fn an_older_record_whose_write_count_had_moved_is_no_baseline_on_replay() {
+    let mut state = ready(&["alice"]);
+    write(&mut state, "alice", "w1");
+    // An event an earlier version stored: results kept although a write was
+    // counted after the run took its count.
+    let event = Event::CheckRecorded {
+        check: langspan_core::CheckRecord {
+            check_id: "c0".into(),
+            workspace_id: "work".into(),
+            name: "tests".into(),
+            command: "cargo test".into(),
+            tree_oid: tree('a'),
+            head_oid: None,
+            inputs: Vec::new(),
+            result: CheckResult::Failed { exit_code: 101 },
+            duration_ms: 900,
+            recorded_ms: 100,
+            generation: 1,
+            changed_since: false,
+        },
+        tests: Some(langspan_core::KeptTests {
+            results: failing(&["parser::keeps_order"], &[]),
+            writes_before: 0,
+            command_id: "c".repeat(64),
+        }),
+    };
+    apply(&mut state, &event).unwrap();
+    assert!(
+        state.checks["work"]
+            .iter()
+            .any(|record| record.check_id == "c0")
+    );
+    assert!(state.kept_tests.is_empty(), "{:?}", state.kept_tests);
+}
