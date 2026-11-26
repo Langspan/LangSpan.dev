@@ -419,6 +419,21 @@ model.
 | Denial of service | Off by default. One run per workspace at a time; a burst of batches waits for a pause of `auto_check_debounce_ms` (50 ms to 60 s) and at most 30 s; the command is killed with its process group at its limit (1 to 3,600 s) and whenever it ends. The trigger queue holds 256 and never blocks the state owner; output kept while running is 8 KiB. Each run takes two snapshots of the working tree, plus one per trigger while it runs. If the daemon stops, a running check's process group is not killed and runs to its end. |
 | Elevation of privilege | **The command runs outside the agent host**: as the daemon's user, with the daemon's environment, in the workspace root, not in the host's sandbox and not behind its permission prompts. Code an agent writes and the command executes (tests, build scripts, a `Makefile`) therefore runs without the host asking, and a prompt-injected agent can use that to run code the host would have refused. Turning the check on is the owner's grant of this. There is no MCP tool for it; the CLI and any other client of the owner-only socket can set it, so an agent that runs `langspan check auto` through its shell does so under the host's own prompt for that shell command. An owner who runs agents in a sandbox for safety should leave it off. |
 
+### The wider check after an interface change
+
+The wider command (issue #71, ADR 0030) adds a second owner-chosen command to
+the automatic check, run outside the agent host like the first, and relays
+index-derived file names to more sessions.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | The wider command starts only from an interface notice the daemon's own indexer reported (`observe_interface` reaches the worker only through the state owner, and a replayed request starts nothing). A same-user client can send `observe_interface` itself and so make the configured wider command run, bounded like any trigger: one run per workspace, after the debounce. It cannot choose what runs. |
+| Tampering (prompt injection) | The briefing quotes repository text: an export's name and signatures, cleaned and capped (128 and 160 bytes), and at most 8 file paths, cleaned and capped, labelled as a name lookup and not resolved uses, inside the check section's 1,200-byte cap with the output tail's existing label. A crafted signature can still put words in the model's context. |
+| Repudiation | The wider result is an ordinary `check_recorded` and `check_reported` event, with the grade and the change; the sessions told are named in the event. |
+| Information disclosure | The sessions working on a mentioning file now receive the wider check's output tail, which was before sent only to the sessions whose writes triggered the check. All are sessions of the same workspace on the same machine. Nothing is published to a remote. |
+| Denial of service | At most 16 ungraded changes per workspace; the wider run shares the one-run-per-workspace rule, the debounce, its own 1 to 3,600 s limit and the tree-change cancellation, and is never rerun for flaky-test learning. Each boundary in a workspace with a wider command reads the index's coverage once, a bounded query of a local file. |
+| Elevation of privilege | **The wider command runs outside the agent host**, as the regular command does: as the daemon's user, not in the host's sandbox. Setting it is the owner's grant, from the CLI or another client of the owner-only socket; there is no MCP tool, and a command that looks like it holds a secret is refused by the daemon. |
+
 ### Tests that flip on unchanged code
 
 Learning which tests flip (issue #70, ADR 0030) widens three things: a quick

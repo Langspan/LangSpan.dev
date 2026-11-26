@@ -149,6 +149,7 @@ fn ready() -> State {
                 name: "test".into(),
                 argv: vec!["cargo".into(), "test".into()],
                 timeout_s: 60,
+                on_interface_change: None,
             },
             5,
         ),
