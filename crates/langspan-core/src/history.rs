@@ -134,7 +134,7 @@ pub struct HistoryQuery<'a> {
     /// Only changes recorded before this sequence number.
     pub before_seq: Option<u64>,
     /// Logged events, in any order: interface changes, prompts, notes,
-    /// forgettings and messages. Others are ignored.
+    /// forgettings, messages and withdrawals. Others are ignored.
     pub events: &'a [RecordedEvent],
     /// Every generation's clock anchor that the log holds.
     pub anchors: &'a [ClockAnchor],
@@ -211,6 +211,19 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
             _ => None,
         })
         .collect();
+    // A withdrawn message no longer holds: its text is left out, as the
+    // briefing and recap stop presenting it.
+    let retracted: BTreeSet<&str> = events
+        .iter()
+        .filter_map(|recorded| match &recorded.event {
+            Event::MessageRetracted {
+                workspace_id,
+                message_id,
+                ..
+            } if workspace_id == query.workspace_id => Some(message_id.as_str()),
+            _ => None,
+        })
+        .collect();
     let now = Stamp {
         at_ms: query.now_ms,
         generation: state.generation,
@@ -280,6 +293,7 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
                 Event::MessageSent { message, at: when }
                     if message.workspace_id == query.workspace_id
                         && messages.len() < HISTORY_RELATED
+                        && !retracted.contains(message.message_id.as_str())
                         && !messages
                             .iter()
                             .any(|held| held.message_id == message.message_id)

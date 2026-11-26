@@ -108,6 +108,28 @@ const FORGETTING_LOOKUP: &str = concat!(
     " AND json_extract(event_json, '$.note_id') = ?1"
 );
 
+/// The withdrawals, one row per withdrawn message.
+macro_rules! retracted_kind {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END = 'message_retracted'"
+    };
+}
+
+/// A partial index of the withdrawals by message, so a history finds
+/// whether a message it would show was withdrawn however far after it that
+/// happened.
+const RETRACTED_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_retracted ON events(json_extract(event_json, '$.message_id')) WHERE ",
+    retracted_kind!()
+);
+
+/// The withdrawals of one message.
+const RETRACTION_LOOKUP: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE ",
+    retracted_kind!(),
+    " AND json_extract(event_json, '$.message_id') = ?1"
+);
+
 /// Every generation's clock anchor.
 const ANCHORS: &str = concat!(
     "SELECT event_json FROM events WHERE ",
@@ -313,6 +335,7 @@ impl Store {
         connection.execute_batch(GENERATION_MARKER_INDEX)?;
         connection.execute_batch(HISTORY_INDEX)?;
         connection.execute_batch(FORGOTTEN_INDEX)?;
+        connection.execute_batch(RETRACTED_INDEX)?;
 
         let state = Self::recover(&connection)?;
         let generation = state
@@ -1135,9 +1158,11 @@ impl Store {
     /// A definition's history (roadmap D4): the newest `HISTORY_EVENTS`
     /// events of the kinds it reads before `before_seq`, the notes and
     /// messages after that point, and every generation's anchor, decided by
-    /// the core. Reads only, through the `events_history` index, and the
-    /// forgettings of the notes read through `events_forgotten`, by note and
-    /// not within a capped window; it writes nothing and delivers nothing.
+    /// the core. Reads only, through the `events_history` index, the
+    /// forgettings of the notes read through `events_forgotten` and the
+    /// withdrawals of the messages read through `events_retracted`, by note
+    /// or message and not within a capped window; it writes nothing and
+    /// delivers nothing.
     /// When the log holds older events than those read, the answer says
     /// `truncated` with a `next_seq` that reads on from there.
     pub fn history(
@@ -1194,6 +1219,23 @@ impl Store {
                     .into_iter()
                     .filter(|recorded| !read_seqs.contains(&recorded.seq)),
             );
+        }
+        drop(statement);
+        // Likewise a message read here may have been withdrawn after every
+        // event read; withdrawals are not among the kinds read above, so
+        // each is looked up by message.
+        let messages: std::collections::BTreeSet<String> = events
+            .iter()
+            .filter_map(|recorded| match &recorded.event {
+                Event::MessageSent { message, .. } if message.workspace_id == workspace_id => {
+                    Some(message.message_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut statement = self.connection.prepare_cached(RETRACTION_LOOKUP)?;
+        for message_id in &messages {
+            events.extend(rows_of(statement.query([message_id])?)?);
         }
         drop(statement);
         let mut anchors = Vec::new();
@@ -1688,7 +1730,18 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        let plans = plans.into_iter().chain([(forgetting, "events_forgotten")]);
+        let retraction: Vec<String> = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {RETRACTION_LOOKUP}"))
+            .unwrap()
+            .query_map(["message-1"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let plans = plans.into_iter().chain([
+            (forgetting, "events_forgotten"),
+            (retraction, "events_retracted"),
+        ]);
         drop(store);
         std::fs::remove_dir_all(&directory).unwrap();
         for (steps, index) in plans {
@@ -1816,5 +1869,127 @@ mod tests {
             !serde_json::to_string(&history).unwrap().contains(text),
             "{history:?}"
         );
+    }
+
+    /// A withdrawn message's text never comes back in a history, whether
+    /// its withdrawal is within the events one answer reads or behind more
+    /// following events than that.
+    #[test]
+    fn history_never_shows_a_withdrawn_message() {
+        use langspan_core::{InterfaceChange, InterfaceNotice, Message, Recipient, Stamp};
+        for filler in [0, HISTORY_EVENTS] {
+            let directory = std::env::temp_dir().join(format!(
+                "langspan-history-retracted-{}-{}-{filler}",
+                std::process::id(),
+                wall_now_ms()
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+            let register = Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: directory.to_string_lossy().into_owned(),
+            };
+            store.execute("w", &register, &register, 0).unwrap();
+            let at = Stamp {
+                at_ms: 1_000,
+                generation: store.state.generation,
+            };
+            let withdrawn = "save now takes the retry count";
+            let kept = "callers of save pass three";
+            let sent = |message_id: &str, text: &str, paths: Vec<String>| Event::MessageSent {
+                message: Message {
+                    message_id: message_id.into(),
+                    workspace_id: "work".into(),
+                    from: None,
+                    to: Recipient::Everyone {},
+                    text: text.into(),
+                    paths,
+                    acknowledged: Vec::new(),
+                    retracted: false,
+                },
+                at: Some(at),
+            };
+            store
+                .commit(
+                    &[
+                        sent("m-withdrawn", withdrawn, vec!["src/save.rs".into()]),
+                        sent("m-kept", kept, vec!["src/save.rs".into()]),
+                        Event::InterfaceChanged {
+                            notice: InterfaceNotice {
+                                notice_id: "n-1".into(),
+                                workspace_id: "work".into(),
+                                path: "src/save.rs".into(),
+                                changes: vec![InterfaceChange {
+                                    name: "save".into(),
+                                    kind: "function".into(),
+                                    change: "signature_changed".into(),
+                                    before: Some("fn save()".into()),
+                                    after: Some("fn save(retries: u32)".into()),
+                                    before_arity: None,
+                                    after_arity: None,
+                                    before_count: None,
+                                    after_count: None,
+                                }],
+                                dependents: Vec::new(),
+                                by_session: None,
+                                at_ms: at.at_ms,
+                                generation: at.generation,
+                            },
+                        },
+                    ],
+                    None,
+                )
+                .unwrap();
+            let changed: i64 = store
+                .connection
+                .query_row("SELECT max(seq) FROM events", [], |row| row.get(0))
+                .unwrap();
+            let unrelated: Vec<Event> = (0..filler)
+                .map(|index| sent(&format!("m-{index}"), "unrelated", Vec::new()))
+                .collect();
+            if !unrelated.is_empty() {
+                store.commit(&unrelated, None).unwrap();
+            }
+            store
+                .commit(
+                    &[Event::MessageRetracted {
+                        workspace_id: "work".into(),
+                        message_id: "m-withdrawn".into(),
+                        by: None,
+                    }],
+                    None,
+                )
+                .unwrap();
+
+            let before = u64::try_from(changed).unwrap() + 1;
+            let paged = store
+                .history(("work", "save", None), 10, Some(before), at.at_ms)
+                .unwrap();
+            // Unpaged, the change is within the events read only without
+            // the filler.
+            let newest = (filler == 0).then(|| {
+                store
+                    .history(("work", "save", None), 10, None, at.at_ms)
+                    .unwrap()
+            });
+            drop(store);
+            std::fs::remove_dir_all(&directory).unwrap();
+            for outcome in std::iter::once(paged).chain(newest) {
+                let Outcome::History { history } = outcome else {
+                    panic!("{outcome:?}");
+                };
+                assert_eq!(history.entries.len(), 1, "{filler}: {history:?}");
+                let messages: Vec<&str> = history.entries[0]
+                    .messages
+                    .iter()
+                    .map(|message| message.message_id.as_str())
+                    .collect();
+                assert_eq!(messages, ["m-kept"], "{filler}: {history:?}");
+                assert!(
+                    !serde_json::to_string(&history).unwrap().contains(withdrawn),
+                    "{filler}: {history:?}"
+                );
+            }
+        }
     }
 }

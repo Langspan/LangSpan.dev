@@ -295,7 +295,9 @@ a store opens, like the generation-marker index), the notes, forgettings and
 messages after that point when paging, and every clock anchor. Whether a note
 it read was forgotten is looked up by the note's ID through a second partial
 index, `events_forgotten`, never within those capped reads, so a forgotten
-note's text does not come back however many events follow it. An answer is
+note's text does not come back however many events follow it. Likewise
+whether a message it read was withdrawn is looked up by the message's ID
+through `events_retracted`, and a withdrawn message is left out. An answer is
 cut, a whole event's entries at a time and oldest first, with `truncated`
 and a `next_seq` to pass as `before_seq`: past the limit, past 28 KiB (the
 MCP result carries it twice, and the adapter trims again against one frame,
@@ -311,7 +313,9 @@ index and repository changed across several scans, the CLI and the MCP tool;
 `history_reads_only_the_events_it_uses` in `src/store.rs` checks that the
 query plans use the partial indexes, and
 `paging_into_old_history_never_shows_a_forgotten_note` there pages into a
-change whose note is forgotten after 20,000 following messages. Not yet called
+change whose note is forgotten after 20,000 following messages, and
+`history_never_shows_a_withdrawn_message` does the same for a message
+withdrawn straight after the change and after 20,000 following messages. Not yet called
 on a native host.
 
 **Code briefing at a prompt (added later).** At `UserPromptSubmit`, for both

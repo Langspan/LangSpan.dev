@@ -1067,8 +1067,8 @@ before the change was indexed, a correlation and not proof of who wrote it
 summary before the change, absent when it recorded none (prompt summaries
 off). `notes` and `messages` (up to 4 each) are those that named the file, in
 their paths or text, within 30 minutes either side of the change; forgotten
-notes, and notes or messages recorded before they kept their time, are not
-shown. `reverted: true` means the change put back a signature that the
+notes, withdrawn messages, and notes or messages recorded before they kept
+their time, are not shown. `reverted: true` means the change put back a signature that the
 definition, in that file, had at an earlier recorded change. A new exported
 name is recorded as `added` for this history and told to no session; a removal
 records the signature that went, so a definition removed and added back is
