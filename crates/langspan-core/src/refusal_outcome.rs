@@ -6,9 +6,15 @@
 //!
 //! Nothing here reaches a model, and nothing is held or refused because of
 //! an outcome.
+//!
+//! The report runs in the daemon's single store worker, so an edit
+//! admission waits behind it. Every event therefore costs the settler a
+//! bounded number of index lookups, never a scan of what is pending: the
+//! refusals pending are indexed by session and path, by holder and path,
+//! and by deadline.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::{iter, mem};
+use std::mem;
 
 use crate::{Event, LeaseRelation, RefusalKind, SHELL_TOOL, SourceOrigin, ToolResult};
 
@@ -59,12 +65,17 @@ impl RefusalOutcome {
     }
 }
 
-/// One refusal, or several of the same session, kind and path set, not yet
-/// settled.
-struct Pending {
+/// What makes refusals of one session one group: workspace, kind and the
+/// refused path set.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct GroupKey {
     workspace_id: String,
     kind: RefusalKind,
     paths: BTreeSet<String>,
+}
+
+/// One group's refusals of a session (`GroupKey`), not yet settled.
+struct Pending {
     /// The refused calls' input digests.
     digests: BTreeSet<String>,
     /// A refusal of the group was recorded without its call's digest.
@@ -86,14 +97,10 @@ struct Pending {
 }
 
 impl Pending {
-    fn touches(&self, paths: &[String]) -> bool {
-        paths.iter().any(|path| self.paths.contains(path))
-    }
-
-    /// The outcome of a write of a refused path: `digest` is the call's
-    /// input digest, `None` for a shell command.
-    fn written(&self, digest: Option<&str>) -> RefusalOutcome {
-        if self.kind == RefusalKind::Conflict {
+    /// The outcome of a write of a refused path of a `kind` group: `digest`
+    /// is the call's input digest, `None` for a shell command.
+    fn written(&self, kind: RefusalKind, digest: Option<&str>) -> RefusalOutcome {
+        if kind == RefusalKind::Conflict {
             if !self.holder_known {
                 return RefusalOutcome::Unknown;
             }
@@ -116,7 +123,16 @@ impl Pending {
             Some(_) => RefusalOutcome::Adapted,
         }
     }
+
+    /// A conflict still waiting for its holder to let go: the one state a
+    /// lease ending can change.
+    fn awaits_holder(&self) -> bool {
+        self.holder_known && !self.holder_ended
+    }
 }
+
+/// A session and a path: the key of the session-and-path indexes.
+type SessionPath = (String, String);
 
 /// Settles refusals from the events, in log order. The report feeds it
 /// every event it reads, then opens a refusal for each counted one.
@@ -124,13 +140,34 @@ impl Pending {
 pub(crate) struct Settler {
     window_ms: u64,
     /// Per session, its refusals not yet settled.
-    pending: BTreeMap<String, Vec<Pending>>,
+    pending: BTreeMap<String, BTreeMap<GroupKey, Pending>>,
+    /// Session and refused path to the session's pending groups with it.
+    by_path: BTreeMap<SessionPath, BTreeSet<GroupKey>>,
+    /// Holder and refused path to the conflicts waiting for that holder
+    /// (`Pending::awaits_holder`), by refused session and group.
+    by_holder: BTreeMap<SessionPath, BTreeSet<(String, GroupKey)>>,
+    /// Pending groups by deadline, earliest first.
+    deadlines: BTreeSet<(u64, String, GroupKey)>,
     /// Open admissions: lease ID to its session and paths.
     leases: BTreeMap<String, (String, Vec<String>)>,
+    /// Session and path to how many of its open admissions hold the path.
+    held: BTreeMap<SessionPath, u32>,
     /// Per session, outcome name to count.
     settled: BTreeMap<String, BTreeMap<&'static str, u32>>,
-    /// The earliest deadline pending, so most events skip the expiry scan.
-    next_deadline_ms: Option<u64>,
+}
+
+fn key(session: &str, path: &str) -> SessionPath {
+    (session.to_owned(), path.to_owned())
+}
+
+/// Take `value` out of the set at `index`, dropping the set once empty.
+fn unindex<K: Ord, V: Ord>(index: &mut BTreeMap<K, BTreeSet<V>>, at: K, value: &V) {
+    if let Some(set) = index.get_mut(&at) {
+        set.remove(value);
+        if set.is_empty() {
+            index.remove(&at);
+        }
+    }
 }
 
 impl Settler {
@@ -151,65 +188,126 @@ impl Settler {
         *count = count.saturating_add(1);
     }
 
+    fn holds(&self, session: &str, path: &str) -> bool {
+        self.held.contains_key(&key(session, path))
+    }
+
+    /// One admission of `holder` on `paths` is no longer open.
+    fn unhold(&mut self, holder: &str, paths: &[String]) {
+        for path in paths {
+            let at = key(holder, path);
+            if let Some(count) = self.held.get_mut(&at) {
+                *count -= 1;
+                if *count == 0 {
+                    self.held.remove(&at);
+                }
+            }
+        }
+    }
+
+    /// Index a conflict as waiting for its holder.
+    fn await_holder(&mut self, session: &str, group: &GroupKey, peer: &str) {
+        for path in &group.paths {
+            self.by_holder
+                .entry(key(peer, path))
+                .or_default()
+                .insert((session.to_owned(), group.clone()));
+        }
+    }
+
+    /// Take a conflict off its holder's index.
+    fn stop_awaiting(&mut self, session: &str, group: &GroupKey, peer: &str) {
+        let entry = (session.to_owned(), group.clone());
+        for path in &group.paths {
+            unindex(&mut self.by_holder, key(peer, path), &entry);
+        }
+    }
+
+    /// Remove one pending group and every index entry for it.
+    fn remove(&mut self, session: &str, group: &GroupKey) -> Option<Pending> {
+        let groups = self.pending.get_mut(session)?;
+        let pending = groups.remove(group)?;
+        if groups.is_empty() {
+            self.pending.remove(session);
+        }
+        for path in &group.paths {
+            unindex(&mut self.by_path, key(session, path), group);
+        }
+        if let (true, Some(peer)) = (pending.awaits_holder(), pending.peer.as_deref()) {
+            self.stop_awaiting(session, group, peer);
+        }
+        self.deadlines
+            .remove(&(pending.deadline_ms, session.to_owned(), group.clone()));
+        Some(pending)
+    }
+
+    /// The session's pending groups with any of `paths`.
+    fn touching<'a>(
+        &self,
+        session: &str,
+        paths: impl IntoIterator<Item = &'a String>,
+    ) -> BTreeSet<GroupKey> {
+        paths
+            .into_iter()
+            .filter_map(|path| self.by_path.get(&key(session, path)))
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
     /// Settle `abandoned` every refusal whose deadline is at or before
     /// `wall_ms`.
     pub(crate) fn expire(&mut self, wall_ms: u64) {
-        if self.next_deadline_ms.is_none_or(|next| next > wall_ms) {
-            return;
+        while let Some((deadline_ms, session, group)) = self.deadlines.first().cloned() {
+            if deadline_ms > wall_ms {
+                break;
+            }
+            if self.remove(&session, &group).is_some() {
+                self.settle(&session, RefusalOutcome::Abandoned);
+            } else {
+                self.deadlines.remove(&(deadline_ms, session, group));
+            }
         }
-        let mut expired = Vec::new();
-        for (session, groups) in &mut self.pending {
-            let before = groups.len();
-            groups.retain(|group| group.deadline_ms > wall_ms);
-            expired.extend(iter::repeat_n(session.clone(), before - groups.len()));
-        }
-        for session in expired {
-            self.settle(&session, RefusalOutcome::Abandoned);
-        }
-        self.pending.retain(|_, groups| !groups.is_empty());
-        self.next_deadline_ms = self
-            .pending
-            .values()
-            .flatten()
-            .map(|group| group.deadline_ms)
-            .min();
     }
 
     /// Settle the session's refusals that a write of `paths` in
     /// `workspace_id` answers.
     fn write(&mut self, session: &str, workspace_id: &str, paths: &[String], digest: Option<&str>) {
-        let Some(groups) = self.pending.get_mut(session) else {
-            return;
-        };
-        let mut outcomes = Vec::new();
-        groups.retain(|group| {
-            if group.workspace_id == workspace_id && group.touches(paths) {
-                outcomes.push(group.written(digest));
-                false
-            } else {
-                true
+        for group in self.touching(session, paths) {
+            if group.workspace_id != workspace_id {
+                continue;
             }
-        });
-        for outcome in outcomes {
-            self.settle(session, outcome);
+            if let Some(pending) = self.remove(session, &group) {
+                self.settle(session, pending.written(group.kind, digest));
+            }
         }
     }
 
-    /// The peer's admissions ended: mark its conflicts whose paths it no
-    /// longer holds.
-    fn holder_released(&mut self, peer: &str) {
-        let held: BTreeSet<&String> = self
-            .leases
-            .values()
-            .filter(|(session, _)| session == peer)
-            .flat_map(|(_, paths)| paths)
+    /// The admission `lease_id` ended: mark the conflicts waiting for its
+    /// holder whose paths that holder no longer holds. Only a conflict with
+    /// one of the lease's paths can change.
+    fn lease_ended(&mut self, lease_id: &str) {
+        let Some((holder, paths)) = self.leases.remove(lease_id) else {
+            return;
+        };
+        self.unhold(&holder, &paths);
+        let waiting: BTreeSet<(String, GroupKey)> = paths
+            .iter()
+            .filter_map(|path| self.by_holder.get(&key(&holder, path)))
+            .flatten()
+            .cloned()
             .collect();
-        for group in self.pending.values_mut().flatten() {
-            if group.peer.as_deref() == Some(peer)
-                && group.holder_known
-                && !group.paths.iter().any(|path| held.contains(path))
+        for (session, group) in waiting {
+            if group.paths.iter().any(|path| self.holds(&holder, path)) {
+                continue;
+            }
+            self.stop_awaiting(&session, &group, &holder);
+            if let Some(pending) = self
+                .pending
+                .get_mut(&session)
+                .and_then(|groups| groups.get_mut(&group))
             {
-                group.holder_ended = true;
+                pending.holder_ended = true;
             }
         }
     }
@@ -222,10 +320,17 @@ impl Settler {
         }
         match event {
             Event::LeaseGranted { lease } => {
-                self.leases.insert(
+                for path in &lease.paths {
+                    *self.held.entry(key(&lease.session_id, path)).or_default() += 1;
+                }
+                if let Some((holder, replaced)) = self.leases.insert(
                     lease.lease_id.clone(),
                     (lease.session_id.clone(), lease.paths.clone()),
-                );
+                ) {
+                    // Not expected: a lease ID granted twice. Keep the
+                    // counts to the paths of the open grant.
+                    self.unhold(&holder, &replaced);
+                }
                 // A manual `admit` is not a write.
                 if let (Some(operation), Some(_)) = (&lease.operation, wall_ms) {
                     self.write(
@@ -239,20 +344,13 @@ impl Settler {
             // A new generation holds none of the earlier one's admissions,
             // and no event ends them one by one.
             Event::Booted { .. } => {
-                let holders: BTreeSet<String> = self
-                    .leases
-                    .values()
-                    .map(|(session, _)| session.clone())
-                    .collect();
-                self.leases.clear();
-                for holder in holders {
-                    self.holder_released(&holder);
+                let ids: Vec<String> = self.leases.keys().cloned().collect();
+                for id in ids {
+                    self.lease_ended(&id);
                 }
             }
             Event::LeaseCompleted { lease_id } | Event::LeaseExpired { lease_id } => {
-                if let Some((session, _)) = self.leases.remove(lease_id) {
-                    self.holder_released(&session);
-                }
+                self.lease_ended(lease_id);
             }
             Event::OperationObserved { observation }
                 if wall_ms.is_some()
@@ -278,19 +376,33 @@ impl Settler {
                 origin: SourceOrigin::Read,
                 ..
             } if wall_ms.is_some() => {
-                for group in self.pending.get_mut(session_id).into_iter().flatten() {
-                    if files.iter().any(|file| group.paths.contains(&file.path)) {
-                        group.read = true;
+                let groups = self.touching(session_id, files.iter().map(|file| &file.path));
+                if let Some(pending) = self.pending.get_mut(session_id) {
+                    for group in groups {
+                        if let Some(pending) = pending.get_mut(&group) {
+                            pending.read = true;
+                        }
                     }
                 }
             }
             Event::SessionEnded { session_id } => {
-                self.leases.retain(|_, (session, _)| session != session_id);
-                self.holder_released(session_id);
-                if wall_ms.is_some()
-                    && let Some(groups) = self.pending.remove(session_id)
-                {
-                    for _ in groups {
+                let ids: Vec<String> = self
+                    .leases
+                    .iter()
+                    .filter(|(_, (session, _))| session == session_id)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in ids {
+                    self.lease_ended(&id);
+                }
+                if wall_ms.is_some() {
+                    let groups: Vec<GroupKey> = self
+                        .pending
+                        .get(session_id)
+                        .map(|groups| groups.keys().cloned().collect())
+                        .unwrap_or_default();
+                    for group in groups {
+                        self.remove(session_id, &group);
                         self.settle(session_id, RefusalOutcome::Abandoned);
                     }
                 }
@@ -318,54 +430,54 @@ impl Settler {
         if kind == RefusalKind::CommitHeld || paths.is_empty() {
             return;
         }
-        let paths: BTreeSet<String> = paths.iter().cloned().collect();
-        let holder_known = peer.is_some_and(|peer| {
-            self.leases.values().any(|(session, held)| {
-                session == peer && held.iter().any(|path| paths.contains(path))
-            })
-        });
-        let deadline_ms = wall_ms.saturating_add(self.window_ms);
-        self.next_deadline_ms = Some(
-            self.next_deadline_ms
-                .map_or(deadline_ms, |next| next.min(deadline_ms)),
-        );
-        let groups = self.pending.entry(session.clone()).or_default();
-        let index = match groups.iter().position(|group| {
-            group.workspace_id == *workspace_id && group.kind == kind && group.paths == paths
-        }) {
-            Some(index) => index,
-            None => {
-                groups.push(Pending {
-                    workspace_id: workspace_id.clone(),
-                    kind,
-                    paths,
-                    digests: BTreeSet::new(),
-                    digest_missing: false,
-                    peer: None,
-                    holder_known: false,
-                    holder_ended: false,
-                    read: false,
-                    reads_reported,
-                    deadline_ms,
-                });
-                groups.len() - 1
-            }
+        let group = GroupKey {
+            workspace_id: workspace_id.clone(),
+            kind,
+            paths: paths.iter().cloned().collect(),
         };
-        let group = &mut groups[index];
+        let holder_known =
+            peer.is_some_and(|peer| group.paths.iter().any(|path| self.holds(peer, path)));
+        let deadline_ms = wall_ms.saturating_add(self.window_ms);
+        // Take the group out of every index, update it, and put it back.
+        let mut pending = self.remove(session, &group).unwrap_or(Pending {
+            digests: BTreeSet::new(),
+            digest_missing: false,
+            peer: None,
+            holder_known: false,
+            holder_ended: false,
+            read: false,
+            reads_reported,
+            deadline_ms,
+        });
         match digest {
             Some(digest) => {
-                group.digests.insert(digest.into());
+                pending.digests.insert(digest.into());
             }
-            None => group.digest_missing = true,
+            None => pending.digest_missing = true,
         }
         // The latest refusal names the holder now, and restarts the window.
         if kind == RefusalKind::Conflict {
-            group.peer = peer.map(str::to_owned);
-            group.holder_known = holder_known;
-            group.holder_ended = false;
+            pending.peer = peer.map(str::to_owned);
+            pending.holder_known = holder_known;
+            pending.holder_ended = false;
         }
-        group.read = false;
-        group.deadline_ms = deadline_ms;
+        pending.read = false;
+        pending.deadline_ms = deadline_ms;
+        for path in &group.paths {
+            self.by_path
+                .entry(key(session, path))
+                .or_default()
+                .insert(group.clone());
+        }
+        if let (true, Some(peer)) = (pending.awaits_holder(), pending.peer.as_deref()) {
+            self.await_holder(session, &group, peer);
+        }
+        self.deadlines
+            .insert((deadline_ms, session.clone(), group.clone()));
+        self.pending
+            .entry(session.clone())
+            .or_default()
+            .insert(group, pending);
     }
 
     /// Settle `abandoned` what is past its deadline at `to_ms`, then give,

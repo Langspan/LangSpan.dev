@@ -1008,6 +1008,49 @@ fn a_session_unknown_to_a_partial_history_is_not_counted_and_the_report_is_parti
 
 // What a session did after a refusal (H9).
 
+/// The report runs in the daemon's single store worker, so settling
+/// refusals must cost each event index lookups, not a scan of what is
+/// pending. As many events as a report reads (`TODAY_EVENTS`): 25,000
+/// conflicts of distinct paths pending at once, then 12,500 edits of the
+/// holder, each ending an admission. Scanning the pending refusals at each
+/// took 65 s here (Apple silicon, debug build); the indexes 1.2 s for the
+/// whole report. The limit is far from both.
+#[test]
+fn settling_refusals_costs_each_event_a_lookup_not_a_scan_of_those_pending() {
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
+    let (alice, bob) = ("claude-code.alice", "codex.bob");
+    let mut log = Log::ready(&[alice, bob]);
+    for i in 0..25_000 {
+        log.refused(
+            alice,
+            RefusalKind::Conflict,
+            &format!("src/f{i}.rs"),
+            Some(bob),
+            Some('c'),
+            START + MINUTE,
+        );
+    }
+    for i in 0..12_500 {
+        let call = format!("b{i}");
+        log.edit(
+            bob,
+            &call,
+            "src/bob.rs",
+            present('a'),
+            'b',
+            START + MINUTE + 1,
+        );
+        log.complete(bob, &call, START + MINUTE + 1);
+    }
+    let started = std::time::Instant::now();
+    let outcomes = log.outcomes(alice);
+    let took = started.elapsed();
+    eprintln!("{} events, report {took:?}", log.events.len());
+    // Bob never held a refused path, and Alice wrote none of them.
+    assert_eq!(outcomes, BTreeMap::from([("abandoned".to_owned(), 25_000)]));
+    assert!(took < LIMIT, "the report took {took:?}");
+}
+
 impl Log {
     /// A `write_refused` of `path` recorded at `now` on the daemon's clock.
     fn refused(
