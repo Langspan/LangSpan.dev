@@ -19,6 +19,7 @@ mod status;
 mod status_line;
 mod today;
 mod workspaces;
+mod write_check;
 pub use classes::{
     FailureClass, KeptTests, MAX_FIXED_NAMED, MAX_WRITE_RUNS, MAX_WRITERS_NAMED, WriteRun,
 };
@@ -38,9 +39,9 @@ pub use flaky::{
     MAX_TEST_RESULT_BYTES, TestFailure, TestHistory, TestLearning, TestResults,
 };
 pub use history::{
-    HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_NAME_BYTES, HISTORY_RELATED,
-    HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote, HistoryQuery,
-    history as definition_history,
+    HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_MOVES, HISTORY_NAME_BYTES,
+    HISTORY_RELATED, HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote,
+    HistoryQuery, history as definition_history,
 };
 pub use recall::{
     RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
@@ -71,6 +72,12 @@ pub use today::{
 };
 pub use workspaces::{
     MAX_ENDING_SESSIONS, MAX_WORKSPACE_PAGE, WorkspaceEnding, WorkspaceKept, WorkspaceSummary,
+};
+pub use write_check::{
+    DefinitionFacts, IndexFacts, PathFacts, UnreadLines, WRITE_CHECK_DEFINITIONS,
+    WRITE_CHECK_LABEL, WRITE_CHECK_PATHS, WRITE_CHECK_SYMBOLS, WRITE_CHECK_WRITERS, WriteCheck,
+    WriteCheckPath, WriteCheckRequest, WriteCheckSymbol, write_check, write_check_noticed,
+    write_check_request,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1146,7 +1153,8 @@ pub struct CheckNotice {
     /// absent when it was inconclusive or is no wider check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface_grade: Option<InterfaceGrade>,
-    /// The interface change a wider check ran for.
+    /// The interface change a wider check ran for. Boxed: it holds a whole
+    /// `InterfaceChange`, and most notices have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface: Option<Box<InterfaceCause>>,
     /// See [`CheckReport::index_incomplete`].
@@ -1477,11 +1485,13 @@ pub struct InterfaceChange {
     /// signature in `after`: kept in the log for a definition's history
     /// (roadmap D4), never held for briefings. A removal recorded since
     /// then carries the removed signature in `before`. `renamed` means the
-    /// only definition of `name` went and one with the same body and the
-    /// same signature but for the name came as `after_name`. The last two mean only the number of
-    /// definitions sharing the name and kind changed: `after` (added) or
-    /// `before` (removed) holds the signatures that came or went, and the
-    /// counts say how many there were and are.
+    /// only definition of `name` went and one with the same signature but
+    /// for the name came as `after_name`, with the evidence `evidence`
+    /// names; with `file_moved`, the definition kept its name and moved with
+    /// its whole file from `before_path` to the notice's path. The last two
+    /// mean only the number of definitions sharing the name and kind
+    /// changed: `after` (added) or `before` (removed) holds the signatures
+    /// that came or went, and the counts say how many there were and are.
     pub change: String,
     pub before: Option<String>,
     pub after: Option<String>,
@@ -1489,6 +1499,29 @@ pub struct InterfaceChange {
     /// recorded before renames were told apart from removals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_name: Option<String>,
+    /// The old name, for `renamed` only: always `name` (roadmap D7). Absent
+    /// from notices recorded before it was kept. This field, `evidence`,
+    /// `before_path` and `private` are left out of replies to protocol
+    /// version 3 clients, and so is a change with `private` set
+    /// (`protocol::encode_for` in the daemon).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_name: Option<String>,
+    /// What links the two, for `renamed` only (roadmap D7): `same_body`
+    /// (the same body digest), `same_signature` (a changed body at the same
+    /// first and last line) or `file_moved` (the whole file moved, with
+    /// exactly the same content). Absent from renames recorded before it
+    /// was kept, which were all `same_body`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// Where the file was before, for `file_moved` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_path: Option<String>,
+    /// A definition that is not exported, for `file_moved` only: what the
+    /// notice of a file with no exports lists, so that the file's notes and
+    /// history follow it (roadmap D7). History only, like `added`: never
+    /// held for briefings, recaps, break alerts or the dashboard.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub private: bool,
     /// Parameter counts of `before` and `after`, when each is exactly one
     /// function's signature (ADR 0029). Absent from notices recorded
     /// before they were kept.
@@ -1502,6 +1535,51 @@ pub struct InterfaceChange {
     pub before_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_count: Option<u32>,
+}
+
+/// One recorded rename of an exported definition (roadmap D7): `name` went
+/// from `path` and `after_name` came, linked by `evidence` (absent for a
+/// rename recorded before it was kept).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Rename {
+    pub name: String,
+    pub after_name: String,
+    pub kind: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// The rename's new signature.
+    pub after: String,
+}
+
+/// Renames remembered per workspace for `graph symbol --renamed`.
+pub const MAX_RENAMES: usize = 256;
+/// Renames one lookup follows at most, old name to newest.
+pub const MAX_RENAME_HOPS: usize = 8;
+
+/// The renames that took `name` to its newest name in `workspace_id`, in
+/// order, at most `MAX_RENAME_HOPS`; `None` when no rename of it is
+/// recorded. Each hop after the first is of the first one's kind, so an
+/// unrelated definition's rename never continues the chain. A hop back to a
+/// name already passed ends the chain.
+pub fn renamed_to(state: &State, workspace_id: &str, name: &str) -> Option<Vec<Rename>> {
+    let renames = state.renames.get(workspace_id)?;
+    let mut hops: Vec<Rename> = Vec::new();
+    let mut current = name;
+    while hops.len() < MAX_RENAME_HOPS {
+        let Some(hop) = renames.iter().find(|rename| {
+            rename.name == current && hops.first().is_none_or(|first| first.kind == rename.kind)
+        }) else {
+            break;
+        };
+        if hop.after_name == name || hops.iter().any(|seen| seen.name == hop.after_name) {
+            break;
+        }
+        hops.push(hop.clone());
+        current = &hop.after_name;
+    }
+    (!hops.is_empty()).then_some(hops)
 }
 
 /// Definitions sharing one name and kind that a notice counts at most.
@@ -1659,6 +1737,11 @@ pub struct InflightSymbol {
     pub kind: String,
     pub signature: String,
     pub mentioned_in: Vec<String>,
+    /// The name `HEAD` gave this symbol, when the worktree renamed it
+    /// (roadmap D7): files that mention either name are told. Left out of
+    /// replies to protocol version 3 clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
 }
 
 /// An in-flight symbol as a briefing or `graph inflight` tells it.
@@ -1676,6 +1759,9 @@ pub struct InflightNotice {
     pub signature: String,
     /// The asking side's files that mention it.
     pub mentioned_in: Vec<String>,
+    /// See [`InflightSymbol::renamed_from`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
 }
 
 /// What a symbol's in-flight line costs of `INFLIGHT_BYTES`: at least what
@@ -1694,6 +1780,8 @@ pub fn inflight_cost(notice: &InflightNotice) -> usize {
     .map(|text| quoted(text))
     .sum::<usize>()
         + notice.session.as_deref().map_or(0, quoted)
+        // ` (renamed from "…")`.
+        + notice.renamed_from.as_deref().map_or(0, |from| quoted(from) + 16)
         + notice
             .mentioned_in
             .iter()
@@ -1750,6 +1838,7 @@ pub fn inflight_notice(state: &State, item: &InflightSymbol) -> Option<InflightN
         kind: item.kind.clone(),
         signature: item.signature.clone(),
         mentioned_in: item.mentioned_in.clone(),
+        renamed_from: item.renamed_from.clone(),
     })
 }
 
@@ -2505,6 +2594,11 @@ pub struct State {
     /// the ended session's ID (issue #161). One adoption per ended session.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adoptions: BTreeMap<String, Adoption>,
+    /// Recorded renames per workspace, newest first, at most `MAX_RENAMES`
+    /// (roadmap D7): what `graph symbol --renamed` follows. A name defined
+    /// again is dropped. Derived on replay; not part of the status reply.
+    #[serde(skip)]
+    pub renames: BTreeMap<String, Vec<Rename>>,
     /// The current generation's clock anchor, once recorded. Derived from
     /// the events on replay; not part of the status reply.
     #[serde(skip)]
@@ -3661,6 +3755,10 @@ pub enum Command {
         /// the coverage shape that build knows.
         #[serde(default, skip_serializing_if = "is_false")]
         blind_in_scope: bool,
+        /// Follow recorded renames of `name` to its newest name and look
+        /// that up instead (roadmap D7); the answer's `renamed` says which.
+        #[serde(default, skip_serializing_if = "is_false")]
+        renamed: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
@@ -3719,6 +3817,17 @@ pub enum Command {
         path: String,
         #[serde(default, skip_serializing_if = "is_false")]
         apply: bool,
+    },
+    /// Answered by the daemon from its records, the line journal and its
+    /// source index (roadmap B26): whether `paths` are held, which of their
+    /// lines peers wrote recently and whether they are stale for the
+    /// session, and what a peer just changed in `symbols` (or, without
+    /// any, in the definitions of `paths`). A read: never recorded.
+    CheckWrite {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        symbols: Vec<String>,
     },
     /// Answered by the daemon with its source index: the calls among
     /// `calls` whose argument count does not fit a signature another live
@@ -4369,6 +4478,10 @@ enum CommandWire {
         /// the coverage shape that build knows.
         #[serde(default, skip_serializing_if = "is_false")]
         blind_in_scope: bool,
+        /// Follow recorded renames of `name` to its newest name and look
+        /// that up instead (roadmap D7); the answer's `renamed` says which.
+        #[serde(default, skip_serializing_if = "is_false")]
+        renamed: bool,
     },
     /// Read-only: where `name` is mentioned.
     GraphReferences {
@@ -4420,6 +4533,12 @@ enum CommandWire {
         path: String,
         #[serde(default)]
         apply: bool,
+    },
+    CheckWrite {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default)]
+        symbols: Vec<String>,
     },
     /// Answered by the daemon with its source index: the calls among
     /// `calls` whose argument count does not fit a signature another live
@@ -4949,6 +5068,11 @@ pub enum Outcome {
         /// the same index snapshot as `coverage`. Absent otherwise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         levels: Option<Vec<ImpactLevel>>,
+        /// `graph symbol --renamed` of a name with a recorded rename: the
+        /// renames followed, in order; `symbols` are the last new name's.
+        /// Absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        renamed: Option<Vec<Rename>>,
     },
     /// Only names with at least one definition, in the order asked.
     GraphContext {
@@ -4993,6 +5117,10 @@ pub enum Outcome {
         breaks: Vec<CallBreak>,
         coverage: GraphCoverage,
         ready: bool,
+    },
+    /// The answer to `CheckWrite` (roadmap B26). Nothing was recorded.
+    WriteCheck {
+        check: WriteCheck,
     },
     /// Where the index cannot answer for the workspace's source (roadmap
     /// D8). Each list is in path order and holds at most the request's
@@ -7346,6 +7474,7 @@ fn decide_checked(
         | Command::GraphInflight { .. }
         | Command::GraphExport { .. }
         | Command::GraphImport { .. }
+        | Command::CheckWrite { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
             "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores",
@@ -7783,6 +7912,7 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
             change.after.as_ref(),
             change.after_name.as_ref(),
         ];
+        validate_rename_record(notice, change)?;
         let counts = match (change.before_count, change.after_count) {
             (Some(before), Some(after)) => Some((before, after)),
             (None, None) => None,
@@ -7792,9 +7922,13 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         // signatures. A count change names its counts, in the direction it
         // says, and carries the signatures that came or went; nothing else
         // has counts.
+        // A definition moved with its file keeps its name (roadmap D7).
         let renamed = change.change == "renamed";
+        let moved = change.evidence.as_deref() == Some(FILE_MOVED);
         let named = match &change.after_name {
-            Some(to) => renamed && !to.is_empty() && to.len() <= 128 && *to != change.name,
+            Some(to) => {
+                renamed && !to.is_empty() && to.len() <= 128 && ((*to == change.name) == moved)
+            }
             None => !renamed,
         };
         let shaped = named
@@ -7838,6 +7972,118 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
                 "An interface change has a name, a kind, `added`, `removed`, `signature_changed`, `renamed` with a different `after_name` of at most 128 bytes, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
             ));
         }
+    }
+    Ok(())
+}
+
+/// What a notice's renames and moves change in the state (roadmap D7). A
+/// rename is remembered under its old name and kind, replacing an earlier
+/// rename of that name and kind; a name that comes back as the
+/// same kind (added, or the new name of another rename) is forgotten as
+/// renamed. A file moved
+/// whole takes its notes along: each note about the old path is about the
+/// new one instead.
+fn follow_renames(state: &mut State, notice: &InterfaceNotice) {
+    for change in &notice.changes {
+        let moved = change.evidence.as_deref() == Some(FILE_MOVED);
+        let renames = state
+            .renames
+            .entry(notice.workspace_id.clone())
+            .or_default();
+        let back = match (change.change.as_str(), &change.after_name) {
+            ("added", _) => Some(&change.name),
+            ("renamed", Some(to)) if !moved => Some(to),
+            _ => None,
+        };
+        if let Some(back) = back {
+            // Only a definition of the renamed one's kind takes its name
+            // back, as the lookup's own check does.
+            renames.retain(|rename| rename.name != *back || rename.kind != change.kind);
+        }
+        if let ("renamed", Some(to), false) = (change.change.as_str(), &change.after_name, moved) {
+            renames.retain(|rename| rename.name != change.name || rename.kind != change.kind);
+            renames.insert(
+                0,
+                Rename {
+                    name: change.name.clone(),
+                    after_name: to.clone(),
+                    kind: change.kind.clone(),
+                    path: notice.path.clone(),
+                    evidence: change.evidence.clone(),
+                    after: change.after.clone().unwrap_or_default(),
+                },
+            );
+            renames.truncate(MAX_RENAMES);
+        }
+        if renames.is_empty() {
+            state.renames.remove(&notice.workspace_id);
+        }
+        let Some(from) = change.before_path.as_ref().filter(|_| moved) else {
+            continue;
+        };
+        for note in state
+            .notes
+            .get_mut(&notice.workspace_id)
+            .into_iter()
+            .flatten()
+        {
+            // Sorted and once each, as a note's paths are recorded.
+            if let Some(at) = note.paths.iter().position(|path| path == from) {
+                note.paths[at].clone_from(&notice.path);
+                note.paths.sort();
+                note.paths.dedup();
+            }
+        }
+    }
+}
+
+/// What links a rename's two names (roadmap D7).
+pub const RENAME_EVIDENCE: [&str; 3] = ["same_body", "same_signature", FILE_MOVED];
+/// The evidence of a definition that moved with its whole file.
+pub const FILE_MOVED: &str = "file_moved";
+
+/// A rename's evidence in words, as a notice ends its rename: ` (same
+/// body)`, ` (same signature)`, or nothing for a rename recorded before its
+/// evidence was kept and for a moved file, whose text says so itself.
+pub fn rename_evidence_words(evidence: Option<&str>) -> &'static str {
+    match evidence {
+        Some("same_body") => " (same body)",
+        Some("same_signature") => " (same signature)",
+        _ => "",
+    }
+}
+
+/// A rename's old name, evidence and old path (roadmap D7): each only on a
+/// rename, the old name always `name`, and an old path exactly when the
+/// file moved, other than the notice's path. A rename without them was
+/// recorded before they were kept and is read as it was.
+fn validate_rename_record(
+    notice: &InterfaceNotice,
+    change: &InterfaceChange,
+) -> Result<(), CoreError> {
+    let renamed = change.change == "renamed";
+    let moved = change.evidence.as_deref() == Some(FILE_MOVED);
+    let shaped = change
+        .before_name
+        .as_ref()
+        .is_none_or(|name| renamed && *name == change.name)
+        && change
+            .evidence
+            .as_deref()
+            .is_none_or(|evidence| renamed && RENAME_EVIDENCE.contains(&evidence))
+        && match &change.before_path {
+            Some(path) => moved && *path != notice.path,
+            None => !moved,
+        }
+        && (!change.private || moved);
+    if !shaped {
+        return Err(error(
+            "invalid_notice",
+            "A rename's `before_name` is its name, its `evidence` is `same_body`, `same_signature` or `file_moved`, and only `file_moved` has a `before_path`, another file than the notice's, or is `private`",
+        ));
+    }
+    if let Some(path) = &change.before_path {
+        validate_relative_path(path)?;
     }
     Ok(())
 }
@@ -11117,8 +11363,11 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             // news to no dependent, so it is not held for briefings, recaps,
             // break alerts or the dashboard, and an addition alone does not
             // replace the file's held notice or open a workspace's entry.
+            // A private definition moved with its file is history only too.
+            follow_renames(state, notice);
             let mut held = notice.clone();
-            held.changes.retain(|change| change.change != "added");
+            held.changes
+                .retain(|change| change.change != "added" && !change.private);
             if !held.changes.is_empty() {
                 let notices = state
                     .interface_notices

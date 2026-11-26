@@ -8,19 +8,25 @@
 
 **Run agents in parallel. Build as a team.**
 
+[![Latest stable release](https://img.shields.io/github/v/release/Langspan/LangSpan.dev?style=flat-square&labelColor=151513&display_name=tag&sort=date&color=A34A34)](https://github.com/Langspan/LangSpan.dev/releases/latest) [![Rust checks on main](https://github.com/Langspan/LangSpan.dev/actions/workflows/check.yml/badge.svg?branch=main&event=push)](https://github.com/Langspan/LangSpan.dev/actions/workflows/check.yml) [![Core license](https://img.shields.io/github/license/Langspan/LangSpan.dev?style=flat-square&labelColor=151513&color=3F3E44)](https://github.com/Langspan/LangSpan.dev/blob/main/LICENSE) [![Supported release platforms: macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-3F3E44?style=flat-square&labelColor=151513)](https://langspan.dev/#start) [![Project website](https://img.shields.io/badge/website-langspan.dev-3F3E44?style=flat-square&labelColor=151513)](https://langspan.dev/)
+
+[![Rust (pinned on main)](https://img.shields.io/badge/dynamic/toml?style=flat-square&labelColor=151513&url=https%3A%2F%2Fraw.githubusercontent.com%2FLangspan%2FLangSpan.dev%2Fmain%2Frust-toolchain.toml&query=%24.toolchain.channel&label=Rust&color=3F3E44&logo=rust)](https://github.com/Langspan/LangSpan.dev/blob/main/rust-toolchain.toml) [![MCP SDK (pinned on main)](https://img.shields.io/badge/dynamic/toml?style=flat-square&labelColor=151513&url=https%3A%2F%2Fraw.githubusercontent.com%2FLangspan%2FLangSpan.dev%2Fmain%2FCargo.toml&query=%24.dependencies.rmcp.version&label=MCP%20SDK&color=3F3E44)](https://github.com/Langspan/LangSpan.dev/blob/main/Cargo.toml) [![rusqlite (pinned on main)](https://img.shields.io/badge/dynamic/toml?style=flat-square&labelColor=151513&url=https%3A%2F%2Fraw.githubusercontent.com%2FLangspan%2FLangSpan.dev%2Fmain%2FCargo.toml&query=%24.dependencies.rusqlite.version&label=rusqlite&color=3F3E44)](https://github.com/Langspan/LangSpan.dev/blob/main/Cargo.toml) [![Tree-sitter (pinned on main)](https://img.shields.io/badge/dynamic/toml?style=flat-square&labelColor=151513&url=https%3A%2F%2Fraw.githubusercontent.com%2FLangspan%2FLangSpan.dev%2Fmain%2Fcrates%2Flangspan-graph%2FCargo.toml&query=%24.dependencies%5B%22tree-sitter%22%5D&label=Tree-sitter&color=3F3E44)](https://github.com/Langspan/LangSpan.dev/blob/main/crates/langspan-graph/Cargo.toml) [![Tokio (pinned on main)](https://img.shields.io/badge/dynamic/toml?style=flat-square&labelColor=151513&url=https%3A%2F%2Fraw.githubusercontent.com%2FLangspan%2FLangSpan.dev%2Fmain%2FCargo.toml&query=%24.dependencies.tokio.version&label=Tokio&color=3F3E44)](https://github.com/Langspan/LangSpan.dev/blob/main/Cargo.toml)
+
+<sub>Dependency badges show the exact pins on the main branch. Released binaries have their own SBOMs and provenance.</sub>
+
 LangSpan is the open-source coordination layer for parallel agentic development.
 Keep your existing coding agents. Share relevant work across sessions,
 worktrees and machines, coordinate supported local edits, and verify combined
 changes before landing.
 
 Keep your existing Claude Code and Codex sessions. LangSpan runs locally,
-with optional Git-based teammate awareness and CLI/MCP access. Cursor,
-Gemini CLI and Antigravity adapters exist but have not been verified in live
-sessions.
+with optional Git-based teammate awareness and CLI/MCP access. Cursor and Gemini CLI adapters are built without retained live-session
+verification. Antigravity was corrected against an initial real run; repeat
+validation is pending.
 
-**v0.1.0 is available for macOS and Linux.** [Download a release binary](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0) or [build from source](#build-from-source).
+**Available for macOS and Linux.** [Download the latest stable release](https://github.com/Langspan/LangSpan.dev/releases/latest) or [build from source](#build-from-source).
 
-[Get started](#get-started) · [Parallel work](https://langspan.dev/#scale) · [Explore capabilities](https://langspan.dev/#demo) · [Research](https://langspan.dev/#research) ·
+[Get started](#get-started) · [LangSpan Live](https://langspan.dev/#langspan-live) · [Parallel work](https://langspan.dev/#scale) · [Explore capabilities](https://langspan.dev/#demo) · [Research](https://langspan.dev/#research) ·
 [Usage guide](docs/usage.md) · [Implementation status](docs/IMPLEMENTATION_STATUS.md)
 
 <a href="https://langspan.dev/#edit-coordination">
@@ -62,7 +68,8 @@ continues. Comparative team outcomes remain to be measured.
 [the research](https://langspan.dev/#research), and read
 [the mission](docs/mission.md) and [positioning](docs/positioning.md).
 The [coordination benchmark](https://github.com/Langspan/LangSpan.dev/issues/172)
-describes how we plan to measure the outcome.
+provides an executable harness for comparing coordination conditions. Early
+pilots exposed harness limitations; comparative effectiveness remains unproven.
 
 One developer running several sessions can start with one checkout. The
 same tools also support linked worktrees and opt-in awareness across machines.
@@ -131,11 +138,14 @@ including changed exported signatures and related name mentions. It reads
 Rust, Python, TypeScript/JavaScript, Go and Java. A supported
 Claude Code or Codex write that uses an outdated argument count can receive
 an advisory notice with the tool result. The notice does not refuse the
-write or repair the caller. Matching is by name within one checkout, not
-resolved dependencies. See the [source index](docs/adr/0008-derived-source-index.md),
+write or repair the caller. Matching is by name, not resolved types or imports. See the [source index](docs/adr/0008-derived-source-index.md),
 [alert limits](docs/adr/0029-break-alerts-at-write-time.md) and
 [semantic awareness illustration](https://langspan.dev/#semantic-awareness).
-Rename-aware alerts and cross-worktree symbol awareness are roadmap work.
+Version 0.2.0 adds rename and removal notices, and relevant uncommitted
+exported signatures from linked worktrees. Supported writes can receive
+notices about incompatible calls across linked worktrees. Same-count type
+and parameter-order checks remain future work. Remote Git publications carry
+activity metadata, not source contents or symbol signatures.
 
 ### Catch overlapping edits
 
@@ -207,16 +217,19 @@ unit on Linux), and runs `langspan doctor`. A second run changes nothing.
 ### Install
 
 Get the archive for your operating system and processor from the
-[v0.1.0 release](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0).
+[latest stable release](https://github.com/Langspan/LangSpan.dev/releases/latest) or choose your platform on the
+[installation page](https://langspan.dev/#start).
 The archive contains the executable, notices and licences. Rust is not needed
 to run the published binary.
 
-| Platform | Archive |
+| Platform | Archive suffix |
 | --- | --- |
-| macOS Apple silicon | [Download](https://github.com/Langspan/LangSpan.dev/releases/download/v0.1.0/langspan-v0.1.0-aarch64-apple-darwin.tar.gz) |
-| macOS Intel | [Download](https://github.com/Langspan/LangSpan.dev/releases/download/v0.1.0/langspan-v0.1.0-x86_64-apple-darwin.tar.gz) |
-| Linux x86-64 | [Download](https://github.com/Langspan/LangSpan.dev/releases/download/v0.1.0/langspan-v0.1.0-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux ARM64 | [Download](https://github.com/Langspan/LangSpan.dev/releases/download/v0.1.0/langspan-v0.1.0-aarch64-unknown-linux-gnu.tar.gz) |
+| macOS Apple silicon | `aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `x86_64-apple-darwin.tar.gz` |
+| Linux x86-64 | `x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu.tar.gz` |
+
+[Choose your platform](https://langspan.dev/#start) to get the current versioned download and matching checksums.
 
 Linux requires glibc 2.35 or newer. Run `uname -m` to check your processor.
 After downloading the matching archive and verifying it (see below), extract it,
@@ -252,19 +265,25 @@ Restart a running coordinator after upgrading.
 
 ### Verify a download
 
-The v0.1.0 release includes [SHA256SUMS](https://github.com/Langspan/LangSpan.dev/releases/download/v0.1.0/SHA256SUMS), a CycloneDX SBOM per target
-and a provenance bundle. Download SHA256SUMS beside your archive. For example,
-on macOS Apple silicon, with the [GitHub CLI](https://cli.github.com/):
+Each release includes `SHA256SUMS`, a CycloneDX SBOM per target and a
+provenance bundle. Download the archive and checksum file from the same release.
+For example, in an empty directory on macOS Apple silicon, with the
+[GitHub CLI](https://cli.github.com/), resolve the latest stable tag once and
+download both files from that tag:
 
 ```sh
-grep ' langspan-v0.1.0-aarch64-apple-darwin.tar.gz$' SHA256SUMS | shasum -a 256 -c
-gh attestation verify langspan-v0.1.0-aarch64-apple-darwin.tar.gz \
+tag=$(gh release view -R Langspan/LangSpan.dev --json tagName --jq .tagName)
+archive="langspan-$tag-aarch64-apple-darwin.tar.gz"
+gh release download "$tag" -R Langspan/LangSpan.dev \
+  --pattern "$archive" --pattern SHA256SUMS
+awk -v name="$archive" '$2 == name' SHA256SUMS | shasum -a 256 -c
+gh attestation verify "$archive" \
   -R Langspan/LangSpan.dev \
   --signer-workflow Langspan/LangSpan.dev/.github/workflows/release.yml
 ```
 
-Substitute your actual archive name (on Linux, use `sha256sum -c`).
-The second command checks that the archive was built by this repository's
+Substitute the archive suffix for your platform (on Linux, use `sha256sum -c`).
+The attestation command checks that the archive was built by this repository's
 release workflow. Add `--predicate-type https://cyclonedx.org/bom` to check
 its SBOM attestation instead. Builds are not bit-for-bit reproducible; the
 C code and the macOS linker vary between builds.
@@ -398,7 +417,7 @@ hold expires. See [source-version coverage](docs/usage.md#source-versions) and
 
 ## Current availability
 
-LangSpan v0.1.0 is published for macOS and Linux. A release is not proof of
+LangSpan publishes stable releases for macOS and Linux. A release is not proof of
 every adapter's behavior. One
 [recorded Claude Code/Codex run](docs/evidence/mixed-hosts/README.md) used
 sequential turns in a shared checkout on macOS. Codex completed an edit,

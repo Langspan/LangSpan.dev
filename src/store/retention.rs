@@ -11,7 +11,7 @@
 use super::{Store, StoreResult, redact_event};
 use langspan_core::{
     ClockAnchor, CompactionReport, Event, KeptTests, LeaseStatus, MAX_RETENTION_DAYS,
-    MIN_RETENTION_DAYS, Outcome, PathRefusal, RecentRefusal, State, WriteRun, apply,
+    MIN_RETENTION_DAYS, Outcome, PathRefusal, RecentRefusal, Rename, State, WriteRun, apply,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,9 @@ struct SnapshotRecord {
     /// Each workspace's runs of consecutive writes (ADR 0030).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     write_runs: BTreeMap<String, Vec<WriteRun>>,
+    /// Each workspace's remembered renames (roadmap D7).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    renames: BTreeMap<String, Vec<Rename>>,
 }
 
 impl SnapshotRecord {
@@ -59,6 +62,7 @@ impl SnapshotRecord {
             kept_tests: state.kept_tests.clone(),
             first_writes: state.first_writes.clone(),
             write_runs: state.write_runs.clone(),
+            renames: state.renames.clone(),
         }
     }
     fn into_state(self) -> State {
@@ -70,6 +74,7 @@ impl SnapshotRecord {
         state.kept_tests = self.kept_tests;
         state.first_writes = self.first_writes;
         state.write_runs = self.write_runs;
+        state.renames = self.renames;
         state
     }
 }

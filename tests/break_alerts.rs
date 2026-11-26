@@ -755,12 +755,13 @@ fn a_rename_with_a_changed_body_is_a_removal_and_a_call_to_it_is_told_once() {
     let w = World::new(true);
     w.wait_for_index();
     quiet(&w.writes("bob", "b0", "src/extra.rs", "pub fn extra() {}\n"));
-    // A new name and a new body: no rename is claimed.
+    // A new name and a new body over other lines: no rename is claimed. (At
+    // the same lines it would be a `same_signature` rename, roadmap D7.)
     w.rewrites(
         "alice",
         "a1",
         "src/api.rs",
-        "pub fn grow(width: u32) -> u32 {\n    width + 1\n}\n",
+        "pub fn grow(width: u32) -> u32 {\n    let grown = width + 1;\n    grown\n}\n",
     );
     w.wait_for_notice("resize", "\"removed\"");
     let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);

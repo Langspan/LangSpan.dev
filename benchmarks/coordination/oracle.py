@@ -84,6 +84,39 @@ def arity(function):
     return fewest, most
 
 
+def required_arguments(text, name):
+    """How many arguments the last top-level definition of the function NAME
+    in TEXT requires, or None when TEXT is None, does not parse or does not
+    define NAME. Read from the source, so nothing in TEXT runs."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, TypeError, ValueError, RecursionError, MemoryError):
+        return None
+    found = None
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            args = node.args
+            found = (len(args.posonlyargs) + len(args.args) - len(args.defaults)
+                     + sum(default is None for default in args.kw_defaults))
+    return found
+
+
+def interface_change(plan, checkout):
+    """Whether the changer changed the interface its family is about: `made`
+    when its branch's helper requires the changed form's arguments, else
+    `change_not_made`; None in a family without one. The driver passes the
+    helper's source on the changer's branch as `interface_source`, so a
+    change another session's branch made does not count; without it the
+    merged tree's source is read."""
+    interface = next((task["interface"] for task in plan["tasks"] if task["role"] == "changer"), None)
+    if plan["family"] != "discovered_change" or interface is None:
+        return None
+    path = interface["module"].replace(".", "/") + ".py"
+    text = plan["interface_source"] if "interface_source" in plan else source_of(checkout, path)
+    required = required_arguments(text, interface["name"])
+    return "made" if required is not None and required >= interface["arity"] else "change_not_made"
+
+
 def source_of(checkout, path):
     file = checkout / path
     return file.read_text(encoding="utf-8", errors="replace") if file.is_file() else None
@@ -181,6 +214,7 @@ def judge(plan, checkout):
     for the family; notes sessions wrote are kept as evidence, never judged."""
     sys.path.insert(0, str(checkout))
     merged = {entry["session"] for entry in plan["integration"] if entry["merged"]}
+    change = interface_change(plan, checkout)
     tasks = []
     for session, task in enumerate(plan["tasks"], 1):
         if task["role"] == "rename":
@@ -232,6 +266,16 @@ def judge(plan, checkout):
                         "any number" if taken[1] is None else taken[1]))
         for entry in tasks:
             entry["accepted"] = entry["completed"]
+        if change == "change_not_made":
+            # Nothing changed for a dependent to follow, so its work says
+            # nothing about what it knew: it is not judged (issue #218).
+            why = "the changer's branch does not make %s require %d arguments" % (
+                interface["name"], interface["arity"])
+            for entry, task in zip(tasks, plan["tasks"]):
+                if task["role"] == "changer":
+                    entry.update(accepted=False, detail="change_not_made: %s; %s" % (why, entry["detail"]))
+                else:
+                    entry.update(completed=None, accepted=None, detail="change_not_made: not judged, because " + why)
     else:
         # What every contradiction task defines. Two tasks that want
         # different values of one default: each function gets its own value
@@ -281,6 +325,7 @@ def judge(plan, checkout):
     accepted = all_merged and fixture_tests == "passed" and not conflicts and all(t["accepted"] for t in tasks)
     return {
         "integrated_tests": "passed" if accepted else "failed",
+        "interface_change": change,
         "tasks": tasks,
         "semantic_conflicts": conflicts,
         "fixture_tests": fixture_tests,

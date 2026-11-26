@@ -36,8 +36,8 @@ import tasks as families  # noqa: E402
 
 ARMS = ("worktrees", "awareness_only", "langspan")
 AGENTS = ("standin", "claude")
-STANDIN_MODES = ("follow", "ignore", "hedge")
-SCHEMA_VERSION = 4
+STANDIN_MODES = ("follow", "ignore", "hedge", "workaround")
+SCHEMA_VERSION = 5
 GIT_IDENTITY = ["-c", "user.name=Benchmark", "-c", "user.email=benchmark@example.invalid",
                 "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
 MAX_TIME_LIMIT = 3600
@@ -183,7 +183,7 @@ def make_plan(arm, family, sessions, seed, agent="standin", standin_mode=None, t
     if agent not in AGENTS:
         raise ValueError("--agent must be standin or claude")
     if standin_mode is not None and standin_mode not in STANDIN_MODES:
-        raise ValueError("--standin-mode must be follow or ignore")
+        raise ValueError("--standin-mode must be one of " + ", ".join(STANDIN_MODES))
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
         raise ValueError("--seed must be a nonnegative integer")
     runner.positive_number(time_limit, MAX_TIME_LIMIT, "--time-limit")
@@ -774,6 +774,12 @@ def integrate_main(plan_path):
     plan["integration"] = integration
     plan["merge_logs"] = logs
     plan["duplicates"] = duplicates(plan, repo, base)
+    # The changed helper as the changer's own branch left it: the oracle
+    # judges from it whether the changer made the change.
+    changer = next((index for index, task in enumerate(plan["tasks"], 1) if task["role"] == "changer"), None)
+    if changer is not None:
+        interface = plan["tasks"][changer - 1]["interface"]
+        plan["interface_source"] = show(repo, branch(changer), interface["module"].replace(".", "/") + ".py")
     integrated = plan_path.with_name("integration.json")
     integrated.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     verdict = run_dir / "oracle.json"
@@ -1050,6 +1056,15 @@ def first_line(path):
     return text.splitlines()[0][:200] if text else None
 
 
+def interface_change_status(family, oracle):
+    """Whether the changer made the interface change: `made` or
+    `change_not_made` from the oracle, `unknown` when the oracle did not
+    run, `not_applicable` in a family without a changer."""
+    if family != "discovered_change":
+        return "not_applicable"
+    return (oracle or {}).get("interface_change") or "unknown"
+
+
 def build_record(plan, final, runner_dir, run_dir, events, started_at, total_elapsed, error=None, status=None):
     """EVENTS is the coordinator's event log (LangSpan arm), or None when
     none was read."""
@@ -1153,6 +1168,7 @@ def build_record(plan, final, runner_dir, run_dir, events, started_at, total_ela
         "tasks": tasks, "tasks_total": len(tasks),
         "tasks_accepted": sum(task["accepted"] is True for task in tasks) if oracle else None,
         "integrated_tests": oracle["integrated_tests"] if oracle else "unknown",
+        "interface_change": interface_change_status(plan["family"], oracle),
         "merge_conflicts": [{"session": s, "files": e["files"]} for s, e in sorted(integration.items()) if not e["merged"]],
         "semantic_conflicts": len(oracle["semantic_conflicts"]) if oracle else None,
         "semantic_conflict_details": oracle["semantic_conflicts"] if oracle else [],
@@ -1396,7 +1412,8 @@ def main(argv=None):
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--agent", default="standin", choices=AGENTS)
     parser.add_argument("--standin-mode", choices=STANDIN_MODES,
-                        help="follow (default): use what the arm tells the session; ignore: use nothing")
+                        help="follow (default): use what the arm tells the session; ignore: use nothing; "
+                             "hedge: hold up whatever peers do; workaround: a changer finishes without the change")
     parser.add_argument("--time-limit", type=float, default=1200, help="seconds per session (at most 3600)")
     parser.add_argument("--stagger", type=float, default=0,
                         help="start the session whose task changes an interface first, and the others this many "

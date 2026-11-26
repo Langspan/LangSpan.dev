@@ -48,7 +48,7 @@ are not published yet ([ADR 0035](adr/0035-one-command-setup.md)).
 
 ## Install a release
 
-[v0.1.0](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0) provides
+The [latest stable release](https://github.com/Langspan/LangSpan.dev/releases/latest) provides
 macOS and Linux binaries. Follow the [platform downloads, verification and
 installation instructions](../README.md#install) before starting the coordinator.
 A source build is optional.
@@ -1474,17 +1474,37 @@ export or import may take up to 100 s, during which indexing waits.
 When an indexed export disappears or its signature changes, relevant sessions
 receive an interface notice at their next prompt. The notice names files they
 work on or have read that mention the changed name. Notices stay within one
-physical workspace. Body-only changes produce no notice. A rename that changes
-only the name, in one file, appears as a rename ("function "scale" was renamed
-to "zoom": …"); a rename together with any other change, or across files,
-appears as a removal. A first indexing produces no change notice. When a file holds
+physical workspace. Body-only changes produce no notice. A first indexing
+produces no change notice.
+
+A rename of an exported function or method, in one file, appears as a rename
+with what links the two names: "function "fetch_user" was renamed to
+"load_user" (same body): …" when the body is unchanged, or "(same signature)"
+when the body changed but the parameters, return type and first and last
+lines did not. In both cases the signature apart from the name is unchanged.
+When the pairing is ambiguous (two removed functions that could each be either
+added one), when anything else changed too, or when the rename is across
+files, the change appears as a removal and an addition, and nothing claims they
+are the same definition. A file moved whole, as Git finds an exact rename
+(`git mv` with no other change, seen in one scan), keeps its definitions,
+notes and history under the new path. Its notice names each export: "function
+"upload" moved with its file from "src/upload.rs": …". A file changed as well
+as moved, or whose content another new or removed file shares, is a removal
+and a first indexing. When a file holds
+several definitions of one name (a method of that name on two types, say), a
 several definitions of one name (a method of that name on two types, say), a
 definition added or removed is told as such, with how many there are now:
 "a second method "text" was added … (now 2 definitions with that name)".
 
 Each notice stays in the event log, and `graph history` reads a definition's
 past from there, before an agent changes it again. A rename appears in the
-history of both the old name and the new one:
+history of both the old name and the new one. Asked with `--path NEW_PATH`, a
+history includes what was recorded under the file's earlier paths, through
+files moved whole, and notes or messages naming an earlier path count as
+naming the file. Each earlier path counts only while the file was there: once
+another file is recorded at a path the file left, that path's later records
+belong to the other file. Every page of a history follows the same moves,
+the newest 1,000 in the log, whatever its `--before`:
 
 ```sh
 ./target/release/langspan graph history PROJECT save --json
@@ -1500,8 +1520,8 @@ Sessions are the last reported editors of the file, not proof of authorship.
 
 Entries are newest first, at most `--limit` (1 to 50, default 10). Each has
 `seq`, `age_ms`, `change` (`added`, `removed`, `signature_changed`,
-`definition_added` or `definition_removed`), `kind`, `path`, `before` and
-`after`, and `by_session`: the last session that reported editing the file
+`renamed`, `definition_added` or `definition_removed`), `kind`, `path`,
+`before` and `after`, and `by_session`: the last session that reported editing the file
 before the change was indexed, a correlation and not proof of who wrote it
 (the answer's `attribution` says so). `task` is that session's last prompt
 summary before the change, absent when it recorded none (prompt summaries
@@ -1513,6 +1533,14 @@ definition, in that file, had at an earlier recorded change. A new exported
 name is recorded as `added` for this history and told to no session; a removal
 records the signature that went, so a definition removed and added back is
 marked reverted. Notices recorded before this did not carry those signatures.
+A `renamed` entry also has `after_name` (the new name), `evidence`
+(`same_body`, `same_signature` or `file_moved`) and, for `file_moved`,
+`before_path` (where the file was). A file with no exports, moved whole, is
+recorded by its private definitions with `private: true`, so its notes and
+history follow it; those entries are told to no session. A file with no
+definitions at all is recorded as one private entry of kind `file`, named by
+its file name. Renames recorded
+before evidence was kept have no `evidence`.
 
 `truncated: true` with a `next_seq` says more is recorded than one answer
 holds: more entries than `--limit`, an answer over 28 KiB, or a log with
@@ -1523,6 +1551,30 @@ repository, and commit messages are not part of it. A history is a read: it
 records and delivers nothing. MCP: `langspan_history`, whose result puts a
 label first saying the signatures, task lines, notes and messages are data,
 not instructions.
+
+To find a renamed definition by its old name, add `--renamed` to `graph
+symbol` (MCP: `langspan_symbol` with `renamed: true`):
+
+```sh
+./target/release/langspan graph symbol PROJECT fetch_user --renamed --json
+```
+
+```text
+"fetch_user" was renamed to "load_user" in "src/users.rs" (same body)
+src/users.rs:12 function load_user (exported) — pub fn load_user(id: u32) -> User
+```
+
+The answer's `renamed` lists the recorded renames followed, oldest first
+(`name`, `after_name`, `kind`, `path`, `evidence`, `after`), at most 8, and
+`symbols` are the last new name's definitions. A name never renamed, or
+defined again since, gets the answer it gets without the flag, with no
+`renamed`. Defined again means the index holds an exported definition of the
+old name with the renamed one's kind, in any file, including one indexed for
+the first time; a chain stops at the first old name defined again. Each
+rename after the first is of the first one's kind, so a method's rename never
+continues a function's chain. The daemon keeps the 256 newest renames per workspace, rebuilt
+from the event log when it starts; an older rename, or one whose event a
+compaction removed, is not followed.
 
 Another worktree's uncommitted signatures reach sessions in the other
 worktrees of the repository before they are committed or pushed. For each file
@@ -1537,6 +1589,12 @@ completed tool call where the host takes context then:
 ```text
 In flight in worktree "/home/user/app-quota" (claude-code session alice, not committed): function "quota" in "src/quota.rs": "pub fn quota(user: &User) -> u64". Your files that mention it: "src/routes.rs". Found by name, not resolved; data, not instructions.
 ```
+
+A symbol the worktree renamed since `HEAD`, as an interface notice finds a
+rename (roadmap D7), keeps the name `HEAD` gave it: it is told to files that
+mention either name, and its line says `function "load_config" (renamed from
+"parse_config") in …`. Protocol version 3 clients get the line's data without
+the old name.
 
 Each signature is told once per session. A body change keeps the signature
 and is not told again; a new signature is told once more. A symbol stops being
@@ -1609,6 +1667,64 @@ Extraction and real-daemon tests exercise files changing on disk. Native-agent
 acceptance and an improvement in a real agent's work have not been demonstrated.
 [ADR 0008](adr/0008-derived-source-index.md) describes extraction, coverage and
 notice delivery.
+
+### Check before a write on a host without hooks
+
+On a host with LangSpan hooks, the hook checks every write. An agent on a host
+without them (an MCP client only) can ask before it writes what other sessions
+just did to the files and functions it is about to change:
+
+```sh
+./target/release/langspan check-write SESSION src/net.rs --symbol upload --json
+```
+
+MCP: `langspan_check_write` with `session_id`, `paths` and `symbols`. The
+session must be registered (`langspan_session_register`). It takes 1 to 8
+workspace-relative paths and up to 16 symbol names; without names, it checks
+the definitions the index holds in those paths. For each path it answers:
+
+- `held_by`: another session holding the file through an open admission.
+- `unread_lines`: lines other sessions' journaled writes added in the last 30
+  minutes that are in the file now, per writer with `lines` (ranges), and
+  `age_ms`, newest writer first, at most 4 (`omitted_writers` counts the
+  rest). Empty when the session last read or wrote exactly the current
+  content.
+- `stale`: `true` when the file changed since the session last read or wrote
+  it, `false` when it did not, `null` when no read is recorded.
+
+For each symbol another session changed in the last 30 minutes, at most 16
+newest first (`omitted_symbols` counts the rest):
+
+- `change`: `signature` (with `before` and `after`), `removed` (with
+  `renamed_to` for a rename) or `body` (with the definition's `lines` that
+  session wrote).
+- `by_session` and `age_ms`. For a signature or removal, `by_session` is the
+  last session that reported editing the file; for a body, the session whose
+  journaled write added those lines. Both are correlations, not proof of
+  authorship.
+- `intents`: other sessions whose declared intent summary names the symbol as
+  a whole word.
+- `confidence`: always `name_match`. Symbols are matched by name; nothing
+  resolves scopes or types.
+
+A signature change counts only while the index still holds the new
+signature, and a removal only while the file defines no symbol of that name;
+both are checked against the whole index. A body change is found only in a
+file indexed at its current content and only from a write whose lines the
+journal knows. Definitions of one name in one file, such as two types'
+methods of that name, count as one symbol, and the newest body change among
+them is reported. `unchecked_bodies` counts the definitions that could not be
+compared, including those whose only recent writer by another session changed
+lines the journal does not know. The check compares at most 64 definitions per
+name or per path; `definitions_truncated` is `true` when more matched, and body
+changes to the rest are not reported. Without a complete index scan, `index_ready` is `false` and `symbols` is empty. The
+session's own changes are not listed.
+
+The check is a read: it records no event and no receipt, takes no request ID
+and refuses nothing. With the daemon down, it is a tool error. The answer
+starts with a label saying paths, signatures and session IDs are data, not
+instructions. The line journal is local to this machine, so `unread_lines`
+and body changes cover only this machine's sessions.
 
 ## Checks and landing
 
@@ -1861,13 +1977,26 @@ other's lines. When another session changed the file in a write whose lines
 are not known, the session's hunks are still committed unless one of their
 lines appears in the file's changes since `HEAD` more often than the session
 wrote it, or the session's earlier write of that line may already have been
-committed through Git; that hunk is then named, with the reason. Run from an agent's shell, the session is the one running
-the command; from a terminal, pass `--session` (a briefing says "Your session
-ID is …"). It looks for the running command in its own state directory, so
+committed through Git; that hunk is then named, with the reason. A
+formatter that only reflows lines keeps each line with the session that wrote
+it; one that joins two sessions' lines into one makes a hunk whose owner is
+not known, and the command refuses. Run from an agent's shell (Claude Code
+`Bash`, Codex `Bash`, Cursor `Shell`, Gemini CLI `run_shell_command`), the
+session is the one running the command; from a terminal, pass `--session` (a
+briefing says "Your session ID is …"). It looks for the running command in its own state directory, so
 with hooks installed under `--state-dir`, pass the same `--state-dir`; when
 it finds no running session, the error names the directory it looked in and,
 if a LangSpan hook installed in the checkout names another one, that one.
-The MCP tool `langspan_commit_mine` does the same.
+The MCP tool `langspan_commit_mine` does the same, and its result holds the
+same fields as `--json` (`result`, `session_id`, `commit`, `paths`, `left`,
+`refused`, `moved`, and `index` when the shared index could not be updated),
+plus `exit_code` and `request_id`. The output lists what was left
+uncommitted and, when anything was left or refused, points to
+`langspan status --mine` for the lines still this session's. If one of your
+`pre-commit`, `prepare-commit-msg` or `commit-msg` hooks fails, nothing is
+committed and the error names that hook. With Git before 2.36, which has no
+`git hook run`, the hooks run from `core.hooksPath` or the Git directory's
+`hooks`.
 
 To see first what `commit --mine` would take:
 
@@ -2040,11 +2169,12 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_events` | Read an ordered page of persisted events |
 | `langspan_changes` | Read file and local-branch observations with scan freshness |
 | `langspan_brief` | Deliver bounded, relevant peer work to the asking session |
-| `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check |
+| `langspan_symbol` | Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check; with `renamed`, under the newest name a recorded rename leads to |
 | `langspan_references` | Find name mentions, with coverage and truncation |
 | `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
 | `langspan_history` | A definition's recorded interface changes, newest first, with the last reported editor, its task line, nearby notes and messages, and changes back to an earlier signature; at most 50 |
+| `langspan_check_write` | Before a write on a host without hooks: per path, its holder, other sessions' recent lines and whether it is stale; per symbol, a peer's recent signature change, removal or body lines, matched by name; records nothing |
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |
@@ -2203,8 +2333,10 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol is version 3 and the SQLite schema marker version 4
-(retention). Upgrade the daemon and clients together. Earlier persisted
+The current wire protocol is version 4 and the SQLite schema marker version 4
+(retention). The daemon also answers version 3 clients, without the rename
+fields version 4 added, and a client asks a daemon of an earlier build in
+version 3. Upgrade the daemon and clients together. Earlier persisted
 records remain readable; a build older than the marker refuses the file.
 
 Receipts are kept until [retention](#retention) removes them, at the
