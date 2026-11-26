@@ -121,9 +121,13 @@ owner-only. It logs a `daemon_stopping` line naming the reason
 coordinator for the folder now at that path, as it would after any stop; a
 folder that others can open is refused at start.
 
-A debug build of the daemon also exits after five minutes with no client
-(reason `idle`), so a coordinator left by a test that was killed ends by
-itself. The test-only variable `LANGSPAN_TEST_IDLE_EXIT_MS` changes that limit
+A daemon that stops while an automatic check runs cancels the check and kills
+its command's process group first, waiting up to two seconds for it; a check
+still running then is logged as `auto_check_not_stopped`.
+
+A debug build of the daemon also exits after five minutes with no client and
+no automatic check running (reason `idle`), so a coordinator left by a test
+that was killed ends by itself. The test-only variable `LANGSPAN_TEST_IDLE_EXIT_MS` changes that limit
 (`0` turns it off). A release build has no idle exit and ignores the variable.
 
 ## Connect a native agent

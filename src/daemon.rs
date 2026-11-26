@@ -2048,13 +2048,26 @@ mod unix {
         }
     }
 
-    /// Logs why the daemon is stopping and ends the process. Called by the
-    /// state owner between requests, so no transaction of its own is open.
-    fn stop(level: &str, reason: &str, detail: &str, code: i32) -> ! {
+    /// How long a stopping daemon waits for its running automatic checks to
+    /// stop their commands.
+    const CHECKS_STOP_WITHIN: Duration = Duration::from_secs(2);
+
+    /// Logs why the daemon is stopping, stops any automatic check still
+    /// running (its command's process group would otherwise outlive the
+    /// daemon that enforces its time limit) and ends the process. Called by
+    /// the state owner between requests, so no transaction of its own is
+    /// open.
+    fn stop(checks: &auto_check::Runs, level: &str, reason: &str, detail: &str, code: i32) -> ! {
         eprintln!(
             "{}",
             serde_json::json!({"level":level,"event":"daemon_stopping","reason":reason,"detail":detail})
         );
+        if !checks.cancel_all(CHECKS_STOP_WITHIN) {
+            eprintln!(
+                "{}",
+                serde_json::json!({"level":"warn","event":"auto_check_not_stopped","detail":format!("an automatic check was still running {} ms after it was cancelled", CHECKS_STOP_WITHIN.as_millis())})
+            );
+        }
         std::process::exit(code)
     }
 
@@ -2187,10 +2200,12 @@ mod unix {
         }
         let (check_sender, check_receiver) = mpsc::sync_channel::<auto_check::Message>(256);
         let write_counts = auto_check::WriteCounts::default();
+        let check_runs = auto_check::Runs::default();
         {
             let sender = sender.clone();
             let check_sender = check_sender.clone();
             let write_counts = write_counts.clone();
+            let check_runs = check_runs.clone();
             let timing = auto_check::Timing {
                 debounce: Duration::from_millis(config.auto_check_debounce_ms),
                 rerun_max: Duration::from_secs(config.flaky_rerun_max_s),
@@ -2203,6 +2218,7 @@ mod unix {
                         check_receiver,
                         timing,
                         write_counts,
+                        check_runs,
                         |of: Option<&Registration>, id, command| {
                             ask_as(&sender, of.cloned(), id, command)
                         },
@@ -2374,13 +2390,16 @@ mod unix {
                     if Instant::now() >= next_watch {
                         next_watch = Instant::now() + WATCH_EVERY;
                         if let Some((reason, detail)) = anchor.lost() {
-                            stop("warn", reason, &detail, 1);
+                            stop(&check_runs, "warn", reason, &detail, 1);
                         }
+                        // A running automatic check is activity too: its
+                        // result is still to be recorded.
                         if let Some(limit) = idle_limit
                             && owner_slots.available_permits() == max_clients
+                            && !check_runs.any()
                             && owner_activity.idle_for() >= limit
                         {
-                            stop("info", "idle", &format!("no client for {} ms", limit.as_millis()), 0);
+                            stop(&check_runs, "info", "idle", &format!("no client for {} ms", limit.as_millis()), 0);
                         }
                     }
                     // Facts already committed, whoever asked for them.
