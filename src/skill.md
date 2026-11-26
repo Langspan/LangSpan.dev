@@ -96,7 +96,9 @@ anyone decided how a field is named, even about a file you are not working
 on), `langspan_history` shows how a definition changed before you change it
 (who last edited it, why, and whether a change was tried and reverted), and
 `langspan_send_message` sends one line to another session;
-`langspan_retract_message` withdraws one you sent that no longer holds. A
+`langspan_retract_message` withdraws one you sent that no longer holds, and
+`langspan_message_status` says which sessions it was delivered to (placed in
+their context, not necessarily acted on). A
 message line that ends with `(cut; langspan messages show -- WORKSPACE ID)`
 was shortened; `langspan_show_message` returns it in full.
 

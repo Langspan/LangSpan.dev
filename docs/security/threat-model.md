@@ -482,6 +482,8 @@ A message is text one session or the owner addresses to another session of the s
 | Denial of service | 64 unacknowledged messages per workspace, oldest dropped: a sender can push others' messages out before they are read. At most four messages, within 1,500 rendered bytes (796 beside an uncoordinated-change notice), per briefing; the rest wait. A message for everyone is held until every session of the current daemon generation has it, or until dropped. |
 | Elevation of privilege | A message grants nothing: no lease, intent or admission changes, and a handoff transfers no lease. Acknowledgement only stops delivery. |
 
+Asking who was given a message (`langspan messages status`, `langspan_message_status`, issue #67) adds no boundary: it reads, through the same owner-only socket, the acknowledgements that `events` and `status --all` already expose, and returns session IDs, states and ages, never message text. Its answer is bounded to 64 recipients and reads at most 4,096 acknowledgement rows. The daemon sets `via` from the command that delivered the message. A local process that can reach the socket can make a message look delivered, as it could before, by acknowledging it or by sending a delivering `brief` with the `mcp` flag; the socket's owner-only mode remains the boundary.
+
 Withdrawing a message (`langspan messages retract`, `langspan_retract_message`, issue #66) adds no boundary: it uses the same socket and the same session labels.
 
 | Concern | Behavior and remaining boundary |
@@ -687,6 +689,21 @@ missed between scans. Branch-head commit/tree observations are not complete
 change records, and content digests are not evidence of authorship. Local
 monotonic observation times require their daemon generation; a prior-generation
 record must not be presented as a current observation.
+
+## Coordination benchmark driver
+
+`benchmarks/coordination/driver.py` (issue #172) is an operator tool, not part
+of the product. It adds three boundaries: it launches agent CLIs, it imports
+and runs the code those agents wrote, and it reads the operator's Claude Code
+`settings.json`. Its test suite starts only the stand-in agent, never a model.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Elevation of privilege**: a benchmark session runs with more authority than the operator granted | Each session runs `claude -p --permission-mode default` with an explicit `--allowedTools` list: reads and edits under its own worktree, the fixture's tests and a few Git commands (and, in the LangSpan arm, a few `langspan` commands). No flag or tool approves a permission prompt; a call outside the list is refused by Claude Code and counted from `permission_denials`. A test checks the command line. | `Glob` and `Grep` are not limited to the worktree. An allowed `git commit` can run the fixture repository's hooks; the driver creates that repository and installs none. |
+| **Tampering**: agent-written code runs during integration | The oracle runs in a separate interpreter (`-I` for the oracle, `-E -s` for the fixture tests) inside the integration worktree, with a time limit, after every session has stopped. | The code runs as the operator, like any agent's tests: run the benchmark in an account or machine where that is acceptable. |
+| **Tampering**: one arm's coordination leaks into another | The driver refuses a real run when the operator's `CLAUDE_CONFIG_DIR` has user-level LangSpan hooks or the LangSpan skill. The LangSpan arm's hooks and skill go into each worktree's ignored `.claude/`, and its coordinator has its own temporary state directory, removed after the run. | A LangSpan MCP entry in the configuration's `.claude.json` is not checked, because that file also holds account state; the README tells the operator to use a configuration without one. |
+| **Information disclosure**: credentials or private text in a record | The driver never reads credentials: it reads only `settings.json` and the skill path from the configuration directory, and passes the directory to Claude Code, which signs in itself. Records and transcripts stay in the operator's output directory (`0700`), outside the repository or in its ignored `runs/`. | Transcripts can contain anything a model wrote; review them before committing any under `docs/evidence/`. |
+| **Denial of service**: a session that never ends | `runner.py` bounds every session by `--time-limit` (at most 3,600 seconds) and stops its whole process group. | A process that leaves its group is not found. |
 
 ## Release pipeline
 

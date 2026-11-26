@@ -85,6 +85,7 @@ fn notes_for(state: &mut State, session: &str, id: &str) -> Vec<String> {
             max_peers: 4,
             deliver: true,
             mid_turn: false,
+            mcp: false,
         },
         50,
     ) {
@@ -435,7 +436,8 @@ fn message(id: &str, text: &str, paths: &[&str], at_ms: Option<u64>) -> Event {
             acknowledged: Vec::new(),
             retracted: false,
         },
-        at: stamp(at_ms),
+        at_ms,
+        generation: at_ms.map(|_| 1),
     }
 }
 
@@ -963,7 +965,11 @@ fn notes_and_messages_are_recorded_with_the_time_they_were_made() {
         43,
     );
     match decision.events.as_slice() {
-        [Event::MessageSent { at, .. }] => assert_eq!(*at, now(43)),
+        [
+            Event::MessageSent {
+                at_ms, generation, ..
+            },
+        ] => assert_eq!((*at_ms, *generation), (Some(43), Some(1))),
         other => panic!("{other:?}"),
     }
     // A note or message recorded before the time was kept still replays.

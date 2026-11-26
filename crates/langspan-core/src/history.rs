@@ -290,15 +290,22 @@ pub fn history(state: &State, query: &HistoryQuery<'_>) -> Result<History, CoreE
                         text: note.text.clone(),
                     });
                 }
-                Event::MessageSent { message, at: when }
-                    if message.workspace_id == query.workspace_id
-                        && messages.len() < HISTORY_RELATED
-                        && !retracted.contains(message.message_id.as_str())
-                        && !messages
-                            .iter()
-                            .any(|held| held.message_id == message.message_id)
-                        && names_file(&message.paths, &message.text, &notice.path)
-                        && near(*when) =>
+                Event::MessageSent {
+                    message,
+                    at_ms,
+                    generation,
+                } if message.workspace_id == query.workspace_id
+                    && messages.len() < HISTORY_RELATED
+                    && !retracted.contains(message.message_id.as_str())
+                    && !messages
+                        .iter()
+                        .any(|held| held.message_id == message.message_id)
+                    && names_file(&message.paths, &message.text, &notice.path)
+                    && near(
+                        at_ms
+                            .zip(*generation)
+                            .map(|(at_ms, generation)| Stamp { at_ms, generation }),
+                    ) =>
                 {
                     messages.push(HistoryMessage {
                         message_id: message.message_id.clone(),

@@ -69,6 +69,7 @@ fn brief(session: &str, deliver: bool, mid_turn: bool) -> Command {
         max_peers: 4,
         deliver,
         mid_turn,
+        mcp: false,
     }
 }
 
@@ -481,11 +482,17 @@ fn replaying_the_persisted_events_reproduces_the_same_state() {
     let mut forged = held[0].clone();
     forged.message_id = "forged".into();
     forged.text = "two\nlines".into();
-    let forged = Event::MessageSent {
-        message: forged,
-        at: None,
-    };
-    assert!(apply(&mut replayed, &forged).is_err());
+    assert!(
+        apply(
+            &mut replayed,
+            &Event::MessageSent {
+                message: forged,
+                at_ms: None,
+                generation: None,
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -558,6 +565,7 @@ mod headless_handoffs {
                 max_peers: 4,
                 deliver: false,
                 mid_turn: false,
+                mcp: false,
             },
             "look",
             0,
@@ -1133,7 +1141,8 @@ mod retraction {
                 &mut replayed,
                 &Event::MessageSent {
                     message: forged,
-                    at: None
+                    at_ms: None,
+                    generation: None,
                 }
             )
             .is_err()
