@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 mod dashboard;
 mod flaky;
+mod history;
 mod lines;
 mod recall;
 mod status;
@@ -24,6 +25,11 @@ pub use flaky::{
     FLAKY_DECAY_RUNS, FLAKY_MIN_FLIPS, FLAKY_WINDOW_RUNS, FlakyCount, FlakyTest, LastTests,
     MAX_FLAKY_LISTED, MAX_LEARNED_CHECKS, MAX_LEARNED_TESTS, MAX_TEST_NAME_BYTES, MAX_TEST_NAMES,
     MAX_TEST_RESULT_BYTES, TestFailure, TestHistory, TestLearning, TestResults,
+};
+pub use history::{
+    HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_NAME_BYTES, HISTORY_RELATED,
+    HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote, HistoryQuery,
+    history as definition_history,
 };
 pub use recall::{
     RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
@@ -942,7 +948,56 @@ pub struct AutoCheck {
     pub name: String,
     pub argv: Vec<String>,
     pub timeout_s: u32,
+    /// The wider check run after this one, on the same tree, when the
+    /// session's writes changed an indexed export that other files mention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_interface_change: Option<WiderCheck>,
 }
+
+/// The owner's second, wider command (for example the whole workspace's
+/// tests), run whole: LangSpan never narrows it to the files the index names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WiderCheck {
+    pub name: String,
+    pub argv: Vec<String>,
+    pub timeout_s: u32,
+}
+
+/// What an interface change did to the wider check.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InterfaceGrade {
+    /// The wider check passed.
+    Kept,
+    /// The wider check failed.
+    Broke,
+}
+
+/// The interface change a wider check ran for: one changed export, and the
+/// files that mention its name, from the index. A name lookup, not resolved
+/// uses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InterfaceCause {
+    /// The file whose export changed.
+    pub path: String,
+    pub change: InterfaceChange,
+    /// Other changed exports the same run was for.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub more_changes: u32,
+    /// At most [`MAX_CAUSE_DEPENDENTS`] files that mention a changed name.
+    pub dependents: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub more_dependents: u32,
+    /// Supported-language files the index could not read in full when the
+    /// change was reported: a mention in one of them is missing here.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub blind_files: u32,
+}
+
+/// Mentioning files a wider check's report names at most.
+pub const MAX_CAUSE_DEPENDENTS: usize = 8;
 
 /// Bounds of an automatic check's command and of what is kept of its output.
 pub const MAX_AUTO_CHECK_ARGS: usize = 64;
@@ -972,7 +1027,27 @@ pub struct CheckReport {
     /// The command was stopped at its time limit, of this many seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timed_out_s: Option<u32>,
+    /// For a wider check: the interface change it ran for. The core grades
+    /// it from the result and tells the sessions working on the mentioning
+    /// files too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<Box<InterfaceCause>>,
+    /// A wider check is configured, but the index had no complete scan, so
+    /// no interface change could be found and the wider check did not run.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub index_incomplete: bool,
+    /// For a wider check: every file that mentions a changed name, at most
+    /// [`MAX_REPORT_DEPENDENT_PATHS`]. The sessions working on any of them
+    /// are told, even past the [`MAX_CAUSE_DEPENDENTS`] the notice shows.
+    /// Used to choose recipients and not kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependent_paths: Vec<String>,
 }
+
+/// Mentioning files a wider check's report may name to choose its
+/// recipients: the daemon's 16 waiting interface notices, each with at
+/// most [`NOTICE_DEPENDENTS`] files.
+pub const MAX_REPORT_DEPENDENT_PATHS: usize = 16 * NOTICE_DEPENDENTS;
 
 /// An automatic check's result waiting to be placed in one session's
 /// context, once.
@@ -991,6 +1066,16 @@ pub struct CheckNotice {
     /// to flip on unchanged code. Empty when no test was named.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<TestFailure>,
+    /// A wider check's grade: `kept` when it passed, `broke` when it failed,
+    /// absent when it was inconclusive or is no wider check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface_grade: Option<InterfaceGrade>,
+    /// The interface change a wider check ran for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<InterfaceCause>,
+    /// See [`CheckReport::index_incomplete`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub index_incomplete: bool,
 }
 
 /// A push of an integrated result that LangSpan made at the owner's command.
@@ -1311,8 +1396,11 @@ pub struct BlindSpots {
 pub struct InterfaceChange {
     pub name: String,
     pub kind: String,
-    /// `removed`, `signature_changed`, `definition_added` or
-    /// `definition_removed`. The last two mean only the number of
+    /// `added`, `removed`, `signature_changed`, `definition_added` or
+    /// `definition_removed`. `added` is a new exported name with its
+    /// signature in `after`: kept in the log for a definition's history
+    /// (roadmap D4), never held for briefings. A removal recorded since
+    /// then carries the removed signature in `before`. The last two mean only the number of
     /// definitions sharing the name and kind changed: `after` (added) or
     /// `before` (removed) holds the signatures that came or went, and the
     /// counts say how many there were and are.
@@ -1429,6 +1517,15 @@ pub struct InterfaceImpact {
     /// The asking session's files that mention a changed name.
     pub affected: Vec<String>,
     pub age_ms: u64,
+}
+
+/// When an event that has no time of its own was decided: the daemon's
+/// clock and the generation it belongs to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Stamp {
+    pub at_ms: u64,
+    pub generation: u64,
 }
 
 /// Something a person or an agent asked LangSpan to remember about a
@@ -2465,6 +2562,11 @@ pub enum Event {
     },
     Remembered {
         note: Note,
+        /// When it was remembered. Absent from notes recorded before it was
+        /// kept; a definition's history (roadmap D4) places notes near
+        /// interface changes by it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<Stamp>,
     },
     Forgotten {
         workspace_id: String,
@@ -2768,7 +2870,7 @@ pub enum Command {
         /// For an automatic check: the sessions to tell, and its output's
         /// end.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        report: Option<CheckReport>,
+        report: Option<Box<CheckReport>>,
         /// The tests its output named, for a working-tree check that passed
         /// or failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2811,6 +2913,10 @@ pub enum Command {
         name: String,
         argv: Vec<String>,
         timeout_s: u32,
+        /// The wider check to run after it when the session's writes
+        /// changed an indexed interface that other files mention.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_interface_change: Option<Box<WiderCheck>>,
     },
     AutoCheckDisable {
         workspace_id: String,
@@ -2977,6 +3083,19 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
         limit: u32,
+    },
+    /// Read-only, answered from the event log: the recorded interface
+    /// changes of definitions named `name`, newest first, in `path` or in
+    /// any file, older than `before_seq` when given (roadmap D4). Never
+    /// recorded.
+    History {
+        workspace_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_seq: Option<u64>,
     },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
@@ -3345,7 +3464,7 @@ enum CommandWire {
         /// For an automatic check: the sessions to tell, and its output's
         /// end.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        report: Option<CheckReport>,
+        report: Option<Box<CheckReport>>,
         /// The tests its output named, for a working-tree check that passed
         /// or failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3388,6 +3507,10 @@ enum CommandWire {
         name: String,
         argv: Vec<String>,
         timeout_s: u32,
+        /// The wider check to run after it when the session's writes
+        /// changed an indexed interface that other files mention.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_interface_change: Option<Box<WiderCheck>>,
     },
     AutoCheckDisable {
         workspace_id: String,
@@ -3554,6 +3677,19 @@ enum CommandWire {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
         limit: u32,
+    },
+    /// Read-only, answered from the event log: the recorded interface
+    /// changes of definitions named `name`, newest first, in `path` or in
+    /// any file, older than `before_seq` when given (roadmap D4). Never
+    /// recorded.
+    History {
+        workspace_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_seq: Option<u64>,
     },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
@@ -4066,6 +4202,9 @@ pub enum Outcome {
     },
     Recall {
         recall: Recall,
+    },
+    History {
+        history: History,
     },
     Today {
         today: Today,
@@ -5263,8 +5402,27 @@ fn decide_checked(
                 })
                 .collect();
             if let Some(report) = report {
+                let mut session_ids = report.session_ids.clone();
+                let interface_grade = interface_grade(report.interface.as_deref(), &check.result);
+                validate_dependent_paths(report)?;
+                if let Some(cause) = &report.interface {
+                    validate_interface_cause(cause)?;
+                    // The sessions working on any mentioning file are told
+                    // too, not only those on the files the notice shows,
+                    // decided here so that replay gives the same set.
+                    let mut paths = cause.dependents.clone();
+                    paths.extend(report.dependent_paths.iter().cloned());
+                    for peer in concerned_sessions(state, &check.workspace_id, &paths, now_ms) {
+                        if session_ids.len() >= MAX_CHECK_REPORT_SESSIONS {
+                            break;
+                        }
+                        if !session_ids.contains(&peer) {
+                            session_ids.push(peer);
+                        }
+                    }
+                }
                 let reported = Event::CheckReported {
-                    session_ids: report.session_ids.clone(),
+                    session_ids,
                     notice: CheckNotice {
                         check_id: check.check_id.clone(),
                         name: check.name.clone(),
@@ -5274,6 +5432,9 @@ fn decide_checked(
                         timed_out_s: report.timed_out_s,
                         tail: report.tail.clone(),
                         failures,
+                        interface_grade,
+                        interface: report.interface.as_deref().cloned(),
+                        index_incomplete: report.index_incomplete,
                     },
                 };
                 validate_check_report(state, &check.workspace_id, &reported)?;
@@ -5333,12 +5494,14 @@ fn decide_checked(
             name,
             argv,
             timeout_s,
+            on_interface_change,
         } => {
             let check = AutoCheck {
                 workspace_id: workspace_id.clone(),
                 name: name.clone(),
                 argv: argv.clone(),
                 timeout_s: *timeout_s,
+                on_interface_change: on_interface_change.as_deref().cloned(),
             };
             validate_auto_check(state, &check)?;
             let events = if state.auto_checks.get(workspace_id) == Some(&check) {
@@ -5899,7 +6062,13 @@ fn decide_checked(
             };
             validate_note(&note)?;
             Ok(Decision {
-                events: vec![Event::Remembered { note: note.clone() }],
+                events: vec![Event::Remembered {
+                    note: note.clone(),
+                    at: Some(Stamp {
+                        at_ms: now_ms,
+                        generation: state.generation,
+                    }),
+                }],
                 outcome: Outcome::Remembered { note },
             })
         }
@@ -6214,6 +6383,7 @@ fn decide_checked(
         }
         Command::Events { .. }
         | Command::Today { .. }
+        | Command::History { .. }
         | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
@@ -6654,6 +6824,13 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         // counts.
         let shaped = match (change.change.as_str(), counts) {
             ("removed" | "signature_changed", None) => true,
+            // A new export: its signature, and no parameter counts.
+            ("added", None) => {
+                change.before.is_none()
+                    && change.after.is_some()
+                    && change.before_arity.is_none()
+                    && change.after_arity.is_none()
+            }
             ("definition_added", Some((before, after))) => {
                 before >= 1
                     && before < after
@@ -6681,7 +6858,7 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         {
             return Err(error(
                 "invalid_notice",
-                "An interface change has a name, a kind, `removed`, `signature_changed`, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
+                "An interface change has a name, a kind, `added`, `removed`, `signature_changed`, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
             ));
         }
     }
@@ -7371,42 +7548,7 @@ fn brief(
         .workspace_git
         .get(&me.workspace_id)
         .map(|git| git.repository_id.as_str());
-    let work_paths = |id: &str| -> (Vec<String>, Vec<RecentPath>, BTreeSet<String>) {
-        let editing: Vec<String> = state
-            .leases
-            .values()
-            .filter(|lease| lease.session_id == id && live_lease(state, lease, now_ms))
-            .flat_map(|lease| lease.paths.iter().cloned())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let recent: Vec<RecentPath> = state
-            .activity
-            .get(id)
-            .filter(|activity| activity.generation == state.generation)
-            .map(|activity| {
-                activity
-                    .touched
-                    .iter()
-                    .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
-                    .map(|touch| RecentPath {
-                        path: touch.path.clone(),
-                        age_ms: now_ms.saturating_sub(touch.at_ms),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut all: BTreeSet<String> = editing.iter().cloned().collect();
-        all.extend(recent.iter().map(|recent| recent.path.clone()));
-        if let Some(intent) = state
-            .intents
-            .get(id)
-            .filter(|intent| intent.generation == state.generation)
-        {
-            all.extend(intent.paths.iter().cloned());
-        }
-        (editing, recent, all)
-    };
+    let work_paths = |id: &str| work_paths(state, id, now_ms);
     // Where a running session's last prompt pointed, while it is recent.
     let prompt_targets = |id: &str| -> BTreeSet<String> {
         state
@@ -7704,14 +7846,7 @@ fn brief(
             ))
     });
     remote.truncate(BRIEF_PATHS);
-    // Files this session works on or has read: what a changed interface
-    // could break for it.
-    let mut concerned = mine.clone();
-    concerned.extend(
-        known_versions(state, session_id)
-            .iter()
-            .map(|version| version.path.clone()),
-    );
+    let concerned = concerned_paths(state, session_id, now_ms);
     let interface_changes: Vec<InterfaceImpact> = state
         .interface_notices
         .get(&me.workspace_id)
@@ -8174,12 +8309,27 @@ fn wrote_since_boundary(state: &State, session_id: &str) -> bool {
 
 fn validate_auto_check(state: &State, check: &AutoCheck) -> Result<(), CoreError> {
     validate_known_workspace(state, &check.workspace_id)?;
-    validate_id(&check.name, "check name")?;
-    if check.name.len() > 64
-        || check.argv.is_empty()
-        || check.argv.len() > MAX_AUTO_CHECK_ARGS
-        || check.argv[0].is_empty()
-        || check.argv.iter().any(|arg| {
+    validate_check_command(&check.name, &check.argv, check.timeout_s)?;
+    if let Some(wider) = &check.on_interface_change {
+        validate_check_command(&wider.name, &wider.argv, wider.timeout_s)?;
+        if wider.name == check.name {
+            return Err(error(
+                "invalid_check",
+                "The wider check has a name of its own: its records are told apart from the regular check's by name",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// One automatic command's name, arguments and time limit.
+fn validate_check_command(name: &str, argv: &[String], timeout_s: u32) -> Result<(), CoreError> {
+    validate_id(name, "check name")?;
+    if name.len() > 64
+        || argv.is_empty()
+        || argv.len() > MAX_AUTO_CHECK_ARGS
+        || argv[0].is_empty()
+        || argv.iter().any(|arg| {
             arg.is_empty()
                 || arg.len() > MAX_AUTO_CHECK_ARG_BYTES
                 || arg.chars().any(char::is_control)
@@ -8192,13 +8342,145 @@ fn validate_auto_check(state: &State, check: &AutoCheck) -> Result<(), CoreError
             ),
         ));
     }
-    if !(1..=MAX_AUTO_CHECK_TIMEOUT_S).contains(&check.timeout_s) {
+    if !(1..=MAX_AUTO_CHECK_TIMEOUT_S).contains(&timeout_s) {
         return Err(error(
             "invalid_limit",
             &format!("An automatic check's time limit is 1 to {MAX_AUTO_CHECK_TIMEOUT_S} seconds"),
         ));
     }
     Ok(())
+}
+
+/// A report's mentioning files come only with an interface change, are
+/// valid paths and number at most [`MAX_REPORT_DEPENDENT_PATHS`].
+fn validate_dependent_paths(report: &CheckReport) -> Result<(), CoreError> {
+    if report.dependent_paths.is_empty() {
+        return Ok(());
+    }
+    if report.interface.is_none() || report.dependent_paths.len() > MAX_REPORT_DEPENDENT_PATHS {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A check report names mentioning files only for an interface change, at most {MAX_REPORT_DEPENDENT_PATHS}"
+            ),
+        ));
+    }
+    for path in &report.dependent_paths {
+        validate_relative_path(path)?;
+    }
+    Ok(())
+}
+
+/// A wider check's cause names one valid change, a valid path and at most
+/// [`MAX_CAUSE_DEPENDENTS`] valid mentioning files.
+fn validate_interface_cause(cause: &InterfaceCause) -> Result<(), CoreError> {
+    validate_relative_path(&cause.path)?;
+    if cause.dependents.is_empty() || cause.dependents.len() > MAX_CAUSE_DEPENDENTS {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A wider check's interface change names 1 to {MAX_CAUSE_DEPENDENTS} files that mention it"
+            ),
+        ));
+    }
+    for path in &cause.dependents {
+        validate_relative_path(path)?;
+    }
+    // The change itself is shaped as in an interface notice.
+    validate_notice(&InterfaceNotice {
+        notice_id: "cause".into(),
+        workspace_id: String::new(),
+        path: cause.path.clone(),
+        changes: vec![cause.change.clone()],
+        dependents: Vec::new(),
+        by_session: None,
+        at_ms: 0,
+        generation: 0,
+    })
+}
+
+/// What session `id` works on: the paths its live leases hold, the files it
+/// touched within the briefing horizon (with their ages), and those with the
+/// paths of its declared intent.
+fn work_paths(
+    state: &State,
+    id: &str,
+    now_ms: u64,
+) -> (Vec<String>, Vec<RecentPath>, BTreeSet<String>) {
+    let editing: Vec<String> = state
+        .leases
+        .values()
+        .filter(|lease| lease.session_id == id && live_lease(state, lease, now_ms))
+        .flat_map(|lease| lease.paths.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let recent: Vec<RecentPath> = state
+        .activity
+        .get(id)
+        .filter(|activity| activity.generation == state.generation)
+        .map(|activity| {
+            activity
+                .touched
+                .iter()
+                .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
+                .map(|touch| RecentPath {
+                    path: touch.path.clone(),
+                    age_ms: now_ms.saturating_sub(touch.at_ms),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut all: BTreeSet<String> = editing.iter().cloned().collect();
+    all.extend(recent.iter().map(|recent| recent.path.clone()));
+    if let Some(intent) = state
+        .intents
+        .get(id)
+        .filter(|intent| intent.generation == state.generation)
+    {
+        all.extend(intent.paths.iter().cloned());
+    }
+    (editing, recent, all)
+}
+
+/// Files session `id` works on or has read: what a changed interface could
+/// break for it.
+fn concerned_paths(state: &State, id: &str, now_ms: u64) -> BTreeSet<String> {
+    let (_, _, mut concerned) = work_paths(state, id, now_ms);
+    concerned.extend(
+        known_versions(state, id)
+            .iter()
+            .map(|version| version.path.clone()),
+    );
+    concerned
+}
+
+/// The running sessions of the workspace, in this daemon's lifetime, that
+/// work on or have read one of `paths`, as a briefing counts them.
+fn concerned_sessions(
+    state: &State,
+    workspace_id: &str,
+    paths: &[String],
+    now_ms: u64,
+) -> Vec<String> {
+    state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.workspace_id == workspace_id && session.generation == state.generation
+        })
+        .filter(|session| {
+            state
+                .activity
+                .get(&session.session_id)
+                .is_some_and(|activity| !activity.ended)
+        })
+        .filter(|session| {
+            let concerned = concerned_paths(state, &session.session_id, now_ms);
+            paths.iter().any(|path| concerned.contains(path))
+        })
+        .map(|session| session.session_id.clone())
+        .collect()
 }
 
 /// The sessions are this workspace's, the tail is bounded, and the notice
@@ -8237,7 +8519,29 @@ fn validate_check_report(
     }
     validate_request_id(&notice.check_id)?;
     validate_oid(&notice.tree_oid)?;
+    if let Some(cause) = &notice.interface {
+        validate_interface_cause(cause)?;
+    }
+    // A grade is the wider check's result, and only a wider check has one.
+    if notice.interface_grade != interface_grade(notice.interface.as_ref(), &notice.result) {
+        return Err(error(
+            "invalid_check_report",
+            "An interface grade is kept for a passed wider check and broke for a failed one",
+        ));
+    }
     Ok(())
+}
+
+/// The grade of a wider check with `interface`, from its result.
+fn interface_grade(
+    interface: Option<&InterfaceCause>,
+    result: &CheckResult,
+) -> Option<InterfaceGrade> {
+    match (interface, result) {
+        (Some(_), CheckResult::Passed {}) => Some(InterfaceGrade::Kept),
+        (Some(_), CheckResult::Failed { .. }) => Some(InterfaceGrade::Broke),
+        _ => None,
+    }
 }
 
 /// A write was recorded in the workspace: its write generation moves on, so
@@ -9129,7 +9433,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 link.withdrawn = true;
             }
         }
-        Event::Remembered { note } => {
+        Event::Remembered { note, .. } => {
             validate_note(note)?;
             validate_known_workspace(state, &note.workspace_id)?;
             let notes = state.notes.entry(note.workspace_id.clone()).or_default();
@@ -9403,14 +9707,22 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::InterfaceChanged { notice } => {
             validate_notice(notice)?;
             validate_known_workspace(state, &notice.workspace_id)?;
-            let notices = state
-                .interface_notices
-                .entry(notice.workspace_id.clone())
-                .or_default();
-            // A newer notice for the same file replaces the older one.
-            notices.retain(|held| held.path != notice.path);
-            notices.insert(0, notice.clone());
-            notices.truncate(MAX_NOTICES);
+            // An added export is history only (roadmap D4): a new name is
+            // news to no dependent, so it is not held for briefings, recaps,
+            // break alerts or the dashboard, and an addition alone does not
+            // replace the file's held notice or open a workspace's entry.
+            let mut held = notice.clone();
+            held.changes.retain(|change| change.change != "added");
+            if !held.changes.is_empty() {
+                let notices = state
+                    .interface_notices
+                    .entry(notice.workspace_id.clone())
+                    .or_default();
+                // A newer notice for the same file replaces the older one.
+                notices.retain(|older| older.path != held.path);
+                notices.insert(0, held);
+                notices.truncate(MAX_NOTICES);
+            }
         }
         Event::CheckRecorded { check } => {
             validate_check(state, check)?;
@@ -10503,6 +10815,21 @@ fn validate_no_parent_claims(state: &State, workspace: &Workspace) -> Result<(),
         let Some(parent) = state.workspaces.get(&lease.workspace_id) else {
             continue;
         };
+        // A verified overlap whose roots do not overlap as text, such as a
+        // registered root that is now a link: the core cannot tell which of
+        // the lease's paths lie under this root, so any current admission
+        // there makes the registration wait.
+        if !roots_overlap(&parent.root, &workspace.root)
+            && workspace
+                .verified_overlaps
+                .binary_search(&parent.workspace_id)
+                .is_ok()
+        {
+            return Err(error(
+                "workspace_in_use",
+                "A current admission in a workspace this root overlaps through a link may cover it; complete it or wait for expiry, then start a new registration attempt with a new request ID",
+            ));
+        }
         let prefix = if parent.root.ends_with('/') {
             parent.root.clone()
         } else {
@@ -10557,10 +10884,13 @@ fn validate_workspace_link_targets(
                 "A verified overlap must name an already registered workspace",
             )
         })?;
-        if id == workspace_id || other.root == root || !roots_overlap(&other.root, root) {
+        // The roots need not overlap as text: a registered root kept as
+        // given can be a link to a directory around or inside `root`, and
+        // only the adapter can resolve it.
+        if id == workspace_id || other.root == root {
             return Err(error(
                 "invalid_workspace_verification",
-                "Verified overlaps must name distinct, overlapping physical roots; identical roots must share one workspace ID",
+                "Verified overlaps must name distinct physical roots; identical roots must share one workspace ID",
             ));
         }
     }
