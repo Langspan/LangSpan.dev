@@ -10967,6 +10967,21 @@ fn validate_no_parent_claims(state: &State, workspace: &Workspace) -> Result<(),
         let Some(parent) = state.workspaces.get(&lease.workspace_id) else {
             continue;
         };
+        // A verified overlap whose roots do not overlap as text, such as a
+        // registered root that is now a link: the core cannot tell which of
+        // the lease's paths lie under this root, so any current admission
+        // there makes the registration wait.
+        if !roots_overlap(&parent.root, &workspace.root)
+            && workspace
+                .verified_overlaps
+                .binary_search(&parent.workspace_id)
+                .is_ok()
+        {
+            return Err(error(
+                "workspace_in_use",
+                "A current admission in a workspace this root overlaps through a link may cover it; complete it or wait for expiry, then start a new registration attempt with a new request ID",
+            ));
+        }
         let prefix = if parent.root.ends_with('/') {
             parent.root.clone()
         } else {
@@ -11021,10 +11036,13 @@ fn validate_workspace_link_targets(
                 "A verified overlap must name an already registered workspace",
             )
         })?;
-        if id == workspace_id || other.root == root || !roots_overlap(&other.root, root) {
+        // The roots need not overlap as text: a registered root kept as
+        // given can be a link to a directory around or inside `root`, and
+        // only the adapter can resolve it.
+        if id == workspace_id || other.root == root {
             return Err(error(
                 "invalid_workspace_verification",
-                "Verified overlaps must name distinct, overlapping physical roots; identical roots must share one workspace ID",
+                "Verified overlaps must name distinct physical roots; identical roots must share one workspace ID",
             ));
         }
     }
