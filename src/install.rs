@@ -32,10 +32,12 @@ pub const GEMINI_HOOK_NAME: &str = "langspan";
 /// Antigravity's tool hooks (<https://antigravity.google/docs/hooks/>), matched
 /// by regular expression on the tool name ([ADR 0035](../docs/adr/0035-antigravity-adapter.md)).
 pub const ANTIGRAVITY_EVENTS: [&str; 2] = ["PreToolUse", "PostToolUse"];
+/// Antigravity 1.5.14 edits with `edit_file` and reads with `read_file`; the
+/// documented names stay in case another version uses them. These name the
+/// adapter's `EDIT_TOOLS`, `SHELL_TOOL` and `READ_TOOLS`, which a test checks.
 pub const ANTIGRAVITY_MATCHER: &str =
-    "^(write_to_file|replace_file_content|multi_replace_file_content|run_command)$";
-pub const ANTIGRAVITY_POST_MATCHER: &str =
-    "^(write_to_file|replace_file_content|multi_replace_file_content|run_command|view_file)$";
+    "^(edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command)$";
+pub const ANTIGRAVITY_POST_MATCHER: &str = "^(edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command|read_file|view_file)$";
 /// Antigravity's `hooks.json` maps hook names to definitions. LangSpan's
 /// entries are kept in the definition of this name.
 pub const ANTIGRAVITY_HOOK_NAME: &str = "langspan";
@@ -640,6 +642,32 @@ pub fn switched_off(vendor: Vendor, settings: &Value) -> bool {
     vendor == Vendor::Antigravity && settings[vendor.table()]["enabled"] == json!(false)
 }
 
+/// The tool events whose group holding one of `ours` matches other tools
+/// than this version's install names: written by an earlier version, or
+/// changed by hand. Such an install misses tools LangSpan handles, as the
+/// first Antigravity install missed `edit_file` and `read_file`.
+pub fn stale_matchers(
+    vendor: Vendor,
+    settings: &Value,
+    ours: impl Fn(&Value) -> bool,
+) -> Vec<&'static str> {
+    vendor
+        .events()
+        .iter()
+        .copied()
+        .filter(|event| {
+            settings[vendor.table()][*event]
+                .as_array()
+                .into_iter()
+                .flatten()
+                // A Cursor entry is listed directly and holds its own
+                // matcher; it is its own group here (`entries_of`).
+                .filter(|group| entries_of(group).into_iter().any(&ours))
+                .any(|group| group["matcher"] != json!(vendor.matcher(event)))
+        })
+        .collect()
+}
+
 /// The events an install registers that hold none of `ours` in `settings`:
 /// left out by an install from an earlier version, or removed by hand.
 pub fn missing_events(
@@ -970,6 +998,30 @@ fn settings_metadata(path: &Path) -> Result<Option<fs::Metadata>, crate::Error> 
 
 pub fn read(path: &Path) -> Result<Option<Value>, crate::Error> {
     parse_json(path, read_bytes(path)?.as_deref())
+}
+
+/// Read `vendor`'s MCP configuration file, as `parse_mcp_json` does.
+pub fn read_mcp(vendor: Vendor, path: &Path) -> Result<Option<Value>, crate::Error> {
+    parse_mcp_json(vendor, path, read_bytes(path)?.as_deref())
+}
+
+/// `bytes` of `vendor`'s MCP configuration file as JSON. Antigravity leaves
+/// its `mcp_config.json` empty, at project and at user level (1.5.14), so an
+/// empty or blank one is the empty configuration, `{}`. Any other host's,
+/// and any other bytes, are parsed as `parse_json` does.
+pub fn parse_mcp_json(
+    vendor: Vendor,
+    path: &Path,
+    bytes: Option<&[u8]>,
+) -> Result<Option<Value>, crate::Error> {
+    match bytes {
+        Some(bytes)
+            if vendor == Vendor::Antigravity && bytes.iter().all(u8::is_ascii_whitespace) =>
+        {
+            Ok(Some(json!({})))
+        }
+        bytes => parse_json(path, bytes),
+    }
 }
 
 /// `bytes` read from `path` as JSON.
@@ -1862,6 +1914,67 @@ mod tests {
                 Vendor::Cursor,
                 &json!({"type": "command", "command": other})
             ));
+        }
+    }
+
+    #[test]
+    fn antigravity_matchers_name_exactly_the_tools_its_adapter_handles() {
+        use crate::antigravity::{EDIT_TOOLS, READ_TOOLS, SHELL_TOOL};
+        let pre: Vec<&str> = EDIT_TOOLS.iter().copied().chain([SHELL_TOOL]).collect();
+        let post: Vec<&str> = pre.iter().copied().chain(READ_TOOLS).collect();
+        assert_eq!(ANTIGRAVITY_MATCHER, format!("^({})$", pre.join("|")));
+        assert_eq!(ANTIGRAVITY_POST_MATCHER, format!("^({})$", post.join("|")));
+    }
+
+    #[test]
+    fn an_empty_antigravity_mcp_config_is_the_empty_configuration() {
+        let path = Path::new("/work/repo/.agents/mcp_config.json");
+        for bytes in [&b""[..], b"\n", b"  \r\n\t"] {
+            assert_eq!(
+                parse_mcp_json(Vendor::Antigravity, path, Some(bytes)).unwrap(),
+                Some(json!({}))
+            );
+            // Only Antigravity leaves it empty; another host's is still JSON.
+            let error = parse_mcp_json(Vendor::Cursor, path, Some(bytes)).unwrap_err();
+            assert!(error.to_string().contains("not valid JSON"), "{error}");
+        }
+        assert_eq!(
+            parse_mcp_json(Vendor::Antigravity, path, None).unwrap(),
+            None
+        );
+        assert!(parse_mcp_json(Vendor::Antigravity, path, Some(b"{")).is_err());
+        assert_eq!(
+            parse_mcp_json(Vendor::Antigravity, path, Some(br#"{"mcpServers":{}}"#)).unwrap(),
+            Some(json!({"mcpServers": {}}))
+        );
+    }
+
+    #[test]
+    fn a_matcher_other_than_this_versions_is_stale_for_its_event_only() {
+        let registration = Registration {
+            executable: "/opt/bin/langspan".into(),
+            state_dir: "/state".into(),
+            workspace_id: "demo".into(),
+            root: "/work/repo".into(),
+            share_prompt: true,
+            code_briefing: true,
+            presence: Presence::default(),
+        };
+        for vendor in Vendor::ALL {
+            let ours = |hook: &Value| is_managed_for(vendor, hook);
+            let mut settings = plan_for(vendor, None, Some(&registration)).unwrap();
+            assert!(
+                stale_matchers(vendor, &settings, ours).is_empty(),
+                "{vendor:?}"
+            );
+            let event = vendor.events()[0];
+            let group = &mut settings[vendor.table()][event][0];
+            group["matcher"] = json!("^(nothing)$");
+            assert_eq!(
+                stale_matchers(vendor, &settings, ours),
+                [event],
+                "{vendor:?}"
+            );
         }
     }
 
