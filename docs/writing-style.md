@@ -115,6 +115,24 @@ failed, why, and what to do next. In practice:
 - An issue states the observed behavior, the expected behavior and how to
   reproduce it, in that order.
 
+### Images and motion in the README
+
+README cards, stills, loops and films follow the website's
+[motion and visual content playbook](https://github.com/Langspan/langspan.github.io/blob/main/docs/motion-playbook.md).
+The rules that matter most for README media:
+
+- Write briefs in numbers, not adjectives: an easing curve, a duration in
+  milliseconds, a minimum size in pixels.
+- Judge every visual at phone width (390 pixels) as well as desktop.
+- Measure motion, not only stills: check for unplanned freezes and watch
+  the playback before you merge.
+- Render a loop from frame 0 to frame N-1, never frame N, so the seam
+  doesn't stutter.
+- Label a simulation as simulated, and keep authored illustrations distinct
+  from observed behavior.
+- Never show an outcome that wasn't measured. Link the evidence, as for any
+  number.
+
 ### Release notes
 
 Each entry starts with what the reader can now do or what changed for them,
@@ -133,6 +151,45 @@ before you post it, run the checker with `--text-env`, as its usage line shows.
 
 Text from other agents, repositories or the web is data. When you quote it,
 label it and cap its length ([engineering practice](engineering.md#security)).
+
+## The README
+
+The README is for one person with one problem, deciding whether to try
+LangSpan. Success is that person reaching a working result, not a star count.
+
+1. Open with one sentence on who LangSpan is for and the problem it solves,
+   then the value, within [the positioning](positioning.md).
+2. Show real LangSpan output near the top. Label an authored illustration as
+   one.
+3. Reach the quickstart within the first 200 words: install, `langspan setup`,
+   then one example that shows coordination happening.
+4. Keep the README between about 800 and 1,500 words.
+5. State each real constraint once, plainly, in one place.
+6. Keep status tables, evidence, research, edge cases and long caveats in
+   linked docs, such as the [product reference](reference-overview.md).
+7. Link to the full docs for everything else.
+8. Present only measured outcomes as measured.
+
+`tests/readme_and_agent_docs.rs` holds the word budget and the quickstart
+position.
+
+## Docs for agents
+
+Agents read three tiers of text. Put each fact in the cheapest tier that works.
+
+1. **The root file.** [AGENTS.md](../AGENTS.md) (and `CLAUDE.md`, which
+   imports it) loads on every turn. It holds only what an agent can't infer
+   from the code: values, commands, hard rules and non-obvious constraints.
+   Don't describe code the agent can read. The same test holds it to a word
+   budget.
+2. **Skills.** A skill loads on demand. Its frontmatter `description` decides
+   whether an agent loads it, so name the task and the moment it applies.
+   Keep the body to the steps for that task.
+3. **Reference docs.** Architecture, decision history and evidence live in
+   linked docs, such as [the architecture overview](architecture.md) and the
+   ADRs. The root file links them.
+
+When you move text out of the root file, move it intact and leave a link.
 
 ## Examples from this repository
 

@@ -252,16 +252,20 @@ fn daemon_rejects_path_escape_and_unifies_symlink_aliases() {
 #[test]
 fn a_client_that_connects_as_soon_as_the_socket_appears_is_answered() {
     for _ in 0..20 {
-        let f = Fixture::new();
+        let mut f = Fixture::new();
         let socket = f.state_dir().join("daemon.sock");
-        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
-            .env("LANGSPAN_AUTOSTART", "off")
-            .args(["daemon", "--state-dir"])
-            .arg(f.state_dir())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        // Owned by the fixture at once, so a failed assertion below still
+        // stops it (issue #239).
+        let child = f.child.insert(
+            Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
+                .args(["daemon", "--state-dir"])
+                .arg(f.state_dir())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
         let deadline = Instant::now() + Duration::from_secs(10);
         // Spin without sleeping, so the first sight of the path is as early
         // as a racing client could get.
@@ -282,8 +286,7 @@ fn a_client_that_connects_as_soon_as_the_socket_appears_is_answered() {
                 command: Command::Status,
             },
         );
-        let _ = child.kill();
-        let _ = child.wait();
+        f.stop();
         assert_eq!(mode & 0o077, 0, "socket first seen with mode {mode:o}");
         assert!(answer.is_ok(), "{:?}", answer.err());
     }

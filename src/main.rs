@@ -92,10 +92,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   check flaky WORKSPACE [--name NAME] | --forget TEST [--name NAME] --request-id ID
                                  Tests that flipped on unchanged code (two results on
                                  one tree, no write between); --forget clears one
-  integrate check WORKSPACE --onto BRANCH --name NAME BRANCH... -- COMMAND...
+  integrate check WORKSPACE --onto BRANCH --name NAME [--symbols] BRANCH...
+       -- COMMAND...
                                  Combine branches onto the remote's BRANCH without
                                  touching your checkout, run the command on that exact
-                                 result, and record it. Reports conflicts instead
+                                 result, and record it. Reports conflicts instead.
+                                 --symbols also names definitions the branches changed
+                                 in ways that disagree (advisory; never the result)
   land WORKSPACE --onto BRANCH --name NAME BRANCH... [--apply] [--session ID]
        [--wait-s N] [--check-again -- COMMAND...]
                                  Push that combined result, only if check NAME passed
@@ -453,7 +456,7 @@ fn hook(input: Vec<String>) -> ExitCode {
             default(info);
         }));
     }
-    let result = (|| -> Result<(), langspan::Error> {
+    let result = (|| -> Result<u8, langspan::Error> {
         let ParsedOptions {
             args, mut options, ..
         } = parse_options(input)?;
@@ -497,6 +500,24 @@ fn hook(input: Vec<String>) -> ExitCode {
                 }
             };
         let presence = presence(&mut options)?;
+        // The between-step watcher (issue #214): Claude Code only.
+        let watcher = match options.remove("--mode") {
+            None => false,
+            Some(mode)
+                if mode == langspan::between_steps::MODE
+                    && vendor == langspan::install::Vendor::ClaudeCode =>
+            {
+                true
+            }
+            Some(mode) => {
+                return Err(format!(
+                    "--mode {mode:?} is not a hook mode for {}; only claude-code takes --mode {}",
+                    vendor.name(),
+                    langspan::between_steps::MODE
+                )
+                .into());
+            }
+        };
         let config = langspan::claude_code::Config {
             state_dir: state_dir(&mut options)?,
             workspace_id,
@@ -518,6 +539,28 @@ fn hook(input: Vec<String>) -> ExitCode {
         }
         let deadline = std::time::Instant::now() + config.budget;
         let input = langspan::hook::read_stdin_until(deadline);
+        // A watcher starts no coordinator and writes nothing to stdout. On
+        // exit 2 its stderr is the notice Claude Code shows the model, so
+        // the log line is written only when it does not wake the session.
+        if watcher {
+            let watched = match &input {
+                Ok(bytes) => langspan::between_steps::watch(bytes, &config),
+                Err(error) => langspan::between_steps::Watched {
+                    exit: 0,
+                    stderr: String::new(),
+                    detail: error.to_string(),
+                },
+            };
+            if watched.exit == langspan::between_steps::WAKE {
+                eprint!("{}", watched.stderr);
+                return Ok(langspan::between_steps::WAKE);
+            }
+            eprintln!(
+                "{}",
+                serde_json::json!({"level":"info","event":"langspan_between_steps","detail":watched.detail})
+            );
+            return Ok(0);
+        }
         // At most half of what is left, so the event itself keeps the rest.
         let now = std::time::Instant::now();
         start_coordinator(
@@ -587,11 +630,12 @@ fn hook(input: Vec<String>) -> ExitCode {
             "{}",
             serde_json::json!({"level":"info","event":"langspan_hook","coverage":reply.coverage,"detail":reply.detail})
         );
-        Ok(())
+        Ok(0)
     })();
     match result {
-        Ok(()) => ExitCode::SUCCESS,
-        // Exit 1 is a non-blocking error for Claude Code; this adapter never exits 2.
+        Ok(code) => ExitCode::from(code),
+        // Exit 1 is a non-blocking error for Claude Code. Only the background
+        // between-step watcher exits 2, to wake the model (above).
         Err(error) => {
             if let Some(fallback) = fallback {
                 print!("{fallback}");
@@ -1916,6 +1960,7 @@ fn evidence(
                 .map(|_| langspan::landing::command_id(command)),
             tests,
             rerun: None,
+            symbol_findings: None,
         },
     )?;
     if json {
@@ -2368,6 +2413,10 @@ fn integrate(
         )
     });
     let check_again = options.remove("--check-again").is_some();
+    let symbols = options.remove("--symbols").is_some();
+    if landing.is_some() && symbols {
+        return Err("--symbols is valid only for `integrate check`".into());
+    }
     if landing.is_none() && options.contains_key("--wait-s") {
         return Err("--wait-s is valid only for `land`".into());
     }
@@ -2383,6 +2432,7 @@ fn integrate(
     let check = Check {
         argv: command.to_vec(),
         timeout_s,
+        symbols,
     };
     let Some(apply) = landing else {
         if check_again {
@@ -2420,6 +2470,19 @@ fn integrate(
                         combined.tree
                     ),
                     CheckResult::Inconclusive {} => print_inconclusive(&name, inconclusive),
+                }
+                if let Some(found) = &check.symbol_findings {
+                    println!("Definition findings (found by name; advisory):");
+                    let lines = langspan::definitions::lines(found);
+                    if lines.is_empty() {
+                        println!(
+                            "- none in the {} changed files indexed",
+                            found.files_indexed
+                        );
+                    }
+                    for line in lines {
+                        println!("- {line}");
+                    }
                 }
             }
         }
@@ -4793,7 +4856,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             "--apply" => apply = true,
             // Flags, kept with the options so that only the commands that take
             // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
-            // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
+            // `land`: `--check-again`; `integrate check`: `--symbols`;
+            // `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
             // `graph symbol`: `--detail`, `--rank`, `--renamed`; `brief`: `--recent`;
             // `setup`: `--yes`; `guidance install`: `--create`).
@@ -4801,6 +4865,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--allow-network"
             | "--demo"
             | "--check-again"
+            | "--symbols"
             | "--publish-as-branch"
             | "--mine"
             | "--detail"
@@ -4825,7 +4890,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
             | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" | "--keep-days"
             | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools"
-            | "--wait-ms" | "--max-hops" => {
+            | "--wait-ms" | "--max-hops" | "--mode" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -5577,6 +5642,16 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         } => println!(
             "Session {session_id} will not be alerted again to {} notice(s).",
             notice_ids.len()
+        ),
+        Outcome::BetweenSteps {
+            session_id,
+            open,
+            interface_changes,
+            ..
+        } => println!(
+            "Session {session_id}: {} interface notice(s) told between steps; turn {}.",
+            interface_changes.len(),
+            if *open { "open" } else { "over" }
         ),
         Outcome::GraphContext { matches, coverage } => {
             for context in matches {

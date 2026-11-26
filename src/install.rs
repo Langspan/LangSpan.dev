@@ -879,6 +879,7 @@ pub fn plan_for(
         existing,
         command.as_ref().map(|c| c as &dyn Fn(&str) -> String),
         &|hook| is_managed_for(vendor, hook),
+        false,
     )
 }
 
@@ -895,7 +896,52 @@ pub fn plan_user_for(
         existing,
         command.as_ref().map(|c| c as &dyn Fn(&str) -> String),
         &|hook| is_user_managed_for(vendor, hook),
+        true,
     )
+}
+
+/// What the between-step watcher's command adds to the prompt hook's own
+/// (issue #214).
+const WATCH_WORDS: &str = " --mode between-steps";
+
+/// The event whose hook group also holds the host's between-step watcher:
+/// only Claude Code documents a background hook that wakes the model
+/// (`asyncRewake`, <https://code.claude.com/docs/en/hooks>).
+fn watcher_event(vendor: Vendor) -> Option<&'static str> {
+    (vendor == Vendor::ClaudeCode).then_some("UserPromptSubmit")
+}
+
+/// The watcher entry for the prompt hook `command`: the same command with
+/// `--mode between-steps`, run in the background, past its own bound.
+fn watcher_entry(vendor: Vendor, command: &str, user: bool) -> Option<Map<String, Value>> {
+    let body = vendor.unmark(command, user)?;
+    let mut entry = Map::new();
+    entry.insert("type".into(), "command".into());
+    entry.insert(
+        "command".into(),
+        vendor.mark(&format!("{body}{WATCH_WORDS}"), user).into(),
+    );
+    entry.insert("asyncRewake".into(), true.into());
+    entry.insert(
+        "timeout".into(),
+        crate::between_steps::HOST_TIMEOUT_SECONDS.into(),
+    );
+    Some(entry)
+}
+
+/// Whether `hook` is a watcher LangSpan wrote: a background entry whose
+/// command is one of `ours` with `--mode between-steps` added.
+fn is_watcher(vendor: Vendor, hook: &Value, user: bool, ours: &dyn Fn(&Value) -> bool) -> bool {
+    watcher_event(vendor).is_some()
+        && hook.get("asyncRewake") == Some(&json!(true))
+        && hook
+            .get("command")
+            .and_then(Value::as_str)
+            .and_then(|command| vendor.unmark(command, user))
+            .and_then(|body| body.strip_suffix(WATCH_WORDS))
+            .is_some_and(|body| {
+                ours(&json!({"type": "command", "command": vendor.mark(body, user)}))
+            })
 }
 
 /// `command` gives the generated command for each event.
@@ -904,7 +950,9 @@ fn plan_hooks(
     existing: Option<Value>,
     command: Option<&dyn Fn(&str) -> String>,
     ours: &dyn Fn(&Value) -> bool,
+    user: bool,
 ) -> Result<Value, String> {
+    let ours = &|hook: &Value| ours(hook) || is_watcher(vendor, hook, user, ours);
     let mut settings = match existing {
         None => Map::new(),
         Some(Value::Object(map)) => map,
@@ -961,7 +1009,11 @@ fn plan_hooks(
             if vendor.flat(event) {
                 groups.push(Value::Object(entry));
             } else {
-                group.insert("hooks".into(), Value::Array(vec![Value::Object(entry)]));
+                let watcher = (watcher_event(vendor) == Some(event))
+                    .then(|| watcher_entry(vendor, &command(event), user))
+                    .flatten();
+                let entries = std::iter::once(entry).chain(watcher).map(Value::Object);
+                group.insert("hooks".into(), Value::Array(entries.collect()));
                 groups.push(Value::Object(group));
             }
         }
@@ -2155,5 +2207,98 @@ mod tests {
         assert_eq!(installed_executable(&plain).unwrap(), plain);
         let missing = base.join("Cellar/langspan/9.9.9/bin/langspan");
         assert!(installed_executable(&missing).is_err());
+    }
+
+    /// The between-step watcher entries (issue #214) in `settings`.
+    fn watchers(settings: &Value) -> Vec<Value> {
+        managed_hooks(settings, |hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains(" --mode between-steps"))
+        })
+    }
+
+    #[test]
+    fn a_claude_code_install_adds_one_background_watcher_beside_its_prompt_hook() {
+        let project = plan(None, Some(&registration("/r"))).unwrap();
+        let user =
+            plan_user_for(Vendor::ClaudeCode, None, Some(&user("/opt/bin/langspan"))).unwrap();
+        for (settings, ours) in [
+            (
+                &project,
+                &(|hook: &Value| is_managed_for(Vendor::ClaudeCode, hook))
+                    as &dyn Fn(&Value) -> bool,
+            ),
+            (&user, &|hook: &Value| {
+                is_user_managed_for(Vendor::ClaudeCode, hook)
+            }),
+        ] {
+            let found = watchers(settings);
+            assert_eq!(found.len(), 1, "{settings:#}");
+            let watcher = &found[0];
+            // Claude Code's documented background hook that wakes the model
+            // on exit 2; it never decides anything.
+            assert_eq!(watcher["asyncRewake"], json!(true));
+            assert_eq!(
+                watcher["timeout"],
+                json!(crate::between_steps::HOST_TIMEOUT_SECONDS)
+            );
+            let group = &settings["hooks"]["UserPromptSubmit"][0]["hooks"];
+            assert_eq!(group.as_array().unwrap().len(), 2, "{group:#}");
+            assert!(ours(&group[0]), "the prompt hook comes first");
+            assert_eq!(group[1], *watcher);
+            // The watcher is the prompt hook's own command with the mode.
+            let prompt = group[0]["command"].as_str().unwrap();
+            let command = watcher["command"].as_str().unwrap();
+            let (body, marker) = prompt.split_at(prompt.find(" # langspan-managed").unwrap());
+            assert_eq!(command, format!("{body} --mode between-steps{marker}"));
+            // No other event has one.
+            let all: usize = settings["hooks"]
+                .as_object()
+                .unwrap()
+                .values()
+                .flat_map(|groups| groups.as_array().unwrap())
+                .flat_map(|group| group["hooks"].as_array().unwrap())
+                .filter(|hook| hook.get("asyncRewake").is_some())
+                .count();
+            assert_eq!(all, 1);
+        }
+        // Reinstalling replaces it; removing takes it away with the rest.
+        let twice = plan(Some(project.clone()), Some(&registration("/r"))).unwrap();
+        assert_eq!(
+            twice, project,
+            "reinstalling replaces rather than duplicates"
+        );
+        assert!(watchers(&plan(Some(project), None).unwrap()).is_empty());
+        let removed = plan_user_for(Vendor::ClaudeCode, Some(user), None).unwrap();
+        assert!(watchers(&removed).is_empty(), "{removed:#}");
+        // The other hosts document no between-step delivery.
+        for vendor in [
+            Vendor::Codex,
+            Vendor::Cursor,
+            Vendor::Gemini,
+            Vendor::Antigravity,
+        ] {
+            let settings = plan_for(vendor, None, Some(&registration("/r"))).unwrap();
+            assert!(watchers(&settings).is_empty(), "{}", vendor.name());
+        }
+    }
+
+    #[test]
+    fn a_hand_written_watcher_like_entry_is_not_taken_for_langspan_s() {
+        let registered = plan(None, Some(&registration("/r"))).unwrap();
+        let watcher = watchers(&registered)[0].clone();
+        // Without asyncRewake, or with another mode, it is the owner's.
+        let mut sync = watcher.clone();
+        sync.as_object_mut().unwrap().remove("asyncRewake");
+        let mut other = watcher.clone();
+        other["command"] = json!(
+            watcher["command"]
+                .as_str()
+                .unwrap()
+                .replace("--mode between-steps", "--mode between-steps-2")
+        );
+        let owners = json!({"hooks": {"UserPromptSubmit": [{"hooks": [sync, other]}]}});
+        assert_eq!(plan(Some(owners.clone()), None).unwrap(), owners);
     }
 }

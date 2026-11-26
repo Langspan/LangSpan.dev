@@ -90,15 +90,17 @@ impl Fixture {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
+        // Owned before anything can panic, so `Drop` stops it (issue #239).
+        let fixture = Self {
+            base,
+            child: Some(child),
+        };
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !base.join("state/daemon.sock").exists() {
+        while !fixture.base.join("state/daemon.sock").exists() {
             assert!(Instant::now() < deadline, "daemon did not become ready");
             std::thread::sleep(Duration::from_millis(10));
         }
-        Self {
-            base,
-            child: Some(child),
-        }
+        fixture
     }
     fn root(&self) -> PathBuf {
         self.base.join("work")

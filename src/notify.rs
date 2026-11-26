@@ -673,6 +673,7 @@ mod tests {
                 recorded_ms: 1,
                 generation: 1,
                 changed_since: false,
+                symbol_findings: None,
             }],
         );
         let report = |session: &str, check_id: &str| Event::CheckReported {

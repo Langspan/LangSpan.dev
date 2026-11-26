@@ -3,6 +3,7 @@
 pub mod adopt;
 pub mod auto_check;
 pub mod autostart;
+pub mod between_steps;
 pub mod binary_version;
 mod break_calls;
 pub mod breaks;
@@ -13,6 +14,7 @@ pub mod commit;
 pub mod count;
 pub mod daemon;
 pub mod dashboard;
+pub mod definitions;
 pub mod formatter;
 pub mod guidance;
 pub mod install;
