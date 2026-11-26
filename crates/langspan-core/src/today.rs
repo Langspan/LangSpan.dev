@@ -160,9 +160,11 @@ pub struct TodayQuery<'a> {
     /// The anchor of the generation the first event belongs to, when it was
     /// anchored and the anchor precedes it.
     pub anchor: Option<ClockAnchor>,
-    /// The log holds, or held before retention removed them, events older
-    /// than the first one given.
+    /// The log holds events older than the first one given.
     pub earlier: bool,
+    /// Retention removed events recorded before this wall time (the newest
+    /// compaction's cutoff); `None` when it never removed any.
+    pub retained_from_ms: Option<u64>,
     /// The daemon's clock now, for what is still held.
     pub now_ms: u64,
 }
@@ -302,20 +304,30 @@ impl Placement {
         wall
     }
 
-    /// The wall time of the oldest event placed that carries a time of its
-    /// own: the start of what was read, when it is known.
-    pub(crate) fn covered_from(&self) -> Option<u64> {
-        self.bound.flatten()
+    /// From when every event is counted: the later of the oldest event
+    /// placed that carries a time of its own and the retention cutoff, when
+    /// either is known.
+    pub(crate) fn covered_from(&self, retained_from_ms: Option<u64>) -> Option<u64> {
+        self.bound.flatten().max(retained_from_ms)
     }
 
-    /// Whether the older part of the log, `earlier` when there is one, may
-    /// hold part of a window starting at `from_ms`.
-    pub(crate) fn truncated(&self, earlier: bool, from_ms: u64) -> bool {
-        earlier
-            && match self.bound {
-                Some(Some(first)) => first >= from_ms,
-                _ => true,
-            }
+    /// Whether part of a window starting at `from_ms` may be missing: in
+    /// the older part of the log, `earlier` when there is one, or in what
+    /// retention removed before `retained_from_ms`. A kept event older than
+    /// that cutoff, such as a generation's anchor, says nothing about the
+    /// removed events beside it.
+    pub(crate) fn truncated(
+        &self,
+        earlier: bool,
+        retained_from_ms: Option<u64>,
+        from_ms: u64,
+    ) -> bool {
+        retained_from_ms.is_some_and(|cutoff| cutoff > from_ms)
+            || earlier
+                && match self.bound {
+                    Some(Some(first)) => first >= from_ms,
+                    _ => true,
+                }
     }
 }
 
@@ -401,7 +413,7 @@ pub fn today(state: &State, query: &TodayQuery<'_>) -> Today {
             _ => {}
         }
     }
-    let truncated = placement.truncated(query.earlier, window.from_ms);
+    let truncated = placement.truncated(query.earlier, query.retained_from_ms, window.from_ms);
     let mut listed: Vec<TodaySession> = sessions
         .into_iter()
         .map(|(session_id, tally)| TodaySession {

@@ -174,7 +174,10 @@ acknowledgement. Four choices were needed:
   only new stored field.
 - *Placing and bounding.* Events are placed in wall time by the same code as
   `today` (`Placement`, shared), from the same newest 50,000 events; a
-  window reaching past them says `truncated` with `covered_from_ms`. An
+  window reaching past them says `truncated` with `covered_from_ms`, and so
+  does one starting before the newest retention cutoff, whatever older
+  generation markers retention kept: `covered_from_ms` is then the later of
+  the cutoff and the oldest timed event read. An
   intent set before the window and still open when its session ends inside
   it counts as left open, even when it was set before the events read: the
   store folds the older intent events, found through a partial index, into

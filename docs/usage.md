@@ -1037,8 +1037,9 @@ that places that run's times on the wall clock; events recorded by a build
 before this one have no such anchor and are counted only as `undated`. A
 landing is placed at the time it took its turn to land. A
 window with more than 50,000 events is summarised from the newest 50,000 and
-says `truncated: true`, as does a window that reaches before events retention
-removed; when the oldest of those carries no time of its own,
+says `truncated: true`, as does a window that starts before the newest
+retention cutoff, even though the generation markers retention keeps are
+older than it; when the oldest of those carries no time of its own,
 the first that does decides whether the window may reach past them. With the
 daemon down it exits 1 with "coordination unavailable".
 
@@ -1098,7 +1099,9 @@ with `sessions`, `counts` and `not_reported`), `sessions` (`session_id`,
 `host`, `counts`), `truncated` and, when there are any, `omitted_sessions`,
 `covered_from_ms` and `undated`. A window with more than 50,000 events is
 counted from the newest 50,000 and says `truncated: true`, with
-`covered_from_ms`, the wall time those events start at. The MCP tool
+`covered_from_ms`, the wall time those events start at. So does a window
+that starts before the newest retention cutoff, with `covered_from_ms` no
+earlier than that cutoff. The MCP tool
 `langspan_report` (`workspace_id`, and `since`, optional) returns the same
 text, labelled as data, within 2,400 bytes: session rows are left out, last
 first, until it fits, and the host totals keep them. It is a read: it

@@ -113,11 +113,13 @@ pub struct Report {
     pub sessions: Vec<ReportSession>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub omitted_sessions: u32,
-    /// The window holds more than the events read (or reaches before them):
-    /// the counts are of the newest ones only, from `covered_from_ms`.
+    /// The window holds more than the events read (or reaches before them,
+    /// or before the retention cutoff): the counts are of the newest ones
+    /// only, from `covered_from_ms`.
     pub truncated: bool,
-    /// When truncated, the wall time of the oldest event read that carries a
-    /// time of its own; `None` when none of them does.
+    /// When truncated, the later of the wall time of the oldest event read
+    /// that carries a time of its own and the retention cutoff; `None` when
+    /// neither is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub covered_from_ms: Option<u64>,
     /// Events read that have no wall time (a build before generations were
@@ -137,6 +139,10 @@ pub struct ReportQuery<'a> {
     pub anchor: Option<ClockAnchor>,
     /// The log holds events older than the first one given.
     pub earlier: bool,
+    /// Retention removed events recorded before this wall time (the newest
+    /// compaction's cutoff); `None` when it never removed any. A window
+    /// starting before it is truncated whatever was kept.
+    pub retained_from_ms: Option<u64>,
     /// Sessions holding an intent just before the first event given, each
     /// with the workspace of its intent, from the older events
     /// `open_intents` folded. An intent set before the events read and
@@ -358,7 +364,7 @@ pub fn report(query: &ReportQuery<'_>) -> Report {
     };
     let mut hosts: Vec<ReportHost> = hosts.into_values().collect();
     hosts.sort_by_key(|host| order(&host.host));
-    let truncated = placement.truncated(query.earlier, window.from_ms);
+    let truncated = placement.truncated(query.earlier, query.retained_from_ms, window.from_ms);
     Report {
         workspace_id: query.workspace_id.into(),
         window,
@@ -366,7 +372,9 @@ pub fn report(query: &ReportQuery<'_>) -> Report {
         sessions: listed.into_iter().map(|(_, session)| session).collect(),
         omitted_sessions,
         truncated,
-        covered_from_ms: truncated.then(|| placement.covered_from()).flatten(),
+        covered_from_ms: truncated
+            .then(|| placement.covered_from(query.retained_from_ms))
+            .flatten(),
         undated,
     }
 }

@@ -441,11 +441,13 @@ impl Store {
             tap: None,
         };
         // The generation's clock against the wall clock, so times can be
-        // placed on a day (the status line and `today`).
+        // placed on a day (the status line and `today`). The same wall clock
+        // stamps records' ages, so a retention cutoff and a placed time are
+        // on one clock.
         let anchor = ClockAnchor {
             generation,
             clock_ms: crate::clock::now_ms(),
-            wall_ms: wall_now_ms(),
+            wall_ms: (store.wall_ms)(),
         };
         store.commit(
             &[
@@ -1233,6 +1235,7 @@ impl Store {
             return Ok(refused);
         }
         let (events, anchor, earlier) = self.newest_events()?;
+        let retained_from_ms = retention::since_ms(&self.connection)?;
         let mut today = langspan_core::today(
             &self.state,
             &TodayQuery {
@@ -1244,6 +1247,7 @@ impl Store {
                 events: &events,
                 anchor,
                 earlier,
+                retained_from_ms,
                 now_ms,
             },
         );
@@ -1296,13 +1300,13 @@ impl Store {
         let first = events.first().map_or(0, |recorded| recorded.seq);
         let first = i64::try_from(first)?;
         // Older events exist when the log holds some before the first one
-        // read, or when retention removed some: those are gone, and the core
-        // marks the summary truncated if the window reaches before what is left.
+        // read. What retention removed is the caller's to pass separately,
+        // as its cutoff: the kept generation markers are older than it.
         let earlier: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1)",
             [first],
             |row| row.get(0),
-        )? || retention::since_ms(&self.connection)?.is_some();
+        )?;
         // The generation the first event read belongs to, if it was anchored.
         let before: Option<String> = self
             .connection
@@ -1359,6 +1363,7 @@ impl Store {
             return Ok(refused);
         }
         let (events, anchor, earlier) = self.newest_events()?;
+        let retained_from_ms = retention::since_ms(&self.connection)?;
         let (open_intents, session_workspaces) =
             self.report_history_before(events.first().map_or(0, |first| first.seq))?;
         let mut report = langspan_core::report(&ReportQuery {
@@ -1370,6 +1375,7 @@ impl Store {
             events: &events,
             anchor,
             earlier,
+            retained_from_ms,
             open_intents: &open_intents,
             session_workspaces: &session_workspaces,
         });

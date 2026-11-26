@@ -171,6 +171,7 @@ impl Log {
             events: &self.events,
             anchor: None,
             earlier,
+            retained_from_ms: None,
             open_intents: &BTreeMap::new(),
             session_workspaces: &BTreeMap::new(),
         })
@@ -354,6 +355,7 @@ fn an_intent_set_before_the_events_read_is_left_open_when_its_session_ends() {
             wall_ms: WALL,
         }),
         earlier: true,
+        retained_from_ms: None,
         open_intents: &before,
         session_workspaces: &members_before(&log.events[..start]),
     });
@@ -421,6 +423,7 @@ fn a_removed_workspace_ends_its_intents_for_the_report() {
         events: &log.events,
         anchor: None,
         earlier: false,
+        retained_from_ms: None,
         open_intents: &BTreeMap::new(),
         session_workspaces: &BTreeMap::new(),
     });
@@ -442,6 +445,7 @@ fn a_removed_workspace_ends_its_intents_for_the_report() {
         events: &log.events[start..],
         anchor,
         earlier: true,
+        retained_from_ms: None,
         open_intents: &before,
         session_workspaces: &members_before(&log.events[..start]),
     });
@@ -686,6 +690,7 @@ fn the_window_leaves_out_older_events_and_says_what_it_covered() {
             wall_ms: WALL,
         }),
         earlier: true,
+        retained_from_ms: None,
         open_intents: &BTreeMap::new(),
         session_workspaces: &members_before(&log.events[..start]),
     });
@@ -773,6 +778,7 @@ fn a_session_registered_again_elsewhere_keeps_its_earlier_events_in_its_old_work
             events,
             anchor,
             earlier: false,
+            retained_from_ms: None,
             open_intents: &none,
             session_workspaces: &members,
         };
@@ -791,4 +797,68 @@ fn a_session_registered_again_elsewhere_keeps_its_earlier_events_in_its_old_work
             "{elsewhere:#?}"
         );
     }
+}
+
+/// Review 4704557874, in the core: every event left was read (`earlier`
+/// false), and the first is the generation's anchor, older than the window.
+/// Retention removed the events before its cutoff all the same, so a window
+/// starting before the cutoff is truncated and covers from the cutoff; one
+/// starting at the cutoff is complete.
+#[test]
+fn a_window_before_the_retention_cutoff_is_truncated_though_every_event_left_was_read() {
+    let alice = "claude-code.alice";
+    let mut log = Log::ready(&[alice]);
+    log.prompt(alice, START + 40 * MINUTE);
+    log.edit(
+        alice,
+        "1",
+        "src/a.rs",
+        present('a'),
+        '1',
+        START + 40 * MINUTE,
+    );
+    let cutoff = WALL + 30 * MINUTE;
+    let none = BTreeMap::new();
+    let query = |from_ms| ReportQuery {
+        workspace_id: "work",
+        window: TodayWindow {
+            from_ms,
+            to_ms: WALL + 600 * MINUTE,
+        },
+        events: &log.events,
+        anchor: None,
+        earlier: false,
+        retained_from_ms: Some(cutoff),
+        open_intents: &none,
+        session_workspaces: &none,
+    };
+    let before = report(&query(WALL + 10 * MINUTE));
+    assert!(before.truncated, "{before:#?}");
+    assert_eq!(before.covered_from_ms, Some(cutoff));
+    assert_eq!(row(&before, alice).edits_admitted, 1, "{before:#?}");
+    let at = report(&query(cutoff));
+    assert!(!at.truncated, "{at:#?}");
+    assert_eq!(at.covered_from_ms, None);
+
+    // Truncated by the limit too: the later of the two bounds is given.
+    let start = log
+        .events
+        .iter()
+        .position(|recorded| matches!(recorded.event, Event::SessionPrompted { .. }))
+        .unwrap();
+    let newest = &log.events[start..];
+    let both = report(&ReportQuery {
+        events: newest,
+        anchor: Some(ClockAnchor {
+            generation: 1,
+            clock_ms: START,
+            wall_ms: WALL,
+        }),
+        earlier: true,
+        retained_from_ms: Some(WALL + 5 * MINUTE),
+        ..query(WALL)
+    });
+    assert!(both.truncated, "{both:#?}");
+    assert_eq!(both.covered_from_ms, Some(WALL + 40 * MINUTE));
+    assert_eq!(row(&both, alice).edits_admitted, 1, "{both:#?}");
 }
