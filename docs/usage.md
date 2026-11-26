@@ -1078,7 +1078,8 @@ mentions:
 
 Each item has `path`, `worktree`, `session` (the session that last reported
 editing the file, if any), `name`, `kind`, `signature` and `mentioned_in`, at
-most 200 items in all. Other machines are not covered: a teammate's
+most 200 items in all and no more than fit one 64 KiB response; `truncated`
+says some were left out. Other machines are not covered: a teammate's
 publication carries paths only ([ADR 0006](adr/0006-remote-awareness-through-git-refs.md)).
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude

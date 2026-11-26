@@ -426,6 +426,13 @@ fn version_tokens(text: &[u8], language: Language) -> Vec<Vec<&[u8]>> {
     lines
 }
 
+/// `text`'s tokens, in order, as this module compares them: what a
+/// formatter may change (spacing, line breaks, a trailing comma) left out,
+/// and string literals kept whole, whitespace and all.
+pub fn tokens(text: &[u8], language: Language) -> Vec<&[u8]> {
+    version_tokens(text, language).concat()
+}
+
 /// One change's lines, by index into the change's removed and added lines:
 /// the groups with the same tokens, and the lines in none.
 #[derive(Debug, Default)]

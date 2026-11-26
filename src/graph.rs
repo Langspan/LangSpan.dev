@@ -638,7 +638,12 @@ impl Index {
                 let head = match head_object {
                     Some(object) => {
                         reads += 1;
-                        head_graph(root, path, object, deadline)
+                        match head_graph(root, path, object, deadline) {
+                            Ok(head) => head,
+                            // Not read (a timeout, a missing object): left
+                            // uncompared, so a later pass tries again.
+                            Err(HeadUnread) => continue,
+                        }
                     }
                     None => Some(FileGraph::default()),
                 };
@@ -676,15 +681,23 @@ impl Index {
     }
 
     /// The exported symbols indexed for `path` that `head` does not export
-    /// with the same name, kind and signature (whitespace aside).
+    /// with the same name, kind and signature. Signatures are compared by
+    /// their tokens, as a reformat is (`crate::reformat::tokens`): spacing
+    /// between tokens aside, but not the whitespace in a string literal.
     fn added_or_changed(
         &self,
         workspace_id: &str,
         path: &str,
         head: &FileGraph,
     ) -> Result<Vec<Symbol>, Failure> {
-        let compared = |signature: &str| signature.split_whitespace().collect::<String>();
-        let before: BTreeSet<(&str, SymbolKind, String)> = head
+        let language = crate::reformat::language(path);
+        let compared = |signature: &str| -> Vec<Vec<u8>> {
+            crate::reformat::tokens(signature.as_bytes(), language)
+                .into_iter()
+                .map(<[u8]>::to_vec)
+                .collect()
+        };
+        let before: BTreeSet<(&str, SymbolKind, Vec<Vec<u8>>)> = head
             .symbols
             .iter()
             .filter(|symbol| symbol.exported)
@@ -1396,12 +1409,19 @@ fn read_exact_version(root: &Path, path: &str, digest: &str, max: usize) -> Opti
 
 /// The structure of `path`'s blob `object` at the worktree's `HEAD`, read
 /// raw from Git (never through filters), within the parse bound. `None`
-/// when it cannot be read or parsed completely: then nothing is said of
-/// the file.
-fn head_graph(root: &Path, path: &str, object: &str, deadline: Instant) -> Option<FileGraph> {
-    let language = Language::for_path(path)?;
+/// when it cannot be parsed completely: then nothing is said of the file.
+/// `HeadUnread` when Git did not give the blob: then it is tried again.
+fn head_graph(
+    root: &Path,
+    path: &str,
+    object: &str,
+    deadline: Instant,
+) -> Result<Option<FileGraph>, HeadUnread> {
+    let Some(language) = Language::for_path(path) else {
+        return Ok(None);
+    };
     if object.len() < 40 || object.len() > 64 || !object.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
+        return Ok(None);
     }
     let bytes = crate::git::output(
         root,
@@ -1416,10 +1436,15 @@ fn head_graph(root: &Path, path: &str, object: &str, deadline: Instant) -> Optio
         deadline,
         MAX_SOURCE_BYTES,
     )
-    .ok()?;
-    let graph = langspan_graph::extract(language, &bytes).ok()?;
-    (!graph.partial).then_some(graph)
+    .map_err(|_| HeadUnread)?;
+    let graph = langspan_graph::extract(language, &bytes).ok();
+    Ok(graph.filter(|graph| !graph.partial))
 }
+
+/// Git did not give `head_graph` the blob: it timed out, failed or the
+/// object is missing. Unlike a version that parses partially, this may
+/// pass, so the comparison is tried again.
+struct HeadUnread;
 
 /// The module name a file is imported by: its file name without the
 /// extension, or its directory's name for a Go file and for `mod.rs`,

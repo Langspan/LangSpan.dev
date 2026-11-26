@@ -643,7 +643,10 @@ mod unix {
             }
         }
         if offered.is_empty() {
-            return nothing;
+            // Nothing to look up, but the answer still says whether the
+            // asking workspace is indexed.
+            let ((), coverage) = graph.with_coverage(&of, |_| Ok(()))?;
+            return Ok((Vec::new(), coverage, false));
         }
         let ((found, more), coverage) = graph.with_coverage(&of, |graph| {
             let imports = graph.imports_of(workspace_id, among)?;
@@ -750,14 +753,40 @@ mod unix {
             |_| true,
         )
         .map_err(|error| error.to_string())?;
+        let mut inflight: Vec<langspan_core::InflightNotice> = found
+            .iter()
+            .filter_map(|item| langspan_core::inflight_notice(state, item))
+            .collect();
+        let cut = fit_inflight(&mut inflight, &coverage);
         Ok(Outcome::GraphInflight {
-            inflight: found
-                .iter()
-                .filter_map(|item| langspan_core::inflight_notice(state, item))
-                .collect(),
+            inflight,
             coverage,
-            truncated,
+            truncated: truncated || cut,
         })
+    }
+
+    /// Keep the leading in-flight notices whose answer fits one response
+    /// frame. Returns whether any was left out.
+    fn fit_inflight(
+        notices: &mut Vec<langspan_core::InflightNotice>,
+        coverage: &langspan_core::GraphCoverage,
+    ) -> bool {
+        // The envelope, the request ID and the outcome's other fields.
+        const ROOM: usize = 1024;
+        fn size(value: &impl serde::Serialize) -> usize {
+            serde_json::to_vec(value).map_or(usize::MAX / 2, |bytes| bytes.len())
+        }
+        let mut used = ROOM + size(coverage);
+        let keep = notices
+            .iter()
+            .take_while(|notice| {
+                used = used.saturating_add(size(*notice) + 1);
+                used < MAX_FRAME_BYTES
+            })
+            .count();
+        let cut = keep < notices.len();
+        notices.truncate(keep);
+        cut
     }
 
     /// The write-time break check (ADR 0029). The calls are used for this

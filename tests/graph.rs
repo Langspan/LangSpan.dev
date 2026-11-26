@@ -1560,3 +1560,183 @@ fn in_flight_lines_keep_to_their_share_and_the_rest_are_counted_and_told_later()
         }
     }
 }
+
+/// An empty in-flight answer still carries the asking workspace's
+/// coverage, so "nothing in flight" is told apart from "not indexed yet"
+/// (review comment 4703615489).
+#[test]
+fn an_empty_inflight_answer_still_reports_the_asking_workspaces_coverage() {
+    let w = World::new();
+    let _tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let outcome = w.inflight("app");
+    assert_eq!(outcome["inflight"], json!([]), "{outcome:#}");
+    assert_eq!(outcome["coverage"]["scanned"], true, "{outcome:#}");
+    assert_eq!(outcome["coverage"]["current_files"], 3, "{outcome:#}");
+    let (code, text) = w.cli(&["graph", "inflight", "app"]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("No other worktree of this repository has an uncommitted signature"),
+        "{text}"
+    );
+}
+
+/// Whitespace inside a string literal is part of a signature: a Python
+/// default that changes from "a b" to "ab" is a changed signature, while
+/// spacing between tokens still is not (review comment 4703451943).
+#[test]
+fn a_changed_string_default_is_in_flight_but_respacing_is_not() {
+    let w = World::new();
+    let work = w.work();
+    fs::write(
+        work.join("src/greet.py"),
+        "def greet(prefix=\"a b\", name=\"x\"):\n    return prefix + name\n",
+    )
+    .unwrap();
+    fs::write(
+        work.join("src/hello.py"),
+        "from greet import greet\n\ndef hello():\n    return greet()\n",
+    )
+    .unwrap();
+    git(&work, &["add", "src/greet.py", "src/hello.py"]);
+    git(&work, &["commit", "--quiet", "-m", "greet"]);
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "greet", |outcome| {
+        outcome["coverage"]["current_files"] == 5
+    });
+    // Only the spacing between tokens changes: not in flight.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a1",
+        "src/greet.py",
+        "def greet( prefix = \"a b\" , name=\"x\" ):\n    return prefix + name\n",
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let outcome = w.inflight("app");
+        assert_eq!(
+            inflight_names(&outcome),
+            Vec::<String>::new(),
+            "{outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // The string's content changes: in flight.
+    w.edits_in(
+        "tree",
+        &tree,
+        "alice",
+        "a2",
+        "src/greet.py",
+        "def greet(prefix=\"ab\", name=\"x\"):\n    return prefix + name\n",
+    );
+    w.wait_for_inflight("the changed default", "app", |outcome| {
+        inflight_names(outcome) == ["greet: def greet(prefix=\"ab\", name=\"x\")"]
+    });
+}
+
+/// Many long in-flight notices are trimmed to one response frame and
+/// marked truncated, not replaced by an error (review comment 4703451948).
+#[test]
+fn many_long_inflight_notices_are_trimmed_to_one_response_frame() {
+    let w = World::new();
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let names: Vec<String> = (0..128)
+        .map(|n| format!("a_rather_long_exported_function_number_{n:03}"))
+        .collect();
+    let calls: String = names
+        .iter()
+        .map(|name| format!("    let _ = {name}(\"bob\", 1, 2, 3);\n"))
+        .collect();
+    let work = w.work();
+    for file in ["first", "second", "third", "fourth"] {
+        fs::write(
+            work.join(format!("src/calls_every_limit_from_the_{file}_file.rs")),
+            format!("pub fn {file}() {{\n{calls}}}\n"),
+        )
+        .unwrap();
+    }
+    let parameters: String = (0..12)
+        .map(|n| format!("parameter_with_a_long_name_{n}: u64, "))
+        .collect();
+    let definitions: String = names
+        .iter()
+        .map(|name| format!("pub fn {name}(user: &str, {parameters}) -> u64 {{ 0 }}\n"))
+        .collect();
+    fs::write(
+        tree.join("src/a_module_with_a_rather_long_name_for_limits.rs"),
+        definitions,
+    )
+    .unwrap();
+    let outcome = w.wait_for_inflight("many in flight", "app", |outcome| {
+        !inflight_names(outcome).is_empty()
+    });
+    assert_eq!(outcome["truncated"], true, "{outcome:#}");
+    let listed = inflight_names(&outcome).len();
+    assert!((1..128).contains(&listed), "{listed} listed");
+    assert_eq!(
+        outcome["inflight"][0]["mentioned_in"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4,
+        "{outcome:#}"
+    );
+}
+
+/// A HEAD version that cannot be read is compared again on a later pass,
+/// not recorded as having nothing in flight (review comment 4703451937).
+#[test]
+fn a_head_version_that_could_not_be_read_is_compared_on_a_later_pass() {
+    let w = World::new();
+    let tree = w.linked_tree();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    // Take HEAD's blob of src/upload.rs out of the shared object store.
+    let object = Process::new("git")
+        .arg("-C")
+        .arg(&tree)
+        .args(["rev-parse", "HEAD:src/upload.rs"])
+        .output()
+        .unwrap();
+    let object = String::from_utf8(object.stdout).unwrap().trim().to_owned();
+    let loose = w
+        .work()
+        .join(".git/objects")
+        .join(&object[..2])
+        .join(&object[2..]);
+    let aside = w.base.join("blob-aside");
+    fs::rename(&loose, &aside).unwrap();
+    let changed = "pub fn upload(path: &str) -> bool {\n    !path.is_empty()\n}\n\npub fn gate(user: &str, role: &str) -> bool {\n    user == role\n}\n";
+    w.edits_in("tree", &tree, "alice", "a1", "src/upload.rs", changed);
+    // Wait until the worktree's index holds the new signature, then for
+    // the in-flight comparison of that pass to have run and failed.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, text) = w.cli(&["graph", "symbol", "tree", "gate", "--json"]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome["symbols"][0]["signature"]
+            .as_str()
+            .is_some_and(|signature| signature.contains("role"))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never indexed: {outcome:#}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(inflight_names(&w.inflight("app")), Vec::<String>::new());
+    // The blob is back: the next pass compares the file and finds it.
+    fs::rename(&aside, &loose).unwrap();
+    w.wait_for_inflight("the changed gate", "app", |outcome| {
+        inflight_names(outcome) == ["gate: pub fn gate(user: &str, role: &str) -> bool"]
+    });
+}

@@ -272,8 +272,12 @@ compares each such file, once it is indexed at its scanned content, with that
 blob: it reads the blob raw with `git cat-file blob` (no filters, within the
 1 MiB parse bound and the pass's deadline, at most 200 reads per pass) and
 parses it like any file. The exported symbols of the working version that
-the `HEAD` version lacks, or exports with a different signature (whitespace
-aside), are the file's in-flight set. A file new since `HEAD` puts all its
+the `HEAD` version lacks, or exports with a different signature, are the
+file's in-flight set. Signatures are compared by their tokens as a reformat
+is ([ADR 0011](0011-shell-writes.md)): spacing between tokens aside, but a
+string literal's whitespace counts. A blob Git does not give (a timeout, a
+missing object) leaves the file uncompared, and a later pass tries again. A
+file new since `HEAD` puts all its
 exports in it. The set lives in `graph.sqlite3` (`inflight` and
 `inflight_files`, the latter with the indexed digest and `HEAD` blob it was
 computed at), added without a schema change, so an existing index computes
@@ -297,9 +301,16 @@ delivered briefing records the keys of the signatures it told
 (`InflightDelivered`), at most 128 per session, so each signature is told
 once and a changed one again. `graph inflight WORKSPACE` answers the same
 comparison for any file of the workspace, read-only. Neither a worktree nor
-an asking workspace without a complete scan contributes anything. Tests:
-`another_worktrees_uncommitted_signature_is_told_to_the_session_whose_file_mentions_it`
-and `in_flight_lines_keep_to_their_share_and_the_rest_are_counted_and_told_later`
+an asking workspace without a complete scan contributes anything; an empty
+answer still carries the asking workspace's coverage. Its answer keeps the
+leading items that fit one response frame and is marked `truncated` when any
+are left out. Tests:
+`another_worktrees_uncommitted_signature_is_told_to_the_session_whose_file_mentions_it`,
+`in_flight_lines_keep_to_their_share_and_the_rest_are_counted_and_told_later`,
+`an_empty_inflight_answer_still_reports_the_asking_workspaces_coverage`,
+`a_changed_string_default_is_in_flight_but_respacing_is_not`,
+`many_long_inflight_notices_are_trimmed_to_one_response_frame` and
+`a_head_version_that_could_not_be_read_is_compared_on_a_later_pass`
 in `tests/graph.rs`,
 `a_codex_session_is_told_a_signature_claude_code_has_in_flight_in_a_linked_worktree`
 in `tests/briefing.rs`, and the in-flight tests in
