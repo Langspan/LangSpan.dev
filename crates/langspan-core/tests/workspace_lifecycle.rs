@@ -669,6 +669,38 @@ fn a_removed_workspace_forgets_its_message_history_and_withdrawal_notices() {
     assert!(!text.contains("I am changing upload"), "{text}");
 }
 
+/// An uncoordinated change describes the files of one checkout on disk, as
+/// a checkout change does: a move to another checkout and a removal each
+/// drop it, so no session is told of the old checkout's files.
+#[test]
+fn a_move_or_removal_drops_the_old_checkouts_uncoordinated_changes() {
+    for command in [move_to("/repos/moved", true), remove(true)] {
+        let mut state = ready();
+        apply(
+            &mut state,
+            &Event::UncoordinatedChanged {
+                change: langspan_core::UncoordinatedChange {
+                    change_id: "unreported".into(),
+                    workspace_id: "work".into(),
+                    sessions: vec!["alice".into()],
+                    files: vec![ObservedFile {
+                        path: "src/upload.rs".into(),
+                        state: present('a'),
+                    }],
+                    at_ms: 3,
+                    generation: 1,
+                    delivered: Vec::new(),
+                },
+            },
+        )
+        .unwrap();
+        assert!(state.uncoordinated.contains_key("work"));
+        let outcome = run(&mut state, "change", command.clone(), 10);
+        assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+        assert!(!state.uncoordinated.contains_key("work"), "{command:?}");
+    }
+}
+
 #[test]
 fn replaying_the_log_reproduces_moves_and_removals() {
     let mut state = State::default();

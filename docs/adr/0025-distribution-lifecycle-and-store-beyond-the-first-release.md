@@ -81,8 +81,8 @@ against, so it stays an owner command, as with `remote enable`.
   reads the file again. The workspace's last Git snapshot is deleted in the
   same transaction as the event, so the next scan of NEW_ROOT starts a new
   baseline instead of reporting every file that differs between the two
-  checkouts; its repository grouping, scan outcome and checkout changes are
-  derived again from that scan. The source index keeps the root it last
+  checkouts; its repository grouping, scan outcome, checkout changes and
+  uncoordinated changes are derived again from that scan. The source index keeps the root it last
   indexed each workspace at and forgets a workspace's entries when the root
   changes, so a switch is not reported as interface changes. The line journal
   is keyed by physical root, so NEW_ROOT starts its own.
@@ -105,7 +105,7 @@ against, so it stays an owner command, as with `remote enable`.
   `--apply` (with `--request-id`) appends `workspace_removed`: the workspace,
   its sessions with their intents, admissions, activity, liveness and
   undelivered check results, and its checks, landings, notes, messages,
-  interface notices, scan records, automatic check, what its tests taught
+  interface notices, scan records, uncoordinated changes, automatic check, what its tests taught
   about flipping tests, teammates' received publications, its message
   history and the withdrawal notices its sessions were still owed leave the
   state, so `status`, `recap`, briefings and the dashboard no longer show

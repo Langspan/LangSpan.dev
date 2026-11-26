@@ -295,6 +295,7 @@ pub(crate) fn apply_moved(
     state.scan_failures.remove(id);
     state.scan_coverage.remove(id);
     state.checkouts.remove(id);
+    state.uncoordinated.remove(id);
     // A switch back to an earlier root is still a new registration.
     next_revision(state, id);
     Ok(())
@@ -393,6 +394,7 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
     state.scan_failures.remove(id);
     state.scan_coverage.remove(id);
     state.checkouts.remove(id);
+    state.uncoordinated.remove(id);
     state.auto_checks.remove(id);
     state.test_learning.remove(id);
     // `writes` is kept: it is a generation that never goes back, so a run
