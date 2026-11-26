@@ -527,3 +527,83 @@ fn forgetting_is_bounded_idempotent_and_for_a_current_session() {
     .unwrap_err();
     assert_eq!(refused.code, "invalid_event");
 }
+
+/// Review follow-up #270: a newer notice for the same file is news when it
+/// differs only in a removed signature or in how many definitions are left.
+#[test]
+fn a_change_differing_only_in_a_removed_signature_or_its_counts_is_told() {
+    let mut state = ready();
+    edited(&mut state, "alice", "src/api.rs", 1_000);
+    edited(&mut state, "bob", "src/store.rs", 1_000);
+    let change = |change: &str, before: &str, counts: Option<(u32, u32)>| InterfaceChange {
+        change: change.into(),
+        before: Some(before.into()),
+        after: None,
+        before_count: counts.map(|(before, _)| before),
+        after_count: counts.map(|(_, after)| after),
+        ..signature_change("new")
+    };
+    for (n, next) in [
+        change("definition_removed", "fn new() -> Self", Some((3, 2))),
+        change("definition_removed", "fn new() -> Self", Some((2, 1))),
+        change("removed", "fn new() -> Self", None),
+        change("removed", "fn new(x: u8) -> Self", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let now = 10_000 * (n as u64 + 1);
+        ok(run(
+            &mut state,
+            &format!("n{n}"),
+            Command::ObserveInterface {
+                workspace_id: "main".into(),
+                path: "src/store.rs".into(),
+                changes: vec![next],
+                dependents: vec!["src/api.rs".into()],
+            },
+            now,
+        ));
+        let briefing = prompt(&mut state, "alice", now + 1);
+        assert_eq!(
+            briefing.interface_changes.len(),
+            1,
+            "notice {n}: {briefing:?}"
+        );
+    }
+}
+
+/// Review follow-up #269: a briefing of changes only names the IDs of the
+/// interface notices it keeps, in their order, and no others.
+#[test]
+fn a_briefing_of_changes_only_names_only_the_notices_it_keeps() {
+    let mut state = ready();
+    edited(&mut state, "alice", "src/api.rs", 1_000);
+    edited(&mut state, "bob", "src/store.rs", 1_000);
+    edited(&mut state, "bob", "src/queue.rs", 1_000);
+    let observe = |state: &mut State, id: &str, path: &str, dependent: &str, now: u64| {
+        ok(run(
+            state,
+            id,
+            Command::ObserveInterface {
+                workspace_id: "main".into(),
+                path: path.into(),
+                changes: vec![signature_change("save")],
+                dependents: vec![dependent.into()],
+            },
+            now,
+        ));
+    };
+    observe(&mut state, "n1", "src/store.rs", "src/cli.rs", 1_001);
+    observe(&mut state, "n2", "src/queue.rs", "src/api.rs", 1_002);
+    assert_eq!(
+        prompt(&mut state, "alice", 2_000).interface_notice_ids,
+        ["n2"]
+    );
+    // Alice starts on a file the older change touches: only it is news.
+    edited(&mut state, "alice", "src/cli.rs", 3_000);
+    let next = prompt(&mut state, "alice", 4_000);
+    assert_eq!(next.interface_changes.len(), 1, "{next:?}");
+    assert_eq!(next.interface_changes[0].path, "src/store.rs");
+    assert_eq!(next.interface_notice_ids, ["n1"]);
+}

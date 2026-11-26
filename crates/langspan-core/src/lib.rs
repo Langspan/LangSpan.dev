@@ -10656,11 +10656,20 @@ fn interface_key(impact: &InterfaceImpact) -> u64 {
         .changes
         .iter()
         .map(|change| {
+            // Everything that says what changed: a removal's signature and
+            // a count change's counts too (issue #270).
             format!(
-                "{}:{}:{}",
-                change.name,
-                change.change,
-                change.after.as_deref().unwrap_or("")
+                "{:?}",
+                (
+                    &change.name,
+                    &change.kind,
+                    &change.change,
+                    &change.before,
+                    &change.after,
+                    &change.after_name,
+                    change.before_count,
+                    change.after_count,
+                )
             )
         })
         .collect();
@@ -10766,12 +10775,22 @@ fn keep_changes(
         .checkout_changes
         .retain(|change| keep(checkout_key(change), false));
     briefing.notes.retain(|note| keep(note_key(note), false));
+    // Each notice's ID goes with its change, so the hook's report of what it
+    // showed names the right one (issue #269).
+    let mut ids = briefing.interface_notice_ids.drain(..).collect::<Vec<_>>().into_iter();
+    let mut kept_ids = Vec::new();
     briefing.interface_changes.retain(|impact| {
-        keep(
+        let id = ids.next();
+        let fresh = keep(
             interface_key(impact),
             impact.affected.iter().any(|path| acted(path)),
-        )
+        );
+        if fresh {
+            kept_ids.extend(id);
+        }
+        fresh
     });
+    briefing.interface_notice_ids = kept_ids;
     // Presence counted apart: alone, mid-turn, it is held back.
     let mut presence = Vec::new();
     let mut work_news = false;
