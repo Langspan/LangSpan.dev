@@ -213,6 +213,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   status --all [--after CURSOR]  Read every record, history included, one page at a
                                  time; pass the page's `next` as --after for the next
   events [--after SEQ] [--limit N] Read ordered events (default limit 100; maximum 1000)
+  compact [--keep-days N] [--apply]
+                                 Delete events and receipts older than N days (default
+                                 90, 7..3650) after snapshotting the state they built.
+                                 A dry run unless --apply: shows what would go
   changes WORKSPACE [--after SEQ] [--limit N]
                                  Read disk and local-branch observations and scan freshness
   request JSON                   Send a complete version 3 request envelope
@@ -3269,9 +3273,9 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         return hooks(vendor, *action == "install", state_dir, &mut options, apply);
     }
     let removes_workspace = matches!(words.as_slice(), ["workspace", "remove", _]);
-    if apply && !removes_workspace {
+    if apply && before_command != ["compact"] && !removes_workspace {
         return Err(
-            "--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land` and `workspace remove`"
+            "--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact` and `workspace remove`"
                 .into(),
         );
     }
@@ -3540,6 +3544,11 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 limit: u32::try_from(number(&mut options, "--limit", 100)?)
                     .map_err(|_| "--limit is too large")?,
             },
+            ["compact"] => Command::Compact {
+                keep_days: u32::try_from(number(&mut options, "--keep-days", 90)?)
+                    .map_err(|_| "--keep-days is too large")?,
+                apply,
+            },
             ["events"] => Command::Events {
                 after: options
                     .remove("--after")
@@ -3574,10 +3583,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::Recall { .. }
                 | Command::Today { .. }
                 | Command::Report { .. }
+                | Command::Compact { .. }
                 | Command::History { .. }
                 | Command::WorkspaceList { .. }
                 | Command::WorkspaceRemove { apply: false, .. }
         ) {
+            // Compaction is never recorded or replayed: running it again
+            // finds what is left to remove.
             options
                 .remove("--request-id")
                 .unwrap_or_else(|| "read".into())
@@ -3686,7 +3698,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--max-peers" | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s"
             | "--wait-s" | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen"
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
-            | "--sound" | "--depth" | "--path" | "--before" => {
+            | "--sound" | "--depth" | "--path" | "--before" | "--keep-days" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -4122,7 +4134,18 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             );
             println!("{}", serde_json::to_string_pretty(publication)?);
         }
-        Outcome::RemoteSent { sent, more } => {
+        Outcome::Compaction { report } => print_compaction(report),
+        Outcome::RemoteSent {
+            sent,
+            more,
+            since_ms,
+        } => {
+            if let Some(since) = since_ms {
+                println!(
+                    "Retention removed older records: this lists every publication since {}.",
+                    utc(*since)
+                );
+            }
             if sent.is_empty() {
                 println!("Nothing has been published for this workspace.");
             }
@@ -4883,6 +4906,56 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
     Ok(())
 }
 
+/// `value` with a comma between each group of three digits.
+fn grouped(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// `bytes` in the largest binary unit that keeps a whole number.
+fn sized(bytes: u64) -> String {
+    match bytes {
+        0..1024 => format!("{bytes} bytes"),
+        1024..1_048_576 => format!("{} KiB", bytes / 1024),
+        _ => format!("{} MiB", bytes / 1_048_576),
+    }
+}
+
+fn print_compaction(report: &langspan_core::CompactionReport) {
+    let verb = if report.applied {
+        "deleted"
+    } else {
+        "would delete"
+    };
+    let range = match (report.first_seq, report.last_seq) {
+        (Some(first), Some(last)) => format!("seq {first}..{last}, "),
+        _ => String::new(),
+    };
+    println!(
+        "{verb} {} events ({range}before {}) and {} receipts",
+        grouped(report.events),
+        utc(report.cutoff_ms),
+        grouped(report.receipts)
+    );
+    match report.snapshot_seq {
+        Some(seq) => println!("snapshot at seq {seq}; about {} freed", sized(report.bytes)),
+        None => println!("no snapshot: no event is older than the window"),
+    }
+    if let Some(held) = &report.held_by {
+        println!("kept from there on: {held}");
+    }
+    if !report.applied {
+        println!("dry run: add --apply to compact");
+    }
+}
+
 /// `messages status` for a person: the message, then one line per
 /// recipient, then what "delivered" means.
 fn print_message_status(status: &langspan_core::MessageStatus) {
@@ -4946,4 +5019,19 @@ fn print_message_status(status: &langspan_core::MessageStatus) {
         println!("Part of this message's record is no longer kept; this is what remains.");
     }
     println!("{}", status.delivered_means);
+}
+
+#[cfg(test)]
+mod time_tests {
+    #[test]
+    fn counts_and_sizes_read_as_people_write_them() {
+        assert_eq!(super::grouped(0), "0");
+        assert_eq!(super::grouped(999), "999");
+        assert_eq!(super::grouped(1000), "1,000");
+        assert_eq!(super::grouped(812_440), "812,440");
+        assert_eq!(super::grouped(61_204_000), "61,204,000");
+        assert_eq!(super::sized(1023), "1023 bytes");
+        assert_eq!(super::sized(2048), "2 KiB");
+        assert_eq!(super::sized(410 * 1_048_576 + 5), "410 MiB");
+    }
 }
