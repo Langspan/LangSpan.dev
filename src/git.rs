@@ -317,7 +317,8 @@ pub fn standing(
     }
     let commit = object(output(
         changed,
-        &["rev-list", "-1", "HEAD", "--", path],
+        // Literal, so `src/[id]/a.ts` does not also select `src/i/a.ts`.
+        &["--literal-pathspecs", "rev-list", "-1", "HEAD", "--", path],
         deadline,
         256,
     )?)?;
@@ -667,6 +668,24 @@ mod tests {
         // So is a working file that is only a prefix of the blob.
         fs::write(tree.join("a.rs"), "pub fn renamed() {}\r\n").unwrap();
         assert_eq!(repo.of("a.rs"), Ok(Standing::Uncommitted));
+    }
+
+    #[test]
+    fn a_path_with_glob_characters_is_matched_literally() {
+        let repo = Repo::new("glob");
+        let tree = repo.tree();
+        // `src/[id]/a.ts` as a glob also matches `src/i/a.ts`.
+        fs::create_dir_all(tree.join("src/[id]")).unwrap();
+        fs::create_dir_all(tree.join("src/i")).unwrap();
+        fs::write(tree.join("src/[id]/a.ts"), "export function renamed() {}\n").unwrap();
+        git(&tree, &["add", "."]);
+        git(&tree, &["commit", "--quiet", "-m", "rename"]);
+        git(&repo.main(), &["merge", "--quiet", "--no-edit", "feature"]);
+        // A later, unmerged commit of the other file is not the notice's.
+        fs::write(tree.join("src/i/a.ts"), "export const other = 1;\n").unwrap();
+        git(&tree, &["add", "."]);
+        git(&tree, &["commit", "--quiet", "-m", "other"]);
+        assert_eq!(repo.of("src/[id]/a.ts"), Ok(Standing::Merged));
     }
 
     #[test]
