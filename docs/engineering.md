@@ -3,7 +3,7 @@
 How to build LangSpan, for every agent and person working in this repository. Product context and decisions are in `AGENTS.md` and `docs/`; nothing here overrides them.
 
 ## Commands
-Run from the repository root with the pinned Rust toolchain and a C compiler for bundled SQLite:
+Run from the repository root with the pinned Rust toolchain, a C compiler for bundled SQLite, and `python3` 3.9 or later (the test suite runs the [benchmark harness](../benchmarks/coordination/README.md)'s Python tests):
 
 - Build: `cargo build --workspace --release --locked`
 - Whole test suite: `cargo test --workspace --locked`

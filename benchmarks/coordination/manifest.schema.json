@@ -42,6 +42,12 @@
             "additionalProperties": false,
             "minProperties": 1,
             "properties": {
+              "worktrees": {
+                "$ref": "#/$defs/arm"
+              },
+              "awareness_only": {
+                "$ref": "#/$defs/arm"
+              },
               "no_tool": {
                 "$ref": "#/$defs/arm"
               },

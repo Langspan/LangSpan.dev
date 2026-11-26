@@ -90,10 +90,14 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         // bounded view shows what is held, and `status --all` has these.
         message_history: _,
         retracted_notices: _,
+        // Read by a message status query only.
+        dropped_messages: _,
         presence,
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
+        // Derived for a starting session's recent section; likewise.
+        path_refusals: _,
         // Derived for the source index; never part of the status reply.
         workspace_revisions: _,
         // The write generation check runs carry: one count per workspace,
@@ -167,10 +171,12 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         uninstalled_hosts: uninstalled_hosts.clone(),
         retracted_notices: BTreeMap::new(),
         message_history: BTreeMap::new(),
+        dropped_messages: BTreeMap::new(),
         presence: keep(presence, of_shown),
         sessions: shown_sessions.clone(),
         clock_anchor: None,
         refusals: Vec::new(),
+        path_refusals: Vec::new(),
         workspace_revisions: BTreeMap::new(),
         writes: writes.clone(),
     };

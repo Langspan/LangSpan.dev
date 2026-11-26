@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""The dry-run stand-in for an agent session. It makes no model call.
+
+``standin_agent.py PLAN SESSION MODE`` applies one of the two edit lists
+its task defines (see tasks.py) in the current directory:
+
+- ``ignore`` makes the edit a session would make knowing nothing of its
+  peers, whatever its arm told it.
+- ``follow`` reads the information its arm gives about peers: in the
+  awareness-only arm, the peer task text in its prompt; in the LangSpan arm,
+  the briefings LangSpan's hooks return and ``langspan brief``. When that
+  information matches the task's trigger, it makes the edit the task's
+  details ask for; otherwise it makes the same edit as ``ignore``.
+
+Where Claude Code project hooks are installed (``.claude/settings.local.json``),
+it runs them as Claude Code would around each read and edit, so the
+LangSpan arm's dry run passes through LangSpan's real hooks, coordinators,
+event logs and Git-remote sharing. A ``follow`` session there first waits,
+within a bound, until LangSpan has told it every peer's task, and before it
+ends waits until every peer shows edits, so that no peer acts before it
+could have been told of this one. A refused edit is read again and retried
+once, then skipped. It prints a short transcript in the shape of
+``claude -p --output-format stream-json``, ending in the result line.
+"""
+
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+
+HOOK_SECONDS = 30
+BRIEF_SECONDS = 10
+# How long a following session waits to hear from its peers, per phase.
+# Sharing through the remote takes a pass of each daemon (5 s) or two.
+WAIT_SECONDS = 75
+POLL_SECONDS = 1
+MAX_PEERS = 16
+
+
+def hook_commands(settings, event, tool):
+    for entry in settings.get("hooks", {}).get(event, []):
+        matcher = entry.get("matcher") or "*"
+        if matcher == "*" or tool is None or re.fullmatch(matcher, tool):
+            for hook in entry.get("hooks", []):
+                if hook.get("type") == "command":
+                    yield hook["command"], min(hook.get("timeout", HOOK_SECONDS), HOOK_SECONDS)
+
+
+class Session:
+    def __init__(self, settings, log, cwd=None):
+        self.settings = settings
+        self.log = log
+        self.cwd = cwd or os.getcwd()
+        self.session_id = str(uuid.uuid4())
+        self.calls = 0
+        self.refusals = []
+        self.context = []
+
+    def fire(self, event, tool=None, tool_input=None, tool_use_id=None, **extra):
+        """Run every matching hook; return True when one refuses the call."""
+        payload = {"session_id": self.session_id, "cwd": self.cwd, "hook_event_name": event, **extra}
+        if tool is not None:
+            payload.update(tool_name=tool, tool_input=tool_input, tool_use_id=tool_use_id)
+        denied = False
+        for command, timeout in hook_commands(self.settings, event, tool):
+            self.calls += 1
+            try:
+                done = subprocess.run(["/bin/sh", "-c", command], input=json.dumps(payload), cwd=self.cwd,
+                                      capture_output=True, text=True, timeout=timeout)
+                stdout, code = done.stdout, done.returncode
+            except subprocess.TimeoutExpired:
+                stdout, code = "", None
+            try:
+                output = json.loads(stdout).get("hookSpecificOutput", {}) if stdout.strip() else {}
+            except (ValueError, AttributeError):
+                output = {}
+            decision = output.get("permissionDecision") if isinstance(output, dict) else None
+            context = output.get("additionalContext") if isinstance(output, dict) else None
+            if isinstance(context, str):
+                self.context.append(context)
+            denied |= decision == "deny" or code == 2
+            self.log.write(json.dumps({"event": event, "tool": tool, "tool_use_id": tool_use_id,
+                                       "exit_code": code, "decision": decision, "stdout": stdout[:4000]}) + "\n")
+        return denied
+
+    def read(self, path):
+        self.fire("PostToolUse", "Read", {"file_path": str(path.resolve())}, "read-" + uuid.uuid4().hex)
+
+    def edit(self, path, tool, tool_input, apply):
+        for attempt in (1, 2):
+            call = "edit-" + uuid.uuid4().hex
+            if not self.fire("PreToolUse", tool, tool_input, call):
+                apply()
+                self.fire("PostToolUse", tool, tool_input, call)
+                return True
+            self.refusals.append({"path": str(path), "attempt": attempt})
+            self.read(path)
+        return False
+
+
+def remote_peers(session):
+    """Peers on other machines in this session's `langspan brief`, by name:
+    the task line each was last heard with and whether it shows edits."""
+    langspan = shutil.which("langspan")
+    if not langspan or not os.environ.get("LANGSPAN_STATE_DIR"):
+        return {}
+    try:
+        done = subprocess.run([langspan, "brief", "claude-code." + session.session_id, "--max-peers", str(MAX_PEERS),
+                               "--json", "--request-id", "standin-brief-" + uuid.uuid4().hex],
+                              capture_output=True, text=True, timeout=BRIEF_SECONDS)
+        briefing = json.loads(done.stdout)["outcome"]["briefing"]
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+        return {}
+    peers = {}
+    for peer in briefing.get("remote") or []:
+        work = peer.get("work") or {}
+        peers[str(peer.get("name"))] = {"task": work.get("summary"),
+                                         "edited": bool(work.get("editing") or work.get("recent"))}
+    return peers
+
+
+def wait_for(session, peers_expected, ready):
+    """Poll LangSpan until READY holds for every expected peer, within the
+    bound. Each poll is a read of the task's own files, as an agent's
+    would be, so hook briefings arrive as well. Returns what was heard."""
+    heard = {}
+    deadline = time.monotonic() + WAIT_SECONDS
+    while True:
+        heard.update(remote_peers(session))
+        if len([name for name, peer in heard.items() if ready(peer)]) >= peers_expected:
+            return heard
+        if time.monotonic() > deadline:
+            return heard
+        session.read(Path("shelf") / "settings.py")
+        time.sleep(POLL_SECONDS)
+
+
+def main(argv):
+    if len(argv) != 3 or argv[2] not in ("ignore", "follow"):
+        print("usage: standin_agent.py PLAN SESSION ignore|follow", file=sys.stderr)
+        return 2
+    plan = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
+    index, mode = int(argv[1]), argv[2]
+    task = plan["tasks"][index - 1]
+    prompt = plan["prompts"][index - 1]
+    hooks_file = Path(".claude/settings.local.json")
+    settings = json.loads(hooks_file.read_text(encoding="utf-8")) if hooks_file.is_file() else {}
+    log_path = Path(os.environ.get("LANGSPAN_BENCH_RUN_DIR", ".")) / ("standin-s%d.jsonl" % index)
+    edited, informed, heard = [], False, {}
+    with open(log_path, "a", encoding="utf-8") as log:
+        session = Session(settings, log)
+        session.fire("SessionStart", source="startup")
+        session.fire("UserPromptSubmit", prompt=prompt)
+        sharing = bool(settings) and shutil.which("langspan") is not None
+        if mode == "follow":
+            if sharing:
+                heard = wait_for(session, plan["sessions"] - 1, lambda peer: bool(peer["task"]))
+            # The whole prompt but the session's own task counts, as it would
+            # for a real agent, so peer information leaking into the shared
+            # text shows in a dry run.
+            shared = prompt.replace(task["task"], "").replace(task["details"], "")
+            information = "\n".join(
+                [shared] + session.context + [peer["task"] for peer in heard.values() if peer["task"]])
+            informed = "trigger" in task and re.search(task["trigger"], information) is not None
+        for op in task["standin"]["follow" if informed else "ignore"]:
+            for name in op.get("paths", [op.get("path")]):
+                path = Path(name)
+                if op["op"] == "write":
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    content = op["content"]
+                    done = session.edit(path, "Write", {"file_path": str(path.resolve()), "content": content},
+                                        lambda: path.write_text(content, encoding="utf-8"))
+                else:
+                    session.read(path)
+                    before = path.read_text(encoding="utf-8")
+                    if op["old"] not in before:
+                        continue
+                    after = before.replace(op["old"], op["new"]) if op.get("all") else before.replace(op["old"], op["new"], 1)
+                    done = session.edit(path, "Edit", {"file_path": str(path.resolve()), "old_string": op["old"],
+                                                       "new_string": op["new"], "replace_all": bool(op.get("all"))},
+                                        lambda: path.write_text(after, encoding="utf-8"))
+                if done:
+                    edited.append(name)
+        if mode == "follow" and sharing:
+            # A peer that shows edits has finished waiting for this one.
+            wait_for(session, plan["sessions"] - 1, lambda peer: peer["edited"])
+        session.fire("Stop", stop_hook_active=False)
+        session.fire("SessionEnd", reason="other")
+    print(json.dumps({"type": "system", "subtype": "init", "session_id": session.session_id, "model": "standin"}))
+    print(json.dumps({
+        "type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+        "result": "Stand-in %s edit of %s." % (mode, ", ".join(edited) or "nothing"),
+        "session_id": session.session_id, "permission_denials": [],
+        "standin": {"mode": mode, "informed": informed, "peers_heard": sorted(heard),
+                    "hook_calls": session.calls, "refusals": session.refusals, "edited": edited},
+    }))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

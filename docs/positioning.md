@@ -41,6 +41,7 @@ recovery is an illustration, not an observed outcome.
 The coordination layer uses source relationships as well as file activity.
 The v0.1.0 local Tree-sitter index extracts definitions, name mentions,
 imports and signatures from Rust, Python, TypeScript/JavaScript and Go.
+Java extraction is built on the main branch and is not yet in a release.
 It matches names, not resolved scopes, types or imports. Interface notices
 stay in one physical checkout. Related sessions can receive a notice at
 their next prompt. Supported Claude Code and Codex writes can receive

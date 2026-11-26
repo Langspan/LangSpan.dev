@@ -96,6 +96,7 @@ impl World {
         let mut world = Self { base, daemon: None };
         world.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(&state)
                 .stdout(Stdio::null())
@@ -128,6 +129,7 @@ impl World {
     }
     fn cli(&self, args: &[&str]) -> (i32, String) {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.base.join("state"))
             .args(args)
@@ -709,6 +711,7 @@ impl World {
     }
     fn spawn(&self, args: &[&str]) -> Child {
         Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.base.join("state"))
             .args(args)
@@ -1456,6 +1459,7 @@ async fn an_mcp_landing_whose_record_fails_reports_the_push_and_commit() {
     let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
     let original = hub_main();
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.env("LANGSPAN_AUTOSTART", "off");
     command
         .arg("mcp")
         .arg("--state-dir")
@@ -1517,6 +1521,7 @@ async fn an_mcp_check_whose_command_creates_an_untracked_file_says_so_and_what_t
     use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
     let w = World::new();
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.env("LANGSPAN_AUTOSTART", "off");
     command
         .arg("mcp")
         .arg("--state-dir")
@@ -1641,6 +1646,7 @@ async fn a_secret_on_a_check_command_line_never_reaches_the_store_cli_or_mcp() {
 
     // MCP: a combined check's record and the event history.
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.env("LANGSPAN_AUTOSTART", "off");
     command
         .arg("mcp")
         .arg("--state-dir")
@@ -1709,6 +1715,7 @@ async fn agents_check_and_land_through_the_mcp_adapter() {
     let hub_main = || git(&w.hub(), &["rev-parse", "refs/heads/main"]);
     let original = hub_main();
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.env("LANGSPAN_AUTOSTART", "off");
     command
         .arg("mcp")
         .arg("--state-dir")
@@ -1780,6 +1787,7 @@ impl World {
     /// `cli` with the push budget cut to `budget_ms`, a test-only setting.
     fn cli_with_push_budget(&self, budget_ms: u64, args: &[&str]) -> (i32, String) {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.base.join("state"))
             .args(args)
@@ -1916,6 +1924,7 @@ async fn agents_see_the_landing_queue_and_conflict_hunks_and_cancel_a_wait_throu
     use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
     let w = World::new();
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_langspan"));
+    command.env("LANGSPAN_AUTOSTART", "off");
     command
         .arg("mcp")
         .arg("--state-dir")

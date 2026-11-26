@@ -8,6 +8,7 @@ use std::{
 #[test]
 fn stalled_host_input_consumes_the_same_hook_budget() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args([
             "hook",
             "claude-code",
@@ -91,6 +92,7 @@ fn a_coordinator_whose_backlog_is_full_does_not_hold_a_hook_past_its_budget() {
         "tool_input": {"file_path": root.join("a.txt"), "content": "x"},
     });
     let mut child = Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
         .args(["hook", "claude-code", "--workspace", "work", "--root"])
         .arg(&root)
         .arg("--state-dir")

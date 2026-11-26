@@ -26,9 +26,20 @@ pub enum Language {
     TypeScript,
     Tsx,
     Go,
+    Java,
 }
 
 impl Language {
+    /// Every indexed language, in the order `langspan doctor` lists them.
+    pub const ALL: [Self; 6] = [
+        Self::Rust,
+        Self::Python,
+        Self::TypeScript,
+        Self::Tsx,
+        Self::Go,
+        Self::Java,
+    ];
+
     /// Chosen by file extension only. Content is never sniffed.
     pub fn for_path(path: &str) -> Option<Self> {
         let extension = path.rsplit_once('.')?.1;
@@ -38,6 +49,7 @@ impl Language {
             "ts" | "mts" | "cts" | "js" | "mjs" | "cjs" => Self::TypeScript,
             "tsx" | "jsx" => Self::Tsx,
             "go" => Self::Go,
+            "java" => Self::Java,
             _ => return None,
         })
     }
@@ -49,6 +61,7 @@ impl Language {
             Self::TypeScript => "typescript",
             Self::Tsx => "tsx",
             Self::Go => "go",
+            Self::Java => "java",
         }
     }
 
@@ -59,6 +72,7 @@ impl Language {
             Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Self::Go => tree_sitter_go::LANGUAGE.into(),
+            Self::Java => tree_sitter_java::LANGUAGE.into(),
         }
     }
 }
@@ -111,11 +125,30 @@ pub struct Symbol {
     pub signature: String,
     /// Visible outside its file by the language's own rule: `pub` in Rust,
     /// `export` in TypeScript, a capital in Go, no leading underscore in
-    /// Python.
+    /// Python, `public` or `protected` in Java (see `java_exported`).
     pub exported: bool,
     /// The definition's own bytes in the source it was extracted from,
     /// without leading comments or attributes.
     pub bytes: std::ops::Range<usize>,
+    /// A function's or method's body: the bytes after its signature. `None`
+    /// for other kinds and for a declaration without a body.
+    pub block: Option<std::ops::Range<usize>>,
+    /// A digest of `block`'s bytes, set by `digest_blocks`. `diff` links a
+    /// removal and an addition as a rename only through it.
+    pub block_digest: Option<String>,
+}
+
+/// Set each symbol's `block_digest` from `source`, the bytes `graph` was
+/// extracted from. The caller chooses the digest, so this crate does no
+/// hashing of its own.
+pub fn digest_blocks(graph: &mut FileGraph, source: &[u8], digest: impl Fn(&[u8]) -> String) {
+    for symbol in &mut graph.symbols {
+        symbol.block_digest = symbol
+            .block
+            .clone()
+            .and_then(|block| source.get(block))
+            .map(&digest);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,7 +229,9 @@ fn is_type_body(language: Language, kind: &str) -> bool {
                 "class_declaration" | "interface_declaration" | "class"
             )
         }
-        Language::Go => false,
+        // Every Java method and constructor belongs to a type, so its kind
+        // needs no context.
+        Language::Go | Language::Java => false,
     }
 }
 
@@ -271,6 +306,176 @@ fn exported(language: Language, node: Node, name: &str) -> bool {
             }
             false
         }
+        Language::Java => java_exported(node),
+    }
+}
+
+/// Java's own rule: what another package can reach. `public` and
+/// `protected` are exported; package-private and `private` are not. An
+/// interface's or annotation type's members are public unless declared
+/// `private`, and so is an enum constant and a module. A method of an
+/// anonymous class or of an enum constant's body is no one's interface.
+/// Each declaration is judged alone, as in Rust: a `public` method of a
+/// package-private class is exported.
+fn java_exported(node: Node) -> bool {
+    if matches!(node.kind(), "enum_constant" | "module_declaration") {
+        return true;
+    }
+    // A constant is named by its declarator; the modifiers are its field's.
+    let declaration = match node.kind() {
+        "variable_declarator" => match node.parent() {
+            Some(parent) => parent,
+            None => return false,
+        },
+        _ => node,
+    };
+    let modifier = |keyword: &str| {
+        let mut cursor = declaration.walk();
+        declaration
+            .children(&mut cursor)
+            .filter(|child| child.kind() == "modifiers")
+            .any(|modifiers| has_child_kind(modifiers, keyword))
+    };
+    let container = declaration.parent();
+    match container.map(|container| container.kind()) {
+        Some("interface_body" | "annotation_type_body") => return !modifier("private"),
+        Some("class_body") => {
+            let owner = container.and_then(|container| container.parent());
+            if owner.is_some_and(|owner| {
+                matches!(owner.kind(), "object_creation_expression" | "enum_constant")
+            }) {
+                return false;
+            }
+        }
+        _ => {}
+    }
+    modifier("public") || modifier("protected")
+}
+
+/// A Java field declares constants when it is both `static` and `final`;
+/// an interface's fields always are.
+fn java_constant(declarator: Node) -> bool {
+    let Some(field) = declarator.parent() else {
+        return false;
+    };
+    match field.kind() {
+        "constant_declaration" => true,
+        "field_declaration" => {
+            let mut cursor = field.walk();
+            field
+                .children(&mut cursor)
+                .filter(|child| child.kind() == "modifiers")
+                .any(|modifiers| {
+                    has_child_kind(modifiers, "static") && has_child_kind(modifiers, "final")
+                })
+        }
+        _ => false,
+    }
+}
+
+fn is_annotation(node: Node) -> bool {
+    matches!(node.kind(), "annotation" | "marker_annotation") || node.kind().contains("comment")
+}
+
+/// The first node of a Java declaration's own text: after the annotations
+/// and comments that lead its modifiers.
+fn java_start(node: Node) -> Node {
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.children(&mut cursor).collect();
+    for child in children {
+        if child.kind() == "modifiers" {
+            let mut inner = child.walk();
+            let first = child.children(&mut inner).find(|m| !is_annotation(*m));
+            if let Some(first) = first {
+                return first;
+            }
+        } else if !is_annotation(child) {
+            return child;
+        }
+    }
+    node
+}
+
+/// The source between `start` and `end` without the annotations among a
+/// declaration's modifiers, on one line. An annotation is metadata: adding
+/// `@Deprecated` or `@Override` does not change what a caller writes.
+fn java_text(declaration: Node, start: usize, end: usize, source: &[u8]) -> String {
+    let mut holes = Vec::new();
+    let mut cursor = declaration.walk();
+    for child in declaration.children(&mut cursor) {
+        if child.kind() == "modifiers" {
+            let mut inner = child.walk();
+            holes.extend(
+                child
+                    .children(&mut inner)
+                    .filter(|m| is_annotation(*m))
+                    .map(|m| m.start_byte()..m.end_byte()),
+            );
+        }
+    }
+    // The end closes the last piece.
+    holes.push(end..end);
+    let mut text = String::new();
+    let mut at = start;
+    for hole in holes {
+        if hole.start >= at && hole.start <= end {
+            text.push_str(&String::from_utf8_lossy(
+                source.get(at..hole.start).unwrap_or(&[]),
+            ));
+            text.push(' ');
+            at = hole.end.min(end).max(at);
+        }
+    }
+    one_line(
+        text.trim_end_matches(['{', ';', '=', ' ', '\n', '\t', '\r']),
+        SIGNATURE_BYTES,
+    )
+}
+
+/// A Java definition's signature: the declaration up to its body, without
+/// annotations. A constant's is its modifiers, type, name and any array
+/// dimensions after the name, without the value; an enum constant's is its
+/// name. An annotation element's ends before its `default` value, which a
+/// caller does not write.
+fn java_signature(node: Node, source: &[u8]) -> String {
+    match node.kind() {
+        "enum_constant" => node
+            .child_by_field_name("name")
+            .map(|name| text(name, source).to_owned())
+            .unwrap_or_default(),
+        "variable_declarator" => {
+            let Some(field) = node.parent() else {
+                return String::new();
+            };
+            let end = field
+                .child_by_field_name("type")
+                .map_or(field.start_byte(), |kind| kind.end_byte());
+            let name = node
+                .child_by_field_name("name")
+                .map_or("", |name| text(name, source));
+            // `int IDS[][]`: the brackets after one declarator's name are
+            // part of its type.
+            let dimensions = node
+                .child_by_field_name("dimensions")
+                .map_or(String::new(), |dimensions| {
+                    one_line(text(dimensions, source), SIGNATURE_BYTES).replace(' ', "")
+                });
+            let prefix = java_text(field, java_start(field).start_byte(), end, source);
+            one_line(&format!("{prefix} {name}{dimensions}"), SIGNATURE_BYTES)
+        }
+        _ => {
+            let mut cursor = node.walk();
+            let default = node
+                .children(&mut cursor)
+                .find(|child| child.kind() == "default")
+                .map(|keyword| keyword.start_byte());
+            let end = node
+                .child_by_field_name("body")
+                .map(|body| body.start_byte())
+                .or(default)
+                .unwrap_or(node.end_byte());
+            java_text(node, java_start(node).start_byte(), end, source)
+        }
     }
 }
 
@@ -304,6 +509,16 @@ fn definition_kind(language: Language, kind: &str, in_type: bool) -> Option<Symb
         (Language::Go, "method_declaration") => Method,
         (Language::Go, "type_spec" | "type_alias") => Type,
         (Language::Go, "const_spec") => Constant,
+        (
+            Language::Java,
+            "method_declaration"
+            | "constructor_declaration"
+            | "annotation_type_element_declaration",
+        ) => Method,
+        (Language::Java, "class_declaration" | "record_declaration" | "enum_declaration") => Type,
+        (Language::Java, "interface_declaration" | "annotation_type_declaration") => Interface,
+        (Language::Java, "enum_constant") => Constant,
+        (Language::Java, "module_declaration") => Module,
         _ => return None,
     })
 }
@@ -320,6 +535,7 @@ fn is_reference(language: Language, kind: &str) -> bool {
         Language::Rust | Language::Go => {
             matches!(kind, "identifier" | "type_identifier" | "field_identifier")
         }
+        Language::Java => matches!(kind, "identifier" | "type_identifier"),
     }
 }
 
@@ -336,6 +552,62 @@ fn import_target<'a>(language: Language, node: Node<'a>) -> Option<Node<'a>> {
     }
 }
 
+/// Java's imports and definitions. `None` when `node` is neither, so the
+/// caller looks at it as a reference; otherwise what `visit` returns.
+fn visit_java(node: Node, source: &[u8], graph: &mut FileGraph) -> Option<Option<usize>> {
+    let kind = node.kind();
+    if kind == "import_declaration" {
+        // As written after `import` or `import static`: `java.util.*` keeps
+        // its asterisk.
+        let mut cursor = node.walk();
+        let target = node
+            .named_children(&mut cursor)
+            .find(|child| matches!(child.kind(), "identifier" | "scoped_identifier"))?;
+        let end = node.end_byte();
+        let written = String::from_utf8_lossy(source.get(target.start_byte()..end).unwrap_or(&[]));
+        graph.imports.push(Reference {
+            name: one_line(
+                written.trim_end_matches([';', ' ', '\n', '\t', '\r']),
+                SIGNATURE_BYTES,
+            ),
+            line: line(node),
+        });
+        // The imported names are still references.
+        return None;
+    }
+    let symbol_kind = match kind {
+        "variable_declarator" if java_constant(node) => SymbolKind::Constant,
+        "variable_declarator" => return None,
+        _ => definition_kind(Language::Java, kind, false)?,
+    };
+    let name = node.child_by_field_name("name")?;
+    let name_text = text(name, source);
+    if name_text.is_empty() || name_text.len() > NAME_BYTES {
+        return Some(Some(name.id()));
+    }
+    // A constant spans its whole field, so a change to its type is within it.
+    let whole = match kind {
+        "variable_declarator" => node.parent().unwrap_or(node),
+        _ => node,
+    };
+    let start = java_start(whole);
+    graph.symbols.push(Symbol {
+        name: name_text.to_owned(),
+        kind: symbol_kind,
+        line: line(start),
+        end_line: end_line(whole),
+        signature: java_signature(node, source),
+        exported: java_exported(node),
+        bytes: start.start_byte()..whole.end_byte(),
+        block: matches!(symbol_kind, SymbolKind::Function | SymbolKind::Method)
+            .then(|| node.child_by_field_name("body"))
+            .flatten()
+            .map(|body| body.byte_range()),
+        block_digest: None,
+    });
+    Some(Some(name.id()))
+}
+
 /// Record what `node` is. Returns the ID of the node naming a definition, so
 /// the walk does not also count it as a reference.
 fn visit(
@@ -346,7 +618,11 @@ fn visit(
     graph: &mut FileGraph,
 ) -> Option<usize> {
     let kind = node.kind();
-    if let Some(target) = import_target(language, node) {
+    if language == Language::Java {
+        if let Some(defined) = visit_java(node, source, graph) {
+            return defined;
+        }
+    } else if let Some(target) = import_target(language, node) {
         graph.imports.push(Reference {
             name: one_line(
                 text(target, source).trim_matches(['"', '\'', '`']),
@@ -385,6 +661,10 @@ fn visit(
             ),
             exported: exported(language, node, name_text),
             bytes: node.start_byte()..node.end_byte(),
+            block: value
+                .child_by_field_name("body")
+                .map(|body| body.byte_range()),
+            block_digest: None,
         });
         return Some(name.id());
     }
@@ -402,6 +682,11 @@ fn visit(
             signature: signature(node, source),
             exported: exported(language, node, name_text),
             bytes: node.start_byte()..node.end_byte(),
+            block: matches!(symbol_kind, SymbolKind::Function | SymbolKind::Method)
+                .then(|| node.child_by_field_name("body"))
+                .flatten()
+                .map(|body| body.byte_range()),
+            block_digest: None,
         });
         return Some(name.id());
     }
@@ -423,6 +708,16 @@ pub enum Change {
     /// No exported symbol of this name and kind remains.
     Removed,
     Added,
+    /// The only exported function or method of this name and kind went, and
+    /// the only one of a new name `to` came, with the same kind, the same
+    /// signature but for the name, and the same block digest; each of the
+    /// two pairs with no other. Reported under the old name, which is the
+    /// name callers still use; `to` gets no `Added` of its own.
+    Renamed {
+        to: String,
+        before: String,
+        after: String,
+    },
     SignatureChanged {
         before: String,
         after: String,
@@ -519,11 +814,80 @@ fn comparable(signature: &str) -> String {
     result
 }
 
+/// `signature` as compared, with the first whole-word `name` taken out, so
+/// that two signatures differing only in the name compare equal. `None` for
+/// a signature cut at its bound or not holding the name.
+fn unnamed(signature: &str, name: &str) -> Option<String> {
+    if signature.ends_with('…') {
+        return None;
+    }
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let at = signature.match_indices(name).find_map(|(at, _)| {
+        let end = at + name.len();
+        let alone = !signature[..at].ends_with(word) && !signature[end..].starts_with(word);
+        alone.then_some(at)
+    })?;
+    Some(comparable(&format!(
+        "{}{}",
+        &signature[..at],
+        &signature[at + name.len()..]
+    )))
+}
+
+/// Renames between `before` and `after`: old name and kind to the new
+/// name. See `Change::Renamed`.
+fn renames(
+    before: &FileGraph,
+    after: &FileGraph,
+) -> std::collections::BTreeMap<(String, SymbolKind), String> {
+    use std::collections::BTreeMap;
+    type Only<'a> = BTreeMap<(String, SymbolKind), Option<&'a Symbol>>;
+    // Per name and kind: the only exported definition, `None` when several.
+    fn only(graph: &FileGraph) -> Only<'_> {
+        let mut map = Only::new();
+        for symbol in graph.symbols.iter().filter(|symbol| symbol.exported) {
+            map.entry((symbol.name.clone(), symbol.kind))
+                .and_modify(|seen| *seen = None)
+                .or_insert(Some(symbol));
+        }
+        map
+    }
+    let (old, new) = (only(before), only(after));
+    // What a definition is apart from its name: kind, signature without the
+    // name, block digest. Only functions and methods with a block have one.
+    let shape = |symbol: &Symbol| {
+        matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method)
+            .then_some(())
+            .and(symbol.block_digest.clone())
+            .zip(unnamed(&symbol.signature, &symbol.name))
+            .map(|(digest, rest)| (symbol.kind, rest, digest))
+    };
+    // The keys that went (or came) with each shape; a shape had by two is
+    // ambiguous and links nothing.
+    let gone_or_come = |from: &Only, other: &Only| {
+        let mut shapes: BTreeMap<_, Vec<(String, SymbolKind)>> = BTreeMap::new();
+        for (key, symbol) in from.iter().filter(|(key, _)| !other.contains_key(*key)) {
+            if let Some(shape) = symbol.and_then(shape) {
+                shapes.entry(shape).or_default().push(key.clone());
+            }
+        }
+        shapes
+    };
+    let (gone, come) = (gone_or_come(&old, &new), gone_or_come(&new, &old));
+    gone.into_iter()
+        .filter_map(|(shape, mut from)| match (from.len(), come.get(&shape)) {
+            (1, Some(to)) if to.len() == 1 => Some((from.remove(0), to[0].0.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Compare the exported symbols of two versions of one file, by name and
-/// kind. A rename shows as one removal and one addition: nothing here claims
-/// that two differently named symbols are the same thing. A change to a body
-/// alone, or a formatter's rewrap of a signature (see `comparable`), is not
-/// reported. A notice shows each signature as written.
+/// kind. A change to a body alone, or a formatter's rewrap of a signature
+/// (see `comparable`), is not reported. A rename is reported as one only
+/// when nothing but the name changed (see `Change::Renamed`); with any other
+/// change too it is a removal and an addition, and nothing claims the two
+/// are the same thing. A notice shows each signature as written.
 pub fn diff(before: &FileGraph, after: &FileGraph) -> Vec<SymbolChange> {
     use std::collections::BTreeMap;
     // Per name and kind: (compared form, text as written), sorted.
@@ -578,10 +942,18 @@ pub fn diff(before: &FileGraph, after: &FileGraph) -> Vec<SymbolChange> {
             .join(" | ")
     }
     let count = |signatures: &Signatures| u32::try_from(signatures.len()).unwrap_or(u32::MAX);
+    let renamed = renames(before, after);
     let mut changes = Vec::new();
     for (key, signatures) in &old {
         let change = match new.get(key) {
-            None => Change::Removed,
+            None => match renamed.get(key) {
+                Some(to) => Change::Renamed {
+                    to: to.clone(),
+                    before: shown(signatures),
+                    after: new.get(&(to.clone(), key.1)).map(shown).unwrap_or_default(),
+                },
+                None => Change::Removed,
+            },
             Some(current) if same(current, signatures) => continue,
             // Only the number of same-named definitions changed, each
             // earlier (or each remaining) signature still there: say so,
@@ -609,7 +981,15 @@ pub fn diff(before: &FileGraph, after: &FileGraph) -> Vec<SymbolChange> {
             change,
         });
     }
-    for key in new.keys().filter(|key| !old.contains_key(*key)) {
+    let target = |key: &(String, SymbolKind)| {
+        renamed
+            .iter()
+            .any(|(from, to)| from.1 == key.1 && *to == key.0)
+    };
+    for key in new
+        .keys()
+        .filter(|key| !old.contains_key(*key) && !target(key))
+    {
         changes.push(SymbolChange {
             name: key.0.clone(),
             kind: key.1,

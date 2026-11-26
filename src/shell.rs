@@ -573,6 +573,66 @@ fn literal_path(path: &str) -> Result<String, &'static str> {
     })
 }
 
+/// The file a quoted heredoc writes whole, and what it writes: `cat > PATH
+/// <<'EOF'` or `cat <<'EOF' > PATH` (the delimiter in single or double
+/// quotes), the body, then a line that is exactly the delimiter, with
+/// nothing after it. A quoted delimiter means the shell expands nothing in
+/// the body, so the body is the file's new content. Used for the write-time
+/// break check ([ADR 0029](../docs/adr/0029-break-alerts-at-write-time.md));
+/// it admits nothing. Any other shape is `None`: `>>`, `<<-`, an unquoted
+/// delimiter, a second heredoc or command, or text after the closing line.
+/// The path is as written, not yet resolved.
+pub fn heredoc_write(command: &str) -> Option<(String, String)> {
+    if command.len() > langspan_graph::MAX_SOURCE_BYTES + MAX_COMMAND_BYTES {
+        return None;
+    }
+    let (head, rest) = command.split_once('\n')?;
+    if head.len() > MAX_COMMAND_BYTES || head.contains(">>") {
+        return None;
+    }
+    let at = head.find("<<")?;
+    let word = head[at + 2..].trim_start_matches([' ', '\t']);
+    let quote = word.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    let (delimiter, tail) = word[1..].split_once(quote)?;
+    if delimiter.is_empty()
+        || !delimiter
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        || tail.starts_with(|c: char| !matches!(c, ' ' | '\t'))
+    {
+        return None;
+    }
+    // What is left of the first line: `cat` and one `>` redirection. A
+    // second `<` stops the tokenizer.
+    let tokens = tokenize(&format!("{} {tail}", &head[..at])).ok()?;
+    let [
+        Token::Word(name),
+        Token::Redirect(None | Some(1)),
+        Token::Word(target),
+    ] = tokens.as_slice()
+    else {
+        return None;
+    };
+    if name != "cat" || target == "/dev/null" {
+        return None;
+    }
+    let target = literal_path(target).ok()?;
+    let mut lines = rest.split('\n');
+    let mut body = String::new();
+    loop {
+        let line = lines.next()?;
+        if line == delimiter {
+            break;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    match (lines.next(), lines.next()) {
+        (None, _) | (Some(""), None) => Some((target, body)),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Workspace snapshot
 // ---------------------------------------------------------------------------
@@ -1852,6 +1912,48 @@ mod parser {
             write_targets("cat <<'EOF' > a.txt\ndon't\nEOF"),
             Err("input redirection, a heredoc or process substitution")
         );
+    }
+
+    #[test]
+    fn a_quoted_heredoc_names_its_target_and_its_body() {
+        let body = Some(("app/x.py".to_owned(), "a = 1\nb = '$HOME'\n".to_owned()));
+        for command in [
+            "cat > app/x.py <<'EOF'\na = 1\nb = '$HOME'\nEOF",
+            "cat > ./app/x.py <<'EOF'\na = 1\nb = '$HOME'\nEOF\n",
+            "cat <<\"EOF\" > app/x.py\na = 1\nb = '$HOME'\nEOF",
+            "cat >app/x.py << 'EOF'\na = 1\nb = '$HOME'\nEOF",
+        ] {
+            assert_eq!(heredoc_write(command), body, "{command}");
+        }
+        assert_eq!(
+            heredoc_write("cat > a.txt <<'END_1'\nEOF\nEND_1"),
+            Some(("a.txt".into(), "EOF\n".into()))
+        );
+        assert_eq!(
+            heredoc_write("cat > a.txt <<'EOF'\nEOF"),
+            Some(("a.txt".into(), String::new()))
+        );
+        for command in [
+            "cat > a.txt <<EOF\nx\nEOF",
+            "cat >> a.txt <<'EOF'\nx\nEOF",
+            "cat > a.txt <<-'EOF'\nx\nEOF",
+            "cat > a.txt <<<'x'\n",
+            "cat > a.txt <<'EOF'\nx\nEOF\nrm b.txt",
+            "cat > a.txt <<'EOF'\nx\n EOF",
+            "cat > a.txt <<'EOF' <<'TWO'\nx\nEOF\ny\nTWO",
+            "cat > a.txt <<'EOF'; rm b.txt\nx\nEOF",
+            "cat > a.txt > b.txt <<'EOF'\nx\nEOF",
+            "cat 2> a.txt <<'EOF'\nx\nEOF",
+            "tee a.txt <<'EOF'\nx\nEOF",
+            "cat > /dev/null <<'EOF'\nx\nEOF",
+            "cat > ../a.txt <<'EOF'\nx\nEOF",
+            "cat > a.txt <<'E F'\nx\nE F",
+            "cat > a.txt <<'EOF'x\nx\nEOFx",
+            "cat > a.txt <<'EOF'\nx",
+            "cat > a.txt",
+        ] {
+            assert_eq!(heredoc_write(command), None, "{command}");
+        }
     }
 
     #[test]

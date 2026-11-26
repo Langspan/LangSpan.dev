@@ -3,9 +3,11 @@
 These are workload and evidence requirements, not results. Use owner-supplied
 native commands and task-specific checkers. Keep each scenario/item, arm, and
 repetition separate in the [raw schema](records.schema.json). The three comparison
-arms are no tool, coarse file claims, and the full **currently implemented**
-LangSpan configuration. Another coordination tool is an optional, separately
-configured arm (`comparable_tool`).
+arms are worktrees alone (`worktrees`), worktrees with a fixed description of
+each peer's task (`awareness_only`), and the full **currently implemented**
+LangSpan configuration (`langspan`). Another coordination tool is an optional,
+separately configured arm (`comparable_tool`). The seeded task families that
+`driver.py` runs, with their oracles, are in [README.md](README.md#task-families).
 
 ## Common experimental record
 

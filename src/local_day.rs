@@ -1,13 +1,13 @@
 //! The start of the local day: the one place LangSpan turns "today" into a
 //! wall-clock instant, from the system's own time-zone rules.
 //!
-//! The offset from UTC is asked of `date` for each instant that matters
-//! (`date -r SECONDS +%z` on BSD and macOS, `date -d @SECONDS +%z` on Linux),
-//! honouring `TZ`. One offset is not enough: on a day the clocks change, the
+//! The offset from UTC at each instant that matters comes from the zone's
+//! own rules, honoring `TZ`, read in-process by `zone` (no `date` child is
+//! started). One offset is not enough: on a day the clocks change, the
 //! offset now differs from the offset at midnight, and applying the current
 //! one to the whole day puts midnight an hour off.
 
-use std::time::{Duration, Instant};
+use crate::zone::Zone;
 
 const DAY_MS: i64 = 86_400_000;
 const HOUR_MS: i64 = 3_600_000;
@@ -64,48 +64,28 @@ pub fn local_midnight_ms(now_ms: u64, mut offset_at: impl FnMut(u64) -> Option<i
     u64::try_from(midnight).unwrap_or(0)
 }
 
-/// The start of the local day at `deadline`'s wall clock, asking the
-/// system's `date` (each child stopped at `deadline`).
-pub fn midnight_now_ms(now_ms: u64, deadline: Instant) -> u64 {
-    local_midnight_ms(now_ms, |at| offset_at(at, deadline, None))
+/// The start of the local day now, in the inherited `TZ`.
+pub fn midnight_now_ms(now_ms: u64) -> u64 {
+    let zone = Zone::load(None);
+    local_midnight_ms(now_ms, |at| {
+        zone.as_ref().map(|zone| zone.offset_minutes(at))
+    })
 }
 
-/// The zone's offset at `at_ms`, from `date`, in `tz` when given (else the
-/// inherited `TZ`). `None` when `date` fails, prints anything other than
-/// `+HHMM` or `-HHMM`, or does not finish by `deadline`.
-pub fn offset_at(at_ms: u64, deadline: Instant, tz: Option<&str>) -> Option<i32> {
-    let seconds = at_ms / 1000;
-    let mut command = std::process::Command::new("date");
-    if cfg!(any(target_os = "linux", target_os = "android")) {
-        command.arg(format!("-d@{seconds}"));
-    } else {
-        command.arg("-r").arg(seconds.to_string());
-    }
-    command
-        .arg("+%z")
-        .env("LC_ALL", "C")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    if let Some(tz) = tz {
-        command.env("TZ", tz);
-    }
-    let mut child = command.spawn().ok()?;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(_)) | Err(_) => return None,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(1)),
-        }
-    }
-    let mut text = String::new();
-    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut text).ok()?;
-    parse_offset(text.trim())
+/// The zone's offset at `at_ms`, in `tz` when given (else the inherited
+/// `TZ`). `None` when the zone's rules cannot be read.
+pub fn offset_at(at_ms: u64, tz: Option<&str>) -> Option<i32> {
+    Zone::load(tz).map(|zone| zone.offset_minutes(at_ms))
+}
+
+/// Run `run` with the offsets of the zone `tz` names (else the inherited
+/// `TZ`), its rules read once. Every offset is `None` when they cannot be.
+pub fn with_offsets<T>(
+    tz: Option<&str>,
+    run: impl FnOnce(&mut dyn FnMut(u64) -> Option<i32>) -> T,
+) -> T {
+    let zone = Zone::load(tz);
+    run(&mut |at| zone.as_ref().map(|zone| zone.offset_minutes(at)))
 }
 
 /// `+HHMM` or `-HHMM` as minutes east of UTC.
@@ -241,18 +221,21 @@ mod tests {
     }
 
     #[test]
-    fn the_system_date_gives_new_york_midnight_on_both_changes() {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let system = |at| offset_at(at, deadline, Some("America/New_York"));
+    fn the_systems_zone_rules_give_new_york_midnight_on_both_changes() {
+        let tz = Some("America/New_York");
+        let system = |at| offset_at(at, tz);
         assert_eq!(system(MARCH_8), Some(-300));
         assert_eq!(system(MARCH_8 + 8 * HOUR), Some(-240));
+        let midnights = with_offsets(tz, |offset_at| {
+            [MARCH_8 + 16 * HOUR, NOVEMBER_1 + 17 * HOUR]
+                .map(|now| local_midnight_ms(now, &mut *offset_at))
+        });
+        assert_eq!(midnights, [MARCH_8 + 5 * HOUR, NOVEMBER_1 + 4 * HOUR]);
+        // A zone that cannot be read answers nothing.
+        assert_eq!(offset_at(MARCH_8, Some("No/Such_Zone")), None);
         assert_eq!(
-            local_midnight_ms(NOVEMBER_1 + 17 * HOUR, system),
-            NOVEMBER_1 + 4 * HOUR
-        );
-        assert_eq!(
-            local_midnight_ms(MARCH_8 + 16 * HOUR, system),
-            MARCH_8 + 5 * HOUR
+            with_offsets(Some("No/Such_Zone"), |offset_at| offset_at(MARCH_8)),
+            None
         );
     }
 

@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LangSpan coordination benchmark run record v2",
+  "description": "One record per driver run: one arm, task family, session count and seed, including a run the preflight check refused. A value the run did not measure is null, never zero. The runner's raw journal (runner/runs.jsonl) holds the per-command detail. v2: isolated clones, tasks_accepted in place of tasks_completed, no contradictions_reported (notes are evidence, not a verdict), split permission denials, session cost, duration and turns, coordinator scans, the requested model, ignored options and the refused status.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "record_type", "run_id", "arm", "family", "sessions", "seed", "agent",
+    "dry_run", "status", "started_at", "elapsed_s", "total_elapsed_s", "time_limit_s",
+    "ignored_options", "versions", "tasks", "tasks_total", "tasks_accepted", "integrated_tests",
+    "merge_conflicts", "semantic_conflicts", "duplicate_work", "stops", "questions",
+    "permission_denials", "cost_usd", "refusals", "coordinator_scans", "tokens", "evidence"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "record_type": {"const": "coordination_run"},
+    "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "arm": {"enum": ["worktrees", "awareness_only", "langspan"]},
+    "family": {"enum": ["rename_vs_new_caller", "contradictory_defaults"]},
+    "sessions": {"enum": [2, 5, 10]},
+    "seed": {"type": "integer", "minimum": 0},
+    "agent": {"enum": ["standin", "claude-code"]},
+    "dry_run": {"type": "boolean"},
+    "standin_mode": {"enum": ["follow", "ignore"]},
+    "status": {"enum": ["succeeded", "failed", "timed_out", "setup_failed", "interrupted", "refused"]},
+    "started_at": {"type": "string"},
+    "elapsed_s": {"type": ["number", "null"], "minimum": 0},
+    "total_elapsed_s": {"type": "number", "minimum": 0},
+    "time_limit_s": {"type": "number", "minimum": 0},
+    "ignored_options": {"type": "array", "items": {"type": "string"}},
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_cli", "requested_model", "models", "langspan_commit", "langspan_binary_sha256", "git", "python"],
+      "properties": {
+        "agent_cli": {"type": ["string", "null"]},
+        "requested_model": {"type": ["string", "null"]},
+        "models": {"type": "array", "items": {"type": "string"}},
+        "langspan_commit": {"type": ["string", "null"]},
+        "langspan_binary_sha256": {"type": ["string", "null"]},
+        "git": {"type": ["string", "null"]},
+        "python": {"type": "string"}
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session", "task_id", "role", "branch", "process_status", "merged", "completed",
+          "accepted", "detail", "stopped", "asked_question", "permission_denials", "tokens",
+          "cost_usd", "duration_ms", "turns", "refusals", "transcript", "hook_log", "standin_informed"
+        ],
+        "properties": {
+          "session": {"type": "integer", "minimum": 1},
+          "task_id": {"type": "string"},
+          "role": {"enum": ["rename", "new_caller", "contradiction", "control"]},
+          "branch": {"type": "string"},
+          "process_status": {"type": ["string", "null"]},
+          "merged": {"type": "boolean"},
+          "completed": {"type": ["boolean", "null"]},
+          "accepted": {"type": ["boolean", "null"]},
+          "detail": {"type": ["string", "null"]},
+          "stopped": {"type": ["boolean", "null"]},
+          "asked_question": {"type": ["boolean", "null"]},
+          "permission_denials": {"$ref": "#/$defs/denials"},
+          "tokens": {"$ref": "#/$defs/tokens"},
+          "cost_usd": {"type": ["number", "null"], "minimum": 0},
+          "duration_ms": {"type": ["integer", "null"], "minimum": 0},
+          "turns": {"type": ["integer", "null"], "minimum": 0},
+          "refusals": {"type": ["integer", "null"], "minimum": 0},
+          "transcript": {"type": ["string", "null"]},
+          "hook_log": {"type": ["string", "null"]},
+          "standin_informed": {"type": ["boolean", "null"]}
+        }
+      }
+    },
+    "tasks_total": {"type": "integer", "minimum": 1},
+    "tasks_accepted": {"type": ["integer", "null"], "minimum": 0},
+    "integrated_tests": {"enum": ["passed", "failed", "unknown"]},
+    "merge_conflicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["session", "files"],
+        "properties": {
+          "session": {"type": "integer", "minimum": 1},
+          "files": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "semantic_conflicts": {"type": ["integer", "null"], "minimum": 0},
+    "semantic_conflict_details": {"type": "array", "items": {"type": "string"}},
+    "duplicate_work": {"type": ["integer", "null"], "minimum": 0},
+    "duplicate_work_details": {"type": "array", "items": {"type": "string"}},
+    "fixture_tests": {"enum": ["passed", "failed", "unknown"]},
+    "stops": {"type": ["integer", "null"], "minimum": 0},
+    "questions": {"type": ["integer", "null"], "minimum": 0},
+    "permission_denials": {"$ref": "#/$defs/denials"},
+    "cost_usd": {"type": ["number", "null"], "minimum": 0},
+    "refusals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "count", "items", "sessions_registered", "admissions"],
+      "properties": {
+        "status": {"enum": ["reported", "not_applicable", "unknown"]},
+        "count": {"type": ["integer", "null"], "minimum": 0},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["seq", "session", "kind", "paths", "peer_session", "followed_by"],
+            "properties": {
+              "seq": {"type": "integer", "minimum": 0},
+              "session": {"type": ["integer", "null"], "minimum": 1},
+              "kind": {"type": "string"},
+              "paths": {"type": "array", "items": {"type": "string"}},
+              "peer_session": {"type": ["string", "null"]},
+              "followed_by": {"enum": ["admitted_later", "no_later_admission"]}
+            }
+          }
+        },
+        "sessions_registered": {"type": ["integer", "null"], "minimum": 0},
+        "admissions": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "coordinator_scans": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "failed", "recovered", "items"],
+      "properties": {
+        "status": {"enum": ["reported", "not_applicable", "unknown"]},
+        "failed": {"type": ["integer", "null"], "minimum": 0},
+        "recovered": {"type": ["integer", "null"], "minimum": 0},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["session", "seq", "type", "detail"],
+            "properties": {
+              "session": {"type": "integer", "minimum": 1},
+              "seq": {"type": "integer", "minimum": 0},
+              "type": {"enum": ["scan_failed", "scan_recovered"]},
+              "detail": {"type": ["string", "null"]}
+            }
+          }
+        }
+      }
+    },
+    "tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "total"],
+      "properties": {
+        "status": {"enum": ["reported", "partial", "unknown"]},
+        "total": {"$ref": "#/$defs/tokens"}
+      }
+    },
+    "error": {"type": "string"},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runner_journal", "plan", "integration", "oracle", "events", "notes", "merge_logs"],
+      "properties": {
+        "runner_journal": {"type": ["string", "null"]},
+        "plan": {"type": "string"},
+        "integration": {"type": ["string", "null"]},
+        "oracle": {"type": ["string", "null"]},
+        "events": {"type": "array", "items": {"type": "string"}},
+        "notes": {"type": "array", "items": {"type": "string"}},
+        "merge_logs": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  },
+  "$defs": {
+    "tokens": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["input", "output", "cache_creation", "cache_read"],
+      "properties": {
+        "input": {"type": "integer", "minimum": 0},
+        "output": {"type": "integer", "minimum": 0},
+        "cache_creation": {"type": "integer", "minimum": 0},
+        "cache_read": {"type": "integer", "minimum": 0}
+      }
+    },
+    "denials": {
+      "description": "Calls the agent host refused: outside_clone aimed at a path outside the session's clone; not_allowed for any other call outside the allowed tool list.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["total", "outside_clone", "not_allowed"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "outside_clone": {"type": "integer", "minimum": 0},
+        "not_allowed": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

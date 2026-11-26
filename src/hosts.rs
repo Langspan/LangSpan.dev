@@ -38,6 +38,12 @@ impl UserHome {
         self.explicit
     }
 
+    /// A path from the environment variable `name`, unless the home was
+    /// named with `--home` or the variable is empty.
+    pub fn env_path(&self, name: &str) -> Option<PathBuf> {
+        self.env(name)
+    }
+
     fn env(&self, name: &str) -> Option<PathBuf> {
         (!self.explicit)
             .then(|| std::env::var_os(name))
@@ -51,7 +57,7 @@ impl UserHome {
         let variable = match vendor {
             Vendor::ClaudeCode => Some("CLAUDE_CONFIG_DIR"),
             Vendor::Codex => Some("CODEX_HOME"),
-            Vendor::Cursor => None,
+            Vendor::Cursor | Vendor::Antigravity => None,
             Vendor::Gemini => Some("GEMINI_CLI_HOME"),
         };
         user_install::host_files(
@@ -118,10 +124,11 @@ impl HostReport {
 }
 
 /// Hosts proposed for install without the owner naming them: those
-/// `install` chooses by itself. Gemini CLI is chosen only by name, since
-/// `~/.gemini` is also made by other tools.
+/// `install` chooses by itself. Gemini CLI and Antigravity are chosen only
+/// by name: they share `~/.gemini`, which other tools also make, and their
+/// adapters have no live-host evidence yet.
 pub fn proposed(vendor: Vendor) -> bool {
-    vendor != Vendor::Gemini
+    !matches!(vendor, Vendor::Gemini | Vendor::Antigravity)
 }
 
 fn presence(dir: &Path) -> Presence {
@@ -157,8 +164,8 @@ fn user_install_of(
         }
     }
     let server = match vendor {
-        Vendor::ClaudeCode | Vendor::Cursor | Vendor::Gemini => {
-            match install::read(&files.mcp).map_err(|e| e.to_string())? {
+        Vendor::ClaudeCode | Vendor::Cursor | Vendor::Gemini | Vendor::Antigravity => {
+            match install::read_mcp(vendor, &files.mcp).map_err(|e| e.to_string())? {
                 None => None,
                 Some(config) => config
                     .get("mcpServers")

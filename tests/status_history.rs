@@ -131,6 +131,7 @@ impl Fixture {
     fn start(&mut self) {
         self.child = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -158,6 +159,7 @@ impl Fixture {
 
     fn cli(&self, args: &[&str]) -> (i32, String) {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(args)
             .arg("--state-dir")
             .arg(self.state_dir())
@@ -382,6 +384,7 @@ impl Fixture {
                         name: "unit".into(),
                         argv: largest_auto_check(),
                         timeout_s: 60,
+                        on_interface_change: None,
                     },
                 ),
             ] {
@@ -513,6 +516,7 @@ fn a_record_that_changes_while_its_parts_are_read_is_read_again_whole() {
                 name: "unit".into(),
                 argv: changed.clone(),
                 timeout_s: 60,
+                on_interface_change: None,
             };
             store.execute("change", &change, &change, 3).unwrap();
         }

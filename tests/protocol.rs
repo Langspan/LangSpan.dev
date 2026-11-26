@@ -136,6 +136,52 @@ fn v3_briefing_request_and_response_match_the_committed_golden_vectors() {
     assert!(serde_json::from_str::<Response>(&unknown).is_err());
 }
 
+/// What changed recently (roadmap C3): optional fields, so the earlier
+/// briefing vectors above still decode and encode unchanged.
+#[test]
+fn v3_recent_briefing_request_and_response_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/brief-recent-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::Brief {
+            recent: true,
+            recent_window_ms: Some(14_400_000),
+            mid_turn: false,
+            ..
+        }
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+    let old: Request =
+        serde_json::from_slice(include_bytes!("../fixtures/brief-request-v3.json")).unwrap();
+    assert!(matches!(
+        &old.command,
+        Command::Brief {
+            recent: false,
+            recent_window_ms: None,
+            ..
+        }
+    ));
+
+    let wire = include_bytes!("../fixtures/recent-briefing-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    let recent = briefing.recent.as_ref().unwrap();
+    assert_eq!(recent.changed_paths[0].sessions, 2);
+    assert!(recent.changed_paths[1].elsewhere);
+    assert_eq!(recent.contested_paths[0].refusals, 1);
+    assert_eq!(recent.left_uncommitted[0].paths, ["src/store.rs"]);
+    assert_eq!(recent.omitted, 3);
+    assert_eq!(encode(&response).unwrap(), wire);
+    let unknown = String::from_utf8_lossy(wire).replace(
+        r#""window_ms":14400000"#,
+        r#""window_ms":14400000,"summary":"x""#,
+    );
+    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+}
+
 #[test]
 fn v3_base_admission_and_stale_result_match_the_committed_golden_vectors() {
     let wire = include_bytes!("../fixtures/admit-base-request-v3.json");
@@ -212,6 +258,61 @@ fn v3_code_context_request_and_response_match_the_committed_golden_vectors() {
     let unknown = String::from_utf8_lossy(wire)
         .replace(r#""truncated":false"#, r#""truncated":false,"prompt":"x""#);
     assert!(serde_json::from_str::<Response>(&unknown).is_err());
+}
+
+#[test]
+fn v3_compaction_request_and_reports_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/compact-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::Compact {
+            keep_days: 90,
+            apply: true
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    // `apply` may be left out: a dry run.
+    let dry: Request = serde_json::from_str(
+        r#"{"version":3,"request_id":"read","command":{"op":"compact","keep_days":30}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        dry.command,
+        Command::Compact {
+            keep_days: 30,
+            apply: false
+        }
+    );
+
+    let wire = include_bytes!("../fixtures/compaction-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::Compaction { report } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(report.snapshot_seq, Some(812_440));
+    assert!(report.held_by.as_deref().unwrap().contains("lease-7"));
+    assert_eq!(encode(&response).unwrap(), wire);
+    let unknown =
+        String::from_utf8_lossy(wire).replace(r#""receipts":61204"#, r#""receipts":61204,"x":1"#);
+    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/remote-sent-since-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        response.outcome,
+        langspan_core::Outcome::RemoteSent {
+            since_ms: Some(1_788_134_400_000),
+            ..
+        }
+    ));
+    assert_eq!(encode(&response).unwrap(), wire);
+    // A store never compacted leaves the field out, as earlier builds did.
+    let earlier = String::from_utf8_lossy(wire).replace(r#","since_ms":1788134400000"#, "");
+    assert!(matches!(
+        serde_json::from_str::<Response>(&earlier).unwrap().outcome,
+        langspan_core::Outcome::RemoteSent { since_ms: None, .. }
+    ));
 }
 
 #[test]
@@ -470,7 +571,7 @@ fn v3_message_handoff_and_ack_requests_match_the_committed_golden_vectors() {
     assert!(matches!(
         &old.command,
         Command::Brief {
-            mid_turn: false,
+            recent_window_ms: None,
             ..
         }
     ));
@@ -523,6 +624,91 @@ fn v3_show_message_request_and_response_match_the_committed_golden_vectors() {
     assert_eq!(message.paths, ["src/api.rs"]);
     assert!(!message.retracted);
     assert_eq!(encode(&response).unwrap(), wire);
+}
+
+#[test]
+fn v3_message_status_request_and_response_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/message-status-request-v3.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(matches!(
+        &request.command,
+        Command::MessageStatus { workspace_id, from: Some(from), message_id: Some(id) }
+            if workspace_id == "demo" && from == "codex.bob" && id == "m-9"
+    ));
+    assert_eq!(encode(&request).unwrap(), wire);
+    // `last` leaves the ID out, and the owner leaves out the sender.
+    let last: Request = serde_json::from_str(
+        r#"{"version":3,"request_id":"read","command":{"op":"message_status","workspace_id":"demo"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        last.command,
+        Command::MessageStatus {
+            from: None,
+            message_id: None,
+            ..
+        }
+    ));
+    let unknown = String::from_utf8_lossy(wire).replace(
+        r#""message_id":"m-9""#,
+        r#""message_id":"m-9","session_id":"x""#,
+    );
+    assert!(serde_json::from_str::<Request>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/message-status-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::MessageStatus { status } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!(status.state, langspan_core::MessageState::Pending);
+    assert_eq!(
+        status.recipients[0].via,
+        Some(langspan_core::Delivery::Briefing)
+    );
+    assert_eq!(
+        status.recipients[2].status,
+        langspan_core::RecipientState::Ended
+    );
+    assert_eq!(encode(&response).unwrap(), wire);
+}
+
+#[test]
+fn message_events_recorded_before_delivery_receipts_still_read() {
+    use langspan_core::Event;
+    let sent: Event = serde_json::from_str(
+        r#"{"type":"message_sent","message":{"message_id":"m1","workspace_id":"app","from":null,"to":{"kind":"everyone"},"text":"hi","paths":[]}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        sent,
+        Event::MessageSent {
+            at_ms: None,
+            generation: None,
+            ..
+        }
+    ));
+    let acknowledged: Event = serde_json::from_str(
+        r#"{"type":"message_acknowledged","workspace_id":"app","message_id":"m1","session_id":"codex.bob"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        acknowledged,
+        Event::MessageAcknowledged {
+            via: None,
+            at_ms: None,
+            generation: None,
+            ..
+        }
+    ));
+    // A new record carries how and when, and is written the same way back.
+    let json = r#"{"type":"message_acknowledged","workspace_id":"app","message_id":"m1","session_id":"codex.bob","via":"mcp_brief","at_ms":5,"generation":2}"#;
+    let event: Event = serde_json::from_str(json).unwrap();
+    assert_eq!(serde_json::to_string(&event).unwrap(), json);
+    // The brief command says when the MCP tool asked, and only then.
+    let brief = r#"{"version":3,"request_id":"b","command":{"op":"brief","session_id":"s","max_peers":4,"deliver":true,"mcp":true}}"#;
+    let request: Request = serde_json::from_str(brief).unwrap();
+    assert!(matches!(request.command, Command::Brief { mcp: true, .. }));
+    assert_eq!(encode(&request).unwrap(), format!("{brief}\n").into_bytes());
 }
 
 #[test]
