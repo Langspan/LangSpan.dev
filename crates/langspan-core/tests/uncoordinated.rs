@@ -104,6 +104,8 @@ fn brief(state: &mut State, session: &str, id: &str, now: u64) -> Briefing {
             max_peers: 8,
             deliver: true,
             mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         now,

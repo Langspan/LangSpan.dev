@@ -17,6 +17,7 @@ pub mod local_day;
 pub mod mcp;
 pub mod notify;
 pub mod protocol;
+pub mod recent;
 mod reformat;
 pub mod regions;
 pub mod report;

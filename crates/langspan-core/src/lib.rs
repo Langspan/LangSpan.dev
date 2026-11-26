@@ -11,6 +11,7 @@ mod flaky;
 mod history;
 mod lines;
 mod recall;
+mod recent;
 mod report;
 mod status;
 mod status_line;
@@ -34,6 +35,12 @@ pub use history::{
 };
 pub use recall::{
     RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
+};
+pub use recent::{
+    ChangedPath, ContestedPath, LeftUncommitted, MAX_PATH_REFUSALS, MAX_RECENT_WINDOW_MS,
+    MIN_RECENT_WINDOW_MS, PathRefusal, RECENT_BYTES, RECENT_CHANGED, RECENT_CONTESTED,
+    RECENT_INTERFACES, RECENT_LEFT, RECENT_LEFT_CANDIDATES, RECENT_NOTICE_CHANGES,
+    RECENT_WINDOW_MS, RecentChanges, RecentInterfaceChange,
 };
 pub use report::{
     OTHER_HOST, REPORT_SESSIONS, Report, ReportCounts, ReportHost, ReportQuery, ReportSession,
@@ -2123,6 +2130,10 @@ pub struct Briefing {
     /// yet delivered. Each is delivered once. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckNotice>,
+    /// What changed recently in the repository, only in a briefing asked
+    /// for at session start (roadmap C3). Never part of the signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent: Option<RecentChanges>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -2221,6 +2232,11 @@ pub struct State {
     /// line (roadmap H2). Derived on replay; not part of the status reply.
     #[serde(skip)]
     pub refusals: Vec<RecentRefusal>,
+    /// Refusals of the current run with their paths, newest first, at most
+    /// `MAX_PATH_REFUSALS`, for a starting session's recent section
+    /// (roadmap C3). Derived on replay; not part of the status reply.
+    #[serde(skip)]
+    pub path_refusals: Vec<PathRefusal>,
     /// How many times each workspace ID has been moved or removed: its
     /// registration revision. With the root it names one registration, so
     /// what was derived outside the log during an earlier one (the source
@@ -3339,6 +3355,15 @@ pub enum Command {
         /// tool call. A handoff waits for a session's start or next prompt.
         #[serde(default, skip_serializing_if = "is_false")]
         mid_turn: bool,
+        /// Add what changed recently in the repository (roadmap C3). Set
+        /// by session-start hooks and `langspan brief --recent` only; never
+        /// with `mid_turn`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        recent: bool,
+        /// How far back `recent` looks. The daemon sets it from its
+        /// configuration; absent means `RECENT_WINDOW_MS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recent_window_ms: Option<u64>,
         /// True when the session asked through the MCP tool
         /// `langspan_brief`, so a message it carries is recorded as
         /// delivered that way (roadmap E12).
@@ -3949,6 +3974,10 @@ enum CommandWire {
         /// tool call. A handoff waits for a session's start or next prompt.
         #[serde(default, skip_serializing_if = "is_false")]
         mid_turn: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        recent: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recent_window_ms: Option<u64>,
         /// True when the session asked through the MCP tool
         /// `langspan_brief`, so a message it carries is recorded as
         /// delivered that way (roadmap E12).
@@ -5928,6 +5957,8 @@ fn decide_checked(
             max_peers,
             deliver,
             mid_turn,
+            recent,
+            recent_window_ms,
             mcp,
         } => {
             if !(1..=MAX_BRIEF_PEERS).contains(max_peers) {
@@ -5936,8 +5967,21 @@ fn decide_checked(
                     "A briefing names between 1 and 16 peers",
                 ));
             }
+            if *recent && *mid_turn {
+                return Err(error(
+                    "invalid_request",
+                    "What changed recently is told at a session's start, never mid-turn; leave out recent",
+                ));
+            }
+            let window = recent::window(*recent_window_ms)?;
             let (mut briefing, signature) =
                 brief(state, session_id, *max_peers, !*mid_turn, now_ms)?;
+            // Not part of the signature: a prompt's briefing never carries
+            // it, so it must not make the next one look new.
+            if *recent {
+                let me = current_session(state, session_id)?;
+                briefing.recent = Some(recent::recent(state, me, window, now_ms));
+            }
             let previous = state
                 .activity
                 .get(session_id)
@@ -7840,12 +7884,14 @@ fn brief(
         .map(|(_, peer)| peer)
         .take(max_peers as usize)
         .take_while(|peer| {
+            // Counted as encoded, escapes included, so quoted or control
+            // characters cannot push the reply past its frame.
             let cost = 256
-                + peer.workspace_root.len()
+                + recent::json_len(&peer.workspace_root)
                 + [&peer.summary, &peer.intent, &peer.branch_ref]
                     .into_iter()
                     .flatten()
-                    .map(String::len)
+                    .map(|text| recent::json_len(text))
                     .sum::<usize>()
                 + peer
                     .editing
@@ -7853,7 +7899,7 @@ fn brief(
                     .chain(&peer.overlap)
                     .chain(&peer.target_overlap)
                     .chain(peer.recent.iter().map(|recent| &recent.path))
-                    .map(|path| path.len() + 32)
+                    .map(|path| recent::json_len(path) + 32)
                     .sum::<usize>();
             bytes += cost;
             if bytes > BRIEF_BYTES {
@@ -7869,7 +7915,7 @@ fn brief(
         let presence: usize = peer
             .looking
             .iter()
-            .map(|looked| looked.path.len() + 32)
+            .map(|looked| recent::json_len(&looked.path) + 32)
             .sum();
         if bytes + presence <= BRIEF_BYTES {
             bytes += presence;
@@ -8177,6 +8223,7 @@ fn brief(
                 .cloned()
                 .into_iter()
                 .collect(),
+            recent: None,
         },
         signature,
     ))
@@ -9128,6 +9175,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 ));
             }
             status_line::remember(state, workspace_id, *at_ms, *generation);
+            recent::remember_refusal(state, workspace_id, paths, *at_ms, *generation);
         }
         Event::WorkspaceRegistered { workspace } => {
             validate_workspace(state, workspace)?;

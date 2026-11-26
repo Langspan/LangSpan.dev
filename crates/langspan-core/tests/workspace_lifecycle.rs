@@ -567,6 +567,8 @@ fn a_removed_workspace_leaves_status_and_briefings_and_its_id_can_start_again() 
             max_peers: 8,
             deliver: true,
             mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         11,
@@ -580,6 +582,8 @@ fn a_removed_workspace_leaves_status_and_briefings_and_its_id_can_start_again() 
             max_peers: 8,
             deliver: false,
             mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
             mcp: false,
         },
         11,
@@ -617,6 +621,8 @@ fn a_removed_workspace_forgets_its_message_history_and_withdrawal_notices() {
         max_peers: 8,
         deliver: true,
         mid_turn: false,
+        recent: false,
+        recent_window_ms: None,
         mcp: false,
     };
     run(&mut state, "brief-bob", brief("bob"), 3);
