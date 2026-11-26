@@ -565,11 +565,15 @@ function buildModel(d) {
     col.overlap = o;
     const labels = strings(o.agents);
     const members = strings(o.members);
+    // Peer identities and labels repeat across repositories, so a member
+    // joins only rows in the overlap's own repository group.
+    const inGroup = (found) => (found || []).filter((row) => rowGroup(row) === col.group);
     labels.forEach((label, i) => {
       // With identities, a member names its rows exactly; without them, a
       // label counts only when it names one visible row.
-      const matches = members.length === labels.length ? (byIdentity.get(members[i]) || [])
-        : ((byLabel.get(label) || []).length === 1 ? byLabel.get(label) : []);
+      const byName = inGroup(byLabel.get(label));
+      const matches = members.length === labels.length ? inGroup(byIdentity.get(members[i]))
+        : (byName.length === 1 ? byName : []);
       if (matches.length) for (const row of matches) col.members.add(row.key);
       else col.unmatched.push(label);
     });

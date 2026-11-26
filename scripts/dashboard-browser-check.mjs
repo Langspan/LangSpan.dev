@@ -327,6 +327,15 @@ async function main() {
       + " if (!head) return null; head.click(); const text = document.getElementById('inspector').textContent;"
       + " return { here: text.includes('NOTE-HERE'), other: text.includes('NOTE-OTHER-REPO') }; })()");
     check(scoped && scoped.here && !scoped.other, 'live: a path lists notes from its own repository only (' + JSON.stringify(scoped) + ')');
+    // Peer identities are not unique across repositories: an overlap's members
+    // join only rows in the overlap's own repository group.
+    const grouped = await p.eval("(() => { const peer = (ws, group) => ({ id: 'peer:m1:claude-code:abcd1234', workspace_id: ws, group, machine: 'm1', host: 'claude-code', session: 'abcd1234' });"
+      + " const m = buildModel({ agents: [peer('w1', 'repo:one'), peer('w2', 'repo:two'), { id: 'local:s1', local: true, session_id: 's1', host: 'codex', session: 's1', workspace_id: 'w1', group: 'repo:one' }],"
+      + " overlaps: [{ path: 'x.rs', group: 'repo:one', workspace_id: 'w1', agents: ['m1: claude-code abcd1234', 'codex s1'], members: ['peer:m1:claude-code:abcd1234', 'local:s1'] }] });"
+      + " const col = m.columns.find((c) => c.path === 'x.rs' && c.group === 'repo:one');"
+      + " return { members: [...col.members].map((k) => m.rowsByKey.get(k).group), unmatched: col.unmatched }; })()");
+    check(grouped && grouped.members.length === 2 && grouped.members.every((g) => g === 'repo:one') && grouped.unmatched.length === 0,
+      'live: an overlap joins only rows in its own repository (' + JSON.stringify(grouped) + ')');
     const polled = await p.eval("performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/state')).length");
     await sleep(4500);
     const polledLater = await p.eval("performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/state')).length");
