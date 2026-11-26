@@ -2462,6 +2462,18 @@ fn a_formatter_reflowing_both_sessions_lines_in_one_file_commits_only_the_runner
     let left = git(&f.work(), &["diff", "-U0"]);
     assert!(left.contains("+fn bob(c, d) {}"), "{left}");
     assert!(!left.contains("alice"), "{left}");
+
+    // The reformatted hunk left is Bob's, not nobody's: his own commit
+    // takes it.
+    let output = f.commit_mine(BOB, "Bob: formatted");
+    assert!(output.status.success(), "{}", said(&output));
+    assert!(
+        stdout_of(&output).starts_with("Committed this session's changes of 1 file(s)"),
+        "{}",
+        said(&output)
+    );
+    assert_eq!(git(&f.work(), &["show", "HEAD:shared.txt"]), formatted);
+    assert_eq!(f.status(), "");
 }
 
 /// A formatter that joins one session's line with another's makes a line

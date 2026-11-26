@@ -256,10 +256,12 @@ still this session's (issue #26). Tests in `tests/commit_guard.rs`:
 `each_failing_commit_hook_is_named_and_nothing_is_committed` and
 `commit_mine_text_lists_what_was_left_and_points_to_status_mine`.
 
-A formatter run over a file both sessions changed reflows each session's
-lines in place: each reformatted line stays the session's that wrote it, so
-`commit --mine` takes the runner's reformatted hunk and leaves the other's
-(test
+A formatter run over a file that another live session also changed, its
+lines uncommitted (a contested file, ADR 0011), reflows each session's lines
+in place. Through the partial entries for reformatted lines above, each
+reformatted line stays the session's that wrote it: `commit --mine` takes
+the runner's reformatted hunk and leaves the other's, which that session's
+own `commit --mine` then takes (test
 `a_formatter_reflowing_both_sessions_lines_in_one_file_commits_only_the_runners`).
 A reflow that joins one session's line with another's makes a line neither
 wrote; its hunk is not known, and `commit --mine` refuses with nothing
