@@ -2851,9 +2851,12 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol is version 6 and the SQLite schema marker version 4
-(retention). The daemon also answers version 5 clients, without the
-`rebased` and `adapted` that version 6 added to a landing; version 4
+The current wire protocol is version 7 and the SQLite schema marker version 4
+(retention). The daemon also answers version 6 clients, without the
+note fields `symbol`, `tags`, `anchor_state` and `tag` that version 7
+added (see [Notes about a definition](#notes-about-a-definition) for how an anchored note reaches them); version 5
+clients, also without the `rebased` and `adapted` that version 6 added to a
+landing; version 4
 clients, also without the `refusal_outcomes` that version 5 added to a
 report's counts and the `interface_notice_ids` it added to a briefing; and
 version 3 clients, also without the rename fields
