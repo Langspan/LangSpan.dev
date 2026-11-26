@@ -41,8 +41,9 @@ const INFLIGHT_FIELD_SINCE_4: &str = "renamed_from";
 /// The trail a briefing carries (`Briefing`, the only object with
 /// `changed` and `omitted_peers`) and the trails of a recap (`Recap`, with
 /// `sessions` and `omitted_sessions`), roadmap C9. A version 3 client is
-/// told neither; a trail taken by its briefing is not offered again.
-const BRIEFING_FIELD_SINCE_4: &str = "trail";
+/// told neither; a trail taken by its briefing is not offered again. Nor
+/// is it given a briefing's notice IDs (issue #214).
+const BRIEFING_FIELDS_SINCE_4: [&str; 2] = ["trail", "interface_notice_ids"];
 const RECAP_FIELD_SINCE_4: &str = "trails";
 
 /// An interface change or a history entry: the objects of the protocol
@@ -82,7 +83,9 @@ fn protocol_3_shape(value: &mut serde_json::Value) {
                 fields.shift_remove(INFLIGHT_FIELD_SINCE_4);
             }
             if fields.contains_key("changed") && fields.contains_key("omitted_peers") {
-                fields.shift_remove(BRIEFING_FIELD_SINCE_4);
+                for key in BRIEFING_FIELDS_SINCE_4 {
+                    fields.shift_remove(key);
+                }
             }
             if fields.contains_key("sessions") && fields.contains_key("omitted_sessions") {
                 fields.shift_remove(RECAP_FIELD_SINCE_4);

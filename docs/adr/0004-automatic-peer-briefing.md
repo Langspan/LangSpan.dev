@@ -274,7 +274,10 @@ core does with an eight-hour gap.
 - On Claude Code an interface notice can also reach a session between its
   steps, with no hook call of its own ([ADR 0002](0002-claude-code-adapter.md),
   issue #214). A briefing placed in context records the interface notices it
-  told (`interface_notices_told`, `via: briefing`), and one told between steps
+  showed (`interface_notices_told`, `via: briefing`): a hook reports the ones
+  its capped text holds (`interface_shown`), so a notice the cap left out is
+  still told between steps, and `langspan_brief` records all it returns. One
+  told between steps
   is left out of every later briefing, so no notice is told twice through the
   two paths. A notice a briefing told can still appear in a later briefing
   that is delivered because something else in it changed, as before.

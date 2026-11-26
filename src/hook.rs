@@ -109,6 +109,13 @@ pub fn valid_host_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
+/// A host's prompt or turn ID that LangSpan uses: a valid host ID of at
+/// most 64 bytes. It keys a redelivered prompt's requests, and binds a
+/// between-step watcher and a stop to their prompt (issue #214).
+pub(crate) fn prompt_event_id(id: Option<&str>) -> Option<&str> {
+    id.filter(|id| valid_host_id(id) && id.len() <= 64)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Phase {
     Pre,
@@ -701,11 +708,9 @@ pub fn lifecycle_event(
         Ok(config) => config,
         Err(reply) => return Some(reply),
     };
-    let event_id = event
-        .prompt_id
-        .or(event.turn_id)
-        .filter(|id| valid_host_id(id) && id.len() <= 64)
-        .filter(|_| matches!(kind, LifecycleKind::Prompt { .. }));
+    let event_id = prompt_event_id(event.prompt_id.or(event.turn_id).as_deref())
+        .filter(|_| matches!(kind, LifecycleKind::Prompt { .. }))
+        .map(str::to_owned);
     Some(lifecycle(
         source,
         &host_session,
@@ -824,9 +829,8 @@ pub fn lifecycle_resolved(
     if !valid_host_id(host_session) {
         return no_session_identity();
     }
-    let event_id = event_id
-        .filter(|id| valid_host_id(id) && id.len() <= 64)
-        .filter(|_| matches!(kind, LifecycleKind::Prompt { .. }));
+    let event_id =
+        prompt_event_id(event_id).filter(|_| matches!(kind, LifecycleKind::Prompt { .. }));
     lifecycle(
         source,
         host_session,
@@ -1413,6 +1417,9 @@ fn lifecycle(
             format!("no new relevant peer work{targets_note}"),
         );
     };
+    if let Some(briefing) = &briefing {
+        targets_note.push_str(&report_shown(&step, briefing, &context));
+    }
     let stdout = json!({
         "hookSpecificOutput": {
             "hookEventName": event_name,
@@ -1545,10 +1552,13 @@ fn turn_event(event: LifecycleEvent, source: &str, config: &Config, deadline: In
         unreachable: Default::default(),
         reached: Default::default(),
     };
+    // The prompt whose reply finished, which ends a between-step watcher
+    // started for it (issue #214). A subagent's stop ends no prompt.
+    let prompt = prompt_event_id(event.prompt_id.or(event.turn_id).as_deref()).map(str::to_owned);
     match kind {
         TurnKind::Batch { calls, total } => session.batch(&own, &calls, total),
-        TurnKind::Stop { failure } => session.stop(&own, failure, false),
-        TurnKind::SubagentStop => session.stop(&own, None, true),
+        TurnKind::Stop { failure } => session.stop(&own, failure, prompt, false),
+        TurnKind::SubagentStop => session.stop(&own, None, None, true),
     }
 }
 
@@ -1558,7 +1568,13 @@ impl Session<'_> {
     /// may come more than once for one prompt, so each is a new request;
     /// repeating one releases nothing more. A session the coordinator never
     /// saw is not registered just to be stopped.
-    fn stop(&self, own: &str, failure: Option<String>, end_session: bool) -> Reply {
+    fn stop(
+        &self,
+        own: &str,
+        failure: Option<String>,
+        prompt_id: Option<String>,
+        end_session: bool,
+    ) -> Reply {
         let nonce = format!(
             "stop-{}-{}",
             std::process::id(),
@@ -1577,6 +1593,7 @@ impl Session<'_> {
             Command::SessionStop {
                 session_id: ids.session_id.clone(),
                 failure: failure.clone(),
+                prompt_id,
             },
         );
         let released = match stopped {
@@ -2180,6 +2197,49 @@ pub(crate) fn interface_impact_line(impact: &langspan_core::InterfaceImpact) -> 
         ),
         PEER_LINE_LIMIT,
     )
+}
+
+/// The IDs of the briefing's interface notices whose whole line `text`
+/// shows. A briefing's byte cap can leave a notice out, and one left out
+/// is still owed to the session (issue #214).
+pub(crate) fn shown_notice_ids(briefing: &langspan_core::Briefing, text: &str) -> Vec<String> {
+    briefing
+        .interface_changes
+        .iter()
+        .zip(&briefing.interface_notice_ids)
+        .filter(|(impact, _)| text.contains(&interface_impact_line(impact)))
+        .map(|(_, id)| id.clone())
+        .take(langspan_core::BRIEF_INTERFACE_NOTICES)
+        .collect()
+}
+
+/// Tell the coordinator which interface notices of `briefing` the context
+/// `text` placed showed, so a between-step watcher does not tell them
+/// again (issue #214). Returns a note for the hook's diagnostic when that
+/// fails; the briefing is delivered either way, and the cost of a failure
+/// is one notice told twice.
+fn report_shown(
+    step: &impl Fn(&str, Command) -> Result<Response, Failure>,
+    briefing: &langspan_core::Briefing,
+    text: &str,
+) -> String {
+    let notice_ids = shown_notice_ids(briefing, text);
+    if notice_ids.is_empty() {
+        return String::new();
+    }
+    match step(
+        "notices-shown",
+        Command::InterfaceShown {
+            session_id: briefing.session_id.clone(),
+            notice_ids,
+        },
+    ) {
+        Ok(_) => String::new(),
+        Err(failure) => format!(
+            "; shown interface notices not recorded: {}",
+            failure_reply(failure).detail
+        ),
+    }
 }
 
 pub(crate) fn quoted(text: &str) -> String {
@@ -4052,7 +4112,16 @@ impl Session<'_> {
             .ok()?;
         match response.outcome {
             Outcome::Briefing { briefing } if briefing.changed && has_content(&briefing) => {
-                Some(render_briefing(&briefing))
+                let text = render_briefing(&briefing);
+                // A failure costs at most a notice told twice.
+                let _ = report_shown(
+                    &|kind: &str, command| {
+                        self.call(wire_id(kind, &[self.source, &ids.operation_id]), command)
+                    },
+                    &briefing,
+                    &text,
+                );
+                Some(text)
             }
             _ => None,
         }
@@ -5567,6 +5636,7 @@ mod briefing_text {
             stale_reads: Vec::new(),
             remote: Vec::new(),
             interface_changes: Vec::new(),
+            interface_notice_ids: Vec::new(),
             inflight: Vec::new(),
             omitted_inflight: 0,
             notes: Vec::new(),
@@ -5945,6 +6015,63 @@ mod briefing_text {
         assert!(text.len() <= BRIEFING_LIMIT, "{}", text.len());
         assert!(text.contains("more notice(s) not shown"), "{text}");
         assert!(text.ends_with("before changing it."), "the footer is kept");
+    }
+
+    /// Review comment 4712432083: four near-cap interface lines alone do not
+    /// fit a briefing. Only the ones its text shows are reported as told,
+    /// in the prompt hook's composed context and in a mid-turn briefing.
+    #[test]
+    fn only_the_interface_notices_a_briefing_shows_are_reported_as_told() {
+        use langspan_core::{InterfaceChange, InterfaceImpact};
+        let mut full = briefing(Vec::new());
+        full.interface_changes = (0..4)
+            .map(|n| InterfaceImpact {
+                path: format!("src/{n}{}.rs", "p".repeat(120)),
+                by_session: Some("codex.s".into()),
+                changes: vec![InterfaceChange {
+                    name: "f".repeat(100),
+                    kind: "function".into(),
+                    change: "signature_changed".into(),
+                    before: Some("b".repeat(240)),
+                    after: Some("a".repeat(240)),
+                    after_name: None,
+                    before_name: None,
+                    evidence: None,
+                    before_path: None,
+                    private: false,
+                    before_arity: None,
+                    after_arity: None,
+                    before_count: None,
+                    after_count: None,
+                }],
+                affected: vec![format!("src/{n}{}.rs", "m".repeat(120))],
+                age_ms: 1,
+            })
+            .collect();
+        full.interface_notice_ids = (0..4).map(|n| format!("n{n}")).collect();
+        let lines: Vec<String> = full
+            .interface_changes
+            .iter()
+            .map(interface_impact_line)
+            .collect();
+        assert!(
+            lines.iter().map(String::len).sum::<usize>() > BRIEFING_LIMIT,
+            "the four lines together exceed the cap"
+        );
+        for text in [
+            render_briefing(&full),
+            compose_context(Some(&full), None).unwrap(),
+        ] {
+            let shown = shown_notice_ids(&full, &text);
+            assert!(!shown.is_empty(), "{text}");
+            assert!(shown.len() < 4, "{shown:?}: {text}");
+            for (id, line) in full.interface_notice_ids.iter().zip(&lines) {
+                assert_eq!(shown.contains(id), text.contains(line.as_str()), "{id}");
+            }
+        }
+        // A briefing that carries no IDs (an older coordinator) reports none.
+        full.interface_notice_ids.clear();
+        assert!(shown_notice_ids(&full, &render_briefing(&full)).is_empty());
     }
 
     #[test]
@@ -6846,6 +6973,7 @@ mod code_briefing_text {
             stale_reads: Vec::new(),
             remote: Vec::new(),
             interface_changes: Vec::new(),
+            interface_notice_ids: Vec::new(),
             inflight: Vec::new(),
             omitted_inflight: 0,
             notes: Vec::new(),

@@ -921,16 +921,25 @@ Delivery is advisory and recorded:
 - The watcher holds, refuses and allows nothing. Claude Code gives a
   background hook's decision fields no effect, and the watcher writes none.
 - The coordinator records each notice it tells as `interface_notices_told`
-  with `via` `between_steps`, and a briefing records the notices it tells
-  with `via` `briefing`. A notice told between steps is left out of later
-  briefings; one told by a briefing or a write-time alert is not told
-  between steps. Two watchers of one session never tell one notice twice.
+  with `via` `between_steps`. A briefing's notices are recorded with `via`
+  `briefing` only once they reach the session: a hook reports the ones its
+  rendered text showed (`interface_shown`), since the briefing's byte cap
+  can leave some out, and `langspan_brief` records all it returns. A notice
+  told between steps is left out of later briefings; one shown by a
+  briefing or told by a write-time alert is not told between steps. Two
+  watchers of one session never tell one notice twice.
 - An ask with nothing to tell writes nothing to the store and does not count
   as the session's activity.
-- The watcher exits 0, silently, when the turn it started in ends (the
-  session's `Stop` hook ran), the session ends, the coordinator is
-  unreachable, or 20 minutes pass. An idle session is never woken; a notice
-  recorded after the turn reaches the next prompt's briefing.
+- The watcher exits 0, silently, when the turn it started in ends, the
+  session ends, or 20 minutes pass. The turn ends when the session's `Stop`
+  hook reports the reply to the watcher's own prompt (Claude Code's
+  `prompt_id`), even if that came before the watcher's first answer, or any
+  reply after the watcher's first answer. The watcher keeps asking for 10
+  seconds while the coordinator is unreachable or does not know the
+  session yet, since the prompt hook beside it may still be starting the
+  coordinator or registering the session, and exits after that. An idle
+  session is never woken; a notice recorded after the turn reaches the next
+  prompt's briefing.
 - Cursor also runs Claude Code's hooks. A Cursor event ends the watcher at
   once.
 

@@ -561,6 +561,11 @@ pub struct SessionActivity {
     /// watcher started in one turn stops once this moves (issue #214).
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub stops: u64,
+    /// The host's IDs of the prompts whose replies finished in this
+    /// generation, newest first, at most `MAX_STOPPED_PROMPTS`: a watcher
+    /// started for one of them has no turn left (issue #214).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stopped_prompts: Vec<String>,
     /// In-flight signatures told to this session, newest first, at most
     /// `MAX_INFLIGHT_TOLD` (roadmap C7).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1701,6 +1706,9 @@ pub const MAX_ALERTED: usize = 64;
 pub const MAX_TOLD_NOTICES: usize = 64;
 /// Interface notices one briefing or one between-step delivery tells.
 pub const BRIEF_INTERFACE_NOTICES: usize = 4;
+/// Prompts remembered per session as finished, for between-step watchers
+/// (issue #214). A watcher lives within one turn, so a few suffice.
+pub const MAX_STOPPED_PROMPTS: usize = 8;
 
 /// How an interface notice reached a session's context (issue #214).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2521,6 +2529,11 @@ pub struct Briefing {
     /// name. A name match, not a resolved dependency.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interface_changes: Vec<InterfaceImpact>,
+    /// The notice ID of each of `interface_changes`, in the same order. A
+    /// hook reports the ones its rendered text showed (`InterfaceShown`,
+    /// issue #214).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interface_notice_ids: Vec<String>,
     /// Exported symbols another worktree of the repository has added or
     /// changed and not committed, that this session's files mention by name
     /// (roadmap C7). Each signature is told once, at most `INFLIGHT_LINES`
@@ -3107,6 +3120,10 @@ pub enum Event {
         failure: Option<String>,
         at_ms: u64,
         generation: u64,
+        /// The host's ID of the prompt whose reply finished, when it gave
+        /// one (issue #214). Absent from older records.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
     },
     /// The host finished a batch of tool calls and is about to ask the model
     /// again (Claude Code's PostToolBatch). `operation_ids` name at most
@@ -4060,11 +4077,24 @@ pub enum Command {
     /// (issue #214). Records only what it tells. `stops` is the count an
     /// earlier answer gave: once the session finished a reply since, its
     /// turn is over and nothing is told. Never the session at work: a
-    /// waiting watcher does not count as activity.
+    /// waiting watcher does not count as activity. `prompt_id` is the
+    /// host's ID of the prompt the watcher started at: once that prompt's
+    /// reply finished, even before the watcher's first answer, its turn is
+    /// over.
     BetweenSteps {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stops: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
+    },
+    /// The session's hook placed these interface notices of a briefing in
+    /// its context (`Briefing::interface_notice_ids`), so no between-step
+    /// watcher tells them again (issue #214). A hook reports only the ones
+    /// its rendered text showed.
+    InterfaceShown {
+        session_id: String,
+        notice_ids: Vec<String>,
     },
     Complete {
         session_id: String,
@@ -4148,6 +4178,9 @@ pub enum Command {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         failure: Option<String>,
+        /// The host's ID of the prompt whose reply finished (issue #214).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
     },
     /// A batch of the session's tool calls has finished.
     ObserveToolBatch {
@@ -4855,11 +4888,24 @@ enum CommandWire {
     /// (issue #214). Records only what it tells. `stops` is the count an
     /// earlier answer gave: once the session finished a reply since, its
     /// turn is over and nothing is told. Never the session at work: a
-    /// waiting watcher does not count as activity.
+    /// waiting watcher does not count as activity. `prompt_id` is the
+    /// host's ID of the prompt the watcher started at: once that prompt's
+    /// reply finished, even before the watcher's first answer, its turn is
+    /// over.
     BetweenSteps {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stops: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
+    },
+    /// The session's hook placed these interface notices of a briefing in
+    /// its context (`Briefing::interface_notice_ids`), so no between-step
+    /// watcher tells them again (issue #214). A hook reports only the ones
+    /// its rendered text showed.
+    InterfaceShown {
+        session_id: String,
+        notice_ids: Vec<String>,
     },
     Complete {
         session_id: String,
@@ -4943,6 +4989,9 @@ enum CommandWire {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         failure: Option<String>,
+        /// The host's ID of the prompt whose reply finished (issue #214).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
     },
     /// A batch of the session's tool calls has finished.
     ObserveToolBatch {
@@ -6185,10 +6234,14 @@ fn decide_checked(
         Command::SessionStop {
             session_id,
             failure,
+            prompt_id,
         } => {
             known_session(state, session_id)?;
             if let Some(failure) = failure {
                 validate_failure(failure)?;
+            }
+            if let Some(prompt_id) = prompt_id {
+                validate_request_id(prompt_id)?;
             }
             // Only what the session's own tool calls hold, in this
             // generation, and not already past its deadline (that is the
@@ -6218,6 +6271,7 @@ fn decide_checked(
                 failure: failure.clone(),
                 at_ms: now_ms,
                 generation: state.generation,
+                prompt_id: prompt_id.clone(),
             });
             Ok(Decision {
                 events,
@@ -6245,17 +6299,58 @@ fn decide_checked(
                 },
             })
         }
-        Command::BetweenSteps { session_id, stops } => {
+        Command::InterfaceShown {
+            session_id,
+            notice_ids,
+        } => {
+            current_session(state, session_id)?;
+            validate_told(notice_ids)?;
+            // A notice told before, either way, is not recorded twice.
+            let newly_told: Vec<String> = notice_ids
+                .iter()
+                .filter(|id| !told_notices(state, session_id).any(|told| told.notice_id == **id))
+                .cloned()
+                .collect();
+            let events = if newly_told.is_empty() {
+                Vec::new()
+            } else {
+                vec![Event::InterfaceNoticesTold {
+                    session_id: session_id.clone(),
+                    notice_ids: newly_told,
+                    via: NoticeVia::Briefing,
+                }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::InterfaceAcknowledged {
+                    session_id: session_id.clone(),
+                    notice_ids: notice_ids.clone(),
+                },
+            })
+        }
+        Command::BetweenSteps {
+            session_id,
+            stops,
+            prompt_id,
+        } => {
             let me = known_session(state, session_id)?;
+            if let Some(prompt_id) = prompt_id {
+                validate_request_id(prompt_id)?;
+            }
             let activity = state
                 .activity
                 .get(session_id)
                 .filter(|activity| activity.generation == state.generation);
             let now_stops = activity.map_or(0, |activity| activity.stops);
-            // The watcher's turn is over once a reply finished after its
-            // first ask; an ended or earlier-generation session has none.
+            // The watcher's turn is over once its own prompt's reply
+            // finished, whenever its first answer came, or once any reply
+            // finished after its first ask; an ended or earlier-generation
+            // session has none.
             let open = me.generation == state.generation
                 && !activity.is_some_and(|activity| activity.ended)
+                && !prompt_id.as_ref().is_some_and(|prompt| {
+                    activity.is_some_and(|activity| activity.stopped_prompts.contains(prompt))
+                })
                 && stops.is_none_or(|stops| stops == now_stops);
             let (notice_ids, interface_changes): (Vec<String>, Vec<InterfaceImpact>) = if open {
                 let alerted = activity.map_or(&[][..], |activity| activity.alerted.as_slice());
@@ -7188,7 +7283,7 @@ fn decide_checked(
                 }
                 _ => &[],
             };
-            let (mut briefing, signature, inflight_keys, notice_ids) =
+            let (mut briefing, signature, inflight_keys) =
                 brief(state, session_id, *max_peers, !*mid_turn, now_ms, inflight)?;
             briefing.left_work = left_work(state, session_id, left)?;
             // Not part of the signature: a prompt's briefing never carries
@@ -7265,14 +7360,20 @@ fn decide_checked(
                         keys: inflight_keys,
                     });
                 }
-                // Shown to the session only when the briefing is placed in
-                // its context: a changed one, or one it asked for itself.
-                // A notice told before is not recorded twice.
-                let newly_told: Vec<String> = notice_ids
-                    .into_iter()
-                    .filter(|id| !told_notices(state, session_id).any(|told| told.notice_id == *id))
+                // The MCP tool returns every notice, so asking there tells
+                // them all. A hook renders within a byte cap that can leave
+                // some out, so it reports the ones it showed itself
+                // (`InterfaceShown`). A notice told before is not recorded
+                // twice.
+                let newly_told: Vec<String> = briefing
+                    .interface_notice_ids
+                    .iter()
+                    .filter(|id| {
+                        !told_notices(state, session_id).any(|told| told.notice_id == **id)
+                    })
+                    .cloned()
                     .collect();
-                if (briefing.changed || *mcp) && !newly_told.is_empty() {
+                if *mcp && !newly_told.is_empty() {
                     events.push(Event::InterfaceNoticesTold {
                         session_id: session_id.clone(),
                         notice_ids: newly_told,
@@ -9260,7 +9361,7 @@ fn brief(
     handoffs: bool,
     now_ms: u64,
     inflight: &[InflightSymbol],
-) -> Result<(Briefing, String, Vec<String>, Vec<String>), CoreError> {
+) -> Result<(Briefing, String, Vec<String>), CoreError> {
     let me = current_session(state, session_id)?;
     let repository = state
         .workspace_git
@@ -9850,6 +9951,7 @@ fn brief(
             stale_reads,
             remote,
             interface_changes,
+            interface_notice_ids: notice_ids,
             omitted_inflight: u32::try_from(owed.len() - inflight_notices.len())
                 .unwrap_or(u32::MAX),
             inflight: inflight_notices,
@@ -9875,7 +9977,6 @@ fn brief(
         },
         signature,
         inflight_keys,
-        notice_ids,
     ))
 }
 
@@ -11576,11 +11677,15 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             session_id,
             failure,
             generation,
+            prompt_id,
             ..
         } => {
             known_session(state, session_id)?;
             if let Some(failure) = failure {
                 validate_failure(failure)?;
+            }
+            if let Some(prompt_id) = prompt_id {
+                validate_request_id(prompt_id)?;
             }
             if *generation != state.generation {
                 return Err(error(
@@ -11593,6 +11698,12 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             if let Some(activity) = state.activity.get_mut(session_id) {
                 activity.wrote_since_boundary = false;
                 activity.stops = activity.stops.saturating_add(1);
+                if let Some(prompt_id) = prompt_id {
+                    let stopped = &mut activity.stopped_prompts;
+                    stopped.retain(|held| held != prompt_id);
+                    stopped.insert(0, prompt_id.clone());
+                    stopped.truncate(MAX_STOPPED_PROMPTS);
+                }
             }
         }
         Event::ToolBatchObserved {
@@ -12418,15 +12529,8 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             via,
         } => {
             current_session(state, session_id)?;
-            if notice_ids.is_empty() || notice_ids.len() > BRIEF_INTERFACE_NOTICES {
-                return Err(error(
-                    "invalid_event",
-                    "A delivery tells 1 to 4 interface notices",
-                ));
-            }
-            notice_ids
-                .iter()
-                .try_for_each(|id| validate_request_id(id))?;
+            validate_told(notice_ids)
+                .map_err(|failure| error("invalid_event", &failure.message))?;
             let told = &mut activity_mut(state, session_id).notices_told;
             told.retain(|held| !notice_ids.contains(&held.notice_id));
             for id in notice_ids.iter().rev() {
@@ -12593,6 +12697,18 @@ fn validate_alerted(notice_ids: &[String]) -> Result<(), CoreError> {
         return Err(error(
             "invalid_alert",
             "An interface alert names 1 to 8 notices",
+        ));
+    }
+    notice_ids.iter().try_for_each(|id| validate_request_id(id))
+}
+
+/// The notices one briefing or one between-step delivery told: 1 to
+/// `BRIEF_INTERFACE_NOTICES` valid IDs (issue #214).
+fn validate_told(notice_ids: &[String]) -> Result<(), CoreError> {
+    if notice_ids.is_empty() || notice_ids.len() > BRIEF_INTERFACE_NOTICES {
+        return Err(error(
+            "invalid_told",
+            "A delivery tells 1 to 4 interface notices",
         ));
     }
     notice_ids.iter().try_for_each(|id| validate_request_id(id))

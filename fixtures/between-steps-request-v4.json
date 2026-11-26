@@ -1,1 +1,1 @@
-{"version":4,"request_id":"lsh1-between-steps-0123456789abcdef0123456789abcdef","command":{"op":"between_steps","session_id":"claude-code.alice","stops":3}}
+{"version":4,"request_id":"lsh1-between-steps-0123456789abcdef0123456789abcdef","command":{"op":"between_steps","session_id":"claude-code.alice","stops":3,"prompt_id":"38ca4096-2385-4d27-97e1-59b74594c136"}}

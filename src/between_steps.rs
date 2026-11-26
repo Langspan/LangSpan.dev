@@ -10,8 +10,11 @@
 //! touches a file the session works on or has read, and that no briefing,
 //! write-time alert or earlier delivery told it. When one does, it prints
 //! the notice to stderr and exits 2. It exits 0, silently, when the turn it
-//! started in is over (the session finished a reply), the session ended,
-//! the coordinator cannot be reached, or `WATCH_LIMIT` passed.
+//! started in is over (the reply to its own prompt, or any later reply,
+//! finished), the session ended, the coordinator cannot be reached or does
+//! not know the session once `START_GRACE` has passed (the prompt hook
+//! beside it may still be starting the coordinator or registering the
+//! session), or `WATCH_LIMIT` passed.
 //!
 //! The delivery is advisory. Claude Code gives a background hook's
 //! decision fields no effect, and the watcher writes none: it can hold,
@@ -36,8 +39,9 @@ pub const WATCH_LIMIT: Duration = Duration::from_secs(20 * 60);
 /// The hook entry's `timeout`, in seconds: past `WATCH_LIMIT`, so the host
 /// never stops a watcher that is about to stop itself.
 pub const HOST_TIMEOUT_SECONDS: u64 = WATCH_LIMIT.as_secs() + 60;
-/// How long the watcher keeps asking for a session the coordinator does
-/// not know yet: the prompt hook that registers it runs at the same time.
+/// How long the watcher keeps asking a coordinator it cannot reach, or one
+/// that does not know the session yet: the prompt hook that starts the
+/// coordinator and registers the session runs at the same time.
 const START_GRACE: Duration = Duration::from_secs(10);
 /// One ask's bound.
 const CALL_BUDGET: Duration = Duration::from_millis(1500);
@@ -69,6 +73,9 @@ struct HostEvent {
     session_id: Option<String>,
     cwd: Option<String>,
     agent_id: Option<String>,
+    /// The prompt this watcher runs for. Its own reply's stop names it, so
+    /// the turn is over then even if that came before the first answer.
+    prompt_id: Option<String>,
     /// Cursor runs Claude Code's hooks with its own payload, which carries
     /// this; it has no between-step delivery (see `claude_code`).
     cursor_version: Option<serde_json::Value>,
@@ -103,6 +110,7 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
             Err(reply) => return Watched::quiet(reply.detail),
         };
     let session_id = format!("{}.{host_session}", crate::claude_code::SOURCE);
+    let prompt_id = crate::hook::prompt_event_id(event.prompt_id.as_deref()).map(str::to_owned);
     // Unique to this watcher, so no ask is ever answered from another's
     // receipt.
     let nonce = format!(
@@ -123,6 +131,7 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
             command: Command::BetweenSteps {
                 session_id: session_id.clone(),
                 stops,
+                prompt_id: prompt_id.clone(),
             },
         };
         let deadline = Instant::now() + CALL_BUDGET;
@@ -143,14 +152,19 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
                 return Watched::quiet("the turn is over");
             }
             Ok(Outcome::BetweenSteps { stops: now, .. }) => stops = Some(now),
-            // The prompt hook may not have registered the session yet.
+            // The prompt hook that runs beside this watcher may not have
+            // started the coordinator or registered the session yet.
             Ok(Outcome::Error { code, message }) => {
                 if started.elapsed() >= START_GRACE {
                     return Watched::quiet(format!("{code}: {message}"));
                 }
             }
             Ok(_) => return Watched::quiet("unexpected coordinator answer"),
-            Err(error) => return Watched::quiet(format!("coordinator unavailable: {error}")),
+            Err(error) => {
+                if started.elapsed() >= START_GRACE {
+                    return Watched::quiet(format!("coordinator unavailable: {error}"));
+                }
+            }
         }
         std::thread::sleep(POLL);
     }

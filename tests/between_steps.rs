@@ -63,24 +63,8 @@ impl World {
         let state = base.join("state");
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-        let world = Self {
-            daemon: Some(
-                Process::new(env!("CARGO_BIN_EXE_langspan"))
-                    .env("LANGSPAN_AUTOSTART", "off")
-                    .args(["daemon", "--state-dir"])
-                    .arg(&state)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .unwrap(),
-            ),
-            base,
-        };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while world.cli(&["status"]).0 != 0 {
-            assert!(Instant::now() < deadline, "daemon did not become ready");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let mut world = Self { daemon: None, base };
+        world.start_daemon();
         let root = world.work();
         let (code, text) = world.cli(&[
             "workspace",
@@ -92,6 +76,34 @@ impl World {
         ]);
         assert_eq!(code, 0, "{text}");
         world
+    }
+    fn start_daemon(&mut self) {
+        self.daemon = Some(
+            Process::new(env!("CARGO_BIN_EXE_langspan"))
+                .env("LANGSPAN_AUTOSTART", "off")
+                .args(["daemon", "--state-dir"])
+                .arg(self.base.join("state"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.cli(&["status"]).0 != 0 {
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn stop_daemon(&mut self) {
+        if let Some(mut child) = self.daemon.take() {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.cli(&["status"]).0 == 0 {
+            assert!(Instant::now() < deadline, "daemon did not stop");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
     fn work(&self) -> PathBuf {
         self.base.join("work")
@@ -212,6 +224,19 @@ impl Drop for World {
 fn prompt_event(root: &Path, session: &str) -> Value {
     json!({"session_id": session, "cwd": root,
            "hook_event_name": "UserPromptSubmit", "prompt": "continue"})
+}
+
+/// The prompt event as Claude Code sends it, with the prompt's own ID.
+fn prompt_event_for(root: &Path, session: &str, prompt: &str) -> Value {
+    let mut event = prompt_event(root, session);
+    event["prompt_id"] = json!(prompt);
+    event
+}
+
+/// The Stop event of the reply to `prompt`.
+fn stop_event(root: &Path, session: &str, prompt: &str) -> Value {
+    json!({"session_id": session, "cwd": root, "hook_event_name": "Stop",
+           "prompt_id": prompt})
 }
 
 /// The watcher's exit code and stderr, once it exits within `within`.
@@ -368,4 +393,123 @@ fn a_cursor_event_or_another_event_ends_the_watcher_at_once() {
     let (code, stderr) = finished(tool, Duration::from_secs(10));
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("prompt only"), "{stderr}");
+}
+
+/// Review comment 4712432075: the watcher can ask before the prompt hook
+/// beside it has started the coordinator. It keeps asking within its
+/// startup grace, and tells the notice once the coordinator is up.
+#[test]
+fn a_watcher_started_before_the_coordinator_waits_for_it_and_still_tells() {
+    let mut w = World::new();
+    w.stop_daemon();
+    let mut watcher = w.watcher(prompt_event_for(&w.work(), "alice", "prompt-1"));
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        watcher.try_wait().unwrap().is_none(),
+        "an unreachable coordinator is retried within the startup grace"
+    );
+    // The prompt hook's coordinator is up; alice's turn goes on.
+    w.start_daemon();
+    w.edits("alice", "a1", "src/main.rs", &format!("{MAIN}// touched\n"));
+    w.indexed("alice's edit indexed", "references", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 2
+    });
+    change_signature(&w);
+    let (code, stderr) = finished(watcher, WAIT);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains(r#"Interface change in "src/upload.rs""#),
+        "{stderr}"
+    );
+}
+
+/// A coordinator that never comes ends the watcher, quietly, once the
+/// startup grace has passed: not at the first refused connection.
+#[test]
+fn a_watcher_ends_quietly_when_the_coordinator_never_comes() {
+    let mut w = World::new();
+    w.stop_daemon();
+    let started = Instant::now();
+    let mut watcher = w.watcher(prompt_event_for(&w.work(), "alice", "prompt-1"));
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(watcher.try_wait().unwrap().is_none());
+    let (code, stderr) = finished(watcher, WAIT);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("coordinator unavailable"), "{stderr}");
+    assert!(
+        started.elapsed() >= Duration::from_secs(10),
+        "after the grace"
+    );
+}
+
+/// Review comment 4712602568: the reply to the watcher's prompt finished
+/// before the watcher's first answer. The watcher, bound to its prompt,
+/// ends at once and a later change never wakes the idle session.
+#[test]
+fn a_watcher_whose_prompt_already_finished_ends_and_never_wakes_the_session() {
+    let w = World::new();
+    w.edits("alice", "a1", "src/main.rs", &format!("{MAIN}// touched\n"));
+    w.indexed("alice's edit indexed", "references", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 2
+    });
+    w.hook(prompt_event_for(&w.work(), "alice", "prompt-1"));
+    assert_eq!(
+        w.hook(stop_event(&w.work(), "alice", "prompt-1")).0,
+        "stopped"
+    );
+    // The watcher for that prompt asks only now.
+    let late = w.watcher(prompt_event_for(&w.work(), "alice", "prompt-1"));
+    let (code, stderr) = finished(late, Duration::from_secs(10));
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("the turn is over"), "{stderr}");
+    // The watcher of alice's next prompt is open and tells the change.
+    w.hook(prompt_event_for(&w.work(), "alice", "prompt-2"));
+    let next = w.watcher(prompt_event_for(&w.work(), "alice", "prompt-2"));
+    std::thread::sleep(Duration::from_secs(2));
+    change_signature(&w);
+    let (code, stderr) = finished(next, WAIT);
+    assert_eq!(code, 2, "{stderr}");
+    let stopped: Vec<Value> = w
+        .events()
+        .into_iter()
+        .filter(|event| event["type"] == "session_stopped")
+        .collect();
+    assert_eq!(stopped.len(), 1, "{stopped:#?}");
+    assert_eq!(stopped[0]["prompt_id"], "prompt-1");
+}
+
+/// Review comment 4712432083, end to end: a notice the prompt hook's
+/// briefing showed is recorded as told in a briefing, so no watcher tells
+/// it again.
+#[test]
+fn a_notice_a_prompt_briefing_showed_is_recorded_and_not_told_again() {
+    let w = World::new();
+    w.edits("alice", "a1", "src/main.rs", &format!("{MAIN}// touched\n"));
+    w.indexed("alice's edit indexed", "references", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 2
+    });
+    change_signature(&w);
+    let deadline = Instant::now() + WAIT;
+    while !w
+        .prompt("alice")
+        .is_some_and(|context| context.contains(r#"Interface change in "src/upload.rs""#))
+    {
+        assert!(Instant::now() < deadline, "alice was never briefed");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let told: Vec<Value> = w
+        .events()
+        .into_iter()
+        .filter(|event| event["type"] == "interface_notices_told")
+        .collect();
+    assert_eq!(told.len(), 1, "{told:#?}");
+    assert_eq!(told[0]["via"], "briefing");
+    let watcher = w.watcher(prompt_event_for(&w.work(), "alice", "prompt-3"));
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        w.hook(stop_event(&w.work(), "alice", "prompt-3")).0,
+        "stopped"
+    );
+    let (code, stderr) = finished(watcher, WAIT);
+    assert_eq!(code, 0, "already told: {stderr}");
 }
