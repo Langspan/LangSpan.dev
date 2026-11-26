@@ -153,7 +153,12 @@ definition's bytes after its signature, compared by SHA-256 digest
 index keeps each baseline function's digest in a column of its own. When two
 candidates on either side have the same shape, nothing is linked. Any other
 change made in the same transition (a new body, a parameter, a return type)
-leaves it a removal and an addition, as before. The notice is `renamed`, under
+leaves it a removal and an addition, as before. Roadmap D7 (26 November 2026)
+also links a new body at the same first and last line, with `evidence:
+"same_signature"`, and records `same_body` for the rule above; a pair is
+linked only when each is the other's one candidate (ADR 0008). A file moved
+whole is `renamed` with `file_moved` and the same name: the name is not gone,
+so no call of it alerts. The notice is `renamed`, under
 the old name (the one the calls still use, so the dependents are the files
 that mention it), with the new name in `after_name` and both signatures. A
 removal's notice now also keeps the signature it had, in `before`.
@@ -222,12 +227,13 @@ Any failure is a note in the diagnostic, never a decision.
   time; it remains in the prompt briefing. Keyword arguments are counted as
   arguments, not matched to names. See "Not now" below for the same-count
   case.
-- A rename is linked only when nothing but the name changed, in one file. A
-  rename across files is a removal from one and an addition to the other,
-  and its removal does not alert while the new file defines the old name.
-  A recursive function's body names the function, so renaming it changes the
-  body and it is a removal. A function without a body (a Rust trait method
-  declaration) is never linked. Calls to a removed name may reach a library
+- A rename is linked only when the signature apart from the name is
+  unchanged and the body or the lines are too, in one file. A rename across
+  files is a removal from one and an addition to the other, and its removal
+  does not alert while the new file defines the old name. A recursive
+  function's body names the function, so renaming it changes the body: it is
+  a rename only while its lines stay the same (D7). A function without a body
+  (a Rust trait method declaration) is linked only by its lines. Calls to a removed name may reach a library
   function of the same name that the index does not hold; such a call is
   alerted to once per notice, like any other name match.
 - A rename is told under the old name in the prompt briefing too (`function
@@ -325,16 +331,18 @@ For roadmap B10, `tests/break_alerts.rs` also has a Python rename recorded as
 `renamed` with its new name, whose old-name call gets one line naming the new
 name and file while a call of the new name gets nothing, once per session
 (`a_call_to_a_peers_renamed_function_is_told_the_new_name_once`); a Rust rename
-with a new body recorded as a removal, whose call gets one "removed" line,
-once (`a_rename_with_a_changed_body_is_a_removal_and_a_call_to_it_is_told_once`);
+with a new body over other lines recorded as a removal, whose call gets one
+"removed" line, once
+(`a_rename_with_a_changed_body_is_a_removal_and_a_call_to_it_is_told_once`);
 a Go function moved to another file, not told as removed
 (`a_removed_name_still_defined_elsewhere_is_not_told`); and a TypeScript type
 change that keeps the count, not told
 (`a_signature_change_that_keeps_the_count_is_not_told_at_the_write`).
 `crates/langspan-graph/tests/renames.rs` covers rename detection in the four
-languages, a renamed method and arrow function, a changed body, parameter or
-return type staying a removal and an addition, and ambiguous, undigested,
-type and bodiless pairs never linked; `crates/langspan-core/tests/renames.rs`
+languages, a renamed method and arrow function, a changed body at the same
+lines as `same_signature`, a changed body over other lines, parameter or
+return type staying a removal and an addition, and ambiguous, undigested and
+type pairs never linked; `crates/langspan-core/tests/renames.rs`
 the shape of a `renamed` change; `src/graph.rs` a rename through a real index
 pass and an index from before body digests; and `src/breaks.rs` the rename and
 removal lines and their bounds.

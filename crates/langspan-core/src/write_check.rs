@@ -15,8 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BRIEF_HORIZON_MS, CoreError, FileState, HISTORY_NAME_BYTES, InterfaceNotice, LeaseStatus,
-    LineRange, State, SymbolRef, WrittenLines, current_session, error, known_versions,
+    BRIEF_HORIZON_MS, CoreError, FILE_MOVED, FileState, HISTORY_NAME_BYTES, InterfaceNotice,
+    LeaseStatus, LineRange, State, SymbolRef, WrittenLines, current_session, error, known_versions,
     validate_relative_path,
 };
 
@@ -409,7 +409,13 @@ pub fn write_check(
     // Recorded interface changes, each only while the index still holds it.
     for notice in recent_notices(state, session_id, &request.workspace_id, now_ms) {
         for change in &notice.changes {
-            if !asked(&change.name, &notice.path) {
+            // A definition that moved with its whole file (roadmap D7) kept
+            // its name and signature: it is not removed or renamed away. One
+            // that is not exported is history only.
+            if !asked(&change.name, &notice.path)
+                || change.private
+                || change.evidence.as_deref() == Some(FILE_MOVED)
+            {
                 continue;
             }
             let (kind, renamed_to) = match change.change.as_str() {

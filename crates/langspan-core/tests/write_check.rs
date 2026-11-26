@@ -63,6 +63,10 @@ fn changed(name: &str, change: &str, before: &str, after: Option<&str>) -> Inter
         before: Some(before.into()),
         after: after.map(Into::into),
         after_name: None,
+        before_name: None,
+        evidence: None,
+        before_path: None,
+        private: false,
         before_arity: None,
         after_arity: None,
         before_count: None,
@@ -248,6 +252,81 @@ fn a_signature_a_peer_changed_two_minutes_ago_is_reported_with_its_session_and_a
     let blind = write_check(&state, "bob", &asked, &no_paths(&asked), None, now);
     assert!(!blind.index_ready && blind.symbols.is_empty());
     assert_eq!(blind.paths.len(), 1);
+}
+
+/// Roadmap D7's rename records meet B26's answers: a rename with its
+/// evidence and old name is still a rename away from the old name, while a
+/// definition that moved with its whole file, exported or not, is neither
+/// removed nor renamed, even before the index holds it at the new path.
+#[test]
+fn a_tracked_rename_is_answered_and_a_moved_file_is_not_a_removal() {
+    let mut state = ready();
+    let mut renamed = changed(
+        "parse_config",
+        "renamed",
+        "def parse_config(path)",
+        Some("def parse_config(path)"),
+    );
+    renamed.after_name = Some("load_config".into());
+    renamed.before_name = Some("parse_config".into());
+    renamed.evidence = Some("same_signature".into());
+    let moved = |name: &str, private: bool| InterfaceChange {
+        after_name: Some(name.into()),
+        before_name: Some(name.into()),
+        evidence: Some("file_moved".into()),
+        before_path: Some("app/old.py".into()),
+        private,
+        ..changed(name, "renamed", "def f()", Some("def f()"))
+    };
+    notice(
+        &mut state,
+        "n1",
+        "app/config.py",
+        "alice",
+        10,
+        vec![renamed],
+    );
+    notice(
+        &mut state,
+        "n2",
+        "app/new.py",
+        "alice",
+        11,
+        vec![moved("helper", false), moved("_inner", true)],
+    );
+    let asked = request(&state, "bob", &["app/config.py", "app/new.py"], &[]);
+    let check = write_check(
+        &state,
+        "bob",
+        &asked,
+        &no_paths(&asked),
+        Some(&read_all(&[])),
+        20,
+    );
+    let found: Vec<(&str, &str, Option<&str>)> = check
+        .symbols
+        .iter()
+        .map(|s| (s.name.as_str(), s.change.as_str(), s.renamed_to.as_deref()))
+        .collect();
+    assert_eq!(
+        found,
+        [("parse_config", "removed", Some("load_config"))],
+        "{found:?}"
+    );
+    // Asked by name, the moved definitions are still not reported.
+    let by_name = request(&state, "bob", &["app/new.py"], &["helper", "_inner"]);
+    assert!(
+        write_check(
+            &state,
+            "bob",
+            &by_name,
+            &no_paths(&by_name),
+            Some(&read_all(&[])),
+            20
+        )
+        .symbols
+        .is_empty()
+    );
 }
 
 #[test]
