@@ -847,6 +847,361 @@ mod unix {
         Ok(Outcome::GraphContext { matches, coverage })
     }
 
+    /// In-flight symbols `graph inflight` reads from one worktree's index,
+    /// at most.
+    const INFLIGHT_PER_WORKTREE: usize = 128;
+    /// In-flight symbols compared with the asking workspace's files, at most:
+    /// for `graph inflight` across worktrees, and for one briefing.
+    const INFLIGHT_OFFERED: usize = 256;
+
+    /// A place in the in-flight rows of a repository's worktrees, ordered by
+    /// worktree workspace and then as `Index::inflight` orders a worktree's.
+    type InflightAt = (String, crate::graph::InflightRow);
+
+    /// Per session, the last in-flight row its briefings went past without
+    /// finding anything to offer before it (review comment 4704678374).
+    /// Each briefing reads at most `INFLIGHT_OFFERED` rows from there, and
+    /// from the first row again after the last, so every row is read in
+    /// turn, however many there are. Only the request thread uses it. A
+    /// restart loses it, which costs a briefing or two, never a notice: what
+    /// a session was told is recorded in the store.
+    static BRIEF_WINDOWS: std::sync::Mutex<std::collections::BTreeMap<String, InflightAt>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+    /// The other worktrees of `workspace_id`'s repository whose index has a
+    /// complete scan, in workspace order, with their registrations.
+    fn inflight_worktrees<'a>(
+        state: &'a State,
+        workspace_id: &str,
+    ) -> Vec<(&'a String, Registration)> {
+        let Some(git) = state.workspace_git.get(workspace_id) else {
+            return Vec::new();
+        };
+        state
+            .workspace_git
+            .iter()
+            .filter(|(other, other_git)| {
+                *other != workspace_id && other_git.repository_id == git.repository_id
+            })
+            .filter_map(|(other, _)| Some((other, Registration::of(state, other)?)))
+            .collect()
+    }
+
+    /// Up to `budget` in-flight rows of other worktrees after `after`, in
+    /// order, and whether they run to the last row.
+    fn inflight_after(
+        graph: &crate::graph::Index,
+        state: &State,
+        workspace_id: &str,
+        after: Option<&InflightAt>,
+        budget: usize,
+    ) -> Result<(Vec<InflightAt>, bool), Box<dyn std::error::Error + Send + Sync>> {
+        let mut rows = Vec::new();
+        for (other, at) in inflight_worktrees(state, workspace_id) {
+            if after.is_some_and(|(from, _)| other < from) {
+                continue;
+            }
+            let from = after.filter(|(from, _)| from == other).map(|(_, row)| row);
+            let left = budget - rows.len();
+            // One more than is left, to tell the last row from a cut.
+            let (read, coverage) =
+                graph.with_coverage(&at, |graph| graph.inflight_after(other, from, left + 1))?;
+            if !coverage.scanned {
+                continue;
+            }
+            let cut = read.len() > left;
+            rows.extend(read.into_iter().take(left).map(|row| (other.clone(), row)));
+            if cut {
+                return Ok((rows, false));
+            }
+        }
+        Ok((rows, true))
+    }
+
+    /// Which of `offered` the asking workspace's files mention: the files in
+    /// `among` for a briefing, any file for `graph inflight`. Each found
+    /// item comes with its place in `offered`. `keep` decides which count
+    /// toward `limit`; the flag says more were found. The coverage is the
+    /// asking workspace's, and an asking workspace without a complete scan
+    /// finds nothing.
+    #[allow(clippy::type_complexity)]
+    fn inflight_mentioned(
+        graph: &crate::graph::Index,
+        of: &Registration,
+        workspace_id: &str,
+        among: Option<&std::collections::BTreeSet<String>>,
+        offered: Vec<InflightAt>,
+        limit: usize,
+        keep: impl Fn(&langspan_core::InflightSymbol) -> bool,
+    ) -> Result<
+        (
+            Vec<(usize, langspan_core::InflightSymbol)>,
+            langspan_core::GraphCoverage,
+            bool,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        if offered.is_empty() {
+            // Nothing to look up, but the answer still says whether the
+            // asking workspace is indexed.
+            let ((), coverage) = graph.with_coverage(of, |_| Ok(()))?;
+            return Ok((Vec::new(), coverage, false));
+        }
+        let ((found, more), coverage) = graph.with_coverage(of, |graph| {
+            let imports = graph.imports_of(workspace_id, among)?;
+            let mut found = Vec::new();
+            for (place, (other, (path, name, kind, signature))) in offered.into_iter().enumerate() {
+                let mentioned_in = graph.mentioning(
+                    workspace_id,
+                    (&path, &name),
+                    &imports,
+                    among,
+                    langspan_core::INFLIGHT_MENTIONS,
+                )?;
+                if mentioned_in.is_empty() {
+                    continue;
+                }
+                let item = langspan_core::InflightSymbol {
+                    workspace_id: other,
+                    path,
+                    name,
+                    kind,
+                    signature,
+                    mentioned_in,
+                };
+                if !keep(&item) {
+                    continue;
+                }
+                if found.len() == limit {
+                    return Ok((found, true));
+                }
+                found.push((place, item));
+            }
+            Ok((found, false))
+        })?;
+        if !coverage.scanned {
+            return Ok((Vec::new(), coverage, false));
+        }
+        Ok((found, coverage, more))
+    }
+
+    /// What other worktrees have in flight (roadmap C7) that the session's
+    /// files mention and it was not told, for its briefing: from the rows
+    /// after its window's place, at most `INFLIGHT_OFFERED` of them, wrapping
+    /// to the first row after the last. The window then starts just before
+    /// the first item offered, or after the last row read when none was, so
+    /// an item not told this time is read again first, and rows past it are
+    /// reached once what precedes them is told or not mentioned.
+    fn brief_inflight(
+        graph: &crate::graph::Index,
+        state: &State,
+        session_id: &str,
+        workspace_id: &str,
+        concerned: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<langspan_core::InflightSymbol>, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(of) = Registration::of(state, workspace_id) else {
+            return Ok(Vec::new());
+        };
+        let mut windows = BRIEF_WINDOWS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        windows.retain(|session, _| state.sessions.contains_key(session));
+        let from = windows.get(session_id).cloned();
+        let (mut rows, end) =
+            inflight_after(graph, state, workspace_id, from.as_ref(), INFLIGHT_OFFERED)?;
+        if let Some(from) = from.as_ref().filter(|_| end) {
+            let (first, _) = inflight_after(
+                graph,
+                state,
+                workspace_id,
+                None,
+                INFLIGHT_OFFERED - rows.len(),
+            )?;
+            rows.extend(first.into_iter().take_while(|row| row <= from));
+        }
+        let place = |at: usize| at.checked_sub(1).map(|at| rows[at].clone());
+        let last = rows.last().cloned();
+        let read = rows.len();
+        let (found, _, _) = inflight_mentioned(
+            graph,
+            &of,
+            workspace_id,
+            Some(concerned),
+            rows.clone(),
+            langspan_core::INFLIGHT_CANDIDATES,
+            |item| !langspan_core::inflight_told(state, session_id, item),
+        )?;
+        let next = match found.first() {
+            Some((0, _)) => from,
+            Some((first, _)) => place(*first),
+            None if read == 0 => None,
+            None => last,
+        };
+        match next {
+            Some(next) => windows.insert(session_id.to_owned(), next),
+            None => windows.remove(session_id),
+        };
+        Ok(found.into_iter().map(|(_, item)| item).collect())
+    }
+
+    /// `Brief` with what the index finds in flight in other worktrees for
+    /// the session's own files. An index that cannot be read leaves it out.
+    fn prepare_brief(
+        state: &State,
+        graph: Option<&crate::graph::Index>,
+        command: &Command,
+    ) -> Command {
+        let Command::Brief {
+            session_id,
+            max_peers,
+            deliver,
+            mid_turn,
+            left,
+            recent,
+            recent_window_ms,
+            mcp,
+        } = command
+        else {
+            return command.clone();
+        };
+        // The window is the daemon's configuration, whatever a client
+        // sent (roadmap C3).
+        let recent_window_ms = if *recent {
+            RECENT_WINDOW_MS.get().copied()
+        } else {
+            *recent_window_ms
+        };
+        let inflight = graph
+            .zip(langspan_core::briefing_concern(state, session_id, now_ms()))
+            .filter(|(_, (_, concerned))| !concerned.is_empty())
+            .and_then(|(graph, (workspace_id, concerned))| {
+                brief_inflight(graph, state, session_id, &workspace_id, &concerned)
+                .inspect_err(|error| {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({"level":"warn","event":"inflight_unavailable","detail":error.to_string()})
+                    );
+                })
+                .ok()
+            })
+            .unwrap_or_default();
+        Command::BriefPrepared {
+            session_id: session_id.clone(),
+            max_peers: *max_peers,
+            deliver: *deliver,
+            mid_turn: *mid_turn,
+            recent: *recent,
+            recent_window_ms,
+            mcp: *mcp,
+            left: left.clone(),
+            inflight,
+        }
+    }
+
+    /// What `graph inflight` compares: the first `INFLIGHT_PER_WORKTREE`
+    /// rows of each other worktree, at most `INFLIGHT_OFFERED` in all. The
+    /// flag says a limit left rows unread or more were found than are
+    /// listed, so the comparison was partial (review comment 4704149471).
+    #[allow(clippy::type_complexity)]
+    fn listed_inflight(
+        graph: &crate::graph::Index,
+        state: &State,
+        workspace_id: &str,
+    ) -> Result<
+        (
+            Vec<(usize, langspan_core::InflightSymbol)>,
+            langspan_core::GraphCoverage,
+            bool,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let Some(of) = Registration::of(state, workspace_id) else {
+            return Ok((Vec::new(), langspan_core::GraphCoverage::default(), false));
+        };
+        let mut offered = Vec::new();
+        // One more row than the limit is read to tell a full worktree from
+        // a cut one.
+        let mut capped = false;
+        for (other, at) in inflight_worktrees(state, workspace_id) {
+            let (mut rows, coverage) = graph.with_coverage(&at, |graph| {
+                graph.inflight(other, INFLIGHT_PER_WORKTREE + 1)
+            })?;
+            if !coverage.scanned {
+                continue;
+            }
+            if rows.len() > INFLIGHT_PER_WORKTREE {
+                rows.truncate(INFLIGHT_PER_WORKTREE);
+                capped = true;
+            }
+            offered.extend(rows.into_iter().map(|row| (other.clone(), row)));
+            if offered.len() > INFLIGHT_OFFERED {
+                offered.truncate(INFLIGHT_OFFERED);
+                capped = true;
+                break;
+            }
+        }
+        let (found, coverage, more) = inflight_mentioned(
+            graph,
+            &of,
+            workspace_id,
+            None,
+            offered,
+            crate::graph::MAX_RESULTS as usize,
+            |_| true,
+        )?;
+        let partial = coverage.scanned && (more || capped);
+        Ok((found, coverage, partial))
+    }
+
+    /// `graph inflight`: what other worktrees have in flight that any of
+    /// the workspace's files mention.
+    fn graph_inflight(
+        graph: Option<&crate::graph::Index>,
+        state: &State,
+        workspace_id: &str,
+    ) -> Result<Outcome, String> {
+        if !state.workspaces.contains_key(workspace_id) {
+            return Err("workspace is not registered".into());
+        }
+        let graph = graph.ok_or("the index is not available yet; try again shortly")?;
+        let (found, coverage, truncated) =
+            listed_inflight(graph, state, workspace_id).map_err(|error| error.to_string())?;
+        let mut inflight: Vec<langspan_core::InflightNotice> = found
+            .iter()
+            .filter_map(|(_, item)| langspan_core::inflight_notice(state, item))
+            .collect();
+        let cut = fit_inflight(&mut inflight, &coverage);
+        Ok(Outcome::GraphInflight {
+            inflight,
+            coverage,
+            truncated: truncated || cut,
+        })
+    }
+
+    /// Keep the leading in-flight notices whose answer fits one response
+    /// frame. Returns whether any was left out.
+    fn fit_inflight(
+        notices: &mut Vec<langspan_core::InflightNotice>,
+        coverage: &langspan_core::GraphCoverage,
+    ) -> bool {
+        // The envelope, the request ID and the outcome's other fields.
+        const ROOM: usize = 1024;
+        fn size(value: &impl serde::Serialize) -> usize {
+            serde_json::to_vec(value).map_or(usize::MAX / 2, |bytes| bytes.len())
+        }
+        let mut used = ROOM + size(coverage);
+        let keep = notices
+            .iter()
+            .take_while(|notice| {
+                used = used.saturating_add(size(*notice) + 1);
+                used < MAX_FRAME_BYTES
+            })
+            .count();
+        let cut = keep < notices.len();
+        notices.truncate(keep);
+        cut
+    }
+
     /// The write-time break check (ADR 0029). The calls are used for this
     /// answer only: never logged or recorded. What is recorded, when a
     /// break is found, is which notices the session was alerted to.
@@ -2249,8 +2604,13 @@ mod unix {
                 | Command::GraphImpact { .. }
                 | Command::GraphBlindSpots { .. }
                 | Command::GraphContext { .. }
+                | Command::GraphInflight { .. }
         ) {
             let answer = match &command {
+                Command::GraphInflight { workspace_id } => {
+                    graph_inflight(graph, store.state(), workspace_id)
+                        .map_err(|message| ("index_unavailable", message))
+                }
                 Command::GraphBlindSpots {
                     workspace_id,
                     limit,
@@ -2324,6 +2684,8 @@ mod unix {
                     return error(request_id, store.state().generation, code, message);
                 }
             }
+        } else if let Command::Brief { .. } = &command {
+            prepare_brief(store.state(), graph, &command)
         } else {
             match prepare(store.state(), &command) {
                 Ok(command) => command,
@@ -2700,27 +3062,6 @@ mod unix {
                     verified_overlaps,
                 })
             }
-            // The window is the daemon's configuration, whatever a client
-            // sent (roadmap C3).
-            Command::Brief {
-                session_id,
-                max_peers,
-                deliver,
-                mid_turn,
-                left,
-                recent: true,
-                mcp,
-                ..
-            } => Ok(Command::Brief {
-                session_id: session_id.clone(),
-                max_peers: *max_peers,
-                deliver: *deliver,
-                mid_turn: *mid_turn,
-                left: left.clone(),
-                recent: true,
-                recent_window_ms: RECENT_WINDOW_MS.get().copied(),
-                mcp: *mcp,
-            }),
             Command::IntentSet {
                 session_id,
                 paths,
