@@ -687,6 +687,7 @@ pub fn lifecycle_event(
         (&event.hook_event_name, event_id.as_deref()),
         &config,
         deadline,
+        BRIEFING_LIMIT,
     ))
 }
 
@@ -753,15 +754,41 @@ pub fn lifecycle_parsed(
     deadline: Instant,
 ) -> Reply {
     if !valid_host_id(host_session) {
-        return Reply::none(
-            "unsupported",
-            "lifecycle event lacks a usable session identity",
-        );
+        return no_session_identity();
     }
-    let config = match resolve_workspace(config, cwd, deadline) {
-        Ok(config) => config,
-        Err(reply) => return reply,
-    };
+    match resolve_workspace(config, cwd, deadline) {
+        Ok(config) => lifecycle_resolved(
+            source,
+            host_session,
+            kind,
+            (event_name, event_id),
+            &config,
+            deadline,
+            BRIEFING_LIMIT,
+        ),
+        Err(reply) => reply,
+    }
+}
+
+/// `lifecycle_parsed` for a workspace the adapter has already resolved
+/// (`resolve_workspace`), for a host whose session identity depends on it.
+/// `room` is what is left of the briefing limit for this workspace's
+/// context when one reply joins several (at most `BRIEFING_LIMIT`). With
+/// less than the whole limit, the briefing is first looked at without
+/// delivery and delivered only if it fits `room`; otherwise nothing is
+/// delivered, and its messages and check results wait for the next event.
+pub fn lifecycle_resolved(
+    source: &str,
+    host_session: &str,
+    kind: LifecycleKind,
+    (event_name, event_id): (&str, Option<&str>),
+    config: &Config,
+    deadline: Instant,
+    room: usize,
+) -> Reply {
+    if !valid_host_id(host_session) {
+        return no_session_identity();
+    }
     let event_id = event_id
         .filter(|id| valid_host_id(id) && id.len() <= 64)
         .filter(|_| matches!(kind, LifecycleKind::Prompt { .. }));
@@ -770,8 +797,16 @@ pub fn lifecycle_parsed(
         host_session,
         kind,
         (event_name, event_id),
-        &config,
+        config,
         deadline,
+        room.min(BRIEFING_LIMIT),
+    )
+}
+
+fn no_session_identity() -> Reply {
+    Reply::none(
+        "unsupported",
+        "lifecycle event lacks a usable session identity",
     )
 }
 
@@ -1080,6 +1115,7 @@ fn lifecycle(
     (event_name, event_id): (&str, Option<&str>),
     config: &Config,
     deadline: Instant,
+    room: usize,
 ) -> Reply {
     if Instant::now() >= deadline {
         return Reply::none("timeout", "hook deadline elapsed before coordination");
@@ -1188,12 +1224,16 @@ fn lifecycle(
             );
         }
     }
-    let mut briefing = match step(
-        "brief",
+    let code_part = || {
+        code.as_ref()
+            .map(|(matches, coverage)| (matches.as_slice(), coverage))
+    };
+    let brief = |kind: &str, deliver: bool| match step(
+        kind,
         Command::Brief {
             session_id: ids.session_id.clone(),
             max_peers: BRIEF_PEERS,
-            deliver: true,
+            deliver,
             mid_turn: false,
             // What changed recently goes only into a starting context.
             recent: starting,
@@ -1203,32 +1243,62 @@ fn lifecycle(
         Ok(Response {
             outcome: Outcome::Briefing { briefing },
             ..
-        }) => briefing,
-        Ok(other) => return Reply::none("unknown", format!("unexpected outcome {other:?}")),
-        Err(failure) => return failure_reply(failure),
+        }) => Ok(briefing),
+        Ok(other) => Err(Reply::none(
+            "unknown",
+            format!("unexpected outcome {other:?}"),
+        )),
+        Err(failure) => Err(failure_reply(failure)),
     };
     // The work ended sessions left uncommitted is confirmed against the line
     // journal within a quarter of the budget; past it, the recent section
-    // is left out and the rest of the briefing is sent.
-    if let Some(recent) = briefing.recent.as_mut() {
-        let share = (Instant::now() + config.budget / 4).min(deadline);
-        if let Err(reason) =
-            crate::recent::confirm_left(&config.state_dir, &ids.session_id, recent, share)
-        {
-            briefing.recent = None;
-            targets_note.push_str(&format!("; recent changes left out: {reason}"));
+    // is left out and the rest of the briefing is sent. A new or resumed
+    // context has lost any earlier briefing; a prompt in a continuing
+    // context gets one only when the situation changed.
+    let confirmed = |mut briefing: langspan_core::Briefing, note: &mut String| {
+        if let Some(recent) = briefing.recent.as_mut() {
+            let share = (Instant::now() + config.budget / 4).min(deadline);
+            if let Err(reason) =
+                crate::recent::confirm_left(&config.state_dir, &ids.session_id, recent, share)
+            {
+                briefing.recent = None;
+                note.push_str(&format!("; recent changes left out: {reason}"));
+            }
         }
-    }
-    // A new or resumed context has lost any earlier briefing; a prompt in a
-    // continuing context gets one only when the situation changed.
-    let deliver = has_content(&briefing) && (starting || briefing.changed);
+        (has_content(&briefing) && (starting || briefing.changed)).then_some(briefing)
+    };
+    // Delivering a briefing acknowledges its messages and check results, so
+    // with less than the whole limit left (a reply joining several
+    // workspaces) it is first looked at without delivery, and delivered
+    // only if it fits the room. Otherwise it waits for the next event.
+    // A delivered briefing that has grown since its preview is shown whole.
+    let preview = if room >= BRIEFING_LIMIT {
+        None
+    } else {
+        match brief("brief-preview", false) {
+            // The preview only sizes the reply; a note about it is not kept.
+            Ok(preview) => Some(confirmed(preview, &mut String::new())),
+            Err(reply) => return reply,
+        }
+    };
+    let briefing = match preview {
+        Some(None) => None,
+        Some(Some(preview))
+            if compose_context_within(Some(&preview), code_part(), room)
+                .is_none_or(|text| text.len() > room) =>
+        {
+            targets_note.push_str("; peer briefing deferred: no room left in this reply");
+            None
+        }
+        _ => match brief("brief", true) {
+            Ok(briefing) => confirmed(briefing, &mut targets_note),
+            Err(reply) => return reply,
+        },
+    };
+    let deliver = briefing.is_some();
     // The code section is about this prompt, so it is sent whether or not
     // the peer briefing changed. It is never remembered as delivered.
-    let Some(context) = compose_context(
-        deliver.then_some(&briefing),
-        code.as_ref()
-            .map(|(matches, coverage)| (matches.as_slice(), coverage)),
-    ) else {
+    let Some(context) = compose_context_within(briefing.as_ref(), code_part(), room) else {
         return Reply::none(
             "no_briefing",
             format!("no new relevant peer work{targets_note}"),
@@ -1247,7 +1317,7 @@ fn lifecycle(
         coverage: if deliver { "briefed" } else { "code_briefed" },
         detail: format!(
             "{} peer session(s); {matched} prompt name(s) found in the source index{targets_note}",
-            if deliver { briefing.peers.len() } else { 0 }
+            briefing.as_ref().map_or(0, |b| b.peers.len())
         ),
     }
 }
@@ -2305,21 +2375,32 @@ pub fn compose_context(
     peers: Option<&langspan_core::Briefing>,
     code: Option<(&[langspan_core::NameContext], &langspan_core::GraphCoverage)>,
 ) -> Option<String> {
+    compose_context_within(peers, code, BRIEFING_LIMIT)
+}
+
+/// `compose_context` within `limit` bytes, for one part of a reply that
+/// joins several. Messages and check results are shown in full even past
+/// it: a delivered one is acknowledged.
+fn compose_context_within(
+    peers: Option<&langspan_core::Briefing>,
+    code: Option<(&[langspan_core::NameContext], &langspan_core::GraphCoverage)>,
+    limit: usize,
+) -> Option<String> {
     let render_code = |limit: usize| {
         code.and_then(|(matches, coverage)| render_code_briefing(matches, coverage, limit))
     };
     let Some(peers) = peers else {
-        return render_code(BRIEFING_LIMIT);
+        return render_code(limit);
     };
-    let Some(share) = render_code(CODE_SHARE).map(|text| text.len() + 2) else {
-        return Some(render_briefing(peers));
+    let Some(share) = render_code(CODE_SHARE.min(limit)).map(|text| text.len() + 2) else {
+        return Some(render_briefing_within(peers, limit));
     };
     // Peer lines yield to the code section's reservation. Messages do not:
     // a delivered message is acknowledged, so it is always shown in full
     // (the core bounds them to fit), and the code section, rebuilt at every
     // prompt, takes whatever room is left. If none is left it says so.
-    let peer_text = render_briefing_within(peers, BRIEFING_LIMIT - share);
-    let room = BRIEFING_LIMIT.saturating_sub(peer_text.len() + 2);
+    let peer_text = render_briefing_within(peers, limit.saturating_sub(share));
+    let room = limit.saturating_sub(peer_text.len() + 2);
     match render_code(room) {
         Some(code_text) => Some(format!("{peer_text}\n\n{code_text}")),
         None if room > CODE_SKIPPED.len() => Some(format!("{peer_text}\n\n{CODE_SKIPPED}")),
@@ -2546,16 +2627,21 @@ fn adopted_workspace_id(config: &Config, root: &Path, deadline: Instant) -> Opti
 /// that the host would also run here, if there is one. Looked for at every
 /// directory from `cwd` up to the repository root, at the main checkout (where
 /// Claude Code keeps a worktree's local settings) and, for Claude Code, at the
-/// directory the session started in; for Gemini CLI, only at `cwd`. A file
-/// that cannot be read safely means no decision, not a guess.
+/// directory the session started in; for Gemini CLI and Antigravity, only at
+/// `cwd`. A file that cannot be read safely means no decision, not a guess.
 fn project_install(
     vendor: crate::install::Vendor,
     cwd: &Path,
     git: &crate::git::Identity,
 ) -> Result<Option<PathBuf>, Reply> {
     // Gemini CLI reads project settings only from the directory it was
-    // started in, which is the event's cwd.
-    if vendor == crate::install::Vendor::Gemini {
+    // started in, which is the event's cwd. Antigravity reads
+    // `.agents/hooks.json` at the workspace root, which its adapter passes
+    // as the cwd.
+    if matches!(
+        vendor,
+        crate::install::Vendor::Gemini | crate::install::Vendor::Antigravity
+    ) {
         let path = cwd.join(vendor.project_hook_files()[0]);
         return covered(vendor, path);
     }
@@ -2584,7 +2670,9 @@ fn project_install(
     Ok(None)
 }
 
-/// `path`, if it holds a LangSpan project hook for `vendor`.
+/// `path`, if it holds a LangSpan project hook for `vendor` that the host
+/// runs. A definition switched off as a whole runs none of its hooks, so it
+/// covers nothing and the user-level hook decides.
 fn covered(vendor: crate::install::Vendor, path: PathBuf) -> Result<Option<PathBuf>, Reply> {
     let settings = crate::install::read(&path).map_err(|error| {
         Reply::none(
@@ -2593,6 +2681,7 @@ fn covered(vendor: crate::install::Vendor, path: PathBuf) -> Result<Option<PathB
         )
     })?;
     Ok(settings
+        .filter(|settings| !crate::install::switched_off(vendor, settings))
         .filter(|settings| {
             !crate::install::managed_hooks(settings, |hook| {
                 crate::install::is_managed_for(vendor, hook)
