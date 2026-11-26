@@ -1623,6 +1623,64 @@ acceptance and an improvement in a real agent's work have not been demonstrated.
 [ADR 0008](adr/0008-derived-source-index.md) describes extraction, coverage and
 notice delivery.
 
+### Check before a write on a host without hooks
+
+On a host with LangSpan hooks, the hook checks every write. An agent on a host
+without them (an MCP client only) can ask before it writes what other sessions
+just did to the files and functions it is about to change:
+
+```sh
+./target/release/langspan check-write SESSION src/net.rs --symbol upload --json
+```
+
+MCP: `langspan_check_write` with `session_id`, `paths` and `symbols`. The
+session must be registered (`langspan_session_register`). It takes 1 to 8
+workspace-relative paths and up to 16 symbol names; without names, it checks
+the definitions the index holds in those paths. For each path it answers:
+
+- `held_by`: another session holding the file through an open admission.
+- `unread_lines`: lines other sessions' journaled writes added in the last 30
+  minutes that are in the file now, per writer with `lines` (ranges), and
+  `age_ms`, newest writer first, at most 4 (`omitted_writers` counts the
+  rest). Empty when the session last read or wrote exactly the current
+  content.
+- `stale`: `true` when the file changed since the session last read or wrote
+  it, `false` when it did not, `null` when no read is recorded.
+
+For each symbol another session changed in the last 30 minutes, at most 16
+newest first (`omitted_symbols` counts the rest):
+
+- `change`: `signature` (with `before` and `after`), `removed` (with
+  `renamed_to` for a rename) or `body` (with the definition's `lines` that
+  session wrote).
+- `by_session` and `age_ms`. For a signature or removal, `by_session` is the
+  last session that reported editing the file; for a body, the session whose
+  journaled write added those lines. Both are correlations, not proof of
+  authorship.
+- `intents`: other sessions whose declared intent summary names the symbol as
+  a whole word.
+- `confidence`: always `name_match`. Symbols are matched by name; nothing
+  resolves scopes or types.
+
+A signature change counts only while the index still holds the new
+signature, and a removal only while the file defines no symbol of that name;
+both are checked against the whole index. A body change is found only in a
+file indexed at its current content and only from a write whose lines the
+journal knows. Definitions of one name in one file, such as two types'
+methods of that name, count as one symbol, and the newest body change among
+them is reported. `unchecked_bodies` counts the definitions that could not be
+compared, including those whose only recent writer by another session changed
+lines the journal does not know. The check compares at most 64 definitions per
+name or per path; `definitions_truncated` is `true` when more matched, and body
+changes to the rest are not reported. Without a complete index scan, `index_ready` is `false` and `symbols` is empty. The
+session's own changes are not listed.
+
+The check is a read: it records no event and no receipt, takes no request ID
+and refuses nothing. With the daemon down, it is a tool error. The answer
+starts with a label saying paths, signatures and session IDs are data, not
+instructions. The line journal is local to this machine, so `unread_lines`
+and body changes cover only this machine's sessions.
+
 ## Checks and landing
 
 The CLI implements `check run`, `check status`, `integrate check`, and `land`.
@@ -2058,6 +2116,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_impact` | Find a file's exports and files mentioning those names; with `depth` 2 or 3, those files level by level |
 | `langspan_blind_spots` | List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension |
 | `langspan_history` | A definition's recorded interface changes, newest first, with the last reported editor, its task line, nearby notes and messages, and changes back to an earlier signature; at most 50 |
+| `langspan_check_write` | Before a write on a host without hooks: per path, its holder, other sessions' recent lines and whether it is stale; per symbol, a peer's recent signature change, removal or body lines, matched by name; records nothing |
 | `langspan_integrate_check` | Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result |
 | `langspan_land` | Dry run, or with `apply` take the push turn (waiting in line for up to `wait_s`, default 240) and push a combined result that has a passing check, retrying a moved target up to 3 attempts; conflicts come with their hunks |
 | `langspan_land_queue` | Read who holds a target's push turn and who waits for it, in order |

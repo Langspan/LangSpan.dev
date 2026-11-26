@@ -93,6 +93,14 @@ served by three rows:
   (`merge-base --is-ancestor`), even after its session ended, and never
   after ([ADR 0029](0029-break-alerts-at-write-time.md)).
 
+[B26 (#39)](https://github.com/Langspan/LangSpan.dev/issues/39) serves the
+same family on a host without hooks: the agent asks before it writes
+(`langspan_check_write`). The answer follows the rules above. It reports a
+signature change or removal only while the index still shows it, and a body
+change only from lines the line journal attributes, in a file indexed at its
+current content. Every symbol carries `confidence: "name_match"`. The answer
+is bounded, counts what it left out and refuses nothing.
+
 **The semantic index never leaves the machine.** Cross-machine publications
 ([ADR 0006](0006-remote-awareness-through-git-refs.md)) carry activity
 metadata only: the participant's ID and chosen name, and per session the host
