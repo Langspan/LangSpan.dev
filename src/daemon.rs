@@ -1366,6 +1366,52 @@ mod unix {
         cut
     }
 
+    /// How long one write check may spend asking Git where other worktrees'
+    /// changes stand (issue #217). A notice Git has not answered for by then
+    /// keeps the uncommitted rules.
+    const STANDING_BUDGET: Duration = Duration::from_millis(250);
+
+    /// Git's answer, for each of the write's `standing_questions`, to where
+    /// that worktree's change stands against the session's checkout. A
+    /// failure or the budget running out leaves a notice out, and is logged.
+    fn standings(
+        state: &State,
+        session_id: &str,
+        calls: &[langspan_core::CallSite],
+        now: u64,
+    ) -> Result<langspan_core::Standings, langspan_core::CoreError> {
+        let questions = langspan_core::standing_questions(state, session_id, calls, now)?;
+        let mut standings = langspan_core::Standings::new();
+        let base = state
+            .sessions
+            .get(session_id)
+            .and_then(|session| state.workspaces.get(&session.workspace_id));
+        let (Some(base), false) = (base, questions.is_empty()) else {
+            return Ok(standings);
+        };
+        let deadline = Instant::now() + STANDING_BUDGET;
+        for question in questions {
+            let Some(changed) = state.workspaces.get(&question.workspace_id) else {
+                continue;
+            };
+            match crate::git::standing(
+                Path::new(&changed.root),
+                &question.path,
+                Path::new(&base.root),
+                deadline,
+            ) {
+                Ok(standing) => {
+                    standings.insert((question.workspace_id, question.notice_id), standing);
+                }
+                Err(detail) => eprintln!(
+                    "{}",
+                    serde_json::json!({"level":"info","event":"change_standing_unknown","workspace_id":question.workspace_id,"detail":detail})
+                ),
+            }
+        }
+        Ok(standings)
+    }
+
     /// The write-time break check (ADR 0029). The calls are used for this
     /// answer only: never logged or recorded. What is recorded, when a
     /// break is found, is which notices the session was alerted to.
@@ -1386,11 +1432,16 @@ mod unix {
             lease_valid: None,
             outcome,
         };
-        let candidates = match langspan_core::call_candidates(store.state(), session_id, calls, now)
-        {
-            Ok(candidates) => candidates,
+        let standings = match standings(store.state(), session_id, calls, now) {
+            Ok(standings) => standings,
             Err(e) => return error(request_id, generation, &e.code, e.message),
         };
+        let candidates =
+            match langspan_core::call_candidates(store.state(), session_id, calls, &standings, now)
+            {
+                Ok(candidates) => candidates,
+                Err(e) => return error(request_id, generation, &e.code, e.message),
+            };
         let workspace_id = store.state().sessions[session_id].workspace_id.clone();
         let not_ready = |coverage: Option<langspan_core::GraphCoverage>| {
             answer(Outcome::CallBreaks {
@@ -1487,11 +1538,17 @@ mod unix {
                 }
             },
         };
-        let breaks =
-            match langspan_core::call_breaks(store.state(), session_id, calls, &current, now) {
-                Ok(breaks) => breaks,
-                Err(e) => return error(request_id, generation, &e.code, e.message),
-            };
+        let breaks = match langspan_core::call_breaks(
+            store.state(),
+            session_id,
+            calls,
+            &standings,
+            &current,
+            now,
+        ) {
+            Ok(breaks) => breaks,
+            Err(e) => return error(request_id, generation, &e.code, e.message),
+        };
         // Only the notices the hook's alert will show are recorded: one
         // left out for room stays to be told at a later write. The hook
         // lays the alert out with the same function.

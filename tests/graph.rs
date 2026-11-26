@@ -3683,3 +3683,140 @@ fn a_rename_notice_lists_a_caller_written_later_in_another_worktree() {
         std::thread::sleep(Duration::from_millis(200));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #217: a change committed on another worktree's branch stays in
+// flight for a peer until the peer's base holds that commit.
+// ---------------------------------------------------------------------------
+
+/// Alice commits her rename on her branch `feature`, and her session ends:
+/// the change now lives only in that branch's commit.
+fn alice_commits_the_rename_and_ends(w: &World, tree: &Path) {
+    git(tree, &["commit", "--quiet", "-am", "rename parse_config"]);
+    let (coverage, _, detail) = w.hook_in(
+        "tree",
+        tree,
+        json!({"session_id": "alice", "cwd": tree,
+               "hook_event_name": "SessionEnd", "reason": "other"}),
+        &[],
+    );
+    assert_ne!(coverage, "failed", "SessionEnd: {detail}");
+}
+
+/// A Claude Code `Write` of `src/report.rs` in the checkout by `session`,
+/// before it lands: its additional context.
+fn writes_a_caller(w: &World, session: &str, call: &str) -> Option<String> {
+    writes_a_caller_in(w, session, call, "src/report.rs")
+}
+
+/// The same, of `file`.
+fn writes_a_caller_in(w: &World, session: &str, call: &str, file: &str) -> Option<String> {
+    let root = w.work();
+    let (coverage, context, detail) = w.hook_in(
+        "app",
+        &root,
+        json!({
+            "session_id": session, "cwd": root, "hook_event_name": "PreToolUse",
+            "tool_name": "Write", "tool_use_id": call,
+            "tool_input": {"file_path": root.join(file), "content": CALLS_PARSE_CONFIG},
+        }),
+        &[],
+    );
+    assert_eq!(coverage, "admitted", "{detail}");
+    context
+}
+
+const TOLD_RENAME: &str = r#"calls "parse_config", which was renamed to "load_config""#;
+
+/// Issue #217, first acceptance criterion: Alice renames `parse_config`,
+/// commits on her branch and ends her session; Bob's later write of a caller
+/// of the old name in the checkout gets the alert naming the rename, because
+/// the checkout's `HEAD` does not hold Alice's commit.
+#[test]
+fn a_committed_rename_on_another_worktrees_branch_is_told_at_a_later_write_that_calls_the_old_name()
+{
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    alice_commits_the_rename_and_ends(&w, &tree);
+    let context = writes_a_caller(&w, "bob", "b1").expect("no alert at the write");
+    assert!(context.contains(TOLD_RENAME), "{context}");
+    let expected = format!(r#"in worktree "{}" by claude-code.alice"#, tree.display());
+    assert!(context.contains(&expected), "{context}");
+}
+
+/// Issue #217, second acceptance criterion: once Alice's branch is merged
+/// into the checkout's branch, a write there that calls the old name is no
+/// longer told of the rename. Bob, told before the merge, shows the notice
+/// was alive; Carol writes after it.
+#[test]
+fn a_committed_rename_merged_into_the_peers_base_is_no_longer_told() {
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    git(&tree, &["commit", "--quiet", "-am", "rename parse_config"]);
+    let told = writes_a_caller(&w, "bob", "b1").expect("no alert before the merge");
+    assert!(told.contains(TOLD_RENAME), "{told}");
+    git(&w.work(), &["merge", "--quiet", "--no-edit", "feature"]);
+    // The checkout's index has the merged file before Carol writes, so her
+    // write is checked against a complete scan.
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, text) = w.cli(&["graph", "symbol", "app", "load_config", "--json"]);
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        if outcome["coverage"]["current_files"] == 3
+            && outcome.to_string().contains("pub fn load_config")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "merge never indexed: {outcome:#}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        writes_a_caller_in(&w, "carol", "c1", "src/summary.rs")
+            .is_none_or(|context| !context.contains("parse_config")),
+        "told after the merge"
+    );
+}
+
+/// Issue #217, third acceptance criterion: after Alice commits and ends,
+/// Bob's caller written in the checkout is listed among the rename notice's
+/// files of other worktrees.
+#[test]
+fn a_caller_written_after_a_committed_rename_is_listed_on_its_notice() {
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    alice_commits_the_rename_and_ends(&w, &tree);
+    w.edits("bob", "b1", "src/report.rs", CALLS_PARSE_CONFIG);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let notice = rename_notice(&w).unwrap();
+        if notice["elsewhere"].as_array().is_some_and(|files| {
+            files.contains(&json!({"workspace_id": "app", "path": "src/report.rs"}))
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Bob's file never listed: {notice:#}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Issue #217, fourth acceptance criterion: an uncommitted change keeps its
+/// earlier rule, so once its session ends a write is not told of it.
+#[test]
+fn an_uncommitted_rename_whose_session_ended_is_not_told() {
+    let (w, tree) = parse_config_renamed_in_another_worktree();
+    let (coverage, _, detail) = w.hook_in(
+        "tree",
+        &tree,
+        json!({"session_id": "alice", "cwd": tree,
+               "hook_event_name": "SessionEnd", "reason": "other"}),
+        &[],
+    );
+    assert_ne!(coverage, "failed", "SessionEnd: {detail}");
+    assert!(
+        writes_a_caller(&w, "bob", "b1").is_none_or(|context| !context.contains("parse_config")),
+        "told of an ended session's uncommitted change"
+    );
+}
