@@ -106,6 +106,11 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         // The write generation check runs carry: one count per workspace,
         // never trimmed.
         writes,
+        // Derived for comparing check results (issue #69); never part of
+        // the status reply.
+        kept_tests: _,
+        first_writes: _,
+        write_runs: _,
     } = state;
     let mut summary = StatusSummary::default();
     let mut open = BTreeMap::new();
@@ -189,6 +194,9 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         workspace_revisions: BTreeMap::new(),
         renames: BTreeMap::new(),
         writes: writes.clone(),
+        kept_tests: BTreeMap::new(),
+        first_writes: BTreeMap::new(),
+        write_runs: BTreeMap::new(),
     };
     (view, summary)
 }

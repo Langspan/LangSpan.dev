@@ -4,8 +4,9 @@
 [ADR 0007](0007-check-evidence-integration-and-landing.md) (checks bound to
 exact trees) and [ADR 0027](0027-turn-and-batch-events.md) (tool batches and
 stops). Launch track L6 in [the roadmap](../roadmap.md),
-row F1. A failure is reported without being classified (below, under
-"Not now"). Learning which tests flip on unchanged code (F2) was added on
+row F1. Learning which tests flip on unchanged code (F2) was added on
+25 November 2026 (below). Classifying a failure against the session's
+baseline (F1, issue #69), listed under "Not now" until then, was built on
 25 November 2026 (below).
 
 ## Context
@@ -231,6 +232,103 @@ flip. Breaking the write rule, the rerun bound or the write mark makes its
 test fail. **Not observed on a host:** a real Claude Code session told that a
 failure is of a test known to flip, and what it does next.
 
+## Which tests a write broke (issue #69, built 25 November 2026)
+
+**Context.** A failed automatic check named its failing tests, but the agent
+could not tell whether its own write broke a test, the test failed before it
+started, or another session's write did it, so it could spend its turn on a
+failure that is not its own. Each name comes from the same output parsers as
+above, so no new parser and no new run is needed: one earlier result of the
+same check is enough to compare with.
+
+**The baseline.** For each session a result is reported to, the core picks
+the newest record of the same check (name and `command_id`, never the
+shortened command summary) in the
+workspace, with per-test results, whose tree was taken before the session's
+first write since it registered. "Before" is decided by the workspace's
+write count (`State::writes`), never by a clock: the session's first
+recorded write notes the count just before it, and a record qualifies when
+its `writes_before` is at most that count. A record made by `check run` or
+by an earlier automatic run qualifies alike. A record keeps its results as a
+baseline only when the count is still its `writes_before` when it is
+recorded: a write counted between the run's count and its tree would be in
+the tree it tested, so a record whose count moved is no baseline, on replay
+of an older event too. A session with no such record
+has no baseline, and its results are not classified. A daemon restart
+registers a session again in place and keeps its baseline; a registration
+in another workspace starts a new one.
+
+**Classes.** Each failing test of the run is `new` (the baseline passed it:
+named as passing, or the baseline passed as a whole and did not skip it),
+`already_failing` (the baseline failed it) or `unknown_before` (the baseline
+did not name it, or skipped it). A test the baseline failed and this run
+passed is `fixed`, at most 20 named. A failure that is known to flip keeps
+its label inside its class.
+
+**Writers.** The core keeps, per workspace, runs of consecutive writes by one
+session (at most 256 runs, oldest dropped), derived on replay. The sessions
+other than the receiving one with a write counted after the baseline took its
+tree and no later than this run took its own are the run's `writers`, at most
+8. The issue proposed reading `STATE/journal/`; the write count is already in
+the core, needs no file read in the daemon, and gives the same answer on
+replay. A writer whose writes all fell out of the 256 runs is not named.
+
+**What the agent sees.** Inside the 1,200-byte check section, after its first
+line, and in at most 600 bytes with a name that does not fit counted rather
+than cut:
+
+```text
+2 new failures: parser::rejects_empty, parser::keeps_order.
+1 already failing before your writes: net::times_out.
+1 failing that the check before your writes did not name: brand::new.
+1 fixed since before your writes: old::was_broken.
+This tree also holds writes by codex session bob since the check before your writes.
+```
+
+When the output named more failing tests than the 100 names kept, a line says
+so and that the rest are not listed or classified. Without a baseline the
+failures are listed as before; output no parser recognises gives the same
+briefing as before.
+
+**Never done.** Classification changes no record, no result and nothing
+`land` accepts: `check status` and `land` give the same answers with and
+without it. A failure is never hidden or called a pass.
+
+**Storage and events.** `check_recorded` gains an optional `tests`
+(`results`, `writes_before` and `command_id`, the record's first-run
+results) so the
+baseline's results are derived on replay; `State` holds them, each session's
+first-write count and the write runs as derived fields outside the status
+reply. A check notice gains `class` on each failure, `more_failures`,
+`baseline_check_id`, `fixed` and `writers`. One record can now be reported
+in several `check_reported` events, one per group of sessions told the same;
+a desktop notification is still raised once per record. The parsed results
+already carried with `record_check` gain `more_failed`. All are optional with
+serde defaults: earlier stores open in this build, and a store written by it
+does not open in an earlier one. The protocol stays at version 3. Nothing is
+published (the remote payload of ADR 0006 is unchanged). Classification is
+one comparison in the state owner when the record arrives; no hook and no
+extra run does any work for it.
+
+**Evidence.** Core rules in `crates/langspan-core/tests/failure_classes.rs`
+(the baseline is from before the first write; a baseline that passed makes a
+failure new; no baseline or no names means no classes; writers between the
+two trees are named, each session never told of itself, and a write after the
+tree is not one; records and landing readiness are equal with and without
+classification; another command with the same summary is no baseline; a
+run whose write count moved before it was recorded is no baseline, live or
+replayed from an older event; an older `check_recorded` still applies; the state replays equal). Breaking the writers rule makes two of them fail. The rendered text
+and its bound, at the most names, writers and output it can carry, in
+`src/hook.rs`. Through the real daemon, hooks and Git in
+`tests/auto_checks.rs`: a real `cargo test` crate where the write breaks two
+tests (`new`), one failed before (`already_failing`) and one is repaired
+(`fixed`), with `check status` and `land` unchanged; a second session's write
+named; an unknown runner's briefing exactly as before; 200 failing tests within
+1,200 bytes. Real `go test -v` and `pytest -v` runs are in the same file and
+skip, saying so, where the toolchain is absent. **Not observed on a host:**
+a classified result in a real Claude Code or Codex model's context, and the
+model fixing the tests its write broke while leaving the one failing before.
+
 ## The wider check after an interface change (F3), built 25 November 2026
 
 F3 was deferred by
@@ -318,10 +416,6 @@ does next.
 
 ## Not now, with reasons
 
-- **Classifying failures** (whether a test failed before this session's
-  change, which session's writes are in the tree: F1). **Not now.** A result
-  is reported with the failing tests its output named (above), not classified
-  as new or already failing: that needs a baseline run per session.
 - **Selecting dependents' tests from the index.** The source index matches
   names, not resolved dependencies
   ([ADR 0008](0008-derived-source-index.md),
