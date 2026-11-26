@@ -78,6 +78,14 @@ fn dry_run_hedging_fails_in_every_arm() {
 }
 
 #[test]
+fn dry_run_a_changer_that_works_around_the_change_is_change_not_made() {
+    python_suite(
+        "test_driver.py",
+        Some("dry_run_a_changer_that_works_around_the_change_is_change_not_made_in_every_arm"),
+    );
+}
+
+#[test]
 fn dry_run_with_stagger_tells_dependents_before_their_first_write() {
     python_suite(
         "test_driver.py",

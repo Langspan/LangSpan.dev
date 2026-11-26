@@ -1667,19 +1667,28 @@ impl Index {
              WHERE s.workspace_id = ?1 AND {clause} ORDER BY s.path, s.line LIMIT ?3"
         ))?;
         let rows = statement
-            .query_map(params![workspace_id, value, limit], |row| {
-                Ok(SymbolRef {
-                    path: row.get(0)?,
-                    name: row.get(1)?,
-                    kind: row.get(2)?,
-                    line: row.get(3)?,
-                    end_line: row.get(4)?,
-                    signature: row.get(5)?,
-                    exported: row.get(6)?,
-                    digest: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                    ..SymbolRef::default()
-                })
-            })?
+            .query_map(params![workspace_id, value, limit], symbol_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Definitions of `name` in the file `path`, in line order, at most
+    /// `limit`.
+    pub fn symbols_at(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        name: &str,
+        limit: u32,
+    ) -> Result<Vec<SymbolRef>, Failure> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT s.path, s.name, s.kind, s.line, s.end_line, s.signature, s.exported, f.digest
+             FROM symbols s JOIN files f ON f.workspace_id = s.workspace_id AND f.path = s.path
+             WHERE s.workspace_id = ?1 AND s.path = ?2 AND s.name = ?3
+             ORDER BY s.line LIMIT ?4",
+        )?;
+        let rows = statement
+            .query_map(params![workspace_id, path, name, limit], symbol_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -1760,6 +1769,16 @@ impl Index {
         limit: u32,
     ) -> Result<Vec<SymbolRef>, Failure> {
         self.symbols_where("s.name = ?2", workspace_id, name, limit + 1)
+    }
+
+    /// Definitions in the file `path`, in line order, at most `limit`.
+    pub fn symbols_in(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        limit: u32,
+    ) -> Result<Vec<SymbolRef>, Failure> {
+        self.symbols_where("s.path = ?2", workspace_id, path, limit)
     }
 
     /// Mentions of `name`. `except` leaves one file out.
@@ -1925,6 +1944,22 @@ impl Index {
 
 /// Exported names one `impact_levels` level expands at most.
 pub const NAMES_PER_LEVEL: usize = 50;
+
+/// One definition row: path, name, kind, line, end line, signature,
+/// exported and the file's digest, in that order.
+fn symbol_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolRef> {
+    Ok(SymbolRef {
+        path: row.get(0)?,
+        name: row.get(1)?,
+        kind: row.get(2)?,
+        line: row.get(3)?,
+        end_line: row.get(4)?,
+        signature: row.get(5)?,
+        exported: row.get(6)?,
+        digest: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+        ..SymbolRef::default()
+    })
+}
 
 /// For each call, in the same order, the name of the innermost definition
 /// whose lines hold its line. Definitions nest, so one sweep in line order

@@ -1522,6 +1522,190 @@ mod unix {
         })
     }
 
+    /// Bytes a write check's answer takes at most, so that the MCP result,
+    /// which carries it twice, fits one frame.
+    const WRITE_CHECK_BYTES: usize = 24 * 1024;
+
+    /// A write check (roadmap B26), answered and never recorded: no event,
+    /// no receipt, no sighting of the session. Reads the asked paths and the
+    /// files of the definitions found, each at most 512 KiB and at most
+    /// twice `WRITE_CHECK_PATHS` files in all, their line-journal entries,
+    /// and one snapshot of the index, on the owner thread. Latency budget
+    /// (**Target**, not measured): under 100 ms, as `check_calls` plus
+    /// those bounded reads. Failure mode: an index error is a tool error;
+    /// no complete scan answers for the paths only.
+    fn check_write(
+        store: &Store,
+        graph: Option<&crate::graph::Index>,
+        state_dir: &Path,
+        request_id: String,
+        (session_id, paths, symbols): (&str, &[String], &[String]),
+    ) -> Response {
+        use langspan_core::{
+            DefinitionFacts, IndexFacts, LineRange, PathFacts, WRITE_CHECK_DEFINITIONS,
+            WRITE_CHECK_PATHS,
+        };
+        let now = now_ms();
+        let state = store.state();
+        let generation = state.generation;
+        let request = match langspan_core::write_check_request(state, session_id, paths, symbols) {
+            Ok(request) => request,
+            Err(e) => return error(request_id, generation, &e.code, e.message),
+        };
+        let Some(of) = Registration::of(state, &request.workspace_id) else {
+            return error(
+                request_id,
+                generation,
+                "workspace_not_found",
+                "the session's workspace is not registered",
+            );
+        };
+        // Definitions from one snapshot of the index: by name, or without
+        // names, those in the asked paths, each read one past the bound so
+        // truncation shows; and the definitions at each place (path and name)
+        // a recorded signature change or removal names, read whatever that
+        // bound left out. None without a complete scan.
+        let noticed = langspan_core::write_check_noticed(state, session_id, &request, now);
+        let definitions = match graph.map(|graph| {
+            graph.with_coverage(&of, |graph| {
+                let bound = WRITE_CHECK_DEFINITIONS as usize;
+                let mut found = Vec::new();
+                let mut truncated = false;
+                let mut keep = |mut read: Vec<langspan_core::SymbolRef>| {
+                    truncated |= read.len() > bound;
+                    read.truncate(bound);
+                    found.extend(read);
+                };
+                if request.names.is_empty() {
+                    for path in &request.paths {
+                        keep(graph.symbols_in(
+                            &of.workspace_id,
+                            path,
+                            WRITE_CHECK_DEFINITIONS + 1,
+                        )?);
+                    }
+                } else {
+                    for name in &request.names {
+                        // `symbol` reads one past its limit.
+                        keep(graph.symbol(&of.workspace_id, name, WRITE_CHECK_DEFINITIONS)?);
+                    }
+                }
+                let mut at = Vec::new();
+                for (path, name) in &noticed {
+                    at.extend(graph.symbols_at(
+                        &of.workspace_id,
+                        path,
+                        name,
+                        WRITE_CHECK_DEFINITIONS,
+                    )?);
+                }
+                Ok((found, truncated, at))
+            })
+        }) {
+            Some(Ok((found, coverage))) if coverage.scanned => Some(found),
+            Some(Ok(_)) | None => None,
+            Some(Err(failure)) => {
+                return error(
+                    request_id,
+                    generation,
+                    "index_unavailable",
+                    failure.to_string(),
+                );
+            }
+        };
+        // The asked paths first, then the definitions' files, up to the bound.
+        let mut files: Vec<String> = request.paths.clone();
+        for symbol in definitions.iter().flat_map(|(found, _, _)| found) {
+            if files.len() < 2 * WRITE_CHECK_PATHS && !files.contains(&symbol.path) {
+                files.push(symbol.path.clone());
+            }
+        }
+        // Each file's version and content, `None` when it could not be read.
+        type Read = Option<(langspan_core::FileState, Option<Vec<u8>>)>;
+        let read: std::collections::BTreeMap<&str, Read> = files
+            .iter()
+            .map(|path| (path.as_str(), crate::journal::current_file(&of.root, path)))
+            .collect();
+        let entries = crate::journal::entries_for(state_dir, &of.root, &files);
+        let wall = crate::shell::now_ms();
+        let path_facts: Vec<PathFacts> = request
+            .paths
+            .iter()
+            .map(|path| {
+                let found = read.get(path.as_str()).and_then(Option::as_ref);
+                PathFacts {
+                    path: path.clone(),
+                    current: found.map(|(version, _)| version.clone()),
+                    written: found
+                        .and_then(|(_, content)| content.as_deref())
+                        .map(|content| {
+                            crate::lines::overwritten(
+                                &entries, session_id, path, content, None, wall,
+                            )
+                        })
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+        let index = definitions.map(|(found, truncated, noticed)| IndexFacts {
+            definitions: found
+                .into_iter()
+                .map(|symbol| {
+                    // Lines are placed only in the content the index read.
+                    let content = read
+                        .get(symbol.path.as_str())
+                        .and_then(Option::as_ref)
+                        .and_then(|(version, content)| match version {
+                            langspan_core::FileState::Present { digest, .. }
+                                if *digest == symbol.digest =>
+                            {
+                                content.as_deref()
+                            }
+                            _ => None,
+                        });
+                    let span = [LineRange {
+                        start_line: symbol.line,
+                        end_line: symbol.end_line.max(symbol.line),
+                    }];
+                    DefinitionFacts {
+                        body_writers: content.map(|content| {
+                            crate::lines::overwritten(
+                                &entries,
+                                session_id,
+                                &symbol.path,
+                                content,
+                                Some(&span),
+                                wall,
+                            )
+                        }),
+                        symbol,
+                    }
+                })
+                .collect(),
+            truncated,
+            noticed,
+        });
+        let mut check = langspan_core::write_check(
+            state,
+            session_id,
+            &request,
+            &path_facts,
+            index.as_ref(),
+            now,
+        );
+        check.shrink_until(|check| {
+            serde_json::to_vec(check).is_ok_and(|bytes| bytes.len() <= WRITE_CHECK_BYTES)
+        });
+        Response {
+            version: PROTOCOL_VERSION,
+            request_id,
+            replayed: false,
+            generation,
+            lease_valid: None,
+            outcome: Outcome::WriteCheck { check },
+        }
+    }
+
     /// How often the daemon compacts when `retention_days` is set.
     const COMPACTION_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -1689,6 +1873,8 @@ mod unix {
         }
         let handoff_after = Duration::from_millis(config.notify_handoff_after_ms);
         store.tap(notify::relevant);
+        // A write check reads the line journal under the state directory.
+        let owner_directory = directory.clone();
         std::thread::Builder::new()
             .name("langspan-owner".into())
             .spawn(move || {
@@ -1729,7 +1915,7 @@ mod unix {
                             let touched = touched_workspace(store.state(), &job.request.command);
                             let check_before = auto_check_of(store.state(), &job.request.command);
                             let boundary = boundary_session(&job.request.command);
-                            let response = handle(&mut store, graph_reader.as_ref(), job.request);
+                            let response = handle(&mut store, graph_reader.as_ref(), &owner_directory, job.request);
                             let messages = [
                                 auto_check_message(store.state(), graph_reader.as_ref(), check_before, boundary, &response),
                                 interface_message(store.state(), graph_reader.as_ref(), &response),
@@ -2703,11 +2889,12 @@ mod unix {
     fn handle(
         store: &mut Store,
         graph: Option<&crate::graph::Index>,
+        state_dir: &Path,
         request: Request,
     ) -> Response {
         let reads_blind = reads_blind_in_scope(&request.command);
         let acting = langspan_core::acting_session(&request.command).map(str::to_owned);
-        let mut response = answer(store, graph, request);
+        let mut response = answer(store, graph, state_dir, request);
         // Refused or retried, the request still shows the session's hook ran.
         if let Some(session_id) = acting {
             record_seen(store, session_id);
@@ -2792,6 +2979,7 @@ mod unix {
     fn answer(
         store: &mut Store,
         graph: Option<&crate::graph::Index>,
+        state_dir: &Path,
         request: Request,
     ) -> Response {
         let Request {
@@ -2831,6 +3019,20 @@ mod unix {
         }
         if let Command::CheckCalls { session_id, calls } = &command {
             return check_calls(store, graph, request_id, session_id, calls);
+        }
+        if let Command::CheckWrite {
+            session_id,
+            paths,
+            symbols,
+        } = &command
+        {
+            return check_write(
+                store,
+                graph,
+                state_dir,
+                request_id,
+                (session_id, paths, symbols),
+            );
         }
         if matches!(
             command,

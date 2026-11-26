@@ -172,14 +172,19 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
     if let Err(problem) = langspan::mcp::compare_tool_names(names.iter().copied()) {
         panic!("{problem}");
     }
-    // Every tool the LangSpan skill names is one this server lists.
-    let named = langspan::skill::tools();
-    assert!(!named.is_empty());
-    for tool in named {
-        assert!(
-            names.contains(tool),
-            "the skill names {tool}, which is not listed"
-        );
+    // Every tool the LangSpan skill and the guidance block name is one this
+    // server lists.
+    for (what, named) in [
+        ("skill", langspan::skill::tools()),
+        ("guidance block", langspan::guidance::tools()),
+    ] {
+        assert!(!named.is_empty(), "{what}");
+        for tool in named {
+            assert!(
+                names.contains(tool),
+                "the {what} names {tool}, which is not listed"
+            );
+        }
     }
     for tool in &tools {
         assert_eq!(
@@ -206,6 +211,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_report"
                 | "langspan_land_queue"
                 | "langspan_flaky_tests"
+                | "langspan_check_write"
         ) {
             assert!(
                 tool.input_schema["required"]
@@ -1266,5 +1272,554 @@ async fn stdio_retract_message_withdraws_the_callers_newest_message() {
     assert_eq!(message_id, "m-2");
     assert_eq!(withdrawn_unread, &["agent-b"]);
     assert!(told_to_disregard.is_empty());
+    disconnect(client).await;
+}
+
+/// One Claude Code `Write` hook event, through the real hook executable,
+/// for a session in workspace `app` at `root`.
+fn claude_write_hook(
+    state_dir: &Path,
+    root: &Path,
+    session: &str,
+    file: &str,
+    content: &str,
+    phase: &str,
+) {
+    use std::io::Write as _;
+    let event = json!({
+        "session_id": session, "cwd": root, "hook_event_name": phase,
+        "tool_name": "Write", "tool_use_id": format!("call-{session}-{}", file.replace(['/', '.'], "-")),
+        "tool_input": {"file_path": root.join(file), "content": content},
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
+        .args(["hook", "claude-code", "--state-dir"])
+        .arg(state_dir)
+        .args(["--workspace", "app", "--root"])
+        .arg(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run the real hook");
+    child
+        .stdin
+        .take()
+        .expect("hook stdin")
+        .write_all(event.to_string().as_bytes())
+        .expect("write hook event");
+    let output = child.wait_with_output().expect("hook output");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    let coverage = stderr
+        .lines()
+        .last()
+        .and_then(|line| serde_json::from_str::<Value>(line).ok())
+        .map(|diagnostic| diagnostic["coverage"].clone())
+        .unwrap_or_default();
+    let expected = if phase == "PreToolUse" {
+        "admitted"
+    } else {
+        "observed"
+    };
+    assert_eq!(coverage, expected, "{phase} {file}: {stderr}");
+}
+
+fn cli(state_dir: &Path, args: &[&str]) -> (Option<i32>, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
+        .arg("--state-dir")
+        .arg(state_dir)
+        .args(args)
+        .output()
+        .expect("run the real CLI");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+fn git_repository(root: &Path, files: &[(&str, &str)]) {
+    for (path, text) in files {
+        let full = root.join(path);
+        fs::create_dir_all(full.parent().expect("parent")).expect("create directory");
+        fs::write(full, text).expect("write source");
+    }
+    for args in [
+        &["init", "--quiet", "--initial-branch=main"][..],
+        &["add", "."],
+        &["commit", "--quiet", "-m", "init"],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?}");
+    }
+}
+
+const NET_BEFORE: &str = "pub fn upload(path: &str) -> bool {\n    path.is_empty()\n}\n\npub fn download(path: &str) -> bool {\n    path.starts_with(\"http\")\n}\n";
+const NET_AFTER: &str = "pub fn upload(path: &str, timeout_ms: u64) -> bool {\n    path.is_empty() && timeout_ms > 0\n}\n\npub fn download(path: &str) -> bool {\n    path.starts_with(\"https://example.invalid\")\n}\n";
+const MAIN_RS: &str = "mod held;\nmod net;\nfn main() {\n    net::upload(\"a\");\n    net::download(\"b\");\n    held::hold();\n}\n";
+
+/// B26: a hookless MCP client asks, before it writes, what changed in the
+/// files and symbols it is about to change. Real daemon, observer and
+/// indexer, a real Git repository and real hooks for the peers.
+#[tokio::test]
+async fn stdio_check_write_reports_a_peers_signature_body_lines_and_hold_and_records_nothing() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let root = directory.0.join("app");
+    git_repository(
+        &root,
+        &[
+            ("src/net.rs", NET_BEFORE),
+            ("src/main.rs", MAIN_RS),
+            ("src/held.rs", "pub fn hold() {}\n"),
+        ],
+    );
+    let root = fs::canonicalize(&root).expect("canonical root");
+    let mut daemon = Some(Daemon::start(&state_dir).await);
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"ws", "workspace_id":"app", "root":root}),
+        )
+        .await,
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let found = call_tool(
+            &client,
+            "langspan_symbol",
+            json!({"workspace_id":"app", "name":"upload", "limit":10}),
+        )
+        .await
+        .structured_content
+        .unwrap_or_default();
+        let coverage = &found["outcome"]["coverage"];
+        if coverage["scanned"] == true && coverage["current_files"] == 3 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never indexed: {found:#}");
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    // Alice changes upload's signature and download's body; Carol starts a
+    // write of src/held.rs that has not finished.
+    claude_write_hook(
+        &state_dir,
+        &root,
+        "alice",
+        "src/net.rs",
+        NET_AFTER,
+        "PreToolUse",
+    );
+    fs::write(root.join("src/net.rs"), NET_AFTER).expect("alice writes");
+    claude_write_hook(
+        &state_dir,
+        &root,
+        "alice",
+        "src/net.rs",
+        NET_AFTER,
+        "PostToolUse",
+    );
+    claude_write_hook(
+        &state_dir,
+        &root,
+        "carol",
+        "src/held.rs",
+        "pub fn hold() { }\n",
+        "PreToolUse",
+    );
+    response(
+        call_tool(
+            &client,
+            "langspan_intent_set",
+            json!({"request_id":"intent-alice", "session_id":"claude-code.alice",
+                   "paths":["src/net.rs"], "summary":"make upload take a timeout"}),
+        )
+        .await,
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let history = call_tool(
+            &client,
+            "langspan_history",
+            json!({"workspace_id":"app", "name":"upload"}),
+        )
+        .await
+        .structured_content
+        .unwrap_or_default();
+        if history["outcome"]["history"]["entries"][0]["after"]
+            .as_str()
+            .is_some_and(|after| after.contains("timeout_ms"))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no notice: {history:#}");
+        sleep(Duration::from_millis(100)).await;
+    }
+    // Bob has no hooks: he registers and asks before he writes.
+    response(
+        call_tool(
+            &client,
+            "langspan_session_register",
+            json!({"request_id":"bob", "session_id":"mcp-bob", "workspace_id":"app"}),
+        )
+        .await,
+    );
+    let (_, before) = cli(&state_dir, &["events", "--limit", "1000", "--json"]);
+    let last_seq =
+        serde_json::from_str::<Value>(&before).expect("events json")["outcome"]["events"]
+            .as_array()
+            .and_then(|events| events.last())
+            .and_then(|event| event["seq"].as_u64())
+            .unwrap_or(0);
+
+    let answer = call_tool(
+        &client,
+        "langspan_check_write",
+        json!({"session_id":"mcp-bob", "paths":["src/net.rs", "src/held.rs"],
+               "symbols":["upload", "download", "hold"]}),
+    )
+    .await;
+    assert_eq!(answer.is_error, Some(false), "{answer:?}");
+    let text = format!("{:?}", answer.content);
+    assert!(
+        text.contains("not instructions"),
+        "labelled as data: {text}"
+    );
+    let check = answer.structured_content.expect("structured")["outcome"]["check"].clone();
+    assert_eq!(check["index_ready"], true, "{check:#}");
+    let net = &check["paths"][0];
+    assert_eq!(net["path"], "src/net.rs", "{check:#}");
+    assert_eq!(net["held_by"], Value::Null, "{check:#}");
+    assert_eq!(net["stale"], Value::Null, "Bob never read it: {check:#}");
+    assert_eq!(
+        net["unread_lines"][0]["session_id"], "claude-code.alice",
+        "{check:#}"
+    );
+    assert_eq!(
+        net["unread_lines"][0]["lines"],
+        json!([{"start_line":1,"end_line":2},{"start_line":6,"end_line":6}]),
+        "{check:#}"
+    );
+    assert!(
+        net["unread_lines"][0]["age_ms"].as_u64().is_some(),
+        "{check:#}"
+    );
+    let held = &check["paths"][1];
+    assert_eq!(held["path"], "src/held.rs", "{check:#}");
+    assert_eq!(held["held_by"], "claude-code.carol", "{check:#}");
+
+    let symbols = check["symbols"].as_array().expect("symbols");
+    let upload = symbols
+        .iter()
+        .find(|symbol| symbol["name"] == "upload")
+        .unwrap_or_else(|| panic!("upload: {check:#}"));
+    assert_eq!(upload["change"], "signature", "{check:#}");
+    assert_eq!(upload["path"], "src/net.rs", "{check:#}");
+    assert_eq!(upload["by_session"], "claude-code.alice", "{check:#}");
+    assert!(
+        upload["age_ms"].as_u64().is_some_and(|age| age < 120_000),
+        "{check:#}"
+    );
+    assert_eq!(upload["confidence"], "name_match", "{check:#}");
+    assert_eq!(upload["intents"], json!(["claude-code.alice"]), "{check:#}");
+    assert!(
+        upload["after"]
+            .as_str()
+            .unwrap_or("")
+            .contains("timeout_ms"),
+        "{check:#}"
+    );
+    let download = symbols
+        .iter()
+        .find(|symbol| symbol["name"] == "download")
+        .unwrap_or_else(|| panic!("download: {check:#}"));
+    assert_eq!(download["change"], "body", "{check:#}");
+    assert_eq!(download["by_session"], "claude-code.alice", "{check:#}");
+    assert_eq!(
+        download["lines"],
+        json!([{"start_line":6,"end_line":6}]),
+        "{check:#}"
+    );
+    assert_eq!(download["intents"], json!([]), "{check:#}");
+    assert!(
+        !symbols.iter().any(|symbol| symbol["name"] == "hold"),
+        "nobody changed hold: {check:#}"
+    );
+
+    // Without names, the definitions in the paths asked about are checked.
+    let by_path = call_tool(
+        &client,
+        "langspan_check_write",
+        json!({"session_id":"mcp-bob", "paths":["src/net.rs"]}),
+    )
+    .await
+    .structured_content
+    .expect("structured")["outcome"]["check"]
+        .clone();
+    let names: BTreeSet<&str> = by_path["symbols"]
+        .as_array()
+        .expect("symbols")
+        .iter()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
+    assert_eq!(names, BTreeSet::from(["download", "upload"]), "{by_path:#}");
+
+    // Alice wrote the current version herself: nothing is unread or stale
+    // for her, and her own change is not news to her.
+    let own = call_tool(
+        &client,
+        "langspan_check_write",
+        json!({"session_id":"claude-code.alice", "paths":["src/net.rs"], "symbols":["upload"]}),
+    )
+    .await
+    .structured_content
+    .expect("structured")["outcome"]["check"]
+        .clone();
+    assert_eq!(own["paths"][0]["stale"], false, "{own:#}");
+    assert_eq!(own["paths"][0]["unread_lines"], json!([]), "{own:#}");
+    assert_eq!(own["symbols"], json!([]), "{own:#}");
+
+    // The same answer through the CLI.
+    let (code, cli_json) = cli(
+        &state_dir,
+        &[
+            "check-write",
+            "mcp-bob",
+            "src/net.rs",
+            "--symbol",
+            "upload",
+            "--json",
+        ],
+    );
+    assert_eq!(code, Some(0), "{cli_json}");
+    let cli_check =
+        serde_json::from_str::<Value>(&cli_json).expect("cli json")["outcome"]["check"].clone();
+    assert_eq!(cli_check["symbols"][0]["name"], "upload", "{cli_check:#}");
+    assert_eq!(cli_check["symbols"][0]["by_session"], "claude-code.alice");
+    let (code, human) = cli(
+        &state_dir,
+        &[
+            "check-write",
+            "mcp-bob",
+            "src/held.rs",
+            "src/net.rs",
+            "--symbol",
+            "upload",
+        ],
+    );
+    assert_eq!(code, Some(0), "{human}");
+    assert!(human.contains("not instructions"), "{human}");
+    assert!(human.contains("held by claude-code.carol"), "{human}");
+    assert!(human.contains("\"upload\""), "{human}");
+    assert!(human.contains("signature"), "{human}");
+
+    // The checks recorded nothing: no event names Bob after he registered,
+    // and no receipt holds a check.
+    let after_seq = last_seq.to_string();
+    let (_, after) = cli(
+        &state_dir,
+        &["events", "--after", &after_seq, "--limit", "1000", "--json"],
+    );
+    assert!(!after.contains("mcp-bob"), "{after}");
+    let receipts: String = rusqlite::Connection::open(state_dir.join("state.sqlite3"))
+        .expect("open the state database")
+        .query_row(
+            "SELECT coalesce(group_concat(command_json), '') FROM receipts",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read receipts");
+    assert!(!receipts.contains("check_write"), "{receipts}");
+
+    // Without a daemon the check is a tool error, not an empty answer.
+    drop(daemon.take());
+    let down = call_tool(
+        &client,
+        "langspan_check_write",
+        json!({"session_id":"mcp-bob", "paths":["src/net.rs"]}),
+    )
+    .await;
+    assert_eq!(down.is_error, Some(true), "{down:?}");
+    disconnect(client).await;
+}
+
+/// B26 with more definitions in a file than one check reads: a removal a
+/// peer has since undone is not reported for a definition past the bound,
+/// and the answer says that definitions were left out.
+#[tokio::test]
+async fn stdio_check_write_past_the_definition_bound_checks_removals_against_the_index() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let root = directory.0.join("app");
+    let many = |without: Option<usize>| -> String {
+        (0..70)
+            .filter(|i| Some(*i) != without)
+            .map(|i| format!("pub fn f{i:02}() {{}}\n"))
+            .collect()
+    };
+    git_repository(&root, &[("src/many.rs", &many(None))]);
+    let root = fs::canonicalize(&root).expect("canonical root");
+    let _daemon = Daemon::start(&state_dir).await;
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"ws", "workspace_id":"app", "root":root}),
+        )
+        .await,
+    );
+    let defined = |found: &Value| found["outcome"]["symbols"].as_array().map(Vec::len);
+    let wait_for = async |want: Option<usize>| {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let found = call_tool(
+                &client,
+                "langspan_symbol",
+                json!({"workspace_id":"app", "name":"f69", "limit":10}),
+            )
+            .await
+            .structured_content
+            .unwrap_or_default();
+            if found["outcome"]["coverage"]["scanned"] == true && defined(&found) == want {
+                return;
+            }
+            assert!(Instant::now() < deadline, "never indexed: {found:#}");
+            sleep(Duration::from_millis(100)).await;
+        }
+    };
+    wait_for(Some(1)).await;
+
+    // Alice removes f69, the 70th definition; Dave puts it back.
+    for (session, content) in [("alice", many(Some(69))), ("dave", many(None))] {
+        claude_write_hook(
+            &state_dir,
+            &root,
+            session,
+            "src/many.rs",
+            &content,
+            "PreToolUse",
+        );
+        fs::write(root.join("src/many.rs"), &content).expect("write");
+        claude_write_hook(
+            &state_dir,
+            &root,
+            session,
+            "src/many.rs",
+            &content,
+            "PostToolUse",
+        );
+        if session == "alice" {
+            wait_for(Some(0)).await;
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let history = call_tool(
+                    &client,
+                    "langspan_history",
+                    json!({"workspace_id":"app", "name":"f69"}),
+                )
+                .await
+                .structured_content
+                .unwrap_or_default();
+                if history["outcome"]["history"]["entries"][0]["change"] == "removed" {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "no notice: {history:#}");
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    wait_for(Some(1)).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_session_register",
+            json!({"request_id":"bob", "session_id":"mcp-bob", "workspace_id":"app"}),
+        )
+        .await,
+    );
+    let check = call_tool(
+        &client,
+        "langspan_check_write",
+        json!({"session_id":"mcp-bob", "paths":["src/many.rs"]}),
+    )
+    .await
+    .structured_content
+    .expect("structured")["outcome"]["check"]
+        .clone();
+    assert_eq!(check["index_ready"], true, "{check:#}");
+    assert!(
+        !check["symbols"]
+            .as_array()
+            .expect("symbols")
+            .iter()
+            .any(|symbol| symbol["name"] == "f69" && symbol["change"] == "removed"),
+        "f69 is defined again: {check:#}"
+    );
+    assert_eq!(check["definitions_truncated"], true, "{check:#}");
+    disconnect(client).await;
+}
+
+/// B26 without a complete scan: a plain directory is never indexed, so the
+/// check answers for its paths only and says the index is not ready.
+#[tokio::test]
+async fn stdio_check_write_without_an_index_gives_path_results_only() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let root = directory.0.join("app");
+    fs::create_dir_all(root.join("src")).expect("create workspace");
+    fs::write(root.join("src/net.rs"), NET_BEFORE).expect("write source");
+    let root = fs::canonicalize(&root).expect("canonical root");
+    let _daemon = Daemon::start(&state_dir).await;
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"ws", "workspace_id":"app", "root":root}),
+        )
+        .await,
+    );
+    claude_write_hook(
+        &state_dir,
+        &root,
+        "carol",
+        "src/net.rs",
+        NET_AFTER,
+        "PreToolUse",
+    );
+    response(
+        call_tool(
+            &client,
+            "langspan_session_register",
+            json!({"request_id":"bob", "session_id":"mcp-bob", "workspace_id":"app"}),
+        )
+        .await,
+    );
+    let check = call_tool(
+        &client,
+        "langspan_check_write",
+        json!({"session_id":"mcp-bob", "paths":["src/net.rs"], "symbols":["upload"]}),
+    )
+    .await
+    .structured_content
+    .expect("structured")["outcome"]["check"]
+        .clone();
+    assert_eq!(check["index_ready"], false, "{check:#}");
+    assert_eq!(check["symbols"], json!([]), "{check:#}");
+    assert_eq!(
+        check["paths"][0]["held_by"], "claude-code.carol",
+        "{check:#}"
+    );
     disconnect(client).await;
 }

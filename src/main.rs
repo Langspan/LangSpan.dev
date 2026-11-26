@@ -138,6 +138,14 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Dry run: how many exported files have the same
                                  content here. --apply loads those the index does
                                  not hold yet; the rest are indexed from disk
+  check-write SESSION PATH... [--symbol NAME]...
+                                 Before a write, for a host without hooks: per PATH
+                                 (1 to 8) who holds it, lines other sessions wrote in
+                                 the last 30 minutes and whether it changed since
+                                 SESSION read it; per NAME (up to 16, or without any,
+                                 the definitions in PATH) a peer's recent signature
+                                 change, removal or body lines, matched by name.
+                                 Records nothing
   graph history WORKSPACE NAME [--path PATH] [--limit N] [--before SEQ]
                                  The recorded interface changes of definitions named
                                  NAME, newest first (--limit 1 to 50, default 10):
@@ -223,6 +231,17 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  directory exists, its user-level install (none,
                                  current, outdated, other_state_dir, unknown) and the
                                  command that installs it. Reads only
+  guidance [--format agents|gemini|cursor-rules]
+                                 Print LangSpan's block for AGENTS.md, GEMINI.md or a
+                                 Cursor rule: which MCP tools an agent calls to
+                                 coordinate. Without hooks it is advice, not a gate
+  guidance install --root DIR --file FILE [--create] [--apply]
+  guidance remove --root DIR --file FILE [--apply]
+                                 Show (default) or write the block into FILE under DIR
+                                 between <!-- langspan:begin --> and <!-- langspan:end
+                                 -->, or take out only that block; every other byte of
+                                 FILE stays. A missing FILE is created only with
+                                 --create. A hand-edited block stops it, with its lines
   status                         Show workspaces, live or recent sessions, intents and
                                  open admissions; closed ones are counted per session
   status --mine [--session ID] [--root DIR]
@@ -806,6 +825,92 @@ type FilePlan<'a> = (
     Box<langspan::install::Planner<'a>>,
     Option<Box<langspan::install::LeftEmpty<'a>>>,
 );
+
+/// `guidance`: print LangSpan's block for AGENTS.md and similar files, or
+/// write it into (`install`) or take it out of (`remove`) one file of the
+/// owner's repository. A dry run unless `--apply`. Needs no coordinator.
+fn guidance(
+    args: &[String],
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+    apply: bool,
+) -> Result<u8, langspan::Error> {
+    use langspan::guidance::{self, Format};
+    if json {
+        return Err("--json is not valid for guidance; it prints text".into());
+    }
+    // Accepted for every command; the guidance never uses the coordinator.
+    options.remove("--state-dir");
+    let install = match args {
+        [] => {
+            let format = match options.remove("--format") {
+                None => Format::Agents,
+                Some(name) => Format::from_name(&name)
+                    .ok_or_else(|| format!("--format {name}: expected {}", Format::USAGE))?,
+            };
+            no_unused_options(options)?;
+            if apply {
+                return Err("--apply is valid for `guidance install` and `guidance remove`".into());
+            }
+            print!("{}", guidance::render(format));
+            return Ok(0);
+        }
+        [action] if action == "install" => true,
+        [action] if action == "remove" => false,
+        _ => {
+            return Err(format!(
+                "usage: langspan guidance [--format {}] | guidance install --root DIR --file FILE [--create] [--apply] | guidance remove --root DIR --file FILE [--apply]",
+                Format::USAGE
+            )
+            .into());
+        }
+    };
+    let root = options
+        .remove("--root")
+        .ok_or("guidance install and remove need --root DIR, the repository")?;
+    let file = options
+        .remove("--file")
+        .ok_or("guidance install and remove need --file FILE, such as AGENTS.md")?;
+    let create = options.remove("--create").is_some();
+    if create && !install {
+        return Err("--create is valid only for `guidance install`".into());
+    }
+    no_unused_options(options)?;
+    let path = guidance::target(std::path::Path::new(&root), &file)?;
+    let plan = guidance::plan_file(&path, install, create)?;
+    if plan.unchanged() {
+        println!(
+            "{}",
+            if install {
+                format!("{file} already has LangSpan's block; nothing changed.")
+            } else {
+                format!("{file} has no LangSpan block; nothing changed.")
+            }
+        );
+        return Ok(0);
+    }
+    if !apply {
+        print!("{}", plan.diff());
+        if plan.planned.is_none() {
+            println!("{file} would be removed: it held only LangSpan's block.");
+        }
+        println!(
+            "dry run: add --apply to {} {file}",
+            if install { "write" } else { "change" }
+        );
+        return Ok(0);
+    }
+    plan.apply()?;
+    println!(
+        "{}",
+        match (install, plan.planned.is_some()) {
+            (true, _) => format!("wrote LangSpan's block to {file}"),
+            (false, true) => format!("removed LangSpan's block from {file}"),
+            (false, false) => format!("removed {file}: it held only LangSpan's block"),
+        }
+    );
+    Ok(0)
+}
 
 /// How `user_install` runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3701,9 +3806,13 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         args,
         command,
         mut options,
+        symbols,
         json,
         apply,
     } = parse_options(input)?;
+    if !symbols.is_empty() && args.first().map(String::as_str) != Some("check-write") {
+        return Err("option --symbol is not valid for this command".into());
+    }
     if let [action] = args.as_slice()
         && (action == "install" || action == "uninstall")
     {
@@ -3721,6 +3830,9 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             );
         }
         return setup(&mut options, json);
+    }
+    if args.first().map(String::as_str) == Some("guidance") && command.is_empty() {
+        return guidance(&args[1..], &mut options, json, apply);
     }
     let home_option = options.remove("--home").map(PathBuf::from);
     let state_option = options.get("--state-dir").cloned();
@@ -4027,6 +4139,11 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                     .map(|seq| seq.parse().map_err(|_| "--before must be an integer"))
                     .transpose()?,
             },
+            ["check-write", session, paths @ ..] if !paths.is_empty() => Command::CheckWrite {
+                session_id: (*session).into(),
+                paths: paths.iter().map(|path| (*path).into()).collect(),
+                symbols: symbols.clone(),
+            },
             ["graph", "blind-spots", workspace] => Command::GraphBlindSpots {
                 workspace_id: (*workspace).into(),
                 limit: u32::try_from(number(&mut options, "--limit", 50)?)
@@ -4144,6 +4261,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphInflight { .. }
                 | Command::GraphExport { .. }
                 | Command::GraphImport { .. }
+                | Command::CheckWrite { .. }
                 | Command::Recap { .. }
                 | Command::ShowMessage { .. }
                 | Command::MessageStatus { .. }
@@ -4263,6 +4381,8 @@ struct ParsedOptions {
     /// Everything after a literal `--`: a check's command line.
     command: Vec<String>,
     options: BTreeMap<String, String>,
+    /// Each `--symbol NAME`, in order: the one option that may repeat.
+    symbols: Vec<String>,
     json: bool,
     apply: bool,
 }
@@ -4271,6 +4391,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
     let mut positionals = Vec::new();
     let mut command = Vec::new();
     let mut options = BTreeMap::new();
+    let mut symbols = Vec::new();
     let mut json = false;
     let mut apply = false;
     let mut raw = false;
@@ -4284,12 +4405,14 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
         match arg.as_str() {
             "--" => raw = true,
             "--json" => json = true,
+            "--symbol" => symbols.push(input.next().ok_or("--symbol needs a value")?),
             "--apply" => apply = true,
             // Flags, kept with the options so that only the commands that take
             // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
             // `land`: `--check-again`; `remote enable`: `--publish-as-branch`;
             // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
-            // `graph symbol`: `--detail`, `--renamed`; `brief`: `--recent`).
+            // `graph symbol`: `--detail`, `--renamed`; `brief`: `--recent`;
+            // `setup`: `--yes`; `guidance install`: `--create`).
             "--open"
             | "--allow-network"
             | "--demo"
@@ -4301,6 +4424,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--recent"
             | "--all"
             | "--skill"
+            | "--create"
             | "--yes"
             | "--switch"
             | "--off" => {
@@ -4315,7 +4439,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--wait-s" | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen"
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
             | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" | "--keep-days"
-            | "--month" | "--tools" | "--host" | "--mcp-tools" => {
+            | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -4339,6 +4463,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
         args: positionals,
         command,
         options,
+        symbols,
         json,
         apply,
     })
@@ -4458,6 +4583,121 @@ fn print_project_hook_reruns(
             install::quote(&state.to_string_lossy()),
         );
     }
+}
+
+/// Line ranges as `1-2, 6`.
+fn line_ranges(ranges: &[langspan_core::LineRange]) -> String {
+    ranges
+        .iter()
+        .map(|range| {
+            if range.start_line == range.end_line {
+                range.start_line.to_string()
+            } else {
+                format!("{}-{}", range.start_line, range.end_line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A write check (roadmap B26). Paths, names and signatures are quoted:
+/// repository text, shown as data.
+fn print_write_check(check: &langspan_core::WriteCheck) -> Result<(), langspan::Error> {
+    println!("{}", langspan_core::WRITE_CHECK_LABEL);
+    let seconds = |age_ms: u64| format!("{}s ago", age_ms / 1000);
+    for path in &check.paths {
+        let mut parts = vec![match &path.held_by {
+            Some(holder) => format!("held by {holder}"),
+            None => "not held".to_owned(),
+        }];
+        parts.push(
+            match path.stale {
+                Some(true) => "changed since this session last read it",
+                Some(false) => "as this session last read it",
+                None => "no read by this session recorded",
+            }
+            .to_owned(),
+        );
+        for unread in &path.unread_lines {
+            parts.push(if unread.lines.is_empty() {
+                format!(
+                    "{} wrote lines not known {}",
+                    unread.session_id,
+                    seconds(unread.age_ms)
+                )
+            } else {
+                format!(
+                    "{} wrote lines {} {}",
+                    unread.session_id,
+                    line_ranges(&unread.lines),
+                    seconds(unread.age_ms)
+                )
+            });
+        }
+        if path.omitted_writers > 0 {
+            parts.push(format!("{} more writer(s) left out", path.omitted_writers));
+        }
+        println!(
+            "{}: {}.",
+            serde_json::to_string(&path.path)?,
+            parts.join("; ")
+        );
+    }
+    if !check.index_ready {
+        println!(
+            "Symbols not checked: the source index has no complete scan of this workspace yet."
+        );
+        return Ok(());
+    }
+    for symbol in &check.symbols {
+        let by = symbol.by_session.as_deref().unwrap_or("an unknown session");
+        let age = symbol.age_ms.map(seconds).unwrap_or_default();
+        let what = match symbol.change.as_str() {
+            "signature" => format!(
+                "signature changed by {by} {age}, from {} to {}",
+                serde_json::to_string(symbol.before.as_deref().unwrap_or_default())?,
+                serde_json::to_string(symbol.after.as_deref().unwrap_or_default())?
+            ),
+            "removed" => match &symbol.renamed_to {
+                Some(new) => format!("renamed to {} by {by} {age}", serde_json::to_string(new)?),
+                None => format!("removed by {by} {age}"),
+            },
+            _ => format!(
+                "body lines {} written by {by} {age}",
+                line_ranges(&symbol.lines)
+            ),
+        };
+        let intents = if symbol.intents.is_empty() {
+            String::new()
+        } else {
+            format!("; intent of {} names it", symbol.intents.join(", "))
+        };
+        println!(
+            "{} ({} in {}): {what}{intents}.",
+            serde_json::to_string(&symbol.name)?,
+            symbol.kind,
+            serde_json::to_string(&symbol.path)?
+        );
+    }
+    if check.symbols.is_empty() {
+        println!("No recent change by another session to these symbols is recorded.");
+    }
+    if check.omitted_symbols > 0 {
+        println!("{} more symbol change(s) left out.", check.omitted_symbols);
+    }
+    if check.unchecked_bodies > 0 {
+        println!(
+            "{} definition(s) not compared with recent writes: their file is not indexed at its current content, or another session's write changed lines the journal does not know.",
+            check.unchecked_bodies
+        );
+    }
+    if check.definitions_truncated {
+        println!(
+            "More definitions matched than one check compares ({}): body changes to the rest are not shown.",
+            langspan_core::WRITE_CHECK_DEFINITIONS
+        );
+    }
+    Ok(())
 }
 
 fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), langspan::Error> {
@@ -4883,6 +5123,7 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             notice.changes.len(),
             notice.dependents.len()
         ),
+        Outcome::WriteCheck { check } => print_write_check(check)?,
         Outcome::InterfaceDependentsObserved { notice_id, added } => {
             println!("Interface notice {notice_id}: {added} file(s) of another worktree added.")
         }
@@ -5800,5 +6041,49 @@ mod time_tests {
         assert_eq!(super::sized(1023), "1023 bytes");
         assert_eq!(super::sized(2048), "2 KiB");
         assert_eq!(super::sized(410 * 1_048_576 + 5), "410 MiB");
+    }
+}
+
+#[cfg(test)]
+mod option_tests {
+    fn parsed(input: &[&str]) -> std::collections::BTreeMap<String, String> {
+        super::parse_options(input.iter().map(|s| s.to_string()).collect())
+            .unwrap()
+            .options
+    }
+
+    #[test]
+    fn flags_and_values_from_setup_brief_retention_and_guidance_all_parse() {
+        let options = parsed(&[
+            "x",
+            "--yes",
+            "--recent",
+            "--create",
+            "--event",
+            "e",
+            "--before",
+            "b",
+            "--keep-days",
+            "7",
+            "--month",
+            "2026-11",
+            "--format",
+            "cursor",
+            "--file",
+            "AGENTS.md",
+        ]);
+        for flag in ["--yes", "--recent", "--create"] {
+            assert_eq!(options[flag], "", "{flag}");
+        }
+        for (key, value) in [
+            ("--event", "e"),
+            ("--before", "b"),
+            ("--keep-days", "7"),
+            ("--month", "2026-11"),
+            ("--format", "cursor"),
+            ("--file", "AGENTS.md"),
+        ] {
+            assert_eq!(options[key], value, "{key}");
+        }
     }
 }

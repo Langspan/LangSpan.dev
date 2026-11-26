@@ -39,8 +39,10 @@ const ENTRY_FIELDS_SINCE_4: [&str; 3] = ["after_name", "evidence", "before_path"
 /// `InflightNotice`: the only objects with `signature` and `mentioned_in`).
 const INFLIGHT_FIELD_SINCE_4: &str = "renamed_from";
 
-/// An interface change or a history entry: the only objects of the
-/// protocol with all of `kind`, `change`, `before` and `after`.
+/// An interface change or a history entry: the objects of the protocol
+/// with all of `kind`, `change`, `before` and `after`. A write check's
+/// signature change (`WriteCheckSymbol`, roadmap B26) has them too; it
+/// carries none of the fields version 4 added, so it passes unchanged.
 fn is_change(fields: &serde_json::Map<String, serde_json::Value>) -> bool {
     ["kind", "change", "before", "after"]
         .iter()
