@@ -1660,18 +1660,6 @@ pub fn briefing_concern(
     ))
 }
 
-/// Files a session works on or has read: what another session's changed
-/// interface could break for it.
-fn concerned_paths(state: &State, session_id: &str, now_ms: u64) -> BTreeSet<String> {
-    let (_, _, mut concerned) = work_paths(state, session_id, now_ms);
-    concerned.extend(
-        known_versions(state, session_id)
-            .iter()
-            .map(|version| version.path.clone()),
-    );
-    concerned
-}
-
 /// When an event that has no time of its own was decided: the daemon's
 /// clock and the generation it belongs to.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -7750,49 +7738,6 @@ fn normalized_files(files: &[ObservedFile]) -> Result<Vec<ObservedFile>, CoreErr
         .into_iter()
         .map(|(path, state)| ObservedFile { path, state })
         .collect())
-}
-
-/// A session's work: the files it holds now, the files it edited within
-/// the horizon, and those with the paths of its declared intent.
-fn work_paths(
-    state: &State,
-    id: &str,
-    now_ms: u64,
-) -> (Vec<String>, Vec<RecentPath>, BTreeSet<String>) {
-    let editing: Vec<String> = state
-        .leases
-        .values()
-        .filter(|lease| lease.session_id == id && live_lease(state, lease, now_ms))
-        .flat_map(|lease| lease.paths.iter().cloned())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let recent: Vec<RecentPath> = state
-        .activity
-        .get(id)
-        .filter(|activity| activity.generation == state.generation)
-        .map(|activity| {
-            activity
-                .touched
-                .iter()
-                .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
-                .map(|touch| RecentPath {
-                    path: touch.path.clone(),
-                    age_ms: now_ms.saturating_sub(touch.at_ms),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut all: BTreeSet<String> = editing.iter().cloned().collect();
-    all.extend(recent.iter().map(|recent| recent.path.clone()));
-    if let Some(intent) = state
-        .intents
-        .get(id)
-        .filter(|intent| intent.generation == state.generation)
-    {
-        all.extend(intent.paths.iter().cloned());
-    }
-    (editing, recent, all)
 }
 
 fn live_lease(state: &State, lease: &Lease, now_ms: u64) -> bool {
