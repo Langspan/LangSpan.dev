@@ -1102,14 +1102,25 @@ mod unix {
         let ((found, more), coverage) = graph.with_coverage(of, |graph| {
             let imports = graph.imports_of(workspace_id, among)?;
             let mut found = Vec::new();
-            for (place, (other, (path, name, kind, signature))) in offered.into_iter().enumerate() {
-                let mentioned_in = graph.mentioning(
-                    workspace_id,
-                    (&path, &name),
-                    &imports,
-                    among,
-                    langspan_core::INFLIGHT_MENTIONS,
-                )?;
+            for (place, (other, (path, name, kind, signature, renamed_from))) in
+                offered.into_iter().enumerate()
+            {
+                // A rename (roadmap D7) is told to files that still use the
+                // old name as well as to those that use the new one.
+                let mut mentioned_in = std::collections::BTreeSet::new();
+                for name in std::iter::once(&name).chain(renamed_from.as_ref()) {
+                    mentioned_in.extend(graph.mentioning(
+                        workspace_id,
+                        (&path, name),
+                        &imports,
+                        among,
+                        langspan_core::INFLIGHT_MENTIONS,
+                    )?);
+                }
+                let mentioned_in: Vec<String> = mentioned_in
+                    .into_iter()
+                    .take(langspan_core::INFLIGHT_MENTIONS)
+                    .collect();
                 if mentioned_in.is_empty() {
                     continue;
                 }
@@ -1120,6 +1131,7 @@ mod unix {
                     kind,
                     signature,
                     mentioned_in,
+                    renamed_from,
                 };
                 if !keep(&item) {
                     continue;

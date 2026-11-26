@@ -1730,6 +1730,11 @@ pub struct InflightSymbol {
     pub kind: String,
     pub signature: String,
     pub mentioned_in: Vec<String>,
+    /// The name `HEAD` gave this symbol, when the worktree renamed it
+    /// (roadmap D7): files that mention either name are told. Left out of
+    /// replies to protocol version 3 clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
 }
 
 /// An in-flight symbol as a briefing or `graph inflight` tells it.
@@ -1747,6 +1752,9 @@ pub struct InflightNotice {
     pub signature: String,
     /// The asking side's files that mention it.
     pub mentioned_in: Vec<String>,
+    /// See [`InflightSymbol::renamed_from`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
 }
 
 /// What a symbol's in-flight line costs of `INFLIGHT_BYTES`: at least what
@@ -1765,6 +1773,8 @@ pub fn inflight_cost(notice: &InflightNotice) -> usize {
     .map(|text| quoted(text))
     .sum::<usize>()
         + notice.session.as_deref().map_or(0, quoted)
+        // ` (renamed from "…")`.
+        + notice.renamed_from.as_deref().map_or(0, |from| quoted(from) + 16)
         + notice
             .mentioned_in
             .iter()
@@ -1821,6 +1831,7 @@ pub fn inflight_notice(state: &State, item: &InflightSymbol) -> Option<InflightN
         kind: item.kind.clone(),
         signature: item.signature.clone(),
         mentioned_in: item.mentioned_in.clone(),
+        renamed_from: item.renamed_from.clone(),
     })
 }
 

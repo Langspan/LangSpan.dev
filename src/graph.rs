@@ -214,6 +214,18 @@ impl Index {
                 ))?;
             }
         }
+        // The name `HEAD` gave an in-flight symbol that it renames (roadmap
+        // D7 with C7), so that files still using the old name hear of it.
+        // Added the same way: a row from before has none until its file is
+        // compared again.
+        let has: bool = connection.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('inflight') WHERE name = 'renamed_from'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has {
+            connection.execute_batch("ALTER TABLE inflight ADD COLUMN renamed_from TEXT;")?;
+        }
         Ok(Self {
             connection,
             files_per_pass: FILES_PER_PASS,
@@ -994,7 +1006,17 @@ impl Index {
                     None => Some(FileGraph::default()),
                 };
                 match head {
-                    Some(head) => self.added_or_changed(workspace_id, path, &head)?,
+                    Some(head) => {
+                        let renamed = self.renamed_since(workspace_id, path, &head)?;
+                        self.added_or_changed(workspace_id, path, &head)?
+                            .into_iter()
+                            .map(|symbol| {
+                                let from =
+                                    renamed.get(&(symbol.name.clone(), symbol.kind)).cloned();
+                                (symbol, from)
+                            })
+                            .collect()
+                    }
                     None => Vec::new(),
                 }
             };
@@ -1003,15 +1025,17 @@ impl Index {
                 "DELETE FROM inflight WHERE workspace_id = ?1 AND path = ?2",
                 params![workspace_id, path],
             )?;
-            for symbol in &inflight {
+            for (symbol, renamed_from) in &inflight {
                 transaction.execute(
-                    "INSERT INTO inflight VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO inflight(workspace_id, path, name, kind, signature, renamed_from)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![
                         workspace_id,
                         path,
                         symbol.name,
                         symbol.kind.name(),
-                        symbol.signature
+                        symbol.signature,
+                        renamed_from
                     ],
                 )?;
             }
@@ -1039,6 +1063,28 @@ impl Index {
             [workspace_id],
             |row| row.get(0),
         )?)
+    }
+
+    /// The renames from `head` to the indexed version of `path`, as an
+    /// interface notice finds them (roadmap D7): each new name and kind with
+    /// the name `head` gave it. A file moved whole is compared at its new
+    /// path, where `HEAD` has no such file, so it renames nothing here.
+    fn renamed_since(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        head: &FileGraph,
+    ) -> Result<BTreeMap<(String, SymbolKind), String>, Failure> {
+        let Some((_, now)) = self.baseline(workspace_id, path)? else {
+            return Ok(BTreeMap::new());
+        };
+        Ok(langspan_graph::diff(head, &now)
+            .into_iter()
+            .filter_map(|change| match change.change {
+                Change::Renamed { to, .. } => Some(((to, change.kind), change.name)),
+                _ => None,
+            })
+            .collect())
     }
 
     /// The exported symbols indexed for `path` that `head` does not export
@@ -1113,7 +1159,7 @@ impl Index {
         limit: usize,
     ) -> Result<Vec<InflightRow>, Failure> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT path, name, kind, signature FROM inflight WHERE workspace_id = ?1
+            "SELECT path, name, kind, signature, renamed_from FROM inflight WHERE workspace_id = ?1
                 AND (?2 IS NULL OR (path, name, kind, signature) > (?2, ?3, ?4, ?5))
              ORDER BY path, name, kind, signature LIMIT ?6",
         )?;
@@ -1123,7 +1169,15 @@ impl Index {
         let rows = statement
             .query_map(
                 params![workspace_id, path, name, kind, signature, limit as i64],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
@@ -2205,7 +2259,7 @@ fn signature_tokens(path: &str, signature: &str) -> Vec<Vec<u8>> {
 
 /// One in-flight symbol as the index holds it: `(path, name, kind,
 /// signature)`.
-pub type InflightRow = (String, String, String, String);
+pub type InflightRow = (String, String, String, String, Option<String>);
 
 /// Git did not give `head_graph` the blob: it timed out, failed or the
 /// object is missing. Unlike a version that parses partially, this may

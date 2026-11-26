@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader, Read};
 
 /// Version 4 is version 3 with roadmap D7's rename fields in interface
-/// changes and history entries. Requests are the same in both.
+/// changes, history entries and in-flight symbols. Requests are the same in both.
 pub const PROTOCOL_VERSION: u16 = 4;
 /// The earliest version the daemon still answers, in that version's shape
 /// (`langspan_core::in_protocol_3_shape`), so that a client of an earlier
@@ -35,6 +35,9 @@ pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::E
 /// `seq`).
 const CHANGE_FIELDS_SINCE_4: [&str; 4] = ["before_name", "evidence", "before_path", "private"];
 const ENTRY_FIELDS_SINCE_4: [&str; 3] = ["after_name", "evidence", "before_path"];
+/// The field version 4 added to an in-flight symbol (`InflightSymbol`,
+/// `InflightNotice`: the only objects with `signature` and `mentioned_in`).
+const INFLIGHT_FIELD_SINCE_4: &str = "renamed_from";
 
 /// An interface change or a history entry: the only objects of the
 /// protocol with all of `kind`, `change`, `before` and `after`.
@@ -66,6 +69,9 @@ fn protocol_3_shape(value: &mut serde_json::Value) {
                 for key in added {
                     fields.shift_remove(*key);
                 }
+            }
+            if fields.contains_key("signature") && fields.contains_key("mentioned_in") {
+                fields.shift_remove(INFLIGHT_FIELD_SINCE_4);
             }
             fields.values_mut().for_each(protocol_3_shape);
         }

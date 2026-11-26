@@ -1065,3 +1065,44 @@ fn a_version_3_reply_leaves_out_rename_fields_and_private_changes() {
         matches!(&current.outcome, Outcome::InterfaceObserved { notice: read } if read == &notice)
     );
 }
+
+/// Roadmap D7 with C7: an in-flight rename's old name goes to a version 4
+/// client only; a version 3 client reads the in-flight symbol as before.
+#[test]
+fn a_version_3_reply_leaves_out_an_inflight_renames_old_name() {
+    use langspan_core::{InflightNotice, Outcome};
+    let inflight = InflightNotice {
+        path: "src/config.rs".into(),
+        worktree: "/work/tree".into(),
+        session: Some("claude-code.alice".into()),
+        name: "load_config".into(),
+        kind: "function".into(),
+        signature: "pub fn load_config(text: &str) -> usize".into(),
+        mentioned_in: vec!["src/main.rs".into()],
+        renamed_from: Some("parse_config".into()),
+    };
+    let response = Response {
+        version: OLDEST_PROTOCOL_VERSION,
+        request_id: "r".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome: Outcome::GraphInflight {
+            inflight: vec![inflight.clone()],
+            coverage: serde_json::from_value(serde_json::json!({"indexable_files": 3,
+                "current_files": 3, "partial_files": 0, "scanned": true}))
+            .unwrap(),
+            truncated: false,
+        },
+    };
+    let earlier: serde_json::Value =
+        serde_json::from_slice(&encode_for(OLDEST_PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    let shown = &earlier["outcome"]["inflight"][0];
+    assert!(shown.get("renamed_from").is_none(), "{earlier:#}");
+    assert_eq!(shown["name"], "load_config", "{earlier:#}");
+    let current: Response =
+        serde_json::from_slice(&encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    assert!(
+        matches!(&current.outcome, Outcome::GraphInflight { inflight: read, .. } if read == &[inflight])
+    );
+}

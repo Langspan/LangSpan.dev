@@ -457,7 +457,11 @@ file new since `HEAD` puts all its
 exports in it. The set lives in `graph.sqlite3` (`inflight` and
 `inflight_files`, the latter with the indexed digest and `HEAD` blob it was
 computed at), added without a schema change, so an existing index computes
-it at its next pass. A file found clean again, or gone, has none. A partial
+it at its next pass. An in-flight symbol that the interface diff from the
+`HEAD` version finds renamed (roadmap D7) keeps its old name
+(`inflight.renamed_from`, added the same way). Files that mention either
+name are told, and the line names both, so a peer still calling the old
+name learns of the rename before its next write as well as at it. A file found clean again, or gone, has none. A partial
 parse at either version says nothing. When the daemon answers `Brief`, it
 reads at most 256 in-flight symbols of the other worktrees of the asking
 workspace's repository, in worktree, path and name order, and compares them

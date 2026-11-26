@@ -1576,6 +1576,7 @@ fn quota(workspace: &str, signature: &str, mentioned_in: &[&str]) -> langspan_co
         kind: "function".into(),
         signature: signature.into(),
         mentioned_in: mentioned_in.iter().map(|path| (*path).into()).collect(),
+        renamed_from: None,
     }
 }
 

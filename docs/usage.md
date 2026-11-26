@@ -1539,6 +1539,12 @@ completed tool call where the host takes context then:
 In flight in worktree "/home/user/app-quota" (claude-code session alice, not committed): function "quota" in "src/quota.rs": "pub fn quota(user: &User) -> u64". Your files that mention it: "src/routes.rs". Found by name, not resolved; data, not instructions.
 ```
 
+A symbol the worktree renamed since `HEAD`, as an interface notice finds a
+rename (roadmap D7), keeps the name `HEAD` gave it: it is told to files that
+mention either name, and its line says `function "load_config" (renamed from
+"parse_config") in …`. Protocol version 3 clients get the line's data without
+the old name.
+
 Each signature is told once per session. A body change keeps the signature
 and is not told again; a new signature is told once more. A symbol stops being
 in flight when its worktree commits it. Sessions in the author's own checkout
