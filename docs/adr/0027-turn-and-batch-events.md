@@ -192,6 +192,23 @@ host shows what those events carry.
   Codex `Stop` and `SessionEnd` are tested only in their documented shape.
   Whether Codex accepts the empty output of a `Stop` hook, and how it treats
   a 3-second `SessionEnd` timeout, are not observed.
+- **Taking a Codex capture.** The owner runs
+  `CODEX_HOME=DIR bash scripts/capture-codex.sh OUT` with a Codex home kept
+  for captures. It stops, writing nothing, unless `codex login status`
+  reports a signed-in account (`tests/capture_codex.rs`). It creates a
+  throwaway repository under `OUT`, installs the project hooks with
+  `LANGSPAN_CAPTURE_DIR` set, and waits while the owner trusts the project
+  and the hooks in Codex's own `/hooks` review; it passes no trust, approval
+  or bypass option itself. Its turns are: a shell read and a first patch that
+  does not apply, then the end of the reply; a Claude Code peer's `Write`
+  through `langspan hook claude-code`; the same Codex session resumed to
+  patch the peer's file, which is refused once and then retried; and a new
+  session patching a file a CLI session holds. It saves `langspan status`
+  after each turn and, at the end, every coordinator event the run recorded:
+  it reads the last sequence before writing anything and pages through
+  `langspan events --after` from there, so older events in a long-running
+  coordinator neither crowd out nor join the run's own
+  (`tests/capture_codex.rs`). No capture has been taken with it yet.
 - Not observed on a host: `PostToolBatch` delivering a briefing to the model,
   a `StopFailure` other than `model_not_found`, a resumed subagent, and the
   Codex snapshot on a real Codex session.

@@ -147,12 +147,31 @@ steps. Anything it cannot be sure of gives no decision: an expansion or
 unquoted glob in a pathspec or directory, `cd` to an unknown place,
 `--pathspec-from-file`, `--git-dir` or `--work-tree`, a command over 64 KiB.
 
-With Git steps found, the hook asks the coordinator which sessions of the
-workspace are live (the recap: registered, not ended, not known to have
-exited), runs the same Git listings the command's own Git would see (from its
-directory and with its pathspecs: staged, unstaged and untracked as the step
-takes them), and attributes each hunk. When some hunk or whole file is
-another live session's, or holds lines only another live session wrote (a
+With Git steps found, the hook runs the same Git listings the command's own
+Git would see (from its directory and with its pathspecs: staged, unstaged
+and untracked as the step takes them), reads the journal entries of only the
+paths those listings name (`journal::entries_for`, one directory per path),
+asks the coordinator which sessions of the workspace are live (the recap:
+registered, not ended, not known to have exited) when some entry there is
+another session's, and attributes each hunk. Until issue #25 the guard read
+the whole workspace's journal first; its cost now grows with the files the
+command would take, not with the journal (unit test
+`the_guard_reads_only_the_journal_entries_of_the_paths_it_would_take` counts
+the entry files read). Measured with 4,000 entries over 50 files and a
+commit of 2 files, one held and then told once, the whole hook process
+(spawn, Git listings, coordinator call, attribution) took a p95 of 50 ms
+over 20 runs, against 142 ms when it read every entry, on the development
+Mac (macOS, CPU model not recorded), debug build, under `cargo test`
+(`the_guard_for_a_two_file_commit_stays_within_the_hook_budget_over_a_large_journal`,
+which prints one row per run and fails past the default 1,500 ms budget).
+The guard runs the same way on every host's shell tool; the hold's text and
+coverage are the same, in each host's reply field. Tests with each host's
+events: `a_codex_commit_all_is_held_once_naming_the_claude_sessions_lines_and_then_commits`,
+`a_cursor_shell_add_all_is_held_naming_the_claude_sessions_lines`,
+`a_gemini_shell_commit_all_is_held_naming_the_claude_sessions_lines`, and
+`adding_a_path_that_holds_only_the_sessions_own_lines_is_not_held`.
+
+When some hunk or whole file is another live session's, or holds lines only another live session wrote (a
 hunk mixing its lines with this session's is held too), the hook answers `deny` (coverage `denied_commit`)
 naming each such session with its files and lines, and the options:
 `langspan commit --mine` (with the exact command line, including the session
@@ -162,7 +181,8 @@ again, is not held: each command with the same foreign changes is held once
 per session, so the agent (or the owner through it) keeps the capability to
 commit them together. Changes that are nobody's, this session's, or an ended
 session's never hold a command. No decision, never a denial, when the
-journal has no other session's entries, the coordinator cannot be reached,
+journal has no other session's entries for the paths the command would
+take, the coordinator cannot be reached,
 or a Git listing fails or exceeds its bounds (16 MiB of diff, 1,024
 untracked files); the hook detail says which.
 
@@ -361,6 +381,9 @@ line ownership (the guard, `commit --mine`, line-level admission):
 
 - `journal::entries(state_dir, root)`: every write kept for a workspace,
   each with its session, path, time, resulting version and line keys.
+- `journal::entries_for(state_dir, root, paths)`: the same, for only the
+  named paths, reading no other path's entries (the guard and the write
+  hooks).
 - `journal::by_file(&entries)`: per file, line key to the sessions that added
   or removed it, sessions whose lines are not known, and each write's
   version.
@@ -377,8 +400,10 @@ Writes are recorded only by the hooks (`before_edit`, `before_shell`,
   and, for files up to 512 KiB, a copy of the file version: uncommitted file
   content is kept in the owner-only state directory for up to a week. It
   never leaves the machine and is never sent to the coordinator.
-- A `Bash` call with a Git staging or commit step costs one coordinator call
-  and two or three Git listings more, inside the existing hook budget. Every
+- A shell call with a Git staging or commit step costs two or three Git
+  listings, a read of the journal entries of the files they list, and one
+  coordinator call when another session has entries there, inside the
+  existing hook budget. Every
   other `Bash` call costs one substring check, and a stat per changed file
   for the journal.
 - The shared index is written only by `commit --mine`, which the agent runs
