@@ -2,8 +2,8 @@
 //! runs commands stays current while its hooks keep reaching the daemon, and
 //! leaves peers' briefings once they stop. Times are injected.
 use langspan_core::{
-    BRIEF_HORIZON_MS, Briefing, Command, Event, Outcome, SESSION_SEEN_INTERVAL_MS, State, apply,
-    decide, status_view,
+    BRIEF_HORIZON_MS, Briefing, Command, Event, Outcome, PRESENCE_WINDOW_MS, PresenceKind,
+    SESSION_SEEN_INTERVAL_MS, State, acting_session, apply, decide, status_view,
 };
 
 const MINUTE: u64 = 60 * 1000;
@@ -243,4 +243,24 @@ fn a_sighting_is_a_versioned_wire_record() {
     let old: langspan_core::SessionActivity =
         serde_json::from_str(r#"{"session_id":"alice","generation":1,"last_ms":3}"#).unwrap();
     assert_eq!(old.last_hook_ms, 0);
+}
+
+/// A hook run that only searches, runs a shell command or sends its presence
+/// setting is the session at work, as a read is (roadmap A13 with J12).
+#[test]
+fn a_presence_request_is_the_session_at_work() {
+    for command in [
+        Command::ObservePresence {
+            session_id: "alice".into(),
+            kind: PresenceKind::Search,
+            paths: vec!["src".into()],
+        },
+        Command::SetPresence {
+            session_id: "alice".into(),
+            shown: false,
+            window_ms: PRESENCE_WINDOW_MS,
+        },
+    ] {
+        assert_eq!(acting_session(&command), Some("alice"), "{command:?}");
+    }
 }

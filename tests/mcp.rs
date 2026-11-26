@@ -196,6 +196,7 @@ async fn stdio_lists_typed_tools_and_reports_an_unavailable_daemon() {
                 | "langspan_impact"
                 | "langspan_blind_spots"
                 | "langspan_recap"
+                | "langspan_show_message"
                 | "langspan_recall"
                 | "langspan_today"
                 | "langspan_land_queue"
@@ -872,6 +873,120 @@ async fn stdio_symbol_with_detail_returns_calls_and_callers_by_name() {
     };
     assert_eq!(resolution, None);
     assert_eq!((&symbols[0].body_digest, &symbols[0].calls), (&None, &None));
+    disconnect(client).await;
+}
+
+#[tokio::test]
+async fn stdio_show_message_returns_the_whole_text_after_acknowledgement() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let workspace = directory.workspace();
+    let _daemon = Daemon::start(&state_dir).await;
+    let registered = call_ipc(
+        &state_dir,
+        "workspace",
+        Operation::WorkspaceRegister {
+            workspace_id: "workspace".into(),
+            root: workspace.to_string_lossy().into_owned(),
+        },
+    )
+    .await;
+    assert!(matches!(registered.outcome, Outcome::Workspace { .. }));
+    let session = call_ipc(
+        &state_dir,
+        "session",
+        Operation::SessionRegister {
+            session_id: "agent-b".into(),
+            workspace_id: "workspace".into(),
+            parent: None,
+            headless: false,
+        },
+    )
+    .await;
+    assert!(matches!(session.outcome, Outcome::Session { .. }));
+    let text = "\"é".repeat(133);
+    let paths: Vec<String> = (0..8).map(|n| format!("src/{n}.rs")).collect();
+    let sent = call_ipc(
+        &state_dir,
+        "m-9",
+        Operation::SendMessage {
+            workspace_id: "workspace".into(),
+            from: None,
+            to: Some("agent-b".into()),
+            text: text.clone(),
+            paths: paths.clone(),
+        },
+    )
+    .await;
+    assert!(matches!(sent.outcome, Outcome::MessageSent { .. }));
+    let acknowledged = call_ipc(
+        &state_dir,
+        "ack",
+        Operation::AckMessage {
+            session_id: "agent-b".into(),
+            message_id: "m-9".into(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        acknowledged.outcome,
+        Outcome::MessageAcknowledged {
+            acknowledged: true,
+            ..
+        }
+    ));
+
+    let client = connect(&state_dir).await;
+    let shown = response(
+        call_tool(
+            &client,
+            "langspan_show_message",
+            json!({"workspace_id": "workspace", "message_id": "m-9"}),
+        )
+        .await,
+    );
+    let Outcome::MessageShown { message } = shown.outcome else {
+        panic!("{shown:?}");
+    };
+    assert_eq!(
+        (message.text, message.paths, message.from, message.retracted),
+        (text, paths, None, false)
+    );
+    let unknown = call_tool(
+        &client,
+        "langspan_show_message",
+        json!({"workspace_id": "workspace", "message_id": "m-404"}),
+    )
+    .await;
+    assert_eq!(unknown.is_error, Some(true));
+    assert_eq!(
+        unknown.structured_content.unwrap()["outcome"]["code"],
+        "unknown_message"
+    );
+    // A message is found only in the workspace it was sent in.
+    let elsewhere = directory.0.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let registered = call_ipc(
+        &state_dir,
+        "elsewhere",
+        Operation::WorkspaceRegister {
+            workspace_id: "elsewhere".into(),
+            root: elsewhere.to_string_lossy().into_owned(),
+        },
+    )
+    .await;
+    assert!(matches!(registered.outcome, Outcome::Workspace { .. }));
+    let other = call_tool(
+        &client,
+        "langspan_show_message",
+        json!({"workspace_id": "elsewhere", "message_id": "m-9"}),
+    )
+    .await;
+    assert_eq!(other.is_error, Some(true));
+    assert_eq!(
+        other.structured_content.unwrap()["outcome"]["code"],
+        "unknown_message"
+    );
     disconnect(client).await;
 }
 

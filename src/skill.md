@@ -94,7 +94,9 @@ about, `langspan_recap` gives a bounded account of the workspace,
 `langspan_recall` searches the notes remembered in it (for example, whether
 anyone decided how a field is named, even about a file you are not working
 on), and `langspan_send_message` sends one line to another session;
-`langspan_retract_message` withdraws one you sent that no longer holds.
+`langspan_retract_message` withdraws one you sent that no longer holds. A
+message line that ends with `(cut; langspan messages show -- WORKSPACE ID)`
+was shortened; `langspan_show_message` returns it in full.
 
 ## What never to do
 

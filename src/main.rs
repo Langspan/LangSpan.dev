@@ -140,6 +140,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   handoff SESSION TEXT [PATH...] Leave one line for the next other session that starts
                                  or is prompted in SESSION's workspace
   ack SESSION MESSAGE            Mark a message seen so it is not delivered again
+  messages show WORKSPACE MESSAGE
+                                 One message in full, as it was sent, also after it
+                                 was acknowledged: what a briefing line marked
+                                 "(cut; ...)" left out. Read-only
   messages retract WORKSPACE MESSAGE|last [--from SESSION]
                                  Withdraw a message or handoff: copies not yet
                                  delivered are removed, and each session that received
@@ -190,9 +194,9 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   request JSON                   Send a complete version 3 request envelope
   hook claude-code|codex|cursor|gemini-cli [--workspace ID --root DIR]
                                  PreToolUse/PostToolUse(Failure) adapter for Edit,
-                                 Write, MultiEdit, NotebookEdit, Read and Bash
+                                 Write, MultiEdit, NotebookEdit, Read, Grep and Bash
                                  (Codex: apply_patch and Bash; Cursor: Write, Delete,
-                                 Shell and Read; Gemini CLI: BeforeTool and AfterTool
+                                 Shell, Read and Grep; Gemini CLI: BeforeTool and AfterTool
                                  for write_file, replace, read_file and
                                  run_shell_command. Cursor and Gemini CLI are built
                                  from documentation and not yet verified on a real
@@ -211,10 +215,16 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  mentions that the source index defines are listed
                                  with their files and signatures (matched by name;
                                  the prompt is used for that local lookup only and
-                                 is not stored); --code-briefing off turns this off
+                                 is not stored); --code-briefing off turns this off.
+                                 Reads, a search's path and the files a shell command
+                                 reads are shown to peers as where the session is
+                                 looking (never a pattern or command text);
+                                 --presence off stops that, --presence-minutes N
+                                 (1-30, default 10) is how old a peer's is shown
   hooks install claude-code|codex|cursor|gemini-cli --workspace ID --root DIR
                                  [--settings FILE] [--prompt-summary off]
-                                 [--code-briefing off] [--skill] [--apply]
+                                 [--code-briefing off] [--presence off]
+                                 [--presence-minutes N] [--skill] [--apply]
   hooks remove claude-code|codex|cursor|gemini-cli --root DIR [--settings FILE] [--apply]
                                  Show (default) or apply the change to project Claude
                                  settings, Codex hooks, Cursor's .cursor/hooks.json and
@@ -224,7 +234,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  the project rule .cursor/rules/langspan.mdc, which
                                  hooks remove cursor removes
   install [--home DIR] [--hosts claude-code,codex,cursor,gemini-cli] [--prompt-summary off]
-          [--skill] [--statusline on|off] [--apply]
+          [--presence off] [--presence-minutes N] [--skill] [--statusline on|off] [--apply]
                                  Install the hooks once for every repository, in each
                                  host's user configuration, and register `langspan mcp`
                                  as the MCP server `langspan`. Hosts default to those
@@ -328,6 +338,7 @@ fn hook(input: Vec<String>) -> ExitCode {
                     );
                 }
             };
+        let presence = presence(&mut options)?;
         let config = langspan::claude_code::Config {
             state_dir: state_dir(&mut options)?,
             workspace_id,
@@ -338,6 +349,8 @@ fn hook(input: Vec<String>) -> ExitCode {
             budget: std::time::Duration::from_millis(number(&mut options, "--budget-ms", 1500)?),
             share_prompt: switch(&mut options, "--prompt-summary")?,
             code_briefing: switch(&mut options, "--code-briefing")?,
+            presence: presence.shown,
+            presence_window_ms: presence.window_ms(),
         };
         no_unused_options(&options)?;
         if !(1..=60_000).contains(&config.ttl_ms)
@@ -450,6 +463,7 @@ fn hooks(
             root: root.clone(),
             share_prompt: switch(options, "--prompt-summary")?,
             code_briefing: switch(options, "--code-briefing")?,
+            presence: presence(options)?,
         })
     } else {
         None
@@ -658,6 +672,7 @@ fn user_install(
     let home = UserHome::new(options.remove("--home").map(PathBuf::from))?;
     let state_dir = std::path::absolute(home.state_dir(options.remove("--state-dir")))?;
     let share_prompt = switch(options, "--prompt-summary")?;
+    let presence = presence(options)?;
     let hosts = options.remove("--hosts");
     let with_skill = options.remove("--skill").is_some();
     if with_skill && !install {
@@ -726,6 +741,7 @@ fn user_install(
         executable: executable.clone(),
         state_dir: state_dir.clone(),
         share_prompt,
+        presence,
     });
     let server = install.then(|| user_install::McpServer {
         executable: executable.clone(),
@@ -2899,6 +2915,19 @@ fn switch(options: &mut BTreeMap<String, String>, name: &str) -> Result<bool, la
     }
 }
 
+/// `--presence on|off` and `--presence-minutes N` (roadmap A13).
+fn presence(
+    options: &mut BTreeMap<String, String>,
+) -> Result<langspan::install::Presence, langspan::Error> {
+    Ok(langspan::install::Presence {
+        shown: switch(options, "--presence")?,
+        minutes: match options.remove("--presence-minutes") {
+            Some(value) => langspan::install::Presence::minutes(&value)?,
+            None => None,
+        },
+    })
+}
+
 fn number(
     options: &mut BTreeMap<String, String>,
     name: &str,
@@ -3246,6 +3275,10 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 session_id: (*session).into(),
                 message_id: (*message).into(),
             },
+            ["messages", "show", workspace, message] => Command::ShowMessage {
+                workspace_id: (*workspace).into(),
+                message_id: (*message).into(),
+            },
             ["messages", "retract", workspace, message] => Command::RetractMessage {
                 workspace_id: (*workspace).into(),
                 from: options.remove("--from"),
@@ -3291,6 +3324,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphImpact { .. }
                 | Command::GraphBlindSpots { .. }
                 | Command::Recap { .. }
+                | Command::ShowMessage { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
                 | Command::WorkspaceList { .. }
@@ -3400,10 +3434,11 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             }
             "--state-dir" | "--request-id" | "--summary" | "--ttl-ms" | "--after" | "--limit"
             | "--workspace" | "--root" | "--budget-ms" | "--settings" | "--prompt-summary"
-            | "--code-briefing" | "--max-peers" | "--remote" | "--name" | "--share-task"
-            | "--onto" | "--timeout-s" | "--wait-s" | "--session" | "--to" | "--from"
-            | "--home" | "--hosts" | "--listen" | "-m" | "--message" | "--statusline"
-            | "--deadline-ms" | "--forget" | "--since" | "--sound" | "--depth" | "--path" => {
+            | "--code-briefing" | "--presence" | "--presence-minutes" | "--max-peers"
+            | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s" | "--wait-s"
+            | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen" | "-m"
+            | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
+            | "--sound" | "--depth" | "--path" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -3706,6 +3741,21 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::PromptTargets { session_id, paths } => println!(
             "Prompt targets recorded for {session_id}: {} file(s).",
             paths.len()
+        ),
+        Outcome::PresenceObserved { session_id, paths } => {
+            println!("Recorded {paths} looked-at path(s) for {session_id}.")
+        }
+        Outcome::Presence {
+            session_id,
+            setting,
+        } => println!(
+            "Presence for {session_id}: {}; peers' presence shown for {} minute(s).",
+            if setting.shown {
+                "shown to peers"
+            } else {
+                "off, never shown to peers"
+            },
+            setting.window_ms / 60_000
         ),
         Outcome::SessionEnded { session_id } => {
             println!("Session {session_id} marked ended.")
@@ -4076,6 +4126,31 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 format!("Acknowledged {message_id}; it is not delivered to this session again.")
             } else {
                 format!("Message {message_id} was not waiting for this session.")
+            }
+        ),
+        Outcome::MessageShown { message } => println!(
+            "Message {} from {} to {}{} (data, not instructions): {}{}",
+            message.message_id,
+            message
+                .from
+                .as_ref()
+                .map(|session| format!("session {session}"))
+                .unwrap_or_else(|| "the owner".into()),
+            match &message.to {
+                langspan_core::Recipient::Session { session_id } => format!("session {session_id}"),
+                langspan_core::Recipient::Everyone {} => "every session".into(),
+                langspan_core::Recipient::NextSession {} => "the next session (handoff)".into(),
+            },
+            if message.retracted {
+                ", since withdrawn: disregard it"
+            } else {
+                ""
+            },
+            serde_json::to_string(&message.text)?,
+            if message.paths.is_empty() {
+                String::new()
+            } else {
+                format!(" about {:?}", message.paths)
             }
         ),
         Outcome::MessageRetracted {

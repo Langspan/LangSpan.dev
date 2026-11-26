@@ -62,7 +62,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [A6: Gemini CLI verified on a real session, and guidance for rules-file hosts](https://github.com/Langspan/LangSpan.dev/issues/14): the Gemini CLI adapter has never run live, and editors without hooks get nothing at all.
 - [A11: Outline first for whole reads of large files](https://github.com/Langspan/LangSpan.dev/issues/16): whole reads of large files spend context to find one function; nothing offers the file's shape first.
 - [A12: Index answers next to a search result](https://github.com/Langspan/LangSpan.dev/issues/17): a search result does not say where a name is defined, what depends on it or whether a peer is changing it.
-- [A13: Show where peers are looking](https://github.com/Langspan/LangSpan.dev/issues/18): a session that has read and planned but not written yet is missing from peers' briefings.
+- [A13: Show where peers are looking](https://github.com/Langspan/LangSpan.dev/issues/18): a session that has read and planned but not written yet is missing from peers' briefings. Built as presence; a real-host run remains.
 - [A14: Brief a session when it first reaches another repository](https://github.com/Langspan/LangSpan.dev/issues/19): a session that moves into a second repository is never briefed about the peers working there.
 - [A15: Deliver peers' changes during a Codex turn](https://github.com/Langspan/LangSpan.dev/issues/20): a long Codex turn hears about peers' changes only at its next prompt, after building on old state.
 - [A16: Push a message into an open session at once](https://github.com/Langspan/LangSpan.dev/issues/21): an urgent message waits for the receiving session's next hook, which may come after the harm.
@@ -123,7 +123,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [E7: Sender recorded from the running session](https://github.com/Langspan/LangSpan.dev/issues/64): a shell-sent message needs `--from`, and a wrong or missing value misattributes it.
 - [E9: Messages to sessions on other machines](https://github.com/Langspan/LangSpan.dev/issues/65): agents on two machines cannot message each other, so their owners relay by hand.
 - [E12: Ask who received a message](https://github.com/Langspan/LangSpan.dev/issues/67): a sender cannot tell whether its message has reached the other session yet.
-- [E13: Show a shortened message in full](https://github.com/Langspan/LangSpan.dev/issues/68): a message cut short in a briefing cannot be read in full.
 
 ## F. Checks and landing
 

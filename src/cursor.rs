@@ -33,6 +33,10 @@ pub const SHELL_TOOL: &str = "Shell";
 /// never reach the model would still use up its notice. A test fails when a
 /// captured `pre-write.json` appears and this does not name it.
 pub const CAPTURED_WRITE: Option<&str> = None;
+/// A completed `Grep` shows peers the path it searched (roadmap A13), read
+/// from its `path` input; its pattern is never read. The input's shape is
+/// taken from Cursor's documentation and not yet seen from a real Cursor.
+pub const SEARCH_TOOL: &str = "Grep";
 
 #[derive(Debug, Deserialize)]
 struct HostEvent {
@@ -212,6 +216,21 @@ fn dispatch(event: HostEvent, config: &Config, deadline: Instant) -> Reply {
         );
         return hook::execute(operation, &config, deadline);
     }
+    if tool == SEARCH_TOOL {
+        if !matches!(phase, Phase::Post(ToolResult::Succeeded)) {
+            return Reply::none("unsupported", "only a completed Grep is recorded");
+        }
+        return hook::search(
+            SOURCE,
+            &host_session,
+            parent.as_deref(),
+            &tool_use_id,
+            input.get("path").and_then(Value::as_str),
+            event.directory(),
+            &config,
+            deadline,
+        );
+    }
     let phase = match (tool, phase) {
         (READ_TOOL, Phase::Post(ToolResult::Succeeded)) => Phase::Read,
         (READ_TOOL, _) => {
@@ -221,7 +240,7 @@ fn dispatch(event: HostEvent, config: &Config, deadline: Instant) -> Reply {
         _ => {
             return Reply::none(
                 "unsupported",
-                "supported Cursor tools are Write, Delete, Shell and Read",
+                "supported Cursor tools are Write, Delete, Shell, Read and Grep",
             );
         }
     };
