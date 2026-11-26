@@ -1343,9 +1343,13 @@ already waiting when the coordinator starts is timed from that start.
 ## Look up symbols and affected files
 
 The source index finds definitions and name mentions in Rust, Python,
-TypeScript/JavaScript (including TSX/JSX), Go and Java; `langspan doctor`
+TypeScript/JavaScript (including TSX/JSX), Go, Java and C#; `langspan doctor`
 lists them. A Java definition is exported when another package can reach it:
 `public` or `protected`, or a member of an interface that is not `private`.
+A C# definition is exported when another assembly can reach it: `public`,
+`protected` or `protected internal`, a member of an interface that is not
+`private` or `internal`, or an enum member. C# properties are methods, and
+namespaces are not symbols.
 It updates after complete Git
 scans and can lag changes on disk. Replace `PROJECT` with a registered workspace,
 `upload` with the name to look up, and `src/api.rs` with the file to inspect:

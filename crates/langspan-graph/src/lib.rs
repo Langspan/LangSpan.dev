@@ -9,6 +9,7 @@
 use tree_sitter::{Node, Parser};
 
 mod calls;
+mod csharp;
 pub use calls::{Arity, Call, MAX_CALLS, arity, calls};
 
 /// Larger inputs are refused rather than partly parsed.
@@ -29,17 +30,19 @@ pub enum Language {
     Tsx,
     Go,
     Java,
+    CSharp,
 }
 
 impl Language {
     /// Every indexed language, in the order `langspan doctor` lists them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Rust,
         Self::Python,
         Self::TypeScript,
         Self::Tsx,
         Self::Go,
         Self::Java,
+        Self::CSharp,
     ];
 
     /// Chosen by file extension only. Content is never sniffed.
@@ -52,6 +55,7 @@ impl Language {
             "tsx" | "jsx" => Self::Tsx,
             "go" => Self::Go,
             "java" => Self::Java,
+            "cs" => Self::CSharp,
             _ => return None,
         })
     }
@@ -64,6 +68,7 @@ impl Language {
             Self::Tsx => "tsx",
             Self::Go => "go",
             Self::Java => "java",
+            Self::CSharp => "csharp",
         }
     }
 
@@ -75,6 +80,7 @@ impl Language {
             Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Self::Go => tree_sitter_go::LANGUAGE.into(),
             Self::Java => tree_sitter_java::LANGUAGE.into(),
+            Self::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
         }
     }
 }
@@ -127,7 +133,8 @@ pub struct Symbol {
     pub signature: String,
     /// Visible outside its file by the language's own rule: `pub` in Rust,
     /// `export` in TypeScript, a capital in Go, no leading underscore in
-    /// Python, `public` or `protected` in Java (see `java_exported`).
+    /// Python, `public` or `protected` in Java (see `java_exported`) and in
+    /// C# (see `csharp::exported`).
     pub exported: bool,
     /// The definition's own bytes in the source it was extracted from,
     /// without leading comments or attributes.
@@ -231,9 +238,9 @@ fn is_type_body(language: Language, kind: &str) -> bool {
                 "class_declaration" | "interface_declaration" | "class"
             )
         }
-        // Every Java method and constructor belongs to a type, so its kind
-        // needs no context.
-        Language::Go | Language::Java => false,
+        // Every Java and C# method and constructor belongs to a type, so its
+        // kind needs no context.
+        Language::Go | Language::Java | Language::CSharp => false,
     }
 }
 
@@ -309,6 +316,8 @@ fn exported(language: Language, node: Node, name: &str) -> bool {
             false
         }
         Language::Java => java_exported(node),
+        // `csharp::visit` extracts C# and judges its exports itself.
+        Language::CSharp => false,
     }
 }
 
@@ -538,6 +547,7 @@ fn is_reference(language: Language, kind: &str) -> bool {
             matches!(kind, "identifier" | "type_identifier" | "field_identifier")
         }
         Language::Java => matches!(kind, "identifier" | "type_identifier"),
+        Language::CSharp => kind == "identifier",
     }
 }
 
@@ -622,6 +632,10 @@ fn visit(
     let kind = node.kind();
     if language == Language::Java {
         if let Some(defined) = visit_java(node, source, graph) {
+            return defined;
+        }
+    } else if language == Language::CSharp {
+        if let Some(defined) = csharp::visit(node, source, graph) {
             return defined;
         }
     } else if let Some(target) = import_target(language, node) {

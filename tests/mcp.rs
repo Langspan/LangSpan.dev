@@ -1653,6 +1653,130 @@ async fn stdio_check_write_reports_a_peers_signature_body_lines_and_hold_and_rec
     disconnect(client).await;
 }
 
+const NET_CS_BEFORE: &str = "namespace App;\n\npublic class Net\n{\n    public bool Upload(string path)\n    {\n        return path.Length == 0;\n    }\n\n    public bool Download(string path)\n    {\n        return path.StartsWith(\"http\");\n    }\n}\n";
+const NET_CS_AFTER: &str = "namespace App;\n\npublic class Net\n{\n    public bool Upload(string path, int timeoutMs)\n    {\n        return path.Length == 0;\n    }\n\n    public bool Download(string path)\n    {\n        return path.StartsWith(\"https://example.invalid\");\n    }\n}\n";
+
+/// B26 with roadmap D6, in C#: a peer's signature change and body change
+/// to C# methods are what a hookless client is told before it writes.
+#[tokio::test]
+async fn stdio_check_write_reports_a_peers_csharp_signature_and_body_changes() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let root = directory.0.join("app");
+    git_repository(
+        &root,
+        &[
+            ("src/Net.cs", NET_CS_BEFORE),
+            (
+                "src/Program.cs",
+                "namespace App;\n\nstatic class Program\n{\n    static void Main() => new Net().Upload(\"a\");\n}\n",
+            ),
+        ],
+    );
+    let root = fs::canonicalize(&root).expect("canonical root");
+    let _daemon = Daemon::start(&state_dir).await;
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"ws", "workspace_id":"app", "root":root}),
+        )
+        .await,
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let found = call_tool(
+            &client,
+            "langspan_symbol",
+            json!({"workspace_id":"app", "name":"Upload", "limit":10}),
+        )
+        .await
+        .structured_content
+        .unwrap_or_default();
+        let coverage = &found["outcome"]["coverage"];
+        if coverage["scanned"] == true && coverage["current_files"] == 2 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never indexed: {found:#}");
+        sleep(Duration::from_millis(100)).await;
+    }
+    for phase in ["PreToolUse", "PostToolUse"] {
+        if phase == "PostToolUse" {
+            fs::write(root.join("src/Net.cs"), NET_CS_AFTER).expect("alice writes");
+        }
+        claude_write_hook(
+            &state_dir,
+            &root,
+            "alice",
+            "src/Net.cs",
+            NET_CS_AFTER,
+            phase,
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let history = call_tool(
+            &client,
+            "langspan_history",
+            json!({"workspace_id":"app", "name":"Upload"}),
+        )
+        .await
+        .structured_content
+        .unwrap_or_default();
+        if history["outcome"]["history"]["entries"][0]["after"]
+            .as_str()
+            .is_some_and(|after| after.contains("timeoutMs"))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no notice: {history:#}");
+        sleep(Duration::from_millis(100)).await;
+    }
+    response(
+        call_tool(
+            &client,
+            "langspan_session_register",
+            json!({"request_id":"bob", "session_id":"mcp-bob", "workspace_id":"app"}),
+        )
+        .await,
+    );
+    let check = call_tool(
+        &client,
+        "langspan_check_write",
+        json!({"session_id":"mcp-bob", "paths":["src/Net.cs"]}),
+    )
+    .await
+    .structured_content
+    .expect("structured")["outcome"]["check"]
+        .clone();
+    assert_eq!(check["index_ready"], true, "{check:#}");
+    let symbol = |name: &str| {
+        check["symbols"]
+            .as_array()
+            .and_then(|symbols| symbols.iter().find(|symbol| symbol["name"] == name))
+            .unwrap_or_else(|| panic!("{name}: {check:#}"))
+            .clone()
+    };
+    let upload = symbol("Upload");
+    assert_eq!(
+        (&upload["change"], &upload["by_session"], &upload["after"]),
+        (
+            &json!("signature"),
+            &json!("claude-code.alice"),
+            &json!("public bool Upload(string path, int timeoutMs)")
+        ),
+        "{check:#}"
+    );
+    let download = symbol("Download");
+    assert_eq!(
+        (&download["change"], &download["lines"]),
+        (&json!("body"), &json!([{"start_line":12,"end_line":12}])),
+        "{check:#}"
+    );
+    disconnect(client).await;
+}
+
 /// B26 with more definitions in a file than one check reads: a removal a
 /// peer has since undone is not reported for a definition past the bound,
 /// and the answer says that definitions were left out.

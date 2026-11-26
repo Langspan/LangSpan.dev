@@ -84,6 +84,14 @@ const FILES: &[(&str, &str)] = &[
         "shop/Checkout.java",
         "package shop;\n\nclass Checkout {\n    Order submit(Orders orders, Cart cart) {\n        return orders.place(cart);\n    }\n}\n",
     ),
+    (
+        "Billing/Invoices.cs",
+        "namespace Billing;\n\npublic class Invoices\n{\n    public Invoices() { }\n\n    public Invoice Issue(Order order) => null;\n}\n",
+    ),
+    (
+        "Billing/Desk.cs",
+        "namespace Billing;\n\nclass Desk\n{\n    Invoice Close(Invoices invoices, Order order)\n    {\n        return invoices.Issue(order);\n    }\n}\n",
+    ),
 ];
 
 impl World {
@@ -518,6 +526,67 @@ fn a_java_method_call_that_no_longer_fits_is_told_at_the_write() {
         json!({"file_path": w.work().join("shop/Checkout.java"),
                "old_string": "        return orders.place(cart);\n",
                "new_string": "        return orders.place(cart, null);\n"}),
+        "PreToolUse",
+    ));
+}
+
+/// Roadmap D6, C#: a peer adds a parameter to a public method and to a
+/// constructor; writes that keep the old counts are told.
+#[test]
+fn a_csharp_method_call_that_no_longer_fits_is_told_at_the_write() {
+    let w = World::new(true);
+    w.wait_for_index();
+    w.rewrites(
+        "alice",
+        "a1",
+        "Billing/Invoices.cs",
+        "namespace Billing;\n\npublic class Invoices\n{\n    public Invoices(Ledger ledger) { }\n\n    public Invoice Issue(Order order, Tax tax) => null;\n}\n",
+    );
+    w.wait_for_notice("Issue", "Tax tax");
+    w.wait_for_notice("Invoices", "Ledger ledger");
+    let edit = w.claude(
+        "bob",
+        "b1",
+        "Edit",
+        json!({"file_path": w.work().join("Billing/Desk.cs"),
+               "old_string": "        return invoices.Issue(order);\n",
+               "new_string": "        var invoice = invoices.Issue(order);\n        return invoice;\n"}),
+        "PreToolUse",
+    );
+    let context = alert(&edit);
+    assert!(
+        context.contains(r#""Billing/Desk.cs":7 calls "Issue" with 1 argument"#),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#""public Invoice Issue(Order order, Tax tax)""#),
+        "{context}"
+    );
+    // A constructor call is a call of the type's name. Carol, since one
+    // notice is told to a session once.
+    let created = w.writes(
+        "carol",
+        "c1",
+        "Billing/Front.cs",
+        "namespace Billing;\n\nclass Front\n{\n    Invoices Open()\n    {\n        return new Invoices();\n    }\n}\n",
+    );
+    let context = alert(&created);
+    assert!(
+        context.contains(r#""Billing/Front.cs":7 calls "Invoices" with 0 arguments"#),
+        "{context}"
+    );
+    assert!(
+        context.contains(r#""public Invoices(Ledger ledger)""#),
+        "{context}"
+    );
+    // A call with the new count is not told.
+    quiet(&w.claude(
+        "bob",
+        "b3",
+        "Edit",
+        json!({"file_path": w.work().join("Billing/Desk.cs"),
+               "old_string": "        return invoices.Issue(order);\n",
+               "new_string": "        return invoices.Issue(order, null);\n"}),
         "PreToolUse",
     ));
 }

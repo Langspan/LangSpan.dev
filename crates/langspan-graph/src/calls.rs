@@ -5,7 +5,7 @@
 //! exactly (a spread argument, a signature cut at its bound, two definitions
 //! of one name) is `None`, and callers say nothing about it.
 
-use crate::{Language, MAX_SOURCE_BYTES, NAME_BYTES, end_line, line, text};
+use crate::{Language, MAX_SOURCE_BYTES, NAME_BYTES, end_line, has_child_kind, line, text};
 use tree_sitter::{Node, Parser};
 
 /// Calls returned for one file at most; the rest are not reported.
@@ -117,9 +117,73 @@ fn java_call_site(node: Node, source: &[u8]) -> Option<Call> {
     })
 }
 
+/// A C# name as called: `F` of `F` or `F<T>`.
+fn csharp_simple_name(node: Node) -> Option<Node> {
+    match node.kind() {
+        "identifier" => Some(node),
+        "generic_name" => node.named_child(0),
+        _ => None,
+    }
+}
+
+/// A C# method call (`a.F(x)`, `a?.F(x)`, `F<T>(x)`) or constructor call
+/// (`new T(x)`, named by the type's last identifier). A target-typed
+/// `new(x)` names no type, and `new T { ... }` without parentheses has no
+/// argument list; both are left out, as is a `: base(x)` or `: this(x)`
+/// initializer.
+fn csharp_call_site(node: Node, source: &[u8]) -> Option<Call> {
+    let (name, member) = match node.kind() {
+        "invocation_expression" => {
+            let function = node.child_by_field_name("function")?;
+            match function.kind() {
+                "member_access_expression" => (
+                    csharp_simple_name(function.child_by_field_name("name")?)?,
+                    true,
+                ),
+                "conditional_access_expression" => {
+                    let mut cursor = function.walk();
+                    let binding = function
+                        .named_children(&mut cursor)
+                        .find(|child| child.kind() == "member_binding_expression")?;
+                    (
+                        csharp_simple_name(binding.child_by_field_name("name")?)?,
+                        true,
+                    )
+                }
+                _ => (csharp_simple_name(function)?, false),
+            }
+        }
+        "object_creation_expression" => {
+            let mut named = node.child_by_field_name("type")?;
+            // `System.Text.StringBuilder`, then `List<int>`: the type's own
+            // name.
+            while named.kind() == "qualified_name" {
+                named = named.child_by_field_name("name")?;
+            }
+            (csharp_simple_name(named)?, false)
+        }
+        _ => return None,
+    };
+    let name_text = text(name, source);
+    if name_text.is_empty() || name_text.len() > NAME_BYTES {
+        return None;
+    }
+    let arguments = node.child_by_field_name("arguments")?;
+    Some(Call {
+        name: name_text.to_owned(),
+        line: line(name),
+        lines: (line(node), end_line(arguments)),
+        args: count_arguments(arguments),
+        member,
+    })
+}
+
 fn call_site(language: Language, node: Node, source: &[u8]) -> Option<Call> {
     if language == Language::Java {
         return java_call_site(node, source);
+    }
+    if language == Language::CSharp {
+        return csharp_call_site(node, source);
     }
     let call_kind = match language {
         Language::Python => "call",
@@ -197,7 +261,7 @@ pub fn arity(language: Language, signature: &str) -> Option<Arity> {
             format!("class L {{ {signature} {{}} }}"),
         ],
         // A method or constructor is only ever a member of a type.
-        Language::Java => vec![format!("class L {{ {signature} {{}} }}")],
+        Language::Java | Language::CSharp => vec![format!("class L {{ {signature} {{}} }}")],
     };
     candidates
         .iter()
@@ -240,8 +304,55 @@ fn is_function(language: Language, kind: &str) -> bool {
                 | "method_definition"
         ),
         Language::Go => matches!(kind, "function_declaration" | "method_declaration"),
-        Language::Java => matches!(kind, "method_declaration" | "constructor_declaration"),
+        Language::Java | Language::CSharp => {
+            matches!(kind, "method_declaration" | "constructor_declaration")
+        }
     }
+}
+
+/// A C# parameter list. `params T[] items` is not wrapped in a `parameter`
+/// node: the `params` keyword is followed by its type and name, so every
+/// node after it belongs to that last parameter.
+fn csharp_parameters(list: Node, source: &[u8]) -> Option<Arity> {
+    let mut arity = Arity {
+        min: 0,
+        max: Some(0),
+        receiver: false,
+    };
+    let mut params = false;
+    let mut cursor = list.walk();
+    for child in list.children(&mut cursor) {
+        let kind = child.kind();
+        match kind {
+            "(" | ")" | "," | "attribute_list" => {}
+            _ if kind.contains("comment") => {}
+            "params" => {
+                params = true;
+                arity.max = None;
+            }
+            _ if params => {}
+            "parameter" => {
+                let mut inner = child.walk();
+                let mut words = child.children(&mut inner);
+                // `this Cart cart` makes an extension method, called as
+                // `cart.F()` or as `Carts.F(cart)`: both are member calls,
+                // so no count fits both.
+                if words.any(|word| word.kind() == "modifier" && text(word, source) == "this") {
+                    return None;
+                }
+                let optional = has_child_kind(child, "=");
+                if !optional {
+                    arity.min += 1;
+                }
+                if let Some(max) = arity.max.as_mut() {
+                    *max += 1;
+                }
+            }
+            // `__arglist` and anything else: the count would be a guess.
+            _ => return None,
+        }
+    }
+    Some(arity)
 }
 
 fn parameters(language: Language, function: Node, source: &[u8]) -> Option<Arity> {
@@ -264,6 +375,9 @@ fn parameters(language: Language, function: Node, source: &[u8]) -> Option<Arity
         return Some(arity);
     }
     let list = function.child_by_field_name("parameters")?;
+    if language == Language::CSharp {
+        return csharp_parameters(list, source);
+    }
     let mut cursor = list.walk();
     for (index, parameter) in list.named_children(&mut cursor).enumerate() {
         let kind = parameter.kind();

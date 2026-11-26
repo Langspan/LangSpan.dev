@@ -459,6 +459,7 @@ fn every_listed_language_is_chosen_by_its_extension_and_named_once() {
         Language::Tsx => "tsx",
         Language::Go => "go",
         Language::Java => "java",
+        Language::CSharp => "cs",
     };
     for language in Language::ALL {
         assert_eq!(
@@ -481,6 +482,342 @@ fn a_java_file_that_does_not_parse_is_indexed_as_far_as_it_parsed() {
     .unwrap();
     assert!(graph.partial);
     assert!(graph.symbols.iter().any(|symbol| symbol.name == "fine"));
+}
+
+/// A C# source file as an SDK-style project lays it out, with every kind of
+/// definition the language has. C# has no free functions: every method,
+/// constructor and property belongs to a type.
+const ORDERS_CS: &str = r#"using System;
+using System.Collections.Generic;
+using static System.Math;
+using Json = System.Text.Json;
+
+namespace Shop.Orders;
+
+/// <summary>Places orders.</summary>
+[Serializable]
+public sealed class Orders : Base, IPlacer
+{
+    public const int Limit = 255;
+    internal const string Prefix = "o-", Suffix = "-x";
+    public static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
+    private int count;
+
+    public Orders(Cart cart) : base(cart)
+    {
+        count = 0;
+    }
+
+    [Obsolete("Use PlaceAsync")]
+    public Order Place(Cart cart)
+    {
+        return Helper(cart);
+    }
+
+    protected internal async Task<IList<T>> HistoryAsync<T>(int limit = 10) where T : class
+    {
+        return await Task.FromResult(new List<T>());
+    }
+
+    private protected Order Helper(Cart cart) => new Order(Max(1, 2), cart);
+
+    internal void Reset() { }
+
+    public int Count { get; private set; }
+
+    public string Label => "orders";
+
+    public enum Status
+    {
+        Open,
+        Closed = 2,
+    }
+
+    public record Line(string Sku, int Quantity);
+
+    public delegate void Changed(object sender, EventArgs e);
+
+    void IPlacer.Cancel(Order order) { }
+}
+
+interface IPlacer
+{
+    const int Max = 3;
+
+    Order Place(Cart cart);
+
+    void Cancel(Order order);
+
+    private void Secret() { }
+}
+
+public struct Cart
+{
+    public decimal Total;
+}
+"#;
+
+#[test]
+fn csharp_definitions_of_each_kind_with_lines_signatures_references_and_imports() {
+    let graph = extract(Language::CSharp, ORDERS_CS.as_bytes()).unwrap();
+    assert!(!graph.partial);
+    let found: Vec<(&str, SymbolKind, u32, u32, &str)> = graph
+        .symbols
+        .iter()
+        .map(|symbol| {
+            (
+                symbol.name.as_str(),
+                symbol.kind,
+                symbol.line,
+                symbol.end_line,
+                symbol.signature.as_str(),
+            )
+        })
+        .collect();
+    use SymbolKind::{Constant, Interface, Method, Type};
+    assert_eq!(
+        found,
+        [
+            // Line 10: the class starts after its doc comment and attribute.
+            (
+                "Orders",
+                Type,
+                10,
+                52,
+                "public sealed class Orders : Base, IPlacer"
+            ),
+            ("Limit", Constant, 12, 12, "public const int Limit"),
+            // One field, two constants.
+            ("Prefix", Constant, 13, 13, "internal const string Prefix"),
+            ("Suffix", Constant, 13, 13, "internal const string Suffix"),
+            (
+                "Timeout",
+                Constant,
+                14,
+                14,
+                "public static readonly TimeSpan Timeout"
+            ),
+            // The constructor initializer is the body's first step, not
+            // what a caller writes.
+            ("Orders", Method, 17, 20, "public Orders(Cart cart)"),
+            // Line 23: after `[Obsolete]`, which is not in the signature.
+            ("Place", Method, 23, 26, "public Order Place(Cart cart)"),
+            (
+                "HistoryAsync",
+                Method,
+                28,
+                31,
+                "protected internal async Task<IList<T>> HistoryAsync<T>(int limit = 10) where T : class"
+            ),
+            (
+                "Helper",
+                Method,
+                33,
+                33,
+                "private protected Order Helper(Cart cart)"
+            ),
+            ("Reset", Method, 35, 35, "internal void Reset()"),
+            // A property is its accessors, without their bodies.
+            (
+                "Count",
+                Method,
+                37,
+                37,
+                "public int Count { get; private set; }"
+            ),
+            ("Label", Method, 39, 39, "public string Label { get; }"),
+            ("Status", Type, 41, 45, "public enum Status"),
+            ("Open", Constant, 43, 43, "Open"),
+            ("Closed", Constant, 44, 44, "Closed"),
+            (
+                "Line",
+                Type,
+                47,
+                47,
+                "public record Line(string Sku, int Quantity)"
+            ),
+            (
+                "Changed",
+                Type,
+                49,
+                49,
+                "public delegate void Changed(object sender, EventArgs e)"
+            ),
+            ("Cancel", Method, 51, 51, "void IPlacer.Cancel(Order order)"),
+            ("IPlacer", Interface, 54, 63, "interface IPlacer"),
+            ("Max", Constant, 56, 56, "const int Max"),
+            ("Place", Method, 58, 58, "Order Place(Cart cart)"),
+            ("Cancel", Method, 60, 60, "void Cancel(Order order)"),
+            ("Secret", Method, 62, 62, "private void Secret()"),
+            ("Cart", Type, 65, 68, "public struct Cart"),
+        ]
+    );
+    // A definition's bytes start after its attributes and doc comment.
+    let place = &graph.symbols[6];
+    assert!(ORDERS_CS[place.bytes.clone()].starts_with("public Order Place(Cart cart)\n"));
+    assert!(ORDERS_CS[place.bytes.clone()].ends_with('}'));
+    assert!(refers(&graph, "Helper") && refers(&graph, "Cart") && refers(&graph, "Max"));
+    assert!(
+        graph.references.iter().all(|r| r.name != "Reset"),
+        "a definition's own name is not a reference to it"
+    );
+    // Namespaces, like Java packages, are not symbols: every file declares one.
+    assert!(graph.symbols.iter().all(|s| s.kind != SymbolKind::Module));
+    assert!(
+        !refers(&graph, "Shop"),
+        "a namespace's own name is not a mention"
+    );
+    let imports: Vec<&str> = graph.imports.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(
+        imports,
+        [
+            "System",
+            "System.Collections.Generic",
+            "System.Math",
+            "System.Text.Json"
+        ]
+    );
+    assert_eq!(
+        Language::for_path("src/Shop/Orders.cs"),
+        Some(Language::CSharp)
+    );
+    assert_eq!(Language::CSharp.name(), "csharp");
+}
+
+#[test]
+fn csharp_exports_what_another_assembly_can_reach() {
+    let graph = extract(Language::CSharp, ORDERS_CS.as_bytes()).unwrap();
+    let exported = |name: &str, line: u32| {
+        graph
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == name && symbol.line == line)
+            .unwrap_or_else(|| panic!("{name} at {line}"))
+            .exported
+    };
+    // `public`, `protected` and `protected internal` are reachable from
+    // another assembly.
+    assert!(exported("Orders", 10) && exported("Orders", 17) && exported("Place", 23));
+    assert!(
+        exported("HistoryAsync", 28),
+        "protected internal reaches subclasses elsewhere"
+    );
+    assert!(exported("Limit", 12) && exported("Timeout", 14));
+    assert!(exported("Count", 37) && exported("Label", 39));
+    assert!(exported("Status", 41) && exported("Line", 47) && exported("Changed", 49));
+    assert!(exported("Cart", 65));
+    // `internal`, `private protected`, `private` and no modifier are not.
+    assert!(!exported("Prefix", 13) && !exported("Suffix", 13));
+    assert!(
+        !exported("Helper", 33),
+        "private protected stays in the assembly"
+    );
+    assert!(!exported("Reset", 35));
+    assert!(
+        !exported("IPlacer", 54),
+        "a top-level type is internal by default"
+    );
+    assert!(
+        !exported("Cancel", 51),
+        "an explicit implementation is reached through its interface"
+    );
+    // Enum members are public; an interface's members are public unless
+    // declared private.
+    assert!(exported("Open", 43) && exported("Closed", 44));
+    assert!(exported("Max", 56) && exported("Place", 58) && exported("Cancel", 60));
+    assert!(!exported("Secret", 62));
+    // Inside an interface, where members default to public, an explicit
+    // implementation of a base interface's member and an `internal` member
+    // are still not exported; a `protected internal` one is.
+    let derived = extract(
+        Language::CSharp,
+        b"public interface IDerived : IBase\n{\n    void IBase.Run() { }\n    internal void Tune();\n    protected internal void Reach();\n}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        names(&derived),
+        [
+            ("IDerived", SymbolKind::Interface, true),
+            ("Run", SymbolKind::Method, false),
+            ("Tune", SymbolKind::Method, false),
+            ("Reach", SymbolKind::Method, true),
+        ]
+    );
+}
+
+#[test]
+fn a_csharp_rewrap_attribute_or_initializer_is_not_a_signature_change_and_a_type_change_is() {
+    let changed = |before: &str, after: &str| {
+        let before = extract(Language::CSharp, before.as_bytes()).unwrap();
+        let after = extract(Language::CSharp, after.as_bytes()).unwrap();
+        diff(&before, &after)
+    };
+    let one_line = "public class Orders\n{\n    public Order Place(Cart cart, Coupon coupon, int quantity)\n    {\n        return null;\n    }\n}\n";
+    // `dotnet format` keeps a wrapped parameter list as written: one
+    // parameter per line after the opening parenthesis. C# allows no
+    // trailing comma in a parameter list.
+    let wrapped = "public class Orders\n{\n    public Order Place(\n        Cart cart,\n        Coupon coupon,\n        int quantity)\n    {\n        return null;\n    }\n}\n";
+    assert_eq!(changed(one_line, wrapped), [], "a rewrap");
+    // An attribute is not part of the signature.
+    let attributed = "public class Orders\n{\n    [Obsolete]\n    [return: NotNull] public Order Place(Cart cart, Coupon coupon, int quantity)\n    {\n        return null;\n    }\n}\n";
+    assert_eq!(changed(one_line, attributed), [], "attribute");
+    // A parameter's type is.
+    let retyped = "public class Orders\n{\n    public Order Place(Basket cart, Coupon coupon, int quantity)\n    {\n        return null;\n    }\n}\n";
+    assert_eq!(
+        changed(one_line, retyped),
+        [langspan_graph::SymbolChange {
+            name: "Place".into(),
+            kind: SymbolKind::Method,
+            change: Change::SignatureChanged {
+                before: "public Order Place(Cart cart, Coupon coupon, int quantity)".into(),
+                after: "public Order Place(Basket cart, Coupon coupon, int quantity)".into(),
+            },
+        }]
+    );
+    // The issue's example in C#: a parameter added.
+    let before = "public class Orders\n{\n    public Order Place(Cart cart) => null;\n}\n";
+    let after =
+        "public class Orders\n{\n    public Order Place(Cart cart, Coupon coupon) => null;\n}\n";
+    assert_eq!(
+        changed(before, after)[0].change,
+        Change::SignatureChanged {
+            before: "public Order Place(Cart cart)".into(),
+            after: "public Order Place(Cart cart, Coupon coupon)".into(),
+        }
+    );
+    // A body edit, an expression body, a constructor initializer, a
+    // property's initial value and a private method's change are not
+    // interface changes.
+    let body = "public class Orders\n{\n    public Orders() : base() { }\n    public Order Place(Cart cart) { return cart.Order(); }\n    public int Count { get; set; } = 1;\n    private void Hidden(int a) { }\n}\n";
+    let body_after = "public class Orders\n{\n    public Orders() : this(1) { }\n    public Order Place(Cart cart) => null;\n    public int Count { get; set; } = 2;\n    private void Hidden(long a) { }\n}\n";
+    assert_eq!(changed(body, body_after), []);
+    // A property losing its setter or retyped is.
+    let read_only = "public class Orders\n{\n    public Orders() : base() { }\n    public Order Place(Cart cart) { return cart.Order(); }\n    public int Count { get; } = 1;\n    private void Hidden(int a) { }\n}\n";
+    assert_eq!(
+        changed(body, read_only),
+        [langspan_graph::SymbolChange {
+            name: "Count".into(),
+            kind: SymbolKind::Method,
+            change: Change::SignatureChanged {
+                before: "public int Count { get; set; }".into(),
+                after: "public int Count { get; }".into(),
+            },
+        }]
+    );
+    // An accessor's own body is not part of the property's signature.
+    let bodied = "public class Orders\n{\n    public Orders() : base() { }\n    public Order Place(Cart cart) { return cart.Order(); }\n    public int Count { get { return 1; } set { } }\n    private void Hidden(int a) { }\n}\n";
+    assert_eq!(changed(body, bodied), [], "accessor bodies");
+}
+
+#[test]
+fn a_csharp_file_that_does_not_parse_is_indexed_as_far_as_it_parsed() {
+    let graph = extract(
+        Language::CSharp,
+        b"public class Ok\n{\n    public void Fine() { }\n}\nclass Broken\n{\n    void Half( {{{\n",
+    )
+    .unwrap();
+    assert!(graph.partial);
+    assert!(graph.symbols.iter().any(|symbol| symbol.name == "Fine"));
 }
 
 #[test]

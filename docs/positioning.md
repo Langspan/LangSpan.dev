@@ -40,7 +40,7 @@ recovery is an illustration, not an observed outcome.
 
 The coordination layer uses source relationships as well as file activity.
 The v0.2.0 local Tree-sitter index extracts definitions, name mentions,
-imports and signatures from Rust, Python, TypeScript/JavaScript, Go and Java.
+imports and signatures from Rust, Python, TypeScript/JavaScript, Go, Java and C#.
 It matches names, not resolved scopes, types or imports. Interface notices
 can cross linked worktrees on the same machine, including relevant
 uncommitted exported signatures. Related sessions can receive a notice at
