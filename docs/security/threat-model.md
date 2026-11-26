@@ -552,6 +552,23 @@ are the status line's.
 | Denial of service | One answer reads at most the newest 50,000 events and parses each, then one backward search for the generation's anchor; the cost is bounded by that count, not by history, and the answer says `truncated` when the window reaches past it. `date` runs at most five times for each midnight found, all within one 2 s deadline, and is killed at it. The answer fits one 48 KiB frame: listed files, then sessions, are dropped and counted. |
 | Elevation of privilege | It grants nothing and decides nothing; a failure is an error answer. |
 
+## Coordination report
+
+`langspan report` and `langspan_report` (roadmap H8,
+[ADR 0019](../adr/0019-person-facing-surfaces-and-usage-accounting.md)) read
+the event log over the owner-only socket and count, per session and per host
+kind, what `today` already reads. They start no process. The one new stored
+field is the refused tool call's input digest on `write_refused`.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | A session's host kind is read from the prefix of its ID, which the hook sets from the adapter (`claude-code.`, `codex.`); a session registered by hand under such a prefix is counted as that host, which a same-user process could already do. |
+| Tampering (prompt injection) | The MCP answer places session IDs, written by hooks and other callers, in a model's context. It starts with a line saying they are coordination data, not instructions; each ID is cut to 48 characters, each line to 240 bytes and the whole to 2,400 bytes. No path, intent text, prompt or message is included. |
+| Repudiation | Reading leaves no trace: the command is answered from the store, records no event or receipt, refuses or holds nothing, and acknowledges no message. |
+| Information disclosure | The input digest is the SHA-256 the admission's receipt and lease already keep; it holds no file content. Nothing leaves the machine; the digest is not published to a remote. |
+| Denial of service | One answer reads at most the newest 50,000 events, as `today` does, and says `truncated` with the time it covered. Per-session state is bounded by the sessions in those events; the answer lists at most 16 sessions and fits one 48 KiB frame, dropping session rows and counting them. |
+| Elevation of privilege | It grants nothing and decides nothing; a failure is an error answer. |
+
 ## Region admission
 
 [ADR 0012](../adr/0012-region-admission.md): the hook reads and parses the file

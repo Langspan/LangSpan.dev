@@ -12,7 +12,7 @@ use crate::hook::{file_key, valid_host_id};
 use langspan_core::ToolResult;
 use serde::Deserialize;
 use std::{io::Read, time::Instant};
-pub const SOURCE: &str = "claude-code";
+pub const SOURCE: &str = langspan_core::CLAUDE_CODE_HOST;
 pub const SUPPORTED_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 /// A completed `Read` is recorded as the version the session saw. It is
 /// never admitted or denied.

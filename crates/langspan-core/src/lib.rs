@@ -10,6 +10,7 @@ mod dashboard;
 mod flaky;
 mod lines;
 mod recall;
+mod report;
 mod status;
 mod status_line;
 mod today;
@@ -27,6 +28,10 @@ pub use flaky::{
 };
 pub use recall::{
     RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
+};
+pub use report::{
+    OTHER_HOST, REPORT_SESSIONS, Report, ReportCounts, ReportHost, ReportQuery, ReportSession,
+    host_kind, report,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
@@ -1859,6 +1864,12 @@ pub const MAX_UNCOORDINATED_SESSIONS: usize = 2;
 pub const MAX_UNCOORDINATED_OBSERVED: usize = 256;
 /// The host name that starts a Codex session's ID (`codex.<host session>`).
 pub const CODEX_HOST: &str = "codex";
+/// The host names that start the other hooked hosts' session IDs.
+pub const CLAUDE_CODE_HOST: &str = "claude-code";
+pub const CURSOR_HOST: &str = "cursor";
+pub const GEMINI_HOST: &str = "gemini";
+/// The tool name of a shell call on every host, as the hooks record it.
+pub const SHELL_TOOL: &str = "Bash";
 
 /// Files a scan saw change in one physical workspace that no session of it
 /// reported, while Codex sessions are registered there (issue #129). Codex
@@ -1925,6 +1936,12 @@ pub enum Event {
         /// The other session the refusal names, when there is one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer_session_id: Option<String>,
+        /// The refused tool call's input digest (`ToolIdentity`), so the
+        /// coordination report can tell an identical retry from a changed
+        /// call. Absent for a held commit and from records written before it
+        /// was kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_digest: Option<String>,
         at_ms: u64,
         generation: u64,
     },
@@ -2668,6 +2685,13 @@ pub enum Command {
         workspace_id: Option<String>,
         from_ms: u64,
     },
+    /// Read-only, answered from the event log: the coordination report of
+    /// one workspace since `from_ms` (wall clock, Unix milliseconds), per
+    /// session and per host kind.
+    Report {
+        workspace_id: String,
+        from_ms: u64,
+    },
     /// Read-only: the person's status line for the directory `root`, with
     /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
     StatusLine {
@@ -3230,6 +3254,13 @@ enum CommandWire {
         workspace_id: Option<String>,
         from_ms: u64,
     },
+    /// Read-only, answered from the event log: the coordination report of
+    /// one workspace since `from_ms` (wall clock, Unix milliseconds), per
+    /// session and per host kind.
+    Report {
+        workspace_id: String,
+        from_ms: u64,
+    },
     /// Read-only: the person's status line for the directory `root`, with
     /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
     StatusLine {
@@ -3729,6 +3760,9 @@ pub enum Outcome {
     Today {
         today: Today,
     },
+    Report {
+        report: Report,
+    },
     StatusLine {
         line: StatusLine,
     },
@@ -4081,6 +4115,9 @@ fn decide_checked(
                 kind,
                 paths: paths.iter().take(REFUSAL_PATHS).cloned().collect(),
                 peer_session_id: peer.cloned(),
+                input_digest: operation
+                    .as_ref()
+                    .map(|operation| operation.input_digest.clone()),
                 at_ms: now_ms,
                 generation: state.generation,
             };
@@ -5813,6 +5850,7 @@ fn decide_checked(
                     kind: *kind,
                     paths: paths.into_iter().take(REFUSAL_PATHS).collect(),
                     peer_session_id: peer_session_id.clone(),
+                    input_digest: None,
                     at_ms: now_ms,
                     generation: state.generation,
                 }],
@@ -5849,6 +5887,7 @@ fn decide_checked(
         }
         Command::Events { .. }
         | Command::Today { .. }
+        | Command::Report { .. }
         | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
@@ -8335,6 +8374,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             workspace_id,
             paths,
             peer_session_id,
+            input_digest,
             at_ms,
             generation,
             ..
@@ -8346,10 +8386,13 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 || peer_session_id
                     .as_ref()
                     .is_some_and(|peer| peer.len() > 200)
+                || input_digest
+                    .as_ref()
+                    .is_some_and(|digest| !is_hex_digest(digest, 64))
             {
                 return Err(error(
                     "invalid_event",
-                    "A refusal keeps at most 8 paths and one peer session ID",
+                    "A refusal keeps at most 8 paths, one peer session ID and a SHA-256 input digest",
                 ));
             }
             status_line::remember(state, workspace_id, *at_ms, *generation);

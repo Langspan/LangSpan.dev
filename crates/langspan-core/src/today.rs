@@ -167,7 +167,7 @@ pub struct TodayQuery<'a> {
 
 /// The session an event is about, and its own time on the daemon's clock
 /// with the generation that clock belongs to.
-fn event_facts(event: &Event) -> (Option<&str>, Option<(u64, u64)>) {
+pub(crate) fn event_facts(event: &Event) -> (Option<&str>, Option<(u64, u64)>) {
     match event {
         Event::SessionRegistered { session } => (Some(&session.session_id), None),
         Event::SessionPrompted {
@@ -218,7 +218,7 @@ fn event_facts(event: &Event) -> (Option<&str>, Option<(u64, u64)>) {
 }
 
 /// The workspace an event belongs to, when it says so itself.
-fn event_workspace<'a>(state: &'a State, event: &'a Event) -> Option<&'a str> {
+pub(crate) fn event_workspace<'a>(state: &'a State, event: &'a Event) -> Option<&'a str> {
     match event {
         Event::SessionRegistered { session } => Some(&session.workspace_id),
         Event::WriteRefused { workspace_id, .. } | Event::TurnReleased { workspace_id, .. } => {
@@ -242,6 +242,81 @@ fn cut(text: &str, limit: usize) -> String {
     cut
 }
 
+/// Places the events of the log, read oldest first, on the wall clock.
+pub(crate) struct Placement {
+    anchor: Option<ClockAnchor>,
+    clock: Option<u64>,
+    /// The wall time of the first event read that carries one of its own
+    /// (an anchor included): every event left out is older. An event before
+    /// it only inherits a time, which may be far older than its own.
+    bound: Option<Option<u64>>,
+}
+
+impl Placement {
+    /// `anchor`: that of the generation the first event belongs to, when it
+    /// was anchored and the anchor precedes it.
+    pub(crate) fn new(anchor: Option<ClockAnchor>) -> Self {
+        Self {
+            anchor,
+            clock: anchor.map(|anchor| anchor.clock_ms),
+            bound: None,
+        }
+    }
+
+    /// The next event's wall time; `None` when its generation has no anchor.
+    pub(crate) fn place(&mut self, event: &Event) -> Option<u64> {
+        let mut timed = false;
+        match event {
+            Event::Booted { .. } => {
+                self.anchor = None;
+                self.clock = None;
+            }
+            Event::ClockAnchored { anchor: new } => {
+                self.anchor = Some(*new);
+                self.clock = Some(new.clock_ms);
+                timed = true;
+            }
+            _ => {}
+        }
+        if let Some((at_ms, generation)) = event_facts(event).1 {
+            match self.anchor {
+                Some(current) if generation == current.generation => {
+                    self.clock = Some(at_ms);
+                    timed = true;
+                }
+                // Undated: no time to compare, so nothing is known.
+                None => timed = true,
+                // Another generation's time: only an inherited wall here.
+                Some(_) => {}
+            }
+        }
+        let wall = self
+            .anchor
+            .zip(self.clock)
+            .map(|(anchor, clock)| anchor.wall(clock));
+        if timed {
+            self.bound.get_or_insert(wall);
+        }
+        wall
+    }
+
+    /// The wall time of the oldest event placed that carries a time of its
+    /// own: the start of what was read, when it is known.
+    pub(crate) fn covered_from(&self) -> Option<u64> {
+        self.bound.flatten()
+    }
+
+    /// Whether the older part of the log, `earlier` when there is one, may
+    /// hold part of a window starting at `from_ms`.
+    pub(crate) fn truncated(&self, earlier: bool, from_ms: u64) -> bool {
+        earlier
+            && match self.bound {
+                Some(Some(first)) => first >= from_ms,
+                _ => true,
+            }
+    }
+}
+
 #[derive(Default)]
 struct Tally {
     first_ms: u64,
@@ -257,50 +332,16 @@ pub fn today(state: &State, query: &TodayQuery<'_>) -> Today {
         None => true,
         Some(wanted) => workspace == Some(wanted),
     };
-    let mut anchor = query.anchor;
-    let mut clock = anchor.map(|anchor| anchor.clock_ms);
+    let mut placement = Placement::new(query.anchor);
     let mut sessions: BTreeMap<String, Tally> = BTreeMap::new();
     let mut refusals: BTreeMap<String, u32> = BTreeMap::new();
     let mut checks = TodayChecks::default();
     let mut landings = TodayLandings::default();
     let mut undated = 0u32;
-    // The wall time of the first event read that carries one of its own (an
-    // anchor included): every event left out is older. An event before it
-    // only inherits a time, which may be far older than its own.
-    let mut bound: Option<Option<u64>> = None;
     for recorded in query.events {
         let event = &recorded.event;
-        let mut timed = false;
-        match event {
-            Event::Booted { .. } => {
-                anchor = None;
-                clock = None;
-            }
-            Event::ClockAnchored { anchor: new } => {
-                anchor = Some(*new);
-                clock = Some(new.clock_ms);
-                timed = true;
-            }
-            _ => {}
-        }
-        let (session, own) = event_facts(event);
-        if let Some((at_ms, generation)) = own {
-            match anchor {
-                Some(current) if generation == current.generation => {
-                    clock = Some(at_ms);
-                    timed = true;
-                }
-                // Undated: no time to compare, so nothing is known.
-                None => timed = true,
-                // Another generation's time: only an inherited wall here.
-                Some(_) => {}
-            }
-        }
-        let wall = anchor.zip(clock).map(|(anchor, clock)| anchor.wall(clock));
-        if timed {
-            bound.get_or_insert(wall);
-        }
-        let Some(wall) = wall else {
+        let session = event_facts(event).0;
+        let Some(wall) = placement.place(event) else {
             if !matches!(event, Event::Booted { .. }) {
                 undated = undated.saturating_add(1);
             }
@@ -358,12 +399,7 @@ pub fn today(state: &State, query: &TodayQuery<'_>) -> Today {
             _ => {}
         }
     }
-    // The older part of the log may hold part of the window.
-    let truncated = query.earlier
-        && match bound {
-            Some(Some(first)) => first >= window.from_ms,
-            _ => true,
-        };
+    let truncated = placement.truncated(query.earlier, window.from_ms);
     let mut listed: Vec<TodaySession> = sessions
         .into_iter()
         .map(|(session_id, tally)| TodaySession {

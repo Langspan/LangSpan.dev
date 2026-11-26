@@ -29,7 +29,7 @@ such numbers to be measured.
 | E3 | Recap with tokens, model and cost | Not now | Depends on J10 |
 | J10 | Token and cost accounting from host transcripts | Not now | New trust boundary over private transcripts; would need a STRIDE review. Subscription sessions would store no dollars |
 | J11 | Detecting that an agent ran out of quota | Not now | Depends on J10. Claude Code's StopFailure event is hooked (below), but nothing reads it for quota or usage |
-| H8 | `compliance_report`: how often each person's and agent's writes were checked first, intents completed or abandoned, collisions, blocks and overrides (added by the second review) | Not now | On a hooked host every write is checked by construction, so the rate says little; the rest would be counted from LangSpan's own events once someone needs it |
+| H8 | `compliance_report`: how often each person's and agent's writes were checked first, intents completed or abandoned, collisions, blocks and overrides (added by the second review) | Built 26 November 2026 ([issue #81](https://github.com/Langspan/LangSpan.dev/issues/81)): `langspan report` and MCP `langspan_report`, per session and host kind, from LangSpan's own events; see "Coordination report (H8)" below. Not yet run with both hosts on a shared task | First not now: on a hooked host every write is checked by construction, so the rate says little. Built when the rest was wanted counted from LangSpan's events; it gives counts, not a checked-first rate |
 | H9 | Block outcomes: each refusal settled as adapted, overrode, waited or abandoned (added by the second review) | Not now | Whether a refusal changed what the agent did is judged in retained runs for now (the launch validation, PR #56); a product figure would need the benchmark's definition first, as for H5 |
 | H10 | Git trouble baseline: conflicts, rejected pushes and reverts seen in agents' shells, and 26 weeks of `git log` counts (added by the second review) | Not now | A new read of the owner's Git history for a figure nothing uses yet. A report built from the counts by a hosted service is out of scope ([ADR 0016](0016-hosted-service-features-out-of-scope.md)) |
 
@@ -144,6 +144,49 @@ store holding them stops at the first, as for any event kind it does not know
 ([ADR 0015](0015-version-tolerance.md)). Tests: `crates/langspan-core/tests/today.rs`
 (injected clocks across a simulated midnight, a restart without an anchor and
 a reboot), `tests/today.rs` (real daemon, Git, hooks and MCP adapter).
+
+**Coordination report (H8), built 26 November 2026.** `langspan report
+WORKSPACE [--since RFC3339] [--json]` and the read-only MCP tool
+`langspan_report` count, for each session and in total for each host kind
+(`claude-code`, `codex`, `cursor`, `gemini`, `other`), from the event log:
+tool calls admitted (`edits_admitted`), those with a file whose version was
+not compared (`edits_base_unknown`), shell runs seen only after the command
+(`shell_writes_after`), reads the host reported, intents set, ended and left
+open at the session's end, refusals by kind, refusals retried unchanged and
+briefings delivered. It is a read: no event, no receipt, no
+acknowledgement. Four choices were needed:
+
+- *Counts, not rates.* A share is shown only beside the count it is out of
+  (`9 of 41`), and the answer holds no rate field. Nothing in it is a saving
+  or an outcome; it says what was recorded.
+- *Host differences are reported.* A host's total lists the fields its hooks
+  cannot supply (`not_reported`; for Codex, `reads_reported`), and the text
+  shows `-` there, so a zero is not read as behavior. The host kind is the
+  prefix of the session ID, which the hook sets; the adapters' source names
+  and the shell tool's name now come from one constant each in the core.
+- *An identical retry.* `write_refused` now keeps the refused tool call's
+  input digest (`input_digest`, absent for a held commit and in older
+  records). A refusal in the window followed by an admission of the same
+  session's call with the same digest, under a new tool-call ID, counts one
+  `retried_unchanged`; each refused digest is matched once. A second
+  delivery of the refused call is answered from its receipt and adds
+  nothing. An older record without a digest is never matched. This is the
+  only new stored field.
+- *Placing and bounding.* Events are placed in wall time by the same code as
+  `today` (`Placement`, shared), from the same newest 50,000 events; a
+  window reaching past them says `truncated` with `covered_from_ms`. An
+  intent set before the window and still open when its session ends inside
+  it counts as left open. At most 16 sessions are listed, earliest first;
+  host totals include every session. The MCP text, labelled as data, is at
+  most 2,400 bytes, dropping session rows last first.
+
+The new field is read by this build only where it is present; an older build
+that opens a store holding it stops at the first such event, as for any field
+it does not know ([ADR 0015](0015-version-tolerance.md)). Tests:
+`crates/langspan-core/tests/report.rs` (decided events with injected clocks)
+and `tests/report.rs` (a real daemon, Git, hooks fed with recorded Claude Code
+and Codex events, and the MCP adapter with 40 sessions). A run of both real
+hosts over a shared task is still to be retained.
 
 **Status line (row H2), amended 25 November 2026.** H2 is built
 ([issue #76](https://github.com/Langspan/LangSpan.dev/issues/76)), for Claude

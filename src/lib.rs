@@ -18,6 +18,7 @@ pub mod notify;
 pub mod protocol;
 mod reformat;
 pub mod regions;
+pub mod report;
 mod sha1;
 mod sha256;
 pub mod skill;

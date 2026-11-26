@@ -6,9 +6,9 @@
 
 use langspan_core::{
     ClockAnchor, Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event,
-    LeaseStatus, Outcome, RecordedEvent, SentPublication, State, StatusRecord, TODAY_EVENTS,
-    TodayQuery, TodayWindow, apply, dashboard_denials, decide, expiry_events, shrink_status,
-    status_records,
+    LeaseStatus, Outcome, RecordedEvent, ReportQuery, SentPublication, State, StatusRecord,
+    TODAY_EVENTS, TodayQuery, TodayWindow, apply, dashboard_denials, decide, expiry_events,
+    shrink_status, status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
@@ -564,6 +564,7 @@ impl Store {
                 | Command::Recap { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
+                | Command::Report { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
                 | Command::WorkspaceList { .. }
@@ -707,6 +708,10 @@ impl Store {
                 workspace_id,
                 from_ms,
             } => self.today(workspace_id.as_deref(), *from_ms, wall_now_ms(), now_ms)?,
+            Command::Report {
+                workspace_id,
+                from_ms,
+            } => self.report(workspace_id, *from_ms, wall_now_ms())?,
             Command::RemoteSent {
                 workspace_id,
                 limit,
@@ -986,20 +991,56 @@ impl Store {
         wall_ms: u64,
         now_ms: u64,
     ) -> StoreResult<Outcome> {
+        if let Some(refused) = self.refused_window(workspace_id, from_ms, wall_ms) {
+            return Ok(refused);
+        }
+        let (events, anchor, earlier) = self.newest_events()?;
+        let mut today = langspan_core::today(
+            &self.state,
+            &TodayQuery {
+                workspace_id,
+                window: TodayWindow {
+                    from_ms,
+                    to_ms: wall_ms,
+                },
+                events: &events,
+                anchor,
+                earlier,
+                now_ms,
+            },
+        );
+        today.shrink_until(|today| {
+            serde_json::to_vec(today).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+        });
+        Ok(Outcome::Today { today })
+    }
+
+    /// Why a window of the event log cannot be read: an unknown workspace,
+    /// or a start after now.
+    fn refused_window(
+        &self,
+        workspace_id: Option<&str>,
+        from_ms: u64,
+        wall_ms: u64,
+    ) -> Option<Outcome> {
         if let Some(workspace_id) = workspace_id
             && !self.state.workspaces.contains_key(workspace_id)
         {
-            return Ok(Outcome::Error {
+            return Some(Outcome::Error {
                 code: "unknown_workspace".into(),
                 message: "no workspace has this ID; `langspan status` lists them".into(),
             });
         }
-        if from_ms > wall_ms {
-            return Ok(Outcome::Error {
-                code: "invalid_window".into(),
-                message: "the window starts after now; give a --since time in the past".into(),
-            });
-        }
+        (from_ms > wall_ms).then(|| Outcome::Error {
+            code: "invalid_window".into(),
+            message: "the window starts after now; give a --since time in the past".into(),
+        })
+    }
+
+    /// The newest `TODAY_EVENTS` events, oldest first, with the anchor of
+    /// the generation the first belongs to (when it was anchored) and
+    /// whether older events exist. `today` and `report` read the same.
+    fn newest_events(&self) -> StoreResult<(Vec<RecordedEvent>, Option<ClockAnchor>, bool)> {
         let mut statement = self
             .connection
             .prepare("SELECT seq, event_json FROM events ORDER BY seq DESC LIMIT ?1")?;
@@ -1033,9 +1074,21 @@ impl Store {
             Some(Event::ClockAnchored { anchor }) => Some(anchor),
             _ => None,
         };
-        let mut today = langspan_core::today(
+        Ok((events, anchor, earlier))
+    }
+
+    /// The coordination report (roadmap H8): the newest `TODAY_EVENTS`
+    /// events at most, placed in wall time as `today` places them, counted
+    /// by the core. Reads only; it writes nothing and acknowledges no
+    /// message.
+    pub fn report(&self, workspace_id: &str, from_ms: u64, wall_ms: u64) -> StoreResult<Outcome> {
+        if let Some(refused) = self.refused_window(Some(workspace_id), from_ms, wall_ms) {
+            return Ok(refused);
+        }
+        let (events, anchor, earlier) = self.newest_events()?;
+        let mut report = langspan_core::report(
             &self.state,
-            &TodayQuery {
+            &ReportQuery {
                 workspace_id,
                 window: TodayWindow {
                     from_ms,
@@ -1044,13 +1097,12 @@ impl Store {
                 events: &events,
                 anchor,
                 earlier,
-                now_ms,
             },
         );
-        today.shrink_until(|today| {
-            serde_json::to_vec(today).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+        report.shrink_until(|report| {
+            serde_json::to_vec(report).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
         });
-        Ok(Outcome::Today { today })
+        Ok(Outcome::Report { report })
     }
 
     /// The outbound audit: what left for a workspace, newest first, read

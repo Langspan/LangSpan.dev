@@ -27,7 +27,7 @@ use std::{
 };
 
 /// The session namespace: a Gemini session is `gemini.<session_id>`.
-pub const SOURCE: &str = "gemini";
+pub const SOURCE: &str = langspan_core::GEMINI_HOST;
 pub use crate::hook::MAX_EVENT_BYTES;
 /// Tools admitted before they run.
 pub const EDIT_TOOLS: [&str; 2] = ["write_file", "replace"];
