@@ -44,6 +44,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "langspan_recap",
     "langspan_references",
     "langspan_remember",
+    "langspan_retract_message",
     "langspan_send_message",
     "langspan_session_register",
     "langspan_status",
@@ -332,6 +333,19 @@ struct SendMessageArgs {
     text: String,
     /// Workspace-relative files it is about; may be empty. At most 8.
     paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RetractMessageArgs {
+    /// Caller-owned retry identity; a retry returns the first result.
+    request_id: String,
+    workspace_id: String,
+    /// The session that sent the message. Only its sender may withdraw it.
+    session_id: String,
+    /// The message's ID, as its send returned it, or "last" for this
+    /// session's newest message.
+    message_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1372,6 +1386,24 @@ impl McpAdapter {
                 session_id: args.session_id,
                 text: args.text,
                 paths: args.paths,
+            },
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Withdraw a message or handoff this session sent, by its ID or \"last\" for this session's newest. Copies not yet delivered are removed and a handoff not yet taken is not taken; each session that already received it is told once, at its next briefing, to disregard it. Returns the sessions it was withdrawn from unread and those told to disregard it. Local only."
+    )]
+    async fn langspan_retract_message(
+        &self,
+        Parameters(args): Parameters<RetractMessageArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.forward(
+            args.request_id,
+            Command::RetractMessage {
+                workspace_id: args.workspace_id,
+                from: Some(args.session_id),
+                message_id: (args.message_id != "last").then_some(args.message_id),
             },
         )
         .await

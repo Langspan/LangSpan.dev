@@ -238,6 +238,9 @@ pub struct MessageRow {
     pub text: String,
     pub paths: Vec<String>,
     pub acknowledged: u32,
+    /// Withdrawn by its sender or the owner; no longer delivered.
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    pub retracted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -902,10 +905,17 @@ pub(crate) fn dashboard(state: &State, now_ms: u64) -> Dashboard {
         },
     );
 
+    // Held messages, then those withdrawn while still in the history.
+    let withdrawn = state
+        .message_history
+        .values()
+        .flatten()
+        .filter(|message| message.retracted);
     let messages = state
         .messages
         .values()
         .flatten()
+        .chain(withdrawn)
         .map(|message| MessageRow {
             workspace_id: clip(&message.workspace_id),
             from: clip_opt(message.from.as_ref()),
@@ -918,6 +928,7 @@ pub(crate) fn dashboard(state: &State, now_ms: u64) -> Dashboard {
             text: clip(&message.text),
             paths: paths(message.paths.iter().cloned(), DASHBOARD_PATHS).0,
             acknowledged: count(message.acknowledged.len()),
+            retracted: message.retracted,
         })
         .collect();
     let (messages, more_messages) = bounded(messages, DASHBOARD_ITEMS, MESSAGE_BYTES, |row| {
