@@ -6,13 +6,21 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+mod count;
 mod dashboard;
 mod flaky;
+mod history;
 mod lines;
 mod recall;
+mod recent;
 mod status;
 mod status_line;
 mod today;
+mod workspaces;
+pub use count::{
+    COUNT_DAYS, COUNT_KINDS, COUNT_REFUSALS, COUNT_WORKSPACES, CountQuery, RefusalCount,
+    count_refusals, validate_count_days,
+};
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
     DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
@@ -24,8 +32,19 @@ pub use flaky::{
     MAX_FLAKY_LISTED, MAX_LEARNED_CHECKS, MAX_LEARNED_TESTS, MAX_TEST_NAME_BYTES, MAX_TEST_NAMES,
     MAX_TEST_RESULT_BYTES, TestFailure, TestHistory, TestLearning, TestResults,
 };
+pub use history::{
+    HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_NAME_BYTES, HISTORY_RELATED,
+    HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote, HistoryQuery,
+    history as definition_history,
+};
 pub use recall::{
     RECALL_LIMIT, RECALL_QUERY_BYTES, RECALL_WORDS, Recall, RecalledNote, recall as recall_notes,
+};
+pub use recent::{
+    ChangedPath, ContestedPath, LeftUncommitted, MAX_PATH_REFUSALS, MAX_RECENT_WINDOW_MS,
+    MIN_RECENT_WINDOW_MS, PathRefusal, RECENT_BYTES, RECENT_CHANGED, RECENT_CONTESTED,
+    RECENT_INTERFACES, RECENT_LEFT, RECENT_LEFT_CANDIDATES, RECENT_NOTICE_CHANGES,
+    RECENT_WINDOW_MS, RecentChanges, RecentInterfaceChange,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
@@ -39,6 +58,9 @@ pub use today::{
     OpenAdmission, OpenCheck, OpenIntent, OpenMessage, TODAY_EVENTS, TODAY_FILES, TODAY_OPEN,
     TODAY_SESSIONS, Today, TodayChecks, TodayLandings, TodayOpen, TodayQuery, TodaySession,
     TodayWindow, today,
+};
+pub use workspaces::{
+    MAX_ENDING_SESSIONS, MAX_WORKSPACE_PAGE, WorkspaceEnding, WorkspaceKept, WorkspaceSummary,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -511,12 +533,70 @@ pub struct SessionActivity {
     /// the source index (roadmap C8). Paths only; never the prompt's words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_targets: Option<PromptTargets>,
+    /// Where the session was last seen looking: files it read, the path
+    /// scope of its searches, and paths its shell commands named. Newest
+    /// first, one entry per path, at most `MAX_LOOKING` (roadmap A13). Paths
+    /// only: never a search pattern or a command's text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub looking: Vec<LookedPath>,
     /// Digests of the leading non-empty lines of the session's last prompt,
     /// at most `MAX_PROMPT_LINES`: compared with live peers' to tell prompts
     /// started from one template apart (issue #114). Never the words.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub line_digests: Vec<String>,
 }
+
+/// How a session came to look at a path, for presence (roadmap A13).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceKind {
+    /// The host reported a completed read of the file.
+    Read,
+    /// A search (Claude Code's or Cursor's `Grep`) scoped to this path.
+    Search,
+    /// A shell command named this existing path as an operand.
+    Shell,
+}
+
+/// One path a session looked at, and when.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LookedPath {
+    pub path: String,
+    pub kind: PresenceKind,
+    pub at_ms: u64,
+}
+
+/// One path a peer was looking at, as a briefing shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PresencePath {
+    pub path: String,
+    pub kind: PresenceKind,
+    pub age_s: u64,
+}
+
+/// A session's own presence setting, kept only when it differs from the
+/// default (shown, `PRESENCE_WINDOW_MS`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PresenceSetting {
+    /// False: this session's reads, searches and shell paths are never
+    /// shown to peers (`--presence off`).
+    pub shown: bool,
+    /// How old a peer's presence this session is still shown.
+    pub window_ms: u64,
+}
+
+/// Looked-at paths kept per session.
+pub const MAX_LOOKING: usize = 16;
+/// Looked-at paths shown per peer, and named by one presence observation.
+pub const PRESENCE_PATHS: usize = 4;
+/// Presence older than this is not shown, unless the asking session chose
+/// another window (at most `BRIEF_HORIZON_MS`).
+pub const PRESENCE_WINDOW_MS: u64 = 10 * 60 * 1000;
+/// The shortest presence window a session can choose.
+pub const MIN_PRESENCE_WINDOW_MS: u64 = 60 * 1000;
 
 impl SessionActivity {
     /// When the session was last known to be working: its newest edit,
@@ -545,6 +625,8 @@ pub fn acting_session(command: &Command) -> Option<&str> {
         | Command::Admit { session_id, .. }
         | Command::AdmitTool { session_id, .. }
         | Command::ObserveSource { session_id, .. }
+        | Command::ObservePresence { session_id, .. }
+        | Command::SetPresence { session_id, .. }
         | Command::AckMessage { session_id, .. }
         | Command::Handoff { session_id, .. }
         | Command::RecordRefusal { session_id, .. }
@@ -627,12 +709,16 @@ const BRIEF_BYTES: usize = 40 * 1024;
 /// FNV-1a, 64 bits. It only tells one briefing from the next for the same
 /// session; a collision would withhold one repeat briefing and nothing else.
 fn fingerprint(text: &str) -> String {
+    format!("{:016x}", fingerprint_u64(text))
+}
+
+fn fingerprint_u64(text: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{hash:016x}")
+    hash
 }
 
 pub const MAX_TOUCHED: usize = 32;
@@ -679,6 +765,12 @@ pub struct PeerWork {
     /// subagent; absent for an unrelated session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relation: Option<PeerRelation>,
+    /// Where this peer was recently looking (presence, roadmap A13): at most
+    /// `PRESENCE_PATHS`, newest first, none it is editing or edited, within
+    /// the asking session's presence window. Advisory: it never holds,
+    /// refuses or delays anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub looking: Vec<PresencePath>,
 }
 
 /// A peer that belongs to the same host conversation as the asking session.
@@ -751,6 +843,39 @@ pub struct SentPublication {
     /// The exact bytes pushed, or `None` for a record from before payloads
     /// were kept.
     pub payload: Option<String>,
+}
+
+/// The retention windows a compaction accepts, in days, inclusive. The lower bound
+/// stays well above any client's retry time, since a retry whose receipt
+/// was removed is a new request.
+pub const MIN_RETENTION_DAYS: u32 = 7;
+pub const MAX_RETENTION_DAYS: u32 = 3650;
+
+/// One compaction of the event log (ADR 0025, J7). Times are wall-clock
+/// Unix milliseconds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionReport {
+    /// False for a dry run, which deleted nothing.
+    pub applied: bool,
+    pub keep_days: u32,
+    /// Records written before this time are older than the window.
+    pub cutoff_ms: u64,
+    /// The sequence the derived state is snapshotted at: events at or below
+    /// it are no longer replayed at start. `None` when none is kept.
+    pub snapshot_seq: Option<u64>,
+    /// Events removed (or to be removed), and their sequence range.
+    pub events: u64,
+    pub first_seq: Option<u64>,
+    pub last_seq: Option<u64>,
+    pub receipts: u64,
+    /// Bytes of the removed records. SQLite reuses the space for new records
+    /// rather than shrinking the file.
+    pub bytes: u64,
+    /// Why the snapshot stops before the newest event older than the
+    /// window: something still open was started there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<String>,
 }
 
 /// The owner's standing choice to publish a workspace's work to a Git remote.
@@ -868,7 +993,56 @@ pub struct AutoCheck {
     pub name: String,
     pub argv: Vec<String>,
     pub timeout_s: u32,
+    /// The wider check run after this one, on the same tree, when the
+    /// session's writes changed an indexed export that other files mention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_interface_change: Option<WiderCheck>,
 }
+
+/// The owner's second, wider command (for example the whole workspace's
+/// tests), run whole: LangSpan never narrows it to the files the index names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WiderCheck {
+    pub name: String,
+    pub argv: Vec<String>,
+    pub timeout_s: u32,
+}
+
+/// What an interface change did to the wider check.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InterfaceGrade {
+    /// The wider check passed.
+    Kept,
+    /// The wider check failed.
+    Broke,
+}
+
+/// The interface change a wider check ran for: one changed export, and the
+/// files that mention its name, from the index. A name lookup, not resolved
+/// uses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InterfaceCause {
+    /// The file whose export changed.
+    pub path: String,
+    pub change: InterfaceChange,
+    /// Other changed exports the same run was for.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub more_changes: u32,
+    /// At most [`MAX_CAUSE_DEPENDENTS`] files that mention a changed name.
+    pub dependents: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub more_dependents: u32,
+    /// Supported-language files the index could not read in full when the
+    /// change was reported: a mention in one of them is missing here.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub blind_files: u32,
+}
+
+/// Mentioning files a wider check's report names at most.
+pub const MAX_CAUSE_DEPENDENTS: usize = 8;
 
 /// Bounds of an automatic check's command and of what is kept of its output.
 pub const MAX_AUTO_CHECK_ARGS: usize = 64;
@@ -898,7 +1072,27 @@ pub struct CheckReport {
     /// The command was stopped at its time limit, of this many seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timed_out_s: Option<u32>,
+    /// For a wider check: the interface change it ran for. The core grades
+    /// it from the result and tells the sessions working on the mentioning
+    /// files too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<Box<InterfaceCause>>,
+    /// A wider check is configured, but the index had no complete scan, so
+    /// no interface change could be found and the wider check did not run.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub index_incomplete: bool,
+    /// For a wider check: every file that mentions a changed name, at most
+    /// [`MAX_REPORT_DEPENDENT_PATHS`]. The sessions working on any of them
+    /// are told, even past the [`MAX_CAUSE_DEPENDENTS`] the notice shows.
+    /// Used to choose recipients and not kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependent_paths: Vec<String>,
 }
+
+/// Mentioning files a wider check's report may name to choose its
+/// recipients: the daemon's 16 waiting interface notices, each with at
+/// most [`NOTICE_DEPENDENTS`] files.
+pub const MAX_REPORT_DEPENDENT_PATHS: usize = 16 * NOTICE_DEPENDENTS;
 
 /// An automatic check's result waiting to be placed in one session's
 /// context, once.
@@ -917,6 +1111,16 @@ pub struct CheckNotice {
     /// to flip on unchanged code. Empty when no test was named.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<TestFailure>,
+    /// A wider check's grade: `kept` when it passed, `broke` when it failed,
+    /// absent when it was inconclusive or is no wider check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface_grade: Option<InterfaceGrade>,
+    /// The interface change a wider check ran for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<InterfaceCause>,
+    /// See [`CheckReport::index_incomplete`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub index_incomplete: bool,
 }
 
 /// A push of an integrated result that LangSpan made at the owner's command.
@@ -1237,14 +1441,23 @@ pub struct BlindSpots {
 pub struct InterfaceChange {
     pub name: String,
     pub kind: String,
-    /// `removed`, `signature_changed`, `definition_added` or
-    /// `definition_removed`. The last two mean only the number of
+    /// `added`, `removed`, `signature_changed`, `renamed`, `definition_added`
+    /// or `definition_removed`. `added` is a new exported name with its
+    /// signature in `after`: kept in the log for a definition's history
+    /// (roadmap D4), never held for briefings. A removal recorded since
+    /// then carries the removed signature in `before`. `renamed` means the
+    /// only definition of `name` went and one with the same body and the
+    /// same signature but for the name came as `after_name`. The last two mean only the number of
     /// definitions sharing the name and kind changed: `after` (added) or
     /// `before` (removed) holds the signatures that came or went, and the
     /// counts say how many there were and are.
     pub change: String,
     pub before: Option<String>,
     pub after: Option<String>,
+    /// The new name, for `renamed` only (roadmap B10). Absent from notices
+    /// recorded before renames were told apart from removals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_name: Option<String>,
     /// Parameter counts of `before` and `after`, when each is exactly one
     /// function's signature (ADR 0029). Absent from notices recorded
     /// before they were kept.
@@ -1303,20 +1516,28 @@ pub struct CallSite {
     pub member: bool,
 }
 
-/// A written call whose argument count does not fit a signature another
-/// live session just changed. A name match, not a resolved call.
+/// A written call that another live session's recent change makes wrong: its
+/// argument count does not fit the new signature, or the function it names
+/// was renamed or removed. A name match, not a resolved call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CallBreak {
     pub notice_id: String,
     pub call: CallSite,
+    /// The interface change: `signature_changed`, `renamed` or `removed`.
+    pub change: String,
     /// The file whose exported signature changed.
     pub defined_in: String,
     pub by_session: String,
     pub before: String,
+    /// Empty for `removed`.
     pub after: String,
+    /// The new name, for `renamed` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_name: Option<String>,
     pub before_arity: Option<Arity>,
-    pub after_arity: Arity,
+    /// Always present for `signature_changed`.
+    pub after_arity: Option<Arity>,
     pub age_ms: u64,
 }
 
@@ -1355,6 +1576,15 @@ pub struct InterfaceImpact {
     /// The asking session's files that mention a changed name.
     pub affected: Vec<String>,
     pub age_ms: u64,
+}
+
+/// When an event that has no time of its own was decided: the daemon's
+/// clock and the generation it belongs to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Stamp {
+    pub at_ms: u64,
+    pub generation: u64,
 }
 
 /// Something a person or an agent asked LangSpan to remember about a
@@ -1423,6 +1653,324 @@ pub struct RetractedMessage {
     /// True when `text` is shorter than the message was.
     #[serde(default, skip_serializing_if = "is_false")]
     pub cut: bool,
+}
+
+/// One message in full, as it was sent: what `messages show` returns for a
+/// line a briefing cut. The text and paths are data from the sender, never
+/// instructions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ShownMessage {
+    pub message_id: String,
+    /// The sending session; `None` for the owner.
+    pub from: Option<String>,
+    pub to: Recipient,
+    pub text: String,
+    pub paths: Vec<String>,
+    /// Withdrawn by its sender or the owner since it was sent: its readers
+    /// have been or will be told to disregard it.
+    pub retracted: bool,
+}
+
+impl From<Message> for ShownMessage {
+    fn from(message: Message) -> Self {
+        Self {
+            message_id: message.message_id,
+            from: message.from,
+            to: message.to,
+            text: message.text,
+            paths: message.paths,
+            retracted: message.retracted,
+        }
+    }
+}
+
+/// How a message reached a session's context (roadmap E12).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    /// A briefing a hook placed at session start or at a prompt.
+    Briefing,
+    /// A briefing a hook placed after a completed tool call, mid-turn.
+    MidTurn,
+    /// The session's own call to the MCP tool `langspan_brief`.
+    McpBrief,
+    /// `langspan ack` or its operation: marked seen without a briefing.
+    Ack,
+}
+
+/// Where a sent message stands as a whole.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageState {
+    /// Still held: some recipient may yet be given it.
+    Pending,
+    /// Every session it was owed to was given it; nothing more is sent.
+    Done,
+    /// Withdrawn by its sender or the owner.
+    Retracted,
+    /// Pushed out, unread, by newer messages past the `MAX_MESSAGES` held.
+    Dropped,
+}
+
+/// Where a message stands for one recipient.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecipientState {
+    /// Placed in the session's context. Not a sign the model acted on it.
+    Delivered,
+    /// Not yet placed in the session's context.
+    Pending,
+    /// The session ended before it was given the message.
+    Ended,
+}
+
+/// One recipient of a message and whether it was given it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RecipientStatus {
+    pub session_id: String,
+    pub status: RecipientState,
+    /// Since delivery, on this daemon's clock; `None` before delivery or
+    /// when it was recorded before the daemon last started or before
+    /// roadmap E12.
+    pub age_ms: Option<u64>,
+    /// `None` before delivery or in a record from before roadmap E12.
+    pub via: Option<Delivery>,
+}
+
+/// Recipients a status lists at most; the rest are counted.
+pub const STATUS_RECIPIENTS: usize = 64;
+
+/// What `delivered` means, carried in every status reply.
+pub const DELIVERED_MEANS: &str =
+    "Delivered means placed in the session's context, not that it acted on it.";
+
+/// Who was given a sent message: what `messages status` answers its sender
+/// (roadmap E12). Read-only: asking records nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MessageStatus {
+    pub message_id: String,
+    /// The sending session; `None` for the owner.
+    pub from: Option<String>,
+    pub to: Recipient,
+    /// Since it was sent, on this daemon's clock; `None` when that is not
+    /// known (sent before the daemon last started, or the record is gone).
+    pub sent_age_ms: Option<u64>,
+    pub state: MessageState,
+    /// Delivered sessions first, in delivery order, then the rest by ID; at
+    /// most `STATUS_RECIPIENTS`. A pending handoff has none: no session has
+    /// taken it.
+    pub recipients: Vec<RecipientStatus>,
+    /// Recipients past `STATUS_RECIPIENTS`, counted and not listed.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub more_recipients: u64,
+    /// Part of the message's record is no longer in the event log
+    /// (retention removed it): the answer is what remains.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub partial: bool,
+    /// `DELIVERED_MEANS`.
+    pub delivered_means: String,
+}
+
+/// A message's sent record as the event log holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentRecord {
+    pub message: Message,
+    pub at_ms: Option<u64>,
+    pub generation: Option<u64>,
+}
+
+/// One `message_acknowledged` record from the event log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AckRecord {
+    pub session_id: String,
+    pub via: Option<Delivery>,
+    pub at_ms: Option<u64>,
+    pub generation: Option<u64>,
+}
+
+/// The message `message_id` of the workspace, or with no ID the newest one
+/// `from` sent (the owner's when `from` is `None`), for a status query. The
+/// workspace and IDs are validated here; the message's own records are
+/// read from the event log by the caller.
+pub fn status_message_id(
+    state: &State,
+    workspace_id: &str,
+    from: Option<&str>,
+    message_id: Option<&str>,
+) -> Result<String, CoreError> {
+    validate_known_workspace(state, workspace_id)?;
+    if let Some(from) = from {
+        validate_id(from, "session ID")?;
+    }
+    match message_id {
+        Some(id) => {
+            validate_request_id(id)?;
+            Ok(id.to_owned())
+        }
+        None => sent_message(state, workspace_id, from, None)
+            .map(|message| message.message_id.clone())
+            .ok_or_else(|| {
+                error(
+                    "unknown_message",
+                    "This sender has none of the latest 64 messages sent in this workspace; ask about an older one by its ID",
+                )
+            }),
+    }
+}
+
+/// Who was given message `message_id`: from the state's held messages and
+/// history, and from its records in the event log, `sent` (absent when not
+/// kept) and `acks` (in log order, after `sent`). `retracted` says a later
+/// `message_retracted` record exists. `None` when neither the state nor
+/// the log knows the message.
+pub fn message_status(
+    state: &State,
+    workspace_id: &str,
+    message_id: &str,
+    sent: Option<&SentRecord>,
+    acks: &[AckRecord],
+    retracted: bool,
+    now_ms: u64,
+) -> Option<MessageStatus> {
+    fn find<'a>(
+        lists: &'a BTreeMap<String, Vec<Message>>,
+        workspace_id: &str,
+        message_id: &str,
+    ) -> Option<&'a Message> {
+        lists
+            .get(workspace_id)
+            .and_then(|list| list.iter().find(|message| message.message_id == message_id))
+    }
+    let held = find(&state.messages, workspace_id, message_id);
+    let record = find(&state.message_history, workspace_id, message_id);
+    let message = sent.map(|sent| &sent.message).or(record).or(held)?.clone();
+    let age = |at_ms: Option<u64>, generation: Option<u64>| match (at_ms, generation) {
+        (Some(at_ms), Some(generation)) if generation == state.generation => {
+            Some(now_ms.saturating_sub(at_ms))
+        }
+        _ => None,
+    };
+    // Every reader the log and the state know, first delivery first.
+    let mut delivered: Vec<RecipientStatus> = Vec::new();
+    for ack in acks {
+        if !delivered
+            .iter()
+            .any(|seen| seen.session_id == ack.session_id)
+        {
+            delivered.push(RecipientStatus {
+                session_id: ack.session_id.clone(),
+                status: RecipientState::Delivered,
+                age_ms: age(ack.at_ms, ack.generation),
+                via: ack.via,
+            });
+        }
+    }
+    for reader in record
+        .into_iter()
+        .chain(held)
+        .flat_map(|message| &message.acknowledged)
+    {
+        if !delivered.iter().any(|seen| &seen.session_id == reader) {
+            delivered.push(RecipientStatus {
+                session_id: reader.clone(),
+                status: RecipientState::Delivered,
+                age_ms: None,
+                via: None,
+            });
+        }
+    }
+    let dropped = state
+        .dropped_messages
+        .get(workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut partial = sent.is_none();
+    let message_state = if retracted || record.is_some_and(|record| record.retracted) {
+        MessageState::Retracted
+    } else if held.is_some() {
+        MessageState::Pending
+    } else if record.is_some() {
+        // The history outlasts every drop: a message the cap pushed out of
+        // the held list was already out of the history.
+        MessageState::Done
+    } else if dropped.iter().any(|id| id == message_id) {
+        MessageState::Dropped
+    } else {
+        match message.to {
+            // These leave the held list only when taken, withdrawn or dropped.
+            Recipient::Session { .. } | Recipient::NextSession {} => {
+                if delivered.is_empty() {
+                    MessageState::Dropped
+                } else {
+                    MessageState::Done
+                }
+            }
+            Recipient::Everyone {} => {
+                // The drop list keeps the latest `MAX_MESSAGES` drops; once
+                // full, an older drop cannot be told from a completion.
+                if dropped.len() >= MAX_MESSAGES {
+                    partial = true;
+                }
+                MessageState::Done
+            }
+        }
+    };
+    let ended = |session_id: &str| {
+        state
+            .activity
+            .get(session_id)
+            .is_some_and(|activity| activity.ended)
+    };
+    let mut waiting: Vec<RecipientStatus> = Vec::new();
+    let mut not_given = |session_id: &str| {
+        if !delivered.iter().any(|seen| seen.session_id == session_id) {
+            waiting.push(RecipientStatus {
+                session_id: session_id.to_owned(),
+                status: if ended(session_id) {
+                    RecipientState::Ended
+                } else {
+                    RecipientState::Pending
+                },
+                age_ms: None,
+                via: None,
+            });
+        }
+    };
+    match &message.to {
+        Recipient::Session { session_id } => not_given(session_id),
+        // Each current session it is still owed to. Once done, a session
+        // that joined later was never owed it.
+        Recipient::Everyone {} if message_state != MessageState::Done => {
+            for session in state.sessions.values() {
+                if session.workspace_id == workspace_id
+                    && session.generation == state.generation
+                    && message.from.as_deref() != Some(session.session_id.as_str())
+                {
+                    not_given(&session.session_id);
+                }
+            }
+        }
+        Recipient::Everyone {} | Recipient::NextSession {} => {}
+    }
+    waiting.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    let mut recipients = delivered;
+    recipients.append(&mut waiting);
+    let more_recipients = recipients.len().saturating_sub(STATUS_RECIPIENTS) as u64;
+    recipients.truncate(STATUS_RECIPIENTS);
+    Some(MessageStatus {
+        message_id: message.message_id,
+        from: message.from,
+        to: message.to,
+        sent_age_ms: sent.and_then(|sent| age(sent.at_ms, sent.generation)),
+        state: message_state,
+        recipients,
+        more_recipients,
+        partial,
+        delivered_means: DELIVERED_MEANS.into(),
+    })
 }
 
 /// The observer could not complete a scan of a workspace. Until one
@@ -1500,6 +2048,12 @@ pub const MESSAGE_LINE_LIMIT: usize = 700;
 /// every message selected for a briefing fits its text and none is
 /// acknowledged without being shown.
 pub const MESSAGE_BRIEF_BYTES: usize = 1500;
+/// The longest line an adapter renders for an uncoordinated change, before
+/// its ellipsis. A briefing that carries one takes this line, plus its
+/// ellipsis and newline, out of `MESSAGE_BRIEF_BYTES`: both are delivered
+/// once, so every message and withdrawal selected beside it must still be
+/// shown.
+pub const UNCOORDINATED_LINE_LIMIT: usize = 700;
 /// Bytes of a withdrawn message's text quoted when its readers are told.
 pub const RETRACTED_TEXT_BYTES: usize = 120;
 
@@ -1582,10 +2136,19 @@ pub struct Briefing {
     /// Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkout_changes: Vec<CheckoutNotice>,
+    /// Changes on disk in this checkout that no session reported, with the
+    /// Codex sessions that may have run without LangSpan's hooks. Each is
+    /// delivered once. Newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncoordinated: Vec<UncoordinatedNotice>,
     /// Results of the automatic check run after this session's writes, not
     /// yet delivered. Each is delivered once. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckNotice>,
+    /// What changed recently in the repository, only in a briefing asked
+    /// for at session start (roadmap C3). Never part of the signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent: Option<RecentChanges>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1636,6 +2199,11 @@ pub struct State {
     /// whether it was withdrawn: what a withdrawal and the recap read.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub message_history: BTreeMap<String, Vec<Message>>,
+    /// IDs of the messages per workspace that newer ones pushed out of
+    /// `messages` unread, newest first, at most `MAX_MESSAGES`: what a
+    /// status query reads to tell a drop from a completion.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dropped_messages: BTreeMap<String, Vec<String>>,
     /// Withdrawn messages each session received and has not yet been told
     /// to disregard, per session, newest first, at most `MAX_MESSAGES`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1654,6 +2222,10 @@ pub struct State {
     /// explains a held checkout change (at most `MAX_CHECKOUTS` more).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub checkout_runs: BTreeMap<String, Vec<CheckoutRun>>,
+    /// Uncoordinated changes per workspace, newest first, at most
+    /// `MAX_UNCOORDINATED`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub uncoordinated: BTreeMap<String, Vec<UncoordinatedChange>>,
     /// The automatic check per workspace, for the workspaces where the owner
     /// turned one on.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1669,6 +2241,9 @@ pub struct State {
     /// not told.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub uninstalled_hosts: BTreeMap<String, UninstalledHost>,
+    /// Sessions whose presence setting is not the default, by session ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub presence: BTreeMap<String, PresenceSetting>,
     /// The current generation's clock anchor, once recorded. Derived from
     /// the events on replay; not part of the status reply.
     #[serde(skip)]
@@ -1677,6 +2252,19 @@ pub struct State {
     /// line (roadmap H2). Derived on replay; not part of the status reply.
     #[serde(skip)]
     pub refusals: Vec<RecentRefusal>,
+    /// Refusals of the current run with their paths, newest first, at most
+    /// `MAX_PATH_REFUSALS`, for a starting session's recent section
+    /// (roadmap C3). Derived on replay; not part of the status reply.
+    #[serde(skip)]
+    pub path_refusals: Vec<PathRefusal>,
+    /// How many times each workspace ID has been moved or removed: its
+    /// registration revision. With the root it names one registration, so
+    /// what was derived outside the log during an earlier one (the source
+    /// index, a worker's report) is started again or refused, even after a
+    /// switch back to an earlier root. Derived on replay; not part of the
+    /// status reply.
+    #[serde(skip)]
+    pub workspace_revisions: BTreeMap<String, u32>,
     /// Writes recorded per workspace since the event log was replayed: the
     /// write generation a check run takes before its tree and carries with
     /// its test results (`record_check.writes_before`). Derived on replay;
@@ -1724,6 +2312,48 @@ pub struct CheckoutChange {
     pub files: u32,
     pub at_ms: u64,
     pub generation: u64,
+}
+
+/// Uncoordinated changes kept per workspace.
+pub const MAX_UNCOORDINATED: usize = 4;
+/// Changed files one uncoordinated change keeps, at most.
+pub const MAX_UNCOORDINATED_FILES: usize = 8;
+/// Codex sessions one uncoordinated change names, at most.
+pub const MAX_UNCOORDINATED_SESSIONS: usize = 2;
+/// Changed files one scan reports for comparison, at most.
+pub const MAX_UNCOORDINATED_OBSERVED: usize = 256;
+/// The host name that starts a Codex session's ID (`codex.<host session>`).
+pub const CODEX_HOST: &str = "codex";
+
+/// Files a scan saw change in one physical workspace that no session of it
+/// reported, while Codex sessions are registered there (issue #129). Codex
+/// trusts project hooks by the exact path of their file, so a session resumed
+/// under another path for the same directory runs none of them. The sessions
+/// named are the likely cause, not a proven author: a hand edit looks the same.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UncoordinatedChange {
+    pub change_id: String,
+    pub workspace_id: String,
+    /// The Codex sessions registered here, most recently active first.
+    pub sessions: Vec<String>,
+    /// The versions the scan saw, sorted by path.
+    pub files: Vec<ObservedFile>,
+    pub at_ms: u64,
+    pub generation: u64,
+    /// Sessions this change was delivered to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivered: Vec<String>,
+}
+
+/// An uncoordinated change as one session's briefing carries it: the files
+/// still at a version no session has reported.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UncoordinatedNotice {
+    pub sessions: Vec<String>,
+    pub paths: Vec<String>,
+    pub age_ms: u64,
 }
 
 /// A checkout change as one session's briefing carries it.
@@ -1854,6 +2484,19 @@ pub enum Event {
     WorkspaceRegistered {
         workspace: Workspace,
     },
+    /// The owner rebound the workspace to another checkout root (roadmap
+    /// G6). Everything kept under its ID stays; file versions recorded
+    /// under `from_root` are dropped. Local only.
+    WorkspaceMoved {
+        workspace: Workspace,
+        from_root: String,
+    },
+    /// The owner took the workspace out of coordination (roadmap G6): it,
+    /// its sessions and everything derived for them leave the state. The
+    /// events before this one stay in the log. Local only.
+    WorkspaceRemoved {
+        workspace_id: String,
+    },
     SessionRegistered {
         session: Session,
     },
@@ -1909,6 +2552,21 @@ pub enum Event {
         paths: Vec<String>,
         at_ms: u64,
         generation: u64,
+    },
+    /// Paths a session's search or shell command looked at (roadmap A13).
+    /// Paths only, never a pattern or command text. Local only: never
+    /// published. Reads are presence through `SourceObserved`.
+    PresenceObserved {
+        session_id: String,
+        kind: PresenceKind,
+        paths: Vec<String>,
+        at_ms: u64,
+        generation: u64,
+    },
+    /// The session's presence setting; the default removes its record.
+    PresenceSet {
+        session_id: String,
+        setting: PresenceSetting,
     },
     SessionEnded {
         session_id: String,
@@ -2067,18 +2725,38 @@ pub enum Event {
     },
     Remembered {
         note: Note,
+        /// When it was remembered. Absent from notes recorded before it was
+        /// kept; a definition's history (roadmap D4) places notes near
+        /// interface changes by it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<Stamp>,
     },
     Forgotten {
         workspace_id: String,
         note_id: String,
     },
+    /// `at_ms` and `generation` say when it was sent, on the daemon's
+    /// clock; absent in records written before roadmap E12.
     MessageSent {
         message: Message,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
     },
+    /// The session was given the message. `via` is the path that placed it
+    /// in the session's context, and `at_ms` and `generation` when; all
+    /// three are absent in records written before roadmap E12.
     MessageAcknowledged {
         workspace_id: String,
         message_id: String,
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<Delivery>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
     },
     /// The message was withdrawn by `by` (its sender; `None` for the
     /// owner). The `MessageSent` event stays in the log.
@@ -2108,6 +2786,17 @@ pub enum Event {
     },
     CheckoutRunObserved {
         run: CheckoutRun,
+    },
+    /// A scan saw files change that no session reported, with Codex
+    /// sessions registered in the checkout (issue #129).
+    UncoordinatedChanged {
+        change: UncoordinatedChange,
+    },
+    /// A briefing carried this uncoordinated change to this session.
+    UncoordinatedDelivered {
+        workspace_id: String,
+        change_id: String,
+        session_id: String,
     },
     /// A host check found this host present and not covered by any
     /// LangSpan install. Recorded once; repeated only after a
@@ -2200,6 +2889,38 @@ pub enum Command {
         workspace_id: String,
         root: String,
         verified_overlaps: Vec<String>,
+    },
+    /// Read-only: one page of the registered workspaces with what each
+    /// holds, in ID order, after the workspace ID `after` (from the first
+    /// when absent). The daemon's store also bounds each page's bytes.
+    WorkspaceList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
+    /// Rebind the workspace to `root`: a checkout the owner moved (the old
+    /// root is gone), or with `switch` another checkout of the same
+    /// repository. The daemon checks the filesystem and Git before the core
+    /// decides; an owner command only, never an MCP tool.
+    WorkspaceMove {
+        workspace_id: String,
+        root: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        switch: bool,
+    },
+    /// Prepared adapter input only, as `WorkspaceRegisterVerified`: the
+    /// receipt stores the original `WorkspaceMove`.
+    #[serde(skip_serializing)]
+    WorkspaceMoveVerified {
+        workspace_id: String,
+        root: String,
+        verified_overlaps: Vec<String>,
+    },
+    /// Take the workspace out of coordination. Without `apply`, a read that
+    /// says what would end and changes nothing.
+    WorkspaceRemove {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        apply: bool,
     },
     SessionRegister {
         session_id: String,
@@ -2321,7 +3042,7 @@ pub enum Command {
         /// For an automatic check: the sessions to tell, and its output's
         /// end.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        report: Option<CheckReport>,
+        report: Option<Box<CheckReport>>,
         /// The tests its output named, for a working-tree check that passed
         /// or failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2364,6 +3085,10 @@ pub enum Command {
         name: String,
         argv: Vec<String>,
         timeout_s: u32,
+        /// The wider check to run after it when the session's writes
+        /// changed an indexed interface that other files mention.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_interface_change: Option<Box<WiderCheck>>,
     },
     AutoCheckDisable {
         workspace_id: String,
@@ -2452,6 +3177,22 @@ pub enum Command {
         session_id: String,
         message_id: String,
     },
+    /// Read-only: one message as it was sent, from its `message_sent`
+    /// event, so also after every recipient has acknowledged it.
+    ShowMessage {
+        workspace_id: String,
+        message_id: String,
+    },
+    /// Read-only: who was given a sent message (roadmap E12).
+    /// `message_id` absent means the newest message `from` sent, or the
+    /// owner's newest when `from` is absent too.
+    MessageStatus {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
     /// Leave one line for the next other session that starts or is
     /// prompted in this session's workspace. Leases, intents and activity
     /// are unchanged.
@@ -2509,6 +3250,14 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "is_false")]
         files_unchanged: bool,
     },
+    /// Files a scan saw change outside a checkout change, at their new
+    /// versions. The core keeps those no session of the workspace reported
+    /// and names its Codex sessions (issue #129). Internal to the daemon's
+    /// scan, like `ObserveDisk`.
+    ObserveUncoordinated {
+        workspace_id: String,
+        files: Vec<ObservedFile>,
+    },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
     /// earlier check and absent here are cleared.
@@ -2529,6 +3278,19 @@ pub enum Command {
         path: Option<String>,
         limit: u32,
     },
+    /// Read-only, answered from the event log: the recorded interface
+    /// changes of definitions named `name`, newest first, in `path` or in
+    /// any file, older than `before_seq` when given (roadmap D4). Never
+    /// recorded.
+    History {
+        workspace_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_seq: Option<u64>,
+    },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
     /// every workspace when none is named, and what is still open.
@@ -2536,6 +3298,12 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace_id: Option<String>,
         from_ms: u64,
+    },
+    /// Read-only, answered from the event log: refusals in the local days
+    /// starting at each of `days` (wall clock, Unix milliseconds), the last
+    /// being the end, once per session, kind and path set per day (H5).
+    Count {
+        days: Vec<u64>,
     },
     /// Read-only: the person's status line for the directory `root`, with
     /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
@@ -2669,6 +3437,22 @@ pub enum Command {
         session_id: String,
         paths: Vec<String>,
     },
+    /// Paths a search or shell command looked at: 1 to `PRESENCE_PATHS`
+    /// relative paths, never the pattern or the command. `kind` is `search`
+    /// or `shell`; reads arrive as `observe_source`.
+    ObservePresence {
+        session_id: String,
+        kind: PresenceKind,
+        paths: Vec<String>,
+    },
+    /// Whether peers are shown where this session looks, and how old a
+    /// peer's presence this session is shown (`window_ms`,
+    /// `MIN_PRESENCE_WINDOW_MS` to `BRIEF_HORIZON_MS`).
+    SetPresence {
+        session_id: String,
+        shown: bool,
+        window_ms: u64,
+    },
     SessionEnd {
         session_id: String,
     },
@@ -2698,6 +3482,20 @@ pub enum Command {
         /// tool call. A handoff waits for a session's start or next prompt.
         #[serde(default, skip_serializing_if = "is_false")]
         mid_turn: bool,
+        /// Add what changed recently in the repository (roadmap C3). Set
+        /// by session-start hooks and `langspan brief --recent` only; never
+        /// with `mid_turn`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        recent: bool,
+        /// How far back `recent` looks. The daemon sets it from its
+        /// configuration; absent means `RECENT_WINDOW_MS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recent_window_ms: Option<u64>,
+        /// True when the session asked through the MCP tool
+        /// `langspan_brief`, so a message it carries is recorded as
+        /// delivered that way (roadmap E12).
+        #[serde(default, skip_serializing_if = "is_false")]
+        mcp: bool,
     },
     /// Read-only: the bounded view of what matters now. Closed admissions
     /// are counted, not listed; the answer always fits one frame.
@@ -2726,6 +3524,15 @@ pub enum Command {
         after: u64,
         limit: u32,
     },
+    /// Retention (ADR 0025, J7): snapshot the derived state and delete the
+    /// events and receipts recorded more than `keep_days` ago. A dry run
+    /// (`apply` false) deletes nothing and reports what would go. Answered
+    /// by the daemon's store; never recorded and never replayed.
+    Compact {
+        keep_days: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        apply: bool,
+    },
 }
 
 // Serde's internally tagged unit variants ignore extra fields. The empty struct
@@ -2741,6 +3548,21 @@ enum CommandWire {
     WorkspaceRegister {
         workspace_id: String,
         root: String,
+    },
+    WorkspaceList {
+        #[serde(default)]
+        after: Option<String>,
+    },
+    WorkspaceMove {
+        workspace_id: String,
+        root: String,
+        #[serde(default)]
+        switch: bool,
+    },
+    WorkspaceRemove {
+        workspace_id: String,
+        #[serde(default)]
+        apply: bool,
     },
     SessionRegister {
         session_id: String,
@@ -2860,7 +3682,7 @@ enum CommandWire {
         /// For an automatic check: the sessions to tell, and its output's
         /// end.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        report: Option<CheckReport>,
+        report: Option<Box<CheckReport>>,
         /// The tests its output named, for a working-tree check that passed
         /// or failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2903,6 +3725,10 @@ enum CommandWire {
         name: String,
         argv: Vec<String>,
         timeout_s: u32,
+        /// The wider check to run after it when the session's writes
+        /// changed an indexed interface that other files mention.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_interface_change: Option<Box<WiderCheck>>,
     },
     AutoCheckDisable {
         workspace_id: String,
@@ -2991,6 +3817,22 @@ enum CommandWire {
         session_id: String,
         message_id: String,
     },
+    /// Read-only: one message as it was sent, from its `message_sent`
+    /// event, so also after every recipient has acknowledged it.
+    ShowMessage {
+        workspace_id: String,
+        message_id: String,
+    },
+    /// Read-only: who was given a sent message (roadmap E12).
+    /// `message_id` absent means the newest message `from` sent, or the
+    /// owner's newest when `from` is absent too.
+    MessageStatus {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
     /// Leave one line for the next other session that starts or is
     /// prompted in this session's workspace. Leases, intents and activity
     /// are unchanged.
@@ -3048,6 +3890,14 @@ enum CommandWire {
         #[serde(default, skip_serializing_if = "is_false")]
         files_unchanged: bool,
     },
+    /// Files a scan saw change outside a checkout change, at their new
+    /// versions. The core keeps those no session of the workspace reported
+    /// and names its Codex sessions (issue #129). Internal to the daemon's
+    /// scan, like `ObserveDisk`.
+    ObserveUncoordinated {
+        workspace_id: String,
+        files: Vec<ObservedFile>,
+    },
     /// The daemon's host check: every host present now with no LangSpan
     /// install covering it, by name (roadmap A7). Hosts held from an
     /// earlier check and absent here are cleared.
@@ -3068,6 +3918,19 @@ enum CommandWire {
         path: Option<String>,
         limit: u32,
     },
+    /// Read-only, answered from the event log: the recorded interface
+    /// changes of definitions named `name`, newest first, in `path` or in
+    /// any file, older than `before_seq` when given (roadmap D4). Never
+    /// recorded.
+    History {
+        workspace_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_seq: Option<u64>,
+    },
     /// Read-only, answered from the event log: what happened since
     /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
     /// every workspace when none is named, and what is still open.
@@ -3075,6 +3938,12 @@ enum CommandWire {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace_id: Option<String>,
         from_ms: u64,
+    },
+    /// Read-only, answered from the event log: refusals in the local days
+    /// starting at each of `days` (wall clock, Unix milliseconds), the last
+    /// being the end, once per session, kind and path set per day (H5).
+    Count {
+        days: Vec<u64>,
     },
     /// Read-only: the person's status line for the directory `root`, with
     /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
@@ -3208,6 +4077,22 @@ enum CommandWire {
         session_id: String,
         paths: Vec<String>,
     },
+    /// Paths a search or shell command looked at: 1 to `PRESENCE_PATHS`
+    /// relative paths, never the pattern or the command. `kind` is `search`
+    /// or `shell`; reads arrive as `observe_source`.
+    ObservePresence {
+        session_id: String,
+        kind: PresenceKind,
+        paths: Vec<String>,
+    },
+    /// Whether peers are shown where this session looks, and how old a
+    /// peer's presence this session is shown (`window_ms`,
+    /// `MIN_PRESENCE_WINDOW_MS` to `BRIEF_HORIZON_MS`).
+    SetPresence {
+        session_id: String,
+        shown: bool,
+        window_ms: u64,
+    },
     SessionEnd {
         session_id: String,
     },
@@ -3237,6 +4122,15 @@ enum CommandWire {
         /// tool call. A handoff waits for a session's start or next prompt.
         #[serde(default, skip_serializing_if = "is_false")]
         mid_turn: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        recent: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recent_window_ms: Option<u64>,
+        /// True when the session asked through the MCP tool
+        /// `langspan_brief`, so a message it carries is recorded as
+        /// delivered that way (roadmap E12).
+        #[serde(default, skip_serializing_if = "is_false")]
+        mcp: bool,
     },
     Status {},
     StatusRecords {
@@ -3255,6 +4149,11 @@ enum CommandWire {
         after: u64,
         limit: u32,
     },
+    Compact {
+        keep_days: u32,
+        #[serde(default)]
+        apply: bool,
+    },
 }
 
 impl<'de> Deserialize<'de> for Command {
@@ -3271,6 +4170,23 @@ impl<'de> Deserialize<'de> for Command {
 pub enum Outcome {
     Workspace {
         workspace: Workspace,
+    },
+    Workspaces {
+        workspaces: Vec<WorkspaceSummary>,
+        /// The cursor for the next page (`after`), when more remain.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+    },
+    WorkspaceMoved {
+        workspace: Workspace,
+        from_root: String,
+        kept: WorkspaceKept,
+    },
+    /// `applied` is false for a dry run: nothing ended.
+    WorkspaceRemoval {
+        workspace_id: String,
+        applied: bool,
+        ending: WorkspaceEnding,
     },
     Session {
         session: Session,
@@ -3343,6 +4259,14 @@ pub enum Outcome {
         session_id: String,
         paths: Vec<String>,
     },
+    PresenceObserved {
+        session_id: String,
+        paths: u32,
+    },
+    Presence {
+        session_id: String,
+        setting: PresenceSetting,
+    },
     SessionEnded {
         session_id: String,
     },
@@ -3399,6 +4323,15 @@ pub enum Outcome {
     RemoteSent {
         sent: Vec<SentPublication>,
         more: bool,
+        /// Wall-clock Unix milliseconds from which the list is complete:
+        /// publications recorded before it may have been removed by
+        /// retention. Absent when nothing has ever been removed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since_ms: Option<u64>,
+    },
+    /// What a compaction removed, or with `applied` false would remove.
+    Compaction {
+        report: CompactionReport,
     },
     /// `accepted` is false for a publication that is not newer than the one
     /// already held: a replay, or one that arrived out of order.
@@ -3498,6 +4431,12 @@ pub enum Outcome {
         message_id: String,
         acknowledged: bool,
     },
+    MessageShown {
+        message: ShownMessage,
+    },
+    MessageStatus {
+        status: MessageStatus,
+    },
     /// Sessions that were still owed it and now are not, and sessions that
     /// had received it and will be told to disregard it.
     MessageRetracted {
@@ -3519,14 +4458,26 @@ pub enum Outcome {
     CheckoutRunObserved {
         run: CheckoutRun,
     },
+    /// The Codex sessions named and the files kept; both empty when every
+    /// change was explained or nothing new was recorded.
+    UncoordinatedObserved {
+        sessions: Vec<String>,
+        paths: Vec<String>,
+    },
     Recap {
         recap: Recap,
     },
     Recall {
         recall: Recall,
     },
+    History {
+        history: History,
+    },
     Today {
         today: Today,
+    },
+    Count {
+        count: RefusalCount,
     },
     StatusLine {
         line: StatusLine,
@@ -3655,6 +4606,25 @@ fn decide_checked(
                 outcome: Outcome::Workspace { workspace },
             })
         }
+        Command::WorkspaceList { after } => {
+            let (workspaces, next) = workspaces::list(state, after.as_deref())?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Workspaces { workspaces, next },
+            })
+        }
+        Command::WorkspaceMove {
+            workspace_id, root, ..
+        } => workspaces::decide_move(state, workspace_id, root, &[], now_ms),
+        Command::WorkspaceMoveVerified {
+            workspace_id,
+            root,
+            verified_overlaps,
+        } => workspaces::decide_move(state, workspace_id, root, verified_overlaps, now_ms),
+        Command::WorkspaceRemove {
+            workspace_id,
+            apply,
+        } => workspaces::decide_remove(state, workspace_id, *apply, now_ms),
         Command::SessionRegister {
             session_id,
             workspace_id,
@@ -4184,6 +5154,60 @@ fn decide_checked(
                 },
             })
         }
+        Command::ObservePresence {
+            session_id,
+            kind,
+            paths,
+        } => {
+            current_session(state, session_id)?;
+            let paths = presence_paths(*kind, paths)?;
+            if !presence_setting(state, session_id).shown {
+                return Err(error(
+                    "presence_off",
+                    "This session's presence is off; nothing it looks at is recorded",
+                ));
+            }
+            Ok(Decision {
+                events: vec![Event::PresenceObserved {
+                    session_id: session_id.clone(),
+                    kind: *kind,
+                    paths: paths.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }],
+                outcome: Outcome::PresenceObserved {
+                    session_id: session_id.clone(),
+                    paths: u32::try_from(paths.len()).unwrap_or(u32::MAX),
+                },
+            })
+        }
+        Command::SetPresence {
+            session_id,
+            shown,
+            window_ms,
+        } => {
+            known_session(state, session_id)?;
+            let setting = PresenceSetting {
+                shown: *shown,
+                window_ms: *window_ms,
+            };
+            validate_presence_setting(&setting)?;
+            let events = if presence_setting(state, session_id) == setting {
+                Vec::new()
+            } else {
+                vec![Event::PresenceSet {
+                    session_id: session_id.clone(),
+                    setting,
+                }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::Presence {
+                    session_id: session_id.clone(),
+                    setting,
+                },
+            })
+        }
         Command::SessionEnd { session_id } => {
             known_session(state, session_id)?;
             let events = if state
@@ -4648,8 +5672,27 @@ fn decide_checked(
                 })
                 .collect();
             if let Some(report) = report {
+                let mut session_ids = report.session_ids.clone();
+                let interface_grade = interface_grade(report.interface.as_deref(), &check.result);
+                validate_dependent_paths(report)?;
+                if let Some(cause) = &report.interface {
+                    validate_interface_cause(cause)?;
+                    // The sessions working on any mentioning file are told
+                    // too, not only those on the files the notice shows,
+                    // decided here so that replay gives the same set.
+                    let mut paths = cause.dependents.clone();
+                    paths.extend(report.dependent_paths.iter().cloned());
+                    for peer in concerned_sessions(state, &check.workspace_id, &paths, now_ms) {
+                        if session_ids.len() >= MAX_CHECK_REPORT_SESSIONS {
+                            break;
+                        }
+                        if !session_ids.contains(&peer) {
+                            session_ids.push(peer);
+                        }
+                    }
+                }
                 let reported = Event::CheckReported {
-                    session_ids: report.session_ids.clone(),
+                    session_ids,
                     notice: CheckNotice {
                         check_id: check.check_id.clone(),
                         name: check.name.clone(),
@@ -4659,6 +5702,9 @@ fn decide_checked(
                         timed_out_s: report.timed_out_s,
                         tail: report.tail.clone(),
                         failures,
+                        interface_grade,
+                        interface: report.interface.as_deref().cloned(),
+                        index_incomplete: report.index_incomplete,
                     },
                 };
                 validate_check_report(state, &check.workspace_id, &reported)?;
@@ -4718,12 +5764,14 @@ fn decide_checked(
             name,
             argv,
             timeout_s,
+            on_interface_change,
         } => {
             let check = AutoCheck {
                 workspace_id: workspace_id.clone(),
                 name: name.clone(),
                 argv: argv.clone(),
                 timeout_s: *timeout_s,
+                on_interface_change: on_interface_change.as_deref().cloned(),
             };
             validate_auto_check(state, &check)?;
             let events = if state.auto_checks.get(workspace_id) == Some(&check) {
@@ -5057,6 +6105,9 @@ fn decide_checked(
             max_peers,
             deliver,
             mid_turn,
+            recent,
+            recent_window_ms,
+            mcp,
         } => {
             if !(1..=MAX_BRIEF_PEERS).contains(max_peers) {
                 return Err(error(
@@ -5064,8 +6115,21 @@ fn decide_checked(
                     "A briefing names between 1 and 16 peers",
                 ));
             }
+            if *recent && *mid_turn {
+                return Err(error(
+                    "invalid_request",
+                    "What changed recently is told at a session's start, never mid-turn; leave out recent",
+                ));
+            }
+            let window = recent::window(*recent_window_ms)?;
             let (mut briefing, signature) =
                 brief(state, session_id, *max_peers, !*mid_turn, now_ms)?;
+            // Not part of the signature: a prompt's briefing never carries
+            // it, so it must not make the next one look new.
+            if *recent {
+                let me = current_session(state, session_id)?;
+                briefing.recent = Some(recent::recent(state, me, window, now_ms));
+            }
             let previous = state
                 .activity
                 .get(session_id)
@@ -5074,13 +6138,19 @@ fn decide_checked(
             // Delivered messages are acknowledged below and so are absent
             // from the next briefing: the remembered signature leaves them
             // out, and any message at all makes this briefing new.
-            briefing.changed = signature != previous
+            // Presence is news only at a session start or prompt, and only
+            // for a path not shown before. Mid-turn, or when some or all of
+            // it merely aged out, it is not (see `brief`).
+            let differs = without_presence(&signature) != without_presence(previous)
+                || (!*mid_turn && new_presence(&signature, previous));
+            briefing.changed = differs
                 || !briefing.messages.is_empty()
+                || !briefing.uncoordinated.is_empty()
                 || !briefing.retracted.is_empty()
                 || !briefing.checks.is_empty();
             let mut events = Vec::new();
             if *deliver {
-                if signature != previous {
+                if signature != previous && briefing.changed {
                     events.push(Event::BriefingDelivered {
                         session_id: session_id.clone(),
                         signature,
@@ -5094,6 +6164,15 @@ fn decide_checked(
                             workspace_id: message.workspace_id.clone(),
                             message_id: message.message_id.clone(),
                             session_id: session_id.clone(),
+                            via: Some(if *mid_turn {
+                                Delivery::MidTurn
+                            } else if *mcp {
+                                Delivery::McpBrief
+                            } else {
+                                Delivery::Briefing
+                            }),
+                            at_ms: Some(now_ms),
+                            generation: Some(state.generation),
                         }),
                 );
                 events.extend(briefing.retracted.iter().map(|retracted| {
@@ -5106,6 +6185,15 @@ fn decide_checked(
                     session_id: session_id.clone(),
                     check_id: notice.check_id.clone(),
                 }));
+                events.extend(
+                    uncoordinated_owed(state, session_id, now_ms).map(|(change, _)| {
+                        Event::UncoordinatedDelivered {
+                            workspace_id: change.workspace_id.clone(),
+                            change_id: change.change_id.clone(),
+                            session_id: session_id.clone(),
+                        }
+                    }),
+                );
             }
             Ok(Decision {
                 events,
@@ -5153,7 +6241,16 @@ fn decide_checked(
                 }
                 None => Recipient::Everyone {},
             };
-            sent(request_id, workspace_id, from.clone(), to, text, paths)
+            sent(
+                request_id,
+                now_ms,
+                state.generation,
+                workspace_id,
+                from.clone(),
+                to,
+                text,
+                paths,
+            )
         }
         Command::Handoff {
             session_id,
@@ -5163,6 +6260,8 @@ fn decide_checked(
             let session = known_session(state, session_id)?;
             sent(
                 request_id,
+                now_ms,
+                state.generation,
                 &session.workspace_id,
                 Some(session_id.clone()),
                 Recipient::NextSession {},
@@ -5191,6 +6290,9 @@ fn decide_checked(
                         workspace_id: session.workspace_id.clone(),
                         message_id: message_id.clone(),
                         session_id: session_id.clone(),
+                        via: Some(Delivery::Ack),
+                        at_ms: Some(now_ms),
+                        generation: Some(state.generation),
                     }]
                 } else {
                     Vec::new()
@@ -5245,7 +6347,13 @@ fn decide_checked(
             };
             validate_note(&note)?;
             Ok(Decision {
-                events: vec![Event::Remembered { note: note.clone() }],
+                events: vec![Event::Remembered {
+                    note: note.clone(),
+                    at: Some(Stamp {
+                        at_ms: now_ms,
+                        generation: state.generation,
+                    }),
+                }],
                 outcome: Outcome::Remembered { note },
             })
         }
@@ -5439,6 +6547,71 @@ fn decide_checked(
                 outcome: Outcome::CheckoutRunObserved { run },
             })
         }
+        Command::ObserveUncoordinated {
+            workspace_id,
+            files,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            if files.is_empty() || files.len() > MAX_UNCOORDINATED_OBSERVED {
+                return Err(error(
+                    "invalid_path",
+                    &format!(
+                        "An uncoordinated change names 1 to {MAX_UNCOORDINATED_OBSERVED} changed files"
+                    ),
+                ));
+            }
+            let files = normalized_files(files)?;
+            // A file under an admitted edit is that edit's, whose report has
+            // not arrived yet; a version a session reported is explained.
+            let unexplained: Vec<ObservedFile> = files
+                .into_iter()
+                .filter(|file| {
+                    !leased(state, workspace_id, &file.path, now_ms)
+                        && !explained(state, workspace_id, file)
+                })
+                .take(MAX_UNCOORDINATED_FILES)
+                .collect();
+            // A Codex session already named in a notice still held is not
+            // named again: one notice per session until it ages out.
+            let named: BTreeSet<&str> = held_uncoordinated(state, workspace_id, now_ms)
+                .flat_map(|change| change.sessions.iter().map(String::as_str))
+                .collect();
+            let sessions = if unexplained.is_empty() {
+                Vec::new()
+            } else {
+                codex_sessions(state, workspace_id)
+                    .into_iter()
+                    .filter(|session| !named.contains(session.as_str()))
+                    .take(MAX_UNCOORDINATED_SESSIONS)
+                    .collect()
+            };
+            if sessions.is_empty() {
+                return Ok(Decision {
+                    events: Vec::new(),
+                    outcome: Outcome::UncoordinatedObserved {
+                        sessions: Vec::new(),
+                        paths: Vec::new(),
+                    },
+                });
+            }
+            let change = UncoordinatedChange {
+                change_id: request_id.into(),
+                workspace_id: workspace_id.clone(),
+                sessions: sessions.clone(),
+                files: unexplained,
+                at_ms: now_ms,
+                generation: state.generation,
+                delivered: Vec::new(),
+            };
+            validate_uncoordinated(state, &change)?;
+            Ok(Decision {
+                outcome: Outcome::UncoordinatedObserved {
+                    sessions,
+                    paths: change.files.iter().map(|file| file.path.clone()).collect(),
+                },
+                events: vec![Event::UncoordinatedChanged { change }],
+            })
+        }
         Command::Recap { workspace_id } => {
             validate_known_workspace(state, workspace_id)?;
             Ok(Decision {
@@ -5533,9 +6706,14 @@ fn decide_checked(
         }
         Command::Events { .. }
         | Command::Today { .. }
+        | Command::Count { .. }
+        | Command::History { .. }
         | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
+        | Command::Compact { .. }
+        | Command::ShowMessage { .. }
+        | Command::MessageStatus { .. }
         | Command::GraphSymbol { .. }
         | Command::GraphReferences { .. }
         | Command::GraphImpact { .. }
@@ -5543,7 +6721,7 @@ fn decide_checked(
         | Command::GraphContext { .. }
         | Command::CheckCalls { .. } => Err(error(
             "storage_operation",
-            "Event history, status pages, change projections and index queries are answered by the daemon's stores",
+            "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores",
         )),
     }
 }
@@ -5563,8 +6741,11 @@ fn validate_note(note: &Note) -> Result<(), CoreError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sent(
     request_id: &str,
+    now_ms: u64,
+    generation: u64,
     workspace_id: &str,
     from: Option<String>,
     to: Recipient,
@@ -5589,6 +6770,8 @@ fn sent(
     Ok(Decision {
         events: vec![Event::MessageSent {
             message: message.clone(),
+            at_ms: Some(now_ms),
+            generation: Some(generation),
         }],
         outcome: Outcome::MessageSent { message },
     })
@@ -5782,8 +6965,8 @@ fn takes_handoff(state: &State, me: &Session, message: &Message) -> bool {
 
 /// An upper bound on the bytes an adapter renders for one message: a label
 /// of under 192 bytes (a session ID is at most 128), then text and paths
-/// that quoting can grow at most fourfold, cut at `MESSAGE_LINE_LIMIT` plus
-/// its ellipsis and newline.
+/// that quoting can grow at most fourfold, cut within `MESSAGE_LINE_LIMIT`
+/// (ellipsis and `messages show` pointer included) plus its newline.
 fn message_cost(message: &Message) -> usize {
     let raw = message.text.len()
         + message
@@ -5955,33 +7138,49 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
             Some(&change.name),
             change.before.as_ref(),
             change.after.as_ref(),
+            change.after_name.as_ref(),
         ];
         let counts = match (change.before_count, change.after_count) {
             (Some(before), Some(after)) => Some((before, after)),
             (None, None) => None,
             _ => Some((0, 0)),
         };
-        // A count change names its counts, in the direction it says, and
-        // carries the signatures that came or went; nothing else has
-        // counts.
-        let shaped = match (change.change.as_str(), counts) {
-            ("removed" | "signature_changed", None) => true,
-            ("definition_added", Some((before, after))) => {
-                before >= 1
-                    && before < after
-                    && after <= MAX_DEFINITION_COUNT
-                    && change.before.is_none()
-                    && change.after.is_some()
-            }
-            ("definition_removed", Some((before, after))) => {
-                after >= 1
-                    && after < before
-                    && before <= MAX_DEFINITION_COUNT
-                    && change.before.is_some()
-                    && change.after.is_none()
-            }
-            _ => false,
+        // Only a rename has a new name, other than the old one, and both
+        // signatures. A count change names its counts, in the direction it
+        // says, and carries the signatures that came or went; nothing else
+        // has counts.
+        let renamed = change.change == "renamed";
+        let named = match &change.after_name {
+            Some(to) => renamed && !to.is_empty() && to.len() <= 128 && *to != change.name,
+            None => !renamed,
         };
+        let shaped = named
+            && match (change.change.as_str(), counts) {
+                ("removed" | "signature_changed", None) => true,
+                ("renamed", None) => change.before.is_some() && change.after.is_some(),
+                // A new export: its signature, and no parameter counts.
+                ("added", None) => {
+                    change.before.is_none()
+                        && change.after.is_some()
+                        && change.before_arity.is_none()
+                        && change.after_arity.is_none()
+                }
+                ("definition_added", Some((before, after))) => {
+                    before >= 1
+                        && before < after
+                        && after <= MAX_DEFINITION_COUNT
+                        && change.before.is_none()
+                        && change.after.is_some()
+                }
+                ("definition_removed", Some((before, after))) => {
+                    after >= 1
+                        && after < before
+                        && before <= MAX_DEFINITION_COUNT
+                        && change.before.is_some()
+                        && change.after.is_none()
+                }
+                _ => false,
+            };
         if change.name.is_empty()
             || change.name.len() > 128
             || !shaped
@@ -5993,7 +7192,7 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
         {
             return Err(error(
                 "invalid_notice",
-                "An interface change has a name, a kind, `removed`, `signature_changed`, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
+                "An interface change has a name, a kind, `added`, `removed`, `signature_changed`, `renamed` with a different `after_name` of at most 128 bytes, or `definition_added` or `definition_removed` with both counts, and single-line signatures of at most 256 bytes",
             ));
         }
     }
@@ -6683,42 +7882,7 @@ fn brief(
         .workspace_git
         .get(&me.workspace_id)
         .map(|git| git.repository_id.as_str());
-    let work_paths = |id: &str| -> (Vec<String>, Vec<RecentPath>, BTreeSet<String>) {
-        let editing: Vec<String> = state
-            .leases
-            .values()
-            .filter(|lease| lease.session_id == id && live_lease(state, lease, now_ms))
-            .flat_map(|lease| lease.paths.iter().cloned())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let recent: Vec<RecentPath> = state
-            .activity
-            .get(id)
-            .filter(|activity| activity.generation == state.generation)
-            .map(|activity| {
-                activity
-                    .touched
-                    .iter()
-                    .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
-                    .map(|touch| RecentPath {
-                        path: touch.path.clone(),
-                        age_ms: now_ms.saturating_sub(touch.at_ms),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut all: BTreeSet<String> = editing.iter().cloned().collect();
-        all.extend(recent.iter().map(|recent| recent.path.clone()));
-        if let Some(intent) = state
-            .intents
-            .get(id)
-            .filter(|intent| intent.generation == state.generation)
-        {
-            all.extend(intent.paths.iter().cloned());
-        }
-        (editing, recent, all)
-    };
+    let work_paths = |id: &str| work_paths(state, id, now_ms);
     // Where a running session's last prompt pointed, while it is recent.
     let prompt_targets = |id: &str| -> BTreeSet<String> {
         state
@@ -6728,6 +7892,35 @@ fn brief(
             .and_then(|activity| activity.prompt_targets.as_ref())
             .filter(|targets| now_ms.saturating_sub(targets.at_ms) <= BRIEF_HORIZON_MS)
             .map(|targets| targets.paths.iter().cloned().collect())
+            .unwrap_or_default()
+    };
+    // Where a running peer that shows its presence was recently looking,
+    // within this session's window: newest first, none it edits or edited.
+    let window_ms = presence_setting(state, session_id).window_ms;
+    let looking = |id: &str, edited: &BTreeSet<String>| -> Vec<PresencePath> {
+        if !presence_setting(state, id).shown {
+            return Vec::new();
+        }
+        state
+            .activity
+            .get(id)
+            .filter(|activity| activity.generation == state.generation && !activity.ended)
+            .map(|activity| {
+                activity
+                    .looking
+                    .iter()
+                    .filter(|looked| {
+                        now_ms.saturating_sub(looked.at_ms) <= window_ms
+                            && !edited.contains(&looked.path)
+                    })
+                    .take(PRESENCE_PATHS)
+                    .map(|looked| PresencePath {
+                        path: looked.path.clone(),
+                        kind: looked.kind,
+                        age_s: now_ms.saturating_sub(looked.at_ms) / 1000,
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let (_, _, mine) = work_paths(session_id);
@@ -6777,7 +7970,23 @@ fn brief(
             .get(&peer.session_id)
             .filter(|intent| intent.generation == state.generation);
         let targets = prompt_targets(&peer.session_id);
-        if editing.is_empty() && intent.is_none() && !fresh && targets.is_empty() {
+        // Every file the peer holds or edited within the horizon, not only
+        // those listed: such a file is shown as edited, never as looked at.
+        let mut edited: BTreeSet<String> = editing.iter().cloned().collect();
+        edited.extend(activity.into_iter().flat_map(|activity| {
+            activity
+                .touched
+                .iter()
+                .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
+                .map(|touch| touch.path.clone())
+        }));
+        let looking = looking(&peer.session_id, &edited);
+        if editing.is_empty()
+            && intent.is_none()
+            && !fresh
+            && targets.is_empty()
+            && looking.is_empty()
+        {
             continue;
         }
         // A finished session matters only for the edits it left behind.
@@ -6815,10 +8024,16 @@ fn brief(
                 .cloned()
                 .collect()
         };
+        // A peer without admissions, edits, intent or targets (one known by
+        // its task line or by where it looked) ranks after every peer with
+        // them, so presence never takes such a peer's place.
+        let no_work =
+            editing.is_empty() && recent.is_empty() && intent.is_none() && targets.is_empty();
         peers.push((
             (
                 overlap.is_empty() && target_overlap.is_empty(),
                 editing.is_empty(),
+                no_work,
                 u64::MAX - last_ms,
             ),
             PeerWork {
@@ -6843,23 +8058,34 @@ fn brief(
                 overlap,
                 target_overlap,
                 relation,
+                looking,
             },
         ));
     }
-    peers.sort_by(|a, b| (&a.0, &a.1.session_id).cmp(&(&b.0, &b.1.session_id)));
+    // A peer known only by where it looked ranks after every other, so it
+    // never takes a slot from a peer with work or a task.
+    let rank = |(key, peer): &((bool, bool, bool, u64), PeerWork)| {
+        (key.0, key.1, key.2, presence_only(peer), key.3)
+    };
+    peers.sort_by(|a, b| (rank(a), &a.1.session_id).cmp(&(rank(b), &b.1.session_id)));
     let total = peers.len();
+    // Peers are chosen by their work within the byte budget first; where
+    // they look is added after, in the space left, first peers first, so
+    // presence never takes the place of another peer's work.
     let mut bytes = 0;
-    let peers: Vec<PeerWork> = peers
+    let mut peers: Vec<PeerWork> = peers
         .into_iter()
         .map(|(_, peer)| peer)
         .take(max_peers as usize)
         .take_while(|peer| {
-            bytes += 256
-                + peer.workspace_root.len()
+            // Counted as encoded, escapes included, so quoted or control
+            // characters cannot push the reply past its frame.
+            let cost = 256
+                + recent::json_len(&peer.workspace_root)
                 + [&peer.summary, &peer.intent, &peer.branch_ref]
                     .into_iter()
                     .flatten()
-                    .map(String::len)
+                    .map(|text| recent::json_len(text))
                     .sum::<usize>()
                 + peer
                     .editing
@@ -6867,11 +8093,32 @@ fn brief(
                     .chain(&peer.overlap)
                     .chain(&peer.target_overlap)
                     .chain(peer.recent.iter().map(|recent| &recent.path))
-                    .map(|path| path.len() + 32)
+                    .map(|path| recent::json_len(path) + 32)
                     .sum::<usize>();
-            bytes <= BRIEF_BYTES
+            bytes += cost;
+            if bytes > BRIEF_BYTES {
+                bytes -= cost;
+                return false;
+            }
+            true
         })
         .collect();
+    // A peer there only for where it looked, without room for that, is left
+    // out and counted.
+    peers.retain_mut(|peer| {
+        let presence: usize = peer
+            .looking
+            .iter()
+            .map(|looked| recent::json_len(&looked.path) + 32)
+            .sum();
+        if bytes + presence <= BRIEF_BYTES {
+            bytes += presence;
+            return true;
+        }
+        let only = presence_only(peer);
+        peer.looking.clear();
+        !only
+    });
     let mut stale_reads: Vec<StaleRead> = known_versions(state, session_id)
         .iter()
         .filter_map(|version| {
@@ -6935,14 +8182,7 @@ fn brief(
             ))
     });
     remote.truncate(BRIEF_PATHS);
-    // Files this session works on or has read: what a changed interface
-    // could break for it.
-    let mut concerned = mine.clone();
-    concerned.extend(
-        known_versions(state, session_id)
-            .iter()
-            .map(|version| version.path.clone()),
-    );
+    let concerned = concerned_paths(state, session_id, now_ms);
     let interface_changes: Vec<InterfaceImpact> = state
         .interface_notices
         .get(&me.workspace_id)
@@ -6987,8 +8227,17 @@ fn brief(
         .cloned()
         .collect();
     // Withdrawals first, then messages owed to this session, each newest
-    // first, as many as the text of one briefing is sure to hold; the rest
-    // wait for the next one. The first always fits.
+    // first, as many as the text of one briefing is sure to hold beside an
+    // owed uncoordinated change, whose line is reserved; the rest wait for
+    // the next one. The first always fits.
+    let uncoordinated: Vec<UncoordinatedNotice> = uncoordinated_owed(state, session_id, now_ms)
+        .map(|(_, notice)| notice)
+        .collect();
+    let message_bytes = if uncoordinated.is_empty() {
+        MESSAGE_BRIEF_BYTES
+    } else {
+        MESSAGE_BRIEF_BYTES - (UNCOORDINATED_LINE_LIMIT + 4)
+    };
     let mut bytes = 0;
     let retracted: Vec<RetractedMessage> = state
         .retracted_notices
@@ -6999,7 +8248,7 @@ fn brief(
         .take(BRIEF_MESSAGES)
         .take_while(|retracted| {
             bytes += retracted_cost(retracted);
-            bytes <= MESSAGE_BRIEF_BYTES
+            bytes <= message_bytes
         })
         .cloned()
         .collect();
@@ -7019,7 +8268,7 @@ fn brief(
         .take(BRIEF_MESSAGES)
         .take_while(|message| {
             bytes += message_cost(message);
-            bytes <= MESSAGE_BRIEF_BYTES
+            bytes <= message_bytes
         })
         .map(|message| Message {
             acknowledged: Vec::new(),
@@ -7114,7 +8363,8 @@ fn brief(
     for stale in &stale_reads {
         signature.push_str(&format!("stale|{}|{}\n", stale.path, stale.session_id));
     }
-    for peer in &peers {
+    // A peer listed only for where it looked is presence, not work.
+    for peer in peers.iter().filter(|peer| !presence_only(peer)) {
         signature.push_str(&peer.session_id);
         for part in [&peer.editing, &peer.overlap] {
             signature.push('|');
@@ -7141,6 +8391,22 @@ fn brief(
         }
         signature.push_str(if peer.ended { "|ended\n" } else { "\n" });
     }
+    // Presence has a signature part of its own: alone it makes a briefing
+    // new only at a session start or prompt, never mid-turn, so a peer's
+    // reads do not interrupt a turn. The part is a set of bits, one pair per
+    // peer and path (`presence_bits`), so that a briefing is news only for
+    // a path not shown before: a path that ages out, or is read again, or
+    // the same files read in another order, is not.
+    let presence = presence_bits(&peers);
+    // Without presence the signature is as it was before presence existed,
+    // so a briefing stored then is not delivered again.
+    let mut signature = fingerprint(&signature);
+    if let Some(bits) = presence {
+        signature.push('+');
+        for byte in bits {
+            signature.push_str(&format!("{byte:02x}"));
+        }
+    }
     Ok((
         Briefing {
             session_id: session_id.into(),
@@ -7154,6 +8420,7 @@ fn brief(
             messages,
             retracted,
             checkout_changes,
+            uncoordinated,
             // One result per briefing, the newest: it always fits the
             // rendered text, and each delivered one is removed, so the rest
             // follow at the next briefings.
@@ -7164,9 +8431,223 @@ fn brief(
                 .cloned()
                 .into_iter()
                 .collect(),
+            recent: None,
         },
-        fingerprint(&signature),
+        signature,
     ))
+}
+
+/// Bytes in the presence part of a briefing signature: with the work
+/// fingerprint and its `+`, the signature stays within the 64 bytes an
+/// event holds.
+const PRESENCE_SIGNATURE_BYTES: usize = 23;
+
+/// The presence part of a briefing signature: for each peer and path it
+/// shows as presence, two bits set from that pair's fingerprint. None when
+/// it shows none. A path whose bits another pair already set is not news on
+/// its own; it is shown with the next briefing that is.
+fn presence_bits(peers: &[PeerWork]) -> Option<[u8; PRESENCE_SIGNATURE_BYTES]> {
+    const BITS: u64 = (PRESENCE_SIGNATURE_BYTES * 8) as u64;
+    let mut bits = [0u8; PRESENCE_SIGNATURE_BYTES];
+    let mut any = false;
+    for peer in peers {
+        for looked in &peer.looking {
+            let hash = fingerprint_u64(&format!("{}|{}", peer.session_id, looked.path));
+            for bit in [hash % BITS, (hash >> 32) % BITS] {
+                bits[(bit / 8) as usize] |= 1 << (bit % 8);
+            }
+            any = true;
+        }
+    }
+    any.then_some(bits)
+}
+
+/// Whether a briefing signature shows presence that `previous` did not:
+/// a bit set in its presence part that is clear in the previous one. A
+/// previous signature without a presence part, or from before this form,
+/// has shown none.
+fn new_presence(signature: &str, previous: &str) -> bool {
+    let bits = |signature: &str| -> Option<Vec<u8>> {
+        let (_, hex) = signature.split_once('+')?;
+        if hex.len() != PRESENCE_SIGNATURE_BYTES * 2 {
+            return None;
+        }
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+            .collect()
+    };
+    let Some(now) = bits(signature) else {
+        return false;
+    };
+    match bits(previous) {
+        Some(before) => now
+            .iter()
+            .zip(&before)
+            .any(|(now, before)| now & !before != 0),
+        None => true,
+    }
+}
+
+/// A briefing signature without its presence part.
+fn without_presence(signature: &str) -> &str {
+    signature
+        .split_once('+')
+        .map_or(signature, |(work, _)| work)
+}
+
+/// A peer in a briefing only for where it looked.
+fn presence_only(peer: &PeerWork) -> bool {
+    !peer.looking.is_empty()
+        && peer.editing.is_empty()
+        && peer.recent.is_empty()
+        && peer.overlap.is_empty()
+        && peer.target_overlap.is_empty()
+        && peer.summary.is_none()
+        && peer.intent.is_none()
+}
+
+/// Whether an active, unexpired lease of this workspace holds `path`.
+fn leased(state: &State, workspace_id: &str, path: &str, now_ms: u64) -> bool {
+    state.leases.values().any(|lease| {
+        lease.workspace_id == workspace_id
+            && lease.status == LeaseStatus::Active
+            && lease.generation == state.generation
+            && lease.expires_at_ms > now_ms
+            && lease.paths.iter().any(|held| held == path)
+    })
+}
+
+/// Whether a session of this workspace reported reading or writing the file
+/// at this version.
+fn explained(state: &State, workspace_id: &str, file: &ObservedFile) -> bool {
+    state
+        .sessions
+        .values()
+        .filter(|session| session.workspace_id == workspace_id)
+        .filter_map(|session| state.activity.get(&session.session_id))
+        .any(|activity| {
+            activity
+                .known
+                .iter()
+                .any(|known| known.path == file.path && known.state == file.state)
+        })
+}
+
+/// The Codex sessions registered in this workspace in this generation, most
+/// recently active first. An ended or exited one is kept: Codex reports no
+/// session end, and a resumed session is a new process.
+fn codex_sessions(state: &State, workspace_id: &str) -> Vec<String> {
+    let mut sessions: Vec<(u64, &str)> = state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.workspace_id == workspace_id
+                && session.generation == state.generation
+                && session
+                    .session_id
+                    .split_once('.')
+                    .is_some_and(|(host, _)| host == CODEX_HOST)
+        })
+        .map(|session| {
+            let last = state
+                .activity
+                .get(&session.session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map_or(0, |activity| activity.last_ms);
+            (last, session.session_id.as_str())
+        })
+        .collect();
+    sessions.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    sessions.into_iter().map(|(_, id)| id.to_owned()).collect()
+}
+
+/// The files of an uncoordinated change that are still at a version no
+/// session of its workspace reported: a report arriving after the scan
+/// explains the rest.
+fn still_unexplained(state: &State, change: &UncoordinatedChange) -> Vec<String> {
+    change
+        .files
+        .iter()
+        .filter(|file| !explained(state, &change.workspace_id, file))
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+/// This workspace's uncoordinated changes of this generation, within the
+/// briefing horizon, with a file still unexplained. Newest first.
+fn held_uncoordinated<'a>(
+    state: &'a State,
+    workspace_id: &str,
+    now_ms: u64,
+) -> impl Iterator<Item = &'a UncoordinatedChange> {
+    state
+        .uncoordinated
+        .get(workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter(move |change| {
+            change.generation == state.generation
+                && now_ms.saturating_sub(change.at_ms) <= BRIEF_HORIZON_MS
+                && !still_unexplained(state, change).is_empty()
+        })
+}
+
+/// The uncoordinated change owed to this session's next briefing, the
+/// newest, with the notice it carries: one always fits the rendered text, and
+/// each is delivered once, so the rest follow at the next briefings.
+fn uncoordinated_owed<'a>(
+    state: &'a State,
+    session_id: &'a str,
+    now_ms: u64,
+) -> impl Iterator<Item = (&'a UncoordinatedChange, UncoordinatedNotice)> {
+    let workspace = state
+        .sessions
+        .get(session_id)
+        .map_or("", |session| session.workspace_id.as_str());
+    held_uncoordinated(state, workspace, now_ms)
+        .filter(move |change| !change.delivered.iter().any(|held| held == session_id))
+        .take(1)
+        .map(move |change| {
+            (
+                change,
+                UncoordinatedNotice {
+                    sessions: change.sessions.clone(),
+                    paths: still_unexplained(state, change),
+                    age_ms: now_ms.saturating_sub(change.at_ms),
+                },
+            )
+        })
+}
+
+fn validate_uncoordinated(state: &State, change: &UncoordinatedChange) -> Result<(), CoreError> {
+    validate_fact_header(
+        state,
+        &change.change_id,
+        &change.workspace_id,
+        change.generation,
+    )?;
+    if change.files.is_empty()
+        || change.files.len() > MAX_UNCOORDINATED_FILES
+        || normalized_files(&change.files)? != change.files
+        || change.sessions.is_empty()
+        || change.sessions.len() > MAX_UNCOORDINATED_SESSIONS
+        || change.sessions.iter().any(|session| {
+            state
+                .sessions
+                .get(session)
+                .is_none_or(|known| known.workspace_id != change.workspace_id)
+        })
+    {
+        return Err(error(
+            "invalid_event",
+            &format!(
+                "An uncoordinated change names 1 to {MAX_UNCOORDINATED_FILES} sorted, unique files and 1 to {MAX_UNCOORDINATED_SESSIONS} sessions of its workspace"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether the session wrote a file since its last tool batch or stop.
@@ -7179,12 +8660,27 @@ fn wrote_since_boundary(state: &State, session_id: &str) -> bool {
 
 fn validate_auto_check(state: &State, check: &AutoCheck) -> Result<(), CoreError> {
     validate_known_workspace(state, &check.workspace_id)?;
-    validate_id(&check.name, "check name")?;
-    if check.name.len() > 64
-        || check.argv.is_empty()
-        || check.argv.len() > MAX_AUTO_CHECK_ARGS
-        || check.argv[0].is_empty()
-        || check.argv.iter().any(|arg| {
+    validate_check_command(&check.name, &check.argv, check.timeout_s)?;
+    if let Some(wider) = &check.on_interface_change {
+        validate_check_command(&wider.name, &wider.argv, wider.timeout_s)?;
+        if wider.name == check.name {
+            return Err(error(
+                "invalid_check",
+                "The wider check has a name of its own: its records are told apart from the regular check's by name",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// One automatic command's name, arguments and time limit.
+fn validate_check_command(name: &str, argv: &[String], timeout_s: u32) -> Result<(), CoreError> {
+    validate_id(name, "check name")?;
+    if name.len() > 64
+        || argv.is_empty()
+        || argv.len() > MAX_AUTO_CHECK_ARGS
+        || argv[0].is_empty()
+        || argv.iter().any(|arg| {
             arg.is_empty()
                 || arg.len() > MAX_AUTO_CHECK_ARG_BYTES
                 || arg.chars().any(char::is_control)
@@ -7197,13 +8693,145 @@ fn validate_auto_check(state: &State, check: &AutoCheck) -> Result<(), CoreError
             ),
         ));
     }
-    if !(1..=MAX_AUTO_CHECK_TIMEOUT_S).contains(&check.timeout_s) {
+    if !(1..=MAX_AUTO_CHECK_TIMEOUT_S).contains(&timeout_s) {
         return Err(error(
             "invalid_limit",
             &format!("An automatic check's time limit is 1 to {MAX_AUTO_CHECK_TIMEOUT_S} seconds"),
         ));
     }
     Ok(())
+}
+
+/// A report's mentioning files come only with an interface change, are
+/// valid paths and number at most [`MAX_REPORT_DEPENDENT_PATHS`].
+fn validate_dependent_paths(report: &CheckReport) -> Result<(), CoreError> {
+    if report.dependent_paths.is_empty() {
+        return Ok(());
+    }
+    if report.interface.is_none() || report.dependent_paths.len() > MAX_REPORT_DEPENDENT_PATHS {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A check report names mentioning files only for an interface change, at most {MAX_REPORT_DEPENDENT_PATHS}"
+            ),
+        ));
+    }
+    for path in &report.dependent_paths {
+        validate_relative_path(path)?;
+    }
+    Ok(())
+}
+
+/// A wider check's cause names one valid change, a valid path and at most
+/// [`MAX_CAUSE_DEPENDENTS`] valid mentioning files.
+fn validate_interface_cause(cause: &InterfaceCause) -> Result<(), CoreError> {
+    validate_relative_path(&cause.path)?;
+    if cause.dependents.is_empty() || cause.dependents.len() > MAX_CAUSE_DEPENDENTS {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A wider check's interface change names 1 to {MAX_CAUSE_DEPENDENTS} files that mention it"
+            ),
+        ));
+    }
+    for path in &cause.dependents {
+        validate_relative_path(path)?;
+    }
+    // The change itself is shaped as in an interface notice.
+    validate_notice(&InterfaceNotice {
+        notice_id: "cause".into(),
+        workspace_id: String::new(),
+        path: cause.path.clone(),
+        changes: vec![cause.change.clone()],
+        dependents: Vec::new(),
+        by_session: None,
+        at_ms: 0,
+        generation: 0,
+    })
+}
+
+/// What session `id` works on: the paths its live leases hold, the files it
+/// touched within the briefing horizon (with their ages), and those with the
+/// paths of its declared intent.
+fn work_paths(
+    state: &State,
+    id: &str,
+    now_ms: u64,
+) -> (Vec<String>, Vec<RecentPath>, BTreeSet<String>) {
+    let editing: Vec<String> = state
+        .leases
+        .values()
+        .filter(|lease| lease.session_id == id && live_lease(state, lease, now_ms))
+        .flat_map(|lease| lease.paths.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let recent: Vec<RecentPath> = state
+        .activity
+        .get(id)
+        .filter(|activity| activity.generation == state.generation)
+        .map(|activity| {
+            activity
+                .touched
+                .iter()
+                .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
+                .map(|touch| RecentPath {
+                    path: touch.path.clone(),
+                    age_ms: now_ms.saturating_sub(touch.at_ms),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut all: BTreeSet<String> = editing.iter().cloned().collect();
+    all.extend(recent.iter().map(|recent| recent.path.clone()));
+    if let Some(intent) = state
+        .intents
+        .get(id)
+        .filter(|intent| intent.generation == state.generation)
+    {
+        all.extend(intent.paths.iter().cloned());
+    }
+    (editing, recent, all)
+}
+
+/// Files session `id` works on or has read: what a changed interface could
+/// break for it.
+fn concerned_paths(state: &State, id: &str, now_ms: u64) -> BTreeSet<String> {
+    let (_, _, mut concerned) = work_paths(state, id, now_ms);
+    concerned.extend(
+        known_versions(state, id)
+            .iter()
+            .map(|version| version.path.clone()),
+    );
+    concerned
+}
+
+/// The running sessions of the workspace, in this daemon's lifetime, that
+/// work on or have read one of `paths`, as a briefing counts them.
+fn concerned_sessions(
+    state: &State,
+    workspace_id: &str,
+    paths: &[String],
+    now_ms: u64,
+) -> Vec<String> {
+    state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.workspace_id == workspace_id && session.generation == state.generation
+        })
+        .filter(|session| {
+            state
+                .activity
+                .get(&session.session_id)
+                .is_some_and(|activity| !activity.ended)
+        })
+        .filter(|session| {
+            let concerned = concerned_paths(state, &session.session_id, now_ms);
+            paths.iter().any(|path| concerned.contains(path))
+        })
+        .map(|session| session.session_id.clone())
+        .collect()
 }
 
 /// The sessions are this workspace's, the tail is bounded, and the notice
@@ -7242,7 +8870,29 @@ fn validate_check_report(
     }
     validate_request_id(&notice.check_id)?;
     validate_oid(&notice.tree_oid)?;
+    if let Some(cause) = &notice.interface {
+        validate_interface_cause(cause)?;
+    }
+    // A grade is the wider check's result, and only a wider check has one.
+    if notice.interface_grade != interface_grade(notice.interface.as_ref(), &notice.result) {
+        return Err(error(
+            "invalid_check_report",
+            "An interface grade is kept for a passed wider check and broke for a failed one",
+        ));
+    }
     Ok(())
+}
+
+/// The grade of a wider check with `interface`, from its result.
+fn interface_grade(
+    interface: Option<&InterfaceCause>,
+    result: &CheckResult,
+) -> Option<InterfaceGrade> {
+    match (interface, result) {
+        (Some(_), CheckResult::Passed {}) => Some(InterfaceGrade::Kept),
+        (Some(_), CheckResult::Failed { .. }) => Some(InterfaceGrade::Broke),
+        _ => None,
+    }
 }
 
 /// A write was recorded in the workspace: its write generation moves on, so
@@ -7729,12 +9379,20 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 ));
             }
             status_line::remember(state, workspace_id, *at_ms, *generation);
+            recent::remember_refusal(state, workspace_id, paths, *at_ms, *generation);
         }
         Event::WorkspaceRegistered { workspace } => {
             validate_workspace(state, workspace)?;
             state
                 .workspaces
                 .insert(workspace.workspace_id.clone(), workspace.clone());
+        }
+        Event::WorkspaceMoved {
+            workspace,
+            from_root,
+        } => workspaces::apply_moved(state, workspace, from_root)?,
+        Event::WorkspaceRemoved { workspace_id } => {
+            workspaces::apply_removed(state, workspace_id)?;
         }
         Event::SessionRegistered { session } => {
             validate_session_registration(state, session)?;
@@ -7931,6 +9589,45 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             });
             activity.last_ms = activity.last_ms.max(*at_ms);
         }
+        Event::PresenceObserved {
+            session_id,
+            kind,
+            paths,
+            at_ms,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            if presence_paths(*kind, paths)? != *paths || *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A presence record names sorted, unique paths in the current generation",
+                ));
+            }
+            // Recorded only while shown; a record kept from before the
+            // session turned presence off adds nothing.
+            if presence_setting(state, session_id).shown {
+                look(activity_mut(state, session_id), *kind, paths, *at_ms);
+            }
+        }
+        Event::PresenceSet {
+            session_id,
+            setting,
+        } => {
+            known_session(state, session_id)?;
+            validate_presence_setting(setting)?;
+            if !setting.shown {
+                // Off forgets what was recorded: turning it on again later
+                // never shows a path looked at while it was off or before.
+                if let Some(activity) = state.activity.get_mut(session_id) {
+                    activity.looking.clear();
+                }
+            }
+            if *setting == PresenceSetting::default() {
+                state.presence.remove(session_id);
+            } else {
+                state.presence.insert(session_id.clone(), *setting);
+            }
+        }
         Event::SessionEnded { session_id } => {
             known_session(state, session_id)?;
             activity_mut(state, session_id).ended = true;
@@ -7984,9 +9681,9 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::SourceObserved {
             session_id,
             files,
+            origin,
             at_ms,
             generation,
-            ..
         } => {
             current_session(state, session_id)?;
             if *generation != state.generation
@@ -8011,6 +9708,17 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 );
             }
             activity.known.truncate(MAX_KNOWN);
+            // A reported read is also where the session is looking
+            // (roadmap A13), unless its presence is off.
+            if *origin == SourceOrigin::Read && presence_setting(state, session_id).shown {
+                let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+                look(
+                    activity_mut(state, session_id),
+                    PresenceKind::Read,
+                    &paths,
+                    *at_ms,
+                );
+            }
         }
         Event::RemoteEnabled { link } => {
             validate_remote_link(state, link)?;
@@ -8077,7 +9785,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 link.withdrawn = true;
             }
         }
-        Event::Remembered { note } => {
+        Event::Remembered { note, .. } => {
             validate_note(note)?;
             validate_known_workspace(state, &note.workspace_id)?;
             let notes = state.notes.entry(note.workspace_id.clone()).or_default();
@@ -8093,7 +9801,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 notes.retain(|note| &note.note_id != note_id);
             }
         }
-        Event::MessageSent { message } => {
+        Event::MessageSent { message, .. } => {
             validate_message(message)?;
             validate_known_workspace(state, &message.workspace_id)?;
             if !message.acknowledged.is_empty() || message.retracted {
@@ -8102,17 +9810,44 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                     "A message is sent unacknowledged and not withdrawn",
                 ));
             }
-            for list in [&mut state.messages, &mut state.message_history] {
-                let messages = list.entry(message.workspace_id.clone()).or_default();
-                messages.retain(|held| held.message_id != message.message_id);
-                messages.insert(0, message.clone());
-                messages.truncate(MAX_MESSAGES);
+            let history = state
+                .message_history
+                .entry(message.workspace_id.clone())
+                .or_default();
+            history.retain(|held| held.message_id != message.message_id);
+            history.insert(0, message.clone());
+            history.truncate(MAX_MESSAGES);
+            let held = state
+                .messages
+                .entry(message.workspace_id.clone())
+                .or_default();
+            held.retain(|held| held.message_id != message.message_id);
+            held.insert(0, message.clone());
+            // The oldest held past the cap are dropped unread.
+            let pushed_out: Vec<String> = held
+                .split_off(held.len().min(MAX_MESSAGES))
+                .into_iter()
+                .map(|dropped| dropped.message_id)
+                .collect();
+            let dropped = state
+                .dropped_messages
+                .entry(message.workspace_id.clone())
+                .or_default();
+            dropped.retain(|id| *id != message.message_id);
+            for id in pushed_out.into_iter().rev() {
+                dropped.retain(|held| *held != id);
+                dropped.insert(0, id);
+            }
+            dropped.truncate(MAX_MESSAGES);
+            if dropped.is_empty() {
+                state.dropped_messages.remove(&message.workspace_id);
             }
         }
         Event::MessageAcknowledged {
             workspace_id,
             message_id,
             session_id,
+            ..
         } => {
             known_session(state, session_id)?;
             // Sessions of this generation that a message for everyone is
@@ -8310,17 +10045,61 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 index <= MAX_CHECKOUT_RUNS || explaining.contains(&(index - 1))
             });
         }
+        Event::UncoordinatedChanged { change } => {
+            validate_uncoordinated(state, change)?;
+            if !change.delivered.is_empty() {
+                return Err(error(
+                    "invalid_event",
+                    "A new uncoordinated change has not been delivered to any session",
+                ));
+            }
+            let changes = state
+                .uncoordinated
+                .entry(change.workspace_id.clone())
+                .or_default();
+            changes.insert(0, change.clone());
+            changes.truncate(MAX_UNCOORDINATED);
+        }
+        Event::UncoordinatedDelivered {
+            workspace_id,
+            change_id,
+            session_id,
+        } => {
+            if known_session(state, session_id)?.workspace_id != *workspace_id {
+                return Err(error(
+                    "invalid_event",
+                    "An uncoordinated change is delivered to a session of its workspace",
+                ));
+            }
+            // A change already truncated away has nothing left to mark.
+            if let Some(change) = state
+                .uncoordinated
+                .get_mut(workspace_id)
+                .and_then(|changes| changes.iter_mut().find(|c| c.change_id == *change_id))
+                && !change.delivered.contains(session_id)
+            {
+                change.delivered.push(session_id.clone());
+            }
+        }
         Event::InterfaceChanged { notice } => {
             validate_notice(notice)?;
             validate_known_workspace(state, &notice.workspace_id)?;
-            let notices = state
-                .interface_notices
-                .entry(notice.workspace_id.clone())
-                .or_default();
-            // A newer notice for the same file replaces the older one.
-            notices.retain(|held| held.path != notice.path);
-            notices.insert(0, notice.clone());
-            notices.truncate(MAX_NOTICES);
+            // An added export is history only (roadmap D4): a new name is
+            // news to no dependent, so it is not held for briefings, recaps,
+            // break alerts or the dashboard, and an addition alone does not
+            // replace the file's held notice or open a workspace's entry.
+            let mut held = notice.clone();
+            held.changes.retain(|change| change.change != "added");
+            if !held.changes.is_empty() {
+                let notices = state
+                    .interface_notices
+                    .entry(notice.workspace_id.clone())
+                    .or_default();
+                // A newer notice for the same file replaces the older one.
+                notices.retain(|older| older.path != held.path);
+                notices.insert(0, held);
+                notices.truncate(MAX_NOTICES);
+            }
         }
         Event::CheckRecorded { check } => {
             validate_check(state, check)?;
@@ -8817,15 +10596,16 @@ pub fn validate_calls(calls: &[CallSite]) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Signature changes to functions that another live session of this
-/// session's workspace made, in this generation and within the briefing
-/// horizon, that this session has not been alerted to: `(notice, change,
-/// after's arity, the peer)`. Newest notice first.
+/// Changes to functions that another live session of this session's
+/// workspace made, in this generation and within the briefing horizon, that
+/// this session has not been alerted to: `(notice, change, the peer)`. A
+/// signature change counts only with the new parameter count; a rename and
+/// a removal always count. Newest notice first.
 fn alertable<'a>(
     state: &'a State,
     session_id: &str,
     now_ms: u64,
-) -> Result<Vec<(&'a InterfaceNotice, &'a InterfaceChange, Arity, &'a str)>, CoreError> {
+) -> Result<Vec<(&'a InterfaceNotice, &'a InterfaceChange, &'a str)>, CoreError> {
     let me = current_session(state, session_id)?;
     let alerted = state
         .activity
@@ -8866,12 +10646,14 @@ fn alertable<'a>(
             continue;
         }
         for change in &notice.changes {
-            if let (true, Some(arity)) = (
-                change.change == "signature_changed"
-                    && matches!(change.kind.as_str(), "function" | "method"),
-                change.after_arity,
-            ) {
-                found.push((notice, change, arity, peer));
+            let alerts = match change.change.as_str() {
+                "signature_changed" => change.after_arity.is_some(),
+                "renamed" => change.after_name.is_some(),
+                "removed" => true,
+                _ => false,
+            };
+            if alerts && matches!(change.kind.as_str(), "function" | "method") {
+                found.push((notice, change, peer));
             }
         }
     }
@@ -8879,8 +10661,8 @@ fn alertable<'a>(
 }
 
 /// The names among `calls` that a write check must look up in the index:
-/// those of a change it could alert to. Usually none, and then nothing is
-/// looked up.
+/// those of a change it could alert to, and a renamed function's new name.
+/// Usually none, and then nothing is looked up.
 pub fn call_candidates(
     state: &State,
     session_id: &str,
@@ -8890,50 +10672,85 @@ pub fn call_candidates(
     validate_calls(calls)?;
     Ok(alertable(state, session_id, now_ms)?
         .into_iter()
-        .filter(|(_, change, _, _)| calls.iter().any(|call| call.name == change.name))
-        .map(|(_, change, _, _)| change.name.clone())
+        .filter(|(_, change, _)| calls.iter().any(|call| call.name == change.name))
+        .flat_map(|(_, change, _)| [&change.name].into_iter().chain(&change.after_name))
+        .cloned()
         .collect())
 }
 
-/// The calls that do not fit a changed signature, at most
-/// `MAX_CALL_BREAKS`, from notices this session was not alerted to. A
-/// change counts only while `current` (the index's definitions of the
-/// called names) still holds its new signature in its file, so a notice
-/// the index has moved past is never used. Pure; the caller records the
-/// alert.
+/// The calls a peer's recent change makes wrong, at most `MAX_CALL_BREAKS`,
+/// from notices this session was not alerted to. `current` holds the
+/// index's definitions of every candidate name (`call_candidates`), and a
+/// change counts only while it is still true there, so a notice the index
+/// has moved past is never used:
+///
+/// - a signature change, while its file holds the new signature; a call
+///   whose count does not fit it breaks;
+/// - a rename, while its file holds the new name's signature and no
+///   definition of the old name is left anywhere; every call of the old
+///   name breaks;
+/// - a removal, while no definition of the name is left anywhere; every
+///   call of it breaks.
+///
+/// "No definition left anywhere" is read from the index, so a rename or a
+/// removal counts only when `index_complete`: the index reads every
+/// supported file of the workspace at its current content
+/// (`GraphCoverage::blind_in_scope` is zero). A name moved into a file not
+/// indexed yet, partial or too large is otherwise missing from `current`
+/// without being gone.
+///
+/// A same-count change is not alerted: calls are matched by name, and
+/// without the argument types at a call site nothing tells a right call
+/// from a wrong one (ADR 0029). Pure; the caller records the alert.
 pub fn call_breaks(
     state: &State,
     session_id: &str,
     calls: &[CallSite],
     current: &[SymbolRef],
+    index_complete: bool,
     now_ms: u64,
 ) -> Result<Vec<CallBreak>, CoreError> {
     validate_calls(calls)?;
+    let gone = |name: &str| index_complete && !current.iter().any(|symbol| symbol.name == name);
+    let holds = |path: &str, name: &str, signature: &str| {
+        current.iter().any(|symbol| {
+            symbol.path == path && symbol.name == name && symbol.signature == signature
+        })
+    };
     let mut breaks = Vec::new();
-    for (notice, change, arity, peer) in alertable(state, session_id, now_ms)? {
+    for (notice, change, peer) in alertable(state, session_id, now_ms)? {
         let after = change.after.as_deref().unwrap_or("");
-        let still = current.iter().any(|symbol| {
-            symbol.path == notice.path && symbol.name == change.name && symbol.signature == after
-        });
-        if !still {
-            continue;
-        }
-        for call in calls
-            .iter()
-            .filter(|call| call.name == change.name && !arity.fits(call.args, call.member))
-        {
+        // `Some`: a call breaks when its count does not fit; `None`: every
+        // call of the name breaks.
+        let fit: Option<Arity> = match change.change.as_str() {
+            "signature_changed" => match change.after_arity {
+                Some(arity) if holds(&notice.path, &change.name, after) => Some(arity),
+                _ => continue,
+            },
+            "renamed" => match &change.after_name {
+                Some(to) if holds(&notice.path, to, after) && gone(&change.name) => None,
+                _ => continue,
+            },
+            "removed" if gone(&change.name) => None,
+            _ => continue,
+        };
+        for call in calls.iter().filter(|call| {
+            call.name == change.name && fit.is_none_or(|arity| !arity.fits(call.args, call.member))
+        }) {
             if breaks.len() == MAX_CALL_BREAKS {
                 return Ok(breaks);
             }
             breaks.push(CallBreak {
                 notice_id: notice.notice_id.clone(),
                 call: call.clone(),
+                change: change.change.clone(),
                 defined_in: notice.path.clone(),
                 by_session: peer.to_owned(),
                 before: change.before.clone().unwrap_or_default(),
                 after: after.to_owned(),
+                after_name: change.after_name.clone(),
                 before_arity: change.before_arity,
-                after_arity: arity,
+                after_arity: change.after_arity,
                 age_ms: now_ms.saturating_sub(notice.at_ms),
             });
         }
@@ -9068,6 +10885,65 @@ fn prompt_target_paths(paths: &[String]) -> Result<Vec<String>, CoreError> {
         ));
     }
     Ok(paths)
+}
+
+/// Presence paths, sorted and without repeats: 1 to `PRESENCE_PATHS`
+/// normalized relative paths, for a search or a shell command.
+fn presence_paths(kind: PresenceKind, paths: &[String]) -> Result<Vec<String>, CoreError> {
+    if kind == PresenceKind::Read {
+        return Err(error(
+            "invalid_presence",
+            "A read is recorded as an observed source version, not as presence",
+        ));
+    }
+    let paths = normalized_paths(paths)?;
+    if paths.len() > PRESENCE_PATHS {
+        return Err(error(
+            "too_many_paths",
+            &format!("A presence record names at most {PRESENCE_PATHS} paths"),
+        ));
+    }
+    Ok(paths)
+}
+
+impl Default for PresenceSetting {
+    fn default() -> Self {
+        Self {
+            shown: true,
+            window_ms: PRESENCE_WINDOW_MS,
+        }
+    }
+}
+
+/// A session's presence setting: its own, or the default.
+fn presence_setting(state: &State, session_id: &str) -> PresenceSetting {
+    state.presence.get(session_id).copied().unwrap_or_default()
+}
+
+fn validate_presence_setting(setting: &PresenceSetting) -> Result<(), CoreError> {
+    if !(MIN_PRESENCE_WINDOW_MS..=BRIEF_HORIZON_MS).contains(&setting.window_ms) {
+        return Err(error(
+            "invalid_limit",
+            "A presence window is between 1 and 30 minutes",
+        ));
+    }
+    Ok(())
+}
+
+/// Record that a session looked at `paths`: newest first, one entry per path.
+fn look(activity: &mut SessionActivity, kind: PresenceKind, paths: &[String], at_ms: u64) {
+    for path in paths.iter().rev() {
+        activity.looking.retain(|looked| looked.path != *path);
+        activity.looking.insert(
+            0,
+            LookedPath {
+                path: path.clone(),
+                kind,
+                at_ms,
+            },
+        );
+    }
+    activity.looking.truncate(MAX_LOOKING);
 }
 
 fn normalized_related_ids(ids: &[String]) -> Result<Vec<String>, CoreError> {
@@ -9393,6 +11269,21 @@ fn validate_no_parent_claims(state: &State, workspace: &Workspace) -> Result<(),
         let Some(parent) = state.workspaces.get(&lease.workspace_id) else {
             continue;
         };
+        // A verified overlap whose roots do not overlap as text, such as a
+        // registered root that is now a link: the core cannot tell which of
+        // the lease's paths lie under this root, so any current admission
+        // there makes the registration wait.
+        if !roots_overlap(&parent.root, &workspace.root)
+            && workspace
+                .verified_overlaps
+                .binary_search(&parent.workspace_id)
+                .is_ok()
+        {
+            return Err(error(
+                "workspace_in_use",
+                "A current admission in a workspace this root overlaps through a link may cover it; complete it or wait for expiry, then start a new registration attempt with a new request ID",
+            ));
+        }
         let prefix = if parent.root.ends_with('/') {
             parent.root.clone()
         } else {
@@ -9447,10 +11338,13 @@ fn validate_workspace_link_targets(
                 "A verified overlap must name an already registered workspace",
             )
         })?;
-        if id == workspace_id || other.root == root || !roots_overlap(&other.root, root) {
+        // The roots need not overlap as text: a registered root kept as
+        // given can be a link to a directory around or inside `root`, and
+        // only the adapter can resolve it.
+        if id == workspace_id || other.root == root {
             return Err(error(
                 "invalid_workspace_verification",
-                "Verified overlaps must name distinct, overlapping physical roots; identical roots must share one workspace ID",
+                "Verified overlaps must name distinct physical roots; identical roots must share one workspace ID",
             ));
         }
     }

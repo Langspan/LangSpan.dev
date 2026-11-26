@@ -17,6 +17,9 @@ pub const SUPPORTED_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookE
 /// A completed `Read` is recorded as the version the session saw. It is
 /// never admitted or denied.
 pub const READ_TOOL: &str = "Read";
+/// A completed `Grep` shows peers the path it searched (roadmap A13). Its
+/// pattern is never read. It is never admitted or denied.
+pub const SEARCH_TOOL: &str = "Grep";
 pub fn identities(host_session: &str, tool_use_id: &str) -> Identities {
     crate::hook::identities_for(SOURCE, host_session, tool_use_id)
 }
@@ -75,6 +78,48 @@ pub fn run_until(input: impl Read, config: &Config, deadline: Instant) -> Reply 
     if event.tool_name.as_deref() == Some(crate::hook::SHELL_TOOL) {
         return shell(event, phase, config, deadline, started);
     }
+    if event.tool_name.as_deref() == Some(SEARCH_TOOL) {
+        if !matches!(phase, crate::hook::Phase::Post(ToolResult::Succeeded)) {
+            return Reply::none("unsupported", "only a completed Grep is recorded");
+        }
+        let (Some(host_session), Some(tool_use_id)) =
+            (event.session_id.as_deref(), event.tool_use_id.as_deref())
+        else {
+            return Reply::none(
+                "unsupported",
+                "missing host tool-call identity; no ID generated",
+            );
+        };
+        if !valid_host_id(host_session) {
+            return Reply::none(
+                "unsupported",
+                "host session or tool-call identity is outside supported grammar",
+            );
+        }
+        let (host_session, parent) = match identity(host_session, event.agent_id.as_deref()) {
+            Ok(identity) => identity,
+            Err(reply) => return reply,
+        };
+        let scope = event
+            .tool_input
+            .as_ref()
+            .and_then(|input| input.get("path"))
+            .and_then(serde_json::Value::as_str);
+        let reply = crate::hook::search(
+            SOURCE,
+            &host_session,
+            parent.as_deref(),
+            tool_use_id,
+            scope,
+            event.cwd.as_deref(),
+            config,
+            deadline,
+        );
+        return Reply {
+            detail: format!("{} ({} ms)", reply.detail, started.elapsed().as_millis()),
+            ..reply
+        };
+    }
     let phase = match (event.tool_name.as_deref(), phase) {
         (Some(READ_TOOL), crate::hook::Phase::Post(ToolResult::Succeeded)) => {
             crate::hook::Phase::Read
@@ -91,7 +136,7 @@ pub fn run_until(input: impl Read, config: &Config, deadline: Instant) -> Reply 
     else {
         return Reply::none(
             "unsupported",
-            "supported tools are Edit, Write, MultiEdit, NotebookEdit, Read and Bash",
+            "supported tools are Edit, Write, MultiEdit, NotebookEdit, Read, Grep and Bash",
         );
     };
     let (Some(host_session), Some(tool_use_id)) =
@@ -150,6 +195,7 @@ pub fn run_until(input: impl Read, config: &Config, deadline: Instant) -> Reply 
             // A `Write`'s content is in `edits`.
             contents: Vec::new(),
             pre_tool_context: true,
+            breaks_after: false,
         },
         &config,
         deadline,

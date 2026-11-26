@@ -60,6 +60,118 @@ pub fn write_targets(command: &str) -> Result<Vec<String>, &'static str> {
     Ok(targets.into_iter().collect())
 }
 
+/// At most this many words of one command are taken as paths it looked at.
+pub const MAX_LOOKED_WORDS: usize = 16;
+
+/// The words of a command that name what it reads, for presence (roadmap
+/// A13): every operand of a program that only reads or lists the files it
+/// is given (`cat`, `head`, `ls`, ...), and the operands after the pattern
+/// of a search (`grep`, `rg`) whose options are all flags that program is
+/// known to take without a value, so the pattern is never among them. A
+/// search with any other option gives nothing. Options are not operands.
+/// After a command that can change the shell's directory (`cd`, `pushd`,
+/// `popd`, `source`, `.`, `eval`), only absolute operands are taken, since
+/// a relative one would be resolved against the wrong directory. Anything
+/// the parser does not take, or any other program, gives nothing. The
+/// words are as written; the caller keeps only those that name an existing
+/// path in the checkout.
+pub fn looked_at(command: &str) -> Vec<String> {
+    const READERS: [&str; 13] = [
+        "cat", "head", "tail", "less", "more", "wc", "nl", "ls", "stat", "file", "diff", "tree",
+        "du",
+    ];
+    // Each search program's flags that take no value. A flag of one may
+    // take a value in another (`rg -E ENCODING`, `rg -r REPLACEMENT`).
+    const GREP: (&str, &[&str]) = (
+        "nrRilLcHhsFEwvoxqI",
+        &[
+            "--line-number",
+            "--ignore-case",
+            "--recursive",
+            "--files-with-matches",
+            "--count",
+            "--fixed-strings",
+            "--word-regexp",
+            "--invert-match",
+        ],
+    );
+    const RG: (&str, &[&str]) = (
+        "nilcHIFwvoxqusSLN",
+        &[
+            "--line-number",
+            "--ignore-case",
+            "--files-with-matches",
+            "--count",
+            "--fixed-strings",
+            "--word-regexp",
+            "--invert-match",
+            "--hidden",
+            "--no-heading",
+        ],
+    );
+    const DIRECTORY: [&str; 5] = ["cd", "pushd", "popd", "source", "eval"];
+    if command.len() > MAX_COMMAND_BYTES {
+        return Vec::new();
+    }
+    let Ok(tokens) = tokenize(command) else {
+        return Vec::new();
+    };
+    let mut looked = Vec::new();
+    // Set once a command may have changed the shell's directory.
+    let mut moved = false;
+    for part in tokens.split(|token| *token == Token::Separator) {
+        let mut words = Vec::new();
+        let mut tokens = part.iter();
+        while let Some(token) = tokens.next() {
+            match token {
+                Token::Word(word) => words.push(word.as_str()),
+                // A redirection's file is written, not read.
+                Token::Redirect(_) => {
+                    tokens.next();
+                }
+                Token::Duplicate | Token::Separator => {}
+            }
+        }
+        let Some((&program, args)) = words.split_first() else {
+            continue;
+        };
+        let name = program.rsplit('/').next().unwrap_or(program);
+        let search = match name {
+            "grep" | "egrep" | "fgrep" => Some(GREP),
+            "rg" => Some(RG),
+            _ => None,
+        };
+        let operands: Vec<&str> = if READERS.contains(&name) {
+            args.iter()
+                .copied()
+                .filter(|arg| !arg.starts_with('-'))
+                .collect()
+        } else if let Some((flags, long)) = search {
+            match operands(args, flags, long) {
+                // The first operand is the pattern.
+                Ok(operands) => operands.into_iter().skip(1).collect(),
+                Err(_) => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        let relative_ok = !moved;
+        // `command cd`, `builtin cd` or `X=1 cd` move the shell as well.
+        moved |= program == "." || words.iter().any(|word| DIRECTORY.contains(word));
+        for operand in operands
+            .into_iter()
+            .filter(|operand| relative_ok || operand.starts_with('/'))
+        {
+            let operand = operand.trim_start_matches("./");
+            if !operand.is_empty() && !looked.iter().any(|seen| seen == operand) {
+                looked.push(operand.to_owned());
+            }
+        }
+    }
+    looked.truncate(MAX_LOOKED_WORDS);
+    looked
+}
+
 fn tokenize(command: &str) -> Result<Vec<Token>, &'static str> {
     let mut tokens = Vec::new();
     let mut word = String::new();
@@ -459,6 +571,66 @@ fn literal_path(path: &str) -> Result<String, &'static str> {
     } else {
         joined
     })
+}
+
+/// The file a quoted heredoc writes whole, and what it writes: `cat > PATH
+/// <<'EOF'` or `cat <<'EOF' > PATH` (the delimiter in single or double
+/// quotes), the body, then a line that is exactly the delimiter, with
+/// nothing after it. A quoted delimiter means the shell expands nothing in
+/// the body, so the body is the file's new content. Used for the write-time
+/// break check ([ADR 0029](../docs/adr/0029-break-alerts-at-write-time.md));
+/// it admits nothing. Any other shape is `None`: `>>`, `<<-`, an unquoted
+/// delimiter, a second heredoc or command, or text after the closing line.
+/// The path is as written, not yet resolved.
+pub fn heredoc_write(command: &str) -> Option<(String, String)> {
+    if command.len() > langspan_graph::MAX_SOURCE_BYTES + MAX_COMMAND_BYTES {
+        return None;
+    }
+    let (head, rest) = command.split_once('\n')?;
+    if head.len() > MAX_COMMAND_BYTES || head.contains(">>") {
+        return None;
+    }
+    let at = head.find("<<")?;
+    let word = head[at + 2..].trim_start_matches([' ', '\t']);
+    let quote = word.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    let (delimiter, tail) = word[1..].split_once(quote)?;
+    if delimiter.is_empty()
+        || !delimiter
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        || tail.starts_with(|c: char| !matches!(c, ' ' | '\t'))
+    {
+        return None;
+    }
+    // What is left of the first line: `cat` and one `>` redirection. A
+    // second `<` stops the tokenizer.
+    let tokens = tokenize(&format!("{} {tail}", &head[..at])).ok()?;
+    let [
+        Token::Word(name),
+        Token::Redirect(None | Some(1)),
+        Token::Word(target),
+    ] = tokens.as_slice()
+    else {
+        return None;
+    };
+    if name != "cat" || target == "/dev/null" {
+        return None;
+    }
+    let target = literal_path(target).ok()?;
+    let mut lines = rest.split('\n');
+    let mut body = String::new();
+    loop {
+        let line = lines.next()?;
+        if line == delimiter {
+            break;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    match (lines.next(), lines.next()) {
+        (None, _) | (Some(""), None) => Some((target, body)),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1630,6 +1802,94 @@ mod parser {
     }
 
     #[test]
+    fn a_reading_command_names_its_operands_and_a_search_never_its_pattern() {
+        let words = |command: &str| looked_at(command);
+        assert_eq!(words("cat src/auth.rs"), ["src/auth.rs"]);
+        assert_eq!(
+            words("sed -n 1,80p x; head -n 20 ./src/a.rs src/b.rs && ls -la src"),
+            ["20", "src/a.rs", "src/b.rs", "src"],
+            "options are dropped; a value word stays and is kept only if it is a path"
+        );
+        assert_eq!(words("/usr/bin/wc -l a.txt | tail -1"), ["a.txt"]);
+        assert_eq!(
+            words("cat a.txt > out.txt"),
+            ["a.txt"],
+            "a redirection is written"
+        );
+        // The pattern of a search is skipped, whatever it looks like.
+        assert_eq!(words("grep -rn 'src/secret.rs' src"), ["src"]);
+        assert_eq!(
+            words("rg --hidden token_refresh -- src lib"),
+            ["src", "lib"]
+        );
+        assert_eq!(words("grep pattern"), Vec::<String>::new());
+        // An option that may take a value could hide which word is the
+        // pattern: nothing is taken.
+        for command in [
+            "grep -e foo src",
+            "rg -g '*.rs' foo src",
+            "grep -A 3 foo src",
+            "rg --type rust foo src",
+            "grep --regexp=foo src",
+        ] {
+            assert!(words(command).is_empty(), "{command}");
+        }
+        // Other programs, and what the parser does not take, give nothing.
+        for command in [
+            "cargo test",
+            "python3 src/a.py",
+            "git show HEAD:src/a.rs",
+            "cat $(ls)",
+            "cat src/*.rs",
+            "cat 'unterminated",
+        ] {
+            assert!(words(command).is_empty(), "{command}");
+        }
+        let many: String = (0..40).map(|i| format!("f{i} ")).collect();
+        assert_eq!(words(&format!("cat {many}")).len(), MAX_LOOKED_WORDS);
+        assert!(words(&format!("cat {}", "a".repeat(MAX_COMMAND_BYTES))).is_empty());
+    }
+
+    #[test]
+    fn a_search_option_that_takes_a_value_for_one_program_records_nothing() {
+        // `rg -E` names an encoding and `rg -r` a replacement: the word after
+        // either is a value, so the pattern would otherwise be taken as a path.
+        for command in [
+            "rg -E utf-8 src/auth.rs src",
+            "rg -r x src/auth.rs src",
+            "rg -nE utf-8 src/auth.rs src",
+            "rg --recursive src/auth.rs src",
+            "grep --hidden src/auth.rs src",
+            "rg -e src/auth.rs src",
+        ] {
+            assert!(looked_at(command).is_empty(), "{command}");
+        }
+        // Each program keeps its own flags without a value.
+        assert_eq!(looked_at("grep -rE 'a|b' src"), ["src"]);
+        assert_eq!(looked_at("rg -uS foo src"), ["src"]);
+    }
+
+    #[test]
+    fn a_change_of_directory_stops_relative_operands_after_it() {
+        for command in [
+            "cd src && cat auth.rs",
+            "pushd src && cat auth.rs",
+            "command cd src; ls auth.rs",
+            "source env.sh; cat auth.rs",
+            ". env.sh; cat auth.rs",
+            "eval cd src; cat auth.rs",
+        ] {
+            assert!(looked_at(command).is_empty(), "{command}");
+        }
+        assert_eq!(
+            looked_at("cat a.rs && cd src && cat b.rs /abs/c.rs"),
+            ["a.rs", "/abs/c.rs"],
+            "operands before the change and absolute ones after it remain"
+        );
+        assert_eq!(looked_at("ls . && cat a.rs"), [".", "a.rs"]);
+    }
+
+    #[test]
     fn each_supported_form_names_its_targets() {
         assert_eq!(targets("printf x > b.txt"), ["b.txt"]);
         assert_eq!(targets("echo hi >> log.txt"), ["log.txt"]);
@@ -1744,6 +2004,48 @@ mod parser {
             write_targets("cat <<'EOF' > a.txt\ndon't\nEOF"),
             Err("input redirection, a heredoc or process substitution")
         );
+    }
+
+    #[test]
+    fn a_quoted_heredoc_names_its_target_and_its_body() {
+        let body = Some(("app/x.py".to_owned(), "a = 1\nb = '$HOME'\n".to_owned()));
+        for command in [
+            "cat > app/x.py <<'EOF'\na = 1\nb = '$HOME'\nEOF",
+            "cat > ./app/x.py <<'EOF'\na = 1\nb = '$HOME'\nEOF\n",
+            "cat <<\"EOF\" > app/x.py\na = 1\nb = '$HOME'\nEOF",
+            "cat >app/x.py << 'EOF'\na = 1\nb = '$HOME'\nEOF",
+        ] {
+            assert_eq!(heredoc_write(command), body, "{command}");
+        }
+        assert_eq!(
+            heredoc_write("cat > a.txt <<'END_1'\nEOF\nEND_1"),
+            Some(("a.txt".into(), "EOF\n".into()))
+        );
+        assert_eq!(
+            heredoc_write("cat > a.txt <<'EOF'\nEOF"),
+            Some(("a.txt".into(), String::new()))
+        );
+        for command in [
+            "cat > a.txt <<EOF\nx\nEOF",
+            "cat >> a.txt <<'EOF'\nx\nEOF",
+            "cat > a.txt <<-'EOF'\nx\nEOF",
+            "cat > a.txt <<<'x'\n",
+            "cat > a.txt <<'EOF'\nx\nEOF\nrm b.txt",
+            "cat > a.txt <<'EOF'\nx\n EOF",
+            "cat > a.txt <<'EOF' <<'TWO'\nx\nEOF\ny\nTWO",
+            "cat > a.txt <<'EOF'; rm b.txt\nx\nEOF",
+            "cat > a.txt > b.txt <<'EOF'\nx\nEOF",
+            "cat 2> a.txt <<'EOF'\nx\nEOF",
+            "tee a.txt <<'EOF'\nx\nEOF",
+            "cat > /dev/null <<'EOF'\nx\nEOF",
+            "cat > ../a.txt <<'EOF'\nx\nEOF",
+            "cat > a.txt <<'E F'\nx\nE F",
+            "cat > a.txt <<'EOF'x\nx\nEOFx",
+            "cat > a.txt <<'EOF'\nx",
+            "cat > a.txt",
+        ] {
+            assert_eq!(heredoc_write(command), None, "{command}");
+        }
     }
 
     #[test]

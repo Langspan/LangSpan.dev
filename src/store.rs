@@ -6,13 +6,18 @@
 
 use langspan_core::{
     ClockAnchor, Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event,
-    LeaseStatus, Outcome, RecordedEvent, SentPublication, State, StatusRecord, TODAY_EVENTS,
-    TodayQuery, TodayWindow, apply, dashboard_denials, decide, expiry_events, shrink_status,
-    status_records,
+    HISTORY_EVENTS, HistoryQuery, LeaseStatus, Outcome, RecordedEvent, SentPublication, State,
+    StatusRecord, TODAY_EVENTS, TodayQuery, TodayWindow, apply, dashboard_denials, decide,
+    definition_history, expiry_events, shrink_status, status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::path::Path;
 use std::time::Duration;
+
+/// The scan failure recorded when a workspace's root or Git directory now
+/// names another checkout. Admission reads it back from the state.
+pub const IDENTITY_CHANGED: &str =
+    "Git identity changed since the previous scan; register the replacement as a new workspace";
 
 /// The wall clock in Unix milliseconds; 0 if it reads before the epoch.
 pub fn wall_now_ms() -> u64 {
@@ -55,6 +60,151 @@ const ANCHOR_LOOKUP: &str = concat!(
     " ORDER BY seq DESC LIMIT 1"
 );
 
+/// A `write_refused` row, and the index the monthly count reads them by.
+macro_rules! refusal_row {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         = 'write_refused'"
+    };
+}
+
+/// A `lease_granted` row and its session: the index a count's retry lookup
+/// reads, so finding a session's next admission does not scan the log.
+macro_rules! grant_row {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         = 'lease_granted'"
+    };
+}
+macro_rules! grant_session {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.lease.session_id') END"
+    };
+}
+
+/// Partial indexes of refusals and of admissions by session (roadmap H5).
+const COUNT_INDEXES: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_write_refused ON events(seq) WHERE ",
+    refusal_row!(),
+    ";\nCREATE INDEX IF NOT EXISTS events_grant_session ON events(",
+    grant_session!(),
+    ", seq) WHERE ",
+    grant_row!(),
+    ";"
+);
+
+/// The newest `write_refused` rows, newest first.
+const REFUSAL_ROWS: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE ",
+    refusal_row!(),
+    " ORDER BY seq DESC LIMIT ?1"
+);
+
+/// Whether a `write_refused` row precedes a sequence number.
+const REFUSAL_EARLIER: &str = concat!(
+    "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1 AND ",
+    refusal_row!(),
+    ")"
+);
+
+/// The kinds of event a definition's history reads (roadmap D4). One owner
+/// for the partial index over them and the lookups that must match it.
+macro_rules! history_kinds {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END
+         IN ('interface_changed', 'session_prompted', 'remembered', 'forgotten', 'message_sent')"
+    };
+}
+
+/// A partial index of those events, so a history reads them and not the
+/// rest of the log.
+const HISTORY_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_history ON events(seq) WHERE ",
+    history_kinds!()
+);
+
+/// The newest of those events before a sequence number.
+const HISTORY_BEFORE: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE seq < ?1 AND ",
+    history_kinds!(),
+    " ORDER BY seq DESC LIMIT ?2"
+);
+
+/// Notes, forgettings and messages from a sequence number on, oldest first:
+/// those that follow a page's changes.
+const HISTORY_FOLLOWING: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE seq >= ?1 AND ",
+    history_kinds!(),
+    " AND json_extract(event_json, '$.type') IN ('remembered', 'forgotten', 'message_sent')
+     ORDER BY seq LIMIT ?2"
+);
+
+/// The forgettings, one row per forgotten note.
+macro_rules! forgotten_kind {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END = 'forgotten'"
+    };
+}
+
+/// A partial index of the forgettings by note, so a history finds whether a
+/// note it would show was forgotten however far after it that happened.
+const FORGOTTEN_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_forgotten ON events(json_extract(event_json, '$.note_id')) WHERE ",
+    forgotten_kind!()
+);
+
+/// The forgettings of one note.
+const FORGETTING_LOOKUP: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE ",
+    forgotten_kind!(),
+    " AND json_extract(event_json, '$.note_id') = ?1"
+);
+
+/// The withdrawals, one row per withdrawn message.
+macro_rules! retracted_kind {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') END = 'message_retracted'"
+    };
+}
+
+/// A partial index of the withdrawals by message, so a history finds
+/// whether a message it would show was withdrawn however far after it that
+/// happened.
+const RETRACTED_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_retracted ON events(json_extract(event_json, '$.message_id')) WHERE ",
+    retracted_kind!()
+);
+
+/// The withdrawals of one message.
+const RETRACTION_LOOKUP: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE ",
+    retracted_kind!(),
+    " AND json_extract(event_json, '$.message_id') = ?1"
+);
+
+/// Every generation's clock anchor.
+const ANCHORS: &str = concat!(
+    "SELECT event_json FROM events WHERE ",
+    generation_marker!(),
+    " ORDER BY seq"
+);
+
+/// A session's admissions after a sequence number, oldest first.
+const GRANTS_AFTER: &str = concat!(
+    "SELECT event_json FROM events WHERE ",
+    grant_session!(),
+    " = ?1 AND seq > ?2 AND ",
+    grant_row!(),
+    " ORDER BY seq LIMIT ?3"
+);
+
+/// A session's admissions a retry is looked for in, after a refusal: it
+/// may run other edits of the same reply first.
+pub const RETRY_LOOKAHEAD: u32 = 16;
+/// A history's answer stops before this many bytes: the MCP result carries
+/// it twice, once escaped again as text, inside one 64 KiB frame.
+pub const HISTORY_BUDGET_BYTES: usize = 28 * 1024;
+
 /// Bytes a status part adds around its text: the record's fields with the
 /// largest offset, and the separator.
 const PART_OVERHEAD_BYTES: usize = 96;
@@ -89,6 +239,31 @@ fn part_end(text: &str, start: usize, room: usize) -> usize {
     end
 }
 
+/// A `workspace list` page within `PAGE_BUDGET_BYTES`: the core bounds it
+/// by count, and a root can be 4 KiB, so it may end sooner here, with the
+/// cursor moved back to its last workspace. It always keeps one, which a
+/// root's bound lets fit.
+fn workspace_page(
+    mut workspaces: Vec<langspan_core::WorkspaceSummary>,
+    mut next: Option<String>,
+) -> Outcome {
+    let mut bytes = 0usize;
+    let keep = workspaces
+        .iter()
+        .take_while(|workspace| {
+            let size = serde_json::to_vec(workspace).map_or(usize::MAX, |json| json.len() + 1);
+            let first = bytes == 0;
+            bytes = bytes.saturating_add(size);
+            first || bytes <= PAGE_BUDGET_BYTES
+        })
+        .count();
+    if keep < workspaces.len() {
+        workspaces.truncate(keep);
+        next = workspaces.last().map(|last| last.workspace_id.clone());
+    }
+    Outcome::Workspaces { workspaces, next }
+}
+
 /// Identifies one record's JSON across pages, so that a page resumes inside
 /// a record only if the record has not changed. Not a security control: a
 /// mismatch (or a different build) starts the record again from its start.
@@ -98,6 +273,11 @@ fn digest(text: &str) -> u64 {
     text.hash(&mut hasher);
     hasher.finish()
 }
+
+mod retention;
+
+/// The SQLite schema marker this build writes.
+const SCHEMA_VERSION: i64 = 4;
 
 pub type StoreResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -112,6 +292,16 @@ pub struct Execution {
 pub struct Store {
     connection: Connection,
     state: State,
+    /// The newest snapshot's sequence: events at or below it are not
+    /// replayed at start. Zero when there is none.
+    snapshot_seq: u64,
+    /// Wall-clock Unix milliseconds, stamped on every event and receipt so
+    /// that retention can tell their age. Not the daemon's monotonic clock,
+    /// which starts again at every boot.
+    wall_ms: Box<dyn Fn() -> u64 + Send>,
+    /// A test-only pause inside the compaction transaction, before it
+    /// commits, so that a test can kill the daemon there.
+    compaction_pause: Option<Duration>,
     tap: Option<Tap>,
 }
 
@@ -147,13 +337,22 @@ fn shown_event(mut event: Event, stored: String) -> StoreResult<(Event, String)>
 
 impl Store {
     pub fn open(path: &Path) -> StoreResult<Self> {
+        Self::open_with_wall_clock(path, Box::new(wall_now_ms))
+    }
+
+    /// Open with the wall clock that stamps records' ages for retention.
+    pub fn open_with_wall_clock(
+        path: &Path,
+        wall_ms: Box<dyn Fn() -> u64 + Send>,
+    ) -> StoreResult<Self> {
         let mut connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_millis(250))?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !(0..=3).contains(&version) {
-            return Err(
-                format!("unsupported SQLite schema version {version}; expected at most 3").into(),
-            );
+        if !(0..=SCHEMA_VERSION).contains(&version) {
+            return Err(format!(
+                "unsupported SQLite schema version {version}; expected at most {SCHEMA_VERSION}"
+            )
+            .into());
         }
         if version == 0 {
             let tables: i64 = connection.query_row(
@@ -222,8 +421,36 @@ impl Store {
         // when opened (one pass over the log), and a build without it
         // reads and writes the same rows.
         connection.execute_batch(GENERATION_MARKER_INDEX)?;
+        // The same for the monthly count (H5): two partial indexes.
+        connection.execute_batch(COUNT_INDEXES)?;
+        connection.execute_batch(HISTORY_INDEX)?;
+        connection.execute_batch(FORGOTTEN_INDEX)?;
+        connection.execute_batch(RETRACTED_INDEX)?;
 
-        let state = Self::recover(&connection)?;
+        if version < 4 {
+            // Version 4 adds retention: each record's wall-clock time and the
+            // snapshots compaction writes. Records from before it have no
+            // time of their own, so they count from this upgrade.
+            let now = i64::try_from(wall_ms()).unwrap_or(i64::MAX);
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "ALTER TABLE events ADD COLUMN recorded_at_ms INTEGER;
+                 ALTER TABLE receipts ADD COLUMN recorded_at_ms INTEGER;
+                 CREATE TABLE snapshots (
+                    seq INTEGER PRIMARY KEY NOT NULL,
+                    state_json TEXT NOT NULL,
+                    cutoff_ms INTEGER NOT NULL,
+                    created_at_ms INTEGER NOT NULL
+                 );",
+            )?;
+            transaction.execute("UPDATE events SET recorded_at_ms = ?1", [now])?;
+            transaction.execute("UPDATE receipts SET recorded_at_ms = ?1", [now])?;
+            transaction.execute_batch("PRAGMA user_version = 4;")?;
+            transaction.commit()?;
+        }
+
+        let (state, snapshot_seq) = Self::recover(&connection)?;
         let generation = state
             .generation
             .checked_add(1)
@@ -231,6 +458,9 @@ impl Store {
         let mut store = Self {
             connection,
             state,
+            snapshot_seq,
+            wall_ms,
+            compaction_pause: None,
             tap: None,
         };
         // The generation's clock against the wall clock, so times can be
@@ -291,7 +521,12 @@ impl Store {
             .workspaces
             .get(workspace_id)
             .ok_or("cannot store a scan for an unregistered workspace")?;
-        if workspace.root != snapshot.root {
+        if workspace.root != snapshot.root
+            && !crate::observer::same_root(
+                std::path::Path::new(&workspace.root),
+                std::path::Path::new(&snapshot.root),
+            )
+        {
             return Err("scan root differs from the registered physical workspace".into());
         }
         let limits = crate::observer::Limits::default();
@@ -332,23 +567,54 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let previous: Option<crate::observer::Snapshot> = previous_json
+        let mut previous: Option<crate::observer::Snapshot> = previous_json
             .map(|json| serde_json::from_str(&json))
             .transpose()?;
-        if previous
-            .as_ref()
-            .is_some_and(|old| old.root != snapshot.root || old.common_dir != snapshot.common_dir)
-        {
-            return Err("Git identity changed since the previous scan; register the replacement as a new workspace".into());
+        if previous.as_ref().is_some_and(|old| {
+            if old.root == snapshot.root && old.common_dir == snapshot.common_dir {
+                return false;
+            }
+            // Reached through a link left where the checkout used to be,
+            // both paths now name the same directories. A link to any other
+            // checkout would too, so the checkout reached must also hold the
+            // commit the previous scan saw. One bounded Git call, once per
+            // change of path: the next scan compares equal paths.
+            let same = |before: &str, now: &str| {
+                crate::observer::same_root(std::path::Path::new(before), std::path::Path::new(now))
+            };
+            !(same(&old.root, &snapshot.root)
+                && same(&old.common_dir, &snapshot.common_dir)
+                && old.head.as_deref().is_some_and(|head| {
+                    crate::observer::holds_commit(
+                        std::path::Path::new(&snapshot.root),
+                        head,
+                        std::time::Instant::now() + std::time::Duration::from_millis(500),
+                    )
+                    .unwrap_or(false)
+                }))
+        }) {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        // Accepted as the same checkout: the previous scan stays the
+        // baseline under the paths it is reached by now, so a change made
+        // while it moved is still observed with its earlier version.
+        if let Some(old) = previous.as_mut() {
+            old.root.clone_from(&snapshot.root);
+            old.common_dir.clone_from(&snapshot.common_dir);
         }
         let changes = crate::observer::diff(&previous, snapshot);
-        let sequence: i64 =
-            self.connection
-                .query_row("SELECT coalesce(max(seq), 0) FROM events", [], |row| {
-                    row.get(0)
-                })?;
+        // The sequence counter, not the newest row: retention can remove
+        // every row, and a scan ID must not repeat.
+        let sequence: i64 = self.connection.query_row(
+            "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'events'), 0)",
+            [],
+            |row| row.get(0),
+        )?;
         let scan_id = format!("scan-{}-{sequence}", self.state.generation);
         let mut commands = Vec::new();
+        // Files whose content changed since a complete earlier scan, at their
+        // new versions: the core keeps those no session reported (issue #129).
+        let mut content_changes = Vec::new();
         // Several changed files back at their committed version at once,
         // with HEAD where it was: a reset, stash or checkout of files.
         let restored = changes
@@ -390,11 +656,20 @@ impl Store {
             } else {
                 None
             };
+            let after = observed_file_state(change.after.as_ref())?;
+            if before.as_ref().is_some_and(|before| *before != after)
+                && content_changes.len() < langspan_core::MAX_UNCOORDINATED_OBSERVED
+            {
+                content_changes.push(langspan_core::ObservedFile {
+                    path: change.path.clone(),
+                    state: after.clone(),
+                });
+            }
             commands.push(Command::ObserveDisk {
                 workspace_id: workspace_id.into(),
                 path: change.path,
                 before,
-                after: observed_file_state(change.after.as_ref())?,
+                after,
                 related_operation_ids: Vec::new(),
             });
         }
@@ -419,6 +694,7 @@ impl Store {
             }
         }
         let facts = commands.len();
+        let mut checkout_changed = false;
         // The checkout changed under the sessions in it: another branch, a
         // HEAD that moved with files no session put there, or a bulk
         // restore. A commit moves HEAD without changing any file, or with
@@ -439,7 +715,16 @@ impl Store {
                     to_head: snapshot.head.clone(),
                     files: file_changes,
                 });
+                checkout_changed = true;
             }
+        }
+        // Changed files no checkout change accounts for. Which of them no
+        // session reported, and whom to name, is the core's decision.
+        if !checkout_changed && !content_changes.is_empty() {
+            commands.push(Command::ObserveUncoordinated {
+                workspace_id: workspace_id.into(),
+                files: content_changes,
+            });
         }
         // Worktrees of one repository share a Git common directory. Only its
         // digest is recorded; it groups workspaces without merging them.
@@ -509,6 +794,8 @@ impl Store {
                 | Command::Changes { .. }
                 | Command::RemoteOutbox { .. }
                 | Command::RemoteSent { .. }
+                | Command::ShowMessage { .. }
+                | Command::MessageStatus { .. }
                 | Command::CheckStatus { .. }
                 | Command::FlakyTests { .. }
                 | Command::LandingReadiness { .. }
@@ -516,8 +803,13 @@ impl Store {
                 | Command::Recap { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
+                | Command::Count { .. }
+                | Command::History { .. }
                 | Command::StatusLine { .. }
                 | Command::Dashboard
+                | Command::Compact { .. }
+                | Command::WorkspaceList { .. }
+                | Command::WorkspaceRemove { apply: false, .. }
         ) {
             return Ok(None);
         }
@@ -619,9 +911,12 @@ impl Store {
             | Command::LandingReadiness { .. }
             | Command::TurnQueue { .. }
             | Command::StatusLine { .. }
+            | Command::WorkspaceList { .. }
+            | Command::WorkspaceRemove { apply: false, .. }
             | Command::Recap { .. }
             | Command::Recall { .. } => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
+                    Outcome::Workspaces { workspaces, next } => workspace_page(workspaces, next),
                     // A recap or a recall must fit one frame with room for
                     // the envelope.
                     Outcome::Recap { mut recap } => {
@@ -650,14 +945,39 @@ impl Store {
                 outcome
             }
             Command::Events { after, limit } => self.events(*after, *limit)?,
+            Command::Compact { keep_days, apply } => self.compact(*keep_days, *apply)?,
             Command::Today {
                 workspace_id,
                 from_ms,
             } => self.today(workspace_id.as_deref(), *from_ms, wall_now_ms(), now_ms)?,
+            Command::Count { days } => self.count(days)?,
+            Command::History {
+                workspace_id,
+                name,
+                path,
+                limit,
+                before_seq,
+            } => self.history(
+                (workspace_id, name, path.as_deref()),
+                *limit,
+                *before_seq,
+                now_ms,
+            )?,
             Command::RemoteSent {
                 workspace_id,
                 limit,
             } => self.sent(workspace_id, *limit)?,
+            Command::ShowMessage {
+                workspace_id,
+                message_id,
+            } => self.show_message(workspace_id, message_id)?,
+            Command::MessageStatus {
+                workspace_id,
+                from,
+                message_id,
+            } => {
+                self.message_status(workspace_id, from.as_deref(), message_id.as_deref(), now_ms)?
+            }
             Command::Changes {
                 workspace_id,
                 after,
@@ -805,10 +1125,11 @@ impl Store {
 
     /// One page of state records from `after`, within `budget` bytes
     /// (`PAGE_BUDGET_BYTES` unless the reader asked for less, never under
-    /// `MIN_PAGE_BYTES`). A record that fits a page is never split; one that
-    /// does not (an entry at its limits can be larger than a frame) is given
-    /// as parts of its JSON, so that every valid state can be read. A page
-    /// holds at least one record or part when any remain.
+    /// `MIN_PAGE_BYTES`; `workspace_page` bounds a `workspace list` page by
+    /// `PAGE_BUDGET_BYTES`). A record that fits a page is never split; one
+    /// that does not (an entry at its limits can be larger than a frame) is
+    /// given as parts of its JSON, so that every valid state can be read. A
+    /// page holds at least one record or part when any remain.
     fn status_records(&self, after: Option<&str>, budget: usize) -> Outcome {
         let (mut resume, records) = match status_records(&self.state, after) {
             Ok(read) => read,
@@ -958,11 +1279,14 @@ impl Store {
         events.reverse();
         let first = events.first().map_or(0, |recorded| recorded.seq);
         let first = i64::try_from(first)?;
+        // Older events exist when the log holds some before the first one
+        // read, or when retention removed some: those are gone, and the core
+        // marks the summary truncated if the window reaches before what is left.
         let earlier: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1)",
             [first],
             |row| row.get(0),
-        )?;
+        )? || retention::since_ms(&self.connection)?.is_some();
         // The generation the first event read belongs to, if it was anchored.
         let before: Option<String> = self
             .connection
@@ -993,6 +1317,204 @@ impl Store {
             serde_json::to_vec(today).is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
         });
         Ok(Outcome::Today { today })
+    }
+
+    /// The refusal count (H5): the newest `COUNT_REFUSALS` refusals at
+    /// most, placed by their generation's anchor and counted by the core.
+    /// Reads only; it writes nothing.
+    pub fn count(&self, days: &[u64]) -> StoreResult<Outcome> {
+        if let Err(message) = langspan_core::validate_count_days(days) {
+            return Ok(Outcome::Error {
+                code: "invalid_window".into(),
+                message,
+            });
+        }
+        let mut statement = self.connection.prepare(REFUSAL_ROWS)?;
+        let mut rows = statement.query([i64::try_from(langspan_core::COUNT_REFUSALS)?])?;
+        let mut refusals = Vec::new();
+        while let Some(row) = rows.next()? {
+            let seq: i64 = row.get(0)?;
+            let json: String = row.get(1)?;
+            refusals.push(RecordedEvent {
+                seq: u64::try_from(seq)?,
+                event: serde_json::from_str(&json)?,
+            });
+        }
+        refusals.reverse();
+        let earlier: bool = match refusals.first() {
+            Some(first) => {
+                self.connection
+                    .query_row(REFUSAL_EARLIER, [i64::try_from(first.seq)?], |row| {
+                        row.get(0)
+                    })?
+            }
+            None => false,
+        };
+        let mut anchors = Vec::new();
+        let mut statement = self.connection.prepare_cached(ANCHORS)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            if let Event::ClockAnchored { anchor } = serde_json::from_str(&json)? {
+                anchors.push(anchor);
+            }
+        }
+        let mut grants = self.connection.prepare(GRANTS_AFTER)?;
+        let count = langspan_core::count_refusals(
+            &langspan_core::CountQuery {
+                days,
+                refusals: &refusals,
+                anchors: &anchors,
+                earlier,
+                retained_since_ms: retention::since_ms(&self.connection)?,
+            },
+            |session, workspace, after, paths| -> StoreResult<bool> {
+                let mut rows =
+                    grants.query(params![session, i64::try_from(after)?, RETRY_LOOKAHEAD])?;
+                while let Some(row) = rows.next()? {
+                    let json: String = row.get(0)?;
+                    if let Event::LeaseGranted { lease } = serde_json::from_str(&json)? {
+                        let mut granted: Vec<&String> = lease.paths.iter().collect();
+                        granted.sort();
+                        granted.dedup();
+                        // A refusal keeps the first `REFUSAL_PATHS` paths,
+                        // sorted: the grant's, cut the same way, must match.
+                        if lease.workspace_id == workspace
+                            && granted
+                                .iter()
+                                .take(langspan_core::REFUSAL_PATHS)
+                                .copied()
+                                .eq(paths.iter())
+                        {
+                            return Ok(true);
+                        }
+                    }
+                }
+                Ok(false)
+            },
+        )?;
+        Ok(Outcome::Count { count })
+    }
+
+    /// A definition's history (roadmap D4): the newest `HISTORY_EVENTS`
+    /// events of the kinds it reads before `before_seq`, the notes and
+    /// messages after that point, and every generation's anchor, decided by
+    /// the core. Reads only, through the `events_history` index, the
+    /// forgettings of the notes read through `events_forgotten` and the
+    /// withdrawals of the messages read through `events_retracted`, by note
+    /// or message and not within a capped window; it writes nothing and
+    /// delivers nothing.
+    /// When the log holds older events than those read, the answer says
+    /// `truncated` with a `next_seq` that reads on from there.
+    pub fn history(
+        &self,
+        (workspace_id, name, path): (&str, &str, Option<&str>),
+        limit: u32,
+        before_seq: Option<u64>,
+        now_ms: u64,
+    ) -> StoreResult<Outcome> {
+        let rows_of = |mut rows: rusqlite::Rows<'_>| -> StoreResult<Vec<RecordedEvent>> {
+            let mut events = Vec::new();
+            while let Some(row) = rows.next()? {
+                let seq: i64 = row.get(0)?;
+                let json: String = row.get(1)?;
+                events.push(RecordedEvent {
+                    seq: u64::try_from(seq)?,
+                    event: serde_json::from_str(&json)?,
+                });
+            }
+            Ok(events)
+        };
+        let read = |sql: &str, from: i64, count: usize| -> StoreResult<Vec<RecordedEvent>> {
+            let mut statement = self.connection.prepare_cached(sql)?;
+            rows_of(statement.query(params![from, i64::try_from(count)?])?)
+        };
+        let before = before_seq.map_or(i64::MAX, |seq| i64::try_from(seq).unwrap_or(i64::MAX));
+        let mut events = read(HISTORY_BEFORE, before, HISTORY_EVENTS)?;
+        // The oldest event read, when the log may hold older ones.
+        let older = (events.len() == HISTORY_EVENTS)
+            .then(|| events.last().map(|recorded| recorded.seq))
+            .flatten();
+        if before_seq.is_some() {
+            events.extend(read(HISTORY_FOLLOWING, before, HISTORY_EVENTS)?);
+        }
+        // A note read here may have been forgotten after every event read:
+        // its forgetting is looked up by note, never within a capped window,
+        // so a forgotten note's text cannot come back.
+        let read_seqs: std::collections::BTreeSet<u64> =
+            events.iter().map(|recorded| recorded.seq).collect();
+        let notes: std::collections::BTreeSet<String> = events
+            .iter()
+            .filter_map(|recorded| match &recorded.event {
+                Event::Remembered { note, .. } if note.workspace_id == workspace_id => {
+                    Some(note.note_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut statement = self.connection.prepare_cached(FORGETTING_LOOKUP)?;
+        for note_id in &notes {
+            let forgettings = rows_of(statement.query([note_id])?)?;
+            events.extend(
+                forgettings
+                    .into_iter()
+                    .filter(|recorded| !read_seqs.contains(&recorded.seq)),
+            );
+        }
+        drop(statement);
+        // Likewise a message read here may have been withdrawn after every
+        // event read; withdrawals are not among the kinds read above, so
+        // each is looked up by message.
+        let messages: std::collections::BTreeSet<String> = events
+            .iter()
+            .filter_map(|recorded| match &recorded.event {
+                Event::MessageSent { message, .. } if message.workspace_id == workspace_id => {
+                    Some(message.message_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut statement = self.connection.prepare_cached(RETRACTION_LOOKUP)?;
+        for message_id in &messages {
+            events.extend(rows_of(statement.query([message_id])?)?);
+        }
+        drop(statement);
+        let mut anchors = Vec::new();
+        let mut statement = self.connection.prepare_cached(ANCHORS)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            if let Event::ClockAnchored { anchor } = serde_json::from_str(&json)? {
+                anchors.push(anchor);
+            }
+        }
+        let query = HistoryQuery {
+            workspace_id,
+            name,
+            path,
+            limit,
+            before_seq,
+            events: &events,
+            anchors: &anchors,
+            now_ms,
+        };
+        let mut history = match definition_history(&self.state, &query) {
+            Ok(history) => history,
+            Err(failure) => {
+                return Ok(Outcome::Error {
+                    code: failure.code,
+                    message: failure.message,
+                });
+            }
+        };
+        if let (Some(oldest), false) = (older, history.truncated) {
+            history.truncated = true;
+            history.next_seq = Some(oldest);
+        }
+        history.shrink_until(|history| {
+            serde_json::to_vec(history).is_ok_and(|bytes| bytes.len() <= HISTORY_BUDGET_BYTES)
+        });
+        Ok(Outcome::History { history })
     }
 
     /// The outbound audit: what left for a workspace, newest first, read
@@ -1050,7 +1572,250 @@ impl Store {
             bytes += size;
             sent.push(record);
         }
-        Ok(Outcome::RemoteSent { sent, more })
+        Ok(Outcome::RemoteSent {
+            sent,
+            more,
+            since_ms: retention::since_ms(&self.connection)?,
+        })
+    }
+
+    /// One message as it was sent, read from its `message_sent` event, so
+    /// it is there after every recipient has acknowledged it and the
+    /// projection has dropped it, and marked retracted when a later
+    /// `message_retracted` event withdrew it. Read-only and never recorded. Messages
+    /// are rare, so the scan reads few rows past the cheap prefix test; a
+    /// sent message is at most 400 bytes of text and 8 paths, so the answer
+    /// fits a frame.
+    fn show_message(&self, workspace_id: &str, message_id: &str) -> StoreResult<Outcome> {
+        if !self.state.workspaces.contains_key(workspace_id) {
+            return Ok(Outcome::Error {
+                code: "unknown_workspace".into(),
+                message: format!(
+                    "no workspace {workspace_id:?} is registered; `langspan status` lists them"
+                ),
+            });
+        }
+        if let Err(error) = langspan_core::validate_request_id(message_id) {
+            return Ok(Outcome::Error {
+                code: error.code,
+                message: error.message,
+            });
+        }
+        let stored = self.sent_event(workspace_id, message_id)?;
+        let Some((sent_seq, stored)) = stored else {
+            // Retention deletes the oldest events. Once any were deleted, an
+            // ID not found may be a message whose event went with them, and
+            // the log cannot tell that from one never sent: say so plainly.
+            if let Some(first_kept) = self.first_kept_event()? {
+                return Ok(Outcome::Error {
+                    code: "message_not_kept".into(),
+                    message: format!(
+                        "message {message_id:?} is not in the event log of workspace {workspace_id:?}, which keeps events from sequence {first_kept} on; if it was sent before then, its full text is no longer kept. `langspan recap {workspace_id}` lists the messages still pending"
+                    ),
+                });
+            }
+            return Ok(Outcome::Error {
+                code: "unknown_message".into(),
+                message: format!(
+                    "no message {message_id:?} was sent in workspace {workspace_id:?}; `langspan recap {workspace_id}` lists the messages still pending"
+                ),
+            });
+        };
+        let Event::MessageSent { mut message, .. } = serde_json::from_str(&stored)? else {
+            return Err("a message_sent row holds another event".into());
+        };
+        message.retracted = self.retracted_after(sent_seq, workspace_id, message_id)?;
+        Ok(Outcome::MessageShown {
+            message: message.into(),
+        })
+    }
+
+    /// The newest `message_sent` event for the message: its sequence and
+    /// JSON. Messages are rare, so the scan reads few rows past the cheap
+    /// prefix test.
+    fn sent_event(
+        &self,
+        workspace_id: &str,
+        message_id: &str,
+    ) -> StoreResult<Option<(i64, String)>> {
+        Ok(self
+            .connection
+            .query_row(
+                r#"SELECT seq, event_json FROM events
+                 WHERE event_json LIKE '{"type":"message_sent",%'
+                   AND json_valid(event_json)
+                   AND json_extract(event_json, '$.type') = 'message_sent'
+                   AND json_extract(event_json, '$.message.workspace_id') = ?1
+                   AND json_extract(event_json, '$.message.message_id') = ?2
+                 ORDER BY seq DESC LIMIT 1"#,
+                params![workspace_id, message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// Whether a `message_retracted` event after sequence `after` withdrew
+    /// the message. A withdrawal is its own later event; the sent one never
+    /// changes.
+    fn retracted_after(
+        &self,
+        after: i64,
+        workspace_id: &str,
+        message_id: &str,
+    ) -> StoreResult<bool> {
+        Ok(self.connection.query_row(
+            r#"SELECT EXISTS (SELECT 1 FROM events
+                 WHERE seq > ?1
+                   AND event_json LIKE '{"type":"message_retracted",%'
+                   AND json_valid(event_json)
+                   AND json_extract(event_json, '$.type') = 'message_retracted'
+                   AND json_extract(event_json, '$.workspace_id') = ?2
+                   AND json_extract(event_json, '$.message_id') = ?3)"#,
+            params![after, workspace_id, message_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Who was given a sent message (roadmap E12): the core reads its held
+    /// and history records with the `message_sent`, `message_acknowledged`
+    /// and `message_retracted` events the log still keeps. Read-only and
+    /// never recorded. At most `ACK_ROWS` acknowledgements are read (a
+    /// session acknowledges a message once), so the work is bounded; past
+    /// that the answer is `partial`.
+    fn message_status(
+        &self,
+        workspace_id: &str,
+        from: Option<&str>,
+        message_id: Option<&str>,
+        now_ms: u64,
+    ) -> StoreResult<Outcome> {
+        const ACK_ROWS: i64 = 4096;
+        let message_id = match langspan_core::status_message_id(
+            &self.state,
+            workspace_id,
+            from,
+            message_id,
+        ) {
+            Ok(id) => id,
+            Err(error) if error.code == "workspace_not_found" => {
+                return Ok(Outcome::Error {
+                    code: "unknown_workspace".into(),
+                    message: format!(
+                        "no workspace {workspace_id:?} is registered; `langspan status` lists them"
+                    ),
+                });
+            }
+            Err(error) => {
+                return Ok(Outcome::Error {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
+        };
+        let (after, sent) = match self.sent_event(workspace_id, &message_id)? {
+            Some((seq, json)) => {
+                let Event::MessageSent {
+                    message,
+                    at_ms,
+                    generation,
+                } = serde_json::from_str(&json)?
+                else {
+                    return Err("a message_sent row holds another event".into());
+                };
+                (
+                    seq,
+                    Some(langspan_core::SentRecord {
+                        message,
+                        at_ms,
+                        generation,
+                    }),
+                )
+            }
+            None => (0, None),
+        };
+        let mut statement = self.connection.prepare(
+            r#"SELECT event_json FROM events
+             WHERE seq > ?1
+               AND event_json LIKE '{"type":"message_acknowledged",%'
+               AND json_valid(event_json)
+               AND json_extract(event_json, '$.type') = 'message_acknowledged'
+               AND json_extract(event_json, '$.workspace_id') = ?2
+               AND json_extract(event_json, '$.message_id') = ?3
+             ORDER BY seq LIMIT ?4"#,
+        )?;
+        let mut rows = statement.query(params![after, workspace_id, message_id, ACK_ROWS + 1])?;
+        let mut acks = Vec::new();
+        while let Some(row) = rows.next()? {
+            let json: String = row.get(0)?;
+            let Event::MessageAcknowledged {
+                session_id,
+                via,
+                at_ms,
+                generation,
+                ..
+            } = serde_json::from_str(&json)?
+            else {
+                return Err("a message_acknowledged row holds another event".into());
+            };
+            acks.push(langspan_core::AckRecord {
+                session_id,
+                via,
+                at_ms,
+                generation,
+            });
+        }
+        let cut = acks.len() as i64 > ACK_ROWS;
+        acks.truncate(ACK_ROWS as usize);
+        let retracted = self.retracted_after(after, workspace_id, &message_id)?;
+        match langspan_core::message_status(
+            &self.state,
+            workspace_id,
+            &message_id,
+            sent.as_ref(),
+            &acks,
+            retracted,
+            now_ms,
+        ) {
+            Some(mut status) => {
+                status.partial |= cut;
+                Ok(Outcome::MessageStatus { status })
+            }
+            None if self.first_kept_event()?.is_some() => Ok(Outcome::Error {
+                code: "message_not_kept".into(),
+                message: format!(
+                    "message {message_id:?} is neither held nor in the event log of workspace {workspace_id:?}; if it was sent before the log's oldest kept event, who received it is no longer kept"
+                ),
+            }),
+            None => Ok(Outcome::Error {
+                code: "unknown_message".into(),
+                message: format!(
+                    "no message {message_id:?} was sent in workspace {workspace_id:?}; `langspan recap {workspace_id}` lists the messages still pending"
+                ),
+            }),
+        }
+    }
+
+    /// `Some(N)` once events before sequence N have been deleted (by
+    /// retention): the first kept event is past 1, or every row is gone
+    /// while the sequence counter has advanced. `None` while the log is
+    /// whole.
+    fn first_kept_event(&self) -> StoreResult<Option<i64>> {
+        let first: Option<i64> =
+            self.connection
+                .query_row("SELECT MIN(seq) FROM events", [], |row| row.get(0))?;
+        let counter: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'events'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(match (first, counter) {
+            (Some(first), _) if first > 1 => Some(first),
+            (None, Some(last)) if last > 0 => Some(last + 1),
+            _ => None,
+        })
     }
 
     fn changes(&self, workspace_id: &str, after: u64, limit: u32) -> StoreResult<Outcome> {
@@ -1126,22 +1891,39 @@ impl Store {
         for event in events {
             apply(&mut next_state, event)?;
         }
+        let recorded_at = i64::try_from((self.wall_ms)()).unwrap_or(i64::MAX);
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for event in events {
             transaction.execute(
-                "INSERT INTO events(event_json) VALUES (?1)",
-                [serde_json::to_string(event)?],
+                "INSERT INTO events(event_json, recorded_at_ms) VALUES (?1, ?2)",
+                params![serde_json::to_string(event)?, recorded_at],
             )?;
+            // The last scan was of the old checkout: the next scan of the
+            // new root starts a fresh baseline, so files that differ between
+            // the two checkouts are not reported as changes.
+            if let Event::WorkspaceMoved {
+                workspace: langspan_core::Workspace { workspace_id, .. },
+                ..
+            }
+            | Event::WorkspaceRemoved { workspace_id } = event
+            {
+                transaction.execute(
+                    "DELETE FROM git_snapshots WHERE workspace_id = ?1",
+                    [workspace_id],
+                )?;
+            }
         }
         if let Some((request_id, command, outcome)) = receipt {
             transaction.execute(
-                "INSERT INTO receipts(request_id, command_json, outcome_json) VALUES (?1, ?2, ?3)",
+                "INSERT INTO receipts(request_id, command_json, outcome_json, recorded_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
                 params![
                     request_id,
                     serde_json::to_string(command)?,
                     serde_json::to_string(outcome)?,
+                    recorded_at,
                 ],
             )?;
         }
@@ -1168,25 +1950,11 @@ impl Store {
         Ok(())
     }
 
-    fn recover(connection: &Connection) -> StoreResult<State> {
-        let mut state = State::default();
-        let mut statement =
-            connection.prepare("SELECT seq, event_json FROM events ORDER BY seq")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let sequence: i64 = row.get(0)?;
-            if sequence <= 0 {
-                return Err("event history contains a non-positive sequence".into());
-            }
-            let json: String = row.get(1)?;
-            let mut event: Event = serde_json::from_str(&json).map_err(|error| {
-                format!("invalid persisted event at sequence {sequence}: {error}")
-            })?;
-            redact_event(&mut event);
-            apply(&mut state, &event).map_err(|error| {
-                format!("invalid persisted transition at sequence {sequence}: {error}")
-            })?;
-        }
+    /// The state the newest snapshot and the events after it give, and the
+    /// snapshot's sequence.
+    fn recover(connection: &Connection) -> StoreResult<(State, u64)> {
+        let (mut state, snapshot_seq) = retention::snapshot(connection)?;
+        retention::replay_after(connection, &mut state, snapshot_seq, |_, _| Ok(()))?;
 
         // Receipts only answer retries. One this build cannot read (written
         // by another version, or damaged) does not stop the store opening:
@@ -1215,7 +1983,7 @@ impl Store {
                 })
             );
         }
-        Ok(state)
+        Ok((state, snapshot_seq))
     }
 }
 
@@ -1271,6 +2039,42 @@ fn observed_branches(
 mod tests {
     use super::*;
 
+    /// `count` runs in the daemon's request handler too: reading refusals
+    /// and a session's later admissions must use their partial indexes, not
+    /// read the whole log.
+    #[test]
+    fn the_count_lookups_read_their_indexes() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-count-plan-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let plan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> Vec<String> {
+            store
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(params, |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let refusals = plan(REFUSAL_ROWS, &[&10i64]);
+        let earlier = plan(REFUSAL_EARLIER, &[&10i64]);
+        let grants = plan(GRANTS_AFTER, &[&"session", &1i64, &16i64]);
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        for (steps, index) in [
+            (&refusals, "events_write_refused"),
+            (&earlier, "events_write_refused"),
+            (&grants, "events_grant_session"),
+        ] {
+            assert!(steps.iter().any(|step| step.contains(index)), "{steps:?}");
+        }
+    }
+
     /// `today` runs in the daemon's request handler: finding the anchor must
     /// read the generation markers only, not every older event of a long
     /// generation.
@@ -1298,5 +2102,309 @@ mod tests {
                 .any(|step| step.contains("events_generation_marker")),
             "{plan:?}"
         );
+    }
+
+    /// A definition's history (roadmap D4) also runs in the request handler:
+    /// its reads go through the partial index of the five kinds it uses,
+    /// and the anchors through the generation markers.
+    #[test]
+    fn history_reads_only_the_events_it_uses() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-history-plan-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let plan = |sql: &str, arguments: &[i64]| -> Vec<String> {
+            store
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(rusqlite::params_from_iter(arguments), |row| {
+                    row.get::<_, String>(3)
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let plans = [
+            (plan(HISTORY_BEFORE, &[1_000_000, 10]), "events_history"),
+            (plan(HISTORY_FOLLOWING, &[1, 10]), "events_history"),
+            (plan(ANCHORS, &[]), "events_generation_marker"),
+        ];
+        let forgetting: Vec<String> = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {FORGETTING_LOOKUP}"))
+            .unwrap()
+            .query_map(["note-1"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let retraction: Vec<String> = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {RETRACTION_LOOKUP}"))
+            .unwrap()
+            .query_map(["message-1"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let plans = plans.into_iter().chain([
+            (forgetting, "events_forgotten"),
+            (retraction, "events_retracted"),
+        ]);
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        for (steps, index) in plans {
+            assert!(
+                steps.iter().any(|step| step.contains(index)),
+                "{index}: {steps:?}"
+            );
+        }
+    }
+
+    /// A forgotten note's text never comes back in a history, even when
+    /// paging into old changes puts its forgetting behind more following
+    /// events than one answer reads.
+    #[test]
+    fn paging_into_old_history_never_shows_a_forgotten_note() {
+        use langspan_core::{InterfaceChange, InterfaceNotice, Message, Note, Recipient, Stamp};
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-history-forgotten-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let register = Command::WorkspaceRegister {
+            workspace_id: "work".into(),
+            root: directory.to_string_lossy().into_owned(),
+        };
+        store.execute("w", &register, &register, 0).unwrap();
+        let at = Stamp {
+            at_ms: 1_000,
+            generation: store.state.generation,
+        };
+        let text = "the retry loop deadlocks under load";
+        let kept = "retries are capped at three";
+        let remembered = |note_id: &str, text: &str| Event::Remembered {
+            note: Note {
+                note_id: note_id.into(),
+                workspace_id: "work".into(),
+                author: None,
+                text: text.into(),
+                paths: vec!["src/save.rs".into()],
+            },
+            at: Some(at),
+        };
+        store
+            .commit(
+                &[
+                    remembered("note-1", text),
+                    remembered("note-2", kept),
+                    Event::InterfaceChanged {
+                        notice: InterfaceNotice {
+                            notice_id: "n-1".into(),
+                            workspace_id: "work".into(),
+                            path: "src/save.rs".into(),
+                            changes: vec![InterfaceChange {
+                                name: "save".into(),
+                                kind: "function".into(),
+                                change: "signature_changed".into(),
+                                before: Some("fn save()".into()),
+                                after: Some("fn save(retries: u32)".into()),
+                                before_arity: None,
+                                after_arity: None,
+                                before_count: None,
+                                after_count: None,
+                                after_name: None,
+                            }],
+                            dependents: Vec::new(),
+                            by_session: None,
+                            at_ms: at.at_ms,
+                            generation: at.generation,
+                        },
+                    },
+                ],
+                None,
+            )
+            .unwrap();
+        let changed: i64 = store
+            .connection
+            .query_row("SELECT max(seq) FROM events", [], |row| row.get(0))
+            .unwrap();
+        // More following messages than one answer reads, then the forget.
+        let messages: Vec<Event> = (0..HISTORY_EVENTS)
+            .map(|index| Event::MessageSent {
+                message: Message {
+                    message_id: format!("m-{index}"),
+                    workspace_id: "work".into(),
+                    from: None,
+                    to: Recipient::Everyone {},
+                    text: "unrelated".into(),
+                    paths: Vec::new(),
+                    acknowledged: Vec::new(),
+                    retracted: false,
+                },
+                at_ms: Some(at.at_ms),
+                generation: Some(at.generation),
+            })
+            .collect();
+        store.commit(&messages, None).unwrap();
+        store
+            .commit(
+                &[Event::Forgotten {
+                    workspace_id: "work".into(),
+                    note_id: "note-1".into(),
+                }],
+                None,
+            )
+            .unwrap();
+
+        let before = u64::try_from(changed).unwrap() + 1;
+        let outcome = store
+            .history(("work", "save", None), 10, Some(before), at.at_ms)
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        let Outcome::History { history } = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(history.entries.len(), 1, "{history:?}");
+        // The note never forgotten still shows; the forgotten one does not.
+        let notes: Vec<&str> = history.entries[0]
+            .notes
+            .iter()
+            .map(|note| note.note_id.as_str())
+            .collect();
+        assert_eq!(notes, ["note-2"], "{history:?}");
+        assert!(
+            !serde_json::to_string(&history).unwrap().contains(text),
+            "{history:?}"
+        );
+    }
+
+    /// A withdrawn message's text never comes back in a history, whether
+    /// its withdrawal is within the events one answer reads or behind more
+    /// following events than that.
+    #[test]
+    fn history_never_shows_a_withdrawn_message() {
+        use langspan_core::{InterfaceChange, InterfaceNotice, Message, Recipient, Stamp};
+        for filler in [0, HISTORY_EVENTS] {
+            let directory = std::env::temp_dir().join(format!(
+                "langspan-history-retracted-{}-{}-{filler}",
+                std::process::id(),
+                wall_now_ms()
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+            let register = Command::WorkspaceRegister {
+                workspace_id: "work".into(),
+                root: directory.to_string_lossy().into_owned(),
+            };
+            store.execute("w", &register, &register, 0).unwrap();
+            let at = Stamp {
+                at_ms: 1_000,
+                generation: store.state.generation,
+            };
+            let withdrawn = "save now takes the retry count";
+            let kept = "callers of save pass three";
+            let sent = |message_id: &str, text: &str, paths: Vec<String>| Event::MessageSent {
+                message: Message {
+                    message_id: message_id.into(),
+                    workspace_id: "work".into(),
+                    from: None,
+                    to: Recipient::Everyone {},
+                    text: text.into(),
+                    paths,
+                    acknowledged: Vec::new(),
+                    retracted: false,
+                },
+                at_ms: Some(at.at_ms),
+                generation: Some(at.generation),
+            };
+            store
+                .commit(
+                    &[
+                        sent("m-withdrawn", withdrawn, vec!["src/save.rs".into()]),
+                        sent("m-kept", kept, vec!["src/save.rs".into()]),
+                        Event::InterfaceChanged {
+                            notice: InterfaceNotice {
+                                notice_id: "n-1".into(),
+                                workspace_id: "work".into(),
+                                path: "src/save.rs".into(),
+                                changes: vec![InterfaceChange {
+                                    name: "save".into(),
+                                    kind: "function".into(),
+                                    change: "signature_changed".into(),
+                                    before: Some("fn save()".into()),
+                                    after: Some("fn save(retries: u32)".into()),
+                                    before_arity: None,
+                                    after_arity: None,
+                                    before_count: None,
+                                    after_count: None,
+                                    after_name: None,
+                                }],
+                                dependents: Vec::new(),
+                                by_session: None,
+                                at_ms: at.at_ms,
+                                generation: at.generation,
+                            },
+                        },
+                    ],
+                    None,
+                )
+                .unwrap();
+            let changed: i64 = store
+                .connection
+                .query_row("SELECT max(seq) FROM events", [], |row| row.get(0))
+                .unwrap();
+            let unrelated: Vec<Event> = (0..filler)
+                .map(|index| sent(&format!("m-{index}"), "unrelated", Vec::new()))
+                .collect();
+            if !unrelated.is_empty() {
+                store.commit(&unrelated, None).unwrap();
+            }
+            store
+                .commit(
+                    &[Event::MessageRetracted {
+                        workspace_id: "work".into(),
+                        message_id: "m-withdrawn".into(),
+                        by: None,
+                    }],
+                    None,
+                )
+                .unwrap();
+
+            let before = u64::try_from(changed).unwrap() + 1;
+            let paged = store
+                .history(("work", "save", None), 10, Some(before), at.at_ms)
+                .unwrap();
+            // Unpaged, the change is within the events read only without
+            // the filler.
+            let newest = (filler == 0).then(|| {
+                store
+                    .history(("work", "save", None), 10, None, at.at_ms)
+                    .unwrap()
+            });
+            drop(store);
+            std::fs::remove_dir_all(&directory).unwrap();
+            for outcome in std::iter::once(paged).chain(newest) {
+                let Outcome::History { history } = outcome else {
+                    panic!("{outcome:?}");
+                };
+                assert_eq!(history.entries.len(), 1, "{filler}: {history:?}");
+                let messages: Vec<&str> = history.entries[0]
+                    .messages
+                    .iter()
+                    .map(|message| message.message_id.as_str())
+                    .collect();
+                assert_eq!(messages, ["m-kept"], "{filler}: {history:?}");
+                assert!(
+                    !serde_json::to_string(&history).unwrap().contains(withdrawn),
+                    "{filler}: {history:?}"
+                );
+            }
+        }
     }
 }

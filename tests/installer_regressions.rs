@@ -9,6 +9,7 @@ fn registration(executable: &str, root: &str) -> Registration {
         root: root.into(),
         share_prompt: true,
         code_briefing: true,
+        presence: install::Presence::default(),
     }
 }
 
@@ -430,6 +431,7 @@ mod filesystem {
             (install::Vendor::Codex, "codex"),
         ] {
             let output = std::process::Command::new("/bin/sh")
+                .env("LANGSPAN_AUTOSTART", "off")
                 .args(["-c", &registration.command_for(vendor)])
                 .output()
                 .unwrap();
@@ -524,6 +526,65 @@ fn the_code_briefing_opt_out_alone_or_with_the_prompt_opt_out_is_recognised_and_
         "--code-briefing off --code-briefing off",
         "--code-briefing on",
         "--code-briefing",
+    ] {
+        let hook = json!({"type":"command","command": format!(
+            "'/bin/langspan' hook codex --state-dir '/state' --workspace 'demo' --root '/root' {tail} # langspan-managed:codex:v1")});
+        assert!(
+            !install::is_managed_for(install::Vendor::Codex, &hook),
+            "{tail}"
+        );
+    }
+}
+
+#[test]
+fn the_presence_options_are_installed_recognised_replaced_and_removed() {
+    let mut unseen = registration("/bin/langspan", "/root");
+    unseen.code_briefing = false;
+    unseen.presence = install::Presence {
+        shown: false,
+        minutes: Some(5),
+    };
+    for vendor in [
+        install::Vendor::ClaudeCode,
+        install::Vendor::Codex,
+        install::Vendor::Cursor,
+        install::Vendor::Gemini,
+    ] {
+        let installed = install::plan_for(vendor, None, Some(&unseen)).unwrap();
+        let text = installed.to_string();
+        assert!(
+            text.contains("--code-briefing off --presence off --presence-minutes 5"),
+            "{vendor:?}: {text}"
+        );
+        let hooks =
+            install::managed_hooks(&installed, |hook| install::is_managed_for(vendor, hook));
+        assert!(!hooks.is_empty(), "{vendor:?}: {text}");
+        // Reinstalling with the defaults replaces each entry.
+        let default = install::plan_for(
+            vendor,
+            Some(installed.clone()),
+            Some(&registration("/bin/langspan", "/root")),
+        )
+        .unwrap();
+        assert!(!default.to_string().contains("--presence"), "{vendor:?}");
+        assert_eq!(
+            install::managed_hooks(&default, |hook| install::is_managed_for(vendor, hook)).len(),
+            hooks.len(),
+            "{vendor:?}"
+        );
+        let removed = install::plan_for(vendor, Some(installed), None).unwrap();
+        assert!(
+            install::managed_hooks(&removed, |hook| install::is_managed_for(vendor, hook))
+                .is_empty()
+        );
+    }
+    for tail in [
+        "--presence-minutes 5 --presence off",
+        "--presence on",
+        "--presence-minutes 10",
+        "--presence-minutes 0",
+        "--presence-minutes five",
+        "--presence off --code-briefing off",
     ] {
         let hook = json!({"type":"command","command": format!(
             "'/bin/langspan' hook codex --state-dir '/state' --workspace 'demo' --root '/root' {tail} # langspan-managed:codex:v1")});

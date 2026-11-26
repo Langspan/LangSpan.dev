@@ -159,6 +159,9 @@ fn notices(state: &mut State, session: &str, now: u64) -> Vec<CheckoutNotice> {
             max_peers: 4,
             deliver: false,
             mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
         },
         now,
     ) {

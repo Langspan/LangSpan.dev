@@ -100,6 +100,7 @@ impl Fixture {
         fs::write(&config, config_json.to_string()).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let daemon = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["daemon", "--state-dir"])
             .arg(&state)
             .stdout(Stdio::null())
@@ -174,6 +175,7 @@ impl Fixture {
     fn cli(&self, args: &[&str]) -> (i32, String, String) {
         // Before the arguments: everything after `--` is the check's command.
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .arg("--state-dir")
             .arg(self.state_dir())
             .args(args)
@@ -208,6 +210,7 @@ impl Fixture {
     fn run(&self, vendor: &str, event: Value) -> Run {
         let started = Instant::now();
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", vendor, "--state-dir"])
             .arg(self.state_dir())
             .args(["--workspace", "work", "--root"])
@@ -485,6 +488,60 @@ fn the_hook_never_waits_for_the_check_and_turning_it_off_stops_one_running() {
     // Long enough for the worker to hear that the run ended.
     std::thread::sleep(Duration::from_millis(1500));
     assert!(f.checks().is_empty(), "a cancelled run records nothing");
+}
+
+/// A clone of the fixture's checkout, for `workspace move --switch`.
+fn switch_to_a_clone(f: &Fixture) {
+    let clone = f.base.join("clone");
+    git(
+        &f.base,
+        &[
+            "clone",
+            "--quiet",
+            f.root().to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    let (code, stdout, stderr) = f.cli(&[
+        "workspace",
+        "move",
+        "work",
+        clone.to_str().unwrap(),
+        "--switch",
+        "--request-id",
+        "switch-1",
+    ]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+}
+
+#[test]
+fn switching_the_workspace_stops_a_check_running_in_the_old_checkout() {
+    let f = Fixture::new(100);
+    let pidfile = f.base.join("check.pid");
+    f.enable(
+        600,
+        &format!(r#"echo $$ > {}; exec sleep 30"#, pidfile.display()),
+    );
+    f.write_batch("call-1", "one\n");
+    let pid = f.pid("check.pid");
+    switch_to_a_clone(&f);
+    assert!(stops(pid), "the old checkout's run is stopped");
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(f.checks().is_empty(), "nothing reported about the new root");
+    // The setting itself stays for writes in the new checkout.
+    assert!(f.state().auto_checks.contains_key("work"));
+}
+
+#[test]
+fn switching_the_workspace_forgets_a_check_waiting_to_run_in_the_old_checkout() {
+    // Long enough for the switch to land inside the debounce.
+    let f = Fixture::new(3000);
+    f.enable(60, FAILING);
+    f.write_batch("call-1", "one\n");
+    switch_to_a_clone(&f);
+    std::thread::sleep(Duration::from_millis(4500));
+    assert!(f.log_lines().is_empty(), "ran: {:?}", f.log_lines());
+    assert!(f.checks().is_empty());
 }
 
 #[test]

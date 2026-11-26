@@ -29,7 +29,7 @@ All were read on 24 November 2026.
 | Cursor event | Matcher | LangSpan |
 |---|---|---|
 | `preToolUse` | `^(Write|Delete|Shell)$` | Admission: a file write or delete, or a shell command's literal write set ([ADR 0011](0011-shell-writes.md)). |
-| `postToolUse` | `^(Write|Delete|Shell|Read)$` | Observation of a completed write, delete or command. For `Read`, the version the session saw ([ADR 0005](0005-source-versions-and-stale-writes.md)). Peer news since the last briefing goes back as `additional_context` (documented). |
+| `postToolUse` | `^(Write|Delete|Shell|Read|Grep)$` | Observation of a completed write, delete or command. For `Read`, the version the session saw ([ADR 0005](0005-source-versions-and-stale-writes.md)). For `Grep`, its `path` as where the session is looking (roadmap A13; input shape from the documentation, not seen from a real Cursor). Peer news since the last briefing goes back as `additional_context` (documented). |
 | `postToolUseFailure` | `^(Write|Delete|Shell)$` | A failed or interrupted call ends its admission. |
 | `sessionStart` | none | Registration and the start briefing, as `additional_context` (documented). |
 | `beforeSubmitPrompt` | none | The prompt's first line as the session's task (unless `--prompt-summary off`), source-index names, and a briefing as `additional_context`. The briefing field comes from the CLI source; the documentation does not list it. |

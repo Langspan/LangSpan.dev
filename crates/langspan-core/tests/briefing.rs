@@ -1,7 +1,8 @@
 //! Which peers a briefing names, and when it is delivered again.
 use langspan_core::{
-    BRIEF_HORIZON_MS, Briefing, Command, Event, LivenessStatus, Outcome, ProcessIdentity, State,
-    ToolResult, apply, decide,
+    BRIEF_HORIZON_MS, Briefing, Command, Event, InterfaceChange, LivenessStatus, Outcome,
+    PresenceKind, ProcessIdentity, RECENT_WINDOW_MS, RecentChanges, SessionActivity, State,
+    ToolIdentity, ToolResult, apply, decide,
 };
 
 fn run(state: &mut State, id: &str, command: Command, now: u64) -> Outcome {
@@ -95,6 +96,9 @@ fn brief(state: &mut State, session: &str, id: &str, now: u64) -> Briefing {
             max_peers: 8,
             deliver: true,
             mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
         },
         now,
     )) {
@@ -369,12 +373,18 @@ fn invalid_briefing_inputs_are_rejected_without_events() {
             max_peers: 0,
             deliver: true,
             mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
         },
         Command::Brief {
             session_id: "nobody".into(),
             max_peers: 4,
             deliver: true,
             mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
         },
         Command::SessionPrompt {
             session_id: "alice".into(),
@@ -454,6 +464,9 @@ fn the_largest_briefing_is_still_an_event_the_core_accepts_and_fits_one_frame() 
             max_peers: 16,
             deliver: true,
             mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
         },
         300,
     ));
@@ -476,6 +489,9 @@ fn a_look_from_outside_is_not_a_delivery_and_not_activity() {
         max_peers: 8,
         deliver: false,
         mid_turn: false,
+        recent: false,
+        recent_window_ms: None,
+        mcp: false,
     };
     let decision = decide(&state, &look, "look", 200);
     assert!(decision.events.is_empty());
@@ -789,6 +805,9 @@ fn brief_mid_turn(state: &mut State, session: &str, id: &str, now: u64) -> Brief
             max_peers: 8,
             deliver: true,
             mid_turn: true,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
         },
         now,
     )) {
@@ -1066,6 +1085,362 @@ fn a_targets_event_holds_paths_only_and_from_an_older_generation_is_refused() {
     assert!(apply(&mut state, event).is_err(), "a stale generation");
 }
 
+// Presence (roadmap A13): where peers are looking.
+
+fn read(state: &mut State, session: &str, path: &str, now: u64) {
+    use langspan_core::{FileState, ObservedFile, SourceOrigin};
+    ok(run(
+        state,
+        &format!("r-{session}-{}-{now}", path.replace('/', "_")),
+        Command::ObserveSource {
+            session_id: session.into(),
+            files: vec![ObservedFile {
+                path: path.into(),
+                state: FileState::Present {
+                    digest: "1".repeat(64),
+                    kind: Default::default(),
+                },
+            }],
+            origin: SourceOrigin::Read,
+        },
+        now,
+    ));
+}
+
+fn looked(state: &mut State, session: &str, kind: PresenceKind, paths: &[&str], now: u64) {
+    ok(run(
+        state,
+        &format!("p-{session}-{now}"),
+        Command::ObservePresence {
+            session_id: session.into(),
+            kind,
+            paths: paths.iter().map(|path| path.to_string()).collect(),
+        },
+        now,
+    ));
+}
+
+fn looking<'a>(briefing: &'a Briefing, peer: &str) -> Vec<(&'a str, PresenceKind)> {
+    briefing
+        .peers
+        .iter()
+        .find(|work| work.session_id == peer)
+        .map(|work| {
+            work.looking
+                .iter()
+                .map(|looked| (looked.path.as_str(), looked.kind))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+const MINUTE: u64 = 60_000;
+
+#[test]
+fn a_peers_reads_and_searches_are_shown_as_presence_until_the_window_passes() {
+    let mut state = ready();
+    read(&mut state, "alice", "src/auth.rs", 1_000);
+    looked(
+        &mut state,
+        "alice",
+        PresenceKind::Search,
+        &["src/session"],
+        2_000,
+    );
+    // A peer known only by where it looked is still a peer worth naming.
+    let briefing = brief(&mut state, "bob", "b1", 3_000);
+    assert_eq!(
+        looking(&briefing, "alice"),
+        [
+            ("src/session", PresenceKind::Search),
+            ("src/auth.rs", PresenceKind::Read)
+        ]
+    );
+    let presence = &briefing.peers[0].looking[1];
+    assert_eq!(presence.age_s, 2, "seconds since the read");
+    // Not to a peer in another repository, and never to oneself.
+    assert!(brief(&mut state, "dave", "d1", 3_000).peers.is_empty());
+    assert!(looking(&brief(&mut state, "alice", "a1", 3_000), "alice").is_empty());
+    // Ten minutes after the last read and search, the clause and the peer
+    // are gone; at exactly ten minutes the search is still shown.
+    let edge = brief(&mut state, "bob", "b2", 2_000 + 10 * MINUTE);
+    assert_eq!(
+        looking(&edge, "alice"),
+        [("src/session", PresenceKind::Search)]
+    );
+    let late = brief(&mut state, "bob", "b2b", 2_000 + 10 * MINUTE + 1);
+    assert!(late.peers.is_empty(), "{late:?}");
+    // Each newer read comes first; one path is listed once; at most four.
+    for (i, path) in ["a", "b", "c", "d", "e", "a"].iter().enumerate() {
+        read(&mut state, "alice", path, 20 * MINUTE + i as u64);
+    }
+    let briefing = brief(&mut state, "bob", "b3", 21 * MINUTE);
+    let paths: Vec<&str> = looking(&briefing, "alice").iter().map(|l| l.0).collect();
+    assert_eq!(paths, ["a", "e", "d", "c"]);
+}
+
+#[test]
+fn a_file_a_peer_edited_or_holds_is_shown_as_edited_not_as_looked_at() {
+    let mut state = ready();
+    read(&mut state, "alice", "src/auth.rs", 1_000);
+    read(&mut state, "alice", "src/session.rs", 1_100);
+    edited(&mut state, "alice", "src/auth.rs", 2_000);
+    ok(run(
+        &mut state,
+        "hold",
+        Command::Admit {
+            session_id: "alice".into(),
+            paths: vec!["src/session.rs".into()],
+            ttl_ms: 60_000,
+        },
+        2_100,
+    ));
+    read(&mut state, "alice", "src/other.rs", 2_200);
+    let briefing = brief(&mut state, "bob", "b1", 3_000);
+    let alice = &briefing.peers[0];
+    assert_eq!(alice.recent[0].path, "src/auth.rs");
+    assert_eq!(alice.editing, ["src/session.rs"]);
+    assert_eq!(
+        looking(&briefing, "alice"),
+        [("src/other.rs", PresenceKind::Read)]
+    );
+}
+
+#[test]
+fn presence_never_takes_the_place_of_a_peer_with_work() {
+    let mut state = ready();
+    read(&mut state, "alice", "src/auth.rs", 5_000);
+    edited(&mut state, "carol", "src/old.rs", 1_000);
+    let Outcome::Briefing { briefing } = decide(
+        &state,
+        &Command::Brief {
+            session_id: "bob".into(),
+            max_peers: 1,
+            deliver: false,
+            mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+        },
+        "b",
+        6_000,
+    )
+    .outcome
+    else {
+        panic!()
+    };
+    // Carol's edit is older than Alice's read, but it is work.
+    assert_eq!(names(&briefing), ["carol"]);
+    assert_eq!(briefing.omitted_peers, 1);
+}
+
+#[test]
+fn presence_off_hides_a_sessions_reads_and_searches_from_every_peer() {
+    let mut state = ready();
+    read(&mut state, "alice", "src/before.rs", 500);
+    ok(run(
+        &mut state,
+        "off",
+        Command::SetPresence {
+            session_id: "alice".into(),
+            shown: false,
+            window_ms: langspan_core::PRESENCE_WINDOW_MS,
+        },
+        600,
+    ));
+    read(&mut state, "alice", "src/auth.rs", 1_000);
+    let refused = run(
+        &mut state,
+        "search",
+        Command::ObservePresence {
+            session_id: "alice".into(),
+            kind: PresenceKind::Search,
+            paths: vec!["src".into()],
+        },
+        1_100,
+    );
+    assert!(
+        matches!(&refused, Outcome::Error { code, .. } if code == "presence_off"),
+        "{refused:?}"
+    );
+    assert!(brief(&mut state, "bob", "b1", 2_000).peers.is_empty());
+    // Turned on again, nothing looked at before or while it was off appears.
+    ok(run(
+        &mut state,
+        "on",
+        Command::SetPresence {
+            session_id: "alice".into(),
+            shown: true,
+            window_ms: langspan_core::PRESENCE_WINDOW_MS,
+        },
+        2_100,
+    ));
+    assert!(state.presence.is_empty(), "the default is not stored");
+    assert!(brief(&mut state, "bob", "b2", 2_200).peers.is_empty());
+    // The reads are still versions for the session's own stale checks.
+    assert!(
+        state.activity["alice"]
+            .known
+            .iter()
+            .any(|known| known.path == "src/auth.rs")
+    );
+}
+
+#[test]
+fn a_session_chooses_how_old_a_peers_presence_it_is_shown() {
+    let mut state = ready();
+    read(&mut state, "alice", "src/auth.rs", 0);
+    let set = |window_ms| Command::SetPresence {
+        session_id: "bob".into(),
+        shown: true,
+        window_ms,
+    };
+    for wrong in [0, MINUTE - 1, BRIEF_HORIZON_MS + 1] {
+        assert!(matches!(
+            run(&mut state, "w", set(wrong), 1),
+            Outcome::Error { .. }
+        ));
+    }
+    ok(run(&mut state, "w", set(2 * MINUTE), 1));
+    assert_eq!(
+        looking(&brief(&mut state, "bob", "b1", MINUTE), "alice").len(),
+        1
+    );
+    assert!(
+        brief(&mut state, "bob", "b2", 2 * MINUTE + 1)
+            .peers
+            .is_empty()
+    );
+    // Bob's window is his own: Carol, in a linked worktree, has the default.
+    assert_eq!(
+        looking(&brief(&mut state, "carol", "c1", 9 * MINUTE), "alice").len(),
+        1
+    );
+}
+
+#[test]
+fn presence_records_name_paths_only_within_bounds() {
+    let mut state = ready();
+    let observe = |kind, paths: &[&str]| Command::ObservePresence {
+        session_id: "alice".into(),
+        kind,
+        paths: paths.iter().map(|path| path.to_string()).collect(),
+    };
+    for (kind, paths) in [
+        (PresenceKind::Read, &["a"][..]),
+        (PresenceKind::Search, &[][..]),
+        (PresenceKind::Search, &["a", "b", "c", "d", "e"][..]),
+        (PresenceKind::Shell, &["/etc/passwd"][..]),
+        (PresenceKind::Shell, &["../outside"][..]),
+    ] {
+        let outcome = run(&mut state, "bad", observe(kind, paths), 1);
+        assert!(matches!(outcome, Outcome::Error { .. }), "{paths:?}");
+    }
+    assert!(
+        state
+            .activity
+            .get("alice")
+            .is_none_or(|a| a.looking.is_empty())
+    );
+    ok(run(
+        &mut state,
+        "good",
+        observe(PresenceKind::Shell, &["src/b.rs", "src/a.rs", "src/a.rs"]),
+        1,
+    ));
+    // The wire form is the issue's: path, kind and age in seconds.
+    let briefing = brief(&mut state, "bob", "b", 5_000);
+    let wire = serde_json::to_value(&briefing.peers[0].looking).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!([
+            {"path": "src/a.rs", "kind": "shell", "age_s": 4},
+            {"path": "src/b.rs", "kind": "shell", "age_s": 4},
+        ])
+    );
+}
+
+#[test]
+fn a_change_of_presence_alone_waits_for_the_next_prompt_not_the_next_tool_call() {
+    let mut state = ready();
+    edited(&mut state, "alice", "src/api.rs", 1_000);
+    assert!(brief(&mut state, "bob", "b1", 2_000).changed);
+    let briefed = state.activity["bob"].briefed.clone().unwrap();
+    assert!(
+        !briefed.contains('+'),
+        "no presence, the signature as before"
+    );
+    read(&mut state, "alice", "src/auth.rs", 3_000);
+    let mid_turn = |state: &mut State, id: &str, now| match ok(run(
+        state,
+        id,
+        Command::Brief {
+            session_id: "bob".into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: true,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+        },
+        now,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    };
+    assert!(!mid_turn(&mut state, "m1", 4_000).changed);
+    assert_eq!(state.activity["bob"].briefed.as_ref(), Some(&briefed));
+    // At the prompt it is news, once.
+    let prompt = brief(&mut state, "bob", "b2", 5_000);
+    assert!(prompt.changed);
+    assert_eq!(
+        looking(&prompt, "alice"),
+        [("src/auth.rs", PresenceKind::Read)]
+    );
+    assert!(!brief(&mut state, "bob", "b3", 6_000).changed);
+    // When it ages out, nothing new is said.
+    let quiet = brief(&mut state, "bob", "b4", 3_000 + 10 * MINUTE + 1);
+    assert!(!quiet.changed, "{quiet:?}");
+    // A peer known only by where it looked is not news mid-turn either.
+    read(&mut state, "carol", "src/tree.rs", 11 * MINUTE);
+    let later = mid_turn(&mut state, "m3", 11 * MINUTE + 1);
+    assert_eq!(looking(&later, "carol").len(), 1);
+    assert!(!later.changed, "{later:?}");
+    assert!(brief(&mut state, "bob", "b5", 11 * MINUTE + 2).changed);
+    // Real work still arrives mid-turn, with the presence beside it.
+    edited(&mut state, "alice", "src/b.rs", 11 * MINUTE + 3);
+    let news = mid_turn(&mut state, "m2", 11 * MINUTE + 4);
+    assert!(news.changed);
+    assert_eq!(looking(&news, "carol").len(), 1);
+}
+
+#[test]
+fn presence_belongs_to_one_generation_and_an_ended_session_has_none() {
+    let mut state = ready();
+    read(&mut state, "alice", "src/auth.rs", 1_000);
+    ok(run(
+        &mut state,
+        "end",
+        Command::SessionEnd {
+            session_id: "alice".into(),
+        },
+        1_500,
+    ));
+    assert!(brief(&mut state, "bob", "b1", 2_000).peers.is_empty());
+    // A record stored before presence existed reads as before.
+    let old: SessionActivity = serde_json::from_value(serde_json::json!({
+        "session_id": "x", "generation": 1, "last_ms": 0
+    }))
+    .unwrap();
+    assert!(old.looking.is_empty());
+    let event: Event = serde_json::from_value(serde_json::json!({
+        "type": "source_observed", "session_id": "alice", "files": [],
+        "origin": "read", "at_ms": 0, "generation": 1
+    }))
+    .unwrap();
+    assert!(matches!(event, Event::SourceObserved { .. }));
+}
+
 /// A prompt's line digests, for prompts that differ only after `shared`.
 fn template(shared: usize, own: &str) -> Vec<String> {
     let mut lines: Vec<String> = (0..shared).map(|line| format!("{line:032x}")).collect();
@@ -1183,4 +1558,402 @@ fn a_declared_intent_replaces_the_prompt_summary_in_a_briefing() {
         after.peers[0].intent.as_deref(),
         Some("refresh the session handler")
     );
+}
+
+// Recent change at session start (roadmap C3, ADR 0023).
+
+const HOUR: u64 = 60 * MINUTE;
+
+fn register_at(state: &mut State, session: &str, workspace: &str, now: u64) {
+    ok(run(
+        state,
+        &format!("s-{session}-{now}"),
+        Command::SessionRegister {
+            session_id: session.into(),
+            workspace_id: workspace.into(),
+            parent: None,
+            headless: false,
+        },
+        now,
+    ));
+}
+
+fn end(state: &mut State, session: &str, now: u64) {
+    ok(run(
+        state,
+        &format!("end-{session}-{now}"),
+        Command::SessionEnd {
+            session_id: session.into(),
+        },
+        now,
+    ));
+}
+
+fn start_brief(state: &mut State, session: &str, window: Option<u64>, now: u64) -> Briefing {
+    match ok(run(
+        state,
+        &format!("start-{session}-{now}-{}", window.unwrap_or(0)),
+        Command::Brief {
+            session_id: session.into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: false,
+            recent: true,
+            recent_window_ms: window,
+            mcp: false,
+        },
+        now,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn recent(state: &mut State, session: &str, now: u64) -> RecentChanges {
+    start_brief(state, session, None, now)
+        .recent
+        .expect("a starting briefing carries the recent section")
+}
+
+fn admit(state: &mut State, id: &str, session: &str, path: &str, now: u64) -> Outcome {
+    run(
+        state,
+        id,
+        Command::AdmitTool {
+            session_id: session.into(),
+            operation: ToolIdentity {
+                operation_id: format!("op-{id}"),
+                source: "test".into(),
+                tool: "Edit".into(),
+                input_digest: "f".repeat(64),
+            },
+            paths: vec![path.into()],
+            base: Vec::new(),
+            regions: Vec::new(),
+            overwrites: Vec::new(),
+            ttl_ms: 30_000,
+        },
+        now,
+    )
+}
+
+fn signature_change(name: &str, before: &str, after: &str) -> InterfaceChange {
+    InterfaceChange {
+        name: name.into(),
+        kind: "function".into(),
+        change: "signature_changed".into(),
+        before: Some(before.into()),
+        after: Some(after.into()),
+        after_name: None,
+        before_arity: None,
+        after_arity: None,
+        before_count: None,
+        after_count: None,
+    }
+}
+
+fn changed_paths(recent: &RecentChanges) -> Vec<String> {
+    recent
+        .changed_paths
+        .iter()
+        .map(|path| path.path.clone())
+        .collect()
+}
+
+#[test]
+fn a_starting_session_hears_which_files_changed_recently_and_by_how_many_sessions() {
+    let mut state = ready();
+    let start = 10 * HOUR;
+    edited(&mut state, "alice", "src/api.rs", start - 2 * HOUR);
+    edited(&mut state, "bob", "src/store.rs", start - HOUR);
+    edited(&mut state, "bob", "src/api.rs", start - 40 * MINUTE);
+    // Another repository is not this one's news.
+    edited(&mut state, "dave", "src/api.rs", start - MINUTE);
+    end(&mut state, "alice", start - 90 * MINUTE);
+    end(&mut state, "bob", start - 30 * MINUTE);
+    register_at(&mut state, "erin", "main", start);
+    let recent = recent(&mut state, "erin", start);
+    assert_eq!(recent.window_ms, RECENT_WINDOW_MS);
+    let changed: Vec<(&str, u32, u64)> = recent
+        .changed_paths
+        .iter()
+        .map(|path| (path.path.as_str(), path.sessions, path.age_ms))
+        .collect();
+    assert_eq!(
+        changed,
+        [("src/api.rs", 2, 40 * MINUTE), ("src/store.rs", 1, HOUR)],
+        "most sessions first, each with the newest age"
+    );
+    assert!(recent.changed_paths.iter().all(|path| !path.elsewhere));
+    // Two sessions edited one file: it was worked on from two sides.
+    assert_eq!(recent.contested_paths.len(), 1);
+    assert_eq!(recent.contested_paths[0].path, "src/api.rs");
+    assert_eq!(recent.contested_paths[0].sessions, 2);
+    assert_eq!(recent.contested_paths[0].refusals, 0);
+}
+
+#[test]
+fn edits_in_a_linked_worktree_are_counted_and_marked_as_elsewhere() {
+    let mut state = ready();
+    edited(&mut state, "carol", "src/tree.rs", HOUR);
+    end(&mut state, "carol", HOUR + 1);
+    register_at(&mut state, "erin", "main", 2 * HOUR);
+    let recent = recent(&mut state, "erin", 2 * HOUR);
+    assert_eq!(changed_paths(&recent), ["src/tree.rs"]);
+    assert!(recent.changed_paths[0].elsewhere, "{recent:?}");
+    // The line journal is per checkout: nothing of carol's is left in this one.
+    assert!(recent.left_uncommitted.is_empty(), "{recent:?}");
+}
+
+#[test]
+fn an_interface_change_appears_even_when_the_new_sessions_files_do_not_mention_it() {
+    let mut state = ready();
+    edited(&mut state, "bob", "src/store.rs", HOUR);
+    ok(run(
+        &mut state,
+        "interface-1",
+        Command::ObserveInterface {
+            workspace_id: "main".into(),
+            path: "src/store.rs".into(),
+            changes: vec![signature_change(
+                "save",
+                "fn save(x: &Item)",
+                "fn save(x: &Item, sync: bool)",
+            )],
+            dependents: vec!["src/api.rs".into()],
+        },
+        HOUR + 1,
+    ));
+    register_at(&mut state, "erin", "main", 2 * HOUR);
+    let briefing = start_brief(&mut state, "erin", None, 2 * HOUR);
+    // The peer section names only changes its own files mention.
+    assert!(briefing.interface_changes.is_empty());
+    let recent = briefing.recent.unwrap();
+    assert_eq!(recent.interface_changes.len(), 1);
+    let change = &recent.interface_changes[0];
+    assert_eq!(change.path, "src/store.rs");
+    assert_eq!(change.by_session.as_deref(), Some("bob"));
+    assert_eq!(
+        change.changes[0].before.as_deref(),
+        Some("fn save(x: &Item)")
+    );
+    assert_eq!(
+        change.changes[0].after.as_deref(),
+        Some("fn save(x: &Item, sync: bool)")
+    );
+    assert_eq!(change.dependents, ["src/api.rs"]);
+    assert_eq!(change.age_ms, HOUR - 1);
+}
+
+#[test]
+fn a_path_refused_to_one_session_and_edited_by_another_is_contested() {
+    let mut state = ready();
+    assert!(matches!(
+        ok(admit(&mut state, "bob-1", "bob", "src/api.rs", HOUR)),
+        Outcome::Admitted { .. }
+    ));
+    let refused = admit(&mut state, "alice-1", "alice", "src/api.rs", HOUR + 10);
+    assert!(
+        !matches!(refused, Outcome::Admitted { .. }),
+        "the held file is refused: {refused:?}"
+    );
+    edited(&mut state, "bob", "src/api.rs", HOUR + 20);
+    register_at(&mut state, "erin", "main", 2 * HOUR);
+    let recent = recent(&mut state, "erin", 2 * HOUR);
+    assert_eq!(recent.contested_paths.len(), 1, "{recent:?}");
+    let contested = &recent.contested_paths[0];
+    assert_eq!(contested.path, "src/api.rs");
+    assert_eq!(contested.refusals, 1);
+    assert_eq!(contested.sessions, 1, "only bob's edit landed");
+}
+
+#[test]
+fn an_ended_session_in_this_checkout_is_a_candidate_for_work_left_uncommitted() {
+    let mut state = ready();
+    edited(&mut state, "alice", "src/lib.rs", HOUR);
+    edited(&mut state, "alice", "src/main.rs", HOUR + 5);
+    end(&mut state, "alice", HOUR + 10);
+    // A live session's edits are its own, still in progress.
+    edited(&mut state, "bob", "src/bob.rs", HOUR + 20);
+    register_at(&mut state, "erin", "main", 2 * HOUR);
+    let recent = recent(&mut state, "erin", 2 * HOUR);
+    assert_eq!(recent.left_uncommitted.len(), 1, "{recent:?}");
+    let left = &recent.left_uncommitted[0];
+    assert_eq!(left.session_id, "alice");
+    assert_eq!(left.paths, ["src/main.rs", "src/lib.rs"], "newest first");
+    assert_eq!(left.age_ms, HOUR - 5);
+    assert_eq!(recent.root, "/repos/app");
+}
+
+#[test]
+fn nothing_older_than_the_window_or_from_before_the_current_boot_appears() {
+    let mut state = ready();
+    let now = 10 * HOUR;
+    edited(
+        &mut state,
+        "alice",
+        "src/old.rs",
+        now - RECENT_WINDOW_MS - 1,
+    );
+    edited(&mut state, "alice", "src/edge.rs", now - RECENT_WINDOW_MS);
+    edited(&mut state, "bob", "src/new.rs", now - 2 * MINUTE);
+    register_at(&mut state, "erin", "main", now);
+    assert_eq!(
+        changed_paths(&recent(&mut state, "erin", now)),
+        ["src/new.rs", "src/edge.rs"]
+    );
+    // A shorter configured window.
+    let short = start_brief(&mut state, "erin", Some(5 * MINUTE), now)
+        .recent
+        .unwrap();
+    assert_eq!(short.window_ms, 5 * MINUTE);
+    assert_eq!(changed_paths(&short), ["src/new.rs"]);
+    // A window outside the accepted range is refused, not stretched.
+    for window in [MINUTE - 1, 24 * HOUR + 1] {
+        let outcome = run(
+            &mut state,
+            &format!("bad-{window}"),
+            Command::Brief {
+                session_id: "erin".into(),
+                max_peers: 8,
+                deliver: false,
+                mid_turn: false,
+                recent: true,
+                recent_window_ms: Some(window),
+                mcp: false,
+            },
+            now,
+        );
+        assert!(matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+    }
+    // After a restart, the earlier run's edits and refusals are gone, even
+    // within the window: only this boot's events count.
+    apply(&mut state, &Event::Booted { generation: 2 }).unwrap();
+    register_at(&mut state, "erin", "main", now + MINUTE);
+    register_at(&mut state, "bob", "main", now + MINUTE);
+    let after = recent(&mut state, "erin", now + MINUTE);
+    assert!(after.is_empty(), "{after:?}");
+    edited(&mut state, "bob", "src/later.rs", now + 2 * MINUTE);
+    assert_eq!(
+        changed_paths(&recent(&mut state, "erin", now + 3 * MINUTE)),
+        ["src/later.rs"]
+    );
+}
+
+#[test]
+fn the_section_is_bounded_and_counts_what_it_leaves_out() {
+    let mut state = ready();
+    for n in 0..12 {
+        edited(&mut state, "alice", &format!("src/a{n:02}.rs"), HOUR + n);
+        edited(
+            &mut state,
+            "bob",
+            &format!("src/a{n:02}.rs"),
+            HOUR + 100 + n,
+        );
+    }
+    register_at(&mut state, "erin", "main", 2 * HOUR);
+    let recent = recent(&mut state, "erin", 2 * HOUR);
+    assert_eq!(recent.changed_paths.len(), 8);
+    assert_eq!(recent.contested_paths.len(), 4);
+    // 4 changed and 8 contested paths left out.
+    assert_eq!(recent.omitted, 12, "{recent:?}");
+    // Newest first among equals.
+    assert_eq!(recent.changed_paths[0].path, "src/a11.rs");
+}
+
+#[test]
+fn only_a_starting_briefing_carries_the_section_and_it_is_never_news_by_itself() {
+    let mut state = ready();
+    edited(&mut state, "alice", "src/api.rs", HOUR);
+    end(&mut state, "alice", HOUR + 1);
+    register_at(&mut state, "erin", "main", 2 * HOUR);
+    let start = start_brief(&mut state, "erin", None, 2 * HOUR);
+    assert!(!start.recent.unwrap().is_empty());
+    // A prompt briefing does not carry it, and what it said is not
+    // remembered as delivered peer work.
+    let prompt = brief(&mut state, "erin", "prompt-1", 2 * HOUR + 10);
+    assert_eq!(prompt.recent, None);
+    // A mid-turn briefing cannot ask for it.
+    let outcome = run(
+        &mut state,
+        "mid",
+        Command::Brief {
+            session_id: "erin".into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: true,
+            recent: true,
+            recent_window_ms: None,
+            mcp: false,
+        },
+        2 * HOUR + 20,
+    );
+    assert!(matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+    // The asking session's own edits are not news to it.
+    edited(&mut state, "erin", "src/mine.rs", 2 * HOUR + 30);
+    let again = recent(&mut state, "erin", 2 * HOUR + 40);
+    assert!(
+        again
+            .changed_paths
+            .iter()
+            .all(|path| path.path != "src/mine.rs")
+    );
+}
+
+#[test]
+fn presence_that_only_partly_ages_out_is_not_news() {
+    let mut state = ready();
+    read(&mut state, "alice", "src/auth.rs", 1_000);
+    read(&mut state, "alice", "src/token.rs", 5 * MINUTE);
+    assert!(brief(&mut state, "bob", "b1", 5 * MINUTE + 1).changed);
+    // The older path ages out, the newer one remains: nothing happened.
+    let partly = brief(&mut state, "bob", "b2", 10 * MINUTE + 2_000);
+    assert_eq!(
+        looking(&partly, "alice"),
+        [("src/token.rs", PresenceKind::Read)]
+    );
+    assert!(!partly.changed, "{partly:?}");
+    // A path not shown before is news again.
+    read(&mut state, "alice", "src/session.rs", 11 * MINUTE);
+    assert!(brief(&mut state, "bob", "b3", 11 * MINUTE + 1).changed);
+}
+
+#[test]
+fn presence_never_takes_a_work_bearing_peers_place_in_the_briefing() {
+    let mut state = ready();
+    let long =
+        |peer: usize, n: usize, kind: &str| format!("src/{kind}{peer}-{n}-{}", "x".repeat(450));
+    for peer in 0..8 {
+        let id = format!("p{peer}");
+        ok(run(
+            &mut state,
+            &format!("s-{id}"),
+            Command::SessionRegister {
+                session_id: id.clone(),
+                workspace_id: "main".into(),
+                parent: None,
+                headless: false,
+            },
+            0,
+        ));
+        for n in 0..8 {
+            edited(&mut state, &id, &long(peer, n, "w"), 1_000 + n as u64);
+        }
+        let looked_at: Vec<String> = (0..4).map(|n| long(peer, n, "l")).collect();
+        let looked_at: Vec<&str> = looked_at.iter().map(String::as_str).collect();
+        looked(&mut state, &id, PresenceKind::Search, &looked_at, 2_000);
+    }
+    let briefing = brief(&mut state, "bob", "b1", 3_000);
+    for peer in 0..8 {
+        assert!(
+            briefing
+                .peers
+                .iter()
+                .any(|work| work.session_id == format!("p{peer}")),
+            "p{peer} dropped: {} peers shown",
+            briefing.peers.len()
+        );
+    }
+    assert_eq!(briefing.omitted_peers, 0);
 }
