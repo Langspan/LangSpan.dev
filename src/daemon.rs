@@ -698,6 +698,7 @@ mod unix {
             max_peers,
             deliver,
             mid_turn,
+            mcp,
         } = command
         else {
             return command.clone();
@@ -729,6 +730,7 @@ mod unix {
             max_peers: *max_peers,
             deliver: *deliver,
             mid_turn: *mid_turn,
+            mcp: *mcp,
             inflight,
         }
     }

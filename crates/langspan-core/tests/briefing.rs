@@ -95,6 +95,7 @@ fn brief(state: &mut State, session: &str, id: &str, now: u64) -> Briefing {
             max_peers: 8,
             deliver: true,
             mid_turn: false,
+            mcp: false,
         },
         now,
     )) {
@@ -369,12 +370,14 @@ fn invalid_briefing_inputs_are_rejected_without_events() {
             max_peers: 0,
             deliver: true,
             mid_turn: false,
+            mcp: false,
         },
         Command::Brief {
             session_id: "nobody".into(),
             max_peers: 4,
             deliver: true,
             mid_turn: false,
+            mcp: false,
         },
         Command::SessionPrompt {
             session_id: "alice".into(),
@@ -454,6 +457,7 @@ fn the_largest_briefing_is_still_an_event_the_core_accepts_and_fits_one_frame() 
             max_peers: 16,
             deliver: true,
             mid_turn: false,
+            mcp: false,
         },
         300,
     ));
@@ -476,6 +480,7 @@ fn a_look_from_outside_is_not_a_delivery_and_not_activity() {
         max_peers: 8,
         deliver: false,
         mid_turn: false,
+        mcp: false,
     };
     let decision = decide(&state, &look, "look", 200);
     assert!(decision.events.is_empty());
@@ -789,6 +794,7 @@ fn brief_mid_turn(state: &mut State, session: &str, id: &str, now: u64) -> Brief
             max_peers: 8,
             deliver: true,
             mid_turn: true,
+            mcp: false,
         },
         now,
     )) {
@@ -1199,6 +1205,7 @@ fn presence_never_takes_the_place_of_a_peer_with_work() {
             max_peers: 1,
             deliver: false,
             mid_turn: false,
+            mcp: false,
         },
         "b",
         6_000,
@@ -1357,6 +1364,7 @@ fn a_change_of_presence_alone_waits_for_the_next_prompt_not_the_next_tool_call()
             max_peers: 8,
             deliver: true,
             mid_turn: true,
+            mcp: false,
         },
         now,
     )) {
@@ -1561,6 +1569,7 @@ fn brief_with(
             max_peers: 8,
             deliver: true,
             mid_turn: false,
+            mcp: false,
             inflight,
         },
         now,
@@ -1643,6 +1652,7 @@ fn an_in_flight_signature_is_told_once_per_signature_and_only_from_another_workt
             max_peers: 8,
             deliver: false,
             mid_turn: false,
+            mcp: false,
             inflight: found(v3),
         },
         7_000,
@@ -1694,6 +1704,7 @@ fn in_flight_lines_are_at_most_three_within_their_share_and_the_rest_counted() {
             max_peers: 8,
             deliver: true,
             mid_turn: false,
+            mcp: false,
             inflight: too_many,
         },
         3_000,
@@ -1734,6 +1745,7 @@ fn presence_and_an_in_flight_signature_are_each_news_once() {
             max_peers: 8,
             deliver: true,
             mid_turn: true,
+            mcp: false,
             inflight: found(v1),
         },
         3_500,
