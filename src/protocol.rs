@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader, Read};
 
 /// Version 5 is version 4 with roadmap H9's `refusal_outcomes` in a
-/// report's counts. Version 4 is version 3 with roadmap D7's rename fields
+/// report's counts and issue #214's `interface_notice_ids` in a briefing.
+/// Version 4 is version 3 with roadmap D7's rename fields
 /// in interface changes, history entries and in-flight symbols. Requests
 /// are the same in all three.
 pub const PROTOCOL_VERSION: u16 = 5;
@@ -40,8 +41,12 @@ pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::E
 /// objects of the protocol with both `edits_admitted` and
 /// `retried_unchanged`).
 const COUNTS_FIELD_SINCE_5: &str = "refusal_outcomes";
+/// The field version 5 added to a briefing (`Briefing`, the only object
+/// with `changed` and `omitted_peers`): its interface notices' IDs, which
+/// a hook reports back once shown (issue #214).
+const BRIEFING_FIELD_SINCE_5: &str = "interface_notice_ids";
 
-/// `value` without the field version 5 added.
+/// `value` without the fields version 5 added.
 fn protocol_4_shape(value: &mut serde_json::Value) {
     use serde_json::Value;
     match value {
@@ -49,6 +54,9 @@ fn protocol_4_shape(value: &mut serde_json::Value) {
         Value::Object(fields) => {
             if fields.contains_key("edits_admitted") && fields.contains_key("retried_unchanged") {
                 fields.shift_remove(COUNTS_FIELD_SINCE_5);
+            }
+            if fields.contains_key("changed") && fields.contains_key("omitted_peers") {
+                fields.shift_remove(BRIEFING_FIELD_SINCE_5);
             }
             fields.values_mut().for_each(protocol_4_shape);
         }
@@ -67,9 +75,8 @@ const INFLIGHT_FIELD_SINCE_4: &str = "renamed_from";
 /// The trail a briefing carries (`Briefing`, the only object with
 /// `changed` and `omitted_peers`) and the trails of a recap (`Recap`, with
 /// `sessions` and `omitted_sessions`), roadmap C9. A version 3 client is
-/// told neither; a trail taken by its briefing is not offered again. Nor
-/// is it given a briefing's notice IDs (issue #214).
-const BRIEFING_FIELDS_SINCE_4: [&str; 2] = ["trail", "interface_notice_ids"];
+/// told neither; a trail taken by its briefing is not offered again.
+const BRIEFING_FIELD_SINCE_4: &str = "trail";
 const RECAP_FIELD_SINCE_4: &str = "trails";
 
 /// An interface change or a history entry: the objects of the protocol
@@ -109,9 +116,7 @@ fn protocol_3_shape(value: &mut serde_json::Value) {
                 fields.shift_remove(INFLIGHT_FIELD_SINCE_4);
             }
             if fields.contains_key("changed") && fields.contains_key("omitted_peers") {
-                for key in BRIEFING_FIELDS_SINCE_4 {
-                    fields.shift_remove(key);
-                }
+                fields.shift_remove(BRIEFING_FIELD_SINCE_4);
             }
             if fields.contains_key("sessions") && fields.contains_key("omitted_sessions") {
                 fields.shift_remove(RECAP_FIELD_SINCE_4);

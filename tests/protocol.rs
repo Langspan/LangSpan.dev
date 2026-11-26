@@ -1244,7 +1244,7 @@ fn a_version_3_reply_leaves_out_trails() {
     }))
     .unwrap();
     briefing.trail = Some(trail.clone());
-    // Issue #214: notice IDs are version 4 too.
+    // Issue #214: notice IDs are version 5.
     briefing.interface_notice_ids = vec!["n1".into()];
     let response = Response {
         version: OLDEST_PROTOCOL_VERSION,
@@ -1269,6 +1269,20 @@ fn a_version_3_reply_leaves_out_trails() {
         "{earlier:#}"
     );
     assert_eq!(earlier["outcome"]["briefing"]["session_id"], "codex.bob");
+    // A version 4 client, which also reads a briefing with
+    // `deny_unknown_fields`, keeps the trail and gets no notice IDs.
+    let four: serde_json::Value =
+        serde_json::from_slice(&encode_for(4, &response).unwrap()).unwrap();
+    assert!(
+        four["outcome"]["briefing"]
+            .get("interface_notice_ids")
+            .is_none(),
+        "{four:#}"
+    );
+    assert!(
+        four["outcome"]["briefing"].get("trail").is_some(),
+        "{four:#}"
+    );
     let current: Response =
         serde_json::from_slice(&encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
     assert!(
