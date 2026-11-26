@@ -2,6 +2,8 @@
 
 Build, connect native sessions, inspect coordination, and integrate through MCP.
 For the product overview and support summary, see [the README](../README.md).
+For a visual introduction, open the [interactive workflow](https://langspan.dev/#demo),
+[launch film](https://langspan.dev/#film) or [recorded dashboard evidence](https://langspan.dev/#evidence).
 Examples below use the binary built from the LangSpan repository root.
 If you installed a release binary on your PATH, replace
 `./target/release/langspan` with `langspan`.
