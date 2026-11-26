@@ -70,8 +70,8 @@ function git(root, ...rest) {
   const run = spawnSync('git', ['-C', root, '-c', 'user.name=LangSpan test', '-c', 'user.email=test@example.invalid', ...rest]);
   if (run.status !== 0) fail('git ' + rest.join(' ') + ': ' + run.stderr);
 }
-function hook(stateDir, root, vendor, event) {
-  const run = spawnSync(binary, ['hook', vendor, '--state-dir', stateDir, '--workspace', 'work', '--root', root],
+function hook(stateDir, root, vendor, event, workspace = 'work') {
+  const run = spawnSync(binary, ['hook', vendor, '--state-dir', stateDir, '--workspace', workspace, '--root', root],
     { input: JSON.stringify(event) });
   if (run.status !== 0) fail('hook failed: ' + run.stderr);
 }
@@ -98,9 +98,20 @@ async function coordinator() {
   hook(stateDir, root, 'codex', patch('11111111-0000-4000-8000-00000000000b', 'c1', HOSTILE_FILE));
   hook(stateDir, root, 'codex', patch('22222222-0000-4000-8000-00000000000c', 'c2', HOSTILE_FILE));
   hook(stateDir, root, 'codex', patch('11111111-0000-4000-8000-00000000000b', 'c3', 'a.txt'));
-  for (const command of [['message', 'work', HOSTILE, HOSTILE_FILE], ['remember', 'work', HOSTILE, HOSTILE_FILE]]) {
-    const run = spawnSync(binary, ['--state-dir', stateDir, ...command, '--request-id', 'browser-' + command[0]]);
-    if (run.status !== 0) fail(command[0] + ' failed: ' + run.stderr);
+  // An unrelated repository with the same relative path: its note must not
+  // appear in the inspector for this repository's a.txt.
+  const other = path.join(base, 'other');
+  fs.mkdirSync(other);
+  fs.writeFileSync(path.join(other, 'a.txt'), 'hello\n');
+  git(other, 'init', '--quiet', '--initial-branch=main');
+  git(other, 'add', '.');
+  git(other, 'commit', '--quiet', '-m', 'fixture');
+  hook(stateDir, other, 'claude-code', { session_id: '33333333-0000-4000-8000-00000000000d', transcript_path: '/dev/null', cwd: other,
+    hook_event_name: 'UserPromptSubmit', prompt: 'other work' }, 'other');
+  for (const command of [['message', 'work', HOSTILE, HOSTILE_FILE], ['remember', 'work', HOSTILE, HOSTILE_FILE],
+    ['remember', 'work', 'NOTE-HERE', 'a.txt'], ['remember', 'other', 'NOTE-OTHER-REPO', 'a.txt']]) {
+    const run = spawnSync(binary, ['--state-dir', stateDir, ...command, '--request-id', 'browser-' + command[0] + '-' + command[1] + '-' + command[3]]);
+    if (run.status !== 0) fail(command.slice(0, 2).join(' ') + ' failed: ' + run.stderr);
   }
   return { stateDir, daemon };
 }
@@ -306,6 +317,11 @@ async function main() {
     const hostile = await p.eval("({ pwned: window.__pwned === undefined, scripts: document.scripts.length, imgs: document.images.length, text: document.body.textContent })");
     check(hostile.pwned && hostile.scripts === 1 && hostile.imgs === 0, 'live: hostile task, path and message text is never markup');
     check(hostile.text.includes('onerror'), 'live: the hostile text is shown as text');
+    // A path's inspector lists only its own repository's messages and notes.
+    const scoped = await p.eval("(() => { const head = [...document.querySelectorAll('.path-head')].find((h) => JSON.parse(h.dataset.key)[1] === 'a.txt');"
+      + " if (!head) return null; head.click(); const text = document.getElementById('inspector').textContent;"
+      + " return { here: text.includes('NOTE-HERE'), other: text.includes('NOTE-OTHER-REPO') }; })()");
+    check(scoped && scoped.here && !scoped.other, 'live: a path lists notes from its own repository only (' + JSON.stringify(scoped) + ')');
     const polled = await p.eval("performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/state')).length");
     await sleep(4500);
     const polledLater = await p.eval("performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/state')).length");

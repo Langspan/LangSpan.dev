@@ -969,7 +969,10 @@ function inspectPath(col, d) {
       n.by_session ? el('p', 'caveat', 'Last edited by ' + str(n.by_session) + ' (correlation, not proof)') : null,
       el('p', 'caveat', ago(n.age_ms) + '. A name match is advisory; it does not prove a break.')));
   }
-  const related = model.records.filter((r) => (r.kind === 'message' || r.kind === 'note') && r.paths.includes(col.path));
+  // Paths are relative, so a record matches only in the column's overlap
+  // group: linked worktrees share it, unrelated repositories do not.
+  const related = model.records.filter((r) => (r.kind === 'message' || r.kind === 'note') && r.paths.includes(col.path)
+    && model.workspaceGroup(r.object.workspace_id) === col.group);
   if (related.length) out.push(block('message', 'Messages and notes about it', add(el('div', 'items'), ...related.map((r) => add(button('item item-button', 'record', r.key), el('div', null, r.title), el('div', 'muted', r.detail))))));
   out.push(el('p', 'caveat', 'Checks apply to whole recorded trees, not single files.'));
   return out;

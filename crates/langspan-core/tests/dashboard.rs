@@ -613,6 +613,45 @@ fn overlap_members_name_their_sessions_by_stable_id_when_labels_collide() {
     );
 }
 
+/// The page scopes a path's messages and notes to the path's overlap group
+/// through each record's workspace. Notes on one relative path in a linked
+/// worktree and in an unrelated repository resolve to the right groups.
+#[test]
+fn notes_on_one_path_in_unrelated_repositories_resolve_to_different_groups() {
+    let mut state = ready();
+    workspace(&mut state, "work", "repo-one");
+    workspace(&mut state, "work-linked", "repo-one");
+    workspace(&mut state, "other", "repo-two");
+    for workspace in ["work", "work-linked", "other"] {
+        run(
+            &mut state,
+            &format!("note-{workspace}"),
+            Command::Remember {
+                workspace_id: workspace.into(),
+                author: None,
+                text: format!("about src/api.rs in {workspace}"),
+                paths: vec!["src/api.rs".into()],
+            },
+            100,
+        );
+    }
+    let d = view(&state, 2_000);
+    let group_of_note = |workspace: &str| {
+        let note = d
+            .notes
+            .iter()
+            .find(|n| n.workspace_id == workspace)
+            .unwrap_or_else(|| panic!("a note in {workspace}: {:?}", d.notes));
+        d.workspaces
+            .iter()
+            .find(|w| w.workspace_id == note.workspace_id)
+            .and_then(|w| w.group.clone())
+            .unwrap_or_else(|| panic!("a group for {workspace}"))
+    };
+    assert_eq!(group_of_note("work"), group_of_note("work-linked"));
+    assert_ne!(group_of_note("work"), group_of_note("other"));
+}
+
 /// Linked worktrees of one repository share relative paths, so their work
 /// on one file is one overlap; an unrelated repository's file with the same
 /// name is not. Holds stay in the physical checkout that admitted them.
