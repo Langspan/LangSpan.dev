@@ -96,8 +96,8 @@ lists its tools fails too.
 - `fixture/`: the fixture repository, a small Python package with its own tests.
 - `oracle.py`: the combined-integration oracle, run on the merged result.
 - `standin_agent.py`: the dry-run agent; it makes one of its task's fixed
-  edits and no model call.
-- `run-record.schema.json`: the driver's run record v5.
+  edits, or a repair round's, and no model call.
+- `run-record.schema.json`: the driver's run record v6.
 - `runner.py`: validate-only by default; opt-in real-process execution.
 - `manifest.schema.json`: command manifest v1.
 - `manifest.template.json`: owner-filled template for the three required arms.
@@ -193,7 +193,78 @@ the tool guard, and then:
 5. reads the coordinator's event log (LangSpan arm) for refusals, what
    followed them, interface notices delivered, and failed and recovered
    scans;
-6. writes `record.json`, validated against `run-record.schema.json`.
+6. when the combined result fails, runs one repair round (see
+   [Cost to a correct result](#cost-to-a-correct-result));
+7. writes `record.json`, validated against `run-record.schema.json`.
+
+### Cost to a correct result
+
+A trial's own cost covers only its sessions. When their combined tree is
+broken, someone still has to fix it, so the run's cost alone overstates how
+cheap an arm that leaves broken trees is. The cost to a correct result adds
+that repair.
+
+For a trial whose combined result fails, the driver runs one repair round
+after every session, the oracle and the coordinator have stopped:
+
+1. It builds a repair tree, `work/repair` on branch `bench/repair`: every
+   session's branch merged in session order, as in integration. A merge Git
+   refuses is committed as Git left it, conflict markers and all, so every
+   task's work is in the tree.
+2. It starts one session there, asked to make the combined result succeed.
+   Its prompt lists every task, the family's success definition and what the
+   oracle found: each failed task's detail, the semantic conflicts and the
+   end of the fixture tests' output, labelled as data and capped at 16 KiB.
+3. It runs the oracle on the repaired tree, with every branch counted as
+   merged and the changed helper read from the tree itself.
+
+The repair is the same job in every arm, so it runs with the `worktrees`
+arm's configuration everywhere: the same tools, denials, allowed list,
+strict MCP configuration, auto memory off and tool guard as every session,
+every file tool denied every session's checkout and the run's repositories,
+and no LangSpan hooks, skill or peer text. Its time limit is
+`--repair-time-limit` (default 1,200 seconds, at most 3,600).
+
+No repair runs when the combined result passed (`not_needed`), or, with the
+reason recorded (`not_run`), when the trial was refused or interrupted, the
+combined check did not run, the tool check failed, or the changer made no
+change (`change_not_made`, a trial counted apart). One round is all a trial
+gets; a repair that fails leaves the result incorrect.
+
+Read the record's `cost` this way:
+
+- `run`, `repair` and `total` each give tokens (input, output, cache
+  creation, cache read), turns and cost in US dollars. `run` is the sessions'
+  figures, the record's own `tokens.total`, `turns` and `cost_usd`. `repair`
+  is the repair session's, zero when no repair was needed. `total` is their
+  sum.
+- `correct_result` is `true` when the combined result passed, or its repair
+  did.
+- `tasks_accepted` counts the tasks accepted in the final tree, the repaired
+  one when a round ran, and `cost_per_accepted_task` is the total cost over
+  it.
+- A figure a session did not report is `null`, and so is every total that
+  needs it. A stand-in reports no cost, so a dry run's totals are `null`.
+
+Compare arms by `correct_result` first, then by total cost and cost per
+accepted task: an arm whose trials pass without repair spends only `run`,
+while an arm that leaves broken trees spends `run` plus `repair` and can
+still end with fewer accepted tasks.
+
+`driver.py summarize` prints these per arm, from the records of any number
+of trials:
+
+```sh
+python3 benchmarks/coordination/driver.py summarize /path/to/k1/*/
+```
+
+It groups trials by agent, family, session count, stagger and arm, so
+staggered trials stay apart, and gives per group the trials, those refused or
+`change_not_made` (counted, contributing no figure), those passed without
+repair, repairs run and succeeded, correct results, tasks total and accepted,
+the summed `run`, `repair` and `total` figures, the cost per accepted task,
+and `unreported`, the trials with no total cost. A group figure is `null`
+when any trial it counts lacks it. It reads version 6 records only.
 
 ### Staggered start
 
@@ -265,6 +336,12 @@ The stand-in agent makes one of the fixed edits its task defines:
   one-argument calls of `days_left`. Every other task makes the uninformed
   edit.
 
+In a repair round, whatever the mode, the stand-in makes every task's
+informed edit in the combined tree, in session order, and skips a
+replacement whose result is already there. It does not resolve Git's
+conflict markers, so a tree with a refused merge stays broken and its repair
+fails.
+
 The record's `standin_informed` says, per session, whether the information
 changed its edit, before or after its first write. In the LangSpan arm the stand-in runs the installed hooks
 with Claude Code's event shapes around each read and edit, so the run passes
@@ -301,7 +378,12 @@ the oracle tells the arms apart:
   `discovered_change` at N = 5 in every arm;
 - in `discovered_change` at N = 5, in every arm, `workaround` and `hedge` fail
   the changer's task, and the record reports `change_not_made` with no
-  dependent judged; `follow` and `ignore` report the change as `made`.
+  dependent judged and no repair round; `follow` and `ignore` report the
+  change as `made`;
+- every trial whose combined result fails, and only such a trial, gets a
+  repair round, except a `change_not_made` one: a broken call is repaired
+  (`repair.succeeded` is `true`), while a tree with Git's conflict markers,
+  or with the hedge's kept defaults, stays broken (`false`).
 
 A dry run shows that the harness and the oracle work; it says nothing about
 agents.
@@ -346,7 +428,9 @@ Only an operator starts these; the test suite never does. Each session is
 --disallowedTools ... --allowedTools ...`, with
 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` in its environment, built by
 `claude_argv` and `session_env` in `driver.py` with the limits of
-[The same limits in every arm](#the-same-limits-in-every-arm). The allowed
+[The same limits in every arm](#the-same-limits-in-every-arm). A repair
+session's command is the `worktrees` arm's in every arm, built by
+`repair_argv`. The allowed
 list (`CLAUDE_TOOLS`) holds reads and edits under the session's checkout, the
 fixture's tests and a few Git commands, plus a few `langspan` commands in the
 LangSpan arm. No flag or tool approves a permission prompt, and the driver
@@ -376,9 +460,11 @@ model turn.
 3. Keep every record, refused, failed and timed-out ones included.
 
 **Cost.** One trial starts N sessions, each bounded by `--time-limit` seconds
-(default 1,200, at most 3,600). The three families under all three arms cost
-3 × 3 × (2 + 5) = 63 sessions per repetition at N = 2 and 5, and 153 with
-N = 10 as well.
+(default 1,200, at most 3,600), and a trial whose combined result fails one
+repair session more, bounded by `--repair-time-limit`. The three families
+under all three arms cost 3 × 3 × (2 + 5) = 63 sessions per repetition at
+N = 2 and 5, and 153 with N = 10 as well, plus at most one repair session per
+trial, 18 or 27.
 
 ### Where records go
 
@@ -394,9 +480,10 @@ N = 10 as well.
 | `runner/RUN_ID/agent-sN.stdout` | Session N's transcript (`stream-json`, one JSON object per line: its tool list first, one result line per turn it ended, and the tool guard's verdict last); stderr beside it |
 | `runner/RUN_ID/oracle.json` | The oracle's verdict per task |
 | `runner/RUN_ID/notes/sN/`, `runner/RUN_ID/merge-sN.log` | Each branch's notes, and each merge's output |
+| `repair/plan.json`, `repair/integration.json`, `repair/runner/` | A trial with a repair round: the repair session's plan (its prompt and, for real agents, its command), what the oracle judged the repaired tree by, and the runner's journal, the session's transcript and the oracle's verdict, laid out as `runner/` is |
 | `events.jsonl`, `coordinator.log` | LangSpan arm: the coordinator's event log and its log |
 | `hooks-sN.jsonl` | LangSpan arm: every hook call of session N, with its time, event, tool call ID, the file a file tool names, exit code and what LangSpan returned (a briefing's text, a notice, a refusal) |
-| `work/` | The fixture repository, each session's checkout (in the LangSpan arm, worktrees of `work/shared`) and the integration worktree |
+| `work/` | The fixture repository, each session's checkout (in the LangSpan arm, worktrees of `work/shared`), the integration worktree and, after a repair round, the repair worktree `work/repair` |
 
 To check what LangSpan said before an action, find the action's tool call in
 the transcript and the same `tool_use_id` in `hooks-sN.jsonl`: its
@@ -427,10 +514,12 @@ record under `docs/evidence/`.
 | `coordinator_scans` | LangSpan arm: each `scan_failed` and `scan_recovered` event, with the session whose worktree it concerns and the failure's detail |
 | `tokens` | The sessions' reported usage, each session's `usage` summed over its result lines, and the sessions summed only when every session reported it; otherwise `partial` or `unknown` |
 | `notice_before_write` (per task) | LangSpan arm, a new caller or a dependent: `true` when its hook log shows LangSpan's notice of the change in its context before its first `Write`, `Edit` or `MultiEdit` of a file its task owns, `false` when the notice came with that write or later, or never; `null` in the other arms, for other tasks, or when the session wrote no such file. A write through a shell command is not counted. The alert LangSpan gives at a write is read with the write's result, so it does not count as before |
+| `repair` | The repair round: `status` (`not_needed`, `ran`, or `not_run` with its `reason`); for a round that ran, whether the oracle accepted the repaired tree (`succeeded`) and its verdict (`integrated_tests`, `tasks_accepted`, `fixture_tests`, `semantic_conflicts`), the sessions whose refused merge the tree keeps with conflict markers (`conflicted_merges`), and the repair session's figures, tool check and denials, taken as for a task; `null` when no round ran |
+| `cost` | The cost to a correct result: `run`, `repair` and `total` tokens, turns and cost, `correct_result`, `tasks_accepted` in the final tree and `cost_per_accepted_task` (see [Cost to a correct result](#cost-to-a-correct-result)) |
 | `stagger_s` | The `--stagger` the trial ran with; 0 when every session started at once |
 | `auto_memory` | `off` for Claude Code sessions, which all run with auto memory off; `not_applicable` for the stand-in |
 | `isolation` | `worktree` in the LangSpan arm, `clone` in the others |
-| `elapsed_s`, `total_elapsed_s` | Monotonic time of the session phase, and of the whole trial |
+| `elapsed_s`, `total_elapsed_s` | Monotonic time of the session phase, and of the whole trial, any repair round included |
 | `versions` | The agent CLI's `--version`, the requested model (`LANGSPAN_BENCH_MODEL`, or `null` for the configuration's default), the models sessions reported, the LangSpan commit and binary digest, Git and Python |
 | `ignored_options` | Options the run accepted but did not use: `--langspan` outside the LangSpan arm, `--standin-mode` with real agents, `LANGSPAN_BENCH_MODEL` with the stand-in |
 | `evidence` | Paths, relative to the output directory, of the journal, plan, integration, oracle verdict, event logs, kept notes and merge logs. Each task names its `transcript` and, in the LangSpan arm, its `hook_log` |
@@ -697,7 +786,9 @@ layouts, that each task line names what a peer needs, that no
 `discovered_change` prompt in any arm names the change, prompts, each arm's
 checkouts, every family oracle's success definition and the hedges it
 refuses, that the third pilot's workaround cannot find the expired items and
-is reported as `change_not_made`, notes and merge logs kept across a failed merge, denial kinds, a
+is reported as `change_not_made`, notes and merge logs kept across a failed merge, the repair tree
+with a refused merge's conflict markers, the repair session's command line, prompt and decision, the
+run, repair and total figures and the per-arm summary, denial kinds, a
 session with two result lines, scan events and interface notices, that every
 Claude Code session has auto memory off and the check that refuses shared
 memory, the stagger's validation and time limits, and the configuration
