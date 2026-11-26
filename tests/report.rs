@@ -499,7 +499,7 @@ fn claude_code_and_codex_sessions_are_counted_per_session_and_per_host() {
 fn report_requests_match_the_committed_golden_vector() {
     let wire = include_bytes!("../fixtures/report-request-v3.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
-    assert_eq!(request.version, PROTOCOL_VERSION);
+    assert_eq!(request.version, langspan::protocol::OLDEST_PROTOCOL_VERSION);
     assert_eq!(langspan::protocol::encode(&request).unwrap(), wire);
     assert!(matches!(
         &request.command,

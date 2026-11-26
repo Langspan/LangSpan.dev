@@ -6,7 +6,7 @@
 
 use langspan_core::{
     ClockAnchor, Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event,
-    HISTORY_EVENTS, HistoryQuery, LeaseStatus, Outcome, RecordedEvent, ReportQuery,
+    HISTORY_EVENTS, HISTORY_MOVES, HistoryQuery, LeaseStatus, Outcome, RecordedEvent, ReportQuery,
     SentPublication, State, StatusRecord, TODAY_EVENTS, TodayQuery, TodayWindow, apply,
     dashboard_denials, decide, definition_history, expiry_events, shrink_status, status_records,
 };
@@ -180,6 +180,29 @@ const HISTORY_FOLLOWING: &str = concat!(
     history_kinds!(),
     " AND json_extract(event_json, '$.type') IN ('remembered', 'forgotten', 'message_sent')
      ORDER BY seq LIMIT ?2"
+);
+
+/// The notices of files moved whole (roadmap D7): each change of one has
+/// `file_moved`, so the first says it.
+macro_rules! moved_kind {
+    () => {
+        "CASE WHEN json_valid(event_json) THEN json_extract(event_json, '$.type') = 'interface_changed'
+         AND json_extract(event_json, '$.notice.changes[0].evidence') = 'file_moved' END"
+    };
+}
+
+/// A partial index of those notices, so every page of a history follows a
+/// moved file whatever its cursor.
+const MOVES_INDEX: &str = concat!(
+    "CREATE INDEX IF NOT EXISTS events_moves ON events(seq) WHERE ",
+    moved_kind!()
+);
+
+/// The newest of those notices.
+const MOVES_LOOKUP: &str = concat!(
+    "SELECT seq, event_json FROM events WHERE ",
+    moved_kind!(),
+    " ORDER BY seq DESC LIMIT ?1"
 );
 
 /// The forgettings, one row per forgotten note.
@@ -470,6 +493,7 @@ impl Store {
         connection.execute_batch(HISTORY_INDEX)?;
         connection.execute_batch(FORGOTTEN_INDEX)?;
         connection.execute_batch(RETRACTED_INDEX)?;
+        connection.execute_batch(MOVES_INDEX)?;
 
         if version < 4 {
             // Version 4 adds retention: each record's wall-clock time and the
@@ -1671,6 +1695,10 @@ impl Store {
             events.extend(rows_of(statement.query([message_id])?)?);
         }
         drop(statement);
+        // A moved file's earlier paths hold on every page (roadmap D7).
+        let mut statement = self.connection.prepare_cached(MOVES_LOOKUP)?;
+        let moves = rows_of(statement.query([i64::try_from(HISTORY_MOVES)?])?)?;
+        drop(statement);
         let mut anchors = Vec::new();
         let mut statement = self.connection.prepare_cached(ANCHORS)?;
         let mut rows = statement.query([])?;
@@ -1687,6 +1715,7 @@ impl Store {
             limit,
             before_seq,
             events: &events,
+            moves: &moves,
             anchors: &anchors,
             now_ms,
         };
@@ -2691,6 +2720,7 @@ mod tests {
             (plan(HISTORY_BEFORE, &[1_000_000, 10]), "events_history"),
             (plan(HISTORY_FOLLOWING, &[1, 10]), "events_history"),
             (plan(ANCHORS, &[]), "events_generation_marker"),
+            (plan(MOVES_LOOKUP, &[10]), "events_moves"),
         ];
         let forgetting: Vec<String> = store
             .connection
@@ -2777,6 +2807,10 @@ mod tests {
                                 before_count: None,
                                 after_count: None,
                                 after_name: None,
+                                before_name: None,
+                                evidence: None,
+                                before_path: None,
+                                private: false,
                             }],
                             dependents: Vec::new(),
                             elsewhere: Vec::new(),
@@ -2844,6 +2878,95 @@ mod tests {
         );
     }
 
+    /// Roadmap D7: the next page of a moved file's history, asked by its new
+    /// path from before the move, still includes what was recorded under
+    /// the old path: the move is read whatever the page's cursor.
+    #[test]
+    fn the_next_page_of_a_moved_files_history_keeps_its_old_path() {
+        use langspan_core::{InterfaceChange, InterfaceNotice};
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-history-moved-page-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        let register = Command::WorkspaceRegister {
+            workspace_id: "work".into(),
+            root: directory.to_string_lossy().into_owned(),
+        };
+        store.execute("w", &register, &register, 0).unwrap();
+        let generation = store.state.generation;
+        let notice = |id: &str, path: &str, change: InterfaceChange| Event::InterfaceChanged {
+            notice: InterfaceNotice {
+                notice_id: id.into(),
+                workspace_id: "work".into(),
+                path: path.into(),
+                changes: vec![change],
+                dependents: Vec::new(),
+                elsewhere: Vec::new(),
+                by_session: None,
+                at_ms: 1_000,
+                generation,
+            },
+        };
+        let changed = |after: &str| InterfaceChange {
+            name: "save".into(),
+            kind: "function".into(),
+            change: "signature_changed".into(),
+            before: Some("fn save()".into()),
+            after: Some(after.into()),
+            before_arity: None,
+            after_arity: None,
+            before_count: None,
+            after_count: None,
+            after_name: None,
+            before_name: None,
+            evidence: None,
+            before_path: None,
+            private: false,
+        };
+        let moved = InterfaceChange {
+            change: "renamed".into(),
+            before: Some("fn save(b: u32)".into()),
+            after_name: Some("save".into()),
+            before_name: Some("save".into()),
+            evidence: Some("file_moved".into()),
+            before_path: Some("src/a.rs".into()),
+            ..changed("fn save(b: u32)")
+        };
+        store
+            .commit(
+                &[
+                    notice("n-1", "src/a.rs", changed("fn save(a: u32)")),
+                    notice("n-2", "src/a.rs", changed("fn save(b: u32)")),
+                    notice("n-3", "src/b.rs", moved),
+                ],
+                None,
+            )
+            .unwrap();
+        let page = |before_seq| match store
+            .history(("work", "save", Some("src/b.rs")), 1, before_seq, 1_000)
+            .unwrap()
+        {
+            Outcome::History { history } => history,
+            outcome => panic!("{outcome:?}"),
+        };
+        let mut seen = Vec::new();
+        let mut before_seq = None;
+        loop {
+            let history = page(before_seq);
+            seen.extend(history.entries.iter().map(|entry| entry.notice_id.clone()));
+            match history.next_seq {
+                Some(next) if seen.len() < 10 => before_seq = Some(next),
+                _ => break,
+            }
+        }
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(seen, ["n-3", "n-2", "n-1"]);
+    }
+
     /// A withdrawn message's text never comes back in a history, whether
     /// its withdrawal is within the events one answer reads or behind more
     /// following events than that.
@@ -2904,6 +3027,10 @@ mod tests {
                                     before_count: None,
                                     after_count: None,
                                     after_name: None,
+                                    before_name: None,
+                                    evidence: None,
+                                    before_path: None,
+                                    private: false,
                                 }],
                                 dependents: Vec::new(),
                                 elsewhere: Vec::new(),
