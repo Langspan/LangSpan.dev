@@ -26,7 +26,7 @@ about graph depth waits.
 | D4 | A definition's history with rationales and reverted attempts | Raw `events` and `recap` | Not now |
 | D5 | Graph export and import | None | Not now |
 | D6 | 11 languages | 4 languages | Not now. A grammar is a new C-built dependency, each with a row in [dependencies](../dependencies.md) |
-| D7, B10 (renames) | Renames that keep history | A rename is a removal | Not now. Landing's adaptation to landed renames (track L7) is separate and in the bar |
+| D7, B10 (renames) | Renames that keep history | A rename that changes only the name, in one file, is one `renamed` notice, told at a write calling the old name; any other rename is a removal | B10 built 25 November 2026 ([issue #29](https://github.com/Langspan/LangSpan.dev/issues/29)), ahead of the condition below; see [ADR 0029](0029-break-alerts-at-write-time.md). Not yet observed on a host. D7 (history that follows the new name, renames across files) is not now. Landing's adaptation to landed renames (track L7) is separate and in the bar |
 | D8 | Parse states and a blind-spots query | Coverage on every answer, with `blind_in_scope`; whole-file fallback; `doctor`; `graph blind-spots` | Built 25 November 2026 ([issue #57](https://github.com/Langspan/LangSpan.dev/issues/57)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Not yet called on a host |
 | D9 | Symbol-level merge simulation | Git-level combine plus a real check (ADR 0007) | Not now. A real check of the combined tree is the stronger evidence |
 | C2 | Prompt briefing ranked with dependents | Unranked names | Not now |

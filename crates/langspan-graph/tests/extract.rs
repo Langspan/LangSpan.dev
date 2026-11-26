@@ -150,7 +150,8 @@ fn a_signature_change_a_removal_and_a_rename_are_told_apart_from_a_body_edit() {
         }
     );
     assert_eq!(find("gate").change, Change::Removed);
-    // A rename is a removal and an addition; no link between them is claimed.
+    // Without block digests a rename is a removal and an addition; no link
+    // between them is claimed (renames with digests: `tests/renames.rs`).
     assert_eq!(find("old_name").change, Change::Removed);
     assert_eq!(find("new_name").change, Change::Added);
     assert!(
