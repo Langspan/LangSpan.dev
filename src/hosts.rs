@@ -159,7 +159,7 @@ fn user_install_of(
     }
     let server = match vendor {
         Vendor::ClaudeCode | Vendor::Cursor | Vendor::Gemini | Vendor::Antigravity => {
-            match install::read(&files.mcp).map_err(|e| e.to_string())? {
+            match install::read_mcp(vendor, &files.mcp).map_err(|e| e.to_string())? {
                 None => None,
                 Some(config) => config
                     .get("mcpServers")
