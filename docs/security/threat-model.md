@@ -346,6 +346,25 @@ comparison) are unchanged.
 | Denial of service | The same 8 MiB event bound and 1.5 s budget; the installed timeout is 5,000 ms. At most 4,096 calls on the same target are numbered per session; the next gets no decision. A session's markers are removed at `SessionEnd`, and directories older than a week when another session first makes a call. |
 | Elevation of privilege | The hook never answers `allow` and never exits 2. Every outcome other than a deny prints `{}`, including a hook that cannot start or panics: empty stdout would make Gemini parse the stderr log as the answer, and it reads plain text there as `allow`. The MCP entry does not set `trust`, so it bypasses none of Gemini's confirmations. With folder trust on, project hooks load only in a folder Gemini trusts; Gemini's documentation says it warns before a new or changed project hook first runs. |
 
+## Antigravity
+
+[ADR 0035](../adr/0035-antigravity-adapter.md) adds a fifth host. Its hook is
+a new command in `.agents/hooks.json` or `~/.gemini/config/hooks.json`, its MCP
+entry a new server in `.agents/mcp_config.json` or
+`~/.gemini/config/mcp_config.json`, its skill a new rule file, and its events
+a new input. Antigravity's App, CLI and IDE all read these files, so one
+install reaches all three. The other boundaries (socket, store, shell
+comparison) are unchanged.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | An event does not say which event it is; the installed command says, with `--event`, and an event name LangSpan does not register stops the hook with `{}`. A tool call is identified by the conversation's `conversationId` and the call's `stepIdx`. Nothing authenticates either, as with every hook event: a same-user process can forge an event under another conversation's ID. If Antigravity were to give two calls of one conversation the same `stepIdx`, the second would be answered from the first's receipt; that `PreToolUse` and `PostToolUse` share it is unverified. |
+| Tampering | Tool arguments and `lastUserInput` are model or user text: data, parsed into typed fields, never run. A deny's reason is the same labelled, capped text the other hosts get; the briefing goes out as a system message in `injectSteps`, labelled as data, not instructions. Antigravity keeps injected steps in the conversation's history, so a briefing is sent only when it changed. LangSpan's entries live in its own hook definition, named `langspan`; the owner's definitions are not read for anything but their entries' ownership markers, and are written back unchanged. |
+| Repudiation | Antigravity events produce the same events and receipts as the other hosts, under sessions named `antigravity.<conversationId>`. `/hooks` in Antigravity's CLI lists LangSpan's definition by its name. |
+| Information disclosure | The hook reads `lastUserInput` only on the first model call of an execution, for the prompt summary (unless `--prompt-summary off`) and the code briefing, as other hosts' prompts. It does not read the transcript or artifact directory the event names. The MCP entry carries no `env` or `headers`. |
+| Denial of service | The same 8 MiB event bound and 1.5 s budget; the installed timeout is 5 seconds (Antigravity's default is 30). `PreInvocation` runs before every model call, so each costs one coordinator round trip within that budget. |
+| Elevation of privilege | The hook never answers `allow`, `auto_approve`, `ask` or any other permission, never uses `overwrite` or `permissionOverrides`, and never exits 2. Every outcome other than a deny prints `{}`, including a hook that cannot start or panics. What Antigravity does with a `PreToolUse` answer that lacks its documented-required `decision` is not documented; it is checked on the first real-host run. The MCP entry is a plain stdio server, so Antigravity's own MCP permission rules apply to its tools. |
+
 ## Cross-machine publication
 
 [ADR 0006](../adr/0006-remote-awareness-through-git-refs.md) is the first flow
@@ -462,6 +481,8 @@ A message is text one session or the owner addresses to another session of the s
 | Information disclosure | A message to one session is readable by every local session through recap until acknowledged, and in the event log afterwards; `messages show` (MCP `langspan_show_message`) reads one from that log by ID, the same data through the same owner-only socket, so it adds no boundary. A line cut in a briefing names that command with the workspace and message IDs, which are validated identifiers, not message text. Messages are never published to teammates. The tool descriptions say not to send secrets. |
 | Denial of service | 64 unacknowledged messages per workspace, oldest dropped: a sender can push others' messages out before they are read. At most four messages, within 1,500 rendered bytes (796 beside an uncoordinated-change notice), per briefing; the rest wait. A message for everyone is held until every session of the current daemon generation has it, or until dropped. |
 | Elevation of privilege | A message grants nothing: no lease, intent or admission changes, and a handoff transfers no lease. Acknowledgement only stops delivery. |
+
+Asking who was given a message (`langspan messages status`, `langspan_message_status`, issue #67) adds no boundary: it reads, through the same owner-only socket, the acknowledgements that `events` and `status --all` already expose, and returns session IDs, states and ages, never message text. Its answer is bounded to 64 recipients and reads at most 4,096 acknowledgement rows. The daemon sets `via` from the command that delivered the message. A local process that can reach the socket can make a message look delivered, as it could before, by acknowledging it or by sending a delivering `brief` with the `mcp` flag; the socket's owner-only mode remains the boundary.
 
 Withdrawing a message (`langspan messages retract`, `langspan_retract_message`, issue #66) adds no boundary: it uses the same socket and the same session labels.
 
@@ -667,6 +688,21 @@ missed between scans. Branch-head commit/tree observations are not complete
 change records, and content digests are not evidence of authorship. Local
 monotonic observation times require their daemon generation; a prior-generation
 record must not be presented as a current observation.
+
+## Coordination benchmark driver
+
+`benchmarks/coordination/driver.py` (issue #172) is an operator tool, not part
+of the product. It adds three boundaries: it launches agent CLIs, it imports
+and runs the code those agents wrote, and it reads the operator's Claude Code
+`settings.json`. Its test suite starts only the stand-in agent, never a model.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Elevation of privilege**: a benchmark session runs with more authority than the operator granted | Each session runs `claude -p --permission-mode default` with an explicit `--allowedTools` list: reads and edits under its own worktree, the fixture's tests and a few Git commands (and, in the LangSpan arm, a few `langspan` commands). No flag or tool approves a permission prompt; a call outside the list is refused by Claude Code and counted from `permission_denials`. A test checks the command line. | `Glob` and `Grep` are not limited to the worktree. An allowed `git commit` can run the fixture repository's hooks; the driver creates that repository and installs none. |
+| **Tampering**: agent-written code runs during integration | The oracle runs in a separate interpreter (`-I` for the oracle, `-E -s` for the fixture tests) inside the integration worktree, with a time limit, after every session has stopped. | The code runs as the operator, like any agent's tests: run the benchmark in an account or machine where that is acceptable. |
+| **Tampering**: one arm's coordination leaks into another | The driver refuses a real run when the operator's `CLAUDE_CONFIG_DIR` has user-level LangSpan hooks or the LangSpan skill. The LangSpan arm's hooks and skill go into each worktree's ignored `.claude/`, and its coordinator has its own temporary state directory, removed after the run. | A LangSpan MCP entry in the configuration's `.claude.json` is not checked, because that file also holds account state; the README tells the operator to use a configuration without one. |
+| **Information disclosure**: credentials or private text in a record | The driver never reads credentials: it reads only `settings.json` and the skill path from the configuration directory, and passes the directory to Claude Code, which signs in itself. Records and transcripts stay in the operator's output directory (`0700`), outside the repository or in its ignored `runs/`. | Transcripts can contain anything a model wrote; review them before committing any under `docs/evidence/`. |
+| **Denial of service**: a session that never ends | `runner.py` bounds every session by `--time-limit` (at most 3,600 seconds) and stops its whole process group. | A process that leaves its group is not found. |
 
 ## Release pipeline
 

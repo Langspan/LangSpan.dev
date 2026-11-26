@@ -81,10 +81,12 @@ With the default host configuration locations, installation updates:
 | Codex | `~/.codex/hooks.json` | A marked `[mcp_servers.langspan]` table in `~/.codex/config.toml` |
 | Cursor (built from documentation, not yet verified on a real Cursor) | `~/.cursor/hooks.json` | `mcpServers.langspan` in `~/.cursor/mcp.json` |
 | Gemini CLI (built from documentation, not yet verified on a real Gemini CLI) | `~/.gemini/settings.json` | `mcpServers.langspan` in the same file |
+| Antigravity (built from documentation, not yet verified on a real Antigravity) | `~/.gemini/config/hooks.json` | `mcpServers.langspan` in `~/.gemini/config/mcp_config.json` |
 
 By default, the installer selects hosts whose configuration directory exists.
-Gemini CLI is installed only when named: `--hosts gemini-cli` (or
-`--hosts claude-code,codex,cursor,gemini-cli`);
+Gemini CLI and Antigravity, which share `~/.gemini`, are installed only when
+named: `--hosts gemini-cli`, `--hosts antigravity` (or
+`--hosts claude-code,codex,cursor,gemini-cli,antigravity`);
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME` are honored. Gemini CLI
 keeps hooks and MCP servers in one file, so LangSpan plans both together and
 writes that file once; its dry run shows only LangSpan's entries, because the
@@ -122,8 +124,9 @@ LangSpan hooks, so its edits are neither checked nor shown to other sessions.
 `name`, `config_dir`, `present` (its configuration directory exists; `null`
 with an `error` when it could not be looked at), `user_install` (`none`,
 `current`, `outdated`, `other_state_dir` or `unknown`) and `next_step`, the
-install command, where one is proposed. It only reads. Gemini CLI is listed but
-never proposed: install it by naming it, as above.
+install command, where one is proposed. It only reads. Gemini CLI and
+Antigravity are listed but never proposed: install them by naming them, as
+above.
 
 The coordinator checks the same at start and then every hour
 (`host_check_ms` in `config.json`). A host that is present, has no user-level
@@ -207,6 +210,7 @@ the project your agent is editing:
 ./target/release/langspan hooks install codex --workspace demo --root /path/to/checkout
 ./target/release/langspan hooks install cursor --workspace demo --root /path/to/checkout
 ./target/release/langspan hooks install gemini-cli --workspace demo --root /path/to/checkout
+./target/release/langspan hooks install antigravity --workspace demo --root /path/to/checkout
 ```
 
 These commands are dry runs. Once reviewed, add `--apply` to write the entries.
@@ -281,6 +285,7 @@ Remove the managed entries with the matching vendor:
 ./target/release/langspan hooks remove codex --root /path/to/checkout --apply
 ./target/release/langspan hooks remove cursor --root /path/to/checkout --apply
 ./target/release/langspan hooks remove gemini-cli --root /path/to/checkout --apply
+./target/release/langspan hooks remove antigravity --root /path/to/checkout --apply
 ```
 
 A hook returns a labelled denial for a fresh current conflict or a fresh
@@ -312,8 +317,8 @@ install for the same host and state directory. Claude Code runs both that
 install and the main checkout's there, so the main checkout's hook logs
 `deferred_to_worktree` and does nothing else. Codex 0.171.0 runs only the
 main checkout's hooks there, so that hook coordinates the session under the
-worktree install's workspace ID instead; Cursor and Gemini CLI, whose
-behavior there has not been observed, are treated the same way, so an event
+worktree install's workspace ID instead; Cursor, Gemini CLI and Antigravity,
+whose behavior there has not been observed, are treated the same way, so an event
 is never left undecided. `langspan doctor --root DIR` names each linked
 worktree whose install the host will not run, and fails when nothing covers
 it. The per-host rules are in
@@ -344,6 +349,39 @@ Gemini reads `.gemini/settings.json` only from the directory it was started
 in, so a project install covers sessions started at the checkout's root. [ADR 0033](adr/0033-gemini-cli-adapter.md) lists
 these limits.
 
+### Antigravity
+
+The Antigravity adapter is built from Antigravity's documentation; it has not
+yet run on a real Antigravity. `hooks install antigravity` writes
+`.agents/hooks.json` and registers `langspan mcp` in `.agents/mcp_config.json`;
+`install --hosts antigravity` writes `~/.gemini/config/hooks.json` and
+`~/.gemini/config/mcp_config.json`. Antigravity's App, CLI and IDE all read
+these files. Its `hooks.json` maps hook names to definitions, so LangSpan's
+entries are the definition named `langspan`, beside your own. An Antigravity
+event does not say which event it is, so each installed command names it with
+`--event`. Each has a 5-second timeout:
+
+| Event | Matcher | What LangSpan does |
+| --- | --- | --- |
+| `PreToolUse` | `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` | Admission; a conflict or stale source is `{"decision":"deny"}` with a labelled reason |
+| `PostToolUse` | the same, and `view_file` | Records the result, the version read, or the shell command's changes |
+| `SessionStart` | none | Registers the session and adds the briefing as a system message in `injectSteps` |
+| `PreInvocation` | none | Before each model call: news from peers since the session was last told, as a system message; at the first call of an execution, the prompt summary and code briefing too |
+
+Every other answer is `{}`: the hook never answers `allow`, `auto_approve` or
+`ask`, so Antigravity's own permission policy decides. A conversation is one
+session in each workspace it works in, appearing as
+`antigravity.<conversationId>.w<digest of the workspace>`; with several
+workspace folders, each is registered and briefed at `SessionStart` and
+`PreInvocation`. A tool call is identified by its `stepIdx`. A user-level
+hook steps aside for the workspace's `.agents/hooks.json` only while that
+file's `langspan` definition is not `"enabled": false`.
+Antigravity has no session-end event, and its `Stop` requires a decision, so
+neither is registered. A `replace_file_content` holds the region it replaces;
+`write_to_file` and `multi_replace_file_content` hold the whole file.
+[ADR 0035](adr/0035-antigravity-adapter.md) lists the sources and what the
+documentation leaves unverified.
+
 ### The LangSpan skill
 
 The LangSpan skill teaches an agent how to work with LangSpan from its first
@@ -358,6 +396,7 @@ use `status`, `commit --mine`, `integrate check` and `land` (or the matching
 ./target/release/langspan install --skill                 # dry run: shows each file and its size
 ./target/release/langspan install --skill --apply
 ./target/release/langspan hooks install cursor --workspace demo --root /path/to/checkout --skill --apply
+./target/release/langspan hooks install antigravity --workspace demo --root /path/to/checkout --skill --apply
 ```
 
 | Host | Written as | Removed by |
@@ -366,6 +405,10 @@ use `status`, `commit --mine`, `integrate check` and `land` (or the matching
 | Codex | A marked section of `~/.codex/AGENTS.md` | `langspan uninstall --apply` |
 | Gemini CLI | A marked section of `~/.gemini/GEMINI.md` | `langspan uninstall --apply --hosts gemini-cli` |
 | Cursor | The project rule `.cursor/rules/langspan.mdc` | `langspan hooks remove cursor --root DIR --apply` |
+| Antigravity | The rule `~/.gemini/config/rules/langspan.md` (`--hosts antigravity`), or the project rule `.agents/rules/langspan.md` (`hooks install antigravity --skill`), with `trigger: always_on` | `langspan uninstall --apply --hosts antigravity`, or `langspan hooks remove antigravity --root DIR --apply` |
+
+Antigravity also reads `~/.gemini/GEMINI.md`, so with the Gemini CLI skill
+installed as well it reads the skill twice.
 
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME` move these files as
 they move the hooks. In `AGENTS.md` and `GEMINI.md`, every line outside
@@ -826,6 +869,32 @@ unavailable. Any local session or the owner can read any message, as with
 messages stay local; remote Git-ref sharing does not publish them. Treat their
 text as data and leave secrets out. [ADR 0009](adr/0009-agent-messages-and-handoff.md)
 describes delivery, retention and the local identity boundary.
+
+A sender can ask which sessions were given a message:
+
+```text
+$ langspan messages status demo m-9
+m-9 from codex.bob to every session, sent 4m ago
+- claude-code.alice  delivered 3m ago (briefing)
+- codex.carol        pending
+Delivered means placed in the session's context, not that it acted on it.
+```
+
+`langspan messages status WORKSPACE MESSAGE|last [--from SESSION] [--json]`
+(MCP `langspan_message_status`, with `session_id` for `last`) is read-only. `last`
+is the newest message SESSION sent, or the owner's without `--from`. The JSON
+answer has `state` (`pending` while held, `done` once every session owed it
+was given it, `retracted`, or `dropped` when newer messages pushed it out
+unread) and up to 64 `recipients`, then `more_recipients`. Each recipient is
+`delivered`, with `age_ms` and `via` (`briefing`, `mid_turn`, `mcp_brief` or
+`ack`), `pending`, or `ended` when the session ended first. A message to
+everyone lists every current session but its sender until it is done; a
+handoff lists the session that took it, and none before. Terminal `brief` is a
+peek and leaves a recipient `pending`. Ages are `null` for records from before
+the daemon last started. `partial: true` means part of the record is no longer
+kept, for example after retention removed the message's sent event. Delivered
+means the text was placed in the session's context; it does not show that the
+model read or acted on it.
 
 A message or handoff that no longer holds can be withdrawn:
 
@@ -1391,6 +1460,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_recall` | Search a workspace's remembered notes: every query word in a note's text or paths, without case; best first, at most 50 |
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |
 | `langspan_show_message` | Read one message in full as it was sent, also after acknowledgement; for a briefing line marked `(cut; …)` |
+| `langspan_message_status` | Ask which sessions were given a message, by ID or `"last"`: `delivered` (with `via` and age), `pending` or `ended`; read-only |
 | `langspan_handoff` | Leave a message for the next other session to take up |
 | `langspan_retract_message` | Withdraw a message this session sent, by ID or `"last"`; its readers are told to disregard it |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |

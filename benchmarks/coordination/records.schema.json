@@ -101,6 +101,8 @@
         },
         "arm": {
           "enum": [
+            "worktrees",
+            "awareness_only",
             "no_tool",
             "coarse_claims",
             "langspan",
@@ -133,8 +135,8 @@
           "type": "array",
           "items": {
             "enum": [
-              "no_tool",
-              "coarse_claims",
+              "worktrees",
+              "awareness_only",
               "langspan"
             ]
           }
