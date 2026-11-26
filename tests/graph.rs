@@ -4482,8 +4482,12 @@ fn max_hops_outside_one_to_six_is_refused_with_the_allowed_range() {
     assert_eq!(code, 0, "{outcome:#}");
 }
 
-/// Issue #52, sixth criterion: a search that reaches its 10,000-edge bound
-/// stops there and says `truncated: true`.
+/// Issue #52, sixth criterion: a search past its 10,000-edge bound stops at
+/// a bound and says `truncated: true`. The daemon's 500 ms budget can stop
+/// it before the edge bound on a loaded machine (macOS CI did, at 8,503),
+/// so this checks only that it never goes past 10,000; the exact count is
+/// `a_search_never_late_stops_at_exactly_its_edge_bound` in `src/graph.rs`,
+/// with the clock held still.
 #[test]
 fn a_path_search_capped_at_its_edge_bound_says_truncated() {
     let mut hub = String::from("def hub():\n");
@@ -4508,7 +4512,8 @@ fn a_path_search_capped_at_its_edge_bound_says_truncated() {
     };
     assert_eq!(outcome["paths"], json!([]), "{outcome:#}");
     assert_eq!(outcome["truncated"], true, "{outcome:#}");
-    assert_eq!(outcome["edges_visited"], 10_000, "{outcome:#}");
+    let edges = outcome["edges_visited"].as_u64().unwrap_or(0);
+    assert!((1..=10_000).contains(&edges), "{outcome:#}");
     let (_, human) = w.cli(&["graph", "path", "app", "hub", "goal"]);
     assert!(
         human.contains("The search stopped at a bound; a chain may still exist."),

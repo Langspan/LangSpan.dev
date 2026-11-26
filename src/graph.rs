@@ -3822,6 +3822,36 @@ mod review_regressions {
         assert!(edges == 3 && !truncated);
     }
 
+    /// Issue #52, sixth criterion, with the clock held still: a search with
+    /// more edges than `MAX_PATH_EDGES` stops at exactly that many and says
+    /// `truncated`. The daemon's time budget can stop the same search sooner
+    /// on a loaded machine, so the exact count is checked here.
+    #[test]
+    fn a_search_never_late_stops_at_exactly_its_edge_bound() {
+        let (dir, mut index) = setup("paths-edge-bound");
+        let mut hub = String::from("def hub():\n");
+        for n in 0..=langspan_core::MAX_PATH_EDGES {
+            hub.push_str(&format!("    f{n}()\n"));
+        }
+        let files = [
+            ("hub.py", hub.as_str()),
+            ("goal.py", "def goal():\n    return 1\n"),
+        ];
+        pass(&dir, &mut index, &files);
+        let (paths, edges, truncated) = index
+            .symbol_paths_by(
+                "w",
+                ("hub", "goal"),
+                4,
+                langspan_core::MAX_PATH_EDGES,
+                || false,
+            )
+            .unwrap();
+        assert!(paths.is_empty(), "{paths:?}");
+        assert_eq!(edges, langspan_core::MAX_PATH_EDGES);
+        assert!(truncated, "the edge bound cut the search");
+    }
+
     #[test]
     fn every_imported_definition_is_reached_however_many_others_share_the_name() {
         let (dir, mut index) = setup("paths-imported-past-bound");
