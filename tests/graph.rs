@@ -2478,6 +2478,355 @@ fn a_head_version_that_could_not_be_read_is_compared_on_a_later_pass() {
     });
 }
 
+/// A second daemon with its own state directory on the same checkout, as a
+/// fresh clone of the state would be (roadmap D5).
+struct Second {
+    state: PathBuf,
+    daemon: Option<Child>,
+}
+
+impl Second {
+    /// `files_per_pass` 0 keeps its indexer from parsing anything, so what
+    /// it answers can only have come from an import.
+    fn start(w: &World, files_per_pass: Option<usize>) -> Self {
+        let state = w.base.join("state2");
+        if !state.exists() {
+            fs::create_dir(&state).unwrap();
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut daemon = Process::new(env!("CARGO_BIN_EXE_langspan"));
+        daemon
+            .args(["daemon", "--state-dir"])
+            .arg(&state)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(files) = files_per_pass {
+            daemon.env("LANGSPAN_TEST_INDEX_FILES_PER_PASS", files.to_string());
+        }
+        let second = Self {
+            state,
+            daemon: Some(daemon.spawn().unwrap()),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while second.cli(&["status"]).0 != 0 {
+            assert!(Instant::now() < deadline, "daemon did not become ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let root = w.work();
+        let (code, text, _) = second.cli(&[
+            "workspace",
+            "add",
+            "app",
+            root.to_str().unwrap(),
+            "--request-id",
+            "ws",
+        ]);
+        assert_eq!(code, 0, "{text}");
+        second
+    }
+    fn stop(&mut self) {
+        if let Some(mut child) = self.daemon.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+    fn cli(&self, args: &[&str]) -> (i32, String, String) {
+        let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .arg("--state-dir")
+            .arg(&self.state)
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            output.status.code().unwrap(),
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    }
+    fn outcome(&self, args: &[&str]) -> Value {
+        let mut args = args.to_vec();
+        args.push("--json");
+        let (_, text, stderr) = self.cli(&args);
+        serde_json::from_str::<Value>(&text).unwrap_or_else(|_| panic!("{text}{stderr}"))["outcome"]
+            .clone()
+    }
+    /// An import, retried until the daemon's first scan is in.
+    fn import(&self, file: &Path, apply: bool) -> Value {
+        let deadline = Instant::now() + WAIT;
+        let mut args = vec!["graph", "import", "app", "--in", file.to_str().unwrap()];
+        if apply {
+            args.push("--apply");
+        }
+        loop {
+            let outcome = self.outcome(&args);
+            if outcome["message"]
+                .as_str()
+                .is_none_or(|message| !message.contains("no complete scan yet"))
+            {
+                return outcome;
+            }
+            assert!(Instant::now() < deadline, "never scanned: {outcome:#}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    fn interface_events(&self) -> usize {
+        let (_, text, _) = self.cli(&["events", "--limit", "1000", "--json"]);
+        text.matches("interface_changed").count()
+    }
+}
+
+impl Drop for Second {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// `graph symbol --detail` for every name the fixture defines.
+fn answers(outcome: impl Fn(&[&str]) -> Value) -> Vec<Value> {
+    ["upload", "gate", "main", "unrelated"]
+        .iter()
+        .map(|name| outcome(&["graph", "symbol", "app", name, "--detail"]))
+        .collect()
+}
+
+fn export(w: &World, name: &str) -> PathBuf {
+    let file = w.base.join(name);
+    let (code, text) = w.cli(&["graph", "export", "app", "--out", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("Exported 3 files (0 partial"), "{text}");
+    file
+}
+
+#[test]
+fn an_index_imported_into_a_fresh_state_directory_answers_the_same_without_a_parse() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let file = export(&w, "index.jsonl");
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let text = fs::read_to_string(&file).unwrap();
+    let header: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(header["format"], "langspan-source-index");
+    assert_eq!(header["workspace_root"], "work", "the root's name only");
+    assert!(!text.contains(w.base.to_str().unwrap()), "no absolute path");
+    assert!(!text.contains("a.txt"), "no source text beyond signatures");
+    // An export never replaces a file.
+    let (code, _) = w.cli(&["graph", "export", "app", "--out", file.to_str().unwrap()]);
+    assert_ne!(code, 0);
+    assert_eq!(fs::read_to_string(&file).unwrap(), text);
+
+    let second = Second::start(&w, Some(0));
+    let dry = second.import(&file, false);
+    assert_eq!(
+        dry,
+        json!({"type": "graph_imported", "workspace_id": "app", "applied": false,
+               "loaded": 3, "different": 0, "kept": 0, "over_limits": 0, "malformed": 0})
+    );
+    let before = second.outcome(&["graph", "symbol", "app", "upload"]);
+    assert_eq!(before["symbols"], json!([]), "a dry run loads nothing");
+    assert_eq!(before["coverage"]["current_files"], 0, "{before:#}");
+
+    assert_eq!(second.import(&file, true)["loaded"], 3);
+    let imported = answers(|args| second.outcome(args));
+    assert_eq!(
+        imported,
+        answers(|args| {
+            let mut args = args.to_vec();
+            args.push("--json");
+            serde_json::from_str::<Value>(&w.cli(&args).1).unwrap()["outcome"].clone()
+        })
+    );
+    assert_eq!(imported[0]["coverage"]["current_files"], 3);
+    assert_eq!(imported[0]["coverage"]["indexable_files"], 3);
+    // Retried, everything is already indexed here and kept.
+    let again = second.import(&file, true);
+    assert_eq!(
+        (again["loaded"].clone(), again["kept"].clone()),
+        (json!(0), json!(3))
+    );
+    // An import is a first indexing: no interface change is recorded.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(second.interface_events(), 0);
+}
+
+#[test]
+fn only_files_with_the_exported_content_are_imported_and_the_rest_are_indexed_from_disk() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let file = export(&w, "index.jsonl");
+    // One line over the symbol bound, one malformed line.
+    let text = fs::read_to_string(&file).unwrap();
+    let mut over: Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+    let symbol = over["symbols"][0].clone();
+    over["path"] = json!("src/huge.rs");
+    over["symbols"] = Value::Array(vec![symbol; 2001]);
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    lines.push(over.to_string());
+    lines.push(r#"{"path":"src/x.rs"}"#.into());
+    fs::write(&file, lines.join("\n") + "\n").unwrap();
+    // The checkout moves on after the export.
+    fs::write(
+        w.work().join("src/upload.rs"),
+        "pub fn upload(path: &str, size: u64) -> bool {\n    !path.is_empty() && size > 0\n}\n\npub fn gate(user: &str) -> bool {\n    user == \"admin\"\n}\n",
+    )
+    .unwrap();
+
+    let mut second = Second::start(&w, Some(0));
+    // A malformed header refuses the whole import, with the reason.
+    let bad = w.base.join("bad.jsonl");
+    fs::write(&bad, format!("{{\"format\":\"other\"}}\n{}\n", lines[1])).unwrap();
+    let refused = second.import(&bad, true);
+    assert_eq!(refused["code"], "index_import_refused", "{refused:#}");
+    assert!(
+        refused["message"].as_str().unwrap().contains("header"),
+        "{refused:#}"
+    );
+    let unchanged = second.outcome(&["graph", "symbol", "app", "main"]);
+    assert_eq!(unchanged["coverage"]["current_files"], 0, "{unchanged:#}");
+
+    let imported = second.import(&file, true);
+    assert_eq!(
+        imported,
+        json!({"type": "graph_imported", "workspace_id": "app", "applied": true,
+               "loaded": 2, "different": 1, "kept": 0, "over_limits": 1, "malformed": 1})
+    );
+    let (code, human, _) = second.cli(&["graph", "import", "app", "--in", file.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert!(
+        human.starts_with("Dry run: 0 files have the same content here")
+            && human.contains("1 differ or are missing here")
+            && human.contains("2 are already indexed here")
+            && human.contains("1 lines over a parse bound")
+            && human.contains("Add --apply."),
+        "{human}"
+    );
+    let in_upload = |outcome: &Value| -> Vec<Value> {
+        outcome["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|symbol| symbol["path"] == "src/upload.rs")
+            .cloned()
+            .collect()
+    };
+    let upload = second.outcome(&["graph", "symbol", "app", "upload"]);
+    assert_eq!(
+        in_upload(&upload),
+        Vec::<Value>::new(),
+        "the changed file is not imported"
+    );
+    assert_eq!(upload["coverage"]["current_files"], 2, "{upload:#}");
+
+    // With parsing allowed, the changed file is indexed from disk.
+    second.stop();
+    let second = Second::start(&w, None);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let upload = second.outcome(&["graph", "symbol", "app", "upload"]);
+        if upload["coverage"]["current_files"] == 3 {
+            assert_eq!(
+                in_upload(&upload)[0]["signature"],
+                "pub fn upload(path: &str, size: u64) -> bool",
+                "{upload:#}"
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "never indexed: {upload:#}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(second.interface_events(), 0);
+}
+
+/// Review finding 4703518719: an import path naming a FIFO with no writer,
+/// directly or through a symlink, is refused promptly, and the indexer
+/// still answers the next import instead of blocking on the open.
+#[test]
+fn an_import_from_a_fifo_is_refused_without_blocking_the_indexer() {
+    let w = World::new();
+    w.wait_for("the first index", "symbol", "upload", |outcome| {
+        outcome["coverage"]["current_files"] == 3
+    });
+    let file = export(&w, "index.jsonl");
+    let fifo = w.base.join("pipe");
+    let status = Process::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(status.success());
+    let link = w.base.join("pipe-link");
+    std::os::unix::fs::symlink(&fifo, &link).unwrap();
+    for input in [&fifo, &link] {
+        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .arg("--state-dir")
+            .arg(w.base.join("state"))
+            .args(["graph", "import", "app", "--json", "--in"])
+            .arg(input)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("an import from {} blocked", input.display());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+        assert_eq!(outcome["code"], "index_import_refused", "{outcome:#}");
+        assert!(
+            outcome["message"]
+                .as_str()
+                .unwrap()
+                .contains("not a regular file"),
+            "{outcome:#}"
+        );
+    }
+    // The indexer is free: a regular import is answered.
+    let (code, text) = w.cli(&["graph", "import", "app", "--in", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{text}");
+}
+
+/// Review finding 4704176293: a TypeScript arrow-function variable whose
+/// name is longer than an import accepts is left out when indexed, so an
+/// export of that file imports in full instead of being skipped as over
+/// the limits with its other symbols.
+#[test]
+fn an_export_with_an_over_long_arrow_function_name_imports_its_other_symbols() {
+    let long = "a".repeat(129);
+    let source = format!(
+        "export const {long} = (x: number) => x;\nexport const short = (x: number) => x;\nexport function plain(): void {{}}\n"
+    );
+    let w = World::with_files(Vec::new(), &[("src/app.ts", source.as_str())]);
+    w.wait_for("the first index", "symbol", "plain", |outcome| {
+        outcome["coverage"]["current_files"] == 1
+    });
+    let file = w.base.join("index.jsonl");
+    let (code, text) = w.cli(&["graph", "export", "app", "--out", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        !fs::read_to_string(&file).unwrap().contains(&long),
+        "the over-long name is not exported"
+    );
+
+    let second = Second::start(&w, Some(0));
+    let imported = second.import(&file, true);
+    assert_eq!(
+        (imported["loaded"].clone(), imported["over_limits"].clone()),
+        (json!(1), json!(0)),
+        "{imported:#}"
+    );
+    let short = second.outcome(&["graph", "symbol", "app", "short"]);
+    assert_eq!(short["symbols"][0]["path"], "src/app.ts", "{short:#}");
+}
+
 #[test]
 fn a_renamed_definitions_history_says_it_was_renamed_with_both_signatures() {
     let w = World::new();

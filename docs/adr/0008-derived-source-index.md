@@ -444,10 +444,65 @@ are left out. Tests:
 `inflight_signatures_behind_unmentioned_ones_are_told_in_a_later_briefing`,
 `many_long_inflight_notices_are_trimmed_to_one_response_frame` and
 `a_head_version_that_could_not_be_read_is_compared_on_a_later_pass`
-in `tests/graph.rs`,
+in `tests/graph.rs`, the read-outcome and starvation tests after
+`an_oversized_head_blob_is_remembered_for_that_version_and_not_read_again`
+in `src/graph.rs`,
 `a_codex_session_is_told_a_signature_claude_code_has_in_flight_in_a_linked_worktree`
 in `tests/briefing.rs`, and the in-flight tests in
 `crates/langspan-core/tests/briefing.rs`.
+
+**Export and import (added later, roadmap D5).** `langspan graph export
+WORKSPACE --out FILE` writes what the index holds for the workspace's
+current registration as JSON Lines; `langspan graph import WORKSPACE --in
+FILE [--apply]` reads one back, as a dry run unless `--apply` is given. Both
+are CLI-only, with no MCP tool, because they read or write a file the owner
+chose. The format is `crate::index_file`: a header (`format`
+`langspan-source-index`, `schema` 4, `workspace_root` as the root's last
+component, `created_at` in Unix milliseconds) and one line per file indexed
+at some version (`path`, `digest`, `partial`, `symbols`, `refs`, `imports`
+and `calls`, rows in stored order). `calls` is in the line because detailed
+lookups (D1) answer from it, so an imported index gives the same
+`graph symbol --detail` answers. The state owner hands both
+commands to the indexer thread, which stays the index's only writer and
+replies itself; a connection waits up to 120 s for one, and the indexer
+stops after 100 s. Export creates the file with `O_EXCL` and `O_NOFOLLOW` at
+mode `0600`, and removes it on failure. Import refuses a header of another
+format or schema and changes nothing. Each later line is parsed into typed
+structures with the extractor's bounds (`MAX_SYMBOLS`, `MAX_REFERENCES`,
+`MAX_IMPORTS`, `MAX_CALLS`, `NAME_BYTES`, `SIGNATURE_BYTES`); one over a bound
+counts as `over_limits`, any other bad line, or a second line for one path,
+as `malformed`. A file's rows load only when all of these hold: the SHA-256
+of the file on disk equals the exported `digest`; the workspace's last
+complete scan, which the indexer keeps per registration, lists the path; and
+the index holds no version of the file yet. The first rule means an imported
+row never describes content the checkout does not have. The second means the
+next pass cannot report a loaded file's exports removed. The third means an
+import never replaces what the local indexer parsed, so a change between two
+local versions is still compared and noticed. A loaded file is written as a
+first indexing would write it: its rows, its digest as both indexed and
+scanned version, and for a clean parse the interface baseline, so the next
+change to it is compared with the imported version. An import records no
+interface notice. All loads commit in one transaction at the end, so an
+error or the time limit leaves the index unchanged. An imported row is
+trusted as far as its digest goes: a crafted export can claim other names
+for content whose digest it knows, which misleads answers until the file
+changes (see the threat model). Tests: `src/index_file.rs` (bounds, field
+rules, header refusal, bounded line reading and a 20,000-case property test
+of the parser), `an_import_never_replaces_a_version_this_index_parsed_and_sets_the_baseline`
+and `a_path_missing_from_the_scan_is_not_imported` in `src/graph.rs`, and
+`an_index_imported_into_a_fresh_state_directory_answers_the_same_without_a_parse`
+and `only_files_with_the_exported_content_are_imported_and_the_rest_are_indexed_from_disk`
+in `tests/graph.rs`. The second daemon there parses nothing
+(`LANGSPAN_TEST_INDEX_FILES_PER_PASS=0`, a test-only variable), so its
+answers can only come from the import.
+Measured on 26 November 2026 with a release build, on a 4-CPU Intel Xeon at
+2.10 GHz with 15 GiB of memory, Linux, Git 2.43.0: a repository of 4,050 Rust
+files (three definitions each) reached full coverage 41.7, 41.9 and 41.8 s
+after registration without an import (3 runs). Its export took 0.24 to
+0.30 s and was 4,848,601 bytes. In a fresh state directory on the same
+checkout, `graph import --apply`, retried until the first scan was in,
+finished 0.9 s after registration in each run, with 4,050 of 4,050 files
+current: 3,850 loaded, and 200 kept that the first pass had already parsed.
 
 ## Consequences and limits
 

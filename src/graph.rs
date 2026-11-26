@@ -25,6 +25,26 @@ pub const MAX_RESULTS: u32 = 200;
 
 pub struct Index {
     connection: Connection,
+    /// `FILES_PER_PASS`, except where a test sets another.
+    files_per_pass: usize,
+}
+
+/// What an export wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exported {
+    pub files: u32,
+    pub partial_files: u32,
+    pub bytes: u64,
+}
+
+/// What an import found, one count per file line after the header.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Imported {
+    pub loaded: u32,
+    pub different: u32,
+    pub kept: u32,
+    pub over_limits: u32,
+    pub malformed: u32,
 }
 
 /// An exported symbol of `path` changed between two indexed versions.
@@ -148,7 +168,15 @@ impl Index {
         if !has_block {
             connection.execute_batch("ALTER TABLE baselines ADD COLUMN block_digest TEXT;")?;
         }
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            files_per_pass: FILES_PER_PASS,
+        })
+    }
+
+    /// Parse at most `files` per pass from now on. Only tests set it.
+    pub fn set_files_per_pass(&mut self, files: usize) {
+        self.files_per_pass = files;
     }
 
     /// A reader for the request path. It never creates or changes the file.
@@ -158,7 +186,10 @@ impl Index {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         connection.busy_timeout(std::time::Duration::from_millis(100))?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            files_per_pass: FILES_PER_PASS,
+        })
     }
 
     /// The exported symbols of the last version of `path` that parsed
@@ -531,7 +562,7 @@ impl Index {
                 })
                 .map(|(path, digest)| ((path, digest), path.as_str(), digest.clone())),
         );
-        for (failures, (path, digest)) in pending.into_iter().take(FILES_PER_PASS) {
+        for (failures, (path, digest)) in pending.into_iter().take(self.files_per_pass) {
             if Instant::now() >= deadline {
                 break;
             }
@@ -976,6 +1007,245 @@ impl Index {
                 .query_map([workspace_id], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<Result<_, _>>()?,
         })
+    }
+
+    /// Write what the index holds for `of` to `out` in the export format
+    /// (`crate::index_file`): only files indexed at some version, in path
+    /// order, rows in the order they were stored. Signatures are the only
+    /// source text in it. Stops with an error past `index_file::MAX_FILE_BYTES`
+    /// or at `deadline`.
+    pub fn export(
+        &self,
+        of: &crate::daemon::Registration,
+        out: &mut impl std::io::Write,
+        now_ms: u64,
+        deadline: Instant,
+    ) -> Result<Exported, Failure> {
+        use crate::index_file::{CallRow, FileRecord, Header, ImportRow, NameLine, SymbolRow};
+        let workspace_id = of.workspace_id.as_str();
+        // One read snapshot. This connection is the only writer, and it is
+        // busy here, so the snapshot is also the latest state.
+        let snapshot = self.connection.unchecked_transaction()?;
+        if !self.indexed_as(workspace_id, &of.root, of.revision)? {
+            return Err(format!(
+                "the index holds nothing for workspace {workspace_id} yet; wait for its first scan and try again"
+            )
+            .into());
+        }
+        let mut exported = Exported {
+            files: 0,
+            partial_files: 0,
+            bytes: 0,
+        };
+        write_line(
+            out,
+            &mut exported.bytes,
+            &Header {
+                format: crate::index_file::FORMAT.into(),
+                schema: SCHEMA,
+                workspace_root: of
+                    .root
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                created_at: now_ms,
+            },
+        )?;
+        let files: Vec<(String, String, bool)> = self
+            .connection
+            .prepare_cached(
+                "SELECT path, digest, partial FROM files
+                 WHERE workspace_id = ?1 AND digest IS NOT NULL ORDER BY path",
+            )?
+            .query_map([workspace_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<_, _>>()?;
+        let (mut files_written, mut partial_files) = (0u32, 0u32);
+        for (path, digest, partial) in files {
+            if Instant::now() >= deadline {
+                return Err("the export did not finish in time; nothing usable was written".into());
+            }
+            let key = params![workspace_id, path];
+            let symbols = self
+                .connection
+                .prepare_cached(
+                    "SELECT name, kind, line, end_line, signature, exported, body_digest
+                     FROM symbols WHERE workspace_id = ?1 AND path = ?2 ORDER BY rowid",
+                )?
+                .query_map(key, |row| {
+                    Ok(SymbolRow {
+                        name: row.get(0)?,
+                        kind: row.get(1)?,
+                        line: row.get(2)?,
+                        end_line: row.get(3)?,
+                        signature: row.get(4)?,
+                        exported: row.get(5)?,
+                        body_digest: row.get(6)?,
+                    })
+                })?
+                .collect::<Result<_, _>>()?;
+            let refs = self
+                .connection
+                .prepare_cached(
+                    "SELECT name, line FROM refs WHERE workspace_id = ?1 AND path = ?2 ORDER BY rowid",
+                )?
+                .query_map(key, |row| {
+                    Ok(NameLine {
+                        name: row.get(0)?,
+                        line: row.get(1)?,
+                    })
+                })?
+                .collect::<Result<_, _>>()?;
+            let imports = self
+                .connection
+                .prepare_cached(
+                    "SELECT target, line FROM imports
+                     WHERE workspace_id = ?1 AND path = ?2 ORDER BY rowid",
+                )?
+                .query_map(key, |row| {
+                    Ok(ImportRow {
+                        target: row.get(0)?,
+                        line: row.get(1)?,
+                    })
+                })?
+                .collect::<Result<_, _>>()?;
+            let calls = self
+                .connection
+                .prepare_cached(
+                    "SELECT caller, callee, line, args FROM calls
+                     WHERE workspace_id = ?1 AND path = ?2 ORDER BY rowid",
+                )?
+                .query_map(key, |row| {
+                    Ok(CallRow {
+                        caller: row.get(0)?,
+                        callee: row.get(1)?,
+                        line: row.get(2)?,
+                        args: row.get(3)?,
+                    })
+                })?
+                .collect::<Result<_, _>>()?;
+            write_line(
+                out,
+                &mut exported.bytes,
+                &FileRecord {
+                    path,
+                    digest,
+                    partial,
+                    symbols,
+                    refs,
+                    imports,
+                    calls,
+                },
+            )?;
+            files_written += 1;
+            partial_files += u32::from(partial);
+        }
+        snapshot.commit()?;
+        exported.files = files_written;
+        exported.partial_files = partial_files;
+        Ok(exported)
+    }
+
+    /// Read an export from `input` into the index for `of`. A file's rows
+    /// are loaded only when its exported digest is the SHA-256 of the file
+    /// on disk now, the last complete scan `scan` lists it, and the index
+    /// holds no version of it yet: an imported row never describes content
+    /// the local copy does not have, and never replaces what this index
+    /// already parsed. Everything else is left to the indexer. Loading is
+    /// a first indexing: it reports no interface change. Without `apply`
+    /// nothing is written. A malformed header refuses the whole import; a
+    /// bad file line is skipped and counted. All or nothing: an error, or
+    /// `deadline`, leaves the index as it was.
+    pub fn import(
+        &mut self,
+        of: &crate::daemon::Registration,
+        scan: &ScanView,
+        input: &mut impl std::io::BufRead,
+        apply: bool,
+        now_ms: u64,
+        deadline: Instant,
+    ) -> Result<Imported, Failure> {
+        use crate::index_file::{
+            Line, MAX_LINE_BYTES, Seen, Skip, parse_header, parse_record, read_line,
+        };
+        let workspace_id = of.workspace_id.as_str();
+        let mut line = Vec::new();
+        match read_line(input, &mut line, MAX_LINE_BYTES)? {
+            Line::Read => parse_header(&line, SCHEMA)?,
+            Line::TooLong => {
+                return Err("the first line is not an index export header: it is too long".into());
+            }
+            Line::End => return Err("the file is empty: it has no index export header".into()),
+        };
+        if apply {
+            self.start_again_at(workspace_id, &of.root, of.revision)?;
+        }
+        // What this registration's index already holds a version of. Before
+        // its first pass (only possible in a dry run), nothing.
+        let held: BTreeSet<String> = if self.indexed_as(workspace_id, &of.root, of.revision)? {
+            self.connection
+                .prepare_cached(
+                    "SELECT path FROM files WHERE workspace_id = ?1 AND digest IS NOT NULL",
+                )?
+                .query_map([workspace_id], |row| row.get(0))?
+                .collect::<Result<_, _>>()?
+        } else {
+            BTreeSet::new()
+        };
+        let transaction = self.connection.transaction()?;
+        let mut counts = Imported::default();
+        let mut seen = Seen::default();
+        loop {
+            if Instant::now() >= deadline {
+                return Err("the import did not finish in time; the index is unchanged".into());
+            }
+            let record = match read_line(input, &mut line, MAX_LINE_BYTES)? {
+                Line::End => break,
+                Line::TooLong => {
+                    counts.over_limits += 1;
+                    continue;
+                }
+                Line::Read if line.iter().all(u8::is_ascii_whitespace) => continue,
+                Line::Read => match parse_record(&line) {
+                    Ok(record) => record,
+                    Err(Skip::OverLimits(_)) => {
+                        counts.over_limits += 1;
+                        continue;
+                    }
+                    Err(Skip::Malformed(_)) => {
+                        counts.malformed += 1;
+                        continue;
+                    }
+                },
+            };
+            if !seen.first(&record.path) {
+                counts.malformed += 1;
+                continue;
+            }
+            if held.contains(&record.path) {
+                counts.kept += 1;
+                continue;
+            }
+            let Some(scanned) = scan.files.get(&record.path) else {
+                counts.different += 1;
+                continue;
+            };
+            if read_exact_version(&of.root, &record.path, &record.digest, MAX_SOURCE_BYTES)
+                .is_none()
+            {
+                counts.different += 1;
+                continue;
+            }
+            counts.loaded += 1;
+            if apply {
+                load(&transaction, workspace_id, scanned, &record, now_ms)?;
+            }
+        }
+        if apply {
+            transaction.commit()?;
+        }
+        Ok(counts)
     }
 
     /// Run `reads` and measure coverage as one answer, from one read
@@ -1536,6 +1806,127 @@ pub fn last_checks(
         }
     }
     found
+}
+
+/// Write `value` as one JSON line, counting `bytes`, and refuse past the
+/// most an import reads.
+fn write_line(
+    out: &mut impl std::io::Write,
+    bytes: &mut u64,
+    value: &impl serde::Serialize,
+) -> Result<(), Failure> {
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    *bytes += line.len() as u64;
+    if *bytes > crate::index_file::MAX_FILE_BYTES {
+        return Err(format!(
+            "the export would be larger than {} MiB, the most an import reads",
+            crate::index_file::MAX_FILE_BYTES / (1024 * 1024)
+        )
+        .into());
+    }
+    out.write_all(&line)?;
+    Ok(())
+}
+
+/// Write one checked file record as a first indexing of `path` would: its
+/// rows, its version, and for a clean parse its interface baseline.
+/// `scanned` is the digest the last scan recorded for the path.
+fn load(
+    transaction: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    scanned: &str,
+    record: &crate::index_file::FileRecord,
+    now_ms: u64,
+) -> Result<(), Failure> {
+    let path = record.path.as_str();
+    for table in ["symbols", "refs", "imports", "calls", "baselines"] {
+        transaction.execute(
+            &format!("DELETE FROM {table} WHERE workspace_id = ?1 AND path = ?2"),
+            params![workspace_id, path],
+        )?;
+    }
+    // Indexed now: no read of it waits for a retry.
+    transaction.execute(
+        "DELETE FROM retries WHERE workspace_id = ?1 AND path = ?2 AND stage = ?3",
+        params![workspace_id, path, Retries::INDEX],
+    )?;
+    transaction.execute(
+        "INSERT INTO files(workspace_id, path, scan_digest, digest, partial, baseline_digest,
+            partial_since, oversize_digest)
+         VALUES (?1, ?2, ?3, ?4, ?5, CASE WHEN ?5 THEN NULL ELSE ?4 END,
+            CASE WHEN ?5 THEN ?6 ELSE NULL END, NULL)
+         ON CONFLICT(workspace_id, path) DO UPDATE SET scan_digest = excluded.scan_digest,
+            digest = excluded.digest, partial = excluded.partial,
+            baseline_digest = excluded.baseline_digest, partial_since = excluded.partial_since,
+            oversize_digest = NULL",
+        params![
+            workspace_id,
+            path,
+            scanned,
+            record.digest,
+            record.partial,
+            now_ms as i64
+        ],
+    )?;
+    for symbol in &record.symbols {
+        transaction.execute(
+            "INSERT INTO symbols VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                workspace_id,
+                path,
+                symbol.name,
+                symbol.kind,
+                symbol.line,
+                symbol.end_line,
+                symbol.signature,
+                symbol.exported,
+                symbol.body_digest
+            ],
+        )?;
+        if !record.partial && symbol.exported {
+            transaction.execute(
+                // An export carries no block digest, so an imported
+                // baseline has none: its next rename is told as a removal
+                // and an addition, as for a baseline from before B10.
+                "INSERT INTO baselines(workspace_id, path, name, kind, signature)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    workspace_id,
+                    path,
+                    symbol.name,
+                    symbol.kind,
+                    symbol.signature
+                ],
+            )?;
+        }
+    }
+    for call in &record.calls {
+        transaction.execute(
+            "INSERT INTO calls VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                workspace_id,
+                path,
+                call.caller,
+                call.callee,
+                call.line,
+                call.args
+            ],
+        )?;
+    }
+    for reference in &record.refs {
+        transaction.execute(
+            "INSERT INTO refs VALUES (?1, ?2, ?3, ?4)",
+            params![workspace_id, path, reference.name, reference.line],
+        )?;
+    }
+    for import in &record.imports {
+        transaction.execute(
+            "INSERT INTO imports VALUES (?1, ?2, ?3, ?4)",
+            params![workspace_id, path, import.target, import.line],
+        )?;
+    }
+    Ok(())
 }
 
 /// The file's bytes, only if they are still exactly the scanned version and
@@ -3035,7 +3426,7 @@ mod review_regressions {
     /// What a scan of `paths` would hand the index now: each file's digest
     /// and, as every one of them is taken to differ from `HEAD`, its blob
     /// there if `HEAD` has one.
-    fn scan_of(dir: &Dir, paths: &[String]) -> ScanView {
+    fn head_scan(dir: &Dir, paths: &[String]) -> ScanView {
         let listing = git(&dir.0, &["ls-tree", "-r", "HEAD"]);
         let at_head: BTreeMap<&str, &str> = listing
             .lines()
@@ -3141,7 +3532,7 @@ mod review_regressions {
         let big = oversized();
         let (dir, mut index) = repo("head-oversize", &[("src/api.rs", &big)]);
         fs::write(dir.0.join("src/api.rs"), GATE).unwrap();
-        let scan = scan_of(&dir, &["src/api.rs".into()]);
+        let scan = head_scan(&dir, &["src/api.rs".into()]);
         update(&dir, &mut index, &scan);
         assert!(indexed(&index, "src/api.rs"));
         // Uncomparable: nothing is said of it, and that is remembered.
@@ -3155,7 +3546,7 @@ mod review_regressions {
             format!("{GATE}pub fn quota() {{}}\n"),
         )
         .unwrap();
-        update(&dir, &mut index, &scan_of(&dir, &["src/api.rs".into()]));
+        update(&dir, &mut index, &head_scan(&dir, &["src/api.rs".into()]));
         assert_eq!(in_flight(&index), ["src/api.rs: quota"]);
     }
 
@@ -3164,7 +3555,7 @@ mod review_regressions {
         let binary: &[u8] = b"\x00\xff\xfe pub fn \x00 {{{ \x01\x02";
         let (dir, mut index) = repo("head-binary", &[("src/api.rs", binary)]);
         fs::write(dir.0.join("src/api.rs"), GATE).unwrap();
-        update(&dir, &mut index, &scan_of(&dir, &["src/api.rs".into()]));
+        update(&dir, &mut index, &head_scan(&dir, &["src/api.rs".into()]));
         assert!(compared(&index, "src/api.rs"), "left pending");
         assert_eq!(failures(&index, Retries::COMPARE, "src/api.rs"), None);
     }
@@ -3177,7 +3568,7 @@ mod review_regressions {
             b"\x00\xff\xfe pub fn \x00 {{{ \x01",
         )
         .unwrap();
-        update(&dir, &mut index, &scan_of(&dir, &["src/api.rs".into()]));
+        update(&dir, &mut index, &head_scan(&dir, &["src/api.rs".into()]));
         assert!(indexed(&index, "src/api.rs"), "left pending");
         assert!(compared(&index, "src/api.rs"), "left pending");
         assert_eq!(in_flight(&index), Vec::<String>::new());
@@ -3189,7 +3580,7 @@ mod review_regressions {
         let (dir, mut index) = repo("head-missing", &[("src/api.rs", b"pub fn upload() {}\n")]);
         let (loose, aside) = hide_head_blob(&dir, "src/api.rs");
         fs::write(dir.0.join("src/api.rs"), GATE).unwrap();
-        let scan = scan_of(&dir, &["src/api.rs".into()]);
+        let scan = head_scan(&dir, &["src/api.rs".into()]);
         update(&dir, &mut index, &scan);
         assert!(
             !compared(&index, "src/api.rs"),
@@ -3207,7 +3598,7 @@ mod review_regressions {
         let (dir, mut index) = repo("head-bound", &[("src/api.rs", b"pub fn upload() {}\n")]);
         let (loose, aside) = hide_head_blob(&dir, "src/api.rs");
         fs::write(dir.0.join("src/api.rs"), GATE).unwrap();
-        let scan = scan_of(&dir, &["src/api.rs".into()]);
+        let scan = head_scan(&dir, &["src/api.rs".into()]);
         let mut passes = 0;
         while !compared(&index, "src/api.rs") {
             update(&dir, &mut index, &scan);
@@ -3228,7 +3619,7 @@ mod review_regressions {
             format!("{GATE}pub fn quota() {{}}\n"),
         )
         .unwrap();
-        update(&dir, &mut index, &scan_of(&dir, &["src/api.rs".into()]));
+        update(&dir, &mut index, &head_scan(&dir, &["src/api.rs".into()]));
         assert_eq!(in_flight(&index), ["src/api.rs: gate", "src/api.rs: quota"]);
     }
 
@@ -3239,7 +3630,7 @@ mod review_regressions {
         let (dir, mut index) = repo(name, &[("src/api.rs", b"pub fn upload() {}\n")]);
         let full = dir.0.join("src/api.rs");
         fs::write(&full, GATE).unwrap();
-        let scan = scan_of(&dir, &["src/api.rs".into()]);
+        let scan = head_scan(&dir, &["src/api.rs".into()]);
         break_it(&full);
         update(&dir, &mut index, &scan);
         assert_eq!(failures(&index, Retries::INDEX, "src/api.rs"), Some(1));
@@ -3254,7 +3645,7 @@ mod review_regressions {
         let _ = fs::remove_dir_all(&full);
         let _ = fs::remove_file(&full);
         fs::write(&full, format!("{GATE}pub fn quota() {{}}\n")).unwrap();
-        update(&dir, &mut index, &scan_of(&dir, &["src/api.rs".into()]));
+        update(&dir, &mut index, &head_scan(&dir, &["src/api.rs".into()]));
         assert_eq!(in_flight(&index), ["src/api.rs: gate", "src/api.rs: quota"]);
         assert_eq!(failures(&index, Retries::INDEX, "src/api.rs"), None);
     }
@@ -3326,7 +3717,7 @@ mod review_regressions {
             }
             fs::write(dir.0.join(path), GATE).unwrap();
         }
-        let scan = scan_of(&dir, &paths);
+        let scan = head_scan(&dir, &paths);
         for _ in 0..4 {
             update(&dir, &mut index, &scan);
         }
@@ -3352,7 +3743,7 @@ mod review_regressions {
         for path in &paths {
             fs::write(dir.0.join(path), GATE).unwrap();
         }
-        let scan = scan_of(&dir, &paths);
+        let scan = head_scan(&dir, &paths);
         for path in paths.iter().filter(|path| *path != "src/zz.rs") {
             fs::remove_file(dir.0.join(path)).unwrap();
         }
@@ -3360,5 +3751,108 @@ mod review_regressions {
             update(&dir, &mut index, &scan);
         }
         assert_eq!(in_flight(&index), ["src/zz.rs: gate"], "starved");
+    }
+
+    fn scan_of(files: &[(&str, &str)]) -> ScanView {
+        ScanView {
+            files: files
+                .iter()
+                .map(|(path, text)| {
+                    (
+                        (*path).to_owned(),
+                        crate::sha256::hex(&crate::sha256::digest(text.as_bytes())),
+                    )
+                })
+                .collect(),
+            ..ScanView::default()
+        }
+    }
+
+    fn transfer(from: &Index, root: &Path) -> Vec<u8> {
+        let mut out = Vec::new();
+        from.export(
+            &of(root),
+            &mut out,
+            NOW,
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+        out
+    }
+
+    #[test]
+    fn an_import_never_replaces_a_version_this_index_parsed_and_sets_the_baseline() {
+        let (dir, mut source) = setup("import-source");
+        let a = ("src/api.rs", "pub fn upload() {}\n");
+        let b = ("src/api.rs", "pub fn upload(x: u8) {}\n");
+        pass(&dir, &mut source, &[a, CALLER]);
+        let exported = transfer(&source, &dir.0);
+
+        // Here the index already parsed another version of api.rs: it is
+        // kept, and its later change is still compared with it.
+        let local = dir.0.join("local.sqlite3");
+        let mut index = Index::open(&local).unwrap();
+        pass(&dir, &mut index, &[b, CALLER]);
+        fs::write(dir.0.join(a.0), a.1).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let counts = index
+            .import(
+                &of(&dir.0),
+                &scan_of(&[a, CALLER]),
+                &mut &exported[..],
+                true,
+                NOW,
+                deadline,
+            )
+            .unwrap();
+        assert_eq!((counts.loaded, counts.kept), (0, 2), "{counts:?}");
+        let notices = pass(&dir, &mut index, &[a, CALLER]);
+        assert_eq!(notices.len(), 1, "b to a is still a change: {notices:?}");
+
+        // A fresh index loads both, reports nothing, and compares the next
+        // version with the imported one.
+        let fresh = dir.0.join("fresh.sqlite3");
+        let mut index = Index::open(&fresh).unwrap();
+        let counts = index
+            .import(
+                &of(&dir.0),
+                &scan_of(&[a, CALLER]),
+                &mut &exported[..],
+                true,
+                NOW,
+                deadline,
+            )
+            .unwrap();
+        assert_eq!(counts.loaded, 2, "{counts:?}");
+        assert!(
+            pass(&dir, &mut index, &[a, CALLER]).is_empty(),
+            "no parse, no notice"
+        );
+        assert_eq!(upload_with_detail(&index), upload_with_detail(&source));
+        let notices = pass(&dir, &mut index, &[b, CALLER]);
+        assert_eq!(notices.len(), 1, "a to b against the imported baseline");
+        assert_eq!(notices[0].dependents, ["src/main.rs"]);
+    }
+
+    #[test]
+    fn a_path_missing_from_the_scan_is_not_imported() {
+        let (dir, mut source) = setup("import-unscanned");
+        let a = ("src/api.rs", "pub fn upload() {}\n");
+        pass(&dir, &mut source, &[a, CALLER]);
+        let exported = transfer(&source, &dir.0);
+        let mut index = Index::open(&dir.0.join("fresh.sqlite3")).unwrap();
+        let counts = index
+            .import(
+                &of(&dir.0),
+                &scan_of(&[CALLER]),
+                &mut &exported[..],
+                true,
+                NOW,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!((counts.loaded, counts.different), (1, 1), "{counts:?}");
+        // So the next pass cannot report its exports removed.
+        assert!(pass(&dir, &mut index, &[CALLER]).is_empty());
     }
 }

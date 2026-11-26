@@ -1,0 +1,1 @@
+{"version":3,"request_id":"read","command":{"op":"graph_import","workspace_id":"app","path":"/srv/index.jsonl","apply":true}}
