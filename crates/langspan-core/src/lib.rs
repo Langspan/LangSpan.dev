@@ -77,8 +77,8 @@ pub use today::{
     TodayWindow, today,
 };
 pub use trail::{
-    MAX_TRAIL_FACTS, MAX_TRAILS, TRAIL_BYTES, TRAIL_CHECKS, TRAIL_FILES, TRAIL_RANGES,
-    TRAIL_WAITING, Trail, TrailCheck, TrailFacts, TrailFile, TrailView,
+    MAX_TRAIL_FACTS, MAX_TRAILS, TRAIL_BYTES, TRAIL_CHECKS, TRAIL_FILES, TRAIL_JSON_BYTES,
+    TRAIL_RANGES, TRAIL_WAITING, Trail, TrailCheck, TrailFacts, TrailFile, TrailView,
 };
 pub use workspaces::{
     MAX_ENDING_SESSIONS, MAX_WORKSPACE_PAGE, WorkspaceEnding, WorkspaceKept, WorkspaceSummary,
@@ -9118,7 +9118,13 @@ fn brief(
     let total = peers.len();
     // Peers are chosen by their work within the byte budget first; where
     // they look is added after, in the space left, first peers first, so
-    // presence never takes the place of another peer's work.
+    // presence never takes the place of another peer's work. A trail this
+    // briefing may tell takes its encoding out of that budget, so the
+    // reply holds both within its frame.
+    let peer_bytes = BRIEF_BYTES
+        - trail::owed(state, me, handoffs).map_or(0, |trail| {
+            trail::json_cost(trail).min(trail::TRAIL_JSON_BYTES)
+        });
     let mut bytes = 0;
     let mut peers: Vec<PeerWork> = peers
         .into_iter()
@@ -9143,7 +9149,7 @@ fn brief(
                     .map(|path| recent::json_len(path) + 32)
                     .sum::<usize>();
             bytes += cost;
-            if bytes > BRIEF_BYTES {
+            if bytes > peer_bytes {
                 bytes -= cost;
                 return false;
             }
@@ -9158,7 +9164,7 @@ fn brief(
             .iter()
             .map(|looked| recent::json_len(&looked.path) + 32)
             .sum();
-        if bytes + presence <= BRIEF_BYTES {
+        if bytes + presence <= peer_bytes {
             bytes += presence;
             return true;
         }

@@ -1090,7 +1090,9 @@ IDs of messages the session sent that are still unread. It is built from
 recorded events and the line journal on this machine: never the transcript
 or the agent's last reply, never file content. A session that read and wrote
 nothing leaves no trail. The briefing shows at most three lines and 600
-bytes; paths that do not fit are counted. When the end hook cannot read the
+bytes; paths that do not fit are counted. Its JSON stays within 12 KiB: a
+long task line or intent is cut, and the oldest files are dropped and
+counted. When the end hook cannot read the
 journal in its time, or its facts exceed 32 KiB, the trail says its line
 ranges and uncommitted files are not known.
 

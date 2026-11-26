@@ -188,6 +188,17 @@ A trail shares the room the core keeps for messages: when messages fill it,
 or that session's handoff waits for room, the trail waits for the next
 briefing. Paths that do not fit the 600 bytes are counted, not cut.
 
+The trail's JSON in a reply is kept within 12 KiB, since escaped paths and
+texts can take several times their length. When a trail is recorded, and
+again when it is shown (so a trail stored before this bound is cut too), the
+task line and intent are each cut to 3 KiB encoded, and then the oldest files
+read, left uncommitted, edited and held are dropped until it fits. Dropped
+read, uncommitted and edited files are counted in its `more_` fields. A
+briefing that may tell a trail takes the trail's encoded size out of its
+40 KiB peer budget, so the trail and the peers together fit the frame as the
+peers alone did. Otherwise a reply past the frame would fail after the trail
+was marked taken, and no session would hear it.
+
 `langspan trail WORKSPACE [--limit N] [--json]` lists the newest trails
 (1 to 16, default 4) with their sessions, ages and paths and who was told
 them. The read-only MCP tool `langspan_recap` carries the newest 4 in its
