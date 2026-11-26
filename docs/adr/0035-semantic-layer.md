@@ -15,7 +15,7 @@ that before the second session writes the call needs knowledge of what the
 changes mean for each other, not only which files they touch.
 
 `langspan-graph` holds part of that knowledge: it parses Rust, Python,
-TypeScript/JavaScript and Go with Tree-sitter and extracts definitions,
+TypeScript/JavaScript, Go and Java with Tree-sitter and extracts definitions,
 signatures, mentions, imports and call sites with argument counts, matched by
 name and not resolved. Interface notices (ADR 0008) and write-time break
 alerts ([ADR 0029](0029-break-alerts-at-write-time.md)) use it. More of this

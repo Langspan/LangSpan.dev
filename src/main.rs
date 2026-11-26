@@ -69,6 +69,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Claude Code and Codex Stop), on the exact working tree,
                                  records it as check NAME and tells that session the
                                  result at its next briefing. Without options: show it
+    [COMMAND... --on-interface-change NAME2 [--timeout-s N] -- COMMAND2...]
+                                 When the writes changed an indexed export that other
+                                 files mention, COMMAND2 runs whole after COMMAND on the
+                                 same tree, recorded as NAME2 and graded kept or broke
   check flaky WORKSPACE [--name NAME] | --forget TEST [--name NAME] --request-id ID
                                  Tests that flipped on unchanged code (two results on
                                  one tree, no write between); --forget clears one
@@ -94,7 +98,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Who holds BRANCH's push turn and who waits for it
   land-cancel WORKSPACE --onto BRANCH --request-id ID
                                  Stop the waiting landing ID; it pushes nothing
-  graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go)
+  graph symbol WORKSPACE NAME    Where a name is defined (Rust, Python, TypeScript, Go, Java)
                                  [--detail]: with its body digest, calls, callers
                                  by name, notes on its file and last check
   graph references WORKSPACE NAME  Where a name is mentioned
@@ -113,7 +117,15 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Dry run: how many exported files have the same
                                  content here. --apply loads those the index does
                                  not hold yet; the rest are indexed from disk
-  recap WORKSPACE               A bounded account of one workspace: sessions, recent
+  graph history WORKSPACE NAME [--path PATH] [--limit N] [--before SEQ]
+                                 The recorded interface changes of definitions named
+                                 NAME, newest first (--limit 1 to 50, default 10):
+                                 before and after, the last session that reported
+                                 editing the file (not proof of authorship), its task
+                                 line, notes and messages naming the file within 30
+                                 minutes, and changes back to an earlier signature.
+                                 Reads only
+  recap WORKSPACE                A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
                                  messages not yet acknowledged, then withdrawn ones
   today [WORKSPACE] [--since RFC3339]
@@ -328,17 +340,26 @@ fn hook(input: Vec<String>) -> ExitCode {
     // Gemini CLI reads stderr as the answer when stdout is empty, and takes
     // plain text there from a failed process as a deny: whatever happens,
     // it gets the empty answer first. Antigravity documents a JSON answer
-    // for every event and nothing for an empty one, so it gets the same.
-    let gemini = matches!(
-        input.get(1).map(String::as_str),
-        Some("gemini-cli" | "antigravity")
-    );
-    if gemini {
+    // for every event, and 1.5.14 reads `{}` on `PreToolUse` as a refusal,
+    // so it gets its event's fallback: the explicit allow there, else `{}`.
+    let fallback: Option<&'static str> = match input.get(1).map(String::as_str) {
+        Some("gemini-cli") => Some("{}"),
+        Some("antigravity") => Some(langspan::antigravity::fallback(
+            input
+                .windows(2)
+                .find(|pair| pair[0] == "--event")
+                .map(|pair| pair[1].as_str()),
+        )),
+        _ => None,
+    };
+    if let Some(fallback) = fallback {
         let default = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             use std::io::Write;
             let mut stdout = std::io::stdout().lock();
-            let _ = stdout.write_all(b"{}").and_then(|()| stdout.flush());
+            let _ = stdout
+                .write_all(fallback.as_bytes())
+                .and_then(|()| stdout.flush());
             default(info);
         }));
     }
@@ -454,7 +475,7 @@ fn hook(input: Vec<String>) -> ExitCode {
             },
             Err(error) => langspan::hook::Reply {
                 // Gemini CLI reads stderr as the answer when stdout is empty.
-                stdout: if gemini { "{}".into() } else { String::new() },
+                stdout: fallback.unwrap_or_default().into(),
                 ..langspan::hook::Reply::none(
                     if error.kind() == std::io::ErrorKind::TimedOut {
                         "timeout"
@@ -476,8 +497,8 @@ fn hook(input: Vec<String>) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         // Exit 1 is a non-blocking error for Claude Code; this adapter never exits 2.
         Err(error) => {
-            if gemini {
-                print!("{{}}");
+            if let Some(fallback) = fallback {
+                print!("{fallback}");
             }
             eprintln!(
                 "{}",
@@ -539,9 +560,12 @@ fn hooks(
     let server = server.as_ref();
     type Plan<'a> =
         Box<dyn Fn(Option<serde_json::Value>) -> Result<serde_json::Value, String> + 'a>;
-    let mut files: Vec<(PathBuf, Plan)> = vec![(
+    // Each file with its plan and whether it is the MCP configuration, which
+    // Antigravity leaves empty.
+    let mut files: Vec<(PathBuf, Plan, bool)> = vec![(
         settings,
         Box::new(move |existing| install::plan_for(vendor, existing, registration)),
+        false,
     )];
     if let Some(mcp) = vendor.project_mcp_file() {
         files.push((
@@ -556,16 +580,24 @@ fn hooks(
                     )
                 }
             }),
+            true,
         ));
     }
+    let parse = |path: &std::path::Path, mcp: bool, bytes: Option<&[u8]>| {
+        if mcp {
+            install::parse_mcp_json(vendor, path, bytes)
+        } else {
+            install::parse_json(path, bytes)
+        }
+    };
     // Every file is planned, and every refusal raised, before any is written.
     let mut planned_files = Vec::new();
-    for (path, plan) in &files {
+    for (path, plan, mcp) in &files {
         let original = install::read_bytes(path)?;
-        let existing = install::parse_json(path, original.as_deref())?;
+        let existing = parse(path, *mcp, original.as_deref())?;
         let planned = plan(existing.clone()).map_err(|e| format!("{}: {e}", path.display()))?;
         let unchanged = existing.as_ref() == Some(&planned) || (existing.is_none() && !install);
-        planned_files.push((path, plan, original, planned, unchanged));
+        planned_files.push((path, plan, *mcp, original, planned, unchanged));
     }
     // Cursor's and Antigravity's project rule: written with --skill, removed
     // with the hooks wherever LangSpan's is found.
@@ -576,7 +608,7 @@ fn hooks(
         None
     };
     let mut changed = false;
-    for (path, plan, original, planned, unchanged) in planned_files {
+    for (path, plan, mcp, original, planned, unchanged) in planned_files {
         if unchanged {
             println!("{} already matches; nothing to change.", path.display());
             continue;
@@ -584,7 +616,7 @@ fn hooks(
         changed = true;
         if apply {
             let replan = |now: Option<&[u8]>| -> Result<Vec<u8>, langspan::Error> {
-                let existing = install::parse_json(path, now)?;
+                let existing = parse(path, mcp, now)?;
                 if existing.is_none() && !install {
                     return Err(format!(
                         "{} was removed meanwhile; nothing to remove",
@@ -953,12 +985,12 @@ fn user_install(
                         )
                     }
                 };
-                let existing = hooks::parse_json(&files.mcp, original.as_deref())?;
+                let existing = hooks::parse_mcp_json(vendor, &files.mcp, original.as_deref())?;
                 let planned = plan_mcp(existing.clone())
                     .map_err(|e| format!("{}: {e}", files.mcp.display()))?;
                 let path = files.mcp.clone();
                 let replan = move |now: Option<&[u8]>| -> Result<Vec<u8>, langspan::Error> {
-                    let existing = hooks::parse_json(&path, now)?;
+                    let existing = hooks::parse_mcp_json(vendor, &path, now)?;
                     let planned =
                         plan_mcp(existing).map_err(|e| format!("{}: {e}", path.display()))?;
                     hooks::json_bytes(&planned)
@@ -1576,10 +1608,14 @@ fn auto_check(
         let timeout_s = u32::try_from(number(options, "--timeout-s", 1800)?)
             .map_err(|_| "--timeout-s is at most 3600")?;
         no_unused_options(options)?;
+        let (command, wider) = wider_check(command)?;
         if command.is_empty() {
             return Err("give the check command after --, for example: -- cargo test".into());
         }
         langspan::auto_check::refuse_secrets(command)?;
+        if let Some(wider) = &wider {
+            langspan::auto_check::refuse_secrets(&wider.argv)?;
+        }
         ask(
             state_dir,
             unique("auto-check", &[workspace, &name]),
@@ -1588,6 +1624,7 @@ fn auto_check(
                 name,
                 argv: command.to_vec(),
                 timeout_s,
+                on_interface_change: wider.map(Box::new),
             },
         )?
     };
@@ -1607,6 +1644,48 @@ fn auto_check(
         state_dir,
     )?;
     Ok(0)
+}
+
+/// `COMMAND... --on-interface-change NAME [--timeout-s N] -- COMMAND2...`:
+/// the regular command and the wider one, which runs whole after it when a
+/// session's writes changed an indexed interface that other files mention.
+fn wider_check(
+    command: &[String],
+) -> Result<(&[String], Option<langspan_core::WiderCheck>), langspan::Error> {
+    const USAGE: &str = "give the wider check as --on-interface-change NAME [--timeout-s N] -- COMMAND..., after the regular command";
+    let Some(at) = command
+        .iter()
+        .position(|arg| arg == "--on-interface-change")
+    else {
+        return Ok((command, None));
+    };
+    let (regular, rest) = command.split_at(at);
+    let (name, mut rest) = match rest {
+        [_, name, rest @ ..] if !name.starts_with("--") => (name.clone(), rest),
+        _ => return Err(USAGE.into()),
+    };
+    let mut timeout_s = 1800;
+    if let [flag, value, after @ ..] = rest
+        && flag == "--timeout-s"
+    {
+        timeout_s = value
+            .parse::<u32>()
+            .ok()
+            .filter(|seconds| (1..=langspan_core::MAX_AUTO_CHECK_TIMEOUT_S).contains(seconds))
+            .ok_or("--timeout-s of the wider check is 1 to 3600 seconds")?;
+        rest = after;
+    }
+    match rest {
+        [separator, argv @ ..] if separator == "--" && !argv.is_empty() => Ok((
+            regular,
+            Some(langspan_core::WiderCheck {
+                name,
+                argv: argv.to_vec(),
+                timeout_s,
+            }),
+        )),
+        _ => Err(USAGE.into()),
+    }
 }
 
 /// An inconclusive check's reason and next step, as the MCP result has them.
@@ -2293,6 +2372,17 @@ fn doctor(
 ) -> Result<u8, langspan::Error> {
     let mut findings: Vec<(bool, String)> = Vec::new();
     let mut note = |ok: bool, text: String| findings.push((ok, text));
+    note(
+        true,
+        format!(
+            "Source index languages: {}. Other source files are listed by `langspan graph blind-spots`.",
+            langspan_graph::Language::ALL
+                .iter()
+                .map(|language| language.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
     // Registered workspace roots and the hosts whose sessions work in them.
     let mut in_use: Option<InUse> = None;
     // What doctor judges a workspace by must be complete, even when the
@@ -2465,13 +2555,13 @@ fn doctor(
         let mut shell_hooks = false;
         for vendor in Vendor::ALL {
             let path = root.join(vendor.project_hook_files()[0]);
-            let (managed, missing): (Vec<install::Registration>, Vec<&str>) =
+            let (managed, missing, stale): (Vec<install::Registration>, Vec<&str>, Vec<&str>) =
                 match install::read(&path) {
                     Err(error) => {
                         note(false, format!("{}: {error}", path.display()));
                         continue;
                     }
-                    Ok(None) => (Vec::new(), Vec::new()),
+                    Ok(None) => (Vec::new(), Vec::new(), Vec::new()),
                     Ok(Some(settings)) => {
                         let ours = |hook: &serde_json::Value| install::is_managed_for(vendor, hook);
                         if install::switched_off(vendor, &settings) {
@@ -2483,6 +2573,7 @@ fn doctor(
                                 .filter_map(|hook| install::parse_project_hook(vendor, hook))
                                 .collect(),
                             install::missing_events(vendor, &settings, ours),
+                            install::stale_matchers(vendor, &settings, ours),
                         )
                     }
                 };
@@ -2512,9 +2603,9 @@ fn doctor(
             let points_here = install::same_directory(&first.state_dir, state_dir);
             let exists = first.executable.is_file();
             note(
-                points_here && exists && missing.is_empty(),
+                points_here && exists && missing.is_empty() && stale.is_empty(),
                 format!(
-                    "{} hooks installed for {} event(s){}{}{}{}",
+                    "{} hooks installed for {} event(s){}{}{}{}{}",
                     vendor.name(),
                     managed.len(),
                     if missing.is_empty() {
@@ -2523,6 +2614,17 @@ fn doctor(
                         format!(
                             "; not for {}, which an install from an earlier version leaves out: run `langspan hooks install {} --workspace ID --root {} --apply` again",
                             missing.join(", "),
+                            vendor.name(),
+                            root.display()
+                        )
+                    },
+                    if stale.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "; {}: {}, so tools LangSpan handles are not coordinated: run `langspan hooks install {} --workspace ID --root {} --apply` again",
+                            stale.join(", "),
+                            STALE_MATCHER,
                             vendor.name(),
                             root.display()
                         )
@@ -2557,7 +2659,7 @@ fn doctor(
             if let Some(mcp) = vendor.project_mcp_file() {
                 let name = vendor.name();
                 let mcp = root.join(mcp);
-                match install::read(&mcp).map(|config| {
+                match install::read_mcp(vendor, &mcp).map(|config| {
                     config
                         .as_ref()
                         .and_then(|config| config.get("mcpServers"))
@@ -2757,12 +2859,22 @@ fn main_install_problem(
             if !missing.is_empty() {
                 problems.push(format!("is not installed for {}", missing.join(", ")));
             }
+            let stale = install::stale_matchers(vendor, &settings, |hook| {
+                install::is_managed_for(vendor, hook)
+            });
+            if !stale.is_empty() {
+                problems.push(format!("has, for {}, {STALE_MATCHER}", stale.join(", ")));
+            }
         }
         Ok(None) => problems.push("could not be read".to_owned()),
         Err(error) => problems.push(format!("could not be read: {error}")),
     }
     (!problems.is_empty()).then(|| problems.join(" and "))
 }
+
+/// What `doctor` says of the tool events whose installed matcher is not the
+/// one this version writes (`install::stale_matchers`).
+const STALE_MATCHER: &str = "the matcher does not name the tools this version handles";
 
 /// What `doctor` says about the user-level install of each host present
 /// under the home: hooks, MCP registration, the executable both run, and the
@@ -2803,41 +2915,42 @@ fn user_level_findings(
                 findings.push((false, format!("{name}: {problem}.")));
             }
         }
-        let (hooks, missing): (Vec<install::UserRegistration>, Vec<&str>) = match install::read(
-            &files.hooks,
-        ) {
-            // Gemini CLI accepts comments in its settings; LangSpan never
-            // writes a file it cannot parse, so it cannot have installed there.
-            Err(error) if vendor == Vendor::Gemini => {
-                findings.push((
+        let (hooks, missing, stale): (Vec<install::UserRegistration>, Vec<&str>, Vec<&str>) =
+            match install::read(&files.hooks) {
+                // Gemini CLI accepts comments in its settings; LangSpan never
+                // writes a file it cannot parse, so it cannot have installed there.
+                Err(error) if vendor == Vendor::Gemini => {
+                    findings.push((
                         true,
                         format!(
                             "{name}: {error}, so no LangSpan install is there and none can be made until it is plain JSON."
                         ),
                     ));
-                continue;
-            }
-            Err(error) => {
-                findings.push((false, format!("{}: {error}", files.hooks.display())));
-                (Vec::new(), Vec::new())
-            }
-            Ok(None) => (Vec::new(), Vec::new()),
-            Ok(Some(settings)) => {
-                let ours = |hook: &serde_json::Value| install::is_user_managed_for(vendor, hook);
-                if install::switched_off(vendor, &settings) {
-                    findings.push((false, switched_off_finding(vendor, &files.hooks)));
+                    continue;
                 }
-                (
-                    install::managed_hooks(&settings, ours)
-                        .iter()
-                        .filter_map(|hook| install::parse_user_hook(vendor, hook))
-                        .collect(),
-                    install::missing_events(vendor, &settings, ours),
-                )
-            }
-        };
+                Err(error) => {
+                    findings.push((false, format!("{}: {error}", files.hooks.display())));
+                    (Vec::new(), Vec::new(), Vec::new())
+                }
+                Ok(None) => (Vec::new(), Vec::new(), Vec::new()),
+                Ok(Some(settings)) => {
+                    let ours =
+                        |hook: &serde_json::Value| install::is_user_managed_for(vendor, hook);
+                    if install::switched_off(vendor, &settings) {
+                        findings.push((false, switched_off_finding(vendor, &files.hooks)));
+                    }
+                    (
+                        install::managed_hooks(&settings, ours)
+                            .iter()
+                            .filter_map(|hook| install::parse_user_hook(vendor, hook))
+                            .collect(),
+                        install::missing_events(vendor, &settings, ours),
+                        install::stale_matchers(vendor, &settings, ours),
+                    )
+                }
+            };
         let server: Result<Option<user_install::McpServer>, String> = match vendor {
-            Vendor::ClaudeCode | Vendor::Cursor | Vendor::Gemini | Vendor::Antigravity => match install::read(&files.mcp) {
+            Vendor::ClaudeCode | Vendor::Cursor | Vendor::Gemini | Vendor::Antigravity => match install::read_mcp(vendor, &files.mcp) {
                 Err(error) => Err(error.to_string()),
                 Ok(config) => match config
                     .as_ref()
@@ -2895,6 +3008,12 @@ fn user_level_findings(
                     problems.push_str(&format!(
                         "; not for {}, which an install from an earlier version leaves out: run `langspan install --hosts {name} --apply` again",
                         missing.join(", ")
+                    ));
+                }
+                if !stale.is_empty() {
+                    problems.push_str(&format!(
+                        "; {}: {STALE_MATCHER}, so tools LangSpan handles are not coordinated: run `langspan install --hosts {name} --apply` again",
+                        stale.join(", ")
                     ));
                 }
                 problems.push_str(&check(&first.executable, &first.state_dir));
@@ -3004,6 +3123,16 @@ fn switch(options: &mut BTreeMap<String, String>, name: &str) -> Result<bool, la
         None | Some("on") => Ok(true),
         Some("off") => Ok(false),
         Some(_) => Err(format!("{name} must be on or off").into()),
+    }
+}
+
+/// How long ago, for a person: seconds, minutes, hours or days.
+fn ago(ms: u64) -> String {
+    match ms / 1000 {
+        seconds @ 0..=89 => format!("{seconds}s ago"),
+        seconds @ 90..=5399 => format!("{}m ago", seconds / 60),
+        seconds @ 5400..=129_599 => format!("{}h ago", seconds / 3600),
+        seconds => format!("{}d ago", seconds / 86_400),
     }
 }
 
@@ -3331,6 +3460,17 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 path: absolute_option(&mut options, "--in")?,
                 apply,
             },
+            ["graph", "history", workspace, name] => Command::History {
+                workspace_id: (*workspace).into(),
+                name: (*name).into(),
+                path: options.remove("--path"),
+                limit: u32::try_from(number(&mut options, "--limit", 10)?)
+                    .map_err(|_| "--limit is too large")?,
+                before_seq: options
+                    .remove("--before")
+                    .map(|seq| seq.parse().map_err(|_| "--before must be an integer"))
+                    .transpose()?,
+            },
             ["graph", "blind-spots", workspace] => Command::GraphBlindSpots {
                 workspace_id: (*workspace).into(),
                 limit: u32::try_from(number(&mut options, "--limit", 50)?)
@@ -3440,6 +3580,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::MessageStatus { .. }
                 | Command::Recall { .. }
                 | Command::Today { .. }
+                | Command::History { .. }
                 | Command::WorkspaceList { .. }
                 | Command::WorkspaceRemove { apply: false, .. }
         ) {
@@ -3563,7 +3704,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--max-peers" | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s"
             | "--wait-s" | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen"
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
-            | "--sound" | "--depth" | "--path" | "--out" | "--in" => {
+            | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -3899,13 +4040,24 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::SessionEnded { session_id } => {
             println!("Session {session_id} marked ended.")
         }
-        Outcome::AutoCheck { check } => println!(
-            "Automatic check {} is on for workspace {}: after a session's writes, {:?} runs on the exact working tree (time limit {} s).",
-            check.name,
-            check.workspace_id,
-            langspan::landing::command_line(&check.argv),
-            check.timeout_s
-        ),
+        Outcome::AutoCheck { check } => {
+            println!(
+                "Automatic check {} is on for workspace {}: after a session's writes, {:?} runs on the exact working tree (time limit {} s).",
+                check.name,
+                check.workspace_id,
+                langspan::landing::command_line(&check.argv),
+                check.timeout_s
+            );
+            if let Some(wider) = &check.on_interface_change {
+                println!(
+                    "On an interface change: {} runs {:?} whole, after {} on the same tree, when the writes changed an indexed export that other files mention (time limit {} s).",
+                    wider.name,
+                    langspan::landing::command_line(&wider.argv),
+                    check.name,
+                    wider.timeout_s
+                );
+            }
+        }
         Outcome::AutoCheckDisabled { workspace_id } => {
             println!("Automatic check is off for workspace {workspace_id}.")
         }
@@ -4561,6 +4713,93 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
             if recall.truncated {
                 println!("(More notes match; raise --limit, up to 50, or narrow the query.)");
             }
+        }
+        Outcome::History { history } => {
+            if history.entries.is_empty() {
+                println!(
+                    "No interface change to a definition named {} is recorded in {}.",
+                    serde_json::to_string(&history.name)?,
+                    history.workspace_id
+                );
+            }
+            // Signatures, task lines, notes and messages are repository and
+            // session text: quoted, so they read as data.
+            let quoted =
+                |text: &Option<String>| serde_json::to_string(text.as_deref().unwrap_or_default());
+            for entry in &history.entries {
+                let what = match entry.change.as_str() {
+                    "added" => format!("{} {} added", entry.kind, quoted(&entry.after)?),
+                    "removed" if entry.before.is_some() => {
+                        format!(
+                            "{} {} removed or renamed",
+                            entry.kind,
+                            quoted(&entry.before)?
+                        )
+                    }
+                    "removed" => format!("{} removed or renamed", entry.kind),
+                    "definition_added" => {
+                        format!("{} definition {} added", entry.kind, quoted(&entry.after)?)
+                    }
+                    "definition_removed" => {
+                        format!(
+                            "{} definition {} removed",
+                            entry.kind,
+                            quoted(&entry.before)?
+                        )
+                    }
+                    _ => format!(
+                        "{} signature changed from {} to {}",
+                        entry.kind,
+                        quoted(&entry.before)?,
+                        quoted(&entry.after)?
+                    ),
+                };
+                println!(
+                    "seq {}, {}: {} {what}{}{}{}",
+                    entry.seq,
+                    entry.age_ms.map_or_else(|| "age unknown".into(), ago),
+                    serde_json::to_string(&entry.path)?,
+                    entry
+                        .by_session
+                        .as_ref()
+                        .map(|session| format!(" by session {session}"))
+                        .unwrap_or_default(),
+                    if entry.reverted {
+                        " (reverted: back to an earlier signature)"
+                    } else {
+                        ""
+                    },
+                    match &entry.task {
+                        Some(task) => format!("; task: {}", serde_json::to_string(task)?),
+                        None => String::new(),
+                    }
+                );
+                for note in &entry.notes {
+                    println!(
+                        "  note ({}{}): {}",
+                        note.note_id,
+                        note.author
+                            .as_ref()
+                            .map(|author| format!(", by {author}"))
+                            .unwrap_or_default(),
+                        serde_json::to_string(&note.text)?
+                    );
+                }
+                for message in &entry.messages {
+                    println!(
+                        "  message ({}, from {}): {}",
+                        message.message_id,
+                        message.from.as_deref().unwrap_or("the owner"),
+                        serde_json::to_string(&message.text)?
+                    );
+                }
+            }
+            if let Some(next) = history.next_seq {
+                println!("(More is recorded; ask again with --before {next}.)");
+            }
+            println!(
+                "Sessions are the last reported editors of the file, not proof of authorship."
+            );
         }
         Outcome::Error { code, message } => println!("{code}: {}", serde_json::to_string(message)?),
         // The view is for the dashboard page; a terminal gets it as data.
