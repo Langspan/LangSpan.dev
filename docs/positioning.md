@@ -36,6 +36,35 @@ The [semantic example](https://langspan.dev/#why) reproduces a clean Git merge w
 combined check, without a model or LangSpan. Its proposed briefing-assisted
 recovery is an illustration, not an observed outcome.
 
+## Semantic awareness within coordination
+
+The coordination layer uses source relationships as well as file activity.
+The v0.1.0 local Tree-sitter index extracts definitions, name mentions,
+imports and signatures from Rust, Python, TypeScript/JavaScript and Go.
+It matches names, not resolved scopes, types or imports. Interface notices
+stay in one physical checkout. Related sessions can receive a notice at
+their next prompt. Supported Claude Code and Codex writes can receive
+advisory context about a changed function's argument count with the tool
+result, without an edit refusal on that basis.
+
+The [product illustration](https://langspan.dev/#semantic-awareness) uses a
+signature change, not an inferred rename. The
+[released-binary fixture](https://github.com/Langspan/langspan.github.io/blob/main/review/source-awareness-proof.mjs)
+exercises the actual advisory response with constructed hook events, real
+Git and the local coordinator. No model runs. It does not prove that an
+agent changes its approach or automatically repairs the caller.
+
+Use the four-part architecture to explain the responsibilities: existing
+agent execution, semantic awareness, coordination, and verification and
+integration. The middle two belong to LangSpan; checks bind to exact Git
+trees. Semantic awareness is a mechanism, not a new product category.
+[Source index](adr/0008-derived-source-index.md) and
+[argument-count alerts](adr/0029-break-alerts-at-write-time.md) document the
+current limits. Rename-aware alerts, same-count type/order changes and
+cross-worktree symbol awareness remain roadmap work:
+[B10](https://github.com/Langspan/LangSpan.dev/issues/29) and
+[C7](https://github.com/Langspan/LangSpan.dev/issues/44).
+
 ## Claim boundaries
 
 - The coordinator, hooks, CLI, MCP and SQLite run locally. The optional
@@ -67,6 +96,7 @@ recovery is an illustration, not an observed outcome.
 Use [the product website](https://langspan.dev/) for the overview,
 [parallel-work illustration](https://langspan.dev/#scale),
 [semantic conflict](https://langspan.dev/#why),
+[semantic awareness](https://langspan.dev/#semantic-awareness),
 [capability explorer](https://langspan.dev/#demo),
 [research](https://langspan.dev/#research) and
 [retained evidence](https://langspan.dev/#evidence).
