@@ -11,7 +11,8 @@
 use super::{Store, StoreResult, redact_event};
 use langspan_core::{
     ClockAnchor, CompactionReport, Event, KeptTests, LeaseStatus, MAX_RETENTION_DAYS,
-    MIN_RETENTION_DAYS, Outcome, PathRefusal, RecentRefusal, Rename, State, WriteRun, apply,
+    MIN_RETENTION_DAYS, Outcome, PathRefusal, RecentRefusal, Rename, State, UnsettledRefusal,
+    WriteRun, apply,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,12 @@ struct SnapshotRecord {
     /// Each workspace's runs of consecutive writes (ADR 0030).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     write_runs: BTreeMap<String, Vec<WriteRun>>,
+    /// Each workspace's wait for a current holder (ADR 0036).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    conflict_waits: BTreeMap<String, u32>,
+    /// Each session's refusals not yet settled (ADR 0036).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    unsettled: BTreeMap<String, Vec<UnsettledRefusal>>,
     /// Each workspace's remembered renames (roadmap D7).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     renames: BTreeMap<String, Vec<Rename>>,
@@ -62,6 +69,8 @@ impl SnapshotRecord {
             kept_tests: state.kept_tests.clone(),
             first_writes: state.first_writes.clone(),
             write_runs: state.write_runs.clone(),
+            conflict_waits: state.conflict_waits.clone(),
+            unsettled: state.unsettled.clone(),
             renames: state.renames.clone(),
         }
     }
@@ -74,6 +83,8 @@ impl SnapshotRecord {
         state.kept_tests = self.kept_tests;
         state.first_writes = self.first_writes;
         state.write_runs = self.write_runs;
+        state.conflict_waits = self.conflict_waits;
+        state.unsettled = self.unsettled;
         state.renames = self.renames;
         state
     }

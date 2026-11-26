@@ -12,6 +12,7 @@ mod dashboard;
 mod flaky;
 mod history;
 mod lines;
+mod policy;
 mod rank;
 mod recall;
 mod recent;
@@ -44,6 +45,10 @@ pub use history::{
     HISTORY_ATTRIBUTION, HISTORY_EVENTS, HISTORY_LIMIT, HISTORY_MOVES, HISTORY_NAME_BYTES,
     HISTORY_RELATED, HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote,
     HistoryQuery, history as definition_history,
+};
+pub use policy::{
+    DEFAULT_WAIT_MS, MAX_UNSETTLED, MAX_WAIT_MS, Policy, PolicyCase, PolicyRow, SettledOutcome,
+    UnsettledRefusal, WaitResult,
 };
 pub use rank::{
     Dependent, QUALIFIER_BYTES, RANK_CANDIDATES, RankInputs, RankReason, is_qualifier,
@@ -658,6 +663,7 @@ pub fn acting_session(command: &Command) -> Option<&str> {
         | Command::AckMessage { session_id, .. }
         | Command::Handoff { session_id, .. }
         | Command::RecordRefusal { session_id, .. }
+        | Command::RecordWait { session_id, .. }
         | Command::CheckCalls { session_id, .. }
         | Command::Complete { session_id, .. }
         | Command::Observe { session_id, .. }
@@ -2665,6 +2671,16 @@ pub struct State {
     /// status reply.
     #[serde(skip)]
     pub write_runs: BTreeMap<String, Vec<WriteRun>>,
+    /// The wait for a current holder per workspace, for the workspaces
+    /// whose conflict policy is `wait` (roadmap B28). Derived on replay;
+    /// not part of the status reply.
+    #[serde(skip)]
+    pub conflict_waits: BTreeMap<String, u32>,
+    /// Each session's write refusals not yet settled by an admitted write or
+    /// a stop, oldest first, at most `MAX_UNSETTLED`, of the current
+    /// generation only. Derived on replay; not part of the status reply.
+    #[serde(skip)]
+    pub unsettled: BTreeMap<String, Vec<UnsettledRefusal>>,
 }
 
 /// Checkout changes kept per workspace.
@@ -2885,6 +2901,43 @@ pub enum Event {
         input_digest: Option<String>,
         at_ms: u64,
         generation: u64,
+    },
+    /// A hook waited for a current holder instead of refusing at once
+    /// (roadmap B28), and how the wait ended.
+    WriteWaited {
+        session_id: String,
+        workspace_id: String,
+        /// At most `REFUSAL_PATHS`, sorted.
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_session_id: Option<String>,
+        waited_ms: u64,
+        result: WaitResult,
+        at_ms: u64,
+        generation: u64,
+    },
+    /// What the session did after a write refusal: its next admitted tool
+    /// write, or its stop (roadmap B28). `ms_to_next_admitted` is the time
+    /// from the refusal to an admitted write of one of its paths.
+    RefusalSettled {
+        session_id: String,
+        workspace_id: String,
+        kind: RefusalKind,
+        paths: Vec<String>,
+        refused_at_ms: u64,
+        outcome: SettledOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ms_to_next_admitted: Option<u64>,
+        at_ms: u64,
+        generation: u64,
+    },
+    /// The owner set a workspace's policy for a current holder (roadmap
+    /// B28). `wait_ms` is zero for `refuse`.
+    PolicySet {
+        workspace_id: String,
+        case: PolicyCase,
+        policy: Policy,
+        wait_ms: u32,
     },
     WorkspaceRegistered {
         workspace: Workspace,
@@ -3764,6 +3817,44 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer_session_id: Option<String>,
     },
+    /// Read-only: the policy table in effect for a workspace (roadmap B28).
+    Policy {
+        workspace_id: String,
+    },
+    /// The owner sets the policy for a current holder. Every other case is
+    /// fixed and refused with `policy_fixed`.
+    SetPolicy {
+        workspace_id: String,
+        case: PolicyCase,
+        policy: Policy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_ms: Option<u32>,
+    },
+    /// Read-only: the current holders an admission of these paths would
+    /// meet now, polled by a hook that waits for them.
+    Holders {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        base: Vec<ObservedFile>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        regions: Vec<PathRegions>,
+    },
+    /// A hook's wait for a current holder and how it ended, recorded as
+    /// `WriteWaited`, with the refusal it ended in. `changed` are the paths
+    /// whose version changed during the wait, as they are now.
+    RecordWait {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_session_id: Option<String>,
+        waited_ms: u64,
+        result: WaitResult,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changed: Vec<ObservedFile>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_digest: Option<String>,
+    },
     /// Read-only, answered from the derived index: where `name` is defined.
     /// With `detail`, each definition also carries its body digest, calls,
     /// callers, notes and last check (roadmap D1).
@@ -4506,6 +4597,44 @@ enum CommandWire {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer_session_id: Option<String>,
     },
+    /// Read-only: the policy table in effect for a workspace (roadmap B28).
+    Policy {
+        workspace_id: String,
+    },
+    /// The owner sets the policy for a current holder. Every other case is
+    /// fixed and refused with `policy_fixed`.
+    SetPolicy {
+        workspace_id: String,
+        case: PolicyCase,
+        policy: Policy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_ms: Option<u32>,
+    },
+    /// Read-only: the current holders an admission of these paths would
+    /// meet now, polled by a hook that waits for them.
+    Holders {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        base: Vec<ObservedFile>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        regions: Vec<PathRegions>,
+    },
+    /// A hook's wait for a current holder and how it ended, recorded as
+    /// `WriteWaited`, with the refusal it ended in. `changed` are the paths
+    /// whose version changed during the wait, as they are now.
+    RecordWait {
+        session_id: String,
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder_session_id: Option<String>,
+        waited_ms: u64,
+        result: WaitResult,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changed: Vec<ObservedFile>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_digest: Option<String>,
+    },
     /// Read-only, answered from the derived index: where `name` is defined.
     /// With `detail`, each definition also carries its body digest, calls,
     /// callers, notes and last check (roadmap D1).
@@ -5111,6 +5240,16 @@ pub enum Outcome {
     RefusalRecorded {
         session_id: String,
     },
+    Policy {
+        workspace_id: String,
+        rows: Vec<PolicyRow>,
+    },
+    Holders {
+        holders: Vec<Conflict>,
+    },
+    WaitRecorded {
+        session_id: String,
+    },
     Dashboard {
         dashboard: Dashboard,
     },
@@ -5217,7 +5356,11 @@ pub struct Decision {
 /// them. Receipt replay and request-id ownership are storage responsibilities.
 pub fn decide(state: &State, command: &Command, request_id: &str, now_ms: u64) -> Decision {
     match decide_checked(state, command, request_id, now_ms) {
-        Ok(decision) => decision,
+        Ok(mut decision) => {
+            let settled = policy::settle(state, &decision.events, now_ms);
+            decision.events.extend(settled);
+            decision
+        }
         Err(error) => Decision {
             events: Vec::new(),
             outcome: Outcome::Error {
@@ -5442,17 +5585,7 @@ fn decide_checked(
             let session = current_session(state, session_id)?;
             let paths = normalized_paths(paths)?;
             lines::validate_overwrites(overwrites, &paths)?;
-            let regions = normalized_regions(regions, &paths)?
-                .into_iter()
-                // Regions are trusted only for the version the hook saw on
-                // disk when it asked; otherwise the path is held whole.
-                .filter(|located| {
-                    base.iter().flatten().any(|file| {
-                        file.path == located.path
-                            && matches!(&file.state, FileState::Present { digest, .. } if *digest == located.digest)
-                    })
-                })
-                .collect::<Vec<_>>();
+            let regions = trusted_regions(regions, &paths, base.iter().flatten())?;
             if !(1..=60_000).contains(ttl_ms) {
                 return Err(error(
                     "invalid_ttl",
@@ -5478,18 +5611,15 @@ fn decide_checked(
             // expires helps nobody. A manual admission stays exclusive, as
             // ADR 0001 defines.
             let tool_call = operation.is_some();
-            let holders: Vec<Conflict> =
-                conflicts(state, &session.workspace_id, &paths, &regions, now_ms)
-                    .into_iter()
-                    .filter(|holder| {
-                        !(tool_call
-                            && holder.session_id == *session_id
-                            && state
-                                .leases
-                                .get(&holder.lease_id)
-                                .is_some_and(|lease| lease.operation.is_some()))
-                    })
-                    .collect();
+            let holders = holders_of(
+                state,
+                session_id,
+                &session.workspace_id,
+                &paths,
+                &regions,
+                tool_call,
+                now_ms,
+            );
             // Each refusal is one event, stored with the refusal's receipt:
             // the same request again is answered from it and adds none.
             let refused = |kind, peer: Option<&String>| Event::WriteRefused {
@@ -5506,8 +5636,11 @@ fn decide_checked(
             };
             if !holders.is_empty() {
                 // A hook's tool call; a manual `admit` refused is not a write.
+                // Where the workspace waits for a holder, the hook records
+                // the refusal when its wait ends without an admission.
+                let waits = policy::conflict_wait_ms(state, &session.workspace_id) > 0;
                 return Ok(Decision {
-                    events: tool_call
+                    events: (tool_call && !waits)
                         .then(|| {
                             refused(
                                 RefusalKind::Conflict,
@@ -7393,6 +7526,68 @@ fn decide_checked(
                 },
             })
         }
+        Command::Policy { workspace_id } => {
+            validate_known_workspace(state, workspace_id)?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Policy {
+                    workspace_id: workspace_id.clone(),
+                    rows: policy::table(state, workspace_id),
+                },
+            })
+        }
+        Command::SetPolicy {
+            workspace_id,
+            case,
+            policy,
+            wait_ms,
+        } => policy::decide_set(state, workspace_id, *case, *policy, *wait_ms),
+        Command::Holders {
+            session_id,
+            paths,
+            base,
+            regions,
+        } => {
+            let session = current_session(state, session_id)?;
+            let paths = normalized_paths(paths)?;
+            let base = normalized_files(base)?;
+            let regions = trusted_regions(regions, &paths, base.iter())?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Holders {
+                    holders: holders_of(
+                        state,
+                        session_id,
+                        &session.workspace_id,
+                        &paths,
+                        &regions,
+                        true,
+                        now_ms,
+                    ),
+                },
+            })
+        }
+        Command::RecordWait {
+            session_id,
+            paths,
+            holder_session_id,
+            waited_ms,
+            result,
+            changed,
+            input_digest,
+        } => policy::decide_wait(
+            state,
+            policy::WaitReport {
+                session_id,
+                paths,
+                holder_session_id: holder_session_id.as_ref(),
+                waited_ms: *waited_ms,
+                result: *result,
+                changed,
+                input_digest: input_digest.as_ref(),
+            },
+            now_ms,
+        ),
         Command::RecordRefusal {
             session_id,
             kind,
@@ -10446,6 +10641,50 @@ fn decide_observation(
     })
 }
 
+/// The regions of `regions` that name the version `base` gives for their
+/// path. Regions are trusted only for the version the hook saw on disk when
+/// it asked; any other path is held whole.
+fn trusted_regions<'a>(
+    regions: &[PathRegions],
+    paths: &[String],
+    base: impl Iterator<Item = &'a ObservedFile> + Clone,
+) -> Result<Vec<PathRegions>, CoreError> {
+    Ok(normalized_regions(regions, paths)?
+        .into_iter()
+        .filter(|located| {
+            base.clone().any(|file| {
+                file.path == located.path
+                    && matches!(&file.state, FileState::Present { digest, .. } if *digest == located.digest)
+            })
+        })
+        .collect())
+}
+
+/// The current admissions an admission of `paths` by `session_id` would
+/// meet. A host's tool call is never held back by an earlier tool call of
+/// the same session.
+fn holders_of(
+    state: &State,
+    session_id: &str,
+    workspace_id: &str,
+    paths: &[String],
+    regions: &[PathRegions],
+    tool_call: bool,
+    now_ms: u64,
+) -> Vec<Conflict> {
+    conflicts(state, workspace_id, paths, regions, now_ms)
+        .into_iter()
+        .filter(|holder| {
+            !(tool_call
+                && holder.session_id == session_id
+                && state
+                    .leases
+                    .get(&holder.lease_id)
+                    .is_some_and(|lease| lease.operation.is_some()))
+        })
+        .collect()
+}
+
 fn conflicts(
     state: &State,
     workspace_id: &str,
@@ -10625,6 +10864,8 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             state.generation = *generation;
             // The new generation's anchor, if any, is the next event.
             state.clock_anchor = None;
+            // A refusal is settled within the run it was given in.
+            state.unsettled.clear();
             for lease in state.leases.values_mut() {
                 if lease.status == LeaseStatus::Active {
                     lease.status = LeaseStatus::Invalidated;
@@ -10659,12 +10900,12 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::WriteRefused {
             session_id,
             workspace_id,
+            kind,
             paths,
             peer_session_id,
             input_digest,
             at_ms,
             generation,
-            ..
         } => {
             known_session(state, session_id)?;
             validate_known_workspace(state, workspace_id)?;
@@ -10684,7 +10925,36 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             }
             status_line::remember(state, workspace_id, *at_ms, *generation);
             recent::remember_refusal(state, workspace_id, paths, *at_ms, *generation);
+            policy::remember_refusal(state, session_id, *kind, paths, *at_ms, *generation);
         }
+        Event::WriteWaited {
+            session_id,
+            workspace_id,
+            paths,
+            holder_session_id,
+            waited_ms,
+            ..
+        } => policy::validate_waited(
+            state,
+            session_id,
+            workspace_id,
+            paths,
+            holder_session_id.as_ref(),
+            *waited_ms,
+        )?,
+        Event::RefusalSettled {
+            session_id,
+            kind,
+            paths,
+            refused_at_ms,
+            ..
+        } => policy::apply_settled(state, session_id, *kind, paths, *refused_at_ms)?,
+        Event::PolicySet {
+            workspace_id,
+            case,
+            policy,
+            wait_ms,
+        } => policy::apply_set(state, workspace_id, *case, *policy, *wait_ms)?,
         Event::WorkspaceRegistered { workspace } => {
             validate_workspace(state, workspace)?;
             state

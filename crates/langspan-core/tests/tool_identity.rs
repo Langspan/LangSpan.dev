@@ -111,10 +111,13 @@ fn tool_admission_uses_the_same_all_or_none_conflict_rules() {
         Outcome::Conflict { .. }
     ));
     // Nothing is reserved; only the refusal is remembered, for a starting
-    // session's recent section (roadmap C3).
+    // session's recent section (roadmap C3) and until what followed it
+    // settles it (roadmap B28).
     assert_eq!(state.path_refusals.len(), 1);
     assert_eq!(state.path_refusals[0].paths, ["src/api.rs", "src/other.rs"]);
     state.path_refusals.clear();
+    assert_eq!(state.unsettled["alice"].len(), 1);
+    state.unsettled.clear();
     assert_eq!(state, before);
 }
 
