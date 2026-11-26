@@ -69,6 +69,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Claude Code and Codex Stop), on the exact working tree,
                                  records it as check NAME and tells that session the
                                  result at its next briefing. Without options: show it
+    [COMMAND... --on-interface-change NAME2 [--timeout-s N] -- COMMAND2...]
+                                 When the writes changed an indexed export that other
+                                 files mention, COMMAND2 runs whole after COMMAND on the
+                                 same tree, recorded as NAME2 and graded kept or broke
   check flaky WORKSPACE [--name NAME] | --forget TEST [--name NAME] --request-id ID
                                  Tests that flipped on unchanged code (two results on
                                  one tree, no write between); --forget clears one
@@ -1597,10 +1601,14 @@ fn auto_check(
         let timeout_s = u32::try_from(number(options, "--timeout-s", 1800)?)
             .map_err(|_| "--timeout-s is at most 3600")?;
         no_unused_options(options)?;
+        let (command, wider) = wider_check(command)?;
         if command.is_empty() {
             return Err("give the check command after --, for example: -- cargo test".into());
         }
         langspan::auto_check::refuse_secrets(command)?;
+        if let Some(wider) = &wider {
+            langspan::auto_check::refuse_secrets(&wider.argv)?;
+        }
         ask(
             state_dir,
             unique("auto-check", &[workspace, &name]),
@@ -1609,6 +1617,7 @@ fn auto_check(
                 name,
                 argv: command.to_vec(),
                 timeout_s,
+                on_interface_change: wider.map(Box::new),
             },
         )?
     };
@@ -1628,6 +1637,48 @@ fn auto_check(
         state_dir,
     )?;
     Ok(0)
+}
+
+/// `COMMAND... --on-interface-change NAME [--timeout-s N] -- COMMAND2...`:
+/// the regular command and the wider one, which runs whole after it when a
+/// session's writes changed an indexed interface that other files mention.
+fn wider_check(
+    command: &[String],
+) -> Result<(&[String], Option<langspan_core::WiderCheck>), langspan::Error> {
+    const USAGE: &str = "give the wider check as --on-interface-change NAME [--timeout-s N] -- COMMAND..., after the regular command";
+    let Some(at) = command
+        .iter()
+        .position(|arg| arg == "--on-interface-change")
+    else {
+        return Ok((command, None));
+    };
+    let (regular, rest) = command.split_at(at);
+    let (name, mut rest) = match rest {
+        [_, name, rest @ ..] if !name.starts_with("--") => (name.clone(), rest),
+        _ => return Err(USAGE.into()),
+    };
+    let mut timeout_s = 1800;
+    if let [flag, value, after @ ..] = rest
+        && flag == "--timeout-s"
+    {
+        timeout_s = value
+            .parse::<u32>()
+            .ok()
+            .filter(|seconds| (1..=langspan_core::MAX_AUTO_CHECK_TIMEOUT_S).contains(seconds))
+            .ok_or("--timeout-s of the wider check is 1 to 3600 seconds")?;
+        rest = after;
+    }
+    match rest {
+        [separator, argv @ ..] if separator == "--" && !argv.is_empty() => Ok((
+            regular,
+            Some(langspan_core::WiderCheck {
+                name,
+                argv: argv.to_vec(),
+                timeout_s,
+            }),
+        )),
+        _ => Err(USAGE.into()),
+    }
 }
 
 /// An inconclusive check's reason and next step, as the MCP result has them.
@@ -3942,13 +3993,24 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::SessionEnded { session_id } => {
             println!("Session {session_id} marked ended.")
         }
-        Outcome::AutoCheck { check } => println!(
-            "Automatic check {} is on for workspace {}: after a session's writes, {:?} runs on the exact working tree (time limit {} s).",
-            check.name,
-            check.workspace_id,
-            langspan::landing::command_line(&check.argv),
-            check.timeout_s
-        ),
+        Outcome::AutoCheck { check } => {
+            println!(
+                "Automatic check {} is on for workspace {}: after a session's writes, {:?} runs on the exact working tree (time limit {} s).",
+                check.name,
+                check.workspace_id,
+                langspan::landing::command_line(&check.argv),
+                check.timeout_s
+            );
+            if let Some(wider) = &check.on_interface_change {
+                println!(
+                    "On an interface change: {} runs {:?} whole, after {} on the same tree, when the writes changed an indexed export that other files mention (time limit {} s).",
+                    wider.name,
+                    langspan::landing::command_line(&wider.argv),
+                    check.name,
+                    wider.timeout_s
+                );
+            }
+        }
         Outcome::AutoCheckDisabled { workspace_id } => {
             println!("Automatic check is off for workspace {workspace_id}.")
         }
