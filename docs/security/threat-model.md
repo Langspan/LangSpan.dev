@@ -227,7 +227,7 @@ derived from one agent session is placed in another session's model context.
 | Tampering (prompt injection) | A peer's task line is the first line of that owner's prompt; file paths come from the repository. Both are attacker-influenced if a peer session or the repository is. Control characters, Unicode line and paragraph separators, bidirectional overrides and zero-width characters become spaces; every such value is quoted with its own quotes escaped, capped at 200 bytes, each peer at 700 and the whole briefing at 2,400, under a fixed header stating that the lines are data, not instructions. This reduces, and cannot remove, the chance that a host model follows text in a briefing. A briefing never carries a permission decision, so it cannot allow or deny anything by itself. |
 | Repudiation | Each delivery is an event (`briefing_delivered`) with the signature of what was delivered; prompt summaries and session ends are events. |
 | Information disclosure | One line of each prompt, and no other line as text, is stored in the local event log, appears in `status`, and is shown to other sessions of the same user in the same repository: its first line marked `Task:`, else its first non-empty line, else, when a live peer's latest prompt in the repository begins with the same lines, its first line that differs (issue #114). To find that line the hook also sends a 32-hex-character SHA-256 prefix of each of the prompt's first 32 non-empty lines, computed after redaction. They are stored in the event log and the session's activity, visible to same-user clients of the socket through `status` and `events`, never in a briefing and never published; a short or common line can be guessed from its digest by someone who can already read the store. The core accepts at most 32 lower-case hex digests of at most 64 characters. Before that line, an intent summary, a note, a message or a handoff is sent to the daemon, one redaction function in the hook adapter replaces likely secrets with `[redacted]` (provider key shapes, JWTs, PEM blocks, URL passwords, secret-named assignments and query values, `--password`/`--token` arguments, and long high-entropy tokens under a conservative rule) and the owner's home prefix with `~`; the daemon applies it again on receipt. A prompt or intent summary is held to its byte limit after redaction: one that would outgrow it keeps its longest redacted prefix that fits, ending in `[redacted]`, so a summary is never refused, and its prompt shared without one, because it held a secret. A secret in a shape the rule does not know, such as an all-hexadecimal or all-lower-case token, is still shared. `hooks install --prompt-summary off` stops recording prompt text. Nothing leaves the machine unless publication is enabled. Workspaces in other repositories are never briefed about each other. |
-| Denial of service | Session events share the 1.5 s hook budget and the daemon's bounded queue. Activity is 32 paths per session; a briefing reads at most 16 peers. Each prompt adds one receipt and at most three events; retention is still open. |
+| Denial of service | Session events share the 1.5 s hook budget and the daemon's bounded queue. Activity is 32 paths per session; a briefing reads at most 16 peers. Each prompt adds one receipt and at most three events; they are kept until compacted (see Retention). |
 | Spoofing (repository grouping) | `observe_workspace_git` is accepted from any client of the owner-only socket, like the other observation commands. A same-user process can therefore place two workspaces in one repository and make their sessions briefed about each other. It cannot affect admission. |
 | Elevation of privilege | Lifecycle hooks print context only. Every failure, including an unavailable daemon, prints nothing and exits 0. |
 
@@ -645,6 +645,25 @@ by the next hook run that can connect.
 | Denial of service | At most 200 entries and 512 KiB, 3 tries each, an hour old at most; at most 20 sends per hook run, within half of the run's remaining budget, stopping at the first failure; a plainly down daemon costs one connection attempt. At most 800 directory entries are looked at per run. |
 | Elevation of privilege | A resend makes no admission and no decision: it only records observations, versions and completions, as the original run would have. Against a restarted daemon it does not register the session again. |
 
+## Retention
+
+[ADR 0025](../adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md)
+(J7): `langspan compact` and `config.json`'s `retention_days` replace old
+events with a snapshot of the state they built, and delete old receipts. No
+new listener, file outside the state directory or network call: the request
+is an ordinary command on the owner-only socket, and the setting is read from
+the owner-only `config.json`. `LANGSPAN_TEST_COMPACT_PAUSE_MS`, read from the
+daemon's own environment, only delays the commit (at most 10 s) for a test.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Any client of the owner-only socket can ask for a compaction, as it can for any command. It can only remove records older than at least 7 days, and only after the state they built is snapshotted. |
+| Tampering | The snapshot is a row in the same owner-only file as the events. Before anything is deleted, the snapshot read back with the later events applied must equal the state the daemon holds; a same-user process that changed the event table first makes the compaction stop with nothing deleted. A same-user process that edits the snapshot row afterwards changes the state the next start loads, as editing an event row already could. |
+| Repudiation | Removed events and receipts are gone: the log no longer shows what happened before the window, and a retry after it is a new request. The dry run is the default, the window is at least 7 days, and `remote sent` says from which date its list of publications is complete. |
+| Information disclosure | Retention reduces what is kept. The snapshot holds the derived state only (what `status --all` shows), which the events already held. SQLite reuses the freed pages without overwriting them at once, so removed text can remain in the file's free space until it is reused. |
+| Denial of service | A compaction runs in the single writer and blocks other requests while it replays the events after the previous snapshot (0.6 s for 500,000 small events in one measurement). The daemon runs it only when configured, once a day. An unacknowledged message, open admission or push turn holds the snapshot before it, so old events can remain; the report names what holds it. |
+| Elevation of privilege | Compaction makes no admission or decision and changes no state the daemon holds: the snapshot must equal it. |
+
 ## Worktrees, processes and passive observations
 
 **Worktree separation.** Ordinary overlapping roots and same-root aliases remain
@@ -794,7 +813,7 @@ in parts that the reader joins, up to 8 MiB, and resumes inside a record only
 if its JSON is unchanged; otherwise it starts that record again. Decisions that
 need a part the bounded view may leave out (landing retries, doctor, automatic
 checks) read it complete instead of treating it as absent.
-Coverage aggregation and retention are unfinished. macOS path,
+Coverage aggregation is unfinished; retention is built (below). macOS path,
 transport, sleep/resume and signing behavior, and Windows transport, need their
 own validation. Remote publication requires a separate concrete owner-approved
 data flow and threat-model update.
