@@ -38,6 +38,12 @@ const ENTRY_FIELDS_SINCE_4: [&str; 3] = ["after_name", "evidence", "before_path"
 /// The field version 4 added to an in-flight symbol (`InflightSymbol`,
 /// `InflightNotice`: the only objects with `signature` and `mentioned_in`).
 const INFLIGHT_FIELD_SINCE_4: &str = "renamed_from";
+/// The trail a briefing carries (`Briefing`, the only object with
+/// `changed` and `omitted_peers`) and the trails of a recap (`Recap`, with
+/// `sessions` and `omitted_sessions`), roadmap C9. A version 3 client is
+/// told neither; a trail taken by its briefing is not offered again.
+const BRIEFING_FIELD_SINCE_4: &str = "trail";
+const RECAP_FIELD_SINCE_4: &str = "trails";
 
 /// An interface change or a history entry: the objects of the protocol
 /// with all of `kind`, `change`, `before` and `after`. A write check's
@@ -74,6 +80,12 @@ fn protocol_3_shape(value: &mut serde_json::Value) {
             }
             if fields.contains_key("signature") && fields.contains_key("mentioned_in") {
                 fields.shift_remove(INFLIGHT_FIELD_SINCE_4);
+            }
+            if fields.contains_key("changed") && fields.contains_key("omitted_peers") {
+                fields.shift_remove(BRIEFING_FIELD_SINCE_4);
+            }
+            if fields.contains_key("sessions") && fields.contains_key("omitted_sessions") {
+                fields.shift_remove(RECAP_FIELD_SINCE_4);
             }
             fields.values_mut().for_each(protocol_3_shape);
         }

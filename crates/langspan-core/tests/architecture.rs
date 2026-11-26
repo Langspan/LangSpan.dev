@@ -66,6 +66,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
         include_str!("../src/status.rs"),
         include_str!("../src/status_line.rs"),
         include_str!("../src/today.rs"),
+        include_str!("../src/trail.rs"),
         include_str!("../src/workspaces.rs"),
         include_str!("../src/write_check.rs"),
     ];
@@ -117,6 +118,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
             "mod status;",
             "mod status_line;",
             "mod today;",
+            "mod trail;",
             "mod workspaces;",
             "mod write_check;"
         ],
