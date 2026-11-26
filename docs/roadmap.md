@@ -133,10 +133,6 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 - [F8: An integration branch every session lands on](https://github.com/Langspan/LangSpan.dev/issues/73): each agent's own branch leaves the person merging six branches by hand to see the work together.
 - [F9: A LangSpan mark in pull requests](https://github.com/Langspan/LangSpan.dev/issues/74): a reviewer might want to know a pull request's tree was checked through LangSpan.
 
-## G. Cross-machine and team
-
-- [G6: Move, switch and remove a workspace](https://github.com/Langspan/LangSpan.dev/issues/75): a moved or re-cloned checkout loses its history, and an unused repository cannot be removed.
-
 ## H. The person's view
 
 - [H6: A daily "work saved" line, once measured](https://github.com/Langspan/LangSpan.dev/issues/80): people want a savings figure, which needs measurement rather than assumptions.

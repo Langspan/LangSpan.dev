@@ -474,6 +474,20 @@ Withdrawing a message (`langspan messages retract`, `langspan_retract_message`, 
 | Denial of service | Withdrawals owed to a session are capped at 64, oldest dropped; at most four, within the message budget, per briefing. The history kept for withdrawal is the latest 64 messages per workspace. |
 | Elevation of privilege | A withdrawal grants and releases nothing; it only stops delivery and adds a notice. |
 
+## Moving and removing a workspace
+
+`workspace move` rebinds a workspace ID to another root and `workspace remove` takes it out of the derived state ([ADR 0025](../adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md), row G6). They are CLI commands over the existing owner-only socket; no MCP tool offers them, so an agent following repository or peer text has no tool that moves or removes a workspace (a shell command can still run the CLI, as it can `remote disable`).
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Any client of the owner-only socket can send the request, as with `workspace add`. The socket's mode is the boundary. |
+| Tampering (wrong checkout) | A move needs NEW_ROOT to be the top of a Git checkout and, without `--switch`, the old root to be gone; with `--switch`, NEW_ROOT's object database must hold the old root's `HEAD` commit. The check is a shared commit, not an identity: a fork or any clone that fetched that commit passes, and a repository can be given the commit on purpose. The new root then meets the same overlap and alias refusals as `workspace add`. A refused move changes nothing. |
+| Tampering (repository-controlled Git) | NEW_ROOT's top is found with the same `git rev-parse` identity read `workspace add` uses. For `--switch`, `git rev-parse` of the old root's `HEAD` and `git cat-file -e` in NEW_ROOT run with `core.fsmonitor=false` and `--no-replace-objects`, as the observer's reads do. All of it is bounded by one second; no filter, hook or working-tree read runs. The project hook files of both roots are read only to print which `hooks install` commands to rerun; nothing in host configuration is written. |
+| Repudiation | `workspace_moved` (with the old and new root) and `workspace_removed` are events; every earlier event stays in the log. |
+| Information disclosure | `workspace list` shows roots, counts and two settings, as `status` already does. Both events are local only and never published. |
+| Denial of service | A move or removal is refused while a session holds a current admission there or a landing holds or waits for its push turn, so it cannot end work in progress. A removal ends the workspace's sessions, notes, messages and automatic check in the derived state; a same-user process can do this to any idle workspace, as it could already forget its notes. |
+| Elevation of privilege | A move or removal grants nothing. Remote sharing must be off first, and both wait until the published ref is gone, so neither leaves a published ref the daemon no longer withdraws, or withdraws through another checkout's remote. |
+
 ## Source index
 
 [ADR 0008](../adr/0008-derived-source-index.md): repository source is parsed
