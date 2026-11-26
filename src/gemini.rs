@@ -230,11 +230,8 @@ fn parse(
             // It reports its reads, so it gets no snapshot.
             snapshot_unknown: false,
             shell: None,
-            // A `write_file`'s whole new content, for the break check.
-            contents: match (tool, input.get("content").and_then(Value::as_str)) {
-                ("write_file", Some(content)) => vec![(key, content.to_owned())],
-                _ => Vec::new(),
-            },
+            // A `write_file`'s content is in `edits`.
+            contents: Vec::new(),
             // Gemini reads no context on BeforeTool (ADR 0033), so a break
             // alert there would never reach the model. Its AfterTool context
             // is added to the tool's result: the write's calls are found at
@@ -246,9 +243,16 @@ fn parse(
     ))
 }
 
-/// The string replacement a `replace` call states. `None` for `write_file`
-/// or an input of another shape: the file is held whole.
+/// What a call states it changes: a `replace` call's string replacement, or
+/// a `write_file`'s whole new content (held whole, and compared with the
+/// file for the lines it changes as Claude Code's `Write` is, ADR 0028).
+/// `None` for an input of another shape: the file is held whole.
 fn replacement(tool: &str, input: &Value) -> Option<crate::regions::Edit> {
+    if tool == "write_file" {
+        return Some(crate::regions::Edit::Write(
+            input.get("content")?.as_str()?.to_owned(),
+        ));
+    }
     if tool != "replace" {
         return None;
     }

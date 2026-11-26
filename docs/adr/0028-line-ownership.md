@@ -5,7 +5,9 @@
 (source versions). Builds on the line journal of
 [ADR 0026](0026-commit-guard-and-commit-mine.md) and the edit placement of
 [ADR 0012](0012-region-admission.md). Tested with the real daemon and hook
-executables; not yet observed on a host.
+executables; not yet observed on a host. Shell writes on all four hosts and
+the whole-content writes of Cursor and Gemini CLI added 26 November 2026
+(issue #23).
 
 ## Context
 
@@ -34,9 +36,11 @@ same bytes as the admission's base version.
 | Tool | Changed lines found as |
 | --- | --- |
 | Claude Code `Edit`, `MultiEdit` | The replacements applied in memory as the host applies them, then the two versions compared line by line. A replacement must match exactly once, or every match with `replace_all`. The comparison is Myers' algorithm with the common head and tail cut first, within at most 256 edits, 4,000,000 line comparisons and 64 MiB of compared bytes; past any of these, the middle is one change. |
-| Claude Code `Write` | The new content compared with the file in the same way. Only lines that differ are changed, so a whole-file write that keeps another session's line exactly does not replace it. |
+| Claude Code `Write`, Cursor `Write`, Gemini CLI `write_file` | The new content compared with the file in the same way. Only lines that differ are changed, so a whole-file write that keeps another session's line exactly does not replace it. |
 | Codex `apply_patch`, `Update File` | Each hunk placed as ADR 0012 places it (one match under its loose comparison). Its `-` lines are the changed lines. A hunk that matches only once its trailing empty lines are dropped (the host's retry) is not located. |
-| Anything else (`NotebookEdit`, Codex add, delete or move, a shell write), an edit that does not apply exactly, a file over 1 MiB or not UTF-8, or less than half the hook budget left | Not located: the edit may change any line. |
+| A shell write whose targets the parser names (`> path`, `>> path`, `tee path`, `sed -i path`), through the `Bash`, `Shell` and `run_shell_command` pre-tool hooks | Not located: the command may change any line of each target. |
+| Anything else (`NotebookEdit`, Codex add, delete or move), an edit that does not apply exactly, or a file over 1 MiB or not UTF-8 | Not located: the edit may change any line. |
+| Any edit, with less than half the hook budget left | Not looked up: no written lines are sent, so nothing is refused for them. |
 
 An insertion changes no existing line.
 
@@ -143,6 +147,31 @@ explicitly:
   most four, with their task lines, and suggests `langspan adopt`. Only the
   start hook names them, so a session is told once per start.
 
+**Shell writes and whole-content hosts** (added 26 November 2026, issue
+#23). A shell command whose targets the parser names is admitted through the
+same path as an edit, with no stated edit, so each target may change any line
+and every recent line of another live session in it is named. This holds on
+all four hosts' shell tools, and is refused once as any edit is. Cursor
+`Write` and Gemini CLI `write_file` state their content as an edit, as Claude
+Code `Write` does, so a whole-file write that keeps another session's lines
+exactly, or only appends, refuses nothing. Three choices the issue left open
+were taken at their smallest:
+
+- **Heredocs stay with B5.** `cat > path <<'EOF'` is outside the parsed write
+  set, so it gets no decision (`shell_observing`) and is never refused for
+  lines. Comparing its body as a `Write` waits until B5 admits heredocs.
+- **Appends are not told apart.** `>> path` and `tee -a path` are shell
+  writes like `>`: they may change any line and are refused once over a
+  peer's recent lines, though they only add. Telling them apart needs the
+  parser to report the redirection per target.
+- **Too little time is no check.** With less than half the hook budget left
+  the hook reads no journal, compares no lines and sends no `overwrites`, so
+  the admission is decided without them. Before, an edit it could no longer
+  place counted as changing every line, and lack of time could refuse it.
+  Daemon down, journal unreadable or a shell snapshot incomplete already gave
+  no decision for lines; the last says why in its coverage
+  (`shell_unobserved`, "workspace snapshot incomplete").
+
 ## Consequences and limits
 
 - **An adoption cannot be undone or passed on while the adopter is live.**
@@ -220,7 +249,12 @@ explicitly:
 
 Tests:
 
-- `tests/line_ownership.rs`: real daemon and hook executables.
+- `tests/line_ownership.rs`: real daemon and hook executables, a real Git
+  checkout, shell commands run between their hooks on the Codex, Claude Code,
+  Cursor and Gemini CLI shell tools, and constructed Cursor `Write` and Gemini
+  CLI `write_file` events.
+- `src/hook.rs` (`journal_lookup`): no written lines past the locating
+  deadline.
 - `crates/langspan-core/tests/line_ownership.rs`: the rule and its bounds.
 - `src/lines.rs`: the changed lines and the journal lookup.
 - `tests/adopt.rs` and `crates/langspan-core/tests/adoption.rs`: adoption,
