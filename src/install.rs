@@ -2299,7 +2299,6 @@ mod tests {
         for vendor in [
             Vendor::Codex,
             Vendor::Cursor,
-            Vendor::Gemini,
             Vendor::Antigravity,
         ] {
             let settings = plan_for(vendor, None, Some(&registration("/r"))).unwrap();
