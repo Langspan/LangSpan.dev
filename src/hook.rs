@@ -3910,6 +3910,21 @@ impl Session<'_> {
             )
         };
         let mut admitted = self.attach(ids).and_then(|()| admit(ids.admit.clone()));
+        // The same call delivered again after a wait that admitted it: its
+        // first request replays the conflict that started the wait, so ask
+        // again under the request the wait ended with (issue #244).
+        if let Ok(Response {
+            outcome: Outcome::Conflict { .. },
+            replayed: true,
+            ..
+        }) = &admitted
+        {
+            let after =
+                crate::wait::admission_of(&self.config.state_dir, &ids.operation_id, &ids.admit);
+            if after != ids.admit {
+                admitted = admit(after);
+            }
+        }
         // A current holder, in a workspace whose policy waits for one: wait
         // for its admission to end, then ask again under a second request
         // ID, with the base unchanged (ADR 0036).
@@ -4196,7 +4211,7 @@ impl Session<'_> {
         changed: Vec<langspan_core::ObservedFile>,
     ) {
         if let Err(failure) = self.call(
-            wire_id("waited", &[&ids.admit]),
+            crate::wait::record_id(&ids.admit),
             Command::RecordWait {
                 session_id: ids.session_id.clone(),
                 paths: keys.to_vec(),

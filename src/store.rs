@@ -1188,12 +1188,19 @@ impl Store {
         let mut rows = statement.query(params![window, page])?;
         let mut conflicts = Vec::new();
         while let Some(row) = rows.next()? {
-            // A conflict the hook waited out and then admitted (ADR 0036)
-            // was never a refusal.
+            // A conflict the hook waited out (ADR 0036) is a refusal only if
+            // the wait ended in it: an admission asked for after the wait is
+            // listed by its own outcome, and a stale source found during it
+            // with the stale refusals.
+            let first = row.get::<_, String>(2)?;
             let waited: bool = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM receipts WHERE request_id = ?1
-                   AND json_extract(outcome_json, '$.type') = 'admitted')",
-                [crate::wait::admission_id(&row.get::<_, String>(2)?)],
+                   OR (request_id = ?2
+                       AND json_extract(command_json, '$.result') != 'refused_conflict'))",
+                params![
+                    crate::wait::admission_id(&first),
+                    crate::wait::record_id(&first)
+                ],
                 |found| found.get(0),
             )?;
             if waited {
