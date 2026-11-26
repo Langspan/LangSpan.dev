@@ -833,6 +833,39 @@ pub struct SentPublication {
     pub payload: Option<String>,
 }
 
+/// The retention windows a compaction accepts, in days, inclusive. The lower bound
+/// stays well above any client's retry time, since a retry whose receipt
+/// was removed is a new request.
+pub const MIN_RETENTION_DAYS: u32 = 7;
+pub const MAX_RETENTION_DAYS: u32 = 3650;
+
+/// One compaction of the event log (ADR 0025, J7). Times are wall-clock
+/// Unix milliseconds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionReport {
+    /// False for a dry run, which deleted nothing.
+    pub applied: bool,
+    pub keep_days: u32,
+    /// Records written before this time are older than the window.
+    pub cutoff_ms: u64,
+    /// The sequence the derived state is snapshotted at: events at or below
+    /// it are no longer replayed at start. `None` when none is kept.
+    pub snapshot_seq: Option<u64>,
+    /// Events removed (or to be removed), and their sequence range.
+    pub events: u64,
+    pub first_seq: Option<u64>,
+    pub last_seq: Option<u64>,
+    pub receipts: u64,
+    /// Bytes of the removed records. SQLite reuses the space for new records
+    /// rather than shrinking the file.
+    pub bytes: u64,
+    /// Why the snapshot stops before the newest event older than the
+    /// window: something still open was started there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<String>,
+}
+
 /// The owner's standing choice to publish a workspace's work to a Git remote.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -3329,6 +3362,15 @@ pub enum Command {
         after: u64,
         limit: u32,
     },
+    /// Retention (ADR 0025, J7): snapshot the derived state and delete the
+    /// events and receipts recorded more than `keep_days` ago. A dry run
+    /// (`apply` false) deletes nothing and reports what would go. Answered
+    /// by the daemon's store; never recorded and never replayed.
+    Compact {
+        keep_days: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        apply: bool,
+    },
 }
 
 // Serde's internally tagged unit variants ignore extra fields. The empty struct
@@ -3913,6 +3955,11 @@ enum CommandWire {
         after: u64,
         limit: u32,
     },
+    Compact {
+        keep_days: u32,
+        #[serde(default)]
+        apply: bool,
+    },
 }
 
 impl<'de> Deserialize<'de> for Command {
@@ -4082,6 +4129,15 @@ pub enum Outcome {
     RemoteSent {
         sent: Vec<SentPublication>,
         more: bool,
+        /// Wall-clock Unix milliseconds from which the list is complete:
+        /// publications recorded before it may have been removed by
+        /// retention. Absent when nothing has ever been removed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since_ms: Option<u64>,
+    },
+    /// What a compaction removed, or with `applied` false would remove.
+    Compaction {
+        report: CompactionReport,
     },
     /// `accepted` is false for a publication that is not newer than the one
     /// already held: a replay, or one that arrived out of order.
@@ -6401,6 +6457,7 @@ fn decide_checked(
         | Command::StatusRecords { .. }
         | Command::Changes { .. }
         | Command::RemoteSent { .. }
+        | Command::Compact { .. }
         | Command::ShowMessage { .. }
         | Command::MessageStatus { .. }
         | Command::GraphSymbol { .. }
