@@ -308,7 +308,8 @@ fn the_gemini_capture_steps_reach_the_checked_coordinator_from_anywhere() {
         .unwrap();
     assert!(snap.status.success(), "{snap:?}");
     let status = fs::read_to_string(out.join("status-probe.json")).unwrap();
-    let status: Value = serde_json::from_str(&status).unwrap_or_else(|error| panic!("{error}: {status}"));
+    let status: Value =
+        serde_json::from_str(&status).unwrap_or_else(|error| panic!("{error}: {status}"));
     // The script's workspace, and the session `peer.sh` started, are both
     // on that coordinator.
     for name in ["capture-repo-", "capture-peer-repo-"] {
