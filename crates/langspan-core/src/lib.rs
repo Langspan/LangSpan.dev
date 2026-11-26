@@ -481,6 +481,11 @@ pub struct SessionActivity {
     pub session_id: String,
     pub generation: u64,
     pub last_ms: u64,
+    /// The last recorded hook run of any kind that reached the daemon for
+    /// this session (a read, a failed call, a batch, a stop): at most one
+    /// `SessionSeen` per `SESSION_SEEN_INTERVAL_MS`. Zero when none was.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub last_hook_ms: u64,
     /// The owner's own words for the current task, capped by the adapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
@@ -517,6 +522,68 @@ pub struct SessionActivity {
     pub line_digests: Vec<String>,
 }
 
+impl SessionActivity {
+    /// When the session was last known to be working: its newest edit,
+    /// prompt or recorded hook run. Whether it is current compares this, not
+    /// `last_ms` alone, with `BRIEF_HORIZON_MS` (roadmap J12).
+    pub fn last_seen_ms(&self) -> u64 {
+        self.last_ms.max(self.last_hook_ms)
+    }
+}
+
+/// A hook run is recorded as `SessionSeen` at most this often per session,
+/// so a burst of tool calls writes one event, not one per call.
+pub const SESSION_SEEN_INTERVAL_MS: u64 = 30 * 1000;
+
+/// The session a request is made on behalf of, when it is that session at
+/// work: every request a hook run sends for it, and the same requests from
+/// the CLI or MCP. A look from outside (`Brief` without `deliver`, a status
+/// read) and the end of a session are not. The daemon records a
+/// `SessionSeen` after each such request (roadmap J12).
+pub fn acting_session(command: &Command) -> Option<&str> {
+    match command {
+        Command::SessionRegister { session_id, .. }
+        | Command::ObserveSessionLiveness { session_id, .. }
+        | Command::IntentSet { session_id, .. }
+        | Command::IntentEnd { session_id }
+        | Command::Admit { session_id, .. }
+        | Command::AdmitTool { session_id, .. }
+        | Command::ObserveSource { session_id, .. }
+        | Command::AckMessage { session_id, .. }
+        | Command::Handoff { session_id, .. }
+        | Command::RecordRefusal { session_id, .. }
+        | Command::CheckCalls { session_id, .. }
+        | Command::Complete { session_id, .. }
+        | Command::Observe { session_id, .. }
+        | Command::ObserveTool { session_id, .. }
+        | Command::SessionPrompt { session_id, .. }
+        | Command::SetPromptTargets { session_id, .. }
+        | Command::SessionStop { session_id, .. }
+        | Command::ObserveToolBatch { session_id, .. }
+        | Command::Brief {
+            session_id,
+            deliver: true,
+            ..
+        } => Some(session_id),
+        _ => None,
+    }
+}
+
+/// Whether a hook run of `session_id` at `now_ms` is recorded: the session
+/// is current and its last record is at least `SESSION_SEEN_INTERVAL_MS`
+/// old, or there is none in this generation.
+pub fn session_seen_due(state: &State, session_id: &str, now_ms: u64) -> bool {
+    if current_session(state, session_id).is_err() {
+        return false;
+    }
+    let last = state
+        .activity
+        .get(session_id)
+        .filter(|activity| activity.generation == state.generation)
+        .map_or(0, |activity| activity.last_hook_ms);
+    last == 0 || now_ms.saturating_sub(last) >= SESSION_SEEN_INTERVAL_MS
+}
+
 /// At most this many leading prompt lines are compared by digest.
 pub const MAX_PROMPT_LINES: usize = 32;
 /// Hex characters in one prompt line digest, at most.
@@ -544,7 +611,7 @@ fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 
@@ -1335,9 +1402,31 @@ pub struct Message {
     pub text: String,
     /// Files it is about. May be empty.
     pub paths: Vec<String>,
-    /// Sessions that have acknowledged a message for everyone.
+    /// Sessions that have acknowledged it. A held message lists them only
+    /// for everyone; the history kept for withdrawal lists every reader.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub acknowledged: Vec<String>,
+    /// Withdrawn by its sender or the owner: no longer delivered, and each
+    /// session that had received it is told once to disregard it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retracted: bool,
+}
+
+/// A message a session received and that was then withdrawn: the session
+/// is told once, at its next briefing, to disregard it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetractedMessage {
+    pub message_id: String,
+    pub workspace_id: String,
+    /// The message's sender; `None` for the owner.
+    pub from: Option<String>,
+    /// The first `RETRACTED_TEXT_BYTES` of its text, cut at a character
+    /// boundary.
+    pub text: String,
+    /// True when `text` is shorter than the message was.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cut: bool,
 }
 
 /// The observer could not complete a scan of a workspace. Until one
@@ -1385,7 +1474,8 @@ pub struct Recap {
     pub checks: Vec<CheckRecord>,
     pub landings: Vec<Landing>,
     pub notes: Vec<Note>,
-    /// Messages still owed to at least one session, newest first.
+    /// Messages still owed to at least one session, newest first, then
+    /// recently withdrawn ones (`retracted`), newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<Message>,
     pub teammates: Vec<RemotePeer>,
@@ -1414,6 +1504,8 @@ pub const MESSAGE_LINE_LIMIT: usize = 700;
 /// every message selected for a briefing fits its text and none is
 /// acknowledged without being shown.
 pub const MESSAGE_BRIEF_BYTES: usize = 1500;
+/// Bytes of a withdrawn message's text quoted when its readers are told.
+pub const RETRACTED_TEXT_BYTES: usize = 120;
 
 pub const MAX_NOTICES: usize = 32;
 pub const NOTICE_CHANGES: usize = 16;
@@ -1485,6 +1577,10 @@ pub struct Briefing {
     /// handoff, that it has not yet acknowledged. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<Message>,
+    /// Messages this session received that were since withdrawn: each is
+    /// delivered once, so the session disregards it. Newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retracted: Vec<RetractedMessage>,
     /// The checkout this session works in changed under it since it last
     /// read or edited a file there. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1538,6 +1634,15 @@ pub struct State {
     /// `MAX_MESSAGES`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub messages: BTreeMap<String, Vec<Message>>,
+    /// The latest messages sent per workspace, newest first, at most
+    /// `MAX_MESSAGES`, with every session that received each one and
+    /// whether it was withdrawn: what a withdrawal and the recap read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub message_history: BTreeMap<String, Vec<Message>>,
+    /// Withdrawn messages each session received and has not yet been told
+    /// to disregard, per session, newest first, at most `MAX_MESSAGES`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub retracted_notices: BTreeMap<String, Vec<RetractedMessage>>,
     /// Workspaces whose last scan attempt failed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scan_failures: BTreeMap<String, ScanFailure>,
@@ -1682,6 +1787,13 @@ pub enum Event {
     },
     SessionLivenessObserved {
         liveness: SessionLiveness,
+    },
+    /// A hook run of the session reached the daemon (roadmap J12). Evidence
+    /// that it is working; it grants, renews and releases nothing.
+    SessionSeen {
+        session_id: String,
+        at_ms: u64,
+        generation: u64,
     },
     IntentSet {
         intent: Intent,
@@ -1896,6 +2008,18 @@ pub enum Event {
         message_id: String,
         session_id: String,
     },
+    /// The message was withdrawn by `by` (its sender; `None` for the
+    /// owner). The `MessageSent` event stays in the log.
+    MessageRetracted {
+        workspace_id: String,
+        message_id: String,
+        by: Option<String>,
+    },
+    /// The session was told to disregard a withdrawn message.
+    RetractionDelivered {
+        session_id: String,
+        message_id: String,
+    },
     ScanFailed {
         failure: ScanFailure,
     },
@@ -2040,6 +2164,11 @@ pub enum Command {
         session_id: String,
         process: ProcessIdentity,
         status: LivenessStatus,
+    },
+    /// A hook run of the session reached the daemon. Recorded only when the
+    /// last record is `SESSION_SEEN_INTERVAL_MS` old (roadmap J12).
+    SessionSeen {
+        session_id: String,
     },
     IntentSet {
         session_id: String,
@@ -2281,6 +2410,14 @@ pub enum Command {
         session_id: String,
         text: String,
         paths: Vec<String>,
+    },
+    /// Withdraw a sent message or handoff: `message_id` absent means the
+    /// newest message `from` sent. `from` is the sender, or absent for the
+    /// owner, who may withdraw any message.
+    RetractMessage {
+        workspace_id: String,
+        from: Option<String>,
+        message_id: Option<String>,
     },
     /// The observer's latest attempt: a failure with its reason, or `None`
     /// for a completed scan.
@@ -2562,6 +2699,11 @@ enum CommandWire {
         process: ProcessIdentity,
         status: LivenessStatus,
     },
+    /// A hook run of the session reached the daemon. Recorded only when the
+    /// last record is `SESSION_SEEN_INTERVAL_MS` old (roadmap J12).
+    SessionSeen {
+        session_id: String,
+    },
     IntentSet {
         session_id: String,
         paths: Vec<String>,
@@ -2800,6 +2942,14 @@ enum CommandWire {
         session_id: String,
         text: String,
         paths: Vec<String>,
+    },
+    /// Withdraw a sent message or handoff: `message_id` absent means the
+    /// newest message `from` sent. `from` is the sender, or absent for the
+    /// owner, who may withdraw any message.
+    RetractMessage {
+        workspace_id: String,
+        from: Option<String>,
+        message_id: Option<String>,
     },
     /// The observer's latest attempt: a failure with its reason, or `None`
     /// for a completed scan.
@@ -3067,6 +3217,12 @@ pub enum Outcome {
     SessionLiveness {
         liveness: SessionLiveness,
     },
+    /// The session's last recorded hook run, this one or one less than
+    /// `SESSION_SEEN_INTERVAL_MS` earlier.
+    SessionSeen {
+        session_id: String,
+        last_hook_ms: u64,
+    },
     Intent {
         intent: Intent,
     },
@@ -3280,6 +3436,13 @@ pub enum Outcome {
     MessageAcknowledged {
         message_id: String,
         acknowledged: bool,
+    },
+    /// Sessions that were still owed it and now are not, and sessions that
+    /// had received it and will be told to disregard it.
+    MessageRetracted {
+        message_id: String,
+        withdrawn_unread: Vec<String>,
+        told_to_disregard: Vec<String>,
     },
     ScanObserved {
         workspace_id: String,
@@ -3496,6 +3659,31 @@ fn decide_checked(
             Ok(Decision {
                 events,
                 outcome: Outcome::SessionLiveness { liveness },
+            })
+        }
+        Command::SessionSeen { session_id } => {
+            current_session(state, session_id)?;
+            let due = session_seen_due(state, session_id, now_ms);
+            let last = state
+                .activity
+                .get(session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map_or(0, |activity| activity.last_hook_ms);
+            let events = if due {
+                vec![Event::SessionSeen {
+                    session_id: session_id.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::SessionSeen {
+                    session_id: session_id.clone(),
+                    last_hook_ms: if due { now_ms } else { last },
+                },
             })
         }
         Command::IntentSet {
@@ -4843,6 +5031,7 @@ fn decide_checked(
             // out, and any message at all makes this briefing new.
             briefing.changed = signature != previous
                 || !briefing.messages.is_empty()
+                || !briefing.retracted.is_empty()
                 || !briefing.checks.is_empty();
             let mut events = Vec::new();
             if *deliver {
@@ -4862,6 +5051,12 @@ fn decide_checked(
                             session_id: session_id.clone(),
                         }),
                 );
+                events.extend(briefing.retracted.iter().map(|retracted| {
+                    Event::RetractionDelivered {
+                        session_id: session_id.clone(),
+                        message_id: retracted.message_id.clone(),
+                    }
+                }));
                 events.extend(briefing.checks.iter().map(|notice| Event::CheckDelivered {
                     session_id: session_id.clone(),
                     check_id: notice.check_id.clone(),
@@ -4961,6 +5156,11 @@ fn decide_checked(
                 },
             })
         }
+        Command::RetractMessage {
+            workspace_id,
+            from,
+            message_id,
+        } => retract(state, workspace_id, from.as_deref(), message_id.as_deref()),
         Command::Dashboard => Ok(Decision {
             events: Vec::new(),
             outcome: Outcome::Dashboard {
@@ -5300,6 +5500,7 @@ fn sent(
             normalized_paths(paths)?
         },
         acknowledged: Vec::new(),
+        retracted: false,
     };
     validate_message(&message)?;
     Ok(Decision {
@@ -5308,6 +5509,134 @@ fn sent(
         }],
         outcome: Outcome::MessageSent { message },
     })
+}
+
+/// The sent message `message_id` of the workspace, or with no ID the newest
+/// one `from` sent. The history is the latest messages sent, newest first,
+/// and lists every reader, so it answers first. A message older than the
+/// history but still held is found by its ID only: the sender's newest
+/// message is in the history if any of its messages is, so `last` never
+/// reaches past a newer message that was dropped.
+fn sent_message<'a>(
+    state: &'a State,
+    workspace_id: &str,
+    from: Option<&str>,
+    message_id: Option<&str>,
+) -> Option<&'a Message> {
+    let list = |lists: &'a BTreeMap<String, Vec<Message>>| {
+        lists.get(workspace_id).map(Vec::as_slice).unwrap_or(&[])
+    };
+    match message_id {
+        Some(id) => list(&state.message_history)
+            .iter()
+            .chain(list(&state.messages))
+            .find(|message| message.message_id == id),
+        None => list(&state.message_history)
+            .iter()
+            .find(|message| message.from.as_deref() == from),
+    }
+}
+
+fn retract(
+    state: &State,
+    workspace_id: &str,
+    from: Option<&str>,
+    message_id: Option<&str>,
+) -> Result<Decision, CoreError> {
+    validate_known_workspace(state, workspace_id)?;
+    if let Some(id) = message_id {
+        validate_request_id(id)?;
+    }
+    if let Some(from) = from
+        && known_session(state, from)?.workspace_id != workspace_id
+    {
+        return Err(error(
+            "sender_not_in_workspace",
+            "The withdrawing session belongs to another workspace; withdraw from the session that sent it, or leave out the sender to withdraw as the owner",
+        ));
+    }
+    let Some(message) = sent_message(state, workspace_id, from, message_id) else {
+        return Err(error(
+            "unknown_message",
+            match message_id {
+                Some(_) => {
+                    "No such message in this workspace: unknown, or dropped as the oldest of more than 64; `langspan recap WORKSPACE` lists those held"
+                }
+                None => {
+                    "This sender has none of the latest 64 messages sent in this workspace; withdraw an older one still held by its ID"
+                }
+            },
+        ));
+    };
+    if from.is_some() && message.from.as_deref() != from {
+        return Err(error(
+            "not_sender",
+            "Only the session that sent a message, or the owner (without a session), may withdraw it",
+        ));
+    }
+    if message.retracted {
+        return Err(error(
+            "already_retracted",
+            "That message was already withdrawn; its readers have been or will be told",
+        ));
+    }
+    let held = state.messages.get(workspace_id).and_then(|messages| {
+        messages
+            .iter()
+            .find(|held| held.message_id == message.message_id)
+    });
+    let withdrawn_unread: Vec<String> = match held.map(|held| (held, &held.to)) {
+        Some((_, Recipient::Session { session_id })) => vec![session_id.clone()],
+        Some((held, Recipient::Everyone {})) => state
+            .sessions
+            .values()
+            .filter(|session| {
+                session.workspace_id == workspace_id
+                    && session.generation == state.generation
+                    && owed_to(held, &session.session_id, false)
+            })
+            .map(|session| session.session_id.clone())
+            .collect(),
+        Some((_, Recipient::NextSession {})) | None => Vec::new(),
+    };
+    Ok(Decision {
+        events: vec![Event::MessageRetracted {
+            workspace_id: workspace_id.into(),
+            message_id: message.message_id.clone(),
+            by: from.map(str::to_owned),
+        }],
+        outcome: Outcome::MessageRetracted {
+            message_id: message.message_id.clone(),
+            withdrawn_unread,
+            told_to_disregard: readers(state, workspace_id, &message.message_id),
+        },
+    })
+}
+
+/// Every session that received the message, in ID order.
+fn readers(state: &State, workspace_id: &str, message_id: &str) -> Vec<String> {
+    let mut readers: Vec<String> = sent_message(state, workspace_id, None, Some(message_id))
+        .map(|message| message.acknowledged.clone())
+        .unwrap_or_default();
+    readers.sort();
+    readers.dedup();
+    readers
+}
+
+/// The first `RETRACTED_TEXT_BYTES` of `text`, at a character boundary, and
+/// whether anything was left out.
+fn retracted_text(text: &str) -> (String, bool) {
+    let mut end = text.len().min(RETRACTED_TEXT_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_owned(), end < text.len())
+}
+
+/// An upper bound on the bytes an adapter renders to tell a session to
+/// disregard a withdrawn message, counted like `message_cost`.
+fn retracted_cost(retracted: &RetractedMessage) -> usize {
+    (192 + 4 * retracted.text.len()).min(MESSAGE_LINE_LIMIT + 4)
 }
 
 fn validate_message(message: &Message) -> Result<(), CoreError> {
@@ -5403,7 +5732,9 @@ fn recap(state: &State, workspace_id: &str, now_ms: u64) -> Recap {
                 .take(RECAP_ITEMS)
                 .collect();
             (
-                in_generation.map(|activity| activity.last_ms).unwrap_or(0),
+                in_generation
+                    .map(SessionActivity::last_seen_ms)
+                    .unwrap_or(0),
                 RecapSession {
                     session_id: session.session_id.clone(),
                     current: session.generation == state.generation,
@@ -5487,8 +5818,22 @@ fn recap(state: &State, workspace_id: &str, now_ms: u64) -> Recap {
         messages: state
             .messages
             .get(workspace_id)
-            .map(|messages| messages.iter().take(RECAP_SESSIONS).cloned().collect())
-            .unwrap_or_default(),
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .take(RECAP_SESSIONS)
+            .chain(
+                state
+                    .message_history
+                    .get(workspace_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter(|message| message.retracted)
+                    .take(RECAP_ITEMS),
+            )
+            .cloned()
+            .collect(),
         teammates: state
             .remote_peers
             .values()
@@ -6078,7 +6423,7 @@ fn publication(state: &State, link: &RemoteLink, now_ms: u64) -> (Publication, S
             .filter(|activity| {
                 link.share_task
                     && !activity.ended
-                    && now_ms.saturating_sub(activity.last_ms) <= BRIEF_HORIZON_MS
+                    && now_ms.saturating_sub(activity.last_seen_ms()) <= BRIEF_HORIZON_MS
             })
             .and_then(|activity| activity.summary.clone());
         if editing.is_empty() && recent.is_empty() && (summary.is_none() || ended) {
@@ -6342,7 +6687,7 @@ fn brief(
         // A session that only received briefings has shown no work of its own.
         let fresh = activity.is_some_and(|activity| {
             (activity.summary.is_some() || !activity.touched.is_empty())
-                && now_ms.saturating_sub(activity.last_ms) <= BRIEF_HORIZON_MS
+                && now_ms.saturating_sub(activity.last_seen_ms()) <= BRIEF_HORIZON_MS
         });
         let intent = state
             .intents
@@ -6369,7 +6714,7 @@ fn brief(
             .collect();
         editing.truncate(BRIEF_PATHS);
         recent.truncate(BRIEF_PATHS);
-        let last_ms = activity.map(|activity| activity.last_ms).unwrap_or(0);
+        let last_ms = activity.map(SessionActivity::last_seen_ms).unwrap_or(0);
         let relation = relation(me, peer);
         // A subagent's task is the asking parent's own request: its files
         // are news to the parent, its task line and declared intent are not.
@@ -6558,9 +6903,23 @@ fn brief(
         .take(4)
         .cloned()
         .collect();
-    // Messages owed to this session, newest first, as many as the text of
-    // one briefing is sure to hold; the rest wait for the next one.
+    // Withdrawals first, then messages owed to this session, each newest
+    // first, as many as the text of one briefing is sure to hold; the rest
+    // wait for the next one. The first always fits.
     let mut bytes = 0;
+    let retracted: Vec<RetractedMessage> = state
+        .retracted_notices
+        .get(session_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .take(BRIEF_MESSAGES)
+        .take_while(|retracted| {
+            bytes += retracted_cost(retracted);
+            bytes <= MESSAGE_BRIEF_BYTES
+        })
+        .cloned()
+        .collect();
     let messages: Vec<Message> = state
         .messages
         .get(&me.workspace_id)
@@ -6696,6 +7055,7 @@ fn brief(
             interface_changes,
             notes,
             messages,
+            retracted,
             checkout_changes,
             // One result per briefing, the newest: it always fits the
             // rendered text, and each delivered one is removed, so the rest
@@ -7298,6 +7658,21 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 .session_liveness
                 .insert(liveness.session_id.clone(), liveness.clone());
         }
+        Event::SessionSeen {
+            session_id,
+            at_ms,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            if *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A hook-run record must belong to the current daemon generation",
+                ));
+            }
+            let activity = activity_mut(state, session_id);
+            activity.last_hook_ms = activity.last_hook_ms.max(*at_ms);
+        }
         Event::IntentSet { intent } => {
             let session = current_session(state, &intent.session_id)?;
             if intent.workspace_id != session.workspace_id || intent.generation != state.generation
@@ -7631,16 +8006,18 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::MessageSent { message } => {
             validate_message(message)?;
             validate_known_workspace(state, &message.workspace_id)?;
-            if !message.acknowledged.is_empty() {
-                return Err(error("invalid_event", "A message is sent unacknowledged"));
+            if !message.acknowledged.is_empty() || message.retracted {
+                return Err(error(
+                    "invalid_event",
+                    "A message is sent unacknowledged and not withdrawn",
+                ));
             }
-            let messages = state
-                .messages
-                .entry(message.workspace_id.clone())
-                .or_default();
-            messages.retain(|held| held.message_id != message.message_id);
-            messages.insert(0, message.clone());
-            messages.truncate(MAX_MESSAGES);
+            for list in [&mut state.messages, &mut state.message_history] {
+                let messages = list.entry(message.workspace_id.clone()).or_default();
+                messages.retain(|held| held.message_id != message.message_id);
+                messages.insert(0, message.clone());
+                messages.truncate(MAX_MESSAGES);
+            }
         }
         Event::MessageAcknowledged {
             workspace_id,
@@ -7665,6 +8042,21 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                     .position(|message| &message.message_id == message_id)
                 {
                     let message = &mut messages[index];
+                    // The history keeps every reader, for a withdrawal.
+                    if owed_to(message, session_id, true)
+                        && let Some(record) =
+                            state
+                                .message_history
+                                .get_mut(workspace_id)
+                                .and_then(|history| {
+                                    history
+                                        .iter_mut()
+                                        .find(|record| &record.message_id == message_id)
+                                })
+                        && !record.acknowledged.contains(session_id)
+                    {
+                        record.acknowledged.push(session_id.clone());
+                    }
                     let done = match message.to {
                         Recipient::Everyone {} => {
                             if !message.acknowledged.contains(session_id) {
@@ -7679,6 +8071,75 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                     if done {
                         messages.remove(index);
                     }
+                }
+            }
+        }
+        Event::MessageRetracted {
+            workspace_id,
+            message_id,
+            by,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            validate_request_id(message_id)?;
+            if let Some(by) = by {
+                validate_id(by, "session ID")?;
+            }
+            let readers = readers(state, workspace_id, message_id);
+            let held = state.messages.get_mut(workspace_id).and_then(|messages| {
+                let index = messages
+                    .iter()
+                    .position(|message| &message.message_id == message_id)?;
+                Some(messages.remove(index))
+            });
+            if state.messages.get(workspace_id).is_some_and(Vec::is_empty) {
+                state.messages.remove(workspace_id);
+            }
+            // The history stays the latest messages sent, in send order: a
+            // held message older than it is withdrawn without joining it,
+            // so the recap does not list that one.
+            let record = state
+                .message_history
+                .get_mut(workspace_id)
+                .and_then(|history| {
+                    history
+                        .iter_mut()
+                        .find(|record| &record.message_id == message_id)
+                });
+            let withdrawn = match record {
+                Some(record) => {
+                    record.retracted = true;
+                    Some(record.clone())
+                }
+                None => held,
+            };
+            // A message no longer known has nothing left to withdraw.
+            if let Some(withdrawn) = withdrawn {
+                let (text, cut) = retracted_text(&withdrawn.text);
+                let notice = RetractedMessage {
+                    message_id: message_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    from: withdrawn.from.clone(),
+                    text,
+                    cut,
+                };
+                for reader in readers {
+                    let notices = state.retracted_notices.entry(reader).or_default();
+                    notices.retain(|held| held.message_id != *message_id);
+                    notices.insert(0, notice.clone());
+                    notices.truncate(MAX_MESSAGES);
+                }
+            }
+        }
+        Event::RetractionDelivered {
+            session_id,
+            message_id,
+        } => {
+            validate_id(session_id, "session ID")?;
+            validate_request_id(message_id)?;
+            if let Some(notices) = state.retracted_notices.get_mut(session_id) {
+                notices.retain(|notice| notice.message_id != *message_id);
+                if notices.is_empty() {
+                    state.retracted_notices.remove(session_id);
                 }
             }
         }

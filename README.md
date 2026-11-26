@@ -17,7 +17,7 @@ Gemini CLI adapters exist but have not been verified in live sessions.
 
 **v0.1.0 is available for macOS and Linux.** [Download a release binary](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0) or [build from source](#build-from-source).
 
-[Get started](#get-started) · [See it work](https://langspan.dev/#demo) ·
+[Get started](#get-started) · [See it work](https://langspan.dev/#demo) · [Launch film](https://langspan.dev/#film) ·
 [Usage guide](docs/usage.md) · [Implementation status](docs/IMPLEMENTATION_STATUS.md)
 
 <a href="https://langspan.dev/#demo">
@@ -34,6 +34,8 @@ Gemini CLI adapters exist but have not been verified in live sessions.
 [Explore each step](https://langspan.dev/#demo) with Play, Pause and Replay, or open
 the motionless [light](https://langspan.dev/assets/product/langspan-card-light-still.svg) or
 [dark](https://langspan.dev/assets/product/langspan-card-dark-still.svg) version.*
+
+[Watch the 33-second film](https://langspan.dev/#film) or [inspect the recorded evidence](https://langspan.dev/#evidence). The film combines the authored workflow with actual v0.1.0 dashboard excerpts from scripted hook events; no live model was invoked.
 
 ## Why we're building LangSpan
 
@@ -107,7 +109,9 @@ binding to a VPN address and the limits of that setup.
 Within one workspace, agents can ask for a recap, save short notes, message
 another session or leave a handoff for the next one. Notes survive coordinator
 restarts. Messages and handoffs arrive through supported briefing events;
-they do not wake idle sessions. These records stay local to the coordinator.
+they do not wake idle sessions. A message that no longer holds can be
+withdrawn, and sessions that already read it are told to disregard it. These
+records stay local to the coordinator.
 
 ## Get started
 

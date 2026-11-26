@@ -1655,6 +1655,9 @@ mod unix {
             .or_else(|| state.workspaces.iter().next());
         next.map(|(id, workspace)| (id.clone(), PathBuf::from(&workspace.root)))
     }
+    /// An unchanged process observation younger than this is not recorded
+    /// again, nor re-probed when a hook reports it.
+    const LIVENESS_COALESCE_MS: u64 = 15_000;
     fn observe_processes(store: &mut Store, after: &mut Option<String>, now: u64) {
         use std::ops::Bound::{Excluded, Unbounded};
         let mut observations: Vec<_> = if let Some(cursor) = after.as_ref() {
@@ -1677,15 +1680,20 @@ mod unix {
                 .cloned()
                 .collect();
         }
-        for (index, prior) in observations.into_iter().enumerate() {
+        // One probe for the whole page: on macOS a single process listing.
+        let processes: Vec<_> = observations
+            .iter()
+            .map(|prior| prior.process.clone())
+            .collect();
+        let statuses = crate::process::probe_all(&processes);
+        for (index, (prior, status)) in observations.into_iter().zip(statuses).enumerate() {
             *after = Some(prior.session_id.clone());
-            let status = crate::process::probe(&prior.process);
             let same = prior.generation == store.state().generation && prior.status == status;
             // Dead incarnations remain dead. Other unchanged samples are
             // coalesced, while every transition is recorded at the next poll.
             if same
                 && (status == langspan_core::LivenessStatus::Exited
-                    || now.saturating_sub(prior.observed_at_ms) < 15_000)
+                    || now.saturating_sub(prior.observed_at_ms) < LIVENESS_COALESCE_MS)
             {
                 continue;
             }
@@ -1730,13 +1738,49 @@ mod unix {
         request: Request,
     ) -> Response {
         let reads_blind = reads_blind_in_scope(&request.command);
+        let acting = langspan_core::acting_session(&request.command).map(str::to_owned);
         let mut response = answer(store, graph, request);
+        // Refused or retried, the request still shows the session's hook ran.
+        if let Some(session_id) = acting {
+            record_seen(store, session_id);
+        }
         if !reads_blind {
             for coverage in coverages(&mut response.outcome) {
                 coverage.blind_in_scope = 0;
             }
         }
         response
+    }
+
+    /// After a request a session made at work, note that its hook ran: at
+    /// most once per `SESSION_SEEN_INTERVAL_MS`, so a burst writes one event.
+    /// A failure is logged; the request's own answer stands (roadmap J12).
+    fn record_seen(store: &mut Store, session_id: String) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = now_ms();
+        if !langspan_core::session_seen_due(store.state(), &session_id, now) {
+            return;
+        }
+        let id = format!(
+            "seen-{}-{now}-{}",
+            store.state().generation,
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let command = Command::SessionSeen { session_id };
+        let failure = match store.execute(&id, &command, &command, now) {
+            Ok(Execution {
+                outcome: Outcome::Error { code, message },
+                ..
+            }) => Some(format!("{code}: {message}")),
+            Ok(_) => None,
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(detail) = failure {
+            eprintln!(
+                "{}",
+                serde_json::json!({"level":"warn","event":"session_seen_failed","detail":detail})
+            );
+        }
     }
 
     /// Whether the client asked for `GraphCoverage::blind_in_scope`. Earlier
@@ -2314,7 +2358,21 @@ mod unix {
             } => Ok(Command::ObserveSessionLiveness {
                 session_id: session_id.clone(),
                 process: process.clone(),
-                status: crate::process::probe(process),
+                // The same incarnation seen alive within the poll's
+                // coalescing window is not probed again on the writer: on
+                // macOS each probe starts a process listing.
+                status: match state.session_liveness.get(session_id) {
+                    Some(prior)
+                        if prior.process == *process
+                            && prior.generation == state.generation
+                            && prior.status == langspan_core::LivenessStatus::Alive
+                            && now_ms().saturating_sub(prior.observed_at_ms)
+                                < LIVENESS_COALESCE_MS =>
+                    {
+                        langspan_core::LivenessStatus::Alive
+                    }
+                    _ => crate::process::probe(process),
+                },
             }),
             _ => Ok(command.clone()),
         }
