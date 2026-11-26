@@ -69,6 +69,41 @@ needs no long-lived connection, upgrade handshake or server push to bound. When
 the coordinator is unreachable the server answers 503 with the reason, and the
 page keeps the last view, dims it, and says since when.
 
+**LangSpan Live (25 November 2026).** The page was rebuilt as a coordination
+display from an owner-approved prototype, on the same server, view and
+security boundaries. It leads with counts the view reports, then a traffic
+scope (sessions in rows, file paths in columns), the coordination evidence and
+an inspector for the selected path, session or record, then every earlier
+diagnostic: workspace health, index coverage, publishing, install advice and
+the counts of rows the view left out. Its styles copy the design tokens of the
+LangSpan site's `assets/site.css`, and its header embeds the brand kit's
+lockups from `docs/assets/brand/` line for line; nothing is loaded at run
+time. It changes nothing, and it adds no route, listener or CORS header.
+
+**Identities for joins.** Overlap rows named their sessions only by shortened
+labels, which collide: two sessions with the same host and first eight
+characters, or two teammates with the same name. So the view now carries
+additive, optional fields: each agent row's opaque `id` (`local:` and the
+session ID, or `peer:` and the publication's participant, host and session)
+and `group` (the overlap group of its workspace: the repository when known,
+otherwise the workspace); each overlap row's `group`, `members` (the row IDs
+of its labels, index for index) and `more_agents` (labels left out; absent
+from an older coordinator, which cut the list without a count); and each
+workspace row's `group`. The page joins cells to overlaps by these IDs and
+never by label. With an older coordinator that sends none of them, it matches
+a label only when it names exactly one listed row, lists the rest in the
+inspector unjoined, and says so. A column is one path in one group: linked
+worktrees share it, an unrelated repository's file of the same name does not,
+and a hold stays in the row of the checkout that admitted it. The fields are
+`serde(default)`, so a newer page reads an older coordinator's view; the
+protocol version is unchanged.
+
+**A separate demonstration.** `langspan dashboard --demo` serves the same page
+and renderer with fictional scenes from `src/dashboard-demo.js`, labeled
+"Simulated data" in the header and a banner, behind the same token and policy;
+its `/api/state` answers 404. The live page is composed without those scenes,
+and a test checks that it never contains them.
+
 **From a phone.** Keep the default and forward the port over an encrypted
 channel to the Mac: run `ssh -L 7311:127.0.0.1:7311 mac` in the phone's SSH
 client and open the printed URL on the phone; the request arrives at the Mac's
@@ -97,3 +132,11 @@ page is plain HTTP, so anyone on the path can read the token and the view.
   directory, as it can read the database; the token protects against other
   users and other origins, not against the owner's own processes.
 - No TLS. Off the machine, the transport's security is the tunnel's.
+- The counts are what one bounded view reports, not daily totals or measured
+  outcomes. Refusals are a lower bound when the store found more than it
+  passed. A daily count through `langspan today` and a cursor-based,
+  read-only event feed remain possible later additions; the page does not
+  build a chronology from successive polls.
+- A binary older than this change cannot decode a newer coordinator's view,
+  as with every earlier addition to it; the dashboard and the daemon normally
+  run from one binary.
