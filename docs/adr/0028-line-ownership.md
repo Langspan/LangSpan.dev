@@ -100,9 +100,17 @@ explicitly:
   not adopted by another session. It records one `session_adopted` event
   with both sessions, the workspace, the time and the reason, and the state
   keeps one adoption per ended session (`State::adoptions`). An adoption the
-  adopter already made is answered again without a new event.
-- The adapter then credits the journal entries of `from` and its
-  subagents to the adopter, in place: each entry keeps its file name and
+  adopter already made is answered again without a new event. The answer
+  names `from`'s registered subagents that have not ended (`live`, at most
+  64, else `session_live`): ending a session records its end alone, so a
+  subagent can still be writing.
+- A retry of an adoption's request ID is decided again rather than answered
+  from its receipt, because the adapter rewrites the journal from the
+  answer. If `from` has resumed since, the retry is refused with
+  `session_live`; otherwise it carries the current `live` list.
+- The adapter then credits the journal entries of `from` and its ended
+  subagents to the adopter, in place, skipping those of a `live` subagent
+  and its own subagents: each entry keeps its file name and
   modification time, so it expires when it would have and a retry finds
   nothing left to move. The journal stays the one record of who wrote which
   line; the event records the transfer. A replay after a restart gives the

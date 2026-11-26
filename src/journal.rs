@@ -1035,13 +1035,16 @@ pub fn writers(entries: &[Entry]) -> BTreeMap<&str, BTreeSet<&str>> {
 }
 
 /// Credit `from`'s entries (and its subagents') in the physical workspace at
-/// `root` to `to`: an adoption (issue #161). Each entry keeps its file name
-/// and modification time, so it expires when it would have, and a retry
-/// finds nothing left to move. Returns the paths of the entries moved.
+/// `root` to `to`: an adoption (issue #161). The entries of a subagent in
+/// `live`, which has not ended, and of its own subagents stay its own. Each
+/// entry keeps its file name and modification time, so it expires when it
+/// would have, and a retry finds nothing left to move. Returns the paths of
+/// the entries moved.
 pub fn reassign(
     state_dir: &Path,
     root: &Path,
     from: &str,
+    live: &[String],
     to: &str,
 ) -> Result<BTreeSet<String>, String> {
     let directory = workspace_dir(state_dir, root);
@@ -1050,7 +1053,11 @@ pub fn reassign(
         let Some(mut entry) = read_entry(&file) else {
             continue;
         };
-        if !crate::commit::is_own(from, &entry.session_id) {
+        if !crate::commit::is_own(from, &entry.session_id)
+            || live
+                .iter()
+                .any(|running| crate::commit::is_own(running, &entry.session_id))
+        {
             continue;
         }
         entry.session_id = to.to_owned();
@@ -1223,7 +1230,7 @@ mod tests {
             ages
         };
         let before = ages(&dirs);
-        let moved = reassign(&dirs.state, &dirs.root, "a", "b").unwrap();
+        let moved = reassign(&dirs.state, &dirs.root, "a", &[], "b").unwrap();
         assert_eq!(
             moved,
             BTreeSet::from(["src/one.rs".to_owned(), "src/two.rs".to_owned()])
@@ -1247,7 +1254,7 @@ mod tests {
         assert_eq!(ages(&dirs), before, "entries expire when they would have");
         // Nothing is left to move a second time.
         assert!(
-            reassign(&dirs.state, &dirs.root, "a", "b")
+            reassign(&dirs.state, &dirs.root, "a", &[], "b")
                 .unwrap()
                 .is_empty()
         );

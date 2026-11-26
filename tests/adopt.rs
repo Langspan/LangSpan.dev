@@ -171,21 +171,41 @@ impl Fixture {
     }
 
     fn edit(&self, session: &str, call: &str, file: &str, old: &str, new: &str) {
+        self.edit_as(session, None, call, file, old, new);
+    }
+
+    /// An edit by `session`, or by its subagent `agent` when given.
+    fn edit_as(
+        &self,
+        session: &str,
+        agent: Option<&str>,
+        call: &str,
+        file: &str,
+        old: &str,
+        new: &str,
+    ) {
         let path = self.work().join(file);
         let input = json!({"file_path": path, "old_string": old, "new_string": new});
-        let pre = self.hook(json!({
-            "session_id": session, "cwd": self.work(), "hook_event_name": "PreToolUse",
-            "tool_name": "Edit", "tool_use_id": call, "tool_input": input,
-        }));
+        let event = |phase: &str| {
+            let mut event = json!({
+                "session_id": session, "cwd": self.work(), "hook_event_name": phase,
+                "tool_name": "Edit", "tool_use_id": call, "tool_input": input,
+            });
+            if phase == "PostToolUse" {
+                event["tool_response"] = json!({"filePath": path});
+            }
+            if let Some(agent) = agent {
+                event["agent_id"] = json!(agent);
+                event["agent_type"] = json!("general-purpose");
+            }
+            event
+        };
+        let pre = self.hook(event("PreToolUse"));
         assert_eq!(pre.coverage, "admitted", "{pre:?}");
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains(old), "{file} lacks {old:?}");
         fs::write(&path, content.replacen(old, new, 1)).unwrap();
-        let post = self.hook(json!({
-            "session_id": session, "cwd": self.work(), "hook_event_name": "PostToolUse",
-            "tool_name": "Edit", "tool_use_id": call, "tool_input": input,
-            "tool_response": {"filePath": path},
-        }));
+        let post = self.hook(event("PostToolUse"));
         assert_eq!(post.coverage, "observed", "{post:?}");
     }
 
@@ -506,5 +526,80 @@ async fn the_mcp_tool_adopts_an_ended_sessions_work_and_a_retry_is_safe() {
         owners(&mine),
         vec![pair("a.txt", "mine"), pair("b.txt", "mine")],
         "{mine}"
+    );
+}
+
+/// `adopt` with `--json`, as `session`, with `request_id`.
+fn adopt_json(f: &Fixture, session: &str, from: &str, request_id: &str) -> Output {
+    let work = f.work();
+    f.cli(&[
+        "adopt",
+        &id(from),
+        "--session",
+        &id(session),
+        "--request-id",
+        request_id,
+        "--root",
+        work.to_str().unwrap(),
+        "--json",
+    ])
+}
+
+/// A retry of an adoption's request ID is decided again: once the ended
+/// session has resumed and written more, the retry is refused and credits
+/// none of its new lines (review of #176).
+#[test]
+fn a_retried_adoption_after_the_ended_session_resumes_is_refused_and_moves_nothing() {
+    let f = Fixture::new();
+    f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
+    f.lifecycle(ALICE, "SessionEnd", None);
+    f.lifecycle(BOB, "SessionStart", None);
+    let first = adopt_json(&f, BOB, ALICE, "adopt-once");
+    assert!(first.status.success(), "{}", said(&first));
+    let report: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(report["paths"], json!(["a.txt"]), "{report}");
+
+    // Alice resumes and writes another file.
+    f.lifecycle(ALICE, "UserPromptSubmit", Some("carry on"));
+    f.edit(ALICE, "alice-2", "b.txt", "beta", "beta, by Alice");
+
+    let retry = adopt_json(&f, BOB, ALICE, "adopt-once");
+    let text = said(&retry);
+    assert!(!retry.status.success(), "{text}");
+    assert!(text.contains("session_live"), "{text}");
+    assert_eq!(
+        owners(&f.status_mine(BOB, "bob-1")),
+        vec![pair("a.txt", "mine")]
+    );
+    assert_eq!(
+        owners(&f.status_mine(ALICE, "alice-3")),
+        vec![pair("b.txt", "mine")]
+    );
+}
+
+/// Ending a session does not end its subagents: adopting it credits its
+/// own lines and leaves a still-running subagent's lines with that
+/// subagent (review of #176).
+#[test]
+fn adopting_an_ended_session_leaves_its_live_subagents_lines_with_the_subagent() {
+    let f = Fixture::new();
+    f.edit(ALICE, "alice-1", "a.txt", "alpha", "alpha, by Alice");
+    f.edit_as(
+        ALICE,
+        Some("agent-one"),
+        "alice-sub-1",
+        "b.txt",
+        "beta",
+        "beta, by the subagent",
+    );
+    f.lifecycle(ALICE, "SessionEnd", None);
+    f.lifecycle(BOB, "SessionStart", None);
+    let adopted = adopt_json(&f, BOB, ALICE, "adopt-parent");
+    assert!(adopted.status.success(), "{}", said(&adopted));
+    let report: Value = serde_json::from_slice(&adopted.stdout).unwrap();
+    assert_eq!(report["paths"], json!(["a.txt"]), "{report}");
+    assert_eq!(
+        owners(&f.status_mine(BOB, "bob-1")),
+        vec![pair("a.txt", "mine")]
     );
 }

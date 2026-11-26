@@ -45,6 +45,10 @@ pub struct AdoptReport {
     /// Files whose journal entries were credited to this session by this
     /// call, in path order.
     pub paths: Vec<String>,
+    /// Subagents of the ended session that have not ended: their lines
+    /// stay their own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub live: Vec<String>,
 }
 
 impl AdoptReport {
@@ -78,6 +82,12 @@ impl AdoptReport {
                 self.paths.join(", ")
             ));
         }
+        if !self.live.is_empty() {
+            text.push_str(&format!(
+                " Its subagent(s) {} have not ended, so their lines stay theirs.",
+                self.live.join(", ")
+            ));
+        }
         text
     }
 }
@@ -101,16 +111,17 @@ pub fn adopt(
         },
     };
     let response = crate::client::call_until(state_dir, &request, deadline)?;
-    let (adoption, root, recorded) = match response.outcome {
+    let (adoption, root, recorded, live) = match response.outcome {
         Outcome::Adopted {
             adoption,
             root,
             recorded,
-        } => (adoption, root, recorded),
+            live,
+        } => (adoption, root, recorded, live),
         Outcome::Error { code, message } => return Err(format!("{code}: {message}").into()),
         other => return Err(format!("the coordinator answered {other:?}").into()),
     };
-    let moved = journal::reassign(state_dir, &PathBuf::from(&root), from, session_id).map_err(
+    let moved = journal::reassign(state_dir, &PathBuf::from(&root), from, &live, session_id).map_err(
         |error| {
             format!(
                 "the adoption is recorded, but its lines could not all be credited ({error}); run `langspan adopt {from}` again"
@@ -127,6 +138,7 @@ pub fn adopt(
         from: adoption.from,
         reason: adoption.reason,
         paths: moved.into_iter().collect(),
+        live,
     })
 }
 

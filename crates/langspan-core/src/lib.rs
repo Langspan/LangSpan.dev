@@ -3630,10 +3630,14 @@ pub enum Outcome {
     /// `recorded` is false when this session had already adopted `from`:
     /// nothing new was recorded, and the adapter may finish crediting the
     /// lines. `root` is the workspace's, whose line journal holds them.
+    /// `live` names `from`'s subagents that have not ended: their lines
+    /// (and their own subagents') stay theirs.
     Adopted {
         adoption: Adoption,
         root: String,
         recorded: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        live: Vec<String>,
     },
     SessionStopped {
         session_id: String,
@@ -8134,6 +8138,30 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
             "That session has not ended: LangSpan has neither its end nor its process's exit. Ask it to commit its own work, or adopt once it has ended",
         ));
     }
+    // Ending a session does not end its subagents: one still running keeps
+    // its lines.
+    let live: Vec<String> = state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.workspace_id == me.workspace_id
+                && (session.parent.as_deref() == Some(from)
+                    || session
+                        .session_id
+                        .strip_prefix(from)
+                        .is_some_and(|rest| rest.starts_with('.')))
+                && !finished(state, &session.session_id)
+        })
+        .map(|session| session.session_id.clone())
+        .collect();
+    if live.len() > MAX_LEFT {
+        return Err(error(
+            "session_live",
+            &format!(
+                "More than {MAX_LEFT} subagents of that session have not ended; adopt once they have"
+            ),
+        ));
+    }
     let root = state
         .workspaces
         .get(&me.workspace_id)
@@ -8155,6 +8183,7 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
                 adoption: adoption.clone(),
                 root,
                 recorded: false,
+                live,
             },
         });
     }
@@ -8174,6 +8203,7 @@ fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Dec
             adoption,
             root,
             recorded: true,
+            live,
         },
     })
 }

@@ -1305,9 +1305,11 @@ Session claude-code.… adopted the uncommitted work of ended session claude-cod
 The coordinator checks that `SESSION` has ended (the host reported its end,
 or its process is known to have exited) and worked in the same workspace,
 and records the transfer as a `session_adopted` event naming both sessions.
-Then the journal entries of `SESSION` and its subagents are credited to the
-adopting session, keeping their age, so `status --mine` and `commit --mine`
-treat those lines as its own. Lines another session also wrote stay shared,
+Then the journal entries of `SESSION` and its ended subagents are credited
+to the adopting session, keeping their age, so `status --mine` and
+`commit --mine` treat those lines as its own. Ending a session does not end
+its subagents: a subagent that has not ended keeps its lines, and the report
+names it (`live` in `--json`). Lines another session also wrote stay shared,
 exactly as before, and other sessions' lines stay theirs.
 
 The adoption is refused, and nothing changes, for a session that has not
@@ -1315,7 +1317,9 @@ ended (`session_live`: a killed session whose process LangSpan never observed
 counts as live), for one of another workspace (`other_workspace`), and for one
 another session already adopted (`already_adopted`). Running it again is safe:
 the coordinator answers `already_adopted` with nothing new recorded, and any
-lines still credited to the ended session are credited then. The reason shown
+lines still credited to the ended session are credited then. A retry with the
+same `--request-id` is checked again too: if the ended session has resumed
+since, the retry is refused with `session_live` and credits none of its lines. The reason shown
 is a message the ended session sent the adopter (addressed to it, or a
 handoff it took) or a `Task:` line both share; neither is required, so the
 person or agent decides. The adopting session is found as for
