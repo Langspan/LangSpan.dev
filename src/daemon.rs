@@ -1337,7 +1337,8 @@ mod unix {
         (session_id, paths, symbols): (&str, &[String], &[String]),
     ) -> Response {
         use langspan_core::{
-            DefinitionFacts, LineRange, PathFacts, WRITE_CHECK_DEFINITIONS, WRITE_CHECK_PATHS,
+            DefinitionFacts, IndexFacts, LineRange, PathFacts, WRITE_CHECK_DEFINITIONS,
+            WRITE_CHECK_PATHS,
         };
         let now = now_ms();
         let state = store.state();
@@ -1355,27 +1356,45 @@ mod unix {
             );
         };
         // Definitions from one snapshot of the index: by name, or without
-        // names, those in the asked paths. None without a complete scan.
+        // names, those in the asked paths, each read one past the bound so
+        // truncation shows; and the definitions at each place a recorded
+        // signature change or removal names, read in full. None without a
+        // complete scan.
+        let noticed = langspan_core::write_check_noticed(state, session_id, &request, now);
         let definitions = match graph.map(|graph| {
             graph.with_coverage(&of, |graph| {
+                let bound = WRITE_CHECK_DEFINITIONS as usize;
                 let mut found = Vec::new();
+                let mut truncated = false;
+                let mut keep = |mut read: Vec<langspan_core::SymbolRef>| {
+                    truncated |= read.len() > bound;
+                    read.truncate(bound);
+                    found.extend(read);
+                };
                 if request.names.is_empty() {
                     for path in &request.paths {
-                        found.extend(graph.symbols_in(
+                        keep(graph.symbols_in(
                             &of.workspace_id,
                             path,
-                            WRITE_CHECK_DEFINITIONS,
+                            WRITE_CHECK_DEFINITIONS + 1,
                         )?);
                     }
                 } else {
                     for name in &request.names {
-                        let mut named =
-                            graph.symbol(&of.workspace_id, name, WRITE_CHECK_DEFINITIONS)?;
-                        named.truncate(WRITE_CHECK_DEFINITIONS as usize);
-                        found.extend(named);
+                        // `symbol` reads one past its limit.
+                        keep(graph.symbol(&of.workspace_id, name, WRITE_CHECK_DEFINITIONS)?);
                     }
                 }
-                Ok(found)
+                let mut at = Vec::new();
+                for (path, name) in &noticed {
+                    at.extend(graph.symbols_at(
+                        &of.workspace_id,
+                        path,
+                        name,
+                        WRITE_CHECK_DEFINITIONS,
+                    )?);
+                }
+                Ok((found, truncated, at))
             })
         }) {
             Some(Ok((found, coverage))) if coverage.scanned => Some(found),
@@ -1391,7 +1410,7 @@ mod unix {
         };
         // The asked paths first, then the definitions' files, up to the bound.
         let mut files: Vec<String> = request.paths.clone();
-        for symbol in definitions.iter().flatten() {
+        for symbol in definitions.iter().flat_map(|(found, _, _)| found) {
             if files.len() < 2 * WRITE_CHECK_PATHS && !files.contains(&symbol.path) {
                 files.push(symbol.path.clone());
             }
@@ -1423,8 +1442,8 @@ mod unix {
                 }
             })
             .collect();
-        let definition_facts: Option<Vec<DefinitionFacts>> = definitions.map(|found| {
-            found
+        let index = definitions.map(|(found, truncated, noticed)| IndexFacts {
+            definitions: found
                 .into_iter()
                 .map(|symbol| {
                     // Lines are placed only in the content the index read.
@@ -1457,14 +1476,16 @@ mod unix {
                         symbol,
                     }
                 })
-                .collect()
+                .collect(),
+            truncated,
+            noticed,
         });
         let mut check = langspan_core::write_check(
             state,
             session_id,
             &request,
             &path_facts,
-            definition_facts.as_deref(),
+            index.as_ref(),
             now,
         );
         check.shrink_until(|check| {

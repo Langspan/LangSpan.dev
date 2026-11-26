@@ -4524,8 +4524,14 @@ fn print_write_check(check: &langspan_core::WriteCheck) -> Result<(), langspan::
     }
     if check.unchecked_bodies > 0 {
         println!(
-            "{} definition(s) not compared with recent writes: their file is not indexed at its current content.",
+            "{} definition(s) not compared with recent writes: their file is not indexed at its current content, or another session's write changed lines the journal does not know.",
             check.unchecked_bodies
+        );
+    }
+    if check.definitions_truncated {
+        println!(
+            "More definitions matched than one check compares ({}): body changes to the rest are not shown.",
+            langspan_core::WRITE_CHECK_DEFINITIONS
         );
     }
     Ok(())

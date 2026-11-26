@@ -3,10 +3,10 @@
 //! index and the line journal, how one check is bounded, and that the core
 //! never records it.
 use langspan_core::{
-    Command, DefinitionFacts, Event, FileState, InterfaceChange, InterfaceNotice, LineRange,
-    ObservedFile, Outcome, PathFacts, SourceOrigin, State, SymbolRef, WRITE_CHECK_SYMBOLS,
-    WRITE_CHECK_WRITERS, WriteCheckRequest, WrittenLines, apply, decide, write_check,
-    write_check_request,
+    Command, DefinitionFacts, Event, FileState, IndexFacts, InterfaceChange, InterfaceNotice,
+    LineRange, ObservedFile, Outcome, PathFacts, SourceOrigin, State, SymbolRef,
+    WRITE_CHECK_SYMBOLS, WRITE_CHECK_WRITERS, WriteCheckRequest, WrittenLines, apply, decide,
+    write_check, write_check_request,
 };
 
 fn run(state: &mut State, id: &str, command: Command, now: u64) -> Outcome {
@@ -118,6 +118,14 @@ fn definition(
     }
 }
 
+/// An index read that held every matching definition.
+fn read_all(definitions: &[DefinitionFacts]) -> IndexFacts {
+    IndexFacts {
+        definitions: definitions.to_vec(),
+        ..IndexFacts::default()
+    }
+}
+
 fn request(state: &State, session: &str, paths: &[&str], names: &[&str]) -> WriteCheckRequest {
     write_check_request(
         state,
@@ -167,7 +175,14 @@ fn a_signature_a_peer_changed_two_minutes_ago_is_reported_with_its_session_and_a
     let now = 1_000 + 120_000;
     let asked = request(&state, "bob", &["src/main.rs"], &["upload"]);
     let index = [definition("src/net.rs", "upload", NEW, Some(vec![]))];
-    let check = write_check(&state, "bob", &asked, &no_paths(&asked), Some(&index), now);
+    let check = write_check(
+        &state,
+        "bob",
+        &asked,
+        &no_paths(&asked),
+        Some(&read_all(&index)),
+        now,
+    );
     assert!(check.index_ready);
     assert_eq!(check.symbols.len(), 1, "{check:?}");
     let upload = &check.symbols[0];
@@ -190,9 +205,16 @@ fn a_signature_a_peer_changed_two_minutes_ago_is_reported_with_its_session_and_a
     // Not news to the session that made it.
     let own = request(&state, "alice", &["src/main.rs"], &["upload"]);
     assert!(
-        write_check(&state, "alice", &own, &no_paths(&own), Some(&index), now)
-            .symbols
-            .is_empty()
+        write_check(
+            &state,
+            "alice",
+            &own,
+            &no_paths(&own),
+            Some(&read_all(&index)),
+            now
+        )
+        .symbols
+        .is_empty()
     );
     // Not claimed once the index no longer holds the new signature.
     let reverted = [definition("src/net.rs", "upload", OLD, Some(vec![]))];
@@ -202,7 +224,7 @@ fn a_signature_a_peer_changed_two_minutes_ago_is_reported_with_its_session_and_a
             "bob",
             &asked,
             &no_paths(&asked),
-            Some(&reverted),
+            Some(&read_all(&reverted)),
             now
         )
         .symbols
@@ -215,7 +237,7 @@ fn a_signature_a_peer_changed_two_minutes_ago_is_reported_with_its_session_and_a
             "bob",
             &asked,
             &no_paths(&asked),
-            Some(&index),
+            Some(&read_all(&index)),
             1_000 + 31 * 60_000
         )
         .symbols
@@ -244,7 +266,14 @@ fn a_removal_or_rename_counts_only_while_no_definition_is_left_in_its_file() {
         ],
     );
     let asked = request(&state, "bob", &["src/a.rs"], &[]);
-    let check = write_check(&state, "bob", &asked, &no_paths(&asked), Some(&[]), 20);
+    let check = write_check(
+        &state,
+        "bob",
+        &asked,
+        &no_paths(&asked),
+        Some(&read_all(&[])),
+        20,
+    );
     let found: Vec<(&str, &str, Option<&str>)> = check
         .symbols
         .iter()
@@ -261,7 +290,14 @@ fn a_removal_or_rename_counts_only_while_no_definition_is_left_in_its_file() {
         "pub fn fetch()",
         Some(vec![]),
     )];
-    let check = write_check(&state, "bob", &asked, &no_paths(&asked), Some(&back), 20);
+    let check = write_check(
+        &state,
+        "bob",
+        &asked,
+        &no_paths(&asked),
+        Some(&read_all(&back)),
+        20,
+    );
     assert_eq!(
         check
             .symbols
@@ -307,7 +343,14 @@ fn a_body_change_names_the_newest_other_writer_and_an_unreadable_body_is_counted
         definition("src/x.rs", "other", "pub fn other()", None),
         definition("src/y.rs", "other", "pub fn other()", Some(vec![])),
     ];
-    let check = write_check(&state, "bob", &asked, &no_paths(&asked), Some(&index), 10);
+    let check = write_check(
+        &state,
+        "bob",
+        &asked,
+        &no_paths(&asked),
+        Some(&read_all(&index)),
+        10,
+    );
     assert_eq!(check.symbols.len(), 1, "{check:?}");
     let body = &check.symbols[0];
     assert_eq!(
@@ -321,6 +364,133 @@ fn a_body_change_names_the_newest_other_writer_and_an_unreadable_body_is_counted
         "its own lines are not news to the asking session"
     );
     assert_eq!(check.unchecked_bodies, 1);
+}
+
+/// A removal or signature change is checked against the index's definitions
+/// at its own place, not against the bounded list of definitions compared
+/// for bodies, and a truncated list is said.
+#[test]
+fn a_change_past_the_definition_bound_is_checked_at_its_place() {
+    let mut state = ready();
+    notice(
+        &mut state,
+        "n1",
+        "src/many.rs",
+        "alice",
+        10,
+        vec![
+            changed("f69", "removed", "pub fn f69()", None),
+            changed(
+                "f70",
+                "signature_changed",
+                "pub fn f70()",
+                Some("pub fn f70(a: u8)"),
+            ),
+            changed("f71", "removed", "pub fn f71()", None),
+        ],
+    );
+    let asked = request(&state, "bob", &["src/many.rs"], &[]);
+    assert_eq!(
+        langspan_core::write_check_noticed(&state, "bob", &asked, 20),
+        [
+            ("src/many.rs", "f69"),
+            ("src/many.rs", "f70"),
+            ("src/many.rs", "f71")
+        ]
+        .map(|(path, name)| (path.to_owned(), name.to_owned()))
+    );
+    assert!(
+        langspan_core::write_check_noticed(&state, "alice", &asked, 20).is_empty(),
+        "her own changes"
+    );
+    // The bounded list holds f00 only; the index still defines f69 and the
+    // new f70, and no longer f71.
+    let index = IndexFacts {
+        definitions: vec![definition(
+            "src/many.rs",
+            "f00",
+            "pub fn f00()",
+            Some(vec![]),
+        )],
+        truncated: true,
+        noticed: vec![
+            definition("src/many.rs", "f69", "pub fn f69()", None).symbol,
+            definition("src/many.rs", "f70", "pub fn f70(a: u8)", None).symbol,
+        ],
+    };
+    let check = write_check(&state, "bob", &asked, &no_paths(&asked), Some(&index), 20);
+    let changes: Vec<(&str, &str)> = check
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.name.as_str(), symbol.change.as_str()))
+        .collect();
+    assert_eq!(
+        changes,
+        [("f70", "signature"), ("f71", "removed")],
+        "{check:?}"
+    );
+    assert!(check.definitions_truncated);
+}
+
+/// A journal entry whose lines are unknown (its pre-write content could not
+/// be read) is no evidence that any one body changed: it is not reported as
+/// a body change, does not displace an older writer whose lines are in the
+/// definition, and leaves the definition counted as unchecked when it is
+/// the only other writer.
+#[test]
+fn a_writer_whose_lines_are_unknown_is_not_a_body_change() {
+    let state = ready();
+    let unknown = WrittenLines {
+        path: "src/net.rs".into(),
+        session_id: "alice".into(),
+        lines: vec![],
+        age_ms: 1_000,
+    };
+    let known = WrittenLines {
+        path: "src/net.rs".into(),
+        session_id: "carol".into(),
+        lines: vec![LineRange {
+            start_line: 6,
+            end_line: 6,
+        }],
+        age_ms: 9_000,
+    };
+    let asked = request(&state, "bob", &["src/net.rs"], &["download", "upload"]);
+    let index = [
+        definition(
+            "src/net.rs",
+            "download",
+            "pub fn download()",
+            Some(vec![unknown.clone(), known.clone()]),
+        ),
+        definition(
+            "src/net.rs",
+            "upload",
+            "pub fn upload()",
+            Some(vec![unknown]),
+        ),
+    ];
+    let check = write_check(
+        &state,
+        "bob",
+        &asked,
+        &no_paths(&asked),
+        Some(&read_all(&index)),
+        10,
+    );
+    assert_eq!(check.symbols.len(), 1, "{check:?}");
+    let body = &check.symbols[0];
+    assert_eq!(
+        (
+            body.name.as_str(),
+            body.by_session.as_deref(),
+            body.age_ms,
+            body.lines.clone()
+        ),
+        ("download", Some("carol"), Some(9_000), known.lines),
+        "{check:?}"
+    );
+    assert_eq!(check.unchecked_bodies, 1, "upload was not compared");
 }
 
 #[test]
@@ -434,7 +604,14 @@ fn one_check_is_bounded_and_says_what_it_left_out() {
     }
     assert_eq!(WRITE_CHECK_SYMBOLS, 16);
     let asked = request(&state, "bob", &["src/a.rs", "src/b.rs"], &[]);
-    let check = write_check(&state, "bob", &asked, &no_paths(&asked), Some(&[]), 20);
+    let check = write_check(
+        &state,
+        "bob",
+        &asked,
+        &no_paths(&asked),
+        Some(&read_all(&[])),
+        20,
+    );
     assert_eq!(check.symbols.len(), WRITE_CHECK_SYMBOLS);
     assert_eq!(check.omitted_symbols, 3);
 
@@ -456,7 +633,7 @@ fn one_check_is_bounded_and_says_what_it_left_out() {
         current: None,
         written: writers,
     }];
-    let mut check = write_check(&state, "bob", &asked, &facts, Some(&[]), 20);
+    let mut check = write_check(&state, "bob", &asked, &facts, Some(&read_all(&[])), 20);
     let unread = &check.paths[0].unread_lines;
     assert_eq!(unread.len(), WRITE_CHECK_WRITERS);
     assert_eq!(

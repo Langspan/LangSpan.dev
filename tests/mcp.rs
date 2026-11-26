@@ -1648,6 +1648,123 @@ async fn stdio_check_write_reports_a_peers_signature_body_lines_and_hold_and_rec
     disconnect(client).await;
 }
 
+/// B26 with more definitions in a file than one check reads: a removal a
+/// peer has since undone is not reported for a definition past the bound,
+/// and the answer says that definitions were left out.
+#[tokio::test]
+async fn stdio_check_write_past_the_definition_bound_checks_removals_against_the_index() {
+    let directory = TestDirectory::new();
+    let state_dir = directory.state_dir();
+    let root = directory.0.join("app");
+    let many = |without: Option<usize>| -> String {
+        (0..70)
+            .filter(|i| Some(*i) != without)
+            .map(|i| format!("pub fn f{i:02}() {{}}\n"))
+            .collect()
+    };
+    git_repository(&root, &[("src/many.rs", &many(None))]);
+    let root = fs::canonicalize(&root).expect("canonical root");
+    let _daemon = Daemon::start(&state_dir).await;
+    let client = connect(&state_dir).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_workspace_register",
+            json!({"request_id":"ws", "workspace_id":"app", "root":root}),
+        )
+        .await,
+    );
+    let defined = |found: &Value| found["outcome"]["symbols"].as_array().map(Vec::len);
+    let wait_for = async |want: Option<usize>| {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let found = call_tool(
+                &client,
+                "langspan_symbol",
+                json!({"workspace_id":"app", "name":"f69", "limit":10}),
+            )
+            .await
+            .structured_content
+            .unwrap_or_default();
+            if found["outcome"]["coverage"]["scanned"] == true && defined(&found) == want {
+                return;
+            }
+            assert!(Instant::now() < deadline, "never indexed: {found:#}");
+            sleep(Duration::from_millis(100)).await;
+        }
+    };
+    wait_for(Some(1)).await;
+
+    // Alice removes f69, the 70th definition; Dave puts it back.
+    for (session, content) in [("alice", many(Some(69))), ("dave", many(None))] {
+        claude_write_hook(
+            &state_dir,
+            &root,
+            session,
+            "src/many.rs",
+            &content,
+            "PreToolUse",
+        );
+        fs::write(root.join("src/many.rs"), &content).expect("write");
+        claude_write_hook(
+            &state_dir,
+            &root,
+            session,
+            "src/many.rs",
+            &content,
+            "PostToolUse",
+        );
+        if session == "alice" {
+            wait_for(Some(0)).await;
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let history = call_tool(
+                    &client,
+                    "langspan_history",
+                    json!({"workspace_id":"app", "name":"f69"}),
+                )
+                .await
+                .structured_content
+                .unwrap_or_default();
+                if history["outcome"]["history"]["entries"][0]["change"] == "removed" {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "no notice: {history:#}");
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    wait_for(Some(1)).await;
+    response(
+        call_tool(
+            &client,
+            "langspan_session_register",
+            json!({"request_id":"bob", "session_id":"mcp-bob", "workspace_id":"app"}),
+        )
+        .await,
+    );
+    let check = call_tool(
+        &client,
+        "langspan_check_write",
+        json!({"session_id":"mcp-bob", "paths":["src/many.rs"]}),
+    )
+    .await
+    .structured_content
+    .expect("structured")["outcome"]["check"]
+        .clone();
+    assert_eq!(check["index_ready"], true, "{check:#}");
+    assert!(
+        !check["symbols"]
+            .as_array()
+            .expect("symbols")
+            .iter()
+            .any(|symbol| symbol["name"] == "f69" && symbol["change"] == "removed"),
+        "f69 is defined again: {check:#}"
+    );
+    assert_eq!(check["definitions_truncated"], true, "{check:#}");
+    disconnect(client).await;
+}
+
 /// B26 without a complete scan: a plain directory is never indexed, so the
 /// check answers for its paths only and says the index is not ready.
 #[tokio::test]

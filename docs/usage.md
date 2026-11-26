@@ -1570,10 +1570,14 @@ newest first (`omitted_symbols` counts the rest):
   resolves scopes or types.
 
 A signature change counts only while the index still holds the new
-signature, and a removal only while the file defines no symbol of that name. A
-body change is found only in a file indexed at its current content;
-`unchecked_bodies` counts the definitions that could not be compared. Without
-a complete index scan, `index_ready` is `false` and `symbols` is empty. The
+signature, and a removal only while the file defines no symbol of that name;
+both are checked against the whole index. A body change is found only in a
+file indexed at its current content and only from a write whose lines the
+journal knows. `unchecked_bodies` counts the definitions that could not be
+compared, including those whose only recent writer by another session changed
+lines the journal does not know. The check compares at most 64 definitions per
+name or per path; `definitions_truncated` is `true` when more matched, and body
+changes to the rest are not reported. Without a complete index scan, `index_ready` is `false` and `symbols` is empty. The
 session's own changes are not listed.
 
 The check is a read: it records no event and no receipt, takes no request ID

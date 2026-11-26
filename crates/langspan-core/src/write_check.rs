@@ -106,8 +106,15 @@ pub struct WriteCheck {
     /// Changes left out past `WRITE_CHECK_SYMBOLS`.
     pub omitted_symbols: usize,
     /// Definitions whose body could not be compared with the journal: their
-    /// file is not indexed at its current content or could not be read.
+    /// file is not indexed at its current content or could not be read, or
+    /// another session's recent write changed lines the journal does not
+    /// know.
     pub unchecked_bodies: usize,
+    /// True when more definitions matched a name or path than one check
+    /// reads (`WRITE_CHECK_DEFINITIONS`): body changes to the rest are not
+    /// reported. Signature changes and removals are still checked against
+    /// the whole index.
+    pub definitions_truncated: bool,
     /// False when the index has no complete scan of the workspace: then
     /// `symbols` is empty and says nothing.
     pub index_ready: bool,
@@ -130,6 +137,19 @@ pub struct PathFacts {
 pub struct DefinitionFacts {
     pub symbol: SymbolRef,
     pub body_writers: Option<Vec<WrittenLines>>,
+}
+
+/// What the daemon read from one snapshot of the index for a check.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexFacts {
+    /// The definitions named, or in the asked paths, at most
+    /// `WRITE_CHECK_DEFINITIONS` per name or path.
+    pub definitions: Vec<DefinitionFacts>,
+    /// Whether more matched than `definitions` holds.
+    pub truncated: bool,
+    /// The index's definitions at each place `write_check_noticed` lists,
+    /// read whatever the bound on `definitions` left out.
+    pub noticed: Vec<SymbolRef>,
 }
 
 /// A checked request: its session's workspace, the paths without repeats
@@ -239,21 +259,53 @@ fn recent_notices<'a>(
         })
 }
 
+/// The (path, name) places of recorded signature changes and removals the
+/// check asks about. Each is reported only while the index still shows it,
+/// so the daemon reads the index's definitions at each place into
+/// `IndexFacts::noticed`. Without repeats; at most `MAX_NOTICES` times
+/// `NOTICE_CHANGES`.
+pub fn write_check_noticed(
+    state: &State,
+    session_id: &str,
+    request: &WriteCheckRequest,
+    now_ms: u64,
+) -> Vec<(String, String)> {
+    let mut places = BTreeSet::new();
+    for notice in recent_notices(state, session_id, &request.workspace_id, now_ms) {
+        for change in &notice.changes {
+            if asked(request, &change.name, &notice.path) {
+                places.insert((notice.path.clone(), change.name.clone()));
+            }
+        }
+    }
+    places.into_iter().collect()
+}
+
+/// Whether the request asks about `name` defined in `path`: by name, or
+/// without names, by path.
+fn asked(request: &WriteCheckRequest, name: &str, path: &str) -> bool {
+    if request.names.is_empty() {
+        request.paths.iter().any(|asked| asked == path)
+    } else {
+        request.names.iter().any(|asked| asked == name)
+    }
+}
+
 /// Whether `text` holds `name` as a whole identifier.
 fn names_word(text: &str, name: &str) -> bool {
     text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
         .any(|word| word == name)
 }
 
-/// The answer, from what the daemon read. `definitions` is `None` when the
-/// index has no complete scan of the workspace: the answer then holds path
+/// The answer, from what the daemon read. `index` is `None` when the index
+/// has no complete scan of the workspace: the answer then holds path
 /// results only.
 pub fn write_check(
     state: &State,
     session_id: &str,
     request: &WriteCheckRequest,
     paths: &[PathFacts],
-    definitions: Option<&[DefinitionFacts]>,
+    index: Option<&IndexFacts>,
     now_ms: u64,
 ) -> WriteCheck {
     let known = known_versions(state, session_id);
@@ -309,7 +361,7 @@ pub fn write_check(
             }
         })
         .collect();
-    let Some(definitions) = definitions else {
+    let Some(index) = index else {
         return WriteCheck {
             session_id: session_id.to_owned(),
             workspace_id: request.workspace_id.clone(),
@@ -317,23 +369,25 @@ pub fn write_check(
             symbols: Vec::new(),
             omitted_symbols: 0,
             unchecked_bodies: 0,
+            definitions_truncated: false,
             index_ready: false,
         };
     };
-    let asked = |name: &str, path: &str| {
-        if request.names.is_empty() {
-            request.paths.iter().any(|asked| asked == path)
-        } else {
-            request.names.iter().any(|asked| asked == name)
-        }
-    };
+    let asked = |name: &str, path: &str| asked(request, name, path);
     // Whether the index defines `name` in `path`, with `signature` if given.
+    // The bounded `definitions` may leave it out; `noticed` is read at the
+    // place itself.
     let defines = |path: &str, name: &str, signature: Option<&str>| {
-        definitions.iter().any(|definition| {
-            definition.symbol.path == path
-                && definition.symbol.name == name
-                && signature.is_none_or(|signature| definition.symbol.signature == signature)
-        })
+        index
+            .definitions
+            .iter()
+            .map(|definition| &definition.symbol)
+            .chain(&index.noticed)
+            .any(|symbol| {
+                symbol.path == path
+                    && symbol.name == name
+                    && signature.is_none_or(|signature| symbol.signature == signature)
+            })
     };
     let intents = |name: &str| -> Vec<String> {
         let mut found: Vec<String> = state
@@ -401,7 +455,7 @@ pub fn write_check(
     // Lines of a definition's body other sessions wrote, from the journal.
     let mut bodies = Vec::new();
     let mut unchecked_bodies = 0;
-    for definition in definitions {
+    for definition in &index.definitions {
         let symbol = &definition.symbol;
         if !asked(&symbol.name, &symbol.path)
             || reported.contains(&(symbol.name.clone(), symbol.path.clone()))
@@ -412,11 +466,21 @@ pub fn write_check(
             unchecked_bodies += 1;
             continue;
         };
-        let Some(newest) = writers
-            .iter()
-            .filter(|writer| writer.session_id != session_id)
+        let others = || {
+            writers
+                .iter()
+                .filter(|writer| writer.session_id != session_id)
+        };
+        // A writer without lines changed lines the journal does not know:
+        // no evidence about this body, so it is not reported and does not
+        // displace a writer whose lines are in it.
+        let Some(newest) = others()
+            .filter(|writer| !writer.lines.is_empty())
             .min_by_key(|writer| writer.age_ms)
         else {
+            if others().next().is_some() {
+                unchecked_bodies += 1;
+            }
             continue;
         };
         reported.insert((symbol.name.clone(), symbol.path.clone()));
@@ -446,6 +510,7 @@ pub fn write_check(
         symbols,
         omitted_symbols,
         unchecked_bodies,
+        definitions_truncated: index.truncated,
         index_ready: true,
     }
 }

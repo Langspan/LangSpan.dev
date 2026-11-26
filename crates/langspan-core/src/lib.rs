@@ -74,9 +74,10 @@ pub use workspaces::{
     MAX_ENDING_SESSIONS, MAX_WORKSPACE_PAGE, WorkspaceEnding, WorkspaceKept, WorkspaceSummary,
 };
 pub use write_check::{
-    DefinitionFacts, PathFacts, UnreadLines, WRITE_CHECK_DEFINITIONS, WRITE_CHECK_LABEL,
-    WRITE_CHECK_PATHS, WRITE_CHECK_SYMBOLS, WRITE_CHECK_WRITERS, WriteCheck, WriteCheckPath,
-    WriteCheckRequest, WriteCheckSymbol, write_check, write_check_request,
+    DefinitionFacts, IndexFacts, PathFacts, UnreadLines, WRITE_CHECK_DEFINITIONS,
+    WRITE_CHECK_LABEL, WRITE_CHECK_PATHS, WRITE_CHECK_SYMBOLS, WRITE_CHECK_WRITERS, WriteCheck,
+    WriteCheckPath, WriteCheckRequest, WriteCheckSymbol, write_check, write_check_noticed,
+    write_check_request,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
