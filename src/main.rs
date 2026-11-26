@@ -3248,7 +3248,7 @@ fn doctor(
             {
                 continue;
             }
-            let Some(first) = managed.first() else {
+            if managed.is_empty() {
                 note(
                     false,
                     format!(
@@ -3260,14 +3260,20 @@ fn doctor(
                     ),
                 );
                 continue;
-            };
-            let points_here = install::same_directory(&first.state_dir, state_dir);
-            let exists = first.executable.is_file();
-            if points_here {
-                binaries.push((
-                    format!("Hooks ({}) in {}", vendor.name(), root.display()),
-                    first.executable.clone(),
-                ));
+            }
+            // Each event's registration is read on its own, so each may name
+            // its own executable and state directory: all of them count.
+            let points_here = managed
+                .iter()
+                .all(|hook| install::same_directory(&hook.state_dir, state_dir));
+            let exists = managed.iter().all(|hook| hook.executable.is_file());
+            for hook in &managed {
+                if install::same_directory(&hook.state_dir, state_dir) {
+                    binaries.push((
+                        format!("Hooks ({}) in {}", vendor.name(), root.display()),
+                        hook.executable.clone(),
+                    ));
+                }
             }
             note(
                 points_here && exists && missing.is_empty() && stale.is_empty(),
@@ -3609,6 +3615,8 @@ fn version_findings(
     let mut grouped: Vec<(Vec<&str>, &std::path::Path)> = Vec::new();
     for (label, path) in binaries {
         match grouped.iter_mut().find(|(_, seen)| *seen == path.as_path()) {
+            // Each hook event of one install adds the same label.
+            Some((labels, _)) if labels.contains(&label.as_str()) => {}
             Some((labels, _)) => labels.push(label),
             None => grouped.push((vec![label], path)),
         }
@@ -3793,13 +3801,14 @@ fn user_level_findings(
             ));
             continue;
         }
-        if let Some(first) = hooks.first()
-            && install::same_directory(&first.state_dir, state_dir)
-        {
-            binaries.push((
-                format!("User-level hooks ({name})"),
-                first.executable.clone(),
-            ));
+        // Every event's registration, as for a project install.
+        for hook in &hooks {
+            if install::same_directory(&hook.state_dir, state_dir) {
+                binaries.push((
+                    format!("User-level hooks ({name})"),
+                    hook.executable.clone(),
+                ));
+            }
         }
         if let Some(server) = &server
             && install::same_directory(&server.state_dir, state_dir)
@@ -3824,7 +3833,12 @@ fn user_level_findings(
                         stale.join(", ")
                     ));
                 }
-                problems.push_str(&check(&first.executable, &first.state_dir));
+                for hook in &hooks {
+                    let problem = check(&hook.executable, &hook.state_dir);
+                    if !problems.contains(&problem) {
+                        problems.push_str(&problem);
+                    }
+                }
                 findings.push((
                     problems.is_empty(),
                     format!(

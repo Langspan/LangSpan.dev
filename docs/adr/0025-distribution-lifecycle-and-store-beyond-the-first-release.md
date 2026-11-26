@@ -246,9 +246,13 @@ same way or by keeping the previous archive.
 - **A binary's version is read, never run.** Every build carries one marker,
   `NUL langspan-binary-version=VERSION NUL`, in its read-only data.
   `doctor` reads each executable that an installed hook or MCP entry for its
-  state directory names (project and user level), at most 1 GiB in 1 MiB
-  pieces, and takes the version only when the file holds exactly one
-  well-formed marker. A project's own configuration can name that
+  state directory names (project and user level, every hook event's own
+  registration, since each can name a different file), at most 1 GiB in
+  1 MiB pieces, and takes the version only when the file holds exactly one
+  well-formed marker. It opens the file without blocking and reads it only
+  when it is a regular file, so a FIFO, device or directory at that path is
+  reported as unreadable instead of stalling the report. A project's own
+  configuration can name that
   executable, so `doctor` does not run it: running `--version` would execute
   whatever a repository's settings point at. A file that holds no marker, or
   two different ones, has no version: a build from before this one, or not
@@ -271,9 +275,12 @@ same way or by keeping the previous archive.
 Tests: `tests/binary_versions.rs`, with a real daemon and a second binary,
 a copy of this build whose marker is rewritten to a newer, then an older,
 version (the copy is never run, so its broken code signature on macOS does
-not matter); the same file without its marker; `binary_version` unit tests
+not matter); the same file without its marker; one hook event naming an
+older binary than the others, and one naming a FIFO or a missing file, at
+project and user level; `binary_version` unit tests
 for a marker split across every read boundary, two markers, malformed
-markers and version order; and the `version` golden vectors
+markers, a FIFO with and without a writer, a device, a directory, symlinks
+and version order; and the `version` golden vectors
 (`tests/protocol.rs`). Breaking the overlap between reads made the boundary
 test fail. Still to retain: a real `brew upgrade` on macOS once the tap
 exists, and the issue's test that runs every command with networking

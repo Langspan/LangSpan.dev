@@ -239,6 +239,196 @@ fn doctor_names_the_coordinator_and_hook_versions_and_fails_when_they_differ() {
     );
 }
 
+/// Point `event`'s hooks in the settings at `path` to `to` instead of
+/// `from`, leaving every other event's as installed.
+fn repoint_event(path: &Path, event: &str, from: &Path, to: &Path) {
+    let mut settings: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let (from, to) = (from.to_str().unwrap(), to.to_str().unwrap());
+    let mut changed = 0;
+    for group in settings["hooks"][event].as_array_mut().unwrap() {
+        for hook in group["hooks"].as_array_mut().unwrap() {
+            let command = hook["command"].as_str().unwrap();
+            assert!(command.contains(from), "{command}");
+            hook["command"] = Value::String(command.replace(from, to));
+            changed += 1;
+        }
+    }
+    assert!(changed > 0, "no {event} hook in {}", path.display());
+    fs::write(path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+}
+
+#[test]
+fn doctor_compares_the_binary_of_every_hook_event_not_only_the_first() {
+    let mut fixture = Fixture::new("e");
+    let root = fixture.repo();
+    let keg = fixture.keg();
+    let home = fixture.base.join("home");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    for args in [
+        vec![
+            "hooks",
+            "install",
+            "claude-code",
+            "--workspace",
+            "app",
+            "--root",
+            root.to_str().unwrap(),
+            "--apply",
+        ],
+        vec![
+            "install",
+            "--hosts",
+            "claude-code",
+            "--home",
+            home.to_str().unwrap(),
+            "--apply",
+        ],
+    ] {
+        let installed = support::output_once_not_busy(|| {
+            let mut command = Process::new(&keg);
+            support::in_home(&mut command, &home);
+            command
+                .env("LANGSPAN_AUTOSTART", "off")
+                .args(&args)
+                .arg("--state-dir")
+                .arg(fixture.state_dir());
+            command
+        });
+        assert!(installed.status.success(), "{args:?}: {installed:?}");
+    }
+    // An older binary, which only the admission hook still names: the
+    // first event, SessionStart, names the coordinator's version.
+    let old_bin = fixture.base.join("old/bin");
+    fs::create_dir_all(&old_bin).unwrap();
+    let old = old_bin.join("langspan");
+    fs::copy(&keg, &old).unwrap();
+    let older = older();
+    rewrite_version(&old, VERSION, &older);
+    repoint_event(
+        &root.join(".claude/settings.local.json"),
+        "PreToolUse",
+        &keg,
+        &old,
+    );
+    repoint_event(
+        &home.join(".claude/settings.json"),
+        "PreToolUse",
+        &keg,
+        &old,
+    );
+    fixture.start();
+
+    let (code, findings) = fixture.doctor(&root);
+    assert_eq!(code, Some(1), "{findings:#?}");
+    let named = format!("{}, version {older}", old.display());
+    let stale = findings
+        .iter()
+        .find(|(_, text)| text.contains(&named))
+        .unwrap_or_else(|| panic!("no finding for {}: {findings:#?}", old.display()));
+    assert!(!stale.0, "{}", stale.1);
+    for label in ["Hooks (claude-code)", "User-level hooks (claude-code)"] {
+        assert!(stale.1.contains(label), "{label}: {}", stale.1);
+    }
+    assert!(stale.1.contains("is newer than this binary"), "{}", stale.1);
+    // The binary the other events name still matches, once.
+    let current = format!("{}, version {VERSION}, as the coordinator's", keg.display());
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|(ok, text)| *ok && text.contains(&current))
+            .count(),
+        1,
+        "{findings:#?}"
+    );
+}
+
+#[test]
+fn doctor_finishes_when_a_later_hook_event_names_a_fifo_or_a_missing_file() {
+    let mut fixture = Fixture::new("f");
+    let root = fixture.repo();
+    let keg = fixture.keg();
+    let home = fixture.base.join("home");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    for args in [
+        vec![
+            "hooks",
+            "install",
+            "claude-code",
+            "--workspace",
+            "app",
+            "--root",
+            root.to_str().unwrap(),
+            "--apply",
+        ],
+        vec![
+            "install",
+            "--hosts",
+            "claude-code",
+            "--home",
+            home.to_str().unwrap(),
+            "--apply",
+        ],
+    ] {
+        let installed = support::output_once_not_busy(|| {
+            let mut command = Process::new(&keg);
+            support::in_home(&mut command, &home);
+            command
+                .env("LANGSPAN_AUTOSTART", "off")
+                .args(&args)
+                .arg("--state-dir")
+                .arg(fixture.state_dir());
+            command
+        });
+        assert!(installed.status.success(), "{args:?}: {installed:?}");
+    }
+    // A FIFO with no writer, which a blocking open would wait on forever.
+    let fifo = fixture.base.join("fifo-langspan");
+    assert!(
+        Process::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let missing = fixture.base.join("gone/langspan");
+    repoint_event(
+        &root.join(".claude/settings.local.json"),
+        "PostToolUse",
+        &keg,
+        &fifo,
+    );
+    repoint_event(
+        &home.join(".claude/settings.json"),
+        "PostToolUse",
+        &keg,
+        &missing,
+    );
+    fixture.start();
+
+    let (code, findings) = fixture.doctor(&root);
+    assert_eq!(code, Some(1), "{findings:#?}");
+    let unread = findings
+        .iter()
+        .find(|(_, text)| text.contains(&format!("{} could not be read", fifo.display())))
+        .unwrap_or_else(|| panic!("no finding for the FIFO: {findings:#?}"));
+    assert!(!unread.0, "{}", unread.1);
+    assert!(unread.1.contains("not a regular file"), "{}", unread.1);
+    // Neither install's summary passes while one event's executable is
+    // not a file.
+    let project = findings
+        .iter()
+        .find(|(_, text)| text.starts_with("claude-code hooks installed for"))
+        .unwrap_or_else(|| panic!("{findings:#?}"));
+    assert!(!project.0, "{}", project.1);
+    assert!(project.1.contains("no longer exists"), "{}", project.1);
+    let user = findings
+        .iter()
+        .find(|(_, text)| text.starts_with("claude-code: user-level hooks installed"))
+        .unwrap_or_else(|| panic!("{findings:#?}"));
+    assert!(!user.0, "{}", user.1);
+    assert!(user.1.contains("no longer exists"), "{}", user.1);
+}
+
 #[test]
 fn doctor_says_when_a_hook_binary_records_no_version() {
     let mut fixture = Fixture::new("u");
