@@ -4,9 +4,9 @@
 //! as a sequence of records in pages, each resumed after an opaque cursor.
 
 use crate::{
-    AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CoreError, Intent, InterfaceNotice,
-    Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, PresenceSetting, RemoteLink,
-    RemotePeer, RetractedMessage, ScanCoverage, ScanFailure, Session, SessionActivity,
+    Adoption, AutoCheck, CheckNotice, CheckRecord, CheckoutChange, CoreError, Intent,
+    InterfaceNotice, Landing, Lease, LeaseStatus, LivenessStatus, Message, Note, PresenceSetting,
+    RemoteLink, RemotePeer, RetractedMessage, ScanCoverage, ScanFailure, Session, SessionActivity,
     SessionLiveness, State, TestLearning, Turn, TurnWaiter, UninstalledHost, Workspace,
     WorkspaceGit, error,
 };
@@ -246,7 +246,7 @@ macro_rules! activity {
 /// Parts of the view left out, in this order, while it does not fit: the
 /// bulkiest histories first, current coordination last. Each name is the one
 /// `StatusSummary::omitted` gives.
-const TRIMS: [Trim; 17] = [
+const TRIMS: [Trim; 18] = [
     activity!("activity.known", known),
     // `check flaky` reads it through its own command.
     field!("test_learning", test_learning),
@@ -271,6 +271,23 @@ const TRIMS: [Trim; 17] = [
                 .iter()
                 .filter(|(id, _)| view.sessions.contains_key(*id))
                 .map(|(id, notices)| (id.clone(), notices.clone()))
+                .collect();
+        },
+    },
+    // One session can adopt any number of independent ended sessions. Only
+    // the adoptions of sessions in the view are given back.
+    Trim {
+        name: "adoptions",
+        trim: |state| take(&mut state.adoptions),
+        restore: |view, full| {
+            view.adoptions = full
+                .adoptions
+                .iter()
+                .filter(|(from, adoption)| {
+                    view.sessions.contains_key(*from)
+                        || view.sessions.contains_key(&adoption.session_id)
+                })
+                .map(|(from, adoption)| (from.clone(), adoption.clone()))
                 .collect();
         },
     },
@@ -485,6 +502,11 @@ pub enum StatusRecord {
         key: String,
         setting: PresenceSetting,
     },
+    /// Another session took over ended session `key`'s uncommitted lines.
+    Adoption {
+        key: String,
+        adoption: Adoption,
+    },
     /// Part of one record too large for a page: `text` is its JSON from
     /// byte `offset`. The parts of a record come in order, the last with
     /// `last`, and joined they are that record's JSON. A part at offset 0
@@ -497,7 +519,7 @@ pub enum StatusRecord {
 }
 
 /// Record kinds in page order. The cursor names one of these.
-const KINDS: [&str; 26] = [
+const KINDS: [&str; 27] = [
     "workspace",
     "session",
     "intent",
@@ -524,6 +546,7 @@ const KINDS: [&str; 26] = [
     "sent_message",
     "retracted_notice",
     "presence",
+    "adoption",
 ];
 
 impl StatusRecord {
@@ -576,6 +599,7 @@ impl StatusRecord {
                 state.retracted_notices.entry(key).or_default().push(notice)
             }
             Self::Presence { key, setting } => drop(state.presence.insert(key, setting)),
+            Self::Adoption { key, adoption } => drop(state.adoptions.insert(key, adoption)),
         }
         Ok(())
     }
@@ -762,7 +786,7 @@ pub fn status_records<'a>(
         .as_ref()
         .and_then(|after| Some((after.position.clone(), after.within?)));
     let after = after.as_ref();
-    let pages: [Page<'a>; 26] = [
+    let pages: [Page<'a>; 27] = [
         entries(0, &state.workspaces, after, |key, workspace| {
             StatusRecord::Workspace { key, workspace }
         }),
@@ -844,6 +868,9 @@ pub fn status_records<'a>(
         }),
         entries(25, &state.presence, after, |key, setting| {
             StatusRecord::Presence { key, setting }
+        }),
+        entries(26, &state.adoptions, after, |key, adoption| {
+            StatusRecord::Adoption { key, adoption }
         }),
     ];
     Ok((resume, pages.into_iter().flatten()))
