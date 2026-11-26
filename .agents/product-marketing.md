@@ -25,6 +25,14 @@ Worktree isolation remains useful; it does not share local holds across
 checkouts or resolve semantic incompatibilities. Shared notes require agents
 to maintain and read them. Do not claim unique market position without competitive validation.
 
+## Semantic awareness
+
+Use the semantic awareness section of the canonical positioning. The local
+source index and supported advisory argument-count alerts are mechanisms
+within coordination. Do not describe name matching as resolved dependencies,
+advisory context as a refusal, or an illustrated recovery as a measured agent
+outcome. Keep rename-aware and cross-worktree symbol alerts on the roadmap.
+
 ## Objections and evidence
 - Does it replace my agent? No; native hooks integrate supported sessions.
 - Does it lock files everywhere? No; active holds apply to supported local
