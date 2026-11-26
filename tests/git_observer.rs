@@ -543,6 +543,45 @@ fn a_repository_over_the_file_bound_scans_changed_files_first_and_reports_covera
     );
 }
 
+/// The default bounds on a repository over the 4,096-file bound: exactly
+/// 4,096 files versioned, the file over 4 MiB listed as too large and the
+/// rest left out. A two-minute deadline keeps the time bound, which leaves
+/// clean files out once half of the deadline has passed, from stopping the
+/// scan first on a slow or loaded machine. The daemon's own two-second
+/// deadline is exercised in tests/repository_shapes.rs.
+#[test]
+fn the_default_file_bound_versions_exactly_4096_files() {
+    let repo = Repo::new();
+    for index in 0..4200 {
+        repo.write(
+            &format!("d{:02}/f{index:04}.txt", index / 100),
+            format!("{index}\n").as_bytes(),
+        );
+    }
+    repo.write("big.bin", &vec![b'x'; 5 * 1024 * 1024]);
+    repo.commit();
+    let started = Instant::now();
+    let snapshot = observer::scan_with_limits(
+        &repo.root,
+        Instant::now() + Duration::from_secs(120),
+        Limits::default(),
+    )
+    .unwrap();
+    let seen = format!(
+        "{} files versioned in {:?}, coverage {:?}",
+        snapshot.files.len(),
+        started.elapsed(),
+        snapshot.coverage
+    );
+    assert_eq!(snapshot.files.len(), 4096, "{seen}");
+    assert_eq!(snapshot.coverage.too_large_paths, ["big.bin"], "{seen}");
+    // 4,201 listed: 4,096 versioned, 1 too large, the rest left out.
+    assert_eq!(snapshot.coverage.omitted, 4201 - 4096 - 1, "{seen}");
+    // Path order: the files left out are the last ones.
+    assert!(snapshot.files.contains_key("d40/f4095.txt"), "{seen}");
+    assert!(!snapshot.files.contains_key("d40/f4096.txt"), "{seen}");
+}
+
 #[test]
 fn the_byte_budget_leaves_clean_files_out_before_changed_ones() {
     let repo = Repo::new();

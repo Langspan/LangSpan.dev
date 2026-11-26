@@ -55,6 +55,7 @@ impl Log {
                 kind,
                 paths: paths.iter().map(|path| (*path).into()).collect(),
                 peer_session_id: None,
+                input_digest: None,
                 at_ms,
                 generation,
             },

@@ -192,6 +192,15 @@ through the real hooks, the coordinator and its SQLite event log. Every
 stand-in prints a first line listing its arm's tools, which the tool guard
 checks as it checks Claude Code's.
 
+Unlike a host, the stand-in waits for each hook's decision past the hook's
+configured timeout, for up to 30 seconds, and then kills the hook with every
+process it started. A slow machine therefore cannot change a dry run's
+result. A hook slower than its configured timeout is logged as `late`. Each
+hook runs in a process group of its own, so when the runner stops the
+stand-in with SIGTERM, SIGINT or SIGHUP, the stand-in first kills the running
+hook's group. A SIGKILL sent to the stand-in alone can leave that hook
+running; the runner always sends SIGTERM first.
+
 The test suite runs every mode and checks what reaches the sessions and that
 the oracle tells the arms apart:
 

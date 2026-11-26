@@ -116,6 +116,7 @@ impl Log {
                 events: &self.events,
                 anchor: None,
                 earlier,
+                retained_from_ms: None,
                 now_ms: now,
             },
         )
@@ -356,6 +357,7 @@ fn a_window_that_reaches_before_the_events_read_says_truncated() {
                 events: &log.events[first_today..],
                 anchor: Some(anchor),
                 earlier: true,
+                retained_from_ms: None,
                 now_ms: at(MIDNIGHT + HOUR),
             },
         )
@@ -402,6 +404,7 @@ fn another_workspaces_work_is_left_out_unless_every_workspace_is_asked_for() {
             events: &log.events,
             anchor: None,
             earlier: false,
+            retained_from_ms: None,
             now_ms: at(MIDNIGHT + 3),
         },
     );
@@ -459,6 +462,7 @@ fn a_landing_today_on_yesterdays_check_evidence_is_counted_today() {
             events: &log.events,
             anchor: None,
             earlier: false,
+            retained_from_ms: None,
             now_ms: now + 2_000,
         },
     );
@@ -593,6 +597,7 @@ fn a_read_that_starts_on_an_event_without_a_time_says_truncated() {
                 events: &log.events[first..],
                 anchor: Some(anchor),
                 earlier: true,
+                retained_from_ms: None,
                 now_ms: at(MIDNIGHT + HOUR),
             },
         )
