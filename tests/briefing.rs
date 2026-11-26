@@ -1698,7 +1698,9 @@ fn a_peers_reads_and_searches_reach_the_next_briefing_as_where_it_is_looking() {
         .lines()
         .find(|line| line.contains("claude-code session 00000000"))
         .unwrap_or_else(|| panic!("{context}"));
-    assert!(line.contains(r#"task: "Rework token refresh""#), "{line}");
+    // Bob was told Alice's task line at his first prompt: a briefing of
+    // changes only names where she is looking, not the task again (#222).
+    assert!(!line.contains("task:"), "{line}");
     assert!(
         line.contains(r#"looking at "src", "src/session.rs", "src/auth.rs""#),
         "{line}"
@@ -1733,18 +1735,19 @@ fn a_peers_reads_and_searches_reach_the_next_briefing_as_where_it_is_looking() {
     );
     let context = f.prompt("codex", BOB, "carry on", &[]).context.unwrap();
     assert!(context.contains(r#"edited: "src/auth.rs""#), "{context}");
-    assert!(
-        context.contains(r#"looking at "src", "src/session.rs";"#),
-        "{context}"
-    );
-    // (It may also be listed as shared: Bob's prompt names `auth`, which the
-    // source index can find there. Never as looked at.)
-    let clause = context.split("looking at").nth(1).unwrap();
-    assert!(
-        !clause.lines().next().unwrap().contains("auth.rs"),
-        "{context}"
-    );
-    assert_eq!(context.matches("looking at").count(), 1, "{context}");
+    // Where she is looking was told at Bob's last prompt: not again (#222).
+    assert!(!context.contains("looking at"), "{context}");
+    // The full view has it, without the file she now edits. (It may also be
+    // listed as shared: Bob's prompt names `auth`, which the source index
+    // can find there. Never as looked at.)
+    let full: Value = serde_json::from_str(&brief_json(&f, &format!("codex.{BOB}"))).unwrap();
+    let looked: Vec<&str> = full["outcome"]["briefing"]["peers"][0]["looking"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|looked| looked["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(looked, ["src", "src/session.rs"], "{full}");
 
     // The pattern is nowhere: not in an event, the status or a briefing.
     for output in [

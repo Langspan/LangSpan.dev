@@ -478,26 +478,35 @@ mod tests {
         assert!(render(Vendor::Cursor).contains("\nalwaysApply: true\n---\n"));
     }
 
+    /// At most 90% of `limit`: every form keeps at least a tenth of each
+    /// limit free (issue #222), since the skill's text is in every turn.
+    fn headroom(limit: usize) -> usize {
+        limit * 9 / 10
+    }
+
     #[test]
-    fn every_form_stays_within_each_hosts_documented_limit() {
+    fn every_form_stays_at_least_a_tenth_under_each_hosts_documented_limit() {
         for vendor in Vendor::ALL {
             let text = render(vendor);
-            assert!(
-                text.lines().count() <= MAX_LINES,
-                "{}: {} lines, over {MAX_LINES}. {SHORTEN}",
-                vendor.name(),
-                text.lines().count()
-            );
-            assert!(
-                text.len() <= MAX_BYTES,
-                "{}: {} bytes, over {MAX_BYTES}. {SHORTEN}",
-                vendor.name(),
-                text.len()
-            );
+            for (what, size, limit) in [
+                ("lines", text.lines().count(), MAX_LINES),
+                ("bytes", text.len(), MAX_BYTES),
+                (
+                    "bytes of the Codex chain",
+                    text.len(),
+                    CODEX_CHAIN_MAX_BYTES,
+                ),
+            ] {
+                assert!(
+                    size <= headroom(limit),
+                    "{}: {size} {what}, over 90% of {limit}. {SHORTEN}",
+                    vendor.name(),
+                );
+            }
         }
         // Claude Code truncates a skill's description in its listing at
         // 1,536 characters.
-        assert!(DESCRIPTION.len() <= 1536);
+        assert!(DESCRIPTION.len() <= headroom(1536));
     }
 
     #[test]

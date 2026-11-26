@@ -650,10 +650,41 @@ The journal is kept on disk, so a daemon restart does not lose them.
 
 Session-start and prompt hooks register the session and deliver relevant peer
 work through the host's `additionalContext`. The briefing includes current
-admissions, declared intent, recent successful edits and a task line. A prompt
-receives another briefing only when its content has changed; session start can
-restore context in a new or resumed session. Briefings also name files the
-session read before a peer reported editing them in the same checkout.
+admissions, declared intent, recent successful edits and a task line. Session
+start gives the full view, which also restores context in a new, resumed or
+compacted session. After that, a prompt or a completed tool call gets a
+briefing only when something changed, and it carries only what changed since
+the session was last told: a peer's new file, its new task line, a new notice.
+Briefings also name files the session read before a peer reported editing them
+in the same checkout.
+
+A briefing of changes only opens with "What changed since your last
+briefing" and ends with one line that counts what it left out:
+
+```text
+(4 unchanged item(s) from earlier briefings not repeated; the langspan_brief tool or `langspan brief claude-code.SESSION --request-id NEW_ID` shows the full view.)
+```
+
+Three items are told again after they were told, once each time the session
+reads or edits one of their files: another session's hold on a file in this
+checkout that the session works on, an interface change to a name its files
+use, and a file it read that a peer has since edited. Refusals are never left
+out: admission refuses each attempt and says why. [ADR
+0004](adr/0004-automatic-peer-briefing.md) lists what each item is and what
+repeats.
+
+`langspan status` shows, for each session, the context LangSpan's hooks added
+to it in this daemon run: bytes over its turns, bytes and estimated tokens per
+turn, and the largest turn. Tokens are estimated at four bytes each:
+
+```text
+  Added context: 2054 bytes over 13 turn(s), 158 bytes (about 40 tokens) per turn; the largest turn 722 bytes (about 181 tokens). Tokens are estimated at 4 bytes each.
+```
+
+`status --json` has the same counts in each session's `activity.context`
+(`turns`, `bytes`, `largest_turn_bytes`, and `turn_bytes` for the current
+turn). The budget is 256 bytes, about 64 tokens, per turn for a typical
+session; a test holds a stand-in session to it.
 
 By default, one line of the latest user prompt becomes a bounded task line
 shared with relevant local sessions:
@@ -777,8 +808,10 @@ Inspect a registered session's briefing from the terminal:
 ./target/release/langspan brief bob --max-peers 8 --request-id bob-brief-1
 ```
 
-This terminal view does not mark the briefing as delivered to Bob or suppress
-his next hook briefing. It still requires a request ID in the current CLI;
+This terminal view is always the full view. It does not mark the briefing as
+delivered to Bob or suppress his next hook briefing. The MCP tool
+`langspan_brief` also gives the full view, and does mark it delivered. The
+terminal view still requires a request ID in the current CLI;
 use a fresh ID for a new observation, or retry the identical ID and arguments
 if the outcome is unknown.
 

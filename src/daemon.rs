@@ -1420,6 +1420,7 @@ mod unix {
             recent,
             recent_window_ms,
             mcp,
+            changes_only,
         } = command
         else {
             return command.clone();
@@ -1454,6 +1455,7 @@ mod unix {
             recent_window_ms,
             mcp: *mcp,
             left: left.clone(),
+            changes_only: *changes_only,
             inflight,
         }
     }

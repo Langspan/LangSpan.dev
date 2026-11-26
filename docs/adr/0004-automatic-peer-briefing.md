@@ -111,6 +111,88 @@ the model at its next tool call instead of its next prompt. It is never sent
 in place of a decision. Codex does not get it yet: its handling of context on
 a completed tool call has not been observed on the host.
 
+**Changes only (added 26 November 2026, issue #222).** The fingerprint above
+made a briefing all or nothing: any change, including a peer re-editing a file
+it had already edited or two peers swapping places in the order, delivered the
+whole briefing again, every turn and after every tool call. In the third K1
+pilot the `langspan` arm used 1,911k cache tokens against 516k for
+`awareness_only`, mostly from the skill and these repeats. Now a briefing at a
+prompt or mid-turn carries only what changed since the session was last told,
+and the full view goes only to a session start (a new, resumed or compacted
+context) and to an explicit request (`langspan brief SESSION` or the MCP tool
+`langspan_brief`).
+
+- *What is told.* Each briefing item has a 64-bit key of what it says, without
+  ages: a peer's own line (its session, worktree, the branch of a peer in
+  another worktree, its task line and declared intent, whether it ended or its
+  process is no longer confirmed, its relation), and one key per listed path
+  and kind (`overlap`, `target`, `editing`, `recent`, `looking`); a stale read
+  (path and editor); a checkout change; a note; an interface change (path,
+  changes and affected files); a teammate's published work. Delivering a
+  briefing records, in the session's activity, the keys the session has now
+  been told: those of the current full briefing that it was told before or
+  is told now, in order, at most 256 (`MAX_TOLD`). An item past the bound is
+  not remembered and is told again; nothing is dropped for space.
+- *What is left out.* A `Brief` with `changes_only` leaves out every item whose
+  key the session was told, and counts them in `unchanged`. A peer whose own
+  line was told keeps only its new paths, without its task line. A peer with
+  nothing new is left out. An item that goes away is forgotten, so if it comes
+  back (a peer edits the file again after its edits aged out, a session
+  resumes) it is news again. Messages, withdrawals, check results, in-flight
+  signatures, uncoordinated changes and left work are not keyed: each is
+  delivered once already, as before. The prompt and mid-turn hooks set
+  `changes_only`; session start, `langspan brief` and `langspan_brief` do not.
+  A session's first briefing is the full view either way, since it was told
+  nothing. A request without the field, from an older client, gets the full
+  briefing in its old shape.
+- *What repeats, and why.* Three items repeat after they were told, once each
+  time the session reads or edits one of their files after the last briefing
+  that placed items in its context (`told_at_ms`): a peer's hold on a file in
+  this checkout that the session works on (the `editing` and `overlap` path
+  of that file), because admission refuses the session's edit while the hold
+  lasts; an interface change, when the session reads or edits a file that
+  mentions a changed name, because that is where a break would be written; and
+  a stale read under the same rule, though reading the file again records the
+  new version and so resolves it, and admission refuses an edit of it
+  (ADR 0005). Everything else is advisory and is not repeated. Refusals are not
+  briefing items: admission refuses every attempt on a held, stale or unread
+  file and says why each time, and write-time interface alerts (ADR 0029) are
+  given once per notice per session as before; neither changed. A read or edit
+  in the same millisecond as the briefing that last told the session counts as
+  told with it, since the clock cannot order the two.
+- *Mid-turn presence.* Where a peer is looking is still not news by itself
+  during a turn: it stays out of the told keys and waits for the next prompt.
+- *The pointer.* A briefing that left anything out says so: it opens with
+  "What changed since your last briefing", and in place of the closing
+  paragraph about holds, which the full view gave, it ends with one line that
+  counts the unchanged items and names `langspan_brief` and `langspan brief
+  SESSION --request-id NEW_ID` for the full view.
+- *Older records.* A delivery stored before this change has no keys: the next
+  briefing is the full view. Keys are kept per generation, like the rest of a
+  session's activity, so after a daemon restart a session is told the full
+  view again. The keys are bookkeeping and are left out of the bounded
+  `status` view; `status --all` has them.
+
+**Context measured (added 26 November 2026, issue #222).** Each hook that
+places text in a session's context records how many bytes it placed:
+`RecordContext` and its event `ContextAdded`, a measurement only. Session
+start and prompt hooks record one at every turn, with zero bytes when they
+had nothing to add, so the count of turns is exact; mid-turn hooks record only
+when they add something. The session's activity keeps the turns, the bytes,
+and the largest turn (its own context and the mid-turn notes after it).
+`langspan status` prints them per session with an estimate in tokens at 4
+bytes per token (`BYTES_PER_TOKEN`), an estimate only; `status --json` has the
+counts. The benchmark's run record reports them per task and per trial. The
+budget is 256 bytes, about 64 tokens, per turn on average for a typical
+session (`CONTEXT_BUDGET_BYTES_PER_TURN`), held by
+`a_typical_session_stays_within_the_context_budget_per_turn_and_status_shows_it`:
+a session with two peers over twelve prompts of three writes each, one peer
+starting a new file every fourth turn. On the debug build on macOS arm64 that
+session measured 158 bytes per turn (2,054 bytes over 13 turns) with briefings
+of changes only, and 338 bytes per turn (4,397 bytes) with the full view on
+every change; one run each. The skill is in every turn's context too: its test
+keeps every form at most 90% of each host's documented limit.
+
 **Prompt targets (added later, roadmap C8).** A prompt's code briefing finds
 where the prompt's names are defined (at most 12 names, 3 definitions each).
 When the prompt summary was recorded and the index has a complete scan, the
@@ -283,7 +365,18 @@ core does with an eight-hour gap.
   session acts again. Times are never compared with another machine's.
 - A delivery is recorded when the daemon commits it. If the hook then misses
   its deadline, that briefing is not repeated until the situation changes or
-  the session starts again.
+  the session starts again. With briefings of changes only, the items it
+  carried are not told again either; `langspan_brief` shows them.
+- A briefing of changes only does not announce what went away: a peer whose
+  hold expired without a finished edit, or whose work aged out, is simply no
+  longer listed. A model that still believes a file is held only waits or is
+  admitted; the full view shows the current state.
+- The hook's own text limits can still leave a told item unshown (a peer that
+  did not fit is counted in "more sessions not shown"); its key is recorded
+  as told. The full view shows it.
+- Whether a smaller briefing changes a host model's behavior, and the cache
+  token reduction in a benchmark rerun, are not measured here: the
+  measurements above are the hook's bytes in a stand-in session.
 - `status` returns a bounded view of current work in one frame: open
   admissions, live or recent sessions and their activity, with closed
   admissions counted per session. When even that exceeds the frame, activity

@@ -160,7 +160,15 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         leases: open,
         session_liveness: keep(session_liveness, of_shown),
         workspace_git: workspace_git.clone(),
-        activity: keep(activity, of_shown),
+        // The keys of what each session was told are bookkeeping for its
+        // next briefing (issue #222); `status --all` has them.
+        activity: keep(activity, of_shown)
+            .into_iter()
+            .map(|(id, mut activity)| {
+                activity.told = Vec::new();
+                (id, activity)
+            })
+            .collect(),
         remote_links: remote_links.clone(),
         remote_peers: remote_peers.clone(),
         checks: checks.clone(),

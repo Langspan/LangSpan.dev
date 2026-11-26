@@ -97,7 +97,7 @@ lists its tools fails too.
 - `oracle.py`: the combined-integration oracle, run on the merged result.
 - `standin_agent.py`: the dry-run agent; it makes one of its task's fixed
   edits, or a repair round's, and no model call.
-- `run-record.schema.json`: the driver's run record v6.
+- `run-record.schema.json`: the driver's run record v7.
 - `runner.py`: validate-only by default; opt-in real-process execution.
 - `manifest.schema.json`: command manifest v1.
 - `manifest.template.json`: owner-filled template for the three required arms.
@@ -267,8 +267,10 @@ repair session's tool check failed (`repair_tool_check_failed`) and those
 `change_not_made` (each counted, contributing no task, result or figure), those passed without
 repair, repairs run and succeeded, correct results, tasks total and accepted,
 the summed `run`, `repair` and `total` figures, the cost per accepted task,
-and `unreported`, the trials with no total cost. A group figure is `null`
-when any trial it counts lacks it. It reads version 6 records only.
+`unreported`, the trials with no total cost, and `context_added`, the
+context LangSpan added summed over the trials it counts (`null` outside the
+LangSpan arm). A group figure is `null` when any trial it counts lacks it.
+It reads version 7 records only.
 
 ### Staggered start
 
@@ -515,6 +517,7 @@ record under `docs/evidence/`.
 | `cost_usd`, `turns`, and per task `cost_usd`, `duration_ms`, `turns` | What each session reported over all its result lines: `num_turns` and `duration_ms` summed, `total_cost_usd` from the last line (it is cumulative); the totals only when every session reported them |
 | `refusals` | LangSpan arm: each `write_refused` event, and whether the same session was admitted to those paths later (`admitted_later`) or not (`no_later_admission`) |
 | `interface_notices` (per task) | LangSpan arm: how many interface notices the coordinator placed in the session's context, from its `inflight_delivered` (another worktree's uncommitted signatures) and `interface_alerted` events; `null` in the other arms |
+| `context_added`, and per task `context_added` | LangSpan arm: the context LangSpan's hooks placed in the sessions, read from the coordinator with `langspan status --all --json` after the sessions finish and before it stops. Per task, the sum over every session registered from the task's checkout, a subagent's included: `turns` (a session start or resume, and each prompt), `bytes` (every briefing, code section and mid-turn note), `bytes_per_turn` (rounded down), `estimated_tokens_per_turn` and `largest_turn_bytes`. Tokens are an estimate, not a tokenizer's count: bytes divided by 4, rounded up, as `langspan status` gives them. A task is `null` when no session registered from its checkout, its figures are malformed or the coordinator's state was not read; a session registered with nothing added counts as zero. The record's `status` is `reported` with the tasks' sums (the largest single turn for `largest_turn_bytes`) when every task was measured, `partial` or `unknown` with `null` figures otherwise, and `not_applicable` with `null` per task in the other arms. A failed read leaves the trial running and its status `unknown` |
 | `coordinator_scans` | LangSpan arm: each `scan_failed` and `scan_recovered` event, with the session whose worktree it concerns and the failure's detail |
 | `tokens` | The sessions' reported usage, each session's `usage` summed over its result lines, and the sessions summed only when every session reported it; otherwise `partial` or `unknown` |
 | `notice_before_write` (per task) | LangSpan arm, a new caller or a dependent: `true` when its hook log shows LangSpan's notice of the change in its context before its first `Write`, `Edit` or `MultiEdit` of a file its task owns, `false` when the notice came with that write or later, or never; `null` in the other arms, for other tasks, or when the session wrote no such file. A write through a shell command is not counted. The alert LangSpan gives at a write is read with the write's result, so it does not count as before |
@@ -529,8 +532,8 @@ record under `docs/evidence/`.
 | `evidence` | Paths, relative to the output directory, of the journal, plan, integration, oracle verdict, event logs, kept notes and merge logs. Each task names its `transcript` and, in the LangSpan arm, its `hook_log` |
 
 A value the run did not measure is `null`, never zero. In the arms without
-LangSpan, `refusals.status` and `coordinator_scans.status` are
-`not_applicable`.
+LangSpan, `refusals.status`, `coordinator_scans.status` and
+`context_added.status` are `not_applicable`.
 
 ## Arms in owner manifests
 
