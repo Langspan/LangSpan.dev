@@ -113,6 +113,10 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         kept_tests: _,
         first_writes: _,
         write_runs: _,
+        // Derived for coordination policies (roadmap B28); read through
+        // their own requests, never part of the status reply.
+        conflict_waits: _,
+        unsettled: _,
     } = state;
     let mut summary = StatusSummary::default();
     let mut open = BTreeMap::new();
@@ -201,6 +205,8 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         kept_tests: BTreeMap::new(),
         first_writes: BTreeMap::new(),
         write_runs: BTreeMap::new(),
+        conflict_waits: BTreeMap::new(),
+        unsettled: BTreeMap::new(),
     };
     (view, summary)
 }

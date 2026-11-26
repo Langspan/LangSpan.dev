@@ -110,6 +110,7 @@ fn signed_in(per_turn: u32) -> Scratch {
     let script = r#"#!/bin/sh
 case "$1 $2" in
   'login status') echo 'Logged in using ChatGPT'; exit 0 ;;
+  '--version ') echo 'codex-cli 0.0.0-standin'; exit 0 ;;
 esac
 [ "$1" = exec ] || { echo "stand-in codex: unexpected $*" >&2; exit 99; }
 turn=$$-$(date +%s)
@@ -252,6 +253,12 @@ fn the_codex_capture_saves_every_event_of_its_own_run_and_no_earlier_one() {
         );
         assert!(run.status.success(), "{said}");
 
+        // The fixtures are named for the Codex version that sent the events.
+        assert_eq!(
+            fs::read_to_string(base.0.join("out/codex-version.txt")).expect(&said),
+            "codex-cli 0.0.0-standin\n",
+            "{said}"
+        );
         let saved = fs::read_to_string(base.0.join("out/events.txt")).expect(&said);
         let saved: Vec<&str> = saved.lines().collect();
         let first: u64 = saved

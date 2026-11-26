@@ -59,7 +59,7 @@ langspan dashboard --open
 ## What you get
 
 - **Shared awareness.** Briefings about related tasks, files and interface changes.
-- **Edit coordination.** Refuse supported overlapping or stale edits in a shared checkout.
+- **Edit coordination.** Refuse supported overlapping or stale edits in a shared checkout. A workspace can instead wait briefly for an active hold and then revalidate the file ([coordination policies](docs/usage.md#coordination-policies)); this is off by default and is not an edit queue.
 - **Semantic notices.** See changed signatures and renamed functions that affect related code, including linked worktrees.
 - **Verified integration.** Attribute edits to sessions and check the combined Git tree.
 - **LangSpan Live.** Inspect sessions, shared paths, holds and coordination events.
