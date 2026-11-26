@@ -44,9 +44,24 @@ fn prefix() -> &'static [u8] {
 
 /// The version recorded in the file at `path`: `None` when it records none,
 /// or more than one, as a build from before the marker, or a file that is
-/// not LangSpan, does. Reads at most 1 GiB, in 1 MiB pieces.
+/// not LangSpan, does. Reads at most 1 GiB, in 1 MiB pieces, and only from a
+/// regular file: the path comes from a configuration a repository can
+/// supply, so a FIFO, device or directory there is refused with
+/// `InvalidInput` before any read. The open does not block, so a FIFO with
+/// no writer cannot hold it either. A symlink is followed.
 pub fn of_file(path: &Path) -> io::Result<Option<String>> {
-    let file = std::fs::File::open(path)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    // Nonblocking has no effect on a regular file's reads.
     scan(file.take(MAX_FILE_BYTES), CHUNK_BYTES)
 }
 
@@ -184,6 +199,92 @@ mod tests {
     fn this_build_carries_its_own_marker() {
         let exe = std::env::current_exe().unwrap();
         assert_eq!(of_file(&exe).unwrap().as_deref(), Some(VERSION));
+    }
+
+    /// `of_file(path)` on another thread, failing the test instead of hanging
+    /// it when the call blocks.
+    fn of_file_within_a_bound(path: &Path) -> io::Result<Option<String>> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let owned = path.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = sender.send(of_file(&owned));
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("of_file({}) blocked", path.display()))
+    }
+
+    fn temporary_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ls-bv-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fifo(dir: &Path) -> std::path::PathBuf {
+        let path = dir.join("langspan");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        path
+    }
+
+    #[test]
+    fn a_fifo_with_no_writer_is_refused_without_waiting() {
+        let dir = temporary_dir("fifo");
+        let path = fifo(&dir);
+        let error = of_file_within_a_bound(&path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_fifo_with_an_idle_writer_is_refused_without_waiting() {
+        let dir = temporary_dir("idle");
+        let path = fifo(&dir);
+        // Read and write: opens at once, and holds a writer that never writes.
+        let _writer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let error = of_file_within_a_bound(&path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_device_or_a_directory_is_refused_and_a_symlink_to_a_file_is_followed() {
+        // Endless zeros: refused, never read for a gigabyte.
+        let error = of_file_within_a_bound(Path::new("/dev/zero")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        let dir = temporary_dir("kinds");
+        let error = of_file_within_a_bound(&dir).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        // A package manager's `bin/langspan` is a symlink to the keg's file.
+        let file = dir.join("real");
+        std::fs::write(&file, marked("1.2.3")).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(
+            of_file_within_a_bound(&link).unwrap().as_deref(),
+            Some("1.2.3")
+        );
+        // A symlink to a FIFO is the FIFO.
+        let fifo = fifo(&dir);
+        let to_fifo = dir.join("to-fifo");
+        std::os::unix::fs::symlink(&fifo, &to_fifo).unwrap();
+        let error = of_file_within_a_bound(&to_fifo).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        // A missing file stays NotFound, which doctor reports elsewhere.
+        let error = of_file_within_a_bound(&dir.join("missing")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
