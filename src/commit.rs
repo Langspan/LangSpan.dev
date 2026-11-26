@@ -1803,6 +1803,12 @@ impl MineReport {
                 left.join(", ")
             ));
         }
+        if !self.left.is_empty() || !self.refused.is_empty() {
+            out.push(
+                "`langspan status --mine` lists which uncommitted lines are still this session's."
+                    .into(),
+            );
+        }
         if self.moved && self.result == "refused" {
             out.push("HEAD moved: another commit landed on the branch while this one was being made, and this session's changes no longer apply on top of it.".into());
         } else if self.moved {
