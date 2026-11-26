@@ -1230,6 +1230,7 @@ mod tests {
                 before_name: None,
                 evidence: None,
                 before_path: None,
+                private: false,
             }],
             dependents: files.map(|n| format!("src/f{n}.rs")).collect(),
             by_session: "alice".into(),

@@ -582,6 +582,7 @@ fn a_wider_check_is_graded_and_classified_for_each_session_it_tells() {
                         before_name: None,
                         evidence: None,
                         before_path: None,
+                        private: false,
                     },
                     more_changes: 0,
                     dependents: names(&["src/bob.rs"]),

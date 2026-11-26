@@ -1990,6 +1990,7 @@ fn signature_change(name: &str, before: &str, after: &str) -> InterfaceChange {
         before_name: None,
         evidence: None,
         before_path: None,
+        private: false,
         before_arity: None,
         after_arity: None,
         before_count: None,

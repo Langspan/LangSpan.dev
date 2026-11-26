@@ -256,7 +256,10 @@ removed path whose indexed content parsed cleanly and a path new to the index
 with exactly that content and the same language, neither content shared by
 another removed or new path. Its rows move to the new path and are not parsed
 again, and one notice at the new path lists each export as `renamed` with
-`file_moved`, the same name and its old path in `before_path`. A file changed
+`file_moved`, the same name and its old path in `before_path`. A file with no
+exports lists its private definitions instead, marked `private`: history only,
+told to no dependent and never held, so that the file's notes and history
+follow it too. A file changed
 as well as moved stays a removal and a first indexing: similarity is not
 scored. The coordinator moves notes on the old path to the new one, and
 `graph history --path NEW` includes what was recorded under earlier paths.

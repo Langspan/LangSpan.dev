@@ -120,6 +120,7 @@ fn cause(dependents: &[&str]) -> InterfaceCause {
             before_name: None,
             evidence: None,
             before_path: None,
+            private: false,
         },
         more_changes: 0,
         dependents: dependents.iter().map(|path| (*path).to_owned()).collect(),

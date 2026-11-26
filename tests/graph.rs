@@ -3155,3 +3155,43 @@ fn a_git_mv_keeps_notes_and_history_under_the_new_path() {
         "{all:#}"
     );
 }
+
+/// Roadmap D7: a file with only private definitions, moved whole, takes its
+/// notes along too, so a detailed lookup of a private helper at its new
+/// path still shows them.
+#[test]
+fn a_git_mv_of_a_file_without_exports_keeps_its_notes_under_the_new_path() {
+    let w = World::with_files(
+        Vec::new(),
+        &[
+            (
+                "src/helper.rs",
+                "fn helper(count: u32) -> u32 {\n    count + 1\n}\n",
+            ),
+            ("src/main.rs", "mod helper;\nfn main() {}\n"),
+        ],
+    );
+    w.wait_for("the first index", "symbol", "helper", |outcome| {
+        outcome["coverage"]["current_files"] == 2
+            && outcome["symbols"][0]["path"] == "src/helper.rs"
+    });
+    let (code, text) = w.cli(&[
+        "remember",
+        "app",
+        "helper must stay pure",
+        "src/helper.rs",
+        "--request-id",
+        "note-helper",
+    ]);
+    assert_eq!(code, 0, "{text}");
+    git(&w.work(), &["mv", "src/helper.rs", "src/assist.rs"]);
+    let detail = w.detail("helper under its new path", "helper", |outcome| {
+        outcome["symbols"][0]["path"] == "src/assist.rs"
+            && outcome["symbols"][0]["notes"] != json!([])
+    });
+    assert_eq!(
+        detail["symbols"][0]["notes"],
+        json!([{"id": "note-helper", "text": "helper must stay pure"}]),
+        "{detail:#}"
+    );
+}

@@ -1398,8 +1398,10 @@ records the signature that went, so a definition removed and added back is
 marked reverted. Notices recorded before this did not carry those signatures.
 A `renamed` entry also has `after_name` (the new name), `evidence`
 (`same_body`, `same_signature` or `file_moved`) and, for `file_moved`,
-`before_path` (where the file was). Renames recorded before evidence was kept
-have no `evidence`.
+`before_path` (where the file was). A file with no exports, moved whole, is
+recorded by its private definitions with `private: true`, so its notes and
+history follow it; those entries are told to no session. Renames recorded
+before evidence was kept have no `evidence`.
 
 `truncated: true` with a `next_seq` says more is recorded than one answer
 holds: more entries than `--limit`, an answer over 28 KiB, or a log with

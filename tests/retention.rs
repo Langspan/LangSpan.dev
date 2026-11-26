@@ -1428,6 +1428,7 @@ fn a_compaction_keeps_the_remembered_renames() {
                 before_name: Some("fetch_user".into()),
                 evidence: Some("same_body".into()),
                 before_path: None,
+                private: false,
                 before_arity: None,
                 after_arity: None,
                 before_count: None,

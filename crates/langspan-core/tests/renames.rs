@@ -37,6 +37,7 @@ fn renamed() -> InterfaceChange {
         before_name: Some("fetch_user".into()),
         evidence: Some("same_body".into()),
         before_path: None,
+        private: false,
         before_arity: None,
         after_arity: None,
         before_count: None,
@@ -291,6 +292,33 @@ fn a_moved_files_notes_follow_it_to_the_new_path() {
     assert!(
         paths.contains(&("note-other".into(), vec!["src/other.rs".into()])),
         "{paths:?}"
+    );
+}
+
+/// A file with no exports, moved whole, is told by its private definitions
+/// (`private`): its notes follow it, and the notice is history only, never
+/// held for briefings. `private` comes only with `file_moved`.
+#[test]
+fn a_moved_file_without_exports_takes_its_notes_and_is_not_held() {
+    let mut state = ready();
+    remember(&mut state, "note-a", &["src/a.rs"]);
+    let private = InterfaceChange {
+        private: true,
+        ..moved("helper", "src/a.rs")
+    };
+    for event in observed(&state, "src/b.rs", private.clone(), "move").0 {
+        apply(&mut state, &event).unwrap();
+    }
+    assert_eq!(notes(&state)[0].paths, ["src/b.rs"]);
+    assert!(state.interface_notices.is_empty(), "{state:?}");
+    let invalid = Some("invalid_notice".to_owned());
+    assert_eq!(refused_at("src/b.rs", private), None);
+    assert_eq!(
+        refused(InterfaceChange {
+            private: true,
+            ..renamed()
+        }),
+        invalid
     );
 }
 

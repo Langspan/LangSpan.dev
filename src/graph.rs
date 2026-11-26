@@ -386,6 +386,7 @@ impl Index {
                     after_name,
                     evidence,
                     before_path: None,
+                    private: false,
                 }
             })
             .take(langspan_core::NOTICE_CHANGES)
@@ -454,7 +455,10 @@ impl Index {
 
     /// The notice for a file moved whole from `from` to `to`: each exported
     /// definition, by name and kind, kept its name and signature and moved
-    /// with it, for the files that mention it.
+    /// with it, for the files that mention it. A file with no exports lists
+    /// its private definitions instead, as indexed (still at `from`),
+    /// marked `private` and told to no dependent, so that its notes and
+    /// history follow it too.
     fn moved_notice(
         &self,
         workspace_id: &str,
@@ -462,28 +466,48 @@ impl Index {
         to: &str,
         (digest, before): (String, FileGraph),
     ) -> Result<Option<Notice>, Failure> {
-        let mut seen = BTreeSet::new();
-        let changes: Vec<InterfaceChange> = before
-            .symbols
-            .iter()
-            .filter(|symbol| symbol.exported && seen.insert((symbol.name.as_str(), symbol.kind)))
-            .filter_map(|symbol| {
-                let signature = written(&before, &symbol.name, symbol.kind)?;
-                Some(InterfaceChange {
-                    name: symbol.name.clone(),
-                    kind: symbol.kind.name().into(),
-                    change: "renamed".into(),
-                    before: Some(signature.clone()),
-                    after: Some(signature),
-                    after_name: Some(symbol.name.clone()),
-                    before_name: Some(symbol.name.clone()),
-                    evidence: Some(langspan_core::FILE_MOVED.into()),
-                    before_path: Some(from.into()),
-                    before_arity: None,
-                    after_arity: None,
-                    before_count: None,
-                    after_count: None,
+        let exports = !before.symbols.is_empty();
+        let definitions: Vec<(String, String, String)> = if exports {
+            let mut seen = BTreeSet::new();
+            before
+                .symbols
+                .iter()
+                .filter(|symbol| seen.insert((symbol.name.as_str(), symbol.kind)))
+                .filter_map(|symbol| {
+                    let signature = written(&before, &symbol.name, symbol.kind)?;
+                    Some((symbol.name.clone(), symbol.kind.name().into(), signature))
                 })
+                .collect()
+        } else {
+            let mut seen = BTreeSet::new();
+            self.symbols_where("s.path = ?2", workspace_id, from, u32::MAX)?
+                .into_iter()
+                .filter(|symbol| {
+                    !symbol.exported
+                        && symbol.signature.len() <= 256
+                        && !symbol.signature.chars().any(char::is_control)
+                        && seen.insert((symbol.name.clone(), symbol.kind.clone()))
+                })
+                .map(|symbol| (symbol.name, symbol.kind, symbol.signature))
+                .collect()
+        };
+        let changes: Vec<InterfaceChange> = definitions
+            .into_iter()
+            .map(|(name, kind, signature)| InterfaceChange {
+                name: name.clone(),
+                kind,
+                change: "renamed".into(),
+                before: Some(signature.clone()),
+                after: Some(signature),
+                after_name: Some(name.clone()),
+                before_name: Some(name),
+                evidence: Some(langspan_core::FILE_MOVED.into()),
+                before_path: Some(from.into()),
+                private: !exports,
+                before_arity: None,
+                after_arity: None,
+                before_count: None,
+                after_count: None,
             })
             .take(langspan_core::NOTICE_CHANGES)
             .collect();
@@ -493,7 +517,11 @@ impl Index {
         let names: Vec<&str> = changes.iter().map(|change| change.name.as_str()).collect();
         Ok(Some(Notice {
             path: to.into(),
-            dependents: self.dependents(workspace_id, from, &names)?,
+            dependents: if exports {
+                self.dependents(workspace_id, from, &names)?
+            } else {
+                Vec::new()
+            },
             digest: format!("moved from {from}"),
             before_digest: digest,
             changes,

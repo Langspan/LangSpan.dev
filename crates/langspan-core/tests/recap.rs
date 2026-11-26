@@ -376,6 +376,7 @@ fn change(change: &str, before: Option<&str>, after: Option<&str>) -> InterfaceC
         before_name: None,
         evidence: None,
         before_path: None,
+        private: false,
     }
 }
 

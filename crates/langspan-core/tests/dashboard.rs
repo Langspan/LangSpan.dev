@@ -321,6 +321,7 @@ fn evidence_and_risks_are_carried_with_their_applicability() {
                 before_name: None,
                 evidence: None,
                 before_path: None,
+                private: false,
                 before_arity: None,
                 after_arity: None,
                 before_count: None,

@@ -1500,6 +1500,12 @@ pub struct InterfaceChange {
     /// Where the file was before, for `file_moved` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_path: Option<String>,
+    /// A definition that is not exported, for `file_moved` only: what the
+    /// notice of a file with no exports lists, so that the file's notes and
+    /// history follow it (roadmap D7). History only, like `added`: never
+    /// held for briefings, recaps, break alerts or the dashboard.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub private: bool,
     /// Parameter counts of `before` and `after`, when each is exactly one
     /// function's signature (ADR 0029). Absent from notices recorded
     /// before they were kept.
@@ -7669,11 +7675,12 @@ fn validate_rename_record(
         && match &change.before_path {
             Some(path) => moved && *path != notice.path,
             None => !moved,
-        };
+        }
+        && (!change.private || moved);
     if !shaped {
         return Err(error(
             "invalid_notice",
-            "A rename's `before_name` is its name, its `evidence` is `same_body`, `same_signature` or `file_moved`, and only `file_moved` has a `before_path`, another file than the notice's",
+            "A rename's `before_name` is its name, its `evidence` is `same_body`, `same_signature` or `file_moved`, and only `file_moved` has a `before_path`, another file than the notice's, or is `private`",
         ));
     }
     if let Some(path) = &change.before_path {
@@ -10913,9 +10920,11 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             // news to no dependent, so it is not held for briefings, recaps,
             // break alerts or the dashboard, and an addition alone does not
             // replace the file's held notice or open a workspace's entry.
+            // A private definition moved with its file is history only too.
             follow_renames(state, notice);
             let mut held = notice.clone();
-            held.changes.retain(|change| change.change != "added");
+            held.changes
+                .retain(|change| change.change != "added" && !change.private);
             if !held.changes.is_empty() {
                 let notices = state
                     .interface_notices
