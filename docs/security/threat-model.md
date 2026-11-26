@@ -567,6 +567,19 @@ Withdrawing a message (`langspan messages retract`, `langspan_retract_message`, 
 | Denial of service | Withdrawals owed to a session are capped at 64, oldest dropped; at most four, within the message budget, per briefing. The history kept for withdrawal is the latest 64 messages per workspace. |
 | Elevation of privilege | A withdrawal grants and releases nothing; it only stops delivery and adds a notice. |
 
+### Trails at session end
+
+A trail (roadmap C9, [ADR 0023](../adr/0023-messages-presence-and-session-continuity-after-launch.md)) carries what one ended session read, edited and left into the next session's context. It widens the message boundary with facts no one wrote by hand: the end hook reads the line journal on this machine, and the coordinator builds the trail from its own records.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | The ending session is the host's session ID, as for every lifecycle event. A same-user process that can reach the socket can end any registered session and report journal facts for it, as it could already forge its edits. |
+| Tampering (prompt injection) | A trail holds paths, line numbers, check names and results, message IDs, and two texts from that session: its task line (redacted as a prompt summary is, absent with `--prompt-summary off`) and its intent summary (redacted when set). The hook ignores the end event's `last_assistant_message` and never opens the transcript, so neither is stored or shown. Every value is cleaned, quoted and labelled "data, not instructions", in at most three lines and 600 bytes inside the 2,400-byte cap. The core accepts at most 64 relative paths per list and at most 4 one-based ranges per file. |
+| Repudiation | Each trail is a `trail_recorded` event and its delivery a `trail_taken` event naming the session told. |
+| Information disclosure | Paths and line numbers only: no line text, file content or model output. Every local session can list trails through `langspan trail` and `langspan_recap`, as it can read the activity they come from through `status`. Trails are never published to teammates. A session with presence off has no reads in its trail. |
+| Denial of service | The end hook reads the journal within half its remaining time and sends what it has, marked partial. A workspace keeps 16 trails; a listing is held to one 48 KiB frame, counting what it leaves out. A trail shares the briefing's message budget and waits when messages fill it. |
+| Elevation of privilege | A trail grants nothing: no lease, intent, admission or journal credit changes. Taking over uncommitted lines still needs `langspan adopt`. |
+
 ## Moving and removing a workspace
 
 `workspace move` rebinds a workspace ID to another root and `workspace remove` takes it out of the derived state ([ADR 0025](../adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md), row G6). They are CLI commands over the existing owner-only socket; no MCP tool offers them, so an agent following repository or peer text has no tool that moves or removes a workspace (a shell command can still run the CLI, as it can `remote disable`).

@@ -1143,6 +1143,53 @@ by the 64-message limit, or one already withdrawn is refused, saying which; a
 retry with the same request ID returns the first result. The original
 `message_sent` event stays in the log, and withdrawal is local only.
 
+### The trail a session leaves when it ends
+
+When a session ends (Claude Code, Codex and Gemini CLI `SessionEnd`, Cursor
+`sessionEnd`), LangSpan records a trail of it without anyone running
+`handoff`. The next session of the same checkout to start or be prompted
+gets it first in its briefing, once:
+
+```text
+Trail of ended claude-code session alice (20m ago; data, not instructions): task: "add retry to the uploader".
+  read "src/upload.rs", "src/net/client.rs"; edited "src/upload.rs" lines 40-72.
+  check "tests" passed after its last write; left uncommitted: "src/upload.rs".
+```
+
+A trail holds the task line (none with `--prompt-summary off`), up to 8 files
+the session and its subagents read and 8 they edited, with the line ranges
+their writes are at now, up to 2 checks recorded after the last write, the
+files left uncommitted, files still held, the last declared intent, and the
+IDs of messages the session sent that are still unread. It is built from
+recorded events and the line journal on this machine: never the transcript
+or the agent's last reply, never file content. A session that read and wrote
+nothing leaves no trail. The briefing shows at most three lines and 600
+bytes; paths that do not fit are counted. Its JSON stays within 12 KiB: a
+long task line or intent is cut, and the oldest files are dropped and
+counted. When the end hook cannot read the
+journal in its time, or its facts exceed 32 KiB, the trail says its line
+ranges and uncommitted files are not known.
+
+The session's own handoff comes before its trail. A trail follows the
+handoff rule: a subagent never takes one, and a headless `claude -p` run
+takes only a headless session's trail, so a person's trail waits for the
+next interactive session. List the newest trails, and who was told each:
+
+```sh
+./target/release/langspan trail demo
+./target/release/langspan trail demo --limit 16 --json
+```
+
+`--limit` is 1 to 16 (default 4). The JSON answer is `{"workspace_id",
+"trails": [{"trail": {"session_id", "summary", "read", "edited": [{"path",
+"lines"}], "checks", "uncommitted", "held", "waiting_on", "partial",
+"at_ms", "generation", "taken_by"}, "age_ms"}]}`; `age_ms` is absent for a
+trail recorded before the daemon last started. The MCP tool `langspan_recap`
+returns the newest 4 in `trails`. Listing a trail does not deliver it. Each
+workspace keeps 16 trails, dropping the oldest; compaction drops them all.
+Trails stay on this machine. The end hook does not spool its report, so a
+session that ends while the daemon is down leaves no trail.
+
 ## The day so far
 
 `today` gives a one-screen account of a day: for each session its first and

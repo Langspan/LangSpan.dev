@@ -401,6 +401,7 @@ fn a_boundary_neither_revives_an_ended_session_nor_creates_its_activity() {
         "end",
         Command::SessionEnd {
             session_id: "alice".into(),
+            trail: None,
         },
         8,
     );
