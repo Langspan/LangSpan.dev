@@ -31,7 +31,8 @@ people who wanted to try LangSpan.
    was changed, and exits 0.
 4. It applies the install, creates the state directory owner-only, writes
    and starts the service (or, with none, starts a coordinator on demand),
-   and runs `langspan doctor`.
+   and runs `langspan doctor`. If the service file changed after the plan
+   was shown, setup writes nothing to it and says to run setup again.
 
 When no file would change, the service file matches and the service runs (or,
 with no service, a coordinator accepts connections), setup prints `Already

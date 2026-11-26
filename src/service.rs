@@ -287,19 +287,23 @@ pub fn read(path: &Path) -> Result<Option<String>, crate::Error> {
     crate::install::read_text(path)
 }
 
-/// Writes a service file owner-only, replacing the whole file at once.
-pub fn write(path: &Path, text: &str) -> Result<(), crate::Error> {
-    use std::{io::Write, os::unix::fs::OpenOptionsExt};
-    let temporary = path.with_extension("langspan-new");
-    let _ = std::fs::remove_file(&temporary);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(&temporary, path)?;
+/// Replaces a service file with `text` at once; a new file is owner-only.
+/// `planned` is what the file held when setup showed its plan (`None`:
+/// absent). If the file differs from that just before the rename, nothing
+/// is written and the error says to run setup again, so an edit made while
+/// setup waited is never overwritten.
+pub fn write(path: &Path, planned: Option<&str>, text: &str) -> Result<(), crate::Error> {
+    let refuse_changed = |now: Option<&[u8]>| -> Result<Vec<u8>, crate::Error> {
+        if now != planned.map(str::as_bytes) {
+            return Err(format!(
+                "{} changed after setup showed its plan; nothing was written. Run setup again to see the new plan",
+                path.display()
+            )
+            .into());
+        }
+        Ok(text.as_bytes().to_vec())
+    };
+    crate::install::write_planned(path, planned.map(str::as_bytes), &refuse_changed)?;
     Ok(())
 }
 
@@ -484,6 +488,33 @@ mod tests {
 
     fn no_env(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn write_refuses_a_service_file_that_changed_after_the_plan() {
+        let base = std::env::temp_dir().join(format!("ls-service-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // The plan saw "planned"; the file is edited before setup applies it.
+        let path = base.join("langspan.service");
+        std::fs::write(&path, "edited\n").unwrap();
+        let error = write(&path, Some("planned\n"), "new\n").unwrap_err();
+        assert!(error.to_string().contains("changed"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "edited\n");
+        // The plan saw no file; one appears before setup applies it.
+        let appeared = base.join("appeared.service");
+        std::fs::write(&appeared, "not ours\n").unwrap();
+        assert!(write(&appeared, None, "new\n").is_err());
+        assert_eq!(std::fs::read_to_string(&appeared).unwrap(), "not ours\n");
+        // Unchanged since the plan: replaced; a new file is owner-only.
+        write(&path, Some("edited\n"), "new\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+        let absent = base.join("absent.service");
+        write(&absent, None, "new\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&absent).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

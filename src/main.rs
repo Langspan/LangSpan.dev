@@ -1366,9 +1366,9 @@ fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langs
             manager,
             path,
             text,
-            ..
+            existing,
         } => {
-            install_service(manager, &path, &text, &state_dir)?;
+            install_service(manager, &path, existing.as_deref(), &text, &state_dir)?;
         }
         ServicePlan::Unchanged(_) => {}
         ServicePlan::None(_) => {
@@ -1406,11 +1406,13 @@ fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langs
     Ok(0)
 }
 
-/// Writes the login service file and starts it, then waits up to five
-/// seconds for the coordinator to accept connections.
+/// Writes the login service file, unless it changed from `planned` since
+/// the plan was shown, and starts it, then waits up to five seconds for the
+/// coordinator to accept connections.
 fn install_service(
     manager: langspan::service::Manager,
     path: &std::path::Path,
+    planned: Option<&str>,
     text: &str,
     state_dir: &std::path::Path,
 ) -> Result<(), langspan::Error> {
@@ -1422,7 +1424,7 @@ fn install_service(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    langspan::service::write(path, text)?;
+    langspan::service::write(path, planned, text)?;
     println!("Wrote {}.", path.display());
     let commands = service::start_commands(manager, path);
     let last = commands.len() - 1;
