@@ -839,7 +839,11 @@ mod unix {
                             let check_before = auto_check_of(store.state(), &job.request.command);
                             let boundary = boundary_session(&job.request.command);
                             let response = handle(&mut store, graph_reader.as_ref(), job.request);
-                            if let Some(message) = auto_check_message(store.state(), check_before, boundary, &response) {
+                            let messages = [
+                                auto_check_message(store.state(), graph_reader.as_ref(), check_before, boundary, &response),
+                                interface_message(store.state(), graph_reader.as_ref(), &response),
+                            ];
+                            for message in messages.into_iter().flatten() {
                                 // Never waits: a full queue loses this one
                                 // trigger, and the session's next one counts.
                                 if let Err(error) = check_sender.try_send(message) {
@@ -1612,6 +1616,7 @@ mod unix {
     /// nothing.
     fn auto_check_message(
         state: &State,
+        graph: Option<&crate::graph::Index>,
         check_before: Option<CheckBefore>,
         boundary: Option<String>,
         response: &Response,
@@ -1636,10 +1641,65 @@ mod unix {
         );
         let workspace_id = &state.sessions.get(&session_id)?.workspace_id;
         let check = state.auto_checks.get(workspace_id).filter(|_| wrote)?;
+        let of = Registration::of(state, workspace_id)?;
+        // Read only for a check with a wider command: one bounded query of
+        // the index's own file.
+        let index_scanned = check.on_interface_change.is_some()
+            && index_coverage(graph, &of).is_some_and(|coverage| coverage.scanned);
         Some(auto_check::Message::Wrote {
             check: check.clone(),
-            of: Registration::of(state, workspace_id)?,
+            of,
             session_id,
+            index_scanned,
+        })
+    }
+
+    fn index_coverage(
+        graph: Option<&crate::graph::Index>,
+        of: &Registration,
+    ) -> Option<langspan_core::GraphCoverage> {
+        graph?
+            .with_coverage(of, |_| Ok(()))
+            .ok()
+            .map(|((), coverage)| coverage)
+    }
+
+    /// An interface notice the index just reported, for the automatic-check
+    /// worker when the workspace's check has a wider command and a session's
+    /// writes changed an export that other files mention. A replayed report
+    /// tells it nothing.
+    fn interface_message(
+        state: &State,
+        graph: Option<&crate::graph::Index>,
+        response: &Response,
+    ) -> Option<auto_check::Message> {
+        let Outcome::InterfaceObserved { notice } = &response.outcome else {
+            return None;
+        };
+        if response.replayed || notice.dependents.is_empty() {
+            return None;
+        }
+        state
+            .auto_checks
+            .get(&notice.workspace_id)?
+            .on_interface_change
+            .as_ref()?;
+        let by_session = notice.by_session.clone()?;
+        if state.sessions.get(&by_session)?.workspace_id != notice.workspace_id {
+            return None;
+        }
+        let of = Registration::of(state, &notice.workspace_id)?;
+        Some(auto_check::Message::Interface {
+            workspace_id: notice.workspace_id.clone(),
+            change: auto_check::Pending {
+                notice_id: notice.notice_id.clone(),
+                path: notice.path.clone(),
+                changes: notice.changes.clone(),
+                dependents: notice.dependents.clone(),
+                by_session,
+                blind_files: index_coverage(graph, &of)
+                    .map_or(0, |coverage| coverage.blind_in_scope),
+            },
         })
     }
 
@@ -1843,8 +1903,16 @@ mod unix {
             return error(request_id, store.state().generation, &e.code, e.message);
         }
         // Every client, not only the CLI: the command is stored as it is.
-        if let Command::AutoCheckEnable { argv, .. } = &command
-            && let Err(message) = auto_check::refuse_secrets(argv)
+        if let Command::AutoCheckEnable {
+            argv,
+            on_interface_change,
+            ..
+        } = &command
+            && let Err(message) = auto_check::refuse_secrets(argv).and_then(|()| {
+                on_interface_change
+                    .as_ref()
+                    .map_or(Ok(()), |wider| auto_check::refuse_secrets(&wider.argv))
+            })
         {
             return error(
                 request_id,

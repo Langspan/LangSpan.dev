@@ -690,6 +690,9 @@ mod tests {
                 baseline_check_id: None,
                 fixed: Vec::new(),
                 writers: Vec::new(),
+                interface_grade: None,
+                interface: None,
+                index_incomplete: false,
             },
         };
         let notices = notices_for(

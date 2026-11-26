@@ -113,10 +113,15 @@ fn record(
             inputs: Vec::new(),
             result,
             duration_ms: 900,
-            report: (!sessions.is_empty()).then(|| CheckReport {
-                session_ids: names(sessions),
-                tail: "test result: FAILED".into(),
-                timed_out_s: None,
+            report: (!sessions.is_empty()).then(|| {
+                Box::new(CheckReport {
+                    session_ids: names(sessions),
+                    tail: "test result: FAILED".into(),
+                    timed_out_s: None,
+                    interface: None,
+                    index_incomplete: false,
+                    dependent_paths: Vec::new(),
+                })
             }),
             writes_before: tests.as_ref().map(|_| writes),
             command_id: tests.as_ref().map(|_| "c".repeat(64)),
@@ -306,11 +311,14 @@ fn the_sessions_that_wrote_between_the_two_trees_are_named() {
             inputs: Vec::new(),
             result: CheckResult::Failed { exit_code: 101 },
             duration_ms: 900,
-            report: Some(CheckReport {
+            report: Some(Box::new(CheckReport {
                 session_ids: names(&["alice"]),
                 tail: String::new(),
                 timed_out_s: None,
-            }),
+                interface: None,
+                index_incomplete: false,
+                dependent_paths: Vec::new(),
+            })),
             writes_before: Some(writes),
             command_id: Some("c".repeat(64)),
             tests: Some(failing(&["parser::keeps_order"], &[])),
@@ -525,4 +533,87 @@ fn an_older_record_whose_write_count_had_moved_is_no_baseline_on_replay() {
             .any(|record| record.check_id == "c0")
     );
     assert!(state.kept_tests.is_empty(), "{:?}", state.kept_tests);
+}
+
+#[test]
+fn a_wider_check_is_graded_and_classified_for_each_session_it_tells() {
+    use langspan_core::{InterfaceCause, InterfaceChange, InterfaceGrade};
+    let mut state = ready(&["alice", "bob"]);
+    record(
+        &mut state,
+        "c0",
+        &tree('a'),
+        Some(failing(&["net::times_out"], &["parser::keeps_order"])),
+        &[],
+    );
+    write(&mut state, "alice", "w1");
+    write(&mut state, "bob", "w2");
+    // The run is for alice's change; bob works on a file that mentions it.
+    let writes = state.writes["work"];
+    run(
+        &mut state,
+        "c1",
+        Command::RecordCheck {
+            workspace_id: "work".into(),
+            name: "tests".into(),
+            command: "cargo test".into(),
+            tree_oid: tree('b'),
+            head_oid: None,
+            inputs: Vec::new(),
+            result: CheckResult::Failed { exit_code: 101 },
+            duration_ms: 900,
+            report: Some(Box::new(CheckReport {
+                session_ids: names(&["alice"]),
+                tail: String::new(),
+                timed_out_s: None,
+                interface: Some(Box::new(InterfaceCause {
+                    path: "src/alice.rs".into(),
+                    change: InterfaceChange {
+                        name: "parse".into(),
+                        kind: "function".into(),
+                        change: "signature_changed".into(),
+                        before: Some("pub fn parse(a: u32, b: u32)".into()),
+                        after: Some("pub fn parse(a: u32)".into()),
+                        before_arity: None,
+                        after_arity: None,
+                        before_count: None,
+                        after_count: None,
+                    },
+                    more_changes: 0,
+                    dependents: names(&["src/bob.rs"]),
+                    more_dependents: 0,
+                    blind_files: 0,
+                })),
+                index_incomplete: false,
+                dependent_paths: Vec::new(),
+            })),
+            writes_before: Some(writes),
+            command_id: Some("c".repeat(64)),
+            tests: Some(failing(&["parser::keeps_order", "net::times_out"], &[])),
+            rerun: None,
+        },
+        100,
+    );
+    for (session, writer) in [("alice", "bob"), ("bob", "alice")] {
+        let notice = notice(&state, session);
+        assert_eq!(
+            notice.interface_grade,
+            Some(InterfaceGrade::Broke),
+            "{session}"
+        );
+        assert_eq!(
+            notice.interface.as_ref().unwrap().dependents,
+            ["src/bob.rs"]
+        );
+        assert_eq!(notice.baseline_check_id.as_deref(), Some("c0"), "{session}");
+        assert_eq!(
+            classes(notice),
+            [
+                ("parser::keeps_order".into(), Some(FailureClass::New)),
+                ("net::times_out".into(), Some(FailureClass::AlreadyFailing)),
+            ]
+        );
+        assert_eq!(notice.writers, [writer], "{session}");
+    }
+    assert_eq!(replayed(), state, "derived from the events alone");
 }

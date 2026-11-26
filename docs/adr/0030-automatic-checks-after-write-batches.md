@@ -329,14 +329,99 @@ skip, saying so, where the toolchain is absent. **Not observed on a host:**
 a classified result in a real Claude Code or Codex model's context, and the
 model fixing the tests its write broke while leaving the one failing before.
 
+## The wider check after an interface change (F3), built 25 November 2026
+
+F3 was deferred by
+[ADR 0024](0024-write-check-and-landing-depth-beyond-the-launch-bar.md) until
+this track had results to work from; it is now built, issue #71. A fast
+check that builds one package passes while a caller in another package
+breaks; the break shows up later, in another session's work.
+
+**The owner's second command.** `langspan check auto WORKSPACE --name NAME
+[--timeout-s N] -- COMMAND... --on-interface-change NAME2 [--timeout-s N] --
+COMMAND2...` stores COMMAND2 with the check as `on_interface_change` (name,
+arguments and time limit, under the same bounds as the regular command, a
+name of its own, and refused when it looks like it holds a secret, by the
+daemon from any client). `AutoCheck` and `auto_check_enable` gain the field
+with a serde default, so earlier stores replay unchanged. LangSpan splits the
+command line at the literal argument `--on-interface-change`, so a regular
+command cannot contain that argument.
+
+**When it runs.** The index's comparison of a file's versions produces an
+interface notice ([ADR 0008](0008-derived-source-index.md)). When the
+workspace's check has a wider command, the notice names other files that
+mention a changed name, and a session of the workspace last reported editing
+the file, the state owner hands the change to the check worker (with the
+index's count of files it cannot read in full). A body-only change produces
+no notice; a change no other file mentions starts nothing. The worker keeps
+at most 16 ungraded changes per workspace. Notices arrive from the indexer's
+own thread, before or after the regular check of the same writes ends, so the
+worker orders the two:
+
+- Writes waiting for a check always run the regular command first.
+- When a regular run ends on a tree that held still (passed or failed), and
+  an ungraded change waits, the wider command runs next on that same tree:
+  its first snapshot must equal the regular run's tree, or nothing runs and
+  the regular command checks the new tree first.
+- A change that arrives after its regular run ended starts the wider command
+  after the debounce, on the tree of that regular run.
+
+The wider run has the regular run's rules: no shell, its own process group,
+its own time limit, and a tree change from a session's write stops it and
+starts the regular command again on the new tree, followed by the wider one.
+It is never run a second time to learn which tests flip. LangSpan does not
+narrow the command to the mentioning files: the owner's whole command runs,
+so a dependency the name lookup misses cannot skip a test.
+
+**Grading and who is told.** The result is an ordinary check record under
+the wider command's name. Its `check_reported` notice carries the cause: the
+newest notice's changed file and its first change (name, old and new signatures), how many more
+changes the run covered, at most 8 mentioning files with a count of the rest,
+and the count of files the index could not read in full. The core grades it:
+`interface_grade: kept` when it passed, `broke` when it failed, none when it
+was inconclusive. The core refuses a grade that disagrees with the result on
+replay. The sessions the run was for are told, and the core adds the running
+sessions of the workspace that work on or have read a mentioning file, by the
+same rule the briefing uses for interface notices, up to the 16 sessions a
+report names. Recipients are chosen from every mentioning file of the
+changes the run covered, not only the 8 the notice shows: the daemon sends
+all of them, at most 512 (16 waiting changes of at most 32 files each), in
+the report's `dependent_paths`, which the core uses for that choice and does
+not keep. The briefing says, inside the check section's 1,200 bytes:
+`Interface change to parse_upload in core/src/lib.rs: "pub fn
+parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) -> u32":
+the wider check all failed (exit 101); files that mention it: cli/src/main.rs
+(a name lookup, not resolved uses).`
+
+**Failure mode.** With no complete scan of the workspace the index produces
+no notice, so the wider command does not run; the regular result then says
+the index had no complete scan (`index_incomplete`), so a passing fast check
+is not read as covering callers. A daemon stop loses ungraded changes, as it
+loses triggers waiting for their debounce.
+
+**Evidence.** Core rules in `crates/langspan-core/tests/wider_checks.rs`.
+Through the real hook executable, a real daemon, real Git, the real indexer
+and a two-crate Rust workspace (`tests/wider_checks.rs`, with commands that
+log how they ran): a body-only change runs only the regular command; a
+signature change runs the wider command after it on the same tree, whole,
+with no argument added, grades a failure `broke` with the mentioning file
+and a pass `kept`; the session working on the mentioning file receives the
+grade at its next briefing; a write during the wider run stops it and runs
+both again on the new tree; the CLI shows the wider command and refuses one
+with a secret, without a command, or with the regular check's name. Breaking
+the rule that tells sessions on mentioning files, or adding a path to the
+wider command, makes its test fail. **Not observed on a host:** a real
+Claude Code or Codex session told that the wider check broke, and what it
+does next.
+
 ## Not now, with reasons
 
-- **Running dependents' tests after an interface change** (F3, also
-  ADR 0024). The source index matches names, not resolved dependencies
+- **Selecting dependents' tests from the index.** The source index matches
+  names, not resolved dependencies
   ([ADR 0008](0008-derived-source-index.md),
   [ADR 0020](0020-source-graph-depth-after-launch.md)); selecting tests from
-  it would skip tests that a change does affect. The owner's whole command
-  runs instead.
+  it would skip tests that a change does affect. The owner's whole wider
+  command runs instead (F3, below).
 - **Choosing files.** A check could run only when a batch wrote a source file
   of a known language. LangSpan runs after any recorded write; the owner chooses a
   command that is cheap enough, and the debounce bounds how often.

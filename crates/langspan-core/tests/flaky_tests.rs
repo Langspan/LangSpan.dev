@@ -157,11 +157,14 @@ fn record_as(
             inputs: Vec::new(),
             result,
             duration_ms: 900,
-            report: Some(CheckReport {
+            report: Some(Box::new(CheckReport {
                 session_ids: vec!["alice".into()],
                 tail: "test net::times_out ... FAILED".into(),
                 timed_out_s: None,
-            }),
+                interface: None,
+                index_incomplete: false,
+                dependent_paths: Vec::new(),
+            })),
             tests: Some(tests),
             rerun,
             writes_before,
