@@ -37,7 +37,7 @@ other document wins:
 8. **Cut filler, hedging and intensifiers.** Drop "simply", "just", "very",
    "basically", "in order to", "please note that" and "at this time".
 9. **Don't overclaim.** Replace "seamless", "powerful", "easy" and "robust"
-   with the fact. Describe only behaviour that exists and has been checked;
+   with the fact. Describe only behavior that exists and has been checked;
    don't announce planned features as if they ship.
 10. **Use sentence case for headings.** "Catch overlapping edits", not "Catch
     Overlapping Edits".
@@ -59,9 +59,11 @@ Write for readers whose first language may not be English: no idioms, jokes,
 exclamation marks or culture-specific references. Replace an unclear "it" or
 "this" with the noun. Write dates as 25 November 2026 or 2026-11-25.
 
-**Spelling.** The repository mixes British and American spelling. Match the
-file you are editing, and don't respell text you aren't otherwise changing.
-Code identifiers and the `LICENSE` filename keep their own spelling.
+**Spelling.** Use American English (license, behavior, color, canceled,
+organize) for all new and changed text. Identifiers, file names, paths, config
+keys, command output and quoted text keep their exact form, even when they use
+another spelling. Existing text is converted separately in
+[#167](https://github.com/Langspan/LangSpan.dev/issues/167).
 
 ## By kind of text
 
@@ -74,7 +76,7 @@ Code identifiers and the `LICENSE` filename keep their own spelling.
   is still pending. "Tested with the real daemon and hooks; not yet on a host"
   is the model.
 - A number is measured, with its hardware, version and sample size, or it is
-  labelled **Target** ([engineering practice](engineering.md#evidence)).
+  labeled **Target** ([engineering practice](engineering.md#evidence)).
 
 ### Code comments and docstrings
 
@@ -110,7 +112,7 @@ failed, why, and what to do next. In practice:
   [pull request template](../.github/pull_request_template.md): the commands
   run and their results, with a failing test quoted as printed.
 - Separate what you verified from what you assumed or skipped, and say why.
-- An issue states the observed behaviour, the expected behaviour and how to
+- An issue states the observed behavior, the expected behavior and how to
   reproduce it, in that order.
 
 ### Release notes
