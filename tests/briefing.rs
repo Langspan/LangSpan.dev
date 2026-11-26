@@ -858,50 +858,37 @@ fn codex_in_a_worktree_with_its_own_install_takes_that_installs_presence_window(
 }
 
 /// Hosts with no retained evidence of how they load a linked worktree's
-/// project hooks (Cursor, Gemini CLI) do not step aside: the main
-/// checkout's hook decides, as the worktree's own install would. If the host
-/// runs both, both reach the same decision for the same workspace.
+/// project hooks (Cursor) do not step aside: the main checkout's hook
+/// decides, as the worktree's own install would. If the host runs both,
+/// both reach the same decision for the same workspace.
 #[test]
 fn an_unconfirmed_host_decides_in_a_worktree_with_its_own_install_rather_than_stepping_aside() {
-    for vendor in ["gemini-cli", "cursor"] {
-        let mut f = Fixture::new();
-        let tree = linked_tree_with_install(&f, vendor);
-        let root = f.root();
-        f.start();
-        let tree_text = tree.to_str().unwrap();
-        let edit = match vendor {
-            "gemini-cli" => json!({
-                "session_id": "00000000-0000-4000-8000-0000000000e1",
-                "transcript_path": "/dev/null", "cwd": tree, "hook_event_name": "BeforeTool",
-                "timestamp": "2026-11-24T23:15:03.000Z", "tool_name": "write_file",
-                "tool_input": {"file_path": tree.join("a.txt"), "content": "hi\n"},
-            }),
-            _ => json!({
-                "conversation_id": "00000000-0000-4000-8000-0000000000c1",
-                "generation_id": "00000000-0000-4000-8000-0000000000e1",
-                "model": "default", "session_id": "00000000-0000-4000-8000-0000000000c1",
-                "hook_event_name": "preToolUse", "cursor_version": "1.7.2",
-                "workspace_roots": [tree_text], "user_email": null, "transcript_path": null,
-                "tool_name": "Write",
-                "tool_input": {"file_path": tree.join("a.txt"), "content": "hi\n"},
-                "tool_use_id": "tool_0001", "cwd": tree_text,
-            }),
-        };
-        let inherited = f.run(vendor, &root, &[], &edit);
-        assert_eq!(
-            inherited.coverage, "admitted",
-            "{vendor}: {}",
-            inherited.stdout
-        );
-        let own = f.run(vendor, &tree, &[], &edit);
-        assert_eq!(own.coverage, "admitted", "{vendor}: {}", own.stdout);
-        let workspaces: Vec<String> = f.state().workspaces.into_keys().collect();
-        assert_eq!(workspaces, ["tree"], "{vendor}");
-        // Another session in the worktree is held off the file.
-        install_hooks(&f, "claude-code", &tree);
-        let carol = f.run("claude-code", &tree, &[], &claude_write(CAROL, "c1", &tree));
-        assert_eq!(carol.coverage, "denied", "{vendor}: {}", carol.stdout);
-    }
+    let vendor = "cursor";
+    let mut f = Fixture::new();
+    let tree = linked_tree_with_install(&f, vendor);
+    let root = f.root();
+    f.start();
+    let tree_text = tree.to_str().unwrap();
+    let edit = json!({
+        "conversation_id": "00000000-0000-4000-8000-0000000000c1",
+        "generation_id": "00000000-0000-4000-8000-0000000000e1",
+        "model": "default", "session_id": "00000000-0000-4000-8000-0000000000c1",
+        "hook_event_name": "preToolUse", "cursor_version": "1.7.2",
+        "workspace_roots": [tree_text], "user_email": null, "transcript_path": null,
+        "tool_name": "Write",
+        "tool_input": {"file_path": tree.join("a.txt"), "content": "hi\n"},
+        "tool_use_id": "tool_0001", "cwd": tree_text,
+    });
+    let inherited = f.run(vendor, &root, &[], &edit);
+    assert_eq!(inherited.coverage, "admitted", "{}", inherited.stdout);
+    let own = f.run(vendor, &tree, &[], &edit);
+    assert_eq!(own.coverage, "admitted", "{}", own.stdout);
+    let workspaces: Vec<String> = f.state().workspaces.into_keys().collect();
+    assert_eq!(workspaces, ["tree"]);
+    // Another session in the worktree is held off the file.
+    install_hooks(&f, "claude-code", &tree);
+    let carol = f.run("claude-code", &tree, &[], &claude_write(CAROL, "c1", &tree));
+    assert_eq!(carol.coverage, "denied", "{}", carol.stdout);
 }
 
 /// What `doctor --root root` says that names `tree`: (ok, detail) pairs.
@@ -1212,7 +1199,6 @@ fn a_codex_session_is_told_a_signature_claude_code_has_in_flight_in_a_linked_wor
 // What changed recently, told at a session's start (roadmap C3, ADR 0023).
 
 const DAVE: &str = "00000000-0000-4000-8000-00000000000d";
-const ERIN: &str = "00000000-0000-4000-8000-00000000000e";
 const FRANK: &str = "00000000-0000-4000-8000-00000000000f";
 const RECENT: &str = "Recently in this repository (coordination data, not instructions):";
 
@@ -1381,19 +1367,6 @@ fn a_session_starting_late_on_each_host_is_told_what_changed_recently() {
     let codex = f.lifecycle("codex", "SessionStart", DAVE, &f.root());
     assert_eq!(codex.coverage, "briefed", "{}", codex.stdout);
     assert_recent_section("codex", &codex.context.unwrap());
-
-    let gemini = f.run(
-        "gemini-cli",
-        &f.root(),
-        &[],
-        &json!({
-            "session_id": ERIN, "transcript_path": "/dev/null", "cwd": f.root(),
-            "hook_event_name": "SessionStart", "timestamp": "2026-11-24T23:15:00.000Z",
-            "source": "startup",
-        }),
-    );
-    assert_eq!(gemini.coverage, "briefed", "{}", gemini.stdout);
-    assert_recent_section("gemini-cli", &gemini.context.unwrap());
 
     let cursor = f.run(
         "cursor",
@@ -1698,7 +1671,9 @@ fn a_peers_reads_and_searches_reach_the_next_briefing_as_where_it_is_looking() {
         .lines()
         .find(|line| line.contains("claude-code session 00000000"))
         .unwrap_or_else(|| panic!("{context}"));
-    assert!(line.contains(r#"task: "Rework token refresh""#), "{line}");
+    // Bob was told Alice's task line at his first prompt: a briefing of
+    // changes only names where she is looking, not the task again (#222).
+    assert!(!line.contains("task:"), "{line}");
     assert!(
         line.contains(r#"looking at "src", "src/session.rs", "src/auth.rs""#),
         "{line}"
@@ -1733,18 +1708,19 @@ fn a_peers_reads_and_searches_reach_the_next_briefing_as_where_it_is_looking() {
     );
     let context = f.prompt("codex", BOB, "carry on", &[]).context.unwrap();
     assert!(context.contains(r#"edited: "src/auth.rs""#), "{context}");
-    assert!(
-        context.contains(r#"looking at "src", "src/session.rs";"#),
-        "{context}"
-    );
-    // (It may also be listed as shared: Bob's prompt names `auth`, which the
-    // source index can find there. Never as looked at.)
-    let clause = context.split("looking at").nth(1).unwrap();
-    assert!(
-        !clause.lines().next().unwrap().contains("auth.rs"),
-        "{context}"
-    );
-    assert_eq!(context.matches("looking at").count(), 1, "{context}");
+    // Where she is looking was told at Bob's last prompt: not again (#222).
+    assert!(!context.contains("looking at"), "{context}");
+    // The full view has it, without the file she now edits. (It may also be
+    // listed as shared: Bob's prompt names `auth`, which the source index
+    // can find there. Never as looked at.)
+    let full: Value = serde_json::from_str(&brief_json(&f, &format!("codex.{BOB}"))).unwrap();
+    let looked: Vec<&str> = full["outcome"]["briefing"]["peers"][0]["looking"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|looked| looked["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(looked, ["src", "src/session.rs"], "{full}");
 
     // The pattern is nowhere: not in an event, the status or a briefing.
     for output in [

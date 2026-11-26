@@ -106,6 +106,7 @@ fn stop(state: &mut State, session: &str, id: &str) -> bool {
         Command::SessionStop {
             session_id: session.into(),
             failure: None,
+            prompt_id: None,
         },
         7,
     ) {
@@ -127,6 +128,7 @@ fn record(state: &mut State, id: &str, tree: char, sessions: &[&str], tail: &str
             inputs: Vec::new(),
             result: CheckResult::Failed { exit_code: 101 },
             duration_ms: 900,
+            symbol_findings: None,
             report: Some(Box::new(CheckReport {
                 session_ids: sessions.iter().map(|s| (*s).to_owned()).collect(),
                 tail: tail.into(),
@@ -158,6 +160,7 @@ fn delivered(state: &mut State, session: &str, id: &str) -> Vec<String> {
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         20,
     ) {
@@ -308,6 +311,7 @@ fn a_reported_result_is_a_check_record_and_is_delivered_once_to_each_session() {
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         15,
     );
@@ -367,6 +371,7 @@ fn several_waiting_results_are_delivered_one_per_briefing_newest_first() {
                 inputs: Vec::new(),
                 result: CheckResult::Passed {},
                 duration_ms: 10,
+                symbol_findings: None,
                 report: Some(Box::new(CheckReport {
                     session_ids: vec!["alice".into()],
                     tail: String::new(),

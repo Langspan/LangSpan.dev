@@ -1,5 +1,7 @@
 use langspan::protocol::{
-    OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, Response, encode, encode_for, read_frame,
+    OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, PROTOCOL_VERSION_4, PROTOCOL_VERSION_5,
+    PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, Request, Response, encode, encode_for,
+    encode_record_for, read_frame,
 };
 use langspan_core::Command;
 
@@ -472,6 +474,76 @@ fn v3_blind_spots_request_and_response_match_the_committed_golden_vectors() {
         request.command,
         Command::GraphImpact { depth: 1, .. }
     ));
+}
+
+/// Roadmap D3: `graph_path` and `graph_map` requests and answers.
+#[test]
+fn v4_path_and_map_requests_and_responses_match_the_committed_golden_vectors() {
+    let wire = include_bytes!("../fixtures/graph-path-request-v4.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::GraphPath {
+            workspace_id: "app".into(),
+            from: "handler".into(),
+            to: "save".into(),
+            max_hops: 4,
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    // Without `max_hops`, the default of 4.
+    let plain = String::from_utf8_lossy(wire).replace(r#","max_hops":4"#, "");
+    let request: Request = serde_json::from_str(&plain).unwrap();
+    assert!(matches!(
+        request.command,
+        Command::GraphPath { max_hops: 4, .. }
+    ));
+
+    let wire = include_bytes!("../fixtures/graph-path-response-v4.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::GraphPath {
+        paths,
+        edges_visited,
+        truncated,
+        ..
+    } = &response.outcome
+    else {
+        panic!("{response:?}");
+    };
+    assert_eq!((paths.len(), *edges_visited, *truncated), (1, 2, false));
+    assert_eq!(paths[0].steps[2].edge, "defines");
+    assert_eq!(paths[0].steps[2].callee, None, "absent on the last step");
+    assert_eq!(paths[0].steps[1].resolution, "path");
+    assert_eq!(encode(&response).unwrap(), wire);
+    let unknown =
+        String::from_utf8_lossy(wire).replace(r#""edge":"defines""#, r#""edge":"defines","x":1"#);
+    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+
+    let wire = include_bytes!("../fixtures/graph-map-request-v4.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::GraphMap {
+            workspace_id: "app".into(),
+            depth: 1,
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    let plain = String::from_utf8_lossy(wire).replace(r#","depth":1"#, "");
+    let request: Request = serde_json::from_str(&plain).unwrap();
+    assert!(matches!(
+        request.command,
+        Command::GraphMap { depth: 1, .. }
+    ));
+
+    let wire = include_bytes!("../fixtures/graph-map-response-v4.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::GraphMap { areas, edges, .. } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert_eq!((areas.len(), edges.len()), (2, 2));
+    assert_eq!((edges[1].kind.as_str(), edges[1].count), ("imports", 1));
+    assert_eq!(encode(&response).unwrap(), wire);
 }
 
 #[test]
@@ -999,7 +1071,7 @@ fn v3_index_export_and_import_match_the_committed_golden_vectors() {
 fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() {
     let wire = include_bytes!("../fixtures/rename-history-response-v4.json");
     let mut response: Response = serde_json::from_slice(wire).unwrap();
-    assert_eq!(response.version, 4);
+    assert_eq!(response.version, PROTOCOL_VERSION_4);
     let langspan_core::Outcome::History { history } = &response.outcome else {
         panic!("{response:?}");
     };
@@ -1008,8 +1080,11 @@ fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() 
         history.entries[1].before_path.as_deref(),
         Some("app/old_users.py")
     );
-    // Version 5 added nothing to a history answer: versions 4 and 5 agree.
-    assert_eq!(encode_for(4, &response).unwrap(), wire);
+    // Versions 5 to 8 added nothing to a history answer: 4 to 8 agree.
+    assert_eq!(encode_for(PROTOCOL_VERSION_4, &response).unwrap(), wire);
+    assert_eq!(encode_for(PROTOCOL_VERSION_5, &response).unwrap(), wire);
+    assert_eq!(encode_for(PROTOCOL_VERSION_6, &response).unwrap(), wire);
+    assert_eq!(encode_for(PROTOCOL_VERSION_7, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
 
     response.version = OLDEST_PROTOCOL_VERSION;
@@ -1065,13 +1140,30 @@ fn earlier_counts(wire: &[u8]) -> Result<usize, serde_json::Error> {
 fn v5_report_response_and_its_version_4_and_3_forms_match_the_golden_vectors() {
     let wire = include_bytes!("../fixtures/report-response-v5.json");
     let mut response: Response = serde_json::from_slice(wire).unwrap();
-    assert_eq!(response.version, PROTOCOL_VERSION);
+    assert_eq!(response.version, PROTOCOL_VERSION_5);
     let langspan_core::Outcome::Report { report } = &response.outcome else {
         panic!("{response:?}");
     };
     assert_eq!(report.sessions[0].counts.refusal_outcomes["adapted"], 1);
     assert_eq!(report.hosts[0].counts.refusal_outcomes["adapted"], 1);
-    assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
+    // A version 5 client still reads `refusal_outcomes`.
+    assert_eq!(encode_for(PROTOCOL_VERSION_5, &response).unwrap(), wire);
+    // Version 6 changed landings, version 7 (issue #222) activity,
+    // briefings and events, and version 8 (issue #262) briefings: their
+    // report is the version 5 form.
+    for later in [PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, PROTOCOL_VERSION] {
+        let mut current = response.clone();
+        current.version = later;
+        assert_eq!(
+            String::from_utf8(encode_for(later, &current).unwrap()).unwrap(),
+            String::from_utf8_lossy(wire).replacen(
+                r#""version":5"#,
+                &format!(r#""version":{later}"#),
+                1
+            ),
+            "version {later}"
+        );
+    }
     assert!(
         earlier_counts(wire).is_err(),
         "an earlier build cannot read version 5 counts"
@@ -1146,6 +1238,88 @@ fn v4_trail_requests_and_listing_match_the_committed_golden_vectors() {
     assert_eq!(encode(&response).unwrap(), wire);
 }
 
+/// Issue #214: a between-step watcher's ask and the answer that tells it a
+/// notice. `stops` is absent from a first ask.
+#[test]
+fn v4_between_steps_request_and_outcome_match_the_committed_golden_vectors() {
+    use langspan_core::Outcome;
+    let wire = include_bytes!("../fixtures/between-steps-request-v4.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(
+        request.command,
+        Command::BetweenSteps {
+            session_id: "claude-code.alice".into(),
+            stops: Some(3),
+            prompt_id: Some("38ca4096-2385-4d27-97e1-59b74594c136".into()),
+        }
+    );
+    assert_eq!(encode(&request).unwrap(), wire);
+    let first: Request = serde_json::from_str(
+        r#"{"version":4,"request_id":"w","command":{"op":"between_steps","session_id":"claude-code.alice"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        first.command,
+        Command::BetweenSteps {
+            stops: None,
+            prompt_id: None,
+            ..
+        }
+    ));
+    // The hook's report of the notices its briefing showed.
+    let shown = r#"{"version":4,"request_id":"s","command":{"op":"interface_shown","session_id":"claude-code.alice","notice_ids":["n1","n2"]}}"#;
+    let request: Request = serde_json::from_str(shown).unwrap();
+    assert_eq!(
+        request.command,
+        Command::InterfaceShown {
+            session_id: "claude-code.alice".into(),
+            notice_ids: vec!["n1".into(), "n2".into()],
+        }
+    );
+    assert_eq!(
+        String::from_utf8(encode(&request).unwrap())
+            .unwrap()
+            .trim_end(),
+        shown
+    );
+    // A stop names its prompt; one from an older hook names none.
+    let stop: Request = serde_json::from_str(
+        r#"{"version":4,"request_id":"t","command":{"op":"session_stop","session_id":"claude-code.alice","prompt_id":"p1"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        stop.command,
+        Command::SessionStop { prompt_id: Some(ref id), .. } if id == "p1"
+    ));
+    let older: Request = serde_json::from_str(
+        r#"{"version":4,"request_id":"t","command":{"op":"session_stop","session_id":"claude-code.alice"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        older.command,
+        Command::SessionStop {
+            prompt_id: None,
+            ..
+        }
+    ));
+
+    let wire = include_bytes!("../fixtures/between-steps-response-v4.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let Outcome::BetweenSteps {
+        open,
+        stops,
+        interface_changes,
+        ..
+    } = &response.outcome
+    else {
+        panic!("{response:?}");
+    };
+    assert!(*open);
+    assert_eq!(*stops, 3);
+    assert_eq!(interface_changes[0].affected, ["src/main.rs"]);
+    assert_eq!(encode(&response).unwrap(), wire);
+}
+
 /// Roadmap C9: a version 3 client reads briefings and recaps with
 /// `deny_unknown_fields`, so its answer carries no trail.
 #[test]
@@ -1162,6 +1336,8 @@ fn a_version_3_reply_leaves_out_trails() {
     }))
     .unwrap();
     briefing.trail = Some(trail.clone());
+    // Issue #214: notice IDs are version 5.
+    briefing.interface_notice_ids = vec!["n1".into()];
     let response = Response {
         version: OLDEST_PROTOCOL_VERSION,
         request_id: "r".into(),
@@ -1178,18 +1354,39 @@ fn a_version_3_reply_leaves_out_trails() {
         earlier["outcome"]["briefing"].get("trail").is_none(),
         "{earlier:#}"
     );
+    assert!(
+        earlier["outcome"]["briefing"]
+            .get("interface_notice_ids")
+            .is_none(),
+        "{earlier:#}"
+    );
     assert_eq!(earlier["outcome"]["briefing"]["session_id"], "codex.bob");
+    // A version 4 client, which also reads a briefing with
+    // `deny_unknown_fields`, keeps the trail and gets no notice IDs.
+    let four: serde_json::Value =
+        serde_json::from_slice(&encode_for(4, &response).unwrap()).unwrap();
+    assert!(
+        four["outcome"]["briefing"]
+            .get("interface_notice_ids")
+            .is_none(),
+        "{four:#}"
+    );
+    assert!(
+        four["outcome"]["briefing"].get("trail").is_some(),
+        "{four:#}"
+    );
     let current: Response =
         serde_json::from_slice(&encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
     assert!(
-        matches!(&current.outcome, Outcome::Briefing { briefing: read } if read.trail == Some(trail))
+        matches!(&current.outcome, Outcome::Briefing { briefing: read } if read.trail == Some(trail) && read.interface_notice_ids == ["n1"])
     );
 }
 
-/// Issue #262: a version 4 or version 3 client reads briefings with
-/// `deny_unknown_fields`, so its answer does not say the index was partial.
+/// Issue #262: a client of version 7 or earlier reads briefings with
+/// `deny_unknown_fields`, so its answer does not say the index was partial;
+/// a version 8 client's does.
 #[test]
-fn a_version_4_reply_leaves_out_a_partial_index() {
+fn a_version_7_reply_leaves_out_a_partial_index() {
     use langspan_core::{Briefing, Outcome};
     let mut briefing: Briefing = serde_json::from_value(serde_json::json!({
         "session_id": "codex.bob", "changed": true, "peers": [], "omitted_peers": 0,
@@ -1204,7 +1401,7 @@ fn a_version_4_reply_leaves_out_a_partial_index() {
         lease_valid: None,
         outcome: Outcome::Briefing { briefing },
     };
-    for version in [4, OLDEST_PROTOCOL_VERSION] {
+    for version in std::iter::once(PROTOCOL_VERSION_7).chain(EARLIER_VERSIONS) {
         let earlier: serde_json::Value =
             serde_json::from_slice(&encode_for(version, &response).unwrap()).unwrap();
         assert!(
@@ -1329,4 +1526,337 @@ fn a_version_3_reply_leaves_out_an_inflight_renames_old_name() {
     assert!(
         matches!(&current.outcome, Outcome::GraphInflight { inflight: read, .. } if read == &[inflight])
     );
+}
+
+/// What issue #222 added in version 7, as field and event names.
+const ADDED_IN_7: [&str; 6] = [
+    "told",
+    "told_at_ms",
+    "context",
+    "unchanged",
+    "context_added",
+    "told_forgotten",
+];
+/// Every version the daemon answers before version 7. Version 8 (issue
+/// #262) keeps what version 7 added.
+const EARLIER_VERSIONS: [u16; 4] = [
+    PROTOCOL_VERSION_6,
+    PROTOCOL_VERSION_5,
+    PROTOCOL_VERSION_4,
+    OLDEST_PROTOCOL_VERSION,
+];
+
+/// Review comment 4712860167: a state record too large for a page is given
+/// as parts of its JSON, which `encode_for` cannot reshape. The store pages
+/// the text `encode_record_for` gives, which for an earlier version is
+/// already in that version's shape: activity without what version 7 added,
+/// and an interface notice without version 4's `renamed_from` for version
+/// 3. A version 7 record is its own JSON.
+#[test]
+fn a_state_record_is_encoded_in_each_versions_shape_for_its_parts() {
+    use langspan_core::{ContextUse, SessionActivity, StatusRecord};
+    let activity = StatusRecord::Activity {
+        key: "codex.bob".into(),
+        activity: SessionActivity {
+            told: vec![7],
+            told_at_ms: 1_000,
+            context: ContextUse {
+                turns: 1,
+                bytes: 10,
+                largest_turn_bytes: 10,
+                turn_bytes: 10,
+            },
+            ..SessionActivity::default()
+        },
+    };
+    assert_eq!(
+        encode_record_for(PROTOCOL_VERSION, &activity).unwrap(),
+        serde_json::to_string(&activity).unwrap()
+    );
+    for version in EARLIER_VERSIONS {
+        let text = encode_record_for(version, &activity).unwrap();
+        for field in ADDED_IN_7 {
+            assert!(!text.contains(&format!("\"{field}\"")), "{version}: {text}");
+        }
+        // Still the same record otherwise.
+        let read: StatusRecord = serde_json::from_str(&text).unwrap();
+        assert!(matches!(read, StatusRecord::Activity { key, .. } if key == "codex.bob"));
+    }
+    // A version 3 reader also loses version 4's fields in a record's parts.
+    let notice: StatusRecord = serde_json::from_value(serde_json::json!({
+        "kind": "interface_notice", "key": "app",
+        "notice": {
+            "notice_id": "n1", "workspace_id": "app", "path": "a.py",
+            "changes": [{
+                "name": "renamed", "kind": "function", "change": "renamed",
+                "before": "def original()", "after": "def renamed()",
+                "before_name": "original", "evidence": "same_body",
+            }],
+            "dependents": [], "by_session": null, "at_ms": 1, "generation": 1,
+        },
+    }))
+    .unwrap_or_else(|error| panic!("an interface notice: {error}"));
+    let current = encode_record_for(PROTOCOL_VERSION, &notice).unwrap();
+    assert!(current.contains("before_name"), "{current}");
+    let oldest = encode_record_for(OLDEST_PROTOCOL_VERSION, &notice).unwrap();
+    assert!(!oldest.contains("before_name"), "{oldest}");
+    assert!(!oldest.contains("evidence"), "{oldest}");
+}
+
+/// Issue #222 (review comments 4711375982 and 4712860167): version 7 added
+/// what a session was told (`told`, `told_at_ms`), the context its hooks
+/// added (`context`), a briefing's `unchanged` count, the told keys of a
+/// briefing delivery and the `context_added` and `told_forgotten` events.
+/// A client of version 6 (roadmap F5's build), 5 (roadmap H9's), 4 or 3
+/// reads activity, briefings and events with `deny_unknown_fields`: its
+/// reply leaves every one of them out, in every outcome that carries them,
+/// while a version 7 client reads them all.
+#[test]
+fn an_earlier_reply_leaves_out_what_version_7_added_to_activity_briefings_and_events() {
+    use langspan_core::{
+        ContextUse, Event, Outcome, RecordedEvent, SessionActivity, State, StatusRecord,
+    };
+    let activity = SessionActivity {
+        told: vec![7, 9],
+        told_at_ms: 1_000,
+        context: ContextUse {
+            turns: 2,
+            bytes: 300,
+            largest_turn_bytes: 200,
+            turn_bytes: 100,
+        },
+        ..SessionActivity::default()
+    };
+    let mut state = State::default();
+    state.activity.insert("codex.bob".into(), activity.clone());
+    let wire = include_bytes!("../fixtures/briefing-response-v3.json");
+    let Outcome::Briefing { mut briefing } =
+        serde_json::from_slice::<Response>(wire).unwrap().outcome
+    else {
+        panic!("a briefing fixture");
+    };
+    briefing.unchanged = 3;
+    let events = vec![
+        RecordedEvent {
+            seq: 1,
+            event: Event::BriefingDelivered {
+                session_id: "codex.bob".into(),
+                signature: "sig".into(),
+                told: vec![7, 9],
+                told_at_ms: Some(1_000),
+            },
+        },
+        RecordedEvent {
+            seq: 2,
+            event: Event::ContextAdded {
+                session_id: "codex.bob".into(),
+                bytes: 120,
+                turn: true,
+                generation: 1,
+            },
+        },
+        RecordedEvent {
+            seq: 3,
+            event: Event::ToldForgotten {
+                session_id: "codex.bob".into(),
+                keys: vec![9],
+            },
+        },
+    ];
+    let outcomes = [
+        Outcome::Status {
+            state,
+            summary: None,
+        },
+        Outcome::StatusRecords {
+            records: vec![StatusRecord::Activity {
+                key: "codex.bob".into(),
+                activity,
+            }],
+            next: None,
+        },
+        Outcome::Briefing { briefing },
+        Outcome::Events {
+            events: events.clone(),
+        },
+        Outcome::Changes { events, scan: None },
+    ];
+    for outcome in outcomes {
+        let response = Response {
+            version: PROTOCOL_VERSION,
+            request_id: "r".into(),
+            replayed: false,
+            generation: 1,
+            lease_valid: None,
+            outcome,
+        };
+        let current = String::from_utf8(encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+        assert!(
+            ADDED_IN_7
+                .iter()
+                .any(|field| current.contains(&format!("\"{field}\""))),
+            "a version 7 client reads them: {current}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Response>(&current).unwrap(),
+            response
+        );
+        // Version 8 (issue #262) keeps them: a version 7 client reads the
+        // same answer.
+        assert_eq!(
+            String::from_utf8(encode_for(PROTOCOL_VERSION_7, &response).unwrap()).unwrap(),
+            current
+        );
+        for version in EARLIER_VERSIONS {
+            let earlier = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
+            for field in ADDED_IN_7 {
+                assert!(
+                    !earlier.contains(&format!("\"{field}\"")),
+                    "version {version} has {field}: {earlier}"
+                );
+            }
+            // What is left still reads as a response.
+            serde_json::from_str::<Response>(&earlier).unwrap();
+        }
+    }
+}
+
+/// A landing as a build before roadmap F5 reads it: no `rebased` and no
+/// `adapted`, and every other field.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct EarlierLanding {
+    landing_id: String,
+    workspace_id: String,
+    onto: String,
+    commit_oid: String,
+    tree_oid: String,
+    inputs: Vec<String>,
+    check_id: String,
+}
+
+fn rebased_landing() -> langspan_core::Landing {
+    langspan_core::Landing {
+        landing_id: "land-1".into(),
+        workspace_id: "app".into(),
+        onto: "main".into(),
+        commit_oid: "c".repeat(40),
+        tree_oid: "d".repeat(40),
+        inputs: vec!["e".repeat(40)],
+        check_id: "check-1".into(),
+        rebased: vec![langspan_core::Rewritten {
+            from: "e".repeat(40),
+            to: "c".repeat(40),
+        }],
+        adapted: vec!["f".repeat(40)],
+    }
+}
+
+/// Version 6 (roadmap F5, review comment 4712442596): a landing carries
+/// `rebased` and `adapted`. To a client of version 5, 4 or 3 the same
+/// answer is encoded without them, so an earlier build, which reads a
+/// landing with `deny_unknown_fields`, still reads the whole answer.
+/// Version 7 (issue #222) added nothing to a landing: 6 and 7 agree.
+#[test]
+fn v6_landed_response_and_its_earlier_forms_match_the_golden_vectors() {
+    use langspan_core::Outcome;
+    let wire = include_bytes!("../fixtures/landed-response-v6.json");
+    let mut response: Response = serde_json::from_slice(wire).unwrap();
+    assert_eq!(response.version, PROTOCOL_VERSION_6);
+    assert_eq!(
+        response.outcome,
+        Outcome::Landed {
+            landing: rebased_landing()
+        }
+    );
+    assert_eq!(encode_for(PROTOCOL_VERSION_6, &response).unwrap(), wire);
+    let mut current = response.clone();
+    current.version = PROTOCOL_VERSION;
+    assert_eq!(
+        String::from_utf8(encode_for(PROTOCOL_VERSION, &current).unwrap()).unwrap(),
+        String::from_utf8_lossy(wire).replacen(
+            r#""version":6"#,
+            &format!(r#""version":{PROTOCOL_VERSION}"#),
+            1
+        )
+    );
+    let earlier_reads = |wire: &[u8]| {
+        let value: serde_json::Value = serde_json::from_slice(wire).unwrap();
+        serde_json::from_value::<EarlierLanding>(value["outcome"]["landing"].clone()).is_ok()
+    };
+    assert!(!earlier_reads(wire), "an earlier build cannot read it");
+
+    let earlier = include_bytes!("../fixtures/landed-response-v5.json");
+    for version in [
+        PROTOCOL_VERSION_5,
+        PROTOCOL_VERSION_4,
+        OLDEST_PROTOCOL_VERSION,
+    ] {
+        response.version = version;
+        let reply = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
+        let expected = String::from_utf8_lossy(earlier).replacen(
+            "\"version\":5",
+            &format!("\"version\":{version}"),
+            1,
+        );
+        assert_eq!(reply, expected, "version {version}");
+        assert!(earlier_reads(reply.as_bytes()), "version {version}");
+    }
+    // The earlier form is only for that reply: the response is unchanged.
+    assert!(
+        String::from_utf8(encode(&response).unwrap())
+            .unwrap()
+            .contains("rebased")
+    );
+}
+
+/// A request to record a rebased or adapted landing needs version 6 or
+/// later: an earlier daemon refuses its fields as unreadable, and that is
+/// too late once the push is done. A landing that rewrote nothing fits
+/// every version.
+#[test]
+fn recording_a_rebased_or_adapted_landing_fits_only_version_6_and_later() {
+    use langspan::protocol::fits;
+    let wire = include_bytes!("../fixtures/record-landing-request-v6.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(request.version, PROTOCOL_VERSION_6);
+    assert_eq!(encode(&request).unwrap(), wire);
+    let with = |rebased: bool, adapted: bool| {
+        let mut command = request.command.clone();
+        let Command::RecordLanding {
+            rebased: r,
+            adapted: a,
+            ..
+        } = &mut command
+        else {
+            panic!("{request:?}");
+        };
+        assert_eq!((r.len(), a.len()), (1, 1));
+        if !rebased {
+            r.clear();
+        }
+        if !adapted {
+            a.clear();
+        }
+        command
+    };
+    for (rebased, adapted) in [(true, true), (true, false), (false, true)] {
+        let command = with(rebased, adapted);
+        assert!(fits(PROTOCOL_VERSION, &command));
+        assert!(fits(PROTOCOL_VERSION_6, &command));
+        for version in [
+            PROTOCOL_VERSION_5,
+            PROTOCOL_VERSION_4,
+            OLDEST_PROTOCOL_VERSION,
+        ] {
+            assert!(
+                !fits(version, &command),
+                "version {version}, rebased {rebased}, adapted {adapted}"
+            );
+        }
+    }
+    for version in std::iter::once(PROTOCOL_VERSION).chain(EARLIER_VERSIONS) {
+        assert!(fits(version, &with(false, false)), "version {version}");
+    }
 }

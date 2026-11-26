@@ -113,7 +113,7 @@ run the worktree's own install for the same event:
 | Claude Code | Both: the worktree's own project hooks and the main checkout's local settings | Claude Code 2.1.330, macOS 27.2 (launch validation, bug 3) | Steps aside (`deferred_to_worktree`) |
 | Codex | Only the main checkout's project hooks; the worktree's own never run | Codex 0.171.0, macOS (issue #2) | Decides, as the worktree's install would |
 | Cursor | Not known: no run in a linked worktree is retained | — | Decides, as the worktree's install would |
-| Gemini CLI | Not known: its source reads project settings from the directory it starts in (ADR 0033), but no run in a linked worktree is retained | — | Decides, as the worktree's install would |
+| Gemini CLI (removed, ADR 0033) | Not known: its source reads project settings from the directory it starts in (ADR 0033), but no run in a linked worktree is retained | — | Decides, as the worktree's install would |
 
 On Claude Code the inherited copy used to answer every event a second time,
 as `unknown` ("workspace root overlaps an existing physical workspace") at
@@ -148,7 +148,7 @@ Tests (real linked worktrees, a real daemon, constructed host events):
 (Claude Code),
 `codex_in_a_worktree_with_its_own_install_is_coordinated_by_the_main_checkouts_hook`,
 `an_unconfirmed_host_decides_in_a_worktree_with_its_own_install_rather_than_stepping_aside`
-(Gemini CLI and Cursor),
+(Cursor; Gemini CLI too, before its removal),
 `a_worktree_installs_prompt_opt_outs_hold_when_the_main_checkouts_hook_decides`
 (Codex and Cursor),
 `doctor_reports_a_worktree_install_the_host_will_not_run` and
@@ -355,7 +355,10 @@ reports the effect instead:
   their new versions to the core (`ObserveUncoordinated`, internal to the scan
   like `ObserveDisk`). The core drops files under an active admission (an edit
   whose report has not arrived) and versions any session of the workspace
-  read or wrote. If any remain and a Codex session is registered there in this
+  read or wrote. It also drops a file a session reported reading or writing
+  after the scan began: the scan reads the checkout off the state owner's
+  thread, so the version it saw is then the one before that session's edit
+  (`scanned_from_ms`, on the clock the core is told). If any remain and a Codex session is registered there in this
   generation, it records `UncoordinatedChanged` naming up to two Codex
   sessions, most recently active first, and up to eight files. A Codex
   session already named in a notice still within the briefing horizon is not
@@ -444,3 +447,8 @@ timeouts. Useful integrated completion, unnecessary denials, missed stale writes
 human intervention and observation coverage matter in addition to hook latency.
 Remote publication, full change/check records, code graphs, Windows transport,
 platform release commitments and the licence remain outside this local slice.
+
+Codex has no between-step delivery (issue #214). Its hooks run at a session's
+start, a prompt, a tool call and a reply's end, so an interface notice reaches
+a Codex session at its next hook call. The Claude Code watcher is described in
+[ADR 0002](0002-claude-code-adapter.md).

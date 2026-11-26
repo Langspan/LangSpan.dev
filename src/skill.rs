@@ -4,9 +4,10 @@
 //!
 //! Claude Code reads it as a user skill (`skills/langspan/SKILL.md`) and
 //! Cursor as a project rule (`.cursor/rules/langspan.mdc`): each a whole file
-//! that LangSpan writes and marks. Codex reads it from its user `AGENTS.md`
-//! and Gemini CLI from its user `GEMINI.md`: there it is one section between
-//! marker lines, and every other line is the owner's, kept byte for byte.
+//! that LangSpan writes and marks. Codex reads it from its user `AGENTS.md`:
+//! there it is one section between marker lines, and every other line is the
+//! owner's, kept byte for byte. An earlier release put the same section in
+//! Gemini CLI's `GEMINI.md`; `uninstall --hosts gemini-cli` removes it.
 //! The same body is in every form, so no host's copy can drift from it.
 
 use crate::install::{self, Vendor};
@@ -43,29 +44,25 @@ pub const MESSAGES: [&str; 9] = [
 /// The most a host's form may hold. Claude Code's skill documentation and
 /// Cursor's rules documentation each advise under 500 lines; Codex reads at
 /// most 32 KiB of its combined AGENTS files (`project_doc_max_bytes`,
-/// [`CODEX_CHAIN_MAX_BYTES`]), which the owner's text shares; Gemini CLI
-/// documents no limit. LangSpan keeps every form within all of them, and
-/// within 8 KiB of its own.
+/// [`CODEX_CHAIN_MAX_BYTES`]), which the owner's text shares; Antigravity's
+/// rules documentation allows 24,000 bytes per file. LangSpan keeps every
+/// form within all of them, and within 8 KiB of its own.
 pub const MAX_LINES: usize = 500;
 pub const MAX_BYTES: usize = 8 * 1024;
 
 /// The hosts `langspan install --skill` writes the skill for, at user level.
 /// Cursor's form is a project rule: `hooks install cursor --skill` writes it.
 /// Antigravity reads it as a rule at either level.
-pub const USER_HOSTS: [Vendor; 4] = [
-    Vendor::ClaudeCode,
-    Vendor::Codex,
-    Vendor::Gemini,
-    Vendor::Antigravity,
-];
+pub const USER_HOSTS: [Vendor; 3] = [Vendor::ClaudeCode, Vendor::Codex, Vendor::Antigravity];
 
 /// The hosts `hooks install HOST --skill` writes the skill for, in the
 /// project.
 pub const PROJECT_HOSTS: [Vendor; 2] = [Vendor::Cursor, Vendor::Antigravity];
 
 /// Where `vendor` reads the skill. `dir` is the host's user configuration
-/// directory (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.gemini/config`, or
-/// where the host's own variable moves it), or for Cursor the project root.
+/// directory (`~/.claude`, `~/.codex`, `~/.gemini/config`, `~/.gemini` for
+/// a removed Gemini CLI section, or where the host's own variable moves
+/// it), or for Cursor the project root.
 /// For a project's Antigravity rule, see [`project_path`].
 pub fn path(vendor: Vendor, dir: &Path) -> PathBuf {
     match vendor {
@@ -115,8 +112,9 @@ fn note(vendor: Vendor) -> &'static str {
     }
 }
 
-/// The skill in `vendor`'s format: the whole file for Claude Code and
-/// Cursor, the marked section for Codex and Gemini CLI.
+/// The skill in `vendor`'s format: the whole file for Claude Code, Cursor
+/// and Antigravity, the marked section for Codex (and for the Gemini CLI
+/// section that `uninstall` removes).
 pub fn render(vendor: Vendor) -> String {
     let note = note(vendor);
     match vendor {
@@ -478,26 +476,35 @@ mod tests {
         assert!(render(Vendor::Cursor).contains("\nalwaysApply: true\n---\n"));
     }
 
+    /// At most 90% of `limit`: every form keeps at least a tenth of each
+    /// limit free (issue #222), since the skill's text is in every turn.
+    fn headroom(limit: usize) -> usize {
+        limit * 9 / 10
+    }
+
     #[test]
-    fn every_form_stays_within_each_hosts_documented_limit() {
+    fn every_form_stays_at_least_a_tenth_under_each_hosts_documented_limit() {
         for vendor in Vendor::ALL {
             let text = render(vendor);
-            assert!(
-                text.lines().count() <= MAX_LINES,
-                "{}: {} lines, over {MAX_LINES}. {SHORTEN}",
-                vendor.name(),
-                text.lines().count()
-            );
-            assert!(
-                text.len() <= MAX_BYTES,
-                "{}: {} bytes, over {MAX_BYTES}. {SHORTEN}",
-                vendor.name(),
-                text.len()
-            );
+            for (what, size, limit) in [
+                ("lines", text.lines().count(), MAX_LINES),
+                ("bytes", text.len(), MAX_BYTES),
+                (
+                    "bytes of the Codex chain",
+                    text.len(),
+                    CODEX_CHAIN_MAX_BYTES,
+                ),
+            ] {
+                assert!(
+                    size <= headroom(limit),
+                    "{}: {size} {what}, over 90% of {limit}. {SHORTEN}",
+                    vendor.name(),
+                );
+            }
         }
         // Claude Code truncates a skill's description in its listing at
         // 1,536 characters.
-        assert!(DESCRIPTION.len() <= 1536);
+        assert!(DESCRIPTION.len() <= headroom(1536));
     }
 
     #[test]

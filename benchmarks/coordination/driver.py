@@ -38,7 +38,7 @@ import tasks as families  # noqa: E402
 ARMS = ("worktrees", "awareness_only", "langspan")
 AGENTS = ("standin", "claude")
 STANDIN_MODES = ("follow", "ignore", "hedge", "workaround")
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 MAX_SOCKET_PATH = 100
 GIT_IDENTITY = ["-c", "user.name=Benchmark", "-c", "user.email=benchmark@example.invalid",
                 "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
@@ -51,6 +51,8 @@ GIT_SECONDS = 60
 ORACLE_SECONDS = 300
 EVENT_PAGE = 500
 MAX_EVENT_PAGES = 200
+# The largest state record joined from its parts, as the CLI's reader bounds it.
+MAX_STATUS_RECORD_BYTES = 8 * 1024 * 1024
 # A stream-json transcript holds every message and tool result.
 TRANSCRIPT_BYTES = 64 * 1024 * 1024
 MAX_HOOK_INPUT = 64 * 1024 * 1024
@@ -541,6 +543,55 @@ def install_skill(langspan, state_dir, clones, work):
         shutil.copyfile(skill, target / "SKILL.md")
 
 
+class StatusReader:
+    """The sessions and activity of `status --all` pages, added in order.
+    A record too large for a page comes as `part` records of its JSON, in
+    order from `offset`, the last with `last`: they are joined into that
+    record before it is read, as the CLI's own reader (`client::read_all`)
+    joins them. A part at offset 0 starts its record again, and a whole
+    record after a begun one replaces it: the record changed meanwhile."""
+
+    def __init__(self):
+        self.sessions, self.activity, self.part = {}, {}, None
+
+    def add(self, records):
+        for record in records:
+            if isinstance(record, dict) and record.get("kind") == "part":
+                record = self.join(record)
+                if record is None:
+                    continue
+            else:
+                self.part = None
+            kind = record.get("kind") if isinstance(record, dict) else None
+            if kind in ("session", "activity") and isinstance(record.get("key"), str):
+                (self.sessions if kind == "session" else self.activity)[record["key"]] = record.get(kind)
+
+    def join(self, part):
+        """The record PART completes, or None while more of it is to come."""
+        text, offset, last = part.get("text"), part.get("offset"), part.get("last")
+        if not isinstance(text, str) or not isinstance(offset, int) or not isinstance(last, bool):
+            raise ValueError("a malformed status record part: %s" % json.dumps(part)[:500])
+        if offset == 0:
+            self.part = ""
+        elif self.part is None or len(self.part.encode("utf-8")) != offset:
+            raise ValueError("a status record part starts at byte %d, but %d byte(s) of it were read"
+                             % (offset, len((self.part or "").encode("utf-8"))))
+        self.part += text
+        if len(self.part.encode("utf-8")) > MAX_STATUS_RECORD_BYTES:
+            raise ValueError("a status record is larger than %d bytes" % MAX_STATUS_RECORD_BYTES)
+        if not last:
+            return None
+        record, self.part = json.loads(self.part), None
+        if not isinstance(record, dict) or record.get("kind") == "part":
+            raise ValueError("a status record's parts do not join into a record")
+        return record
+
+    def state(self):
+        if self.part is not None:
+            raise ValueError("the status pages ended inside a record's parts")
+        return {"sessions": self.sessions, "activity": self.activity}
+
+
 class Coordinator:
     """One LangSpan daemon, in its own process group."""
 
@@ -586,6 +637,24 @@ class Coordinator:
             events.extend(records)
             after = records[-1]["seq"]
         raise RuntimeError("the event log has more than %d pages" % MAX_EVENT_PAGES)
+
+    def state(self):
+        """The coordinator's sessions and their activity, by session ID,
+        from every page of `status --all`: unlike `status`, it keeps a
+        session that ended long ago."""
+        reader, after = StatusReader(), None
+        for _ in range(MAX_EVENT_PAGES):
+            page = json.loads(langspan_cli(self.langspan, self.state_dir, "status", "--all", "--json",
+                                           *(("--after", after) if after else ())))
+            outcome = page.get("outcome") if isinstance(page, dict) else None
+            records = outcome.get("records") if isinstance(outcome, dict) else None
+            if not isinstance(records, list):
+                raise ValueError("a status page without records: %s" % json.dumps(page)[:500])
+            reader.add(records)
+            after = outcome.get("next")
+            if not after:
+                return reader.state()
+        raise RuntimeError("the coordinator's state has more than %d pages" % MAX_EVENT_PAGES)
 
     def stop(self):
         if self.process.poll() is None:
@@ -1175,16 +1244,74 @@ def session_numbers(events):
 
 def interface_notices(events):
     """Per benchmark session, how many interface notices LangSpan placed in
-    its context: another worktree's in-flight signatures (C7) and alerts
-    at write time (ADR 0029), from the coordinator's own event log."""
+    its context: another worktree's in-flight signatures (C7), alerts at
+    write time (ADR 0029) and notices told between its steps (issue #214),
+    from the coordinator's own event log. A briefing's record of the notices
+    it told is not counted, as briefings were not counted before it."""
     numbers, counts = session_numbers(events), {}
     for record in events:
         event = record.get("event", {})
-        items = {"inflight_delivered": "keys", "interface_alerted": "notice_ids"}.get(event.get("type"))
+        kind = event.get("type")
+        if kind == "interface_notices_told" and event.get("via") != "between_steps":
+            continue
+        items = {"inflight_delivered": "keys", "interface_alerted": "notice_ids",
+                 "interface_notices_told": "notice_ids"}.get(kind)
         session = numbers.get(event.get("session_id")) if items else None
         if session is not None and isinstance(event.get(items), list):
             counts[session] = counts.get(session, 0) + len(event[items])
     return counts
+
+
+# Issue #222: the context LangSpan's hooks added to a session. Tokens are an
+# estimate, as the coordinator's own (langspan_core::BYTES_PER_TOKEN).
+CONTEXT_FIELDS = ("turns", "bytes", "bytes_per_turn", "estimated_tokens_per_turn", "largest_turn_bytes")
+BYTES_PER_TOKEN = 4
+
+
+def context_figures(turns, size, largest):
+    """TURNS, SIZE bytes and the LARGEST turn's bytes, with the bytes per
+    turn (rounded down, zero before a turn) and their estimate in tokens
+    (rounded up), as `langspan status` computes them."""
+    per_turn = size // turns if turns else 0
+    return {"turns": turns, "bytes": size, "bytes_per_turn": per_turn,
+            "estimated_tokens_per_turn": -(-per_turn // BYTES_PER_TOKEN), "largest_turn_bytes": largest}
+
+
+def context_added(state, arm, count):
+    """Per task and for the trial, the context LangSpan's hooks added to
+    the sessions, from the coordinator's STATE (Coordinator.state), or None
+    when it was not read. Every session registered from a task's checkout
+    counts toward that task, a subagent's too; one registered with no
+    context added nothing. A task with no registered session, or a
+    malformed figure, is unmeasured (None)."""
+    unmeasured = dict.fromkeys(CONTEXT_FIELDS)
+    if arm != "langspan":
+        return [None] * count, {"status": "not_applicable", **unmeasured}
+    sessions = state.get("sessions") if isinstance(state, dict) else None
+    activity = state.get("activity") if isinstance(state, dict) else None
+    sums, malformed = {}, set()
+    if isinstance(sessions, dict) and isinstance(activity, dict):
+        for session_id, session in sessions.items():
+            index = workspace_session(session.get("workspace_id")) if isinstance(session, dict) else None
+            if index is None or not 1 <= index <= count:
+                continue
+            record = activity.get(session_id) or {}
+            context = record.get("context", {}) if isinstance(record, dict) else None
+            values = [context.get(key, 0) for key in ("turns", "bytes", "largest_turn_bytes")] \
+                if isinstance(context, dict) else [None]
+            if not all(type(value) is int and value >= 0 for value in values):
+                malformed.add(index)
+                continue
+            turns, size, largest = sums.get(index, (0, 0, 0))
+            sums[index] = (turns + values[0], size + values[1], max(largest, values[2]))
+    tasks = [context_figures(*sums[index]) if index in sums and index not in malformed else None
+             for index in range(1, count + 1)]
+    measured = [task for task in tasks if task is not None]
+    if len(measured) < count:
+        return tasks, {"status": "partial" if measured else "unknown", **unmeasured}
+    return tasks, {"status": "reported", **context_figures(
+        sum(t["turns"] for t in measured), sum(t["bytes"] for t in measured),
+        max(t["largest_turn_bytes"] for t in measured))}
 
 
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit")
@@ -1408,9 +1535,11 @@ def cost_section(record, repair):
 
 
 def build_record(plan, final, runner_dir, run_dir, events, started_at, total_elapsed, error=None, status=None,
-                 repair=None):
+                 repair=None, coordinator_state=None):
     """EVENTS is the coordinator's event log (LangSpan arm), or None when
-    none was read. REPAIR is the repair round's result (see repair_section)."""
+    none was read; COORDINATOR_STATE likewise its sessions and activity
+    (Coordinator.state). REPAIR is the repair round's result (see
+    repair_section)."""
     output = Path(plan["output"])
     commands = {(c["phase"], c["id"]): c for c in final["commands"]} if final else {}
     oracle_path = run_dir / "oracle.json" if run_dir else None
@@ -1426,6 +1555,7 @@ def build_record(plan, final, runner_dir, run_dir, events, started_at, total_ela
             merge_logs = [str((run_dir / name).relative_to(output)) for name in integrated_plan["merge_logs"]]
     refusals = refusal_items(events) if events is not None else []
     notices = interface_notices(events) if events is not None else {}
+    task_context, trial_context = context_added(coordinator_state, plan["arm"], len(plan["tasks"]))
     work = Path(plan.get("work", output / "work"))
     tasks, models, token_list = [], set(), []
     for index, task in enumerate(plan["tasks"], 1):
@@ -1448,6 +1578,7 @@ def build_record(plan, final, runner_dir, run_dir, events, started_at, total_ela
             "turns": totals["turns"],
             "refusals": sum(item["session"] == index for item in refusals) if events is not None else None,
             "interface_notices": notices.get(index, 0) if events is not None else None,
+            "context_added": task_context[index - 1],
             "transcript": session["transcript"],
             "hook_log": hook_log.name if hook_log.is_file() else None,
             "standin_informed": informed if isinstance(informed, bool) else None,
@@ -1516,6 +1647,7 @@ def build_record(plan, final, runner_dir, run_dir, events, started_at, total_ela
                               for r in events) if events is not None else None,
         },
         "coordinator_scans": scan_summary(events, plan["arm"]),
+        "context_added": trial_context,
         "tokens": {
             "status": "reported" if len(reported) == len(tasks) else ("partial" if reported else "unknown"),
             "total": {key: sum(t[key] for t in reported) for key in ("input", "output", "cache_creation", "cache_read")}
@@ -1613,7 +1745,8 @@ def summarize(records):
     whose sessions' or repair session's tool check failed and a
     change_not_made trial are each counted but
     contribute no task, result or figure. A figure is
-    None when any counted trial lacks it, never zero. Trials group by agent,
+    None when any counted trial lacks it, never zero; so is the context
+    LangSpan added (context_added) outside the langspan arm. Trials group by agent,
     family, session count and stagger, so staggered trials stay apart."""
     groups = {}
     for record in records:
@@ -1632,6 +1765,10 @@ def summarize(records):
         accepted = [r["cost"]["tasks_accepted"] for r in compared]
         accepted = None if not compared or None in accepted else sum(accepted)
         repairs = [r for r in compared if r["repair"]["status"] == "ran"]
+        added = [r["context_added"] for r in compared]
+        context = None if not added or any(a["status"] != "reported" for a in added) else context_figures(
+            sum(a["turns"] for a in added), sum(a["bytes"] for a in added),
+            max(a["largest_turn_bytes"] for a in added))
         summary.append({
             **dict(zip(SUMMARY_KEY, key)),
             "trials": len(trials), "refused": kinds.count("refused"),
@@ -1646,6 +1783,7 @@ def summarize(records):
             **figures,
             "cost_per_accepted_task": per_task((figures["total"] or {}).get("cost_usd"), accepted),
             "unreported": sum(r["cost"]["total"]["cost_usd"] is None for r in compared),
+            "context_added": context,
         })
     return summary
 
@@ -1665,7 +1803,7 @@ def summarize_main(paths):
         version = record.get("schema_version") if isinstance(record, dict) else None
         if version != SCHEMA_VERSION:
             print(json.dumps({"error": "%s has schema version %s; summarize reads version %d records, which have "
-                                       "the repair round" % (path, version, SCHEMA_VERSION)}), file=sys.stderr)
+                                       "the context LangSpan added" % (path, version, SCHEMA_VERSION)}), file=sys.stderr)
             return 2
         records.append(record)
     try:
@@ -1780,6 +1918,7 @@ def run(args):
                         plan["model"], peer_paths(work, plan["sessions"], index))
             for index in range(1, plan["sessions"] + 1)]
     coordinator, state, events, final, error, run_dir = None, None, None, None, None, None
+    coordinator_state = None
     try:
         repo, base, checkouts = prepare_fixture(work, plan["sessions"], plan["arm"])
         plan.update(repo=str(repo), base=base)
@@ -1800,6 +1939,12 @@ def run(args):
         final = next(row for row in rows if row["record_type"] == "run_finished")
         run_dir = runner_dir / final["run_id"]
         if coordinator:
+            try:
+                coordinator_state = coordinator.state()
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as failure:
+                # The record reports the context added as unknown; the trial goes on.
+                print(json.dumps({"warning": "cannot read the coordinator's state: %s: %s"
+                                             % (type(failure).__name__, failure)}), file=sys.stderr)
             events = coordinator.events()
             with open(output / "events.jsonl", "w", encoding="utf-8") as sink:
                 for record in events:
@@ -1814,7 +1959,8 @@ def run(args):
     if not (output / "plan.json").exists():
         (output / "plan.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     plan["run_id"] = final["run_id"] if final else os.urandom(16).hex()
-    record = build_record(plan, final, runner_dir, run_dir, events, started_at, time.monotonic() - started, error)
+    record = build_record(plan, final, runner_dir, run_dir, events, started_at, time.monotonic() - started, error,
+                          coordinator_state=coordinator_state)
     # The repair round starts only after every session and the oracle have
     # finished, and the coordinator has stopped.
     decision, reason = repair_decision(record)
@@ -1827,7 +1973,7 @@ def run(args):
                       % (type(failure).__name__, failure)}
             error = error or "repair: " + repair["reason"]
     record = build_record(plan, final, runner_dir, run_dir, events, started_at, time.monotonic() - started, error,
-                          repair=repair)
+                          repair=repair, coordinator_state=coordinator_state)
     validate(record, load_schema())
     (output / "record.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return record

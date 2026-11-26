@@ -155,9 +155,9 @@ events an install lacks and says to run the install again. The Codex
 `SessionEnd` timeout goes through the same per-host hook entry as every other
 event, so a host that takes milliseconds would get them.
 
-**Cursor and Gemini CLI get no end-of-reply event here.** Both adapters
-([ADR 0032](0032-cursor-adapter.md), [ADR 0033](0033-gemini-cli-adapter.md))
-were built from documentation and are not yet verified on a real host, so
+**Cursor and Gemini CLI got no end-of-reply event here.** Both adapters
+([ADR 0032](0032-cursor-adapter.md), [ADR 0033](0033-gemini-cli-adapter.md);
+Gemini CLI support was later removed) were built from documentation and are not yet verified on a real host, so
 this record registers none of their end-of-reply events (for Cursor, `stop`
 and `subagentStop`, which ADR 0032 also leaves out). They keep the session
 events their own records register. Adding them is a follow-up once a real capture of each

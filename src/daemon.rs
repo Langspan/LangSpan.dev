@@ -1439,6 +1439,7 @@ mod unix {
             recent,
             recent_window_ms,
             mcp,
+            changes_only,
         } = command
         else {
             return command.clone();
@@ -1473,6 +1474,7 @@ mod unix {
             recent_window_ms,
             mcp: *mcp,
             left: left.clone(),
+            changes_only: *changes_only,
             inflight,
             inflight_partial,
         }
@@ -1550,7 +1552,7 @@ mod unix {
             .iter()
             .filter_map(|(_, item)| langspan_core::inflight_notice(state, item))
             .collect();
-        let cut = fit_inflight(&mut inflight, &coverage);
+        let cut = fit_items(&mut inflight, &coverage);
         Ok(Outcome::GraphInflight {
             inflight,
             coverage,
@@ -1558,28 +1560,109 @@ mod unix {
         })
     }
 
-    /// Keep the leading in-flight notices whose answer fits one response
-    /// frame. Returns whether any was left out.
-    fn fit_inflight(
-        notices: &mut Vec<langspan_core::InflightNotice>,
-        coverage: &langspan_core::GraphCoverage,
-    ) -> bool {
+    /// Keep the leading `items` whose answer fits one response frame beside
+    /// `rest` (the outcome's other lists and its coverage). Returns whether
+    /// any was left out.
+    fn fit_items<T: serde::Serialize>(items: &mut Vec<T>, rest: &impl serde::Serialize) -> bool {
         // The envelope, the request ID and the outcome's other fields.
         const ROOM: usize = 1024;
         fn size(value: &impl serde::Serialize) -> usize {
             serde_json::to_vec(value).map_or(usize::MAX / 2, |bytes| bytes.len())
         }
-        let mut used = ROOM + size(coverage);
-        let keep = notices
+        let mut used = ROOM + size(rest);
+        let keep = items
             .iter()
-            .take_while(|notice| {
-                used = used.saturating_add(size(*notice) + 1);
+            .take_while(|item| {
+                used = used.saturating_add(size(*item) + 1);
                 used < MAX_FRAME_BYTES
             })
             .count();
-        let cut = keep < notices.len();
-        notices.truncate(keep);
+        let cut = keep < items.len();
+        items.truncate(keep);
         cut
+    }
+
+    /// How long `graph path` may search: as `graph impact`'s levels, well
+    /// inside the client's call timeout and short because requests behind
+    /// it wait. Past it the chains found so far are returned, truncated.
+    const PATH_BUDGET: Duration = Duration::from_millis(500);
+
+    /// `graph path`: the shortest chains of calls between two names
+    /// (roadmap D3).
+    fn graph_path(
+        graph: Option<&crate::graph::Index>,
+        state: &State,
+        (workspace_id, from, to, max_hops): (&str, &str, &str, u32),
+    ) -> Result<Outcome, String> {
+        let of = Registration::of(state, workspace_id).ok_or("workspace is not registered")?;
+        if !(1..=langspan_core::MAX_PATH_HOPS).contains(&max_hops) {
+            return Err(format!(
+                "max_hops must be between 1 and {}",
+                langspan_core::MAX_PATH_HOPS
+            ));
+        }
+        for name in [from, to] {
+            let recordable = (1..=langspan_graph::NAME_BYTES).contains(&name.len())
+                && !name.chars().any(|c| c.is_whitespace() || c.is_control());
+            if !recordable {
+                return Err(format!(
+                    "{name:?} is not a name the index records: 1 to 128 bytes without whitespace or control characters"
+                ));
+            }
+        }
+        let graph = graph.ok_or("the index is not available yet; try again shortly")?;
+        let deadline = Instant::now() + PATH_BUDGET;
+        let ((mut paths, edges_visited, truncated), coverage) = graph
+            .with_coverage(&of, |graph| {
+                graph.symbol_paths(
+                    workspace_id,
+                    (from, to),
+                    max_hops,
+                    langspan_core::MAX_PATH_EDGES,
+                    deadline,
+                )
+            })
+            .map_err(|error| error.to_string())?;
+        let cut = fit_items(&mut paths, &coverage);
+        Ok(Outcome::GraphPath {
+            from: from.into(),
+            to: to.into(),
+            max_hops,
+            paths,
+            edges_visited,
+            coverage,
+            truncated: truncated || cut,
+        })
+    }
+
+    /// `graph map`: the workspace's areas and the edges between them
+    /// (roadmap D3).
+    fn graph_map(
+        graph: Option<&crate::graph::Index>,
+        state: &State,
+        workspace_id: &str,
+        depth: u32,
+    ) -> Result<Outcome, String> {
+        let of = Registration::of(state, workspace_id).ok_or("workspace is not registered")?;
+        if !(1..=langspan_core::MAX_MAP_DEPTH).contains(&depth) {
+            return Err(format!(
+                "depth must be between 1 and {}",
+                langspan_core::MAX_MAP_DEPTH
+            ));
+        }
+        let graph = graph.ok_or("the index is not available yet; try again shortly")?;
+        let ((mut areas, mut edges, truncated), coverage) = graph
+            .with_coverage(&of, |graph| graph.map(workspace_id, depth))
+            .map_err(|error| error.to_string())?;
+        let mut cut = fit_items(&mut areas, &coverage);
+        cut |= fit_items(&mut edges, &(&areas, &coverage));
+        Ok(Outcome::GraphMap {
+            depth,
+            areas,
+            edges,
+            coverage,
+            truncated: truncated || cut,
+        })
     }
 
     /// How long one write check may spend asking Git where other worktrees'
@@ -2195,8 +2278,15 @@ mod unix {
             .name("langspan-git-reader".into())
             .spawn(move || {
                 while let Ok(of) = scan_receiver.recv() {
+                    // Hook reports keep arriving while this thread reads the
+                    // checkout: the core compares them with this time.
+                    let from = now_ms();
                     let snapshot =
-                        crate::observer::scan(&of.root, Instant::now() + Duration::from_secs(2));
+                        crate::observer::scan(&of.root, Instant::now() + Duration::from_secs(2))
+                            .map(|mut snapshot| {
+                                snapshot.scanned_from_ms = Some(from);
+                                snapshot
+                            });
                     if scan_result_sender
                         .send(ScanResult { of, snapshot })
                         .is_err()
@@ -3358,6 +3448,8 @@ mod unix {
         matches!(
             command,
             Command::GraphBlindSpots { .. }
+                | Command::GraphPath { .. }
+                | Command::GraphMap { .. }
                 | Command::GraphSymbol {
                     blind_in_scope: true,
                     ..
@@ -3379,6 +3471,8 @@ mod unix {
             Outcome::Graph { coverage, .. }
             | Outcome::GraphContext { coverage, .. }
             | Outcome::CallBreaks { coverage, .. }
+            | Outcome::GraphPath { coverage, .. }
+            | Outcome::GraphMap { coverage, .. }
             | Outcome::GraphBlindSpots { coverage, .. } => vec![coverage],
             Outcome::Dashboard { dashboard } => dashboard
                 .workspaces
@@ -3468,8 +3562,22 @@ mod unix {
                 | Command::GraphBlindSpots { .. }
                 | Command::GraphContext { .. }
                 | Command::GraphInflight { .. }
+                | Command::GraphPath { .. }
+                | Command::GraphMap { .. }
         ) {
             let answer = match &command {
+                Command::GraphPath {
+                    workspace_id,
+                    from,
+                    to,
+                    max_hops,
+                } => graph_path(graph, store.state(), (workspace_id, from, to, *max_hops))
+                    .map_err(|message| ("index_unavailable", message)),
+                Command::GraphMap {
+                    workspace_id,
+                    depth,
+                } => graph_map(graph, store.state(), workspace_id, *depth)
+                    .map_err(|message| ("index_unavailable", message)),
                 Command::GraphInflight { workspace_id } => {
                     graph_inflight(graph, store.state(), workspace_id)
                         .map_err(|message| ("index_unavailable", message))
@@ -3560,6 +3668,19 @@ mod unix {
         };
         match store.execute(&request_id, &command, &prepared, now_ms()) {
             Ok(mut execution) => {
+                // A record given in parts is cut from its JSON in the
+                // client's version, which the reply's own reshaping cannot
+                // reach (review comment 4712860167).
+                if version < PROTOCOL_VERSION
+                    && let Command::StatusRecords { after, page_bytes } = &command
+                    && matches!(execution.outcome, Outcome::StatusRecords { .. })
+                {
+                    execution.outcome =
+                        store.status_page(after.as_deref(), *page_bytes, |record| {
+                            protocol::encode_record_for(version, record)
+                                .map_err(|error| error.to_string())
+                        });
+                }
                 if let Outcome::Dashboard { dashboard } = &mut execution.outcome {
                     complete_dashboard(dashboard, store.state(), graph);
                 }

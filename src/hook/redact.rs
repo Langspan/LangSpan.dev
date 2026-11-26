@@ -86,9 +86,27 @@ pub fn redact_command(command: &mut Command) {
             command,
             tests,
             rerun,
+            symbol_findings,
             ..
         } => {
             *command = redact_bounded(command, langspan_core::MAX_CHECK_COMMAND_BYTES);
+            // Repository text: names, signatures and paths a branch chose.
+            for finding in symbol_findings.iter_mut().flat_map(|f| &mut f.findings) {
+                let limit = langspan_core::MAX_SYMBOL_FINDING_TEXT;
+                for text in [
+                    &mut finding.name,
+                    &mut finding.path,
+                    &mut finding.before,
+                    &mut finding.other_path,
+                ]
+                .into_iter()
+                .chain(&mut finding.after)
+                .chain(&mut finding.renamed_to)
+                .chain(&mut finding.other_after)
+                {
+                    *text = redact_bounded(text, limit);
+                }
+            }
             // A test name that looks like a secret is left out, not
             // rewritten: a changed name would be another test.
             for results in tests.iter_mut().chain(rerun.iter_mut()) {
@@ -703,6 +721,7 @@ mod tests {
             inputs: vec![],
             result: langspan_core::CheckResult::Failed { exit_code: 101 },
             duration_ms: 1,
+            symbol_findings: None,
             report: None,
             tests: Some(results()),
             rerun: Some(results()),

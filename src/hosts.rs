@@ -124,9 +124,9 @@ impl HostReport {
 }
 
 /// Hosts proposed for install without the owner naming them: those
-/// `install` chooses by itself. Gemini CLI and Antigravity are chosen only
-/// by name: they share `~/.gemini`, which other tools also make, and their
-/// adapters have no live-host evidence yet.
+/// `install` chooses by itself. Antigravity is chosen only by name: its
+/// `~/.gemini` is also made by other tools, Gemini CLI among them. Gemini
+/// CLI is never proposed: its support is removed.
 pub fn proposed(vendor: Vendor) -> bool {
     !matches!(vendor, Vendor::Gemini | Vendor::Antigravity)
 }

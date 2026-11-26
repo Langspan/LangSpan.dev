@@ -3,8 +3,8 @@
 pub mod adopt;
 pub mod auto_check;
 pub mod autostart;
+pub mod between_steps;
 pub mod binary_version;
-mod break_calls;
 pub mod breaks;
 pub mod claude_code;
 pub mod client;
@@ -13,6 +13,7 @@ pub mod commit;
 pub mod count;
 pub mod daemon;
 pub mod dashboard;
+pub mod definitions;
 pub mod formatter;
 pub mod guidance;
 pub mod install;
@@ -51,7 +52,7 @@ pub mod codex;
 
 pub mod cursor;
 
-pub mod gemini;
+pub mod gemini_removed;
 
 pub mod antigravity;
 
@@ -71,3 +72,4 @@ pub mod graph;
 pub mod index_file;
 pub mod integrate;
 pub mod landing;
+pub mod rewrite;

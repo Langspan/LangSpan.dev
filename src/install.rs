@@ -22,13 +22,10 @@ pub const MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash";
 pub const POST_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit|Bash|Read|Grep";
 pub const CODEX_EVENTS: [&str; 2] = ["PreToolUse", "PostToolUse"];
 pub const CODEX_MATCHER: &str = "^(apply_patch|Bash)$";
-pub const GEMINI_EVENTS: [&str; 2] = ["BeforeTool", "AfterTool"];
-/// Gemini CLI matches tool hooks by regular expression on the tool name.
-pub const GEMINI_MATCHER: &str = "^(write_file|replace|run_shell_command)$";
-pub const GEMINI_POST_MATCHER: &str = "^(write_file|replace|run_shell_command|read_file)$";
-/// Gemini CLI names each hook; the name is shown in `/hooks` and is what
-/// `hooksConfig.disabled` lists.
-pub const GEMINI_HOOK_NAME: &str = "langspan";
+/// The tool events an earlier release registered for Gemini CLI, whose
+/// support is removed (issue #246, ADR 0033). Kept only so `uninstall` and
+/// `hooks remove` can find and take out what that release wrote.
+const GEMINI_EVENTS: [&str; 2] = ["BeforeTool", "AfterTool"];
 /// Antigravity's tool hooks (<https://antigravity.google/docs/hooks/>), matched
 /// by regular expression on the tool name ([ADR 0035](../docs/adr/0035-antigravity-adapter.md)).
 pub const ANTIGRAVITY_EVENTS: [&str; 2] = ["PreToolUse", "PostToolUse"];
@@ -64,17 +61,24 @@ pub enum Vendor {
     ClaudeCode,
     Codex,
     Cursor,
+    /// Gemini CLI, no longer supported (issue #246, ADR 0033). For one
+    /// release LangSpan still recognizes what an earlier install wrote, so
+    /// `uninstall`, `hooks remove` and `doctor` can deal with it; nothing
+    /// installs it, and `langspan hook gemini-cli` does nothing.
     Gemini,
     Antigravity,
 }
 
+/// What a refused Gemini CLI install says.
+pub const GEMINI_REMOVED: &str = "Gemini CLI support was removed: Google replaced Gemini CLI with the Antigravity CLI, which LangSpan supports as `antigravity`. `langspan uninstall --hosts gemini-cli --apply` and `langspan hooks remove gemini-cli --root DIR --apply` remove an earlier install. Nothing was changed";
+
 impl Vendor {
-    /// Every host, in the order help text and checks list them.
-    pub const ALL: [Self; 5] = [
+    /// Every supported host, in the order help text and checks list them.
+    /// Gemini CLI is not one of them: see `Vendor::Gemini`.
+    pub const ALL: [Self; 4] = [
         Self::ClaudeCode,
         Self::Codex,
         Self::Cursor,
-        Self::Gemini,
         Self::Antigravity,
     ];
 
@@ -88,13 +92,25 @@ impl Vendor {
         }
     }
 
-    /// The host a command-line name stands for.
+    /// The host a command-line name stands for, Gemini CLI's included so
+    /// that removing it works; `gemini` also names it.
     pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|vendor| vendor.name() == name)
+        if name == "gemini" {
+            return Some(Self::Gemini);
+        }
+        Self::ALL
+            .into_iter()
+            .chain([Self::Gemini])
+            .find(|vendor| vendor.name() == name)
     }
 
-    /// Cursor lists hook entries directly under each event. Claude Code,
-    /// Codex and Gemini CLI nest them in groups that carry the matcher.
+    /// Whether the host is no longer supported: only removal works for it.
+    pub fn removed(self) -> bool {
+        self == Self::Gemini
+    }
+
+    /// Cursor lists hook entries directly under each event. Claude Code and
+    /// Codex nest them in groups that carry the matcher, as Gemini CLI did.
     /// Antigravity nests them for its tool events and lists them directly
     /// under its other events.
     fn flat(self, event: &str) -> bool {
@@ -135,8 +151,8 @@ impl Vendor {
     /// the end of a reply and of a tool batch ([ADR 0027](../docs/adr/0027-turn-and-batch-events.md)).
     /// Codex has no StopFailure or PostToolBatch, and its SubagentStop names
     /// a subagent whose tool events carry the parent's session ID, which this
-    /// adapter does not cover. Cursor's and Gemini CLI's end-of-reply events
-    /// are not registered until they are checked on a real host. Antigravity
+    /// adapter does not cover. Cursor's end-of-reply events are not
+    /// registered until they are checked on a real host. Antigravity
     /// has no session-end event, and its `Stop` requires a decision, so it
     /// is not registered either (ADR 0035).
     fn lifecycle_events(self) -> &'static [&'static str] {
@@ -152,6 +168,7 @@ impl Vendor {
             ],
             Self::Codex => &["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"],
             Self::Cursor => &["sessionStart", "beforeSubmitPrompt", "sessionEnd"],
+            // What an earlier release registered; never installed now.
             Self::Gemini => &["SessionStart", "BeforeAgent", "SessionEnd"],
             Self::Antigravity => &["SessionStart", "PreInvocation"],
         }
@@ -181,8 +198,8 @@ impl Vendor {
             Self::Codex => CODEX_MATCHER,
             Self::Cursor if event == "postToolUse" => CURSOR_POST_MATCHER,
             Self::Cursor => CURSOR_MATCHER,
-            Self::Gemini if event == "AfterTool" => GEMINI_POST_MATCHER,
-            Self::Gemini => GEMINI_MATCHER,
+            // Never installed, so no matcher is written or compared.
+            Self::Gemini => "",
             Self::Antigravity if event == "PostToolUse" => ANTIGRAVITY_POST_MATCHER,
             Self::Antigravity => ANTIGRAVITY_MATCHER,
         }
@@ -285,21 +302,12 @@ impl Vendor {
         }
     }
 
-    /// One hook entry running `command` for `event`. Gemini CLI takes its
-    /// timeout in milliseconds and names each hook; the other hosts take
-    /// seconds.
+    /// One hook entry running `command` for `event`, its timeout in seconds.
     fn hook_entry(self, event: &str, command: String) -> Map<String, Value> {
         let mut entry = Map::new();
-        if self == Self::Gemini {
-            entry.insert("name".into(), GEMINI_HOOK_NAME.into());
-        }
         entry.insert("type".into(), "command".into());
         entry.insert("command".into(), command.into());
-        let timeout = match self {
-            Self::Gemini => self.timeout(event) * 1000,
-            _ => self.timeout(event),
-        };
-        entry.insert("timeout".into(), timeout.into());
+        entry.insert("timeout".into(), self.timeout(event).into());
         entry
     }
 }
@@ -879,6 +887,7 @@ pub fn plan_for(
         existing,
         command.as_ref().map(|c| c as &dyn Fn(&str) -> String),
         &|hook| is_managed_for(vendor, hook),
+        false,
     )
 }
 
@@ -895,7 +904,52 @@ pub fn plan_user_for(
         existing,
         command.as_ref().map(|c| c as &dyn Fn(&str) -> String),
         &|hook| is_user_managed_for(vendor, hook),
+        true,
     )
+}
+
+/// What the between-step watcher's command adds to the prompt hook's own
+/// (issue #214).
+const WATCH_WORDS: &str = " --mode between-steps";
+
+/// The event whose hook group also holds the host's between-step watcher:
+/// only Claude Code documents a background hook that wakes the model
+/// (`asyncRewake`, <https://code.claude.com/docs/en/hooks>).
+fn watcher_event(vendor: Vendor) -> Option<&'static str> {
+    (vendor == Vendor::ClaudeCode).then_some("UserPromptSubmit")
+}
+
+/// The watcher entry for the prompt hook `command`: the same command with
+/// `--mode between-steps`, run in the background, past its own bound.
+fn watcher_entry(vendor: Vendor, command: &str, user: bool) -> Option<Map<String, Value>> {
+    let body = vendor.unmark(command, user)?;
+    let mut entry = Map::new();
+    entry.insert("type".into(), "command".into());
+    entry.insert(
+        "command".into(),
+        vendor.mark(&format!("{body}{WATCH_WORDS}"), user).into(),
+    );
+    entry.insert("asyncRewake".into(), true.into());
+    entry.insert(
+        "timeout".into(),
+        crate::between_steps::HOST_TIMEOUT_SECONDS.into(),
+    );
+    Some(entry)
+}
+
+/// Whether `hook` is a watcher LangSpan wrote: a background entry whose
+/// command is one of `ours` with `--mode between-steps` added.
+fn is_watcher(vendor: Vendor, hook: &Value, user: bool, ours: &dyn Fn(&Value) -> bool) -> bool {
+    watcher_event(vendor).is_some()
+        && hook.get("asyncRewake") == Some(&json!(true))
+        && hook
+            .get("command")
+            .and_then(Value::as_str)
+            .and_then(|command| vendor.unmark(command, user))
+            .and_then(|body| body.strip_suffix(WATCH_WORDS))
+            .is_some_and(|body| {
+                ours(&json!({"type": "command", "command": vendor.mark(body, user)}))
+            })
 }
 
 /// `command` gives the generated command for each event.
@@ -904,7 +958,9 @@ fn plan_hooks(
     existing: Option<Value>,
     command: Option<&dyn Fn(&str) -> String>,
     ours: &dyn Fn(&Value) -> bool,
+    user: bool,
 ) -> Result<Value, String> {
+    let ours = &|hook: &Value| ours(hook) || is_watcher(vendor, hook, user, ours);
     let mut settings = match existing {
         None => Map::new(),
         Some(Value::Object(map)) => map,
@@ -918,15 +974,8 @@ fn plan_hooks(
             "settings `{table}` must be a JSON object; nothing was changed"
         ));
     }
-    if vendor == Vendor::Gemini
-        && let Some(command) = command
-        && let Some(text) = vendor
-            .hook_events()
-            .into_iter()
-            .map(command)
-            .find(|text| text.contains('$'))
-    {
-        return Err(unexpandable(&text));
+    if vendor.removed() && command.is_some() {
+        return Err(GEMINI_REMOVED.into());
     }
     // Retain existing key positions when replacing a registration. Removal
     // prunes only containers emptied by our own entries, using ordered removal.
@@ -961,21 +1010,16 @@ fn plan_hooks(
             if vendor.flat(event) {
                 groups.push(Value::Object(entry));
             } else {
-                group.insert("hooks".into(), Value::Array(vec![Value::Object(entry)]));
+                let watcher = (watcher_event(vendor) == Some(event))
+                    .then(|| watcher_entry(vendor, &command(event), user))
+                    .flatten();
+                let entries = std::iter::once(entry).chain(watcher).map(Value::Object);
+                group.insert("hooks".into(), Value::Array(entries.collect()));
                 groups.push(Value::Object(group));
             }
         }
     }
     Ok(Value::Object(settings))
-}
-
-/// Gemini CLI replaces `$NAME` and `${NAME}` in every string of its
-/// settings, and `$GEMINI_PROJECT_DIR` and its like again in a hook command,
-/// before it runs anything: a path with `$` in it would name another file.
-pub fn unexpandable(text: &str) -> String {
-    format!(
-        "Gemini CLI would expand the `$` in {text:?} as a variable; install LangSpan and its state directory at paths without `$`. Nothing was changed"
-    )
 }
 
 fn settings_metadata(path: &Path) -> Result<Option<fs::Metadata>, crate::Error> {
@@ -1807,18 +1851,12 @@ mod tests {
     }
 
     #[test]
-    fn cursor_and_gemini_keep_their_lifecycle_events_and_gain_no_end_of_reply_event() {
-        let cursor = plan_for(Vendor::Cursor, None, Some(&registration("/r"))).unwrap();
-        let gemini = plan_for(Vendor::Gemini, None, Some(&registration("/r"))).unwrap();
-        for (vendor, settings) in [(Vendor::Cursor, &cursor), (Vendor::Gemini, &gemini)] {
-            let registered: Vec<_> = settings["hooks"].as_object().unwrap().keys().collect();
-            assert_eq!(registered, vendor.hook_events(), "{}", vendor.name());
-            assert!(
-                missing_events(vendor, settings, |hook| is_managed_for(vendor, hook)).is_empty(),
-                "{}",
-                vendor.name()
-            );
-        }
+    fn cursor_keeps_its_lifecycle_events_and_gains_no_end_of_reply_event() {
+        let vendor = Vendor::Cursor;
+        let cursor = plan_for(vendor, None, Some(&registration("/r"))).unwrap();
+        let registered: Vec<_> = cursor["hooks"].as_object().unwrap().keys().collect();
+        assert_eq!(registered, vendor.hook_events());
+        assert!(missing_events(vendor, &cursor, |hook| is_managed_for(vendor, hook)).is_empty());
         for event in [
             "stop",
             "subagentStop",
@@ -1828,18 +1866,55 @@ mod tests {
         ] {
             assert!(cursor["hooks"].get(event).is_none(), "cursor {event}");
         }
-        for event in ["AfterAgent", "Stop", "StopFailure", "SubagentStop"] {
-            assert!(gemini["hooks"].get(event).is_none(), "gemini {event}");
-        }
-        // The per-event timeout goes through each host's own entry shape.
+        // The per-event timeout goes through the host's own entry shape.
         assert_eq!(cursor["hooks"]["sessionEnd"][0]["timeout"], 5);
+    }
+
+    #[test]
+    fn gemini_cli_is_never_installed_but_an_earlier_install_is_removed() {
+        let vendor = Vendor::Gemini;
+        assert!(!Vendor::ALL.contains(&vendor));
+        assert_eq!(Vendor::from_name("gemini-cli"), Some(vendor));
+        assert_eq!(Vendor::from_name("gemini"), Some(vendor));
         assert_eq!(
-            gemini["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"],
-            5000
+            plan_for(vendor, Some(json!({})), Some(&registration("/r"))),
+            Err(GEMINI_REMOVED.into())
+        );
+        let user = UserRegistration {
+            executable: "/bin/langspan".into(),
+            state_dir: "/state".into(),
+            share_prompt: true,
+            presence: Presence::default(),
+        };
+        assert_eq!(
+            plan_user_for(vendor, Some(json!({})), Some(&user)),
+            Err(GEMINI_REMOVED.into())
+        );
+        // What the last release with the adapter wrote, beside the owner's hook.
+        let owner = json!({"matcher": "write_file", "hooks": [{"type": "command", "command": "/x/guard.sh"}]});
+        let mut settings = json!({"hooks": {"BeforeTool": [owner.clone()]}});
+        for (event, command) in vendor.hook_events().into_iter().map(|event| {
+            (
+                event,
+                format!(
+                    "'/bin/langspan' hook gemini-cli --state-dir '/state'{}",
+                    vendor.user_marker()
+                ),
+            )
+        }) {
+            let entry = json!({"hooks": [{"name": "langspan", "type": "command", "command": command, "timeout": 5000}]});
+            match settings["hooks"][event].as_array_mut() {
+                Some(groups) => groups.push(entry),
+                None => settings["hooks"][event] = json!([entry]),
+            }
+        }
+        assert_eq!(
+            managed_hooks(&settings, |hook| is_user_managed_for(vendor, hook)).len(),
+            5
         );
         assert_eq!(
-            gemini["hooks"]["SessionEnd"][0]["hooks"][0]["name"],
-            GEMINI_HOOK_NAME
+            plan_user_for(vendor, Some(settings), None).unwrap(),
+            json!({"hooks": {"BeforeTool": [owner]}})
         );
     }
 
@@ -2155,5 +2230,93 @@ mod tests {
         assert_eq!(installed_executable(&plain).unwrap(), plain);
         let missing = base.join("Cellar/langspan/9.9.9/bin/langspan");
         assert!(installed_executable(&missing).is_err());
+    }
+
+    /// The between-step watcher entries (issue #214) in `settings`.
+    fn watchers(settings: &Value) -> Vec<Value> {
+        managed_hooks(settings, |hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.contains(" --mode between-steps"))
+        })
+    }
+
+    #[test]
+    fn a_claude_code_install_adds_one_background_watcher_beside_its_prompt_hook() {
+        let project = plan(None, Some(&registration("/r"))).unwrap();
+        let user =
+            plan_user_for(Vendor::ClaudeCode, None, Some(&user("/opt/bin/langspan"))).unwrap();
+        for (settings, ours) in [
+            (
+                &project,
+                &(|hook: &Value| is_managed_for(Vendor::ClaudeCode, hook))
+                    as &dyn Fn(&Value) -> bool,
+            ),
+            (&user, &|hook: &Value| {
+                is_user_managed_for(Vendor::ClaudeCode, hook)
+            }),
+        ] {
+            let found = watchers(settings);
+            assert_eq!(found.len(), 1, "{settings:#}");
+            let watcher = &found[0];
+            // Claude Code's documented background hook that wakes the model
+            // on exit 2; it never decides anything.
+            assert_eq!(watcher["asyncRewake"], json!(true));
+            assert_eq!(
+                watcher["timeout"],
+                json!(crate::between_steps::HOST_TIMEOUT_SECONDS)
+            );
+            let group = &settings["hooks"]["UserPromptSubmit"][0]["hooks"];
+            assert_eq!(group.as_array().unwrap().len(), 2, "{group:#}");
+            assert!(ours(&group[0]), "the prompt hook comes first");
+            assert_eq!(group[1], *watcher);
+            // The watcher is the prompt hook's own command with the mode.
+            let prompt = group[0]["command"].as_str().unwrap();
+            let command = watcher["command"].as_str().unwrap();
+            let (body, marker) = prompt.split_at(prompt.find(" # langspan-managed").unwrap());
+            assert_eq!(command, format!("{body} --mode between-steps{marker}"));
+            // No other event has one.
+            let all: usize = settings["hooks"]
+                .as_object()
+                .unwrap()
+                .values()
+                .flat_map(|groups| groups.as_array().unwrap())
+                .flat_map(|group| group["hooks"].as_array().unwrap())
+                .filter(|hook| hook.get("asyncRewake").is_some())
+                .count();
+            assert_eq!(all, 1);
+        }
+        // Reinstalling replaces it; removing takes it away with the rest.
+        let twice = plan(Some(project.clone()), Some(&registration("/r"))).unwrap();
+        assert_eq!(
+            twice, project,
+            "reinstalling replaces rather than duplicates"
+        );
+        assert!(watchers(&plan(Some(project), None).unwrap()).is_empty());
+        let removed = plan_user_for(Vendor::ClaudeCode, Some(user), None).unwrap();
+        assert!(watchers(&removed).is_empty(), "{removed:#}");
+        // The other hosts document no between-step delivery.
+        for vendor in [Vendor::Codex, Vendor::Cursor, Vendor::Antigravity] {
+            let settings = plan_for(vendor, None, Some(&registration("/r"))).unwrap();
+            assert!(watchers(&settings).is_empty(), "{}", vendor.name());
+        }
+    }
+
+    #[test]
+    fn a_hand_written_watcher_like_entry_is_not_taken_for_langspan_s() {
+        let registered = plan(None, Some(&registration("/r"))).unwrap();
+        let watcher = watchers(&registered)[0].clone();
+        // Without asyncRewake, or with another mode, it is the owner's.
+        let mut sync = watcher.clone();
+        sync.as_object_mut().unwrap().remove("asyncRewake");
+        let mut other = watcher.clone();
+        other["command"] = json!(
+            watcher["command"]
+                .as_str()
+                .unwrap()
+                .replace("--mode between-steps", "--mode between-steps-2")
+        );
+        let owners = json!({"hooks": {"UserPromptSubmit": [{"hooks": [sync, other]}]}});
+        assert_eq!(plan(Some(owners.clone()), None).unwrap(), owners);
     }
 }

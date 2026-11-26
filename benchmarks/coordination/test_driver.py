@@ -148,6 +148,14 @@ class DriverUnitTests(Temporary):
             self.assertIn(rule, denied)
         self.assertFalse([rule for rule in denied if "/work/s2/" in rule], "a session keeps its own checkout")
 
+    def test_the_stand_in_runs_foreground_hooks_only(self):
+        settings = {"hooks": {"UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": "prompt", "timeout": 5},
+            {"type": "command", "command": "watch", "asyncRewake": True, "timeout": 1260},
+            {"type": "command", "command": "later", "async": True}]}]}}
+        self.assertEqual(list(standin_agent.hook_commands(settings, "UserPromptSubmit", None)),
+                         [("prompt", 5)])
+
     def test_interface_notices_are_counted_per_session_from_the_event_log(self):
         def registered(session_id, workspace):
             return {"event": {"type": "session_registered",
@@ -156,8 +164,128 @@ class DriverUnitTests(Temporary):
                   {"event": {"type": "inflight_delivered", "session_id": "claude-code.b", "keys": ["k1", "k2"]}},
                   {"event": {"type": "interface_alerted", "session_id": "claude-code.b", "notice_ids": ["n1"]}},
                   {"event": {"type": "inflight_delivered", "session_id": "claude-code.unknown", "keys": ["k3"]}},
-                  {"event": {"type": "briefing_delivered", "session_id": "claude-code.a", "signature": "x"}}]
-        self.assertEqual(driver.interface_notices(events), {2: 3})
+                  {"event": {"type": "briefing_delivered", "session_id": "claude-code.a", "signature": "x"}},
+                  # Between steps counts; a briefing's own record does not,
+                  # as briefings were not counted before it existed.
+                  {"event": {"type": "interface_notices_told", "session_id": "claude-code.a",
+                             "notice_ids": ["n2", "n3"], "via": "between_steps"}},
+                  {"event": {"type": "interface_notices_told", "session_id": "claude-code.a",
+                             "notice_ids": ["n4"], "via": "briefing"}}]
+        self.assertEqual(driver.interface_notices(events), {1: 2, 2: 3})
+
+    def context_record(self, arm, state, sessions=2):
+        plan = driver.make_plan(arm, "rename_vs_new_caller", sessions, 1, agent="claude")
+        plan.update(run_id="0" * 32, output=str(self.root), plan_path=str(self.root / "plan.json"),
+                    work=str(self.root / "work"))
+        record = driver.build_record(plan, None, self.root / "runner", None, None, "t", 0.0, status="failed",
+                                     coordinator_state=state)
+        driver.validate(record, driver.load_schema())
+        return record
+
+    def test_the_context_langspan_added_is_reported_per_task_and_per_trial(self):
+        """Issue #222: the bytes LangSpan's hooks placed in each session's
+        context, from the coordinator's state, with tokens estimated at four
+        bytes each, rounded up. A subagent's session counts toward its task."""
+        def context(turns, size, largest):
+            return {"turns": turns, "bytes": size, "largest_turn_bytes": largest, "turn_bytes": 0}
+        state = {
+            "sessions": {"claude-code.a": {"workspace_id": "bench-s1"}, "claude-code.a2": {"workspace_id": "bench-s1"},
+                         "claude-code.b": {"workspace_id": "bench-s2"}, "claude-code.b2": {"workspace_id": "bench-s2"},
+                         "claude-code.x": {"workspace_id": "other"}},
+            "activity": {"claude-code.a": {"context": context(2, 1001, 900)},
+                         "claude-code.a2": {"context": context(1, 99, 99)},
+                         # A session whose hooks added nothing has no context.
+                         "claude-code.b": {}, "claude-code.x": {"context": context(5, 5000, 5000)}},
+        }
+        record = self.context_record("langspan", state)
+        self.assertEqual([t["context_added"] for t in record["tasks"]], [
+            {"turns": 3, "bytes": 1100, "bytes_per_turn": 366, "estimated_tokens_per_turn": 92,
+             "largest_turn_bytes": 900},
+            # Registered, with nothing added: measured, and zero.
+            {"turns": 0, "bytes": 0, "bytes_per_turn": 0, "estimated_tokens_per_turn": 0, "largest_turn_bytes": 0}])
+        self.assertEqual(record["context_added"], {
+            "status": "reported", "turns": 3, "bytes": 1100, "bytes_per_turn": 366,
+            "estimated_tokens_per_turn": 92, "largest_turn_bytes": 900})
+
+    def test_context_not_measured_is_null_never_zero(self):
+        # Session 3 never reached the coordinator: its task is unmeasured.
+        state = {"sessions": {"claude-code.a": {"workspace_id": "bench-s1"}},
+                 "activity": {"claude-code.a": {"context": {"turns": 1, "bytes": 8, "largest_turn_bytes": 8,
+                                                            "turn_bytes": 8}}}}
+        record = self.context_record("langspan", state, sessions=2)
+        self.assertEqual([t["context_added"] is None for t in record["tasks"]], [False, True])
+        self.assertEqual(record["context_added"], {
+            "status": "partial", "turns": None, "bytes": None, "bytes_per_turn": None,
+            "estimated_tokens_per_turn": None, "largest_turn_bytes": None})
+        # The state could not be read: nothing is measured, and the trial still has a record.
+        record = self.context_record("langspan", None, sessions=2)
+        self.assertEqual([t["context_added"] for t in record["tasks"]], [None, None])
+        self.assertEqual(record["context_added"]["status"], "unknown")
+        self.assertIsNone(record["context_added"]["bytes"])
+        # A malformed figure is not a measurement.
+        state["activity"]["claude-code.a"]["context"]["bytes"] = -1
+        record = self.context_record("langspan", state, sessions=2)
+        self.assertEqual([t["context_added"] for t in record["tasks"]], [None, None])
+        # Another arm has no LangSpan hooks.
+        for arm in ("worktrees", "awareness_only"):
+            record = self.context_record(arm, None, sessions=2)
+            self.assertEqual([t["context_added"] for t in record["tasks"]], [None, None])
+            self.assertEqual(record["context_added"], {
+                "status": "not_applicable", "turns": None, "bytes": None, "bytes_per_turn": None,
+                "estimated_tokens_per_turn": None, "largest_turn_bytes": None})
+
+    @staticmethod
+    def parts(record, *cuts):
+        """RECORD's JSON as the status parts the store gives, cut at CUTS."""
+        text = json.dumps(record)
+        bounds = [0, *cuts, len(text)]
+        return [{"kind": "part", "text": text[start:end], "offset": start, "last": end == len(text)}
+                for start, end in zip(bounds, bounds[1:])]
+
+    def test_an_activity_record_given_in_parts_is_joined_before_its_context_is_read(self):
+        """Review comment 4712860177: an activity record larger than a status
+        page comes as parts of its JSON. They are joined, as the CLI's own
+        reader joins them, so the session's context is measured, not read as
+        none added."""
+        context = {"turns": 2, "bytes": 1001, "largest_turn_bytes": 900, "turn_bytes": 0}
+        session = {"kind": "session", "key": "claude-code.a", "session": {"workspace_id": "bench-s1"}}
+        activity = {"kind": "activity", "key": "claude-code.a",
+                    "activity": {"known": [{"path": "p" * 512}] * 4, "context": context}}
+        cut = self.parts(activity, 100, 1500)
+        # One part per page, and a part and whole records sharing a page.
+        other = [{"kind": "session", "key": "claude-code.b", "session": {"workspace_id": "bench-s2"}},
+                 {"kind": "activity", "key": "claude-code.b", "activity": {"context": dict(context, bytes=99)}}]
+        reader = driver.StatusReader()
+        for page in ([session, cut[0]], [cut[1]], [cut[2], *other]):
+            reader.add(page)
+        state = reader.state()
+        self.assertEqual(state["activity"]["claude-code.a"]["context"], context)
+        record = self.context_record("langspan", state)
+        self.assertEqual(record["context_added"]["status"], "reported")
+        self.assertEqual(record["context_added"]["bytes"], 1100)
+
+        # A record that changed while its parts were read starts again at offset 0.
+        changed = dict(activity, activity=dict(activity["activity"], context=dict(context, bytes=2002)))
+        reader = driver.StatusReader()
+        reader.add([session, cut[0], *self.parts(changed, 200)])
+        self.assertEqual(reader.state()["activity"]["claude-code.a"]["context"]["bytes"], 2002)
+        # A record begun and then given whole is the whole one.
+        reader = driver.StatusReader()
+        reader.add([cut[0], activity])
+        self.assertEqual(reader.state()["activity"]["claude-code.a"]["context"], context)
+
+        # A gap, a part holding a part, a record that never ends and one
+        # beyond the bound are refused: the context is then unknown, never zero.
+        for pages in ([[cut[0], cut[2]]],
+                      [self.parts({"kind": "part", "text": "{}", "offset": 0, "last": True})],
+                      [[session, cut[0]]],
+                      [[{"kind": "part", "text": "x" * (driver.MAX_STATUS_RECORD_BYTES + 1),
+                         "offset": 0, "last": False}]]):
+            reader = driver.StatusReader()
+            with self.assertRaises(ValueError, msg=pages):
+                for page in pages:
+                    reader.add(page)
+                reader.state()
 
     def guard(self, script, arm="worktrees", timeout=30):
         """Run SCRIPT as the session's agent through the tool guard, as
@@ -1201,7 +1329,7 @@ class DriverUnitTests(Temporary):
         self.assertEqual((record["cost"]["correct_result"], record["cost"]["cost_per_accepted_task"]), (True, 0.375))
 
     def summary_record(self, arm, run_cost, repair_status, repair_cost=None, succeeded=None, accepted=2,
-                       change="made", status="succeeded", tool_check="passed", repair_tool_check=None):
+                       change="made", status="succeeded", tool_check="passed", repair_tool_check=None, context=None):
         def figures(cost):
             if cost is None:
                 return {"tokens": None, "turns": None, "cost_usd": None}
@@ -1216,7 +1344,14 @@ class DriverUnitTests(Temporary):
                  "turns": None if run["turns"] is None or repair["turns"] is None else run["turns"] + repair["turns"],
                  "cost_usd": None if run_cost is None or repair["cost_usd"] is None else run_cost + repair["cost_usd"]}
         correct = True if repair_status == "not_needed" else (succeeded if repair_status == "ran" else False)
+        if context is None:
+            added = {"status": "not_applicable" if arm != "langspan" else "unknown",
+                     **dict.fromkeys(driver.CONTEXT_FIELDS)}
+        else:
+            turns, size = context
+            added = {"status": "reported", **driver.context_figures(turns, size, size)}
         return {"schema_version": driver.SCHEMA_VERSION, "arm": arm, "family": "discovered_change", "sessions": 2,
+                "context_added": added,
                 "agent": "claude-code", "stagger_s": 0, "status": status, "interface_change": change,
                 "tool_check": {"status": tool_check, "failed_sessions": [1] if tool_check == "failed" else []},
                 "tasks_total": 2, "repair": {
@@ -1300,12 +1435,27 @@ class DriverUnitTests(Temporary):
         self.assertEqual((group["tool_check_failed"], group["repair_tool_check_failed"], group["compared"]),
                          (1, 0, 0))
 
+    def test_the_summary_adds_up_the_context_langspan_added_over_compared_trials(self):
+        records = [self.summary_record("langspan", 1.0, "not_needed", context=(2, 1000)),
+                   self.summary_record("langspan", 1.5, "not_needed", context=(3, 1001)),
+                   # Not compared: it adds nothing.
+                   self.summary_record("langspan", 2.0, "not_run", status="failed", tool_check="failed",
+                                       context=(9, 9))]
+        group = driver.summarize(records)[0]
+        self.assertEqual(group["context_added"], {"turns": 5, "bytes": 2001, "bytes_per_turn": 400,
+                                                  "estimated_tokens_per_turn": 100, "largest_turn_bytes": 1001})
+        # One compared trial left it unmeasured: the arm's figure is unmeasured, never zero.
+        records.append(self.summary_record("langspan", 1.0, "not_needed"))
+        self.assertIsNone(driver.summarize(records)[0]["context_added"])
+        # Outside the langspan arm there is nothing to add.
+        self.assertIsNone(driver.summarize([self.summary_record("worktrees", 1.0, "not_needed")])[0]["context_added"])
+
     def test_the_summary_command_reads_record_files_and_refuses_an_older_record(self):
         good = self.root / "a"
         good.mkdir()
         (good / "record.json").write_text(json.dumps(self.summary_record("langspan", 1.0, "not_needed")))
         old = self.root / "old.json"
-        old.write_text(json.dumps({"schema_version": 5, "arm": "langspan"}))
+        old.write_text(json.dumps({"schema_version": 6, "arm": "langspan"}))
         done = subprocess.run([sys.executable, "-I", "-B", str(HERE / "driver.py"), "summarize", str(good)],
                               capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -1313,7 +1463,7 @@ class DriverUnitTests(Temporary):
         done = subprocess.run([sys.executable, "-I", "-B", str(HERE / "driver.py"), "summarize", str(good), str(old)],
                               capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, 2)
-        self.assertIn("schema version 5", done.stderr)
+        self.assertIn("schema version 6", done.stderr)
 
 
 class StandinHooks(Temporary):
@@ -1634,7 +1784,17 @@ class DryRun(Temporary):
             self.assertEqual(record["evidence"]["events"], ["events.jsonl"])
             self.assertTrue(all((output / path).is_file() for path in record["evidence"]["events"]))
             self.assertEqual([t["refusals"] for t in record["tasks"]], [0] * n)
+            # Issue #222: the context LangSpan's hooks added, from the coordinator, per task and in all.
+            added = [t["context_added"] for t in record["tasks"]]
+            self.assertTrue(all(a is not None and a["turns"] >= 1 for a in added), added)
+            self.assertTrue(any(a["bytes"] > 0 for a in added), added)
+            trial = record["context_added"]
+            self.assertEqual((trial["status"], trial["turns"], trial["bytes"]),
+                             ("reported", sum(a["turns"] for a in added), sum(a["bytes"] for a in added)))
+            self.assertEqual(trial["estimated_tokens_per_turn"], -(-trial["bytes_per_turn"] // 4))
         else:
+            self.assertEqual([t["context_added"] for t in record["tasks"]], [None] * n)
+            self.assertEqual(record["context_added"]["status"], "not_applicable")
             self.assertEqual(record["refusals"]["status"], "not_applicable")
             self.assertIsNone(record["refusals"]["count"])
             self.assertEqual(record["coordinator_scans"]["status"], "not_applicable")

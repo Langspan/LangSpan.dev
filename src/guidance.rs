@@ -1,4 +1,4 @@
-//! The LangSpan block for `AGENTS.md`, `GEMINI.md` and rules files
+//! The LangSpan block for `AGENTS.md` and rules files
 //! (roadmap I7, [ADR 0018](../docs/adr/0018-other-hosts-after-launch.md)).
 //!
 //! An agent on a host without LangSpan's hooks, or whose hooks are not yet
@@ -33,20 +33,17 @@ const CURSOR_RULE: &str = "---\ndescription: \"LangSpan coordinates the agent se
 pub enum Format {
     /// `AGENTS.md`, read by Codex, Cursor and other hosts.
     Agents,
-    /// Gemini CLI's `GEMINI.md`: the same Markdown.
-    Gemini,
     /// A Cursor project rule (`.cursor/rules/*.mdc`): front matter, then
     /// the block.
     CursorRules,
 }
 
 impl Format {
-    pub const USAGE: &str = "agents|gemini|cursor-rules";
+    pub const USAGE: &str = "agents|cursor-rules";
 
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "agents" => Some(Self::Agents),
-            "gemini" => Some(Self::Gemini),
             "cursor-rules" => Some(Self::CursorRules),
             _ => None,
         }
@@ -61,7 +58,7 @@ pub fn block() -> String {
 /// The text `langspan guidance --format` prints.
 pub fn render(format: Format) -> String {
     match format {
-        Format::Agents | Format::Gemini => block(),
+        Format::Agents => block(),
         Format::CursorRules => format!("{CURSOR_RULE}{}", block()),
     }
 }
@@ -367,7 +364,7 @@ mod tests {
         assert_eq!(text.matches(BEGIN).count(), 1);
         assert_eq!(text.matches(END).count(), 1);
         assert!(!BODY.contains("langspan:"));
-        for format in [Format::Agents, Format::Gemini, Format::CursorRules] {
+        for format in [Format::Agents, Format::CursorRules] {
             assert!(render(format).len() <= MAX_BYTES);
         }
     }

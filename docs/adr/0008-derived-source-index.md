@@ -262,6 +262,90 @@ is the one earlier builds send. Nothing is stored. Tests:
 in `tests/graph.rs`; `stdio_impact_with_depth_returns_levels_by_name` in
 `tests/mcp.rs`; the request vectors in `tests/protocol.rs`.
 
+**Paths between symbols and a repository map (added 26 November 2026,
+roadmap D3).** Two read-only queries use four edge kinds, each with a
+`resolution`. The kinds are `defines` (file to symbol), `calls` (a
+definition to the names called within its lines, from the `calls` table),
+`imports` (file to target as written) and `mentions` (file to name, the
+`refs` table that the earlier queries use).
+
+- **Import resolution.** `langspan_graph::resolve_import` resolves an import
+  to a workspace file by path alone: the target as written, the importing
+  file's path and the paths the last complete scan listed. It covers
+  TypeScript and JavaScript relative specifiers (as written, the `.ts` file a
+  `.js` name is emitted from, each script extension, then `index.*`), Python
+  relative modules from the importer's package and absolute ones under each
+  directory above it, and Rust `crate::` (from the nearest `lib.rs` or
+  `main.rs` above), `super::`, `self::` and bare paths, longest module
+  prefix first. A resolved import has `resolution: "path"`. Go, Java and C#
+  name packages and namespaces, not files, and no configuration file,
+  manifest, alias or search path is read, so those imports stay as written.
+  The issue proposed an `imports_resolved` column; resolution runs at query
+  time instead, against the current file list. A stored column would go
+  stale when the target file appears or disappears after the importer was
+  indexed, and the index schema stays version 4. Nothing new is stored.
+- **`graph path WORKSPACE FROM TO [--max-hops N]` (`graph_path`,
+  `langspan_path`).** A breadth-first search from every function, method or
+  type named `FROM`, over the calls within each definition's lines, to one
+  named `TO`. A call of a name reaches the definitions of that name in files
+  the calling file imports by path, when there are any (`resolution:
+  "path"`); otherwise it reaches every function, method or type of the name
+  (`"name"`). The imported files' definitions are read on their own, so
+  other files' definitions of a common name never push one of them past the
+  bound. More than one reached is `ambiguous`, and each is a separate
+  chain. A module, constant or interface of the name is never reached, so
+  `mod service;` is no second `service`. A type's step follows every call in
+  its lines, its methods' among them, since a constructor call is not told
+  apart from the rest. Each definition is visited once, at
+  its first hop, and every shortest way into it is kept, so a cycle ends and
+  equally short chains are all found. The answer lists at most 5 chains
+  (`MAX_PATHS`), sorted by their steps. `N` is 1 to 6 (`MAX_PATH_HOPS`,
+  default 4); anything else is refused with "max_hops must be between 1 and
+  6". Each step names its file, the call's line (the definition's line on
+  the last step), the definition, its `callee`, its `resolution` and
+  `ambiguous`. The search visits at most 10,000 edges (`MAX_PATH_EDGES`): one
+  per definition a call reaches, and one per called name that reaches none.
+  It may take 500 ms (`PATH_BUDGET`), checked before each called name is
+  read, and the answer must fit one frame.
+  Past any of these, or with more than 5 chains, it returns what it found
+  with `truncated: true` and the `edges_visited` count. A name of more than
+  128 bytes or with whitespace is refused.
+- **`graph map WORKSPACE [--depth D]` (`graph_map`, `langspan_map`).** A
+  file's area is its module path cut to its first `D + 1` parts (`D` is 1 to
+  3, `MAX_MAP_DEPTH`, default 1). The module path is the file's path without
+  its last extension (and without `.d.ts` for a declaration file), or its
+  directory for a Go file (a package is a directory) and for `mod.rs`,
+  `lib.rs`, `main.rs`, `index.*` and `__init__.py`. So `src/api.ts` and
+  `src/api/handler.ts` are both `src/api` at depth 1, which a plain directory
+  cut could not give for the first, while `src/api.v1.ts` and `src/api.v2.ts`
+  stay two areas. Each area has its file
+  count, exported definitions and languages. Edges between two different
+  areas are counted per kind: `imports` resolved by path, and `calls` by name
+  of a name with exactly one function, method or type definition (a common
+  name would otherwise draw edges to every area defining it). At most 64
+  areas in path order (`MAX_MAP_AREAS`) and 256 edges by count
+  (`MAX_MAP_EDGES`). It reads at most 200,000 import rows and as many call
+  rows (`MAP_ROWS`); past any bound, or the frame, it is `truncated`.
+
+Both queries read one snapshot with their coverage (`with_coverage`), so a
+workspace without a complete scan answers `coverage.scanned: false`. Both
+always send `blind_in_scope`. Neither type-checks, resolves a receiver, or
+sees dynamic dispatch, macros or generated code. Tests: the resolution tests
+in `crates/langspan-graph/tests/resolve.rs`;
+`more_shortest_chains_than_the_limit_are_cut_and_said_to_be`,
+`a_cycle_is_visited_once_and_the_start_can_be_the_end`,
+`a_chain_longer_than_the_hops_asked_for_is_not_found` and
+`a_map_area_is_a_module_path_cut_to_its_depth` in `src/graph.rs`;
+`a_call_chain_from_handler_to_save_is_found_in_each_of_four_languages`,
+`a_call_chain_is_printed_one_step_per_line_with_how_each_was_found`,
+`a_chain_through_a_name_with_two_definitions_is_marked_ambiguous`,
+`a_relative_typescript_import_resolves_by_path_and_the_map_counts_its_edges`,
+`max_hops_outside_one_to_six_is_refused_with_the_allowed_range` and
+`a_path_search_capped_at_its_edge_bound_says_truncated` in
+`tests/graph.rs`; `stdio_path_and_map_follow_calls_and_imports` in
+`tests/mcp.rs`; the golden vectors `fixtures/graph-path-*-v4.json` and
+`fixtures/graph-map-*-v4.json`. Not yet called on a host.
+
 **Interface-change notices.** When a file is re-indexed, its exported symbols
 are compared with the previous version by name and kind. A removed symbol or
 a changed signature produces a notice with the files that mention the name.
@@ -587,8 +671,9 @@ answer still carries the asking workspace's coverage. A briefing whose
 comparison met such a worktree, or whose own workspace has none, says in one
 line that the index has not finished scanning every worktree yet, instead of
 saying nothing (issue #262); the line is not news by itself, so it rides with
-a briefing delivered for another reason, and protocol version 4 and 3
-clients are not sent it. Its answer keeps the
+a briefing delivered for another reason. It is the briefing's
+`inflight_partial`, which protocol version 8 added; clients of version 7
+or earlier are not sent it. Its answer keeps the
 leading items that fit one response frame and is marked `truncated` when any
 are left out. Tests:
 `another_worktrees_uncommitted_signature_is_told_to_the_session_whose_file_mentions_it`,
@@ -705,7 +790,8 @@ current: 3,850 loaded, and 200 kept that the first pass had already parsed.
 - Impact is one level by default: files mentioning the names a file exports.
   With `--depth` it follows up to three levels of such name matches; each
   level compounds the false positives of the one before, and nothing is
-  resolved. Import targets are stored but not yet used to narrow matches.
+  resolved. Import targets resolved by path narrow only `graph path` and
+  `graph map` (roadmap D3); impact does not use them.
 - A notice is recorded in one physical workspace, and its prompt briefing
   stays there. A session in another worktree of the repository is told of a
   renamed, removed or recounted function at the write that calls it

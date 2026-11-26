@@ -114,6 +114,7 @@ fn ready() -> State {
             inputs: Vec::new(),
             result: CheckResult::Passed {},
             duration_ms: 10,
+            symbol_findings: None,
             report: None,
             tests: None,
             rerun: None,
@@ -135,6 +136,8 @@ fn ready() -> State {
                 tree_oid: oid('1'),
                 inputs: Vec::new(),
                 check_id: check.check_id,
+                rebased: Vec::new(),
+                adapted: Vec::new(),
             },
             4,
         ),
@@ -509,6 +512,7 @@ fn a_removed_workspace_forgets_what_its_tests_taught() {
             inputs: Vec::new(),
             result: CheckResult::Passed {},
             duration_ms: 10,
+            symbol_findings: None,
             report: None,
             tests: Some(TestResults {
                 all_passed: true,
@@ -571,6 +575,7 @@ fn a_removed_workspace_leaves_status_and_briefings_and_its_id_can_start_again() 
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         11,
     );
@@ -587,6 +592,7 @@ fn a_removed_workspace_leaves_status_and_briefings_and_its_id_can_start_again() 
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
         },
         11,
     ) else {
@@ -627,6 +633,7 @@ fn a_removed_workspace_forgets_its_message_history_and_withdrawal_notices() {
         recent: false,
         recent_window_ms: None,
         mcp: false,
+        changes_only: false,
     };
     run(&mut state, "brief-bob", brief("bob"), 3);
     let Outcome::MessageRetracted { .. } = run(

@@ -923,7 +923,7 @@ fn a_signature_change_that_keeps_the_count_is_not_told_at_the_write() {
 }
 
 // ---------------------------------------------------------------------------
-// B9 on the other hosts: Gemini CLI, Cursor and shell heredocs (issue #28).
+// B9 on the other hosts: Cursor and shell heredocs (issue #28).
 // ---------------------------------------------------------------------------
 
 /// Alice changes `scale` in `app/api.py` to two parameters.
@@ -937,144 +937,53 @@ fn scale_takes_two(w: &World) {
     w.wait_for_notice("scale", "offset");
 }
 
-/// A Gemini CLI `replace` in `app/main.py`: its BeforeTool, then, when it
-/// succeeds, the file changed as Gemini would change it, then its AfterTool.
-fn gemini_replace(w: &World, session: &str, old: &str, new: &str, succeeds: bool) -> (Run, Run) {
-    let path = w.work().join("app/main.py");
-    let input = json!({"file_path": path, "old_string": old, "new_string": new});
-    let event = |phase: &str, response: Value| {
-        json!({"session_id": session, "cwd": w.work(), "hook_event_name": phase,
-               "tool_name": "replace", "tool_input": input, "tool_response": response})
-    };
-    let before = w.hook("gemini-cli", &event("BeforeTool", Value::Null));
-    let response = if succeeds {
-        let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains(old), "{text}");
-        fs::write(&path, text.replacen(old, new, 1)).unwrap();
-        json!({"llmContent": "Successfully modified file."})
-    } else {
-        json!({"error": {"message": "not run", "type": "edit_no_occurrence_found"}})
-    };
-    let after = w.hook("gemini-cli", &event("AfterTool", response));
-    (before, after)
+/// The context LangSpan's hooks added to `session`, as `status` reports it.
+fn context_bytes(w: &World, session: &str) -> u64 {
+    let (_, text) = w.cli(&["status", "--json"]);
+    let status: Value = serde_json::from_str(&text).unwrap();
+    status["outcome"]["state"]["activity"][session]["context"]["bytes"]
+        .as_u64()
+        .unwrap_or(0)
 }
 
-fn told_after(run: &Run) -> &str {
-    assert_eq!(run.coverage, "observed", "{}", run.detail);
-    let context = run
-        .context
-        .as_deref()
-        .unwrap_or_else(|| panic!("no alert: {}", run.detail));
-    assert!(context.starts_with(HEADER), "{context}");
-    assert!(context.contains("not instructions"), "{context}");
-    context
+fn added(runs: &[&Run]) -> u64 {
+    runs.iter()
+        .map(|run| run.context.as_ref().map_or(0, String::len) as u64)
+        .sum()
 }
 
-fn untold_after(run: &Run) {
-    assert!(
-        run.context
-            .as_deref()
-            .is_none_or(|text| !text.contains(HEADER)),
-        "{:?}",
-        run.context
-    );
-}
-
+/// Review comment 4711488164: an alert a tool hook gives at a write is
+/// context added to the session, counted like a briefing, before a Claude
+/// Code write. What a session's status reports is exactly what its hooks'
+/// replies carried.
 #[test]
-fn a_gemini_replace_is_told_of_a_broken_call_with_its_result_once() {
+fn the_context_an_alert_adds_at_a_write_is_counted_for_the_session() {
     let w = World::new(true);
     w.wait_for_index();
-    // Gina is at work before Alice changes anything.
-    let (before, _) = gemini_replace(
-        &w,
-        "gina",
-        "    return scale(2)\n",
-        "    return scale(2)\n\n",
-        true,
-    );
-    assert_eq!(before.coverage, "admitted", "{}", before.detail);
-    scale_takes_two(&w);
-
-    // A call with the new count gets nothing, before or after.
-    let (before, after) = gemini_replace(
-        &w,
-        "gina",
-        "    return scale(2)\n",
-        "    return scale(2, 0)\n",
-        true,
-    );
-    quiet(&before);
-    untold_after(&after);
-
-    // Gemini reads no context on BeforeTool: the calls are kept there and
-    // checked at AfterTool. A write that fails is not told and does not
-    // use up the notice.
-    let broken = "    total = scale(2)\n    return total\n";
-    let (before, after) = gemini_replace(&w, "gina", "    return scale(2, 0)\n", broken, false);
-    quiet(&before);
-    assert!(
-        before.detail.contains("kept for the tool's result"),
-        "{}",
-        before.detail
-    );
-    untold_after(&after);
-
-    let (before, after) = gemini_replace(&w, "gina", "    return scale(2, 0)\n", broken, true);
-    quiet(&before);
-    let context = told_after(&after);
-    assert!(
-        context.contains(r#""app/main.py":5 calls "scale" with 1 argument; it now takes 2"#),
-        "{context}"
-    );
-    assert!(
-        context.contains(r#""def scale(factor, offset)""#),
-        "{context}"
-    );
-    assert!(context.contains("claude-code.alice"), "{context}");
-    assert!(context.len() <= 1200, "{}", context.len());
-
-    // The same session's next write with the same broken call is not told
-    // again.
-    let (_, after) = gemini_replace(
-        &w,
-        "gina",
-        "    total = scale(2)\n",
-        "    total = scale(3)\n",
-        true,
-    );
-    assert_eq!(after.coverage, "observed", "{}", after.detail);
-    untold_after(&after);
-
-    // A `write_file` of another Gemini session is checked whole, and that
-    // session is still told.
-    let path = w.work().join("app/extra.py");
-    let content = "from api import scale\n\nprint(scale(1))\n";
-    let input = json!({"file_path": path, "content": content});
-    let event = |phase: &str, response: Value| {
-        json!({"session_id": "gwen", "cwd": w.work(), "hook_event_name": phase,
-               "tool_name": "write_file", "tool_input": input, "tool_response": response})
+    // Bob is at work before Alice changes anything.
+    let input =
+        |content: &str| json!({"file_path": w.work().join("src/main.rs"), "content": content});
+    let bob = |call: &str, content: &str| {
+        let pre = w.claude("bob", call, "Write", input(content), "PreToolUse");
+        let post = w.claude("bob", call, "Write", input(content), "PostToolUseFailure");
+        (pre, post)
     };
-    quiet(&w.hook("gemini-cli", &event("BeforeTool", Value::Null)));
-    fs::write(&path, content).unwrap();
-    let after = w.hook(
-        "gemini-cli",
-        &event("AfterTool", json!({"llmContent": "Wrote the file."})),
+    let (pre, post) = bob("b0", "mod api;\nfn main() {}\n");
+    let mut bob_runs = vec![pre, post];
+    w.rewrites(
+        "alice",
+        "a0",
+        "src/api.rs",
+        "pub fn resize(width: u32, height: u32) -> u32 {\n    width * height\n}\n",
     );
-    let context = told_after(&after);
-    assert!(
-        context.contains(r#""app/extra.py":3 calls "scale" with 1 argument"#),
-        "{context}"
-    );
+    w.wait_for_notice("resize", "height: u32");
 
-    // Nothing kept is left behind, and only the alert is recorded.
-    let kept = w.base.join("state").join("break-calls");
-    assert!(
-        fs::read_dir(&kept).map_or(true, |mut entries| entries.next().is_none()),
-        "{kept:?}"
-    );
-    let (_, events) = w.cli(&["events", "--limit", "1000", "--json"]);
-    assert!(events.contains("interface_alerted"), "{events}");
-    assert!(!events.contains("total = scale"), "{events}");
+    let (pre, post) = bob("b1", "mod api;\nfn main() {\n    api::resize(1);\n}\n");
+    let alert_bytes = alert(&pre).len() as u64;
+    bob_runs.extend([pre, post]);
+    let counted = context_bytes(&w, "claude-code.bob");
+    assert!(counted >= alert_bytes, "{counted} < {alert_bytes}");
+    assert_eq!(counted, added(&bob_runs.iter().collect::<Vec<_>>()));
 }
 
 #[test]
@@ -1163,82 +1072,6 @@ fn a_quoted_heredoc_writing_a_broken_call_is_told_before_it_runs() {
     );
     assert!(again.context.is_none(), "{:?}", again.context);
     assert!(again.detail.contains("break check"), "{}", again.detail);
-}
-
-/// Review 4703451339: a Gemini edit the user changes in its confirmation
-/// dialog keeps its call ID, but what lands is the changed input. The calls
-/// kept from the original input are not checked against it, and the notice
-/// is left for a later write that really has the broken call.
-#[test]
-fn a_gemini_edit_changed_at_confirmation_is_not_told_of_the_calls_it_no_longer_has() {
-    let w = World::new(true);
-    w.wait_for_index();
-    let (before, _) = gemini_replace(
-        &w,
-        "gina",
-        "    return scale(2)\n",
-        "    return scale(2)\n\n",
-        true,
-    );
-    assert_eq!(before.coverage, "admitted", "{}", before.detail);
-    scale_takes_two(&w);
-
-    let path = w.work().join("app/main.py");
-    let proposed = json!({"file_path": path, "old_string": "    return scale(2)\n",
-                          "new_string": "    total = scale(2)\n    return total\n"});
-    let corrected = json!({"file_path": path, "old_string": "    return scale(2)\n",
-                           "new_string": "    total = scale(2, 0)\n    return total\n"});
-    let event = |phase: &str, input: &Value, response: Value| {
-        json!({"session_id": "gina", "cwd": w.work(), "hook_event_name": phase,
-               "tool_name": "replace", "tool_input": input, "tool_response": response})
-    };
-    let before = w.hook("gemini-cli", &event("BeforeTool", &proposed, Value::Null));
-    quiet(&before);
-    assert!(
-        before.detail.contains("kept for the tool's result"),
-        "{}",
-        before.detail
-    );
-    let text = fs::read_to_string(&path).unwrap();
-    fs::write(
-        &path,
-        text.replacen(
-            "    return scale(2)\n",
-            "    total = scale(2, 0)\n    return total\n",
-            1,
-        ),
-    )
-    .unwrap();
-    let after = w.hook(
-        "gemini-cli",
-        &event(
-            "AfterTool",
-            &corrected,
-            json!({"llmContent": "Successfully modified file."}),
-        ),
-    );
-    assert_eq!(after.coverage, "observed_mismatch", "{}", after.detail);
-    untold_after(&after);
-    let kept = w.base.join("state").join("break-calls");
-    assert!(
-        fs::read_dir(&kept).map_or(true, |mut entries| entries.next().is_none()),
-        "{kept:?}"
-    );
-
-    // The notice was not used up: a write that really has the broken call
-    // is still told.
-    let (_, after) = gemini_replace(
-        &w,
-        "gina",
-        "    total = scale(2, 0)\n",
-        "    total = scale(2)\n",
-        true,
-    );
-    let context = told_after(&after);
-    assert!(
-        context.contains(r#""app/main.py":5 calls "scale" with 1 argument; it now takes 2"#),
-        "{context}"
-    );
 }
 
 /// Review 4703578513: a name missing from the index is no proof it is gone

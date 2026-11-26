@@ -405,6 +405,7 @@ fn a_refusal_is_settled_by_the_next_admitted_write_or_the_stop() {
         Command::SessionStop {
             session_id: "bob".into(),
             failure: None,
+            prompt_id: None,
         },
         90,
     );

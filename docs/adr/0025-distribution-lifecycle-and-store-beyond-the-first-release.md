@@ -205,7 +205,8 @@ built ([issue #94](https://github.com/Langspan/LangSpan.dev/issues/94)):
   saw alive less than 15 seconds before.
 - `status` and `langspan_status` give `summary.last_hook_age_ms` per shown
   session, next to the probe result in `session_liveness`. No new command.
-- Cursor and Gemini CLI process names are not recognised yet: they are added
+- Cursor process names are not recognised yet (Gemini CLI support was removed,
+  ADR 0033): they are added
   on both platforms once seen on a real host. Until then their sessions rely
   on hook runs alone.
 

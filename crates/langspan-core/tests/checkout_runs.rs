@@ -162,6 +162,7 @@ fn notices(state: &mut State, session: &str, now: u64) -> Vec<CheckoutNotice> {
             recent: false,
             recent_window_ms: None,
             mcp: false,
+            changes_only: false,
             left: Vec::new(),
         },
         now,

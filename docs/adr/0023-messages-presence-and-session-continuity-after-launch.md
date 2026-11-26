@@ -43,7 +43,7 @@ events and can follow them.
 
 ## Recent change at session start (C3)
 
-A session-start hook (Claude Code, Codex and Gemini CLI `SessionStart`,
+A session-start hook (Claude Code and Codex `SessionStart`,
 Cursor `sessionStart`) sends its `brief` with `recent: true`; nothing else
 does, and the core refuses `recent` together with `mid_turn`. The daemon
 replaces any `recent_window_ms` a client sends with its own configuration

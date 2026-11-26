@@ -345,11 +345,62 @@ fn the_code_section_and_a_long_peer_briefing_share_the_cap() {
     assert!(context.contains("more session(s) not shown"), "{context}");
     assert_upload_section(&context);
 
-    // The peers have not changed, so only the code section comes again.
+    let shown = peers_in(&context);
+    assert!(!shown.is_empty() && shown.len() < 6, "{context}");
+
+    // The peers the cap left out were never told (issue #222): the next turn
+    // tells them, as a briefing of changes only, within the same cap.
     let again = w.prompt("claude-code", "alice", "Why does upload fail?", &[]);
-    assert_eq!(again.coverage, "code_briefed");
+    assert_eq!(again.coverage, "briefed", "{}", again.stdout);
     let context = again.context.unwrap();
+    assert!(context.len() <= 2400, "{}: {context}", context.len());
+    assert!(context.contains("What changed since your last briefing"));
+    assert!(context.contains("unchanged item(s) from earlier briefings"));
+    assert_upload_section(&context);
+    let retold = peers_in(&context);
+    assert!(retold.iter().all(|peer| !shown.contains(peer)), "{context}");
+    assert_eq!(shown.len() + retold.len(), 6, "{context}");
+
+    // Now nothing about the peers is new, so only the code section comes again.
+    let third = w.prompt("claude-code", "alice", "Why does upload fail?", &[]);
+    assert_eq!(third.coverage, "code_briefed");
+    let context = third.context.unwrap();
     assert!(context.starts_with(HEADER), "{context}");
+}
+
+#[test]
+fn a_changes_only_briefing_and_the_code_section_share_the_cap() {
+    let w = World::new();
+    w.wait_for_index();
+    w.writes("peer0", "first", "first.txt");
+    let run = w.prompt("claude-code", "alice", "Why does upload fail?", &[]);
+    assert_eq!(run.coverage, "briefed", "{}", run.stdout);
+    // Then six peers do new work with long file names: every line is news,
+    // and the changes alone would fill nearly the whole cap.
+    for peer in 0..6 {
+        for file in 0..2 {
+            let name = format!("later-{peer}-{file}-{}.txt", "n".repeat(140));
+            w.writes(&format!("peer{peer}"), &format!("q{peer}-{file}"), &name);
+        }
+    }
+    let again = w.prompt("claude-code", "alice", "Why does upload fail?", &[]);
+    assert_eq!(again.coverage, "briefed", "{}", again.stdout);
+    let context = again.context.unwrap();
+    assert!(context.len() <= 2400, "{}: {context}", context.len());
+    assert!(
+        context.contains("What changed since your last briefing"),
+        "{context}"
+    );
+    assert!(context.contains("more session(s) not shown"), "{context}");
+    assert_upload_section(&context);
+}
+
+/// The peer session IDs a briefing's lines name.
+fn peers_in(context: &str) -> Vec<String> {
+    (0..6)
+        .map(|n| format!("peer{n}"))
+        .filter(|peer| context.contains(&format!("claude-code session {peer} ")))
+        .collect()
 }
 
 #[test]

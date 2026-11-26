@@ -10,7 +10,9 @@ use tree_sitter::{Node, Parser};
 
 mod calls;
 mod csharp;
+mod resolve;
 pub use calls::{Arity, Call, MAX_CALLS, arity, calls};
+pub use resolve::resolve_import;
 
 /// Larger inputs are refused rather than partly parsed.
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -721,6 +723,12 @@ fn visit(
         }
     }
     None
+}
+
+/// Whether two signatures are one interface by `comparable`'s rule: they
+/// differ at most in formatting.
+pub fn same_signature(one: &str, other: &str) -> bool {
+    comparable(one) == comparable(other)
 }
 
 /// How one exported symbol differs between two versions of a file.
