@@ -100,6 +100,59 @@ pub fn git_steps(command: &str) -> Result<Vec<GitStep>, &'static str> {
     Ok(steps)
 }
 
+/// Git subcommands that can change the checkout under the sessions in it:
+/// its branch, its HEAD with files, or many files at once.
+const CHECKOUT_SUBCOMMANDS: &[&str] = &[
+    "am",
+    "checkout",
+    "cherry-pick",
+    "commit",
+    "merge",
+    "pull",
+    "rebase",
+    "reset",
+    "restore",
+    "revert",
+    "stash",
+    "switch",
+];
+
+/// Whether `command` runs a Git operation that can change the checkout
+/// (`git merge`, `pull`, `rebase`, `reset`, `checkout`, `switch`, `stash`
+/// and the like) in the repository it starts in (issue #139). A command too
+/// long or too unusual to read, or one naming another Git directory or work
+/// tree, does not.
+pub fn moves_checkout(command: &str) -> bool {
+    if command.len() > MAX_GIT_COMMAND_BYTES || !command.contains("git") {
+        return false;
+    }
+    let Ok(segments) = Lexer::new(command).segments() else {
+        return false;
+    };
+    segments.iter().any(|words| match command_words(words) {
+        [first, rest @ ..] if first.text == "git" || first.text.ends_with("/git") => {
+            subcommand(rest).is_some_and(|name| CHECKOUT_SUBCOMMANDS.contains(&name))
+        }
+        _ => false,
+    })
+}
+
+/// The subcommand of one `git …` command, after the word `git`.
+fn subcommand(words: &[Word]) -> Option<&str> {
+    let mut at = 0;
+    while let Some(word) = words.get(at) {
+        match word.text.as_str() {
+            "-C" | "-c" => at += 2,
+            text if text.starts_with("--git-dir") || text.starts_with("--work-tree") => {
+                return None;
+            }
+            text if text.starts_with('-') => at += 1,
+            text => return Some(text),
+        }
+    }
+    None
+}
+
 /// A simple command's words from the command it runs, past the words that
 /// run the command that follows: assignments, reserved words and the usual
 /// wrappers (`if git …`, `env X=1 git …`).
@@ -715,6 +768,42 @@ mod tests {
             pathspecs: pathspecs.iter().map(|p| (*p).to_owned()).collect(),
             update,
         }
+    }
+
+    #[test]
+    fn a_git_operation_that_changes_the_checkout_is_recognised() {
+        for command in [
+            "git merge origin/main",
+            "git pull --rebase",
+            "git rebase main",
+            "git reset --hard HEAD~1",
+            "git checkout other",
+            "git switch -c topic",
+            "git stash",
+            "git -C . -c core.pager=cat merge --no-edit origin/main",
+            "cargo build && git fetch origin && git merge origin/main",
+            "if git merge origin/main; then echo ok; fi",
+            "env GIT_EDITOR=true git rebase --continue",
+            "/usr/bin/git cherry-pick abc123",
+            "git commit -m \"$(cat <<'EOF'\nmerge it\nEOF\n)\"",
+        ] {
+            assert!(moves_checkout(command), "{command}");
+        }
+        for command in [
+            "git status",
+            "git log --oneline -- merge",
+            "git fetch origin",
+            "git diff origin/main",
+            "echo git merge",
+            "cargo test",
+            "git --git-dir=/elsewhere/.git merge x",
+            "git --work-tree /elsewhere checkout x",
+            "",
+        ] {
+            assert!(!moves_checkout(command), "{command}");
+        }
+        let long = format!("git merge {}", "x".repeat(MAX_GIT_COMMAND_BYTES));
+        assert!(!moves_checkout(&long), "a command past the read limit");
     }
 
     #[test]

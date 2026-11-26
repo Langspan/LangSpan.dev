@@ -332,6 +332,86 @@ fn dry_run_writes_nothing_and_apply_then_uninstall_round_trips_every_file() {
     assert_eq!(nothing.matches("already matches").count(), 4, "{nothing}");
 }
 
+/// `--mcp-tools hooked` (roadmap I11) writes `--tools hooked --host NAME`
+/// into the Claude Code and Codex entries only after `--apply`, the entry
+/// stays recognised as LangSpan's, and `uninstall --apply` removes it with
+/// the flag. Installing again without the option goes back to every tool.
+#[test]
+fn a_hooked_tool_list_is_written_only_on_apply_and_removed_with_the_entry() {
+    let home = Home::new();
+    home.claude_and_codex();
+    let before = home.files();
+    let args = |host: &str| {
+        json!([
+            "mcp",
+            "--state-dir",
+            home.state_dir(),
+            "--tools",
+            "hooked",
+            "--host",
+            host
+        ])
+    };
+
+    let dry = home.ok(&["install", "--mcp-tools", "hooked"]);
+    assert!(dry.contains("Dry run; nothing was written"), "{dry}");
+    assert!(dry.contains("\"--tools\",\"hooked\""), "{dry}");
+    assert!(
+        dry.contains("\"--tools\", \"hooked\", \"--host\", \"codex\""),
+        "{dry}"
+    );
+    assert_eq!(home.files(), before, "a dry run writes nothing");
+
+    home.ok(&["install", "--mcp-tools", "hooked", "--apply"]);
+    let claude: Value =
+        serde_json::from_str(&fs::read_to_string(home.home().join(".claude.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        claude["mcpServers"]["langspan"]["args"],
+        args("claude-code")
+    );
+    let toml = fs::read_to_string(home.home().join(".codex/config.toml")).unwrap();
+    assert!(
+        toml.contains("\"--tools\", \"hooked\", \"--host\", \"codex\"]"),
+        "{toml}"
+    );
+    let again = home.ok(&["install", "--mcp-tools", "hooked", "--apply"]);
+    assert_eq!(again.matches("already matches").count(), 4, "{again}");
+    let doctor = home.langspan(&["doctor"]);
+    let doctor = String::from_utf8_lossy(&doctor.stdout);
+    assert!(
+        !doctor.contains("LangSpan did not write it"),
+        "the hooked entry is still LangSpan's: {doctor}"
+    );
+
+    // `all`, the default, writes the entry without the flag.
+    home.ok(&["install", "--mcp-tools", "all", "--apply"]);
+    let claude: Value =
+        serde_json::from_str(&fs::read_to_string(home.home().join(".claude.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        claude["mcpServers"]["langspan"]["args"],
+        json!(["mcp", "--state-dir", home.state_dir()])
+    );
+    home.ok(&["install", "--mcp-tools", "hooked", "--apply"]);
+    home.ok(&["uninstall", "--apply"]);
+    assert_eq!(
+        home.files(),
+        before,
+        "uninstall removes the flag with the entry"
+    );
+
+    let wrong = home.langspan(&["install", "--mcp-tools", "some"]);
+    assert!(!wrong.status.success());
+    assert!(
+        String::from_utf8_lossy(&wrong.stderr).contains("all or hooked"),
+        "{wrong:?}"
+    );
+    let wrong = home.langspan(&["uninstall", "--mcp-tools", "hooked"]);
+    assert!(!wrong.status.success());
+    assert_eq!(home.files(), before);
+}
+
 #[test]
 fn default_hosts_are_those_present_and_refusals_write_nothing() {
     let home = Home::new();

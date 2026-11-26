@@ -1,8 +1,8 @@
 //! The coordination benchmark harness in `benchmarks/coordination/`, run in
 //! its dry-run mode through the `langspan` binary this checkout builds: real
-//! Git clones, real SQLite, real coordinators on Unix sockets sharing
-//! through a real Git remote, and real child processes. No model runs; the
-//! agent is the harness's stand-in.
+//! Git clones and worktrees, real SQLite, a real coordinator on a Unix
+//! socket, and real child processes. No model runs; the agent is the
+//! harness's stand-in.
 //!
 //! The harness is Python (standard library only), so these tests need
 //! `python3` 3.9 or later on `PATH`. Each Rust test runs one part of the
@@ -70,6 +70,14 @@ fn dry_run_langspan_arm_ignoring_briefings() {
 #[test]
 fn dry_run_langspan_arm_following_briefings() {
     python_suite("test_driver.py", Some("dry_run_arm_langspan_follow"));
+}
+
+#[test]
+fn dry_run_hedging_fails_the_contradictory_family() {
+    python_suite(
+        "test_driver.py",
+        Some("dry_run_hedging_fails_the_contradictory_family_in_every_arm"),
+    );
 }
 
 #[test]
