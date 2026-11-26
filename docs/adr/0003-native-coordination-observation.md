@@ -299,6 +299,47 @@ in `tests/repository_shapes.rs`, through the real hook executable,
 `a_file_changed_after_a_peers_edit_is_refused_once_without_naming_the_peer` in
 `crates/langspan-core/tests/source_versions.rs`.
 
+Amended 25 November 2026 (issue #139). A session's own Git command is not
+news to it. The shell hooks (ADR 0011) read each command line for a Git
+operation that can change the checkout (`git merge`, `pull`, `rebase`,
+`reset`, `checkout`, `switch`, `restore`, `stash`, `cherry-pick`, `revert`,
+`am`, `commit`; not one naming another `--git-dir` or `--work-tree`). When
+such a command finishes with the branch or HEAD moved, or files changed, the
+post-tool hook records a checkout run: the session, its redacted command line
+(at most 120 bytes), the branch and HEAD it left, how long it ran, and how
+long ago it finished. The hook reads the daemon's own clock (time since
+boot, sleep included; not wall time) when the command starts and finishes
+and keeps both readings in its record; it sends durations, not times, and
+the daemon places the run back from its own now by them, so the run never
+reaches past the daemon's now. A report redelivered after the daemon was
+unreachable sends the age measured at that delivery, so the run keeps its
+own window rather than moving to the retry's arrival: a retry neither loses
+the command's change nor credits a later one to it. A retry differing from
+a recorded report only in that age is the same request. A record written
+before these readings, or with a finish reading later than the clock now
+(taken before a reboot restarted it), reports the run as finishing on
+arrival; a run reported after a reboot is in a new generation and explains
+no change from before it. A duration counts as two hours at most. The
+run explains a checkout change the scan observed while it ran, or the first
+change observed after it, within 60 seconds, at the branch and HEAD it left.
+Once a scan while it ran has seen that branch and HEAD, no later change is
+its, so a later file restore at the same HEAD is still told. The run also
+records whether the command changed any file's content. One that changed
+none, as a commit does, gets no checkout change from the scan, so a change
+after it with branch and HEAD in place, such as a file restore, is not its.
+Either order
+works: the scan may see the change before the hook reports, or
+after. The session that ran it is not told of a change it explains; every
+other session in the checkout still is, with that session and its command
+named. A change no run explains, such as the owner's `git checkout` in a
+terminal, is told to every session as before, naming nobody. This is
+attribution by timing and the command line, not proof: a change someone else
+makes while the command runs is taken as the command's. Stale refusals (ADR
+0005) are unchanged. Tests:
+`a_sessions_own_merge_is_not_briefed_to_it_and_is_named_to_the_others` in
+`tests/repository_shapes.rs`, with two sessions in one checkout and one
+merging through its shell tool, and `crates/langspan-core/tests/checkout_runs.rs`.
+
 #### Changes no hook reported, with a Codex session registered
 
 Amended 25 November 2026 (issue #129). Codex keys hook trust to the exact path

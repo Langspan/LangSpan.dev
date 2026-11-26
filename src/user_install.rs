@@ -91,15 +91,53 @@ pub fn host_files(vendor: Vendor, home: &Path, override_dir: Option<PathBuf>) ->
 pub struct McpServer {
     pub executable: PathBuf,
     pub state_dir: PathBuf,
+    /// `install --mcp-tools hooked` (roadmap I11): the host whose hooks
+    /// shorten the tool list, written as `--tools hooked --host NAME`.
+    /// `None` lists every tool.
+    pub hooked_host: Option<String>,
 }
 
 impl McpServer {
-    pub fn args(&self) -> [String; 3] {
-        [
+    pub fn args(&self) -> Vec<String> {
+        let mut args = vec![
             "mcp".into(),
             "--state-dir".into(),
             self.state_dir.to_string_lossy().into_owned(),
-        ]
+        ];
+        if let Some(host) = &self.hooked_host {
+            args.extend([
+                "--tools".into(),
+                "hooked".into(),
+                "--host".into(),
+                host.clone(),
+            ]);
+        }
+        args
+    }
+
+    /// The server `args` describe, if they are exactly what `args` writes.
+    fn from_args(executable: PathBuf, args: &[String]) -> Option<Self> {
+        let (state_dir, hooked_host) = match args {
+            [mcp, option, state_dir] if mcp == "mcp" && option == "--state-dir" => {
+                (state_dir, None)
+            }
+            [mcp, option, state_dir, tools, hooked, host_option, host]
+                if mcp == "mcp"
+                    && option == "--state-dir"
+                    && tools == "--tools"
+                    && hooked == "hooked"
+                    && host_option == "--host"
+                    && crate::mcp::HOOKED_HOSTS.contains(&host.as_str()) =>
+            {
+                (state_dir, Some(host.clone()))
+            }
+            _ => return None,
+        };
+        Some(Self {
+            executable,
+            state_dir: state_dir.into(),
+            hooked_host,
+        })
     }
 
     /// Claude Code's stdio entry, in the shape its documentation shows.
@@ -153,17 +191,16 @@ pub fn parse_claude_entry(entry: &Value) -> Option<McpServer> {
         }
     }
     let command = entry.get("command")?.as_str()?;
-    let args = entry.get("args")?.as_array()?;
-    let [mcp, option, state_dir] = args.as_slice() else {
-        return None;
-    };
-    if mcp != "mcp" || option != "--state-dir" || !is_langspan_executable(command) {
+    if !is_langspan_executable(command) {
         return None;
     }
-    Some(McpServer {
-        executable: command.into(),
-        state_dir: state_dir.as_str()?.into(),
-    })
+    let args = entry
+        .get("args")?
+        .as_array()?
+        .iter()
+        .map(|arg| arg.as_str().map(str::to_owned))
+        .collect::<Option<Vec<String>>>()?;
+    McpServer::from_args(command.into(), &args)
 }
 
 /// Return an `mcpServers` configuration with LangSpan's server set
@@ -398,14 +435,12 @@ pub fn parse_codex(text: &str) -> Result<Option<McpServer>, String> {
             args = Some(values);
         }
     }
-    match (command, args.as_deref()) {
-        (Some(command), Some([mcp, option, state_dir])) if mcp == "mcp" && option == "--state-dir" => {
-            Ok(Some(McpServer {
-                executable: command.into(),
-                state_dir: state_dir.into(),
-            }))
-        }
-        _ => Err("LangSpan's block in config.toml was edited and is no longer recognised; nothing was changed. Remove the block by hand, then run this again".into()),
+    match command
+        .zip(args)
+        .and_then(|(command, args)| McpServer::from_args(command.into(), &args))
+    {
+        Some(server) => Ok(Some(server)),
+        None => Err("LangSpan's block in config.toml was edited and is no longer recognised; nothing was changed. Remove the block by hand, then run this again".into()),
     }
 }
 
@@ -537,7 +572,89 @@ mod tests {
         McpServer {
             executable: "/opt/bin/langspan".into(),
             state_dir: state.into(),
+            hooked_host: None,
         }
+    }
+
+    fn hooked(state: &str, host: &str) -> McpServer {
+        McpServer {
+            hooked_host: Some(host.into()),
+            ..server(state)
+        }
+    }
+
+    /// `--mcp-tools hooked` entries round-trip, are replaced in place by a
+    /// plain one and removed exactly; an edited flag is not LangSpan's.
+    #[test]
+    fn a_hooked_entry_is_recognised_replaced_and_removed() {
+        let original = json!({"mcpServers":{"other":{"command":"npx"}}});
+        let installed = plan_claude(original.clone(), Some(&hooked("/s", "claude-code"))).unwrap();
+        let entry = &installed["mcpServers"]["langspan"];
+        assert_eq!(
+            entry["args"],
+            json!([
+                "mcp",
+                "--state-dir",
+                "/s",
+                "--tools",
+                "hooked",
+                "--host",
+                "claude-code"
+            ])
+        );
+        assert_eq!(parse_claude_entry(entry), Some(hooked("/s", "claude-code")));
+        let plain = plan_claude(installed.clone(), Some(&server("/s"))).unwrap();
+        assert_eq!(
+            plain["mcpServers"]["langspan"]["args"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(plan_claude(installed, None).unwrap(), original);
+        for edited in [
+            json!(["mcp", "--state-dir", "/s", "--tools", "hooked"]),
+            json!([
+                "mcp",
+                "--state-dir",
+                "/s",
+                "--tools",
+                "hooked",
+                "--host",
+                "cursor"
+            ]),
+            json!([
+                "mcp",
+                "--state-dir",
+                "/s",
+                "--tools",
+                "all",
+                "--host",
+                "codex"
+            ]),
+            json!([
+                "mcp",
+                "--state-dir",
+                "/s",
+                "--host",
+                "codex",
+                "--tools",
+                "hooked"
+            ]),
+        ] {
+            let entry = json!({"command": "/opt/bin/langspan", "args": edited});
+            assert_eq!(parse_claude_entry(&entry), None, "{entry}");
+        }
+
+        let text = plan_codex(None, Some(&hooked("/s", "codex"))).unwrap();
+        assert!(
+            text.contains("args = [\"mcp\", \"--state-dir\", \"/s\", \"--tools\", \"hooked\", \"--host\", \"codex\"]"),
+            "{text}"
+        );
+        assert_eq!(parse_codex(&text).unwrap(), Some(hooked("/s", "codex")));
+        let plain = plan_codex(Some(&text), Some(&server("/s"))).unwrap();
+        assert_eq!(parse_codex(&plain).unwrap(), Some(server("/s")));
+        assert_eq!(plan_codex(Some(&text), None).unwrap(), "");
     }
 
     #[test]
@@ -590,6 +707,7 @@ mod tests {
         let renamed = McpServer {
             executable: "/opt/bin/langspan-0.2".into(),
             state_dir: "/s".into(),
+            hooked_host: None,
         };
         assert!(plan_claude(json!({}), Some(&renamed)).is_err());
     }

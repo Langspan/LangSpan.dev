@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 mod formatters;
 mod git_commands;
 pub use formatters::{Formatting, Reach, formatters};
-pub use git_commands::{GitStep, git_steps};
+pub use git_commands::{GitStep, git_steps, moves_checkout};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -657,6 +657,10 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub head: Option<String>,
+    /// The branch checked out, as `refs/heads/NAME`; `None` when `HEAD` is
+    /// detached, or in a record written before this was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub files: BTreeMap<String, Entry>,
     /// A merge, rebase, cherry-pick or revert is under way, or a file is
     /// conflicted. Nothing is denied then.
@@ -731,6 +735,7 @@ pub fn snapshot(root: &Path, deadline: Instant) -> Result<Snapshot, String> {
     .map_err(|e| format!("git status: {e}"))?;
     let mut snapshot = Snapshot {
         head,
+        branch: checked_out_branch(&git_dir),
         files: BTreeMap::new(),
         in_progress,
     };
@@ -778,6 +783,52 @@ pub fn snapshot(root: &Path, deadline: Instant) -> Result<Snapshot, String> {
         );
     }
     Ok(snapshot)
+}
+
+/// The branch `HEAD` names in the Git directory `git_dir`, as
+/// `refs/heads/NAME`, read from its `HEAD` file (at most 1 KiB). `None` when
+/// it is detached or cannot be read.
+fn checked_out_branch(git_dir: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    fs::File::open(git_dir.join("HEAD"))
+        .ok()?
+        .take(1024)
+        .read_to_string(&mut text)
+        .ok()?;
+    let reference = text.strip_prefix("ref: ")?.trim_end();
+    (reference.len() > "refs/heads/".len()
+        && reference.starts_with("refs/heads/")
+        && !reference.chars().any(char::is_control))
+    .then(|| reference.to_owned())
+}
+
+/// The checkout a run's Git command left (`Record::checkout`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckoutLeft {
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    /// It changed no file's content, as a commit does. Absent from a record
+    /// written before it was kept.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub files_unchanged: bool,
+}
+
+/// What a run whose command runs a Git operation that changes the checkout
+/// (`moves_checkout`) left, when the checkout changed while it ran: another
+/// branch or HEAD, or files changed with them in place (a restore or stash).
+pub fn checkout_left(
+    before: &Snapshot,
+    after: &Snapshot,
+    changed_files: bool,
+) -> Option<CheckoutLeft> {
+    (before.head != after.head || before.branch != after.branch || changed_files).then(|| {
+        CheckoutLeft {
+            branch: after.branch.clone(),
+            head: after.head.clone(),
+            files_unchanged: !changed_files,
+        }
+    })
 }
 
 fn unversioned() -> String {
@@ -898,9 +949,50 @@ pub struct Record {
     /// refusal to name. `None` in a record written before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// The command runs a Git operation that changes the checkout
+    /// (`moves_checkout`), read from the whole command line.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub moves_checkout: bool,
+    /// Once finished: the checkout such a command left, when the checkout
+    /// changed while it ran (issue #139).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<CheckoutLeft>,
+    /// When the command started and finished on the daemon's clock
+    /// (`crate::clock`, time since boot, the same in every process on this
+    /// machine), unlike the wall-clock `started_ms` and `finished_ms`. A
+    /// checkout run's report sends durations measured on it, so a
+    /// redelivered report keeps the command's window (issue #139). `None`
+    /// in a record written before they were kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_clock_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_clock_ms: Option<u64>,
 }
 
 impl Record {
+    /// A finished run's timing for its checkout run's report, as durations
+    /// on the daemon's clock read at `now_clock`: how long it ran and how
+    /// long ago it finished. A record without those readings (written
+    /// before they were kept) reports the wall-clock duration, finished now,
+    /// as does a finish reading later than `now_clock` (taken before a
+    /// reboot restarted the clock). A reading from before a reboot that is
+    /// earlier than `now_clock` gives a wrong age; the daemon's run is then
+    /// in a new generation, so it explains no change from before the reboot.
+    pub fn checkout_timing(&self, now_clock: u64) -> (u64, u64) {
+        match (self.started_clock_ms, self.finished_clock_ms) {
+            (Some(started), Some(finished)) => (
+                finished.saturating_sub(started),
+                now_clock.saturating_sub(finished),
+            ),
+            _ => (
+                self.finished_ms
+                    .unwrap_or(self.started_ms)
+                    .saturating_sub(self.started_ms),
+                0,
+            ),
+        }
+    }
+
     /// Of `changed`, the paths this run's session is credited with: neither
     /// contested nor another session's edit.
     pub fn attributed(&self, changed: &[String]) -> Vec<String> {
@@ -2075,6 +2167,7 @@ mod diff {
     fn snap(files: &[(&str, &str, FileState)]) -> Snapshot {
         Snapshot {
             head: Some("h".into()),
+            branch: None,
             files: files
                 .iter()
                 .map(|(path, code, state)| {
@@ -2284,6 +2377,10 @@ mod diff {
             edited_elsewhere: Vec::new(),
             reformatted: Vec::new(),
             command: None,
+            moves_checkout: false,
+            checkout: None,
+            started_clock_ms: None,
+            finished_clock_ms: None,
         };
         let note = marks(&state).join(OVERFLOW);
         assert!(!overlapping_edits(&state, &run).incomplete);
@@ -2315,5 +2412,34 @@ mod diff {
         assert!(!mark_path(&state, "late").exists());
         assert!(read_overflow(&state).unwrap().is_some_and(|at| at >= now));
         fs::remove_dir_all(&state).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod checkout_timing {
+    use super::*;
+
+    /// A finished record as a build before the daemon-clock readings wrote
+    /// it: wall-clock times only.
+    fn older() -> Record {
+        serde_json::from_value(serde_json::json!({
+            "session_id": "s", "started_ms": 1_700_000_000_000_u64, "admitted": true,
+            "before": {"Err": "test"}, "finished_ms": 1_700_000_000_300_u64, "changed": null,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn durations_come_from_the_daemons_clock_and_an_older_record_reports_now() {
+        let mut record = older();
+        assert_eq!(record.started_clock_ms, None);
+        // No readings: the wall-clock duration, finished as reported.
+        assert_eq!(record.checkout_timing(5_000), (300, 0));
+        // Both readings: the run on the daemon's clock, and its age now.
+        record.started_clock_ms = Some(1_000);
+        record.finished_clock_ms = Some(1_250);
+        assert_eq!(record.checkout_timing(5_000), (250, 3_750));
+        // A finish reading later than the clock now: finished now.
+        assert_eq!(record.checkout_timing(100), (250, 0));
     }
 }

@@ -97,6 +97,12 @@ pub fn redact_command(command: &mut Command) {
                 results.skipped.retain(|name| !contains_secret(name));
             }
         }
+        Command::ObserveCheckoutRun {
+            command: Some(command),
+            ..
+        } => {
+            *command = redact_bounded(command, langspan_core::MAX_CHECKOUT_COMMAND_BYTES);
+        }
         _ => {}
     }
 }
