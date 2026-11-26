@@ -123,6 +123,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  Files the index cannot answer for: partial, never
                                  parsed cleanly, waiting, too large, left out of the
                                  scan, and other languages by extension
+  graph export WORKSPACE --out FILE
+                                 Write the source index to a new owner-only FILE
+                                 (JSON Lines); it never replaces an existing file
+  graph import WORKSPACE --in FILE [--apply]
+                                 Dry run: how many exported files have the same
+                                 content here. --apply loads those the index does
+                                 not hold yet; the rest are indexed from disk
   graph history WORKSPACE NAME [--path PATH] [--limit N] [--before SEQ]
                                  The recorded interface changes of definitions named
                                  NAME, newest first (--limit 1 to 50, default 10):
@@ -161,6 +168,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  staged or not. Refuses (exit 1) a hunk whose author is
                                  not known. Without --session, the session whose shell
                                  call is running it now
+  adopt SESSION [--session ID] [--root DIR]
+                                 Take over the uncommitted lines an ended session left
+                                 in this workspace: status --mine and commit --mine then
+                                 treat them as this session's; lines another session
+                                 also wrote stay shared. Refused for a live session and
+                                 for one of another workspace. Recorded as an event.
+                                 Session found as for commit --mine
   message WORKSPACE TEXT [PATH...] [--to SESSION] [--from SESSION]
                                  Send one line to a session, or without --to to every
                                  other session of the workspace. Without --from it is
@@ -1920,6 +1934,37 @@ fn notify(
     match &found {
         Some((program, path)) => println!("notifier: {} ({})", program.name(), path.display()),
         None => println!("notifier: none found (no {program} on PATH); no notice can be shown"),
+    }
+    Ok(0)
+}
+
+/// `adopt SESSION`: take over an ended session's uncommitted lines (issue
+/// #161). The adopting session is `--session`, or the one running this
+/// command through its shell tool.
+fn adopt(
+    state_dir: &std::path::Path,
+    from: &str,
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    let root = match options.remove("--root") {
+        Some(root) => PathBuf::from(root),
+        None => std::env::current_dir()?,
+    };
+    let session = options.remove("--session");
+    let request_id = options.remove("--request-id");
+    no_unused_options(options)?;
+    let session = match session {
+        Some(session) => session,
+        None => langspan::commit::running_session(state_dir, &root)?,
+    };
+    let request_id = request_id.unwrap_or_else(|| unique("adopt", &[&session, from]));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let report = langspan::adopt::adopt(state_dir, &request_id, &session, from, deadline)?;
+    if json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        println!("{}", report.text());
     }
     Ok(0)
 }
@@ -3712,6 +3757,11 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             return notify(&state_dir, action, &mut options, json);
         }
         ["commit"] => return commit_mine(&state_dir, &mut options, json),
+        // `adopt SESSION` or `adopt -- SESSION`, for an ID that begins with
+        // a hyphen.
+        ["adopt"] | ["adopt", _] if words.len() == 2 => {
+            return adopt(&state_dir, words[1], &mut options, json);
+        }
         ["status"] if options.remove("--mine").is_some() => {
             return status_mine(&state_dir, &mut options, json);
         }
@@ -3736,10 +3786,14 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     {
         return hooks(vendor, *action == "install", state_dir, &mut options, apply);
     }
-    let removes_workspace = matches!(words.as_slice(), ["workspace", "remove", _]);
-    if apply && before_command != ["compact"] && !removes_workspace {
+    let takes_apply = before_command == ["compact"]
+        || matches!(
+            words.as_slice(),
+            ["workspace", "remove", _] | ["graph", "import", _]
+        );
+    if apply && !takes_apply {
         return Err(
-            "--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact` and `workspace remove`"
+            "--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"
                 .into(),
         );
     }
@@ -3865,6 +3919,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 // A look from the terminal is not a delivery to the session.
                 deliver: false,
                 mid_turn: false,
+                left: Vec::new(),
                 recent: options.remove("--recent").is_some(),
                 recent_window_ms: None,
                 mcp: false,
@@ -3931,6 +3986,15 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                     },
                 }
             }
+            ["graph", "export", workspace] => Command::GraphExport {
+                workspace_id: (*workspace).into(),
+                path: absolute_option(&mut options, "--out")?,
+            },
+            ["graph", "import", workspace] => Command::GraphImport {
+                workspace_id: (*workspace).into(),
+                path: absolute_option(&mut options, "--in")?,
+                apply,
+            },
             ["graph", "history", workspace, name] => Command::History {
                 workspace_id: (*workspace).into(),
                 name: (*name).into(),
@@ -4049,6 +4113,8 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 | Command::GraphReferences { .. }
                 | Command::GraphImpact { .. }
                 | Command::GraphBlindSpots { .. }
+                | Command::GraphExport { .. }
+                | Command::GraphImport { .. }
                 | Command::Recap { .. }
                 | Command::ShowMessage { .. }
                 | Command::MessageStatus { .. }
@@ -4094,7 +4160,19 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             },
         )?;
     }
-    let mut response = client::call(&state_dir, &request)?;
+    let mut response = if matches!(
+        request.command,
+        Command::GraphExport { .. } | Command::GraphImport { .. }
+    ) {
+        // The daemon allows an index transfer up to two minutes.
+        client::call_until(
+            &state_dir,
+            &request,
+            std::time::Instant::now() + std::time::Duration::from_secs(125),
+        )?
+    } else {
+        client::call(&state_dir, &request)?
+    };
     // As at a session's start: work ended sessions left is named only while
     // the line journal shows it still uncommitted (roadmap C3).
     if let (
@@ -4204,8 +4282,8 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             | "--max-peers" | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s"
             | "--wait-s" | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen"
             | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
-            | "--sound" | "--depth" | "--path" | "--before" | "--keep-days" | "--month"
-            | "--tools" | "--host" | "--mcp-tools" => {
+            | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" | "--keep-days"
+            | "--month" | "--tools" | "--host" | "--mcp-tools" => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
@@ -4232,6 +4310,20 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
         json,
         apply,
     })
+}
+/// A required file option as an absolute path, so the daemon, which runs
+/// in another directory, opens the file the owner named.
+fn absolute_option(
+    options: &mut BTreeMap<String, String>,
+    name: &str,
+) -> Result<String, langspan::Error> {
+    let value = options
+        .remove(name)
+        .ok_or_else(|| format!("{name} FILE is required"))?;
+    let path = std::path::absolute(&value).map_err(|e| format!("cannot resolve {name}: {e}"))?;
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| format!("{name} must be a UTF-8 path").into())
 }
 fn no_unused_options(options: &BTreeMap<String, String>) -> Result<(), langspan::Error> {
     if let Some((name, _)) = options.first_key_value() {
@@ -4527,6 +4619,10 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
         Outcome::SessionEnded { session_id } => {
             println!("Session {session_id} marked ended.")
         }
+        Outcome::Adopted { adoption, .. } => println!(
+            "Session {} adopted the uncommitted work of session {}.",
+            adoption.session_id, adoption.from
+        ),
         Outcome::AutoCheck { check } => {
             println!(
                 "Automatic check {} is on for workspace {}: after a session's writes, {:?} runs on the exact working tree (time limit {} s).",
@@ -4804,6 +4900,50 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 coverage.current_files, coverage.indexable_files
             );
         }
+        Outcome::GraphExported {
+            workspace_id,
+            files,
+            partial_files,
+            bytes,
+        } => println!(
+            "Exported {files} files ({partial_files} partial, {bytes} bytes) from workspace {workspace_id}."
+        ),
+        Outcome::GraphImported {
+            workspace_id,
+            applied,
+            loaded,
+            different,
+            kept,
+            over_limits,
+            malformed,
+        } => {
+            let mut parts = vec![if *applied {
+                format!("Loaded {loaded} files into workspace {workspace_id}")
+            } else {
+                format!(
+                    "Dry run: {loaded} files have the same content here and can be loaded into workspace {workspace_id}"
+                )
+            }];
+            parts.push(format!(
+                "{different} differ or are missing here and are left to the indexer"
+            ));
+            if *kept > 0 {
+                parts.push(format!("{kept} are already indexed here and are kept"));
+            }
+            if *over_limits > 0 {
+                parts.push(format!(
+                    "{over_limits} lines over a parse bound were skipped"
+                ));
+            }
+            if *malformed > 0 {
+                parts.push(format!("{malformed} malformed lines were skipped"));
+            }
+            println!(
+                "{}.{}",
+                parts.join("; "),
+                if *applied { "" } else { " Add --apply." }
+            );
+        }
         Outcome::GraphBlindSpots {
             blind_spots,
             coverage,
@@ -5056,6 +5196,15 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                         ))
                         .unwrap_or_default()
                 );
+                if let Some(adopter) = &session.adopted_by {
+                    println!("  Its uncommitted work was adopted by session {adopter}.");
+                }
+                if !session.adopted.is_empty() {
+                    println!(
+                        "  Adopted the uncommitted work of ended session(s) {}.",
+                        session.adopted.join(", ")
+                    );
+                }
             }
             if recap.omitted_sessions > 0 {
                 println!("({} more session(s) not shown.)", recap.omitted_sessions);
@@ -5321,6 +5470,12 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                     Some(age) => println!("  Last hook run: {} s ago.", age / 1000),
                     None => println!("  Last hook run: none recorded in this generation."),
                 }
+            }
+            for adoption in state.adoptions.values() {
+                println!(
+                    "Adoption: session {} took over the uncommitted work of ended session {}.",
+                    adoption.session_id, adoption.from
+                );
             }
             for intent in state.intents.values() {
                 println!(

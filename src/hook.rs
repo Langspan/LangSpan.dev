@@ -1250,6 +1250,16 @@ fn lifecycle(
             );
         }
     }
+    // At a start, the sessions whose journaled lines are still uncommitted
+    // here: the coordinator names the ended ones nobody adopted (issue
+    // #161). Half the time left at most, so the briefing still has its own.
+    let left = if starting {
+        let now = Instant::now();
+        let until = now + deadline.saturating_duration_since(now) / 2;
+        crate::adopt::left_sessions(&config.state_dir, &config.root, &ids.session_id, until)
+    } else {
+        Vec::new()
+    };
     let code_part = || {
         code.as_ref()
             .map(|(matches, coverage)| (matches.as_slice(), coverage))
@@ -1261,6 +1271,7 @@ fn lifecycle(
             max_peers: BRIEF_PEERS,
             deliver,
             mid_turn: false,
+            left: left.clone(),
             // What changed recently goes only into a starting context.
             recent: starting,
             recent_window_ms: None,
@@ -1770,6 +1781,27 @@ fn render_checks(checks: &[langspan_core::CheckNotice]) -> String {
     text
 }
 
+/// Bytes of an ended session's task line quoted in its left-work line.
+const LEFT_TASK_LIMIT: usize = 160;
+
+/// The line naming an ended session that left uncommitted work in this
+/// checkout, with its task line (data from that session) and the command
+/// that takes the work over. The session ID is a validated identifier;
+/// `--` ends option parsing, since a valid ID can begin with a hyphen.
+fn left_work_line(work: &langspan_core::LeftWork) -> String {
+    let session = clean(&work.session_id, 128);
+    let task = match &work.summary {
+        Some(summary) => format!(" (its task: {:?})", clean(summary, LEFT_TASK_LIMIT)),
+        None => " (no task line recorded)".into(),
+    };
+    truncate(
+        &format!(
+            "Session {session} ended and left uncommitted work in this checkout{task}. If you are continuing that task, run `langspan adopt -- {session}` to take its lines over as yours; otherwise leave them."
+        ),
+        PEER_LINE_LIMIT,
+    )
+}
+
 /// `Interface change to parse_upload in core/src/lib.rs: "pub fn
 /// parse_upload(a: u32, b: u32) -> u32" -> "pub fn parse_upload(a: u32) ->
 /// u32"`, with every repository value cleaned and quoted signatures capped.
@@ -2119,6 +2151,18 @@ fn render_peers_within(briefing: &langspan_core::Briefing, limit: usize) -> Stri
             text.push_str(heading);
             text.push_str(&shown);
             text.push_str(&reader);
+        }
+    }
+    // Ended sessions' uncommitted work, at a session start (issue #161).
+    // After the messages, whose room the core reserves; like the notices
+    // below, a line that does not fit is counted.
+    for work in &briefing.left_work {
+        let line = left_work_line(work);
+        if text.len() + line.len() + 1 + footer.len() + 96 > limit {
+            skipped += 1;
+        } else {
+            text.push_str(&line);
+            text.push('\n');
         }
     }
     // What changed recently (roadmap C3), at a session's start only: its
@@ -3268,6 +3312,7 @@ fn has_peer_content(briefing: &langspan_core::Briefing) -> bool {
             .as_ref()
             .is_some_and(|recent| !recent.is_empty())
         || !briefing.uncoordinated.is_empty()
+        || !briefing.left_work.is_empty()
 }
 
 impl Session<'_> {
@@ -3285,6 +3330,7 @@ impl Session<'_> {
                     max_peers: BRIEF_PEERS,
                     deliver: true,
                     mid_turn: true,
+                    left: Vec::new(),
                     recent: false,
                     recent_window_ms: None,
                     mcp: false,
@@ -4708,6 +4754,7 @@ mod briefing_text {
             checkout_changes: Vec::new(),
             uncoordinated: Vec::new(),
             checks: Vec::new(),
+            left_work: Vec::new(),
             recent: None,
         }
     }
@@ -4776,6 +4823,52 @@ mod briefing_text {
             .find(crate::recent::HEADING)
             .unwrap_or_else(|| panic!("{text}"));
         assert!(peer_line < section, "{text}");
+        assert!(text.contains("src/store.rs"), "{text}");
+        assert!(text.len() <= BRIEFING_LIMIT, "{}", text.len());
+    }
+
+    /// Both sides of a merge: an ended session's left work (issue #161) and
+    /// the recent section (roadmap C3) in one session-start briefing. Each is
+    /// peer content alone; together, the left-work line comes before the
+    /// recent section and the text stays within the cap.
+    #[test]
+    fn left_work_and_the_recent_section_both_count_and_show() {
+        use langspan_core::{ChangedPath, LeftWork, RecentChanges};
+        let recent = RecentChanges {
+            window_ms: 4 * 60 * 60_000,
+            root: "/repos/app".into(),
+            changed_paths: vec![ChangedPath {
+                path: "src/store.rs".into(),
+                sessions: 2,
+                age_ms: 60_000,
+                elsewhere: false,
+            }],
+            interface_changes: Vec::new(),
+            contested_paths: Vec::new(),
+            left_uncommitted: Vec::new(),
+            omitted: 0,
+        };
+        let left = LeftWork {
+            session_id: "claude-code.alice".into(),
+            summary: Some("Fix the upload handler".into()),
+        };
+        let mut only_left = briefing(Vec::new());
+        only_left.left_work = vec![left.clone()];
+        assert!(has_peer_content(&only_left));
+
+        let mut both = briefing(Vec::new());
+        both.left_work = vec![left];
+        both.recent = Some(recent);
+        assert!(has_peer_content(&both));
+        let text = render_briefing(&both);
+        let told = text
+            .find("Session claude-code.alice ended and left uncommitted work in this checkout")
+            .unwrap_or_else(|| panic!("{text}"));
+        let section = text
+            .find(crate::recent::HEADING)
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(told < section, "{text}");
+        assert!(text.contains("Fix the upload handler"), "{text}");
         assert!(text.contains("src/store.rs"), "{text}");
         assert!(text.len() <= BRIEFING_LIMIT, "{}", text.len());
     }
@@ -5737,6 +5830,7 @@ mod code_briefing_text {
             checkout_changes: Vec::new(),
             uncoordinated: Vec::new(),
             checks: Vec::new(),
+            left_work: Vec::new(),
             recent: None,
         }
     }

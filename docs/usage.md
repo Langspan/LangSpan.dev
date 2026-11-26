@@ -1262,6 +1262,42 @@ full counts. MCP: `langspan_blind_spots`. Read those files directly when the
 index is silent; nothing guesses what they contain. `langspan doctor` also
 says when a workspace has blind files.
 
+A large repository's first indexing takes several passes of 200 files. To
+start a new state directory or a second machine with an index another one
+already built, export it and import it there. Both are CLI-only:
+
+```sh
+./target/release/langspan graph export PROJECT --out /path/to/index.jsonl
+./target/release/langspan graph import PROJECT --in /path/to/index.jsonl
+./target/release/langspan graph import PROJECT --in /path/to/index.jsonl --apply
+```
+
+```text
+Exported 3912 files (2 partial, 9418230 bytes) from workspace PROJECT.
+Dry run: 3870 files have the same content here and can be loaded into workspace PROJECT; 42 differ or are missing here and are left to the indexer. Add --apply.
+```
+
+The export is JSON Lines: a header (`format` `langspan-source-index`, the
+index `schema`, `workspace_root` as the root's last component only, and
+`created_at` in Unix milliseconds), then one line per indexed file with its
+`path`, content `digest`, `partial`, and its `symbols`, `refs`, `imports` and
+`calls`. It holds no file content beyond signatures. The file is created
+with mode `0600` and never replaces an existing file; LangSpan does not send
+it anywhere, so you move it yourself.
+
+`graph import` is a dry run unless you add `--apply`. A file's rows are
+loaded only when the file on disk now has exactly the exported content (its
+SHA-256 equals `digest`), the last scan of this workspace lists it, and this
+index holds no version of it yet. Every other file is left to the indexer,
+and what this index already parsed is kept. Run the import soon after
+registering the workspace, before the indexer reaches most files. An import
+is a first indexing: it records no interface notice. The file can be at most
+256 MiB. A header of another format or index schema refuses the whole
+import and leaves the index unchanged; a line over a parse bound (2,000
+symbols, 20,000 references, 500 imports, 20,000 calls, a 128-byte name or a
+240-byte signature) or otherwise malformed is skipped and counted. An
+export or import may take up to 100 s, during which indexing waits.
+
 When an indexed export disappears or its signature changes, relevant sessions
 receive an interface notice at their next prompt. The notice names files they
 work on or have read that mention the changed name. Notices stay within one
@@ -1607,6 +1643,63 @@ private index, no commit, and Git reads run with `--no-optional-locks`. The
 MCP tool `langspan_my_changes` does the same. Other worktrees and machines
 are not included.
 
+### Take over an ended session's uncommitted work
+
+A session that ends before it commits (its process crashed or was killed, the
+disk filled) leaves its edits in the checkout, credited to it. A session that
+carries on the same task takes them over:
+
+```sh
+langspan adopt SESSION [--session ID] [--root DIR] [--request-id ID] [--json]
+```
+
+```text
+Session claude-code.… adopted the uncommitted work of ended session claude-code.…. Reason: both sessions have the same task line. Its lines in 2 file(s) are now this session's: a.txt, b.txt. …
+```
+
+The coordinator checks that `SESSION` has ended (the host reported its end,
+or its process is known to have exited) and worked in the same workspace,
+and records the transfer as a `session_adopted` event naming both sessions.
+Then the journal entries of `SESSION` and its ended subagents are credited
+to the adopting session, keeping their age, so `status --mine` and
+`commit --mine` treat those lines as its own. Ending a session does not end
+its subagents: a subagent that has not ended keeps its lines, and the report
+names it (`live` in `--json`). Lines another session also wrote stay shared,
+exactly as before, and other sessions' lines stay theirs.
+
+The adoption is refused, and nothing changes, for a session that has not
+ended (`session_live`: a killed session whose process LangSpan never observed
+counts as live), for one of another workspace (`other_workspace`), and for one
+another session already adopted (`already_adopted`). Running it again is safe:
+the coordinator answers `already_adopted` with nothing new recorded, and any
+lines still credited to the ended session are credited then. A retry with the
+same `--request-id` is checked again too: if the ended session has resumed
+since, the retry is refused with `session_live` and credits none of its lines.
+An adopter that ends after its adoption is recorded, but before its lines are
+credited, leaves them under the session it adopted. Adopting that adopter
+credits them as well: the coordinator names every session whose adoptions
+lead to it (`earlier` in the coordinator's answer), and their lines move with
+its own, except those of subagents that have not ended and of sessions that
+have resumed since they were adopted. A subagent that another session adopted
+keeps its lines for that session, even before that session's adoption credits
+them (`kept` in the coordinator's answer). The reason shown
+is a message the ended session sent the adopter (addressed to it, or a
+handoff it took) or a `Task:` line both share; neither is required, so the
+person or agent decides. The adopting session is found as for
+`commit --mine`. The MCP tool `langspan_adopt` does the same. `recap` names
+the transfer under both sessions, as do `status` and the dashboard.
+
+When a session starts in a checkout where an ended session's journaled lines
+are still uncommitted and nobody adopted them, its briefing says so once,
+with that session's task line, and suggests the command:
+
+```text
+Session claude-code.… ended and left uncommitted work in this checkout (its task: "Fix the upload handler"). If you are continuing that task, run `langspan adopt -- claude-code.…` to take its lines over as yours; otherwise leave them.
+```
+
+At most four such sessions are named, and at most 32 files are compared with
+`HEAD` to find them, within half the start hook's time.
+
 A formatter or other workspace-wide command (`cargo fmt --all`) does not
 change who wrote a line it only reformats. Where the command kept a line's
 tokens in order and changed only whitespace and line breaks (re-indented,
@@ -1716,6 +1809,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_retract_message` | Withdraw a message this session sent, by ID or `"last"`; its readers are told to disregard it |
 | `langspan_commit_mine` | Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks |
 | `langspan_my_changes` | List this session's own uncommitted files and hunks in a shared checkout, as `langspan_commit_mine` would split them; changes nothing |
+| `langspan_adopt` | Take over an ended session's uncommitted lines in the same workspace; refused for a live session or another workspace's |
 
 Every mutation tool requires a caller-owned `request_id` (for
 `langspan_land_cancel`, it names the waiting landing). Conflicts are normal

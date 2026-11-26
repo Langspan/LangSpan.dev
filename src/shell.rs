@@ -919,12 +919,14 @@ impl Record {
     }
 }
 
-/// Whether a shell command runs `langspan commit --mine` or `langspan status
-/// --mine`, which take their session from the running call.
+/// Whether a shell command runs `langspan commit --mine`, `langspan status
+/// --mine` or `langspan adopt`, which take their session from the running
+/// call.
 pub fn runs_commit_mine(command: &str) -> bool {
     command.contains("langspan")
-        && (command.contains("commit") || command.contains("status"))
-        && command.contains("--mine")
+        && (((command.contains("commit") || command.contains("status"))
+            && command.contains("--mine"))
+            || command.contains("adopt"))
 }
 
 /// The sessions with a `langspan commit --mine` (or `status --mine`)
