@@ -122,6 +122,18 @@ impl Index {
                 kind TEXT NOT NULL, signature TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS inflight_by_path ON inflight(workspace_id, path);",
         )?;
+        // The digest of each baseline function's body, which links a removal
+        // and an addition as a rename (roadmap B10). Added without a schema
+        // change: a baseline from before has none, so its next change is
+        // told as a removal and an addition, as it was.
+        let has_block: bool = connection.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('baselines') WHERE name = 'block_digest'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_block {
+            connection.execute_batch("ALTER TABLE baselines ADD COLUMN block_digest TEXT;")?;
+        }
         Ok(Self { connection })
     }
 
@@ -156,7 +168,8 @@ impl Index {
             return Ok(None);
         };
         let mut statement = self.connection.prepare_cached(
-            "SELECT name, kind, signature FROM baselines WHERE workspace_id = ?1 AND path = ?2",
+            "SELECT name, kind, signature, block_digest FROM baselines
+             WHERE workspace_id = ?1 AND path = ?2",
         )?;
         let symbols = statement
             .query_map(params![workspace_id, path], |row| {
@@ -169,6 +182,8 @@ impl Index {
                     signature: row.get(2)?,
                     exported: true,
                     bytes: 0..0,
+                    block: None,
+                    block_digest: row.get(3)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -233,9 +248,11 @@ impl Index {
         let changes: Vec<InterfaceChange> = langspan_graph::diff(&before, after)
             .into_iter()
             .map(|change| {
+                let mut after_name = None;
                 let (label, before, after, number) = match change.change {
                     // The signature that went, for a definition's history
-                    // (roadmap D4) to see it come back.
+                    // (roadmap D4) to see it come back and for a write
+                    // calling it to be shown (roadmap B10).
                     Change::Removed => (
                         "removed",
                         written(&before, &change.name, change.kind),
@@ -244,6 +261,11 @@ impl Index {
                     ),
                     Change::SignatureChanged { before, after } => {
                         ("signature_changed", Some(before), Some(after), None)
+                    }
+                    // Told at a write calling the old name (roadmap B10).
+                    Change::Renamed { to, before, after } => {
+                        after_name = Some(to);
+                        ("renamed", Some(before), Some(after), None)
                     }
                     // Only how many definitions share the name changed: no
                     // parameter counts, so no break alert (ADR 0029).
@@ -276,13 +298,13 @@ impl Index {
                         None,
                     ),
                 };
-                // Counts only for a signature change, the one change the
-                // write-time break check reads (ADR 0029).
+                // Counts for the changes the write-time break check reads
+                // (ADR 0029): never for a new name or a count change.
                 let arity = |signature| {
-                    if label == "signature_changed" {
-                        counts(signature)
-                    } else {
+                    if label == "added" || number.is_some() {
                         None
+                    } else {
+                        counts(signature)
                     }
                 };
                 InterfaceChange {
@@ -295,6 +317,7 @@ impl Index {
                     after_count: number.map(|(_, after)| after),
                     before,
                     after,
+                    after_name,
                 }
             })
             .take(langspan_core::NOTICE_CHANGES)
@@ -511,9 +534,12 @@ impl Index {
                 )?;
                 continue;
             }
-            let Ok(graph) = langspan_graph::extract(language, &bytes) else {
+            let Ok(mut graph) = langspan_graph::extract(language, &bytes) else {
                 continue;
             };
+            langspan_graph::digest_blocks(&mut graph, &bytes, |block| {
+                crate::sha256::hex(&crate::sha256::digest(block))
+            });
             // Same bound and parser as `extract`, so it fails only where that
             // did; a file without calls stores none.
             let calls = langspan_graph::calls(language, &bytes).unwrap_or_default();
@@ -579,13 +605,15 @@ impl Index {
                 )?;
                 for symbol in graph.symbols.iter().filter(|symbol| symbol.exported) {
                     transaction.execute(
-                        "INSERT INTO baselines VALUES (?1, ?2, ?3, ?4, ?5)",
+                        "INSERT INTO baselines(workspace_id, path, name, kind, signature,
+                            block_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         params![
                             workspace_id,
                             path,
                             symbol.name,
                             symbol.kind.name(),
-                            symbol.signature
+                            symbol.signature,
+                            symbol.block_digest
                         ],
                     )?;
                 }
@@ -775,6 +803,8 @@ impl Index {
                     signature,
                     exported: true,
                     bytes: 0..0,
+                    block: None,
+                    block_digest: None,
                 })
             })
             .collect())
@@ -2461,6 +2491,89 @@ mod review_regressions {
                 "{path}: {before:?} and {after:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_rename_with_an_unchanged_body_is_one_renamed_change_for_the_old_names_dependents() {
+        let (dir, mut index) = setup("rename");
+        let caller = ("src/main.rs", "fn main() { api::fetch_user(1); }\n");
+        let before = (
+            "src/api.rs",
+            "pub fn fetch_user(id: u32) -> u32 {\n    id\n}\n",
+        );
+        pass(&dir, &mut index, &[before, caller]);
+        let after = (
+            "src/api.rs",
+            "pub fn load_user(id: u32) -> u32 {\n    id\n}\n",
+        );
+        let notices = pass(&dir, &mut index, &[after, caller]);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        let change = &notices[0].changes;
+        assert_eq!(change.len(), 1, "{change:?}");
+        assert_eq!(
+            (
+                change[0].name.as_str(),
+                change[0].change.as_str(),
+                change[0].after_name.as_deref(),
+                change[0].after.as_deref()
+            ),
+            (
+                "fetch_user",
+                "renamed",
+                Some("load_user"),
+                Some("pub fn load_user(id: u32) -> u32")
+            )
+        );
+        assert!(change[0].after_arity.is_some());
+        assert_eq!(notices[0].dependents, ["src/main.rs"]);
+    }
+
+    #[test]
+    fn an_index_from_before_block_digests_is_kept_and_tells_its_next_rename_as_a_removal() {
+        let (dir, mut index) = setup("blocks");
+        let before = (
+            "src/api.rs",
+            "pub fn fetch_user(id: u32) -> u32 {\n    id\n}\n",
+        );
+        pass(&dir, &mut index, &[before, CALLER]);
+        // The baselines as an earlier build wrote them: no block digests.
+        index
+            .connection
+            .execute_batch(
+                "ALTER TABLE baselines DROP COLUMN block_digest;
+                 INSERT INTO files(workspace_id, path, scan_digest) VALUES ('w', 'kept', 'x');",
+            )
+            .unwrap();
+        drop(index);
+        let mut index = Index::open(&dir.0.join("graph.sqlite3")).unwrap();
+        let kept: i64 = index
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'kept'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "the index was kept, not rebuilt");
+        let after = (
+            "src/api.rs",
+            "pub fn load_user(id: u32) -> u32 {\n    id\n}\n",
+        );
+        let notices = pass(&dir, &mut index, &[after, CALLER]);
+        let labels: Vec<&str> = notices[0]
+            .changes
+            .iter()
+            .map(|change| change.change.as_str())
+            .collect();
+        // The new name is also recorded, for its history (roadmap D4).
+        assert_eq!(labels, ["removed", "added"], "{notices:?}");
+        // From then on the baseline has them.
+        let again = (
+            "src/api.rs",
+            "pub fn get_user(id: u32) -> u32 {\n    id\n}\n",
+        );
+        let notices = pass(&dir, &mut index, &[again, CALLER]);
+        assert_eq!(notices[0].changes[0].change, "renamed", "{notices:?}");
     }
 
     #[test]

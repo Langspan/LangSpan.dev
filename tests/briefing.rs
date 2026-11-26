@@ -1294,6 +1294,7 @@ fn a_busy_hour(f: &Fixture) {
                     change: "signature_changed".into(),
                     before: Some("fn save(x: u32)".into()),
                     after: Some("fn save(x: u32, sync: bool)".into()),
+                    after_name: None,
                     before_arity: None,
                     after_arity: None,
                     before_count: None,

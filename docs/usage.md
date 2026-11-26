@@ -245,9 +245,11 @@ directory. It asks the coordinator once with a 200 ms deadline
 (`--deadline-ms`, 100 to 5000). When the coordinator is not running or does
 not answer in time it prints `langspan · coordinator not running` and exits 0;
 it never starts the coordinator, never uses the network, and writes nothing.
-"Local midnight" follows the system's time zone (honouring `TZ`): `date`
-gives the offset at the instants around midnight, so on a day the clocks
-change the count still starts at that day's 00:00. If `date` fails, midnight
+"Local midnight" follows the system's time zone (honoring `TZ`): LangSpan
+reads the zone's rules from the system's zone files (`/etc/localtime`, or the
+file or POSIX rule `TZ` names) and takes the offset at the instants around
+midnight, so on a day the clocks change the count still starts at that day's
+00:00. No `date` program is started. If the rules cannot be read, midnight
 UTC is used. A day of more than 1024 refusals shows 1024.
 
 User-level installation has been tested with a temporary home and real daemon,
@@ -1017,8 +1019,8 @@ handoffs not taken up, checks whose latest result failed).
 ```
 
 Without a workspace it covers every workspace. The window starts at local
-midnight, found from the system's time zone rules for that date (offsets read
-from `date`, so a day the clocks change still starts at its 00:00), or at an
+midnight, found from the system's time zone rules for that date (read from the
+system's zone files, so a day the clocks change still starts at its 00:00), or at an
 RFC 3339 `--since` time;
 a time before the first event covers everything. Times in the text are shown
 at the current local offset, so on a day the clocks change, times before the
@@ -1041,6 +1043,56 @@ says `truncated: true`, as does a window that reaches before events retention
 removed; when the oldest of those carries no time of its own,
 the first that does decides whether the window may reach past them. With the
 daemon down it exits 1 with "coordination unavailable".
+
+The text also carries one line with this month's refusal count (below); the
+JSON and the MCP answer do not, so nothing of it reaches a model.
+
+## Refusals this month
+
+`count` says how often LangSpan refused a write or a commit in one local
+month. It says what LangSpan did, never what it is assumed to have saved, and
+every answer carries the line "A refusal is not proof of avoided rework."
+
+```text
+$ ./target/release/langspan count --month 2027-03
+March 2027: 17 refusals (9 conflict, 5 stale_base, 2 unread_lines, 1 commit_held)
+By workspace: app 12, web 5
+Retried and let through: 3 (the same session was admitted on the same files afterwards).
+6 repeat(s) of a refusal by the same session, kind and files on the same day are not counted again.
+A refusal is not proof of avoided rework.
+```
+
+Without `--month YYYY-MM` it counts the current local month. Months and days
+are local: each day starts at its own local midnight, found from the system's
+time zone rules for that date as `today` does, so a refusal at 02:30 UTC on
+1 April is April in UTC and March in New York. Refusals are the
+`write_refused` events of every workspace on this machine, read at query time;
+nothing is stored for the count. A refusal is counted once per session,
+workspace, kind and path set per local day, so a session refused again and
+again for the same edit is one refusal; the others are reported as `repeats`.
+`retried_through` counts refusals whose session was later admitted on the
+same files, among its next 16 admissions after its last repeat; a held commit
+has no admission and is never counted there.
+
+`--json` prints `month`, `from_ms` and `to_ms` (the window, Unix
+milliseconds), `refusals`, `by_kind` (`conflict`, `stale_base`,
+`unread_lines`, `commit_held`, which add up to `refusals`), `by_workspace`
+(at most 64, the rest in `omitted_workspaces`), `retried_through`, `repeats`,
+`truncated` and, when there are any, `undated` (refusals recorded by a run
+without a clock anchor, in no month). One count reads at most the newest
+20,000 refusal records and says `truncated: true` when the month may reach
+past them; the line in `today` and on the local page then ends with
+"(truncated: counted from the newest 20000 refusal records only)". When the
+month starts before the history a compaction kept, `retained_since_ms` gives
+that cutoff and the line says "(incomplete: retention removed the records from
+before ...)": the refusals of that part are gone, so the total is not the
+month's complete count. A count is
+never shown for a month whose local day starts could not all be read from the
+time zone rules: `count` exits 1 and `today` and the local page say the count
+could not be read. With the daemon down it exits 1 with "coordination
+unavailable"; no earlier figure is kept or shown. The local page (`langspan dashboard`)
+shows the same count for the current month, and its `/api/state` view
+carries it as `refusals_this_month`.
 
 ## Desktop notices
 
@@ -1198,14 +1250,17 @@ says when a workspace has blind files.
 When an indexed export disappears or its signature changes, relevant sessions
 receive an interface notice at their next prompt. The notice names files they
 work on or have read that mention the changed name. Notices stay within one
-physical workspace. Body-only changes produce no notice, and a rename appears
-as a removal. A first indexing produces no change notice. When a file holds
+physical workspace. Body-only changes produce no notice. A rename that changes
+only the name, in one file, appears as a rename ("function "scale" was renamed
+to "zoom": …"); a rename together with any other change, or across files,
+appears as a removal. A first indexing produces no change notice. When a file holds
 several definitions of one name (a method of that name on two types, say), a
 definition added or removed is told as such, with how many there are now:
 "a second method "text" was added … (now 2 definitions with that name)".
 
 Each notice stays in the event log, and `graph history` reads a definition's
-past from there, before an agent changes it again:
+past from there, before an agent changes it again. A rename appears in the
+history of both the old name and the new one:
 
 ```sh
 ./target/release/langspan graph history PROJECT save --json
@@ -1285,7 +1340,9 @@ says some were left out. Other machines are not covered: a teammate's
 publication carries paths only ([ADR 0006](adr/0006-remote-awareness-through-git-refs.md)).
 
 A write is also checked as it is made. When an Edit, MultiEdit or Write (Claude
-Code) or an `apply_patch` (Codex) is admitted, the hook parses the calls in the
+Code), an `apply_patch` (Codex) or a `replace` or `write_file` (Gemini CLI) is
+admitted, or a Claude Code or Codex shell command writes one file whole with a
+quoted heredoc (`cat > app/x.py <<'EOF'`), the hook parses the calls in the
 text it writes. If a call's argument count does not fit a function signature
 that another live session changed in the last 30 minutes, the write's reply
 carries an alert in the model's context: the call's file and line, the
@@ -1293,12 +1350,18 @@ function, the count it now takes, the new and old signatures, and the session
 that changed it. The write itself is not refused or changed, and the host's
 permission prompt is unaffected. Claude Code shows the alert to the model
 with the write's result. Each session is alerted once per change; a call with
-the new count gets nothing. Only argument counts are compared, matched by
-name, so a different function of the same name can be named; a type or order
-change that keeps the count, removals and renames are left to the prompt
-notice. Gemini CLI and Cursor writes are not checked: Gemini reads no context
-before a tool runs, and Cursor's write input has not yet been seen from a real
-Cursor. Nothing is checked until
+the new count gets nothing. A call to a function that such a session renamed
+gets a line naming the new name and its file; a call to one it removed, with
+no definition of that name left in the workspace, gets a line saying it was
+removed. A rename or removal is told only while the index reads every
+supported file in full, since a name missing from a file it cannot read is
+not gone. Calls are matched by name, so a different function of the same name
+can be named. A type or order change that keeps the count is left to the
+prompt notice. Gemini CLI reads no context before a tool runs, so its write's calls
+are found before the write and checked after it: the alert is added to the
+write's result, and a write that fails is not told and uses up nothing.
+Cursor writes are not checked until a real Cursor's `Write` input has been
+captured into the repository. Nothing is checked until
 the index has a complete scan of the workspace, and the hook's diagnostic
 says so. [ADR 0029](adr/0029-break-alerts-at-write-time.md) has the rules.
 

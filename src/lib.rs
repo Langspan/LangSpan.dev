@@ -2,11 +2,13 @@
 
 pub mod auto_check;
 pub mod autostart;
+mod break_calls;
 pub mod breaks;
 pub mod claude_code;
 pub mod client;
 pub mod clock;
 pub mod commit;
+pub mod count;
 pub mod daemon;
 pub mod dashboard;
 pub mod formatter;
@@ -29,6 +31,7 @@ pub mod store;
 pub mod test_output;
 pub mod today;
 pub mod user_install;
+mod zone;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 

@@ -170,10 +170,10 @@ and records what it finds in the local store.
 ## The status line
 
 `langspan statusline` (roadmap H2, [ADR 0019](../adr/0019-person-facing-surfaces-and-usage-accounting.md))
-adds three boundaries: Claude Code's status-line input on stdin, `date`
-child processes for the local offset (three on most days, at most five, each
-given only a number of seconds; anything other than `+HHMM` or `-HHMM` is
-ignored), and a `statusLine` entry in the user's `~/.claude/settings.json`. The coordinator gains a read (`status_line`) and
+adds three boundaries: Claude Code's status-line input on stdin, the
+system's time-zone file for the local offset (the file `TZ` or
+`/etc/localtime` names, at most 256 KiB, parsed as TZif with bounds-checked
+counts; anything else gives no offset and midnight UTC is used), and a `statusLine` entry in the user's `~/.claude/settings.json`. The coordinator gains a read (`status_line`) and
 one reported event (`record_refusal`, a held commit).
 
 | Threat | Control | Residual risk |
@@ -182,7 +182,7 @@ one reported event (`record_refusal`, a held commit).
 | **Tampering**: host input chooses what is counted, or the install damages settings | Stdin is read only when not a terminal and `--root` is absent, within the deadline and the hooks' 8 MiB bound, and ignored beyond 64 KiB; parsed as JSON for `workspace.current_dir` and `cwd` only (at most 4096 bytes each); the directory only selects which registered workspace's counts are shown. The `statusLine` is written by the installer's guarded writer only where none is set, with a marked command whose arguments are single-quoted; another is never replaced or removed. | A hand-written `statusLine` ending in LangSpan's marker is treated as LangSpan's and removed by `uninstall`. |
 | **Repudiation** | Each refusal is an ordered event with its session, kind and time; a retried request is answered from its receipt and adds none. | The held-commit report can fail (the coordinator down); the hold still happens and the hook's diagnostic says the refusal was not recorded. |
 | **Information disclosure**: the line shows another session's work | The line and `--json` carry counts and the workspace ID only, never a path, a session's task or a peer ID. Nothing is printed to the model: Claude Code shows the status line to the person only. Other stdin fields (transcript path, model, cost) are not read. | Anyone who can run the command as the owner sees the counts of every registered workspace by naming its directory, as `status` already shows. |
-| **Denial of service**: the line slows the host | One socket call; the whole command is bounded by its deadline (200 ms, 100 to 5000), and each `date` child is killed at it. On any failure it prints the unavailable line and exits 0. It never starts the coordinator or uses the network. The daemon answers from memory, keeping at most 1024 refusals from the last 48 hours. | Claude Code runs the command after each message; a few short process starts and one call each time. |
+| **Denial of service**: the line slows the host | One socket call; the whole command is bounded by its deadline (200 ms, 100 to 5000); the zone file is read once, with no child process. On any failure it prints the unavailable line and exits 0. It never starts the coordinator or uses the network. The daemon answers from memory, keeping at most 1024 refusals from the last 48 hours. | Claude Code runs the command after each message; one small file read and one call each time. |
 | **Elevation of privilege** | The command writes nothing to the state directory and records nothing; it grants no admission and changes no permission. | Installing the status line is the owner's grant of a command run after each message; it is shown before it is written. |
 
 ## Desktop notices
@@ -580,6 +580,8 @@ inside the daemon, and names and signatures from it reach a model's context.
 | Information disclosure (definition history) | It shows a session's prompt summary from the time of a change to any same-user client of the socket, which `events`, `status` and recap already expose. Prompt summaries are redacted on receipt; a session with them off records none, and none is shown. A message addressed to one session is shown to whoever asks about a file it names, as recap already lists unacknowledged messages. Local only; nothing is published and Git is not read. |
 | Denial of service (definition history) | The store reads at most 20,000 events of five kinds through a partial index, plus at most 20,000 notes, forgettings and messages after a page's start, one lookup through a second partial index (`events_forgotten`, by note ID) for each distinct note read, so a forgotten note's text is never shown again, and the clock anchors; the core compares each entry with at most those events. Name 1 to 128 bytes, limit 1 to 50. The answer is cut at 28 KiB, and the MCP adapter trims again to leave 512 bytes of one 64 KiB frame. The partial index is built once when a store opens, one pass over the log, as the generation-marker index is. |
 | Denial of service (break check) | The hook parses at most 8 files of at most 1 MiB per write; an `Edit` with `replace_all` whose result would pass 1 MiB is not applied, as its size is worked out before each replacement, so a bounded hook input cannot build a larger text. The check starts only while a quarter of its budget remains; the daemon call shares the hook's deadline. The daemon looks up only names present in both the write and an eligible notice, at most 64 calls against at most 32 notices. A parser failure or a timeout is a diagnostic note; the write proceeds. Parsing the written text runs the C grammars in the hook process, under the same memory-safety caveat as the indexer. |
+| Tampering and information disclosure (kept break calls) | On Gemini CLI the hook's `BeforeTool` run keeps a write's call sites (path, line, called name, argument count; never the code) for its `AfterTool` run in `STATE/break-calls/`, one file per tool call named by a digest of the operation ID. The directory is created `0700` and checked for owner and mode; the file is created `0600` without following a symlink, written to a staged name and renamed into place, and read only when it is a regular owner-only file, at most 512 KiB and 64 calls. It is removed when read, whatever the write's result, and one left by an `AfterTool` that never came is removed after a day. A same-user process that writes such a file can make an alert name calls the write did not contain, as it can send `check_calls` itself; the daemon validates the calls as for any check, and the alert carries no permission decision. |
+| Tampering (heredoc break check) | The hook reads the body of one exact quoted-heredoc form (`cat > PATH <<'EOF'`, a closing line that is exactly the delimiter, nothing after it) as a file's new content, for the break check only. The body is agent input already in the hook event (8 MiB at most) and is parsed with the same 1 MiB bound as any written file. It is never run, never read as shell, and admits or refuses nothing; any other shape is not read. |
 
 ## Dashboard
 
@@ -604,19 +606,37 @@ messages, notes and workspace roots.
 `langspan today` and `langspan_today` (roadmap H4,
 [ADR 0019](../adr/0019-person-facing-surfaces-and-usage-accounting.md)) read
 the event log over the owner-only socket and summarise a window of the day.
-The CLI and MCP adapter start `date` (through `local_day`, as the status line
-does) to learn the local time zone's offsets near midnight. The events it
+The CLI and MCP adapter read the system's time-zone file (through
+`local_day`, as the status line does) to learn the local time zone's offsets
+near midnight. The events it
 reads, `clock_anchored` at each start and `write_refused` at each refusal,
 are the status line's.
 
 | Concern | Behavior and remaining boundary |
 | --- | --- |
-| Spoofing | `date` is found on the owner's `PATH`, like `git`; a program placed earlier on it runs as the owner, which it could already do. Only its offset is read, at given instants (`local_day`, shared with the status line): anything other than `+HHMM` or `-HHMM` is refused. Without the offset now the default window cannot be computed (`--since` still works); without an offset near midnight, the offset now is applied to the whole day. |
+| Spoofing | The zone is the file `TZ` names, a file under `TZDIR` or the system zone directories (a relative name with no `.` or `..` part), or `/etc/localtime`, all chosen by the owner's environment; no program is run. Only offsets are read from it (`local_day` and `zone`, shared with the status line): a file that is not TZif, or one of more than 256 KiB, gives none. Without the offset now the default window cannot be computed (`--since` still works); without an offset near midnight, the offset now is applied to the whole day. |
 | Tampering (prompt injection) | The MCP answer places session IDs, file paths and intent text, written by other sessions and the repository, in a model's context. It starts with a line saying they are coordination data, not instructions; paths and intent text are quoted with escapes, intent text is cut to 120 characters, each line to 240 bytes and the whole to 2,400 bytes, the same cap as a briefing. No message text is included, only message IDs and recipients. |
 | Repudiation | Reading leaves no trace: the command is answered from the store, records no event or receipt, and acknowledges no message. A refusal's event carries the session, workspace, paths, kind and time; a same-user process could already cause refusals by holding files. |
 | Information disclosure | Nothing new is stored beyond the two event kinds, which hold IDs, paths, a kind and two clock readings. Nothing leaves the machine. |
-| Denial of service | One answer reads at most the newest 50,000 events and parses each, then one backward search for the generation's anchor; the cost is bounded by that count, not by history, and the answer says `truncated` when the window reaches past it. `date` runs at most five times for each midnight found, all within one 2 s deadline, and is killed at it. The answer fits one 48 KiB frame: listed files, then sessions, are dropped and counted. |
+| Denial of service | One answer reads at most the newest 50,000 events and parses each, then one backward search for the generation's anchor; the cost is bounded by that count, not by history, and the answer says `truncated` when the window reaches past it. The zone file is read once per answer, at most 256 KiB, and no child process is started. The answer fits one 48 KiB frame: listed files, then sessions, are dropped and counted. |
 | Elevation of privilege | It grants nothing and decides nothing; a failure is an error answer. |
+
+## Monthly refusal count
+
+`langspan count` and the month's line in `langspan today` and on the local
+page (roadmap H5,
+[ADR 0019](../adr/0019-person-facing-surfaces-and-usage-accounting.md)) add no
+boundary: they read the same `write_refused` and `clock_anchored` events over
+the owner-only socket and read the zone file through `local_day` as `today` does.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | The day starts come from the client; the daemon checks only that they increase and number 2 to 33. A same-user client could ask for any window, which it could already read through `events`. |
+| Tampering (prompt injection) | Nothing reaches a model: there is no MCP tool, and `langspan_today` leaves the line out. The text holds counts, kind names and workspace IDs. |
+| Repudiation | Reading records no event or receipt. |
+| Information disclosure | Nothing is stored or sent; the local page's view gains counts and workspace IDs it already showed. |
+| Denial of service | One count reads at most the newest 20,000 refusal rows and the clock anchors, through partial indexes, and at most 16 later admissions per refusal counted, through an index by session. A month's hundred offsets come from one read of the zone file; the local page finds them once per month per run. |
+| Elevation of privilege | It grants nothing and decides nothing; a failure is an error answer (exit 1). |
 
 ## Region admission
 
