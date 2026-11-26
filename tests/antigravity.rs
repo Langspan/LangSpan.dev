@@ -161,12 +161,18 @@ impl Fixture {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child
+        // A hook that refuses its arguments exits without reading stdin, so
+        // the pipe can close before the event is written. Its exit status
+        // and answer are what the caller checks.
+        match child
             .stdin
             .take()
             .unwrap()
             .write_all(event.to_string().as_bytes())
-            .unwrap();
+        {
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+            written => written.unwrap(),
+        }
         child.wait_with_output().unwrap()
     }
 
@@ -395,7 +401,10 @@ fn a_shell_command_is_admitted_for_its_literal_write_and_its_change_observed() {
 #[test]
 fn a_hook_without_its_event_fails_with_the_empty_answer() {
     let f = Fixture::new();
-    let body = event("pre-replace.json", &f.root());
+    let mut body = event("pre-replace.json", &f.root());
+    // Larger than a pipe buffer, so the hook always exits before the whole
+    // event is written: it refuses without reading stdin.
+    body["padding"] = json!("x".repeat(1 << 20));
     for name in [None, Some("Stop"), Some("preToolUse")] {
         let output = f.hook("antigravity", name, &body);
         assert_eq!(output.status.code(), Some(1), "{name:?}");
