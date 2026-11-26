@@ -720,17 +720,26 @@ pub fn lifecycle_event(
 /// What a submitted prompt contributes, within the settings of the workspace
 /// it resolved to: its summary, if shared, and the names to look up, if code
 /// briefing is on.
-fn prompt_parts(prompt: Option<&str>, config: &Config) -> (Option<PromptLines>, Vec<String>) {
+fn prompt_parts(prompt: Option<&str>, config: &Config) -> (Option<PromptLines>, CodeAsk) {
+    let code = prompt.filter(|_| config.code_briefing);
     (
         prompt
             .filter(|_| config.share_prompt)
             .map(PromptLines::new)
             .filter(|lines| lines.summary().is_some()),
-        prompt
-            .filter(|_| config.code_briefing)
-            .map(prompt_identifiers)
-            .unwrap_or_default(),
+        CodeAsk {
+            names: code.map(prompt_identifiers).unwrap_or_default(),
+            qualifiers: code.map(prompt_qualifiers).unwrap_or_default(),
+        },
     )
+}
+
+/// What a prompt asks the source index about: its candidate names and the
+/// paths and qualifiers that rank their definitions.
+#[derive(Default)]
+struct CodeAsk {
+    names: Vec<String>,
+    qualifiers: Vec<String>,
 }
 
 /// Record a prompt's summary and line digests. A prompt without a task line
@@ -1106,6 +1115,55 @@ pub fn prompt_identifiers(prompt: &str) -> Vec<String> {
     code
 }
 
+/// Source file extensions a prompt's file name may end with.
+const SOURCE_EXTENSIONS: &[&str] = &[
+    "rs", "py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "java",
+];
+
+/// Paths and qualifiers the prompt names, which rank a name's definitions
+/// (roadmap C2): a relative path (`src/store/upload.rs`), a source file
+/// name (`upload.rs`), and the leading parts of a qualified name (`store`
+/// in `store::upload` or `store.upload`). From the same bytes as
+/// `prompt_identifiers`, distinct, at most `CONTEXT_NAMES`, each passing
+/// `is_qualifier`. Used for one query only, never recorded.
+pub fn prompt_qualifiers(prompt: &str) -> Vec<String> {
+    let mut end = prompt.len().min(PROMPT_SCAN_BYTES);
+    while !prompt.is_char_boundary(end) {
+        end -= 1;
+    }
+    let part = |c: char| c.is_ascii_alphanumeric() || "_./:-".contains(c);
+    let mut found: Vec<String> = Vec::new();
+    let mut add = |qualifier: &str| {
+        let plain = qualifier.bytes().all(|b| b.is_ascii_digit());
+        if found.len() < langspan_core::CONTEXT_NAMES
+            && !plain
+            && !["self", "this", "super"].contains(&qualifier)
+            && langspan_core::is_qualifier(qualifier)
+            && !found.iter().any(|seen| seen == qualifier)
+        {
+            found.push(qualifier.to_owned());
+        }
+    };
+    for token in prompt[..end].split(|c: char| !part(c)) {
+        let token = token.trim_end_matches(|c: char| ".:-".contains(c));
+        let token = token.strip_prefix("./").unwrap_or(token);
+        let token = token.trim_start_matches([':', '-']);
+        if token.contains('/') {
+            add(token);
+        } else if token.contains("::") {
+            let parts: Vec<&str> = token.split("::").collect();
+            parts[..parts.len() - 1].iter().for_each(|part| add(part));
+        } else if let Some((head, extension)) = token.rsplit_once('.') {
+            if SOURCE_EXTENSIONS.contains(&extension) {
+                add(token);
+            } else {
+                head.split('.').for_each(&mut add);
+            }
+        }
+    }
+    found
+}
+
 /// Characters that can forge a line break or reorder what a reader sees.
 fn deceptive(c: char) -> bool {
     c.is_control()
@@ -1198,7 +1256,7 @@ fn lifecycle(
     let step = |kind: &str, command: Command| {
         session.call(wire_id(kind, &[source, &ids.operation_id]), command)
     };
-    let (names, prompt_recorded) = match kind {
+    let (ask, prompt_recorded) = match kind {
         LifecycleKind::End => {
             return match step(
                 "session-end",
@@ -1211,20 +1269,20 @@ fn lifecycle(
             };
         }
         LifecycleKind::Prompt { prompt } => {
-            let (lines, names) = prompt_parts(prompt.as_deref(), config);
+            let (lines, ask) = prompt_parts(prompt.as_deref(), config);
             let recorded = lines.is_some();
             if let Some(lines) = lines
                 && let Err(failure) = record_prompt(&step, &ids.session_id, &lines)
             {
                 return failure_reply(failure);
             }
-            (names, recorded)
+            (ask, recorded)
         }
-        LifecycleKind::Start => (Vec::new(), false),
+        LifecycleKind::Start => (CodeAsk::default(), false),
     };
     // The code section is looked up before the briefing, so that the files
     // this prompt points at are compared with other sessions' in it.
-    let code = session.code_context(&ids, names);
+    let code = session.code_context(&ids, ask);
     // Prompt targets (roadmap C8) go with a recorded prompt: only with the
     // prompt summary and the code briefing on, and only from an index with
     // a complete scan. Paths only; a failure to record them is noted and
@@ -2717,42 +2775,9 @@ pub fn render_code_briefing(
     );
     let mut shown = 0_usize;
     for context in matches {
-        let definitions: Vec<String> = context
-            .definitions
-            .iter()
-            .map(|symbol| {
-                format!(
-                    "{} at {}:{}{}: {}",
-                    clean(&symbol.kind, 16),
-                    quoted(&symbol.path),
-                    symbol.line,
-                    if symbol.exported { ", exported" } else { "" },
-                    quoted(&symbol.signature)
-                )
-            })
-            .collect();
-        let mentions = if context.mentioned_in.is_empty() {
-            "no indexed file mentions it".to_owned()
-        } else {
-            format!(
-                "mentioned in {}",
-                context
-                    .mentioned_in
-                    .iter()
-                    .map(|path| quoted(path))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+        let Some(mut line) = name_line(context) else {
+            continue;
         };
-        let more = if context.truncated { "; and more" } else { "" };
-        let mut line = truncate(
-            &format!(
-                "- {}: {}; {mentions}{more}",
-                quoted(&context.name),
-                definitions.join("; ")
-            ),
-            CODE_LINE_LIMIT,
-        );
         line.push('\n');
         // Room is kept for the line that counts what was left out.
         if text.len() + line.len() + 48 > limit {
@@ -2771,6 +2796,154 @@ pub fn render_code_briefing(
         ));
     }
     Some(text.trim_end().to_owned())
+}
+
+/// Bytes of a path or signature quoted in the code section.
+const CODE_TEXT_LIMIT: usize = 160;
+/// Room at the end of a name's line for the counts of what it left out.
+const CODE_COUNTS: usize = 80;
+
+fn code_quoted(text: &str) -> String {
+    format!("{:?}", clean(text, CODE_TEXT_LIMIT))
+}
+
+/// One name's line, at most `CODE_LINE_LIMIT` bytes, built from whole
+/// parts: a definition or a file that does not fit is counted, never cut.
+/// A ranked answer (roadmap C2) puts the top definition first with why, and
+/// the files that use its name; an unranked one lists definitions and then
+/// the mentioning files, in path order. `None` when not even the first
+/// definition fits.
+fn name_line(context: &langspan_core::NameContext) -> Option<String> {
+    let budget = CODE_LINE_LIMIT - CODE_COUNTS;
+    let mut definitions = context.definitions.iter();
+    let first = definitions.next()?;
+    let mut line = format!("- {}: {}", quoted(&context.name), definition_text(first));
+    if line.len() > budget {
+        return None;
+    }
+    let fits = |line: &String, piece: &str| line.len() + piece.len() <= budget;
+    if let Some(dependents) = &first.dependents {
+        let mut listed = 0_u32;
+        for dependent in dependents {
+            let piece = format!(
+                "{}{} ({})",
+                if listed == 0 { "; used by " } else { ", " },
+                code_quoted(&dependent.path),
+                dependent_text(dependent)
+            );
+            if !fits(&line, &piece) {
+                break;
+            }
+            line.push_str(&piece);
+            listed += 1;
+        }
+        let more = first
+            .dependent_count
+            .unwrap_or(listed)
+            .saturating_sub(listed);
+        match (listed, more) {
+            (0, 0) => line.push_str("; no other indexed file mentions it"),
+            (0, more) => line.push_str(&format!("; used by {more} file(s) not shown")),
+            (_, 0) => {}
+            (_, more) => line.push_str(&format!(" and {more} more file(s)")),
+        }
+    }
+    let ranked = first.dependents.is_some();
+    let mut shown = 1_u32;
+    for symbol in definitions {
+        let also = if ranked { "also " } else { "" };
+        let piece = format!("; {also}{}", definition_text(symbol));
+        if !fits(&line, &piece) {
+            break;
+        }
+        line.push_str(&piece);
+        shown += 1;
+    }
+    let total = context
+        .definition_count
+        .unwrap_or(context.definitions.len() as u32);
+    let hidden = total.saturating_sub(shown);
+    if ranked {
+        if hidden > 0 {
+            line.push_str(&format!("; {hidden} more definition(s) not shown"));
+        }
+        return Some(line);
+    }
+    // An unranked answer from an earlier daemon: path order, as before.
+    let mut listed = 0_usize;
+    for path in &context.mentioned_in {
+        let piece = format!(
+            "{}{}",
+            if listed == 0 { "; mentioned in " } else { ", " },
+            code_quoted(path)
+        );
+        if !fits(&line, &piece) {
+            break;
+        }
+        line.push_str(&piece);
+        listed += 1;
+    }
+    if context.mentioned_in.is_empty() {
+        line.push_str("; no indexed file mentions it");
+    }
+    if context.truncated || hidden > 0 || listed < context.mentioned_in.len() {
+        line.push_str("; and more not shown");
+    }
+    Some(line)
+}
+
+/// A definition: kind, place, whether exported, why it ranks where it does,
+/// and its signature.
+fn definition_text(symbol: &langspan_core::SymbolRef) -> String {
+    use langspan_core::RankReason;
+    let reasons: Vec<String> = symbol
+        .rank_reasons
+        .iter()
+        .flatten()
+        .filter_map(|reason| match reason {
+            RankReason::OwnFile { edited: true } => Some("you edited this file".into()),
+            RankReason::OwnFile { edited: false } => Some("you read this file".into()),
+            RankReason::PeerEditing { session_id } => {
+                Some(format!("{} is editing it", session_label(session_id)))
+            }
+            RankReason::QualifiedInPrompt => Some("your prompt names its path".into()),
+            RankReason::Exported => None,
+        })
+        .collect();
+    format!(
+        "{} at {}:{}{}{}: {}",
+        clean(&symbol.kind, 16),
+        code_quoted(&symbol.path),
+        symbol.line,
+        if symbol.exported { ", exported" } else { "" },
+        if reasons.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", reasons.join("; "))
+        },
+        code_quoted(&symbol.signature)
+    )
+}
+
+/// A dependent's count of mentions and why it ranks where it does.
+fn dependent_text(dependent: &langspan_core::Dependent) -> String {
+    use langspan_core::RankReason;
+    let mut parts = vec![dependent.mentions.to_string()];
+    parts.extend(
+        dependent
+            .rank_reasons
+            .iter()
+            .filter_map(|reason| match reason {
+                RankReason::OwnFile { edited: true } => Some("you edited it".into()),
+                RankReason::OwnFile { edited: false } => Some("you read it".into()),
+                RankReason::PeerEditing { session_id } => {
+                    Some(format!("{} is editing it", session_label(session_id)))
+                }
+                RankReason::QualifiedInPrompt => Some("your prompt names it".into()),
+                RankReason::Exported => None,
+            }),
+    );
+    parts.join(", ")
 }
 
 /// The prompt's whole `additionalContext`: the peer briefing, then the code
@@ -3832,21 +4005,25 @@ impl Session<'_> {
     fn code_context(
         &self,
         ids: &Identities,
-        names: Vec<String>,
+        ask: CodeAsk,
     ) -> Option<(
         Vec<langspan_core::NameContext>,
         langspan_core::GraphCoverage,
     )> {
-        if names.is_empty() || Instant::now() >= self.deadline {
+        if ask.names.is_empty() || Instant::now() >= self.deadline {
             return None;
         }
+        // Ranked for this session (roadmap C2): its own files first.
         let response = self
             .call(
                 wire_id("code-context", &[self.source, &ids.operation_id]),
                 Command::GraphContext {
                     workspace_id: self.config.workspace_id.clone(),
-                    names,
+                    names: ask.names,
                     limit: langspan_core::CONTEXT_DEFINITIONS,
+                    rank: true,
+                    session_id: Some(ids.session_id.clone()),
+                    qualifiers: ask.qualifiers,
                 },
             )
             .ok()?;
@@ -6404,7 +6581,72 @@ mod code_briefing_text {
             )],
             mentioned_in: vec!["src/main.rs".into()],
             truncated: false,
+            definition_count: None,
         }
+    }
+
+    #[test]
+    fn qualifiers_are_the_paths_files_and_leading_parts_a_prompt_names() {
+        assert_eq!(
+            prompt_qualifiers(
+                "make store::upload and net.client.send() use ./src/store/upload.rs, see cli.rs."
+            ),
+            ["store", "net", "client", "src/store/upload.rs", "cli.rs"]
+        );
+        // Not a qualifier: a plain word, a number, `self`, an absolute or
+        // parent path, or a dotted word that is not a source file.
+        assert!(
+            prompt_qualifiers("fix upload in 1.5 via self.x, /etc/passwd or ../up")
+                .iter()
+                .all(|q| q == "via" || q == "up"),
+            "{:?}",
+            prompt_qualifiers("fix upload in 1.5 via self.x, /etc/passwd or ../up")
+        );
+        assert!(prompt_qualifiers("").is_empty());
+        let many: String = (0..40).map(|n| format!("m{n}::x ")).collect();
+        assert_eq!(prompt_qualifiers(&many).len(), langspan_core::CONTEXT_NAMES);
+        let tail = format!("{}late::name", "word ".repeat(PROMPT_SCAN_BYTES));
+        assert!(prompt_qualifiers(&tail).is_empty());
+        for qualifier in prompt_qualifiers(&"é/a.rs ab::c ".repeat(10_000)) {
+            assert!(langspan_core::is_qualifier(&qualifier), "{qualifier}");
+        }
+    }
+
+    #[test]
+    fn an_unranked_answer_is_rendered_in_path_order_with_its_mentions() {
+        let text = render_code_briefing(&[upload()], &coverage(), BRIEFING_LIMIT).unwrap();
+        assert!(text.contains(r#"mentioned in "src/main.rs""#), "{text}");
+        assert!(!text.contains("used by"), "{text}");
+    }
+
+    #[test]
+    fn a_ranked_line_counts_the_files_and_definitions_it_leaves_out() {
+        let mut ranked = upload();
+        ranked.definition_count = Some(9);
+        let first = &mut ranked.definitions[0];
+        first.rank_reasons = Some(vec![langspan_core::RankReason::OwnFile { edited: false }]);
+        first.dependents = Some(vec![langspan_core::Dependent {
+            path: "src/main.rs".into(),
+            mentions: 2,
+            rank_reasons: Vec::new(),
+        }]);
+        first.dependent_count = Some(4);
+        let text = render_code_briefing(&[ranked.clone()], &coverage(), BRIEFING_LIMIT).unwrap();
+        assert!(
+            text.contains(
+                r#"exported (you read this file): "pub fn upload(path: &str) -> bool"; used by "src/main.rs" (2) and 3 more file(s); 8 more definition(s) not shown"#
+            ),
+            "{text}"
+        );
+        // No other file: said, not left blank.
+        let first = &mut ranked.definitions[0];
+        first.dependents = Some(Vec::new());
+        first.dependent_count = Some(0);
+        let text = render_code_briefing(&[ranked], &coverage(), BRIEFING_LIMIT).unwrap();
+        assert!(
+            text.contains("; no other indexed file mentions it;"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -6454,6 +6696,7 @@ mod code_briefing_text {
                         .map(|f| format!("src/{}{f}.rs", "m".repeat(150)))
                         .collect(),
                     truncated: true,
+                    definition_count: None,
                 }
             })
             .collect();
@@ -6491,6 +6734,7 @@ mod code_briefing_text {
             )],
             mentioned_in: vec!["src/main.rs".into()],
             truncated: false,
+            definition_count: None,
         }];
         let coverage = coverage();
         let text = compose_context(Some(&briefing), Some((&matches, &coverage))).unwrap();
