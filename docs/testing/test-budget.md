@@ -81,6 +81,15 @@ The between-steps watcher waits a fixed 10 s start grace
 `a_notice_reaches_a_session_that_makes_no_hook_call_for_30_seconds` waits
 30 s by design (36.4 / 36.2) and is not named `slow_…`.
 
+#456 lets a test shorten the grace with `LANGSPAN_TEST_WATCH_GRACE_MS`
+(500 ms up to the 10 s it can only shorten). The watcher tests use 1 s,
+and the one that starts the coordinator inside the grace uses 5 s. A unit
+test pins that without the setting the grace is 10 s. On an Apple
+M-series laptop the two tests that wait out the grace took 11.2 s each
+before and 2.1 s after; the third took 5.1 s both times. The 30 s test is
+now `slow_a_notice_reaches_…`: its quiet period spans one 30 s
+`SESSION_SEEN_INTERVAL_MS`, so it keeps the real timing.
+
 ### A larger input than the assertion needs (#457, #459)
 
 - `store::tests::a_report_on_a_long_history_folds_at_most_the_budget_and_says_partial`
