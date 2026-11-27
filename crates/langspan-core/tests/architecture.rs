@@ -1,4 +1,6 @@
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
@@ -50,28 +52,15 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
         );
     }
     // A submodule may import only the same pure standard-library items, serde
-    // and its own crate.
-    let submodules = [
-        include_str!("../src/anchors.rs"),
-        include_str!("../src/classes.rs"),
-        include_str!("../src/count.rs"),
-        include_str!("../src/dashboard.rs"),
-        include_str!("../src/flaky.rs"),
-        include_str!("../src/history.rs"),
-        include_str!("../src/lines.rs"),
-        include_str!("../src/policy.rs"),
-        include_str!("../src/rank.rs"),
-        include_str!("../src/recall.rs"),
-        include_str!("../src/recent.rs"),
-        include_str!("../src/refusal_outcome.rs"),
-        include_str!("../src/report.rs"),
-        include_str!("../src/status.rs"),
-        include_str!("../src/status_line.rs"),
-        include_str!("../src/today.rs"),
-        include_str!("../src/trail.rs"),
-        include_str!("../src/workspaces.rs"),
-        include_str!("../src/write_check.rs"),
-    ];
+    // and its own crate. Every file under src/ is a submodule, found when the
+    // test runs, so a new module is checked without an edit here.
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let files = rust_files(&src);
+    let submodules: Vec<String> = files
+        .iter()
+        .filter(|path| **path != src.join("lib.rs"))
+        .map(|path| fs::read_to_string(path).expect("read a core source file"))
+        .collect();
     // Range bounds, `mem::take` and `iter::empty` for the status pages: pure.
     let allowed_imports = [
         &allowed_imports[..],
@@ -99,33 +88,40 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
         );
         assert!(!line.contains("extern crate"));
     }
-    let modules: Vec<_> = source
-        .lines()
-        .filter(|line| line.trim_start().starts_with("mod "))
-        .collect();
-    assert_eq!(
-        modules,
-        [
-            "mod anchors;",
-            "mod classes;",
-            "mod count;",
-            "mod dashboard;",
-            "mod flaky;",
-            "mod history;",
-            "mod lines;",
-            "mod policy;",
-            "mod rank;",
-            "mod recall;",
-            "mod recent;",
-            "mod refusal_outcome;",
-            "mod report;",
-            "mod status;",
-            "mod status_line;",
-            "mod today;",
-            "mod trail;",
-            "mod workspaces;",
-            "mod write_check;"
-        ],
-        "a new core module needs this check"
+    // Each module the crate declares is one of the scanned files, so none can
+    // come from outside src/ (`#[path]`) and escape the import check.
+    assert!(
+        !source.contains("#[path"),
+        "a core module must live under src/"
     );
+    for line in source.lines().map(str::trim) {
+        let Some(name) = line
+            .strip_prefix("pub ")
+            .unwrap_or(line)
+            .strip_prefix("mod ")
+            .and_then(|rest| rest.strip_suffix(';'))
+        else {
+            continue;
+        };
+        assert!(
+            files.contains(&src.join(format!("{name}.rs")))
+                || files.contains(&src.join(name).join("mod.rs")),
+            "core module {name} is not a file under src/"
+        );
+    }
+}
+
+/// Every `.rs` file under `dir`, sorted.
+fn rust_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).expect("read a core source directory") {
+        let path = entry.expect("read a core source directory entry").path();
+        if path.is_dir() {
+            out.extend(rust_files(&path));
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
 }
