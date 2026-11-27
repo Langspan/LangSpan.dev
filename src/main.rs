@@ -4018,10 +4018,11 @@ fn main_install_problem(
 /// one this version writes (`install::stale_matchers`).
 const STALE_MATCHER: &str = "the matcher does not name the tools this version handles";
 
-/// Whether something accepts a connection on `state_dir`'s socket.
+/// Whether `state_dir`'s socket accepts a connection within a second.
 #[cfg(unix)]
 fn accepts_connections(state_dir: &std::path::Path) -> bool {
-    std::os::unix::net::UnixStream::connect(state_dir.join("daemon.sock")).is_ok()
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    client::accepts(state_dir, deadline)
 }
 #[cfg(not(unix))]
 fn accepts_connections(_: &std::path::Path) -> bool {

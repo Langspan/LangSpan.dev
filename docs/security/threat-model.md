@@ -1054,7 +1054,9 @@ A panic on any coordinator thread ends the process with status 1 after one
 the login service restarts it and a hook may start one; the process never keeps
 accepting requests it cannot answer. A hook keeps its own panic fallback.
 `doctor` names a coordinator that accepts connections but does not answer, and
-says how to restart it.
+says how to restart it. Its connection probe is nonblocking with a 1-second
+deadline, so a full listen backlog reports the coordinator as unreachable
+instead of stalling `doctor`.
 
 These tests establish specific component properties. Full current socket CI and
 real native-host M3 acceptance remain separate checks in
