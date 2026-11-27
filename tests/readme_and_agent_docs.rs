@@ -102,6 +102,109 @@ fn the_readme_reaches_setup_within_its_first_words() {
     );
 }
 
+/// The first fenced `sh` block after `heading` in `markdown`, without fences.
+fn sh_block_after(markdown: &str, heading: &str) -> String {
+    let rest = &markdown[markdown
+        .find(heading)
+        .unwrap_or_else(|| panic!("no {heading:?} heading"))..];
+    let start = rest.find("```sh\n").expect("no sh block after the heading") + "```sh\n".len();
+    let len = rest[start..].find("```").expect("unclosed sh block");
+    rest[start..start + len].to_owned()
+}
+
+/// The release targets named in the first table after `heading`.
+fn target_rows(markdown: &str, heading: &str) -> Vec<String> {
+    let rest = &markdown[markdown.find(heading).unwrap()..];
+    rest.lines()
+        .skip_while(|line| !line.starts_with('|'))
+        .take_while(|line| line.starts_with('|'))
+        .filter_map(|line| {
+            let cell = line.split('|').nth(2)?.trim();
+            let target = cell.strip_prefix('`')?.split('`').next()?;
+            target.contains("-").then(|| target.to_owned())
+        })
+        .collect()
+}
+
+const TARGETS: [&str; 4] = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+];
+
+#[test]
+fn the_quickstart_names_one_target_per_platform() {
+    for (doc, heading) in [
+        ("README.md", "## Quickstart"),
+        ("docs/install.md", "# Install"),
+    ] {
+        assert_eq!(
+            target_rows(&read(doc), heading),
+            TARGETS,
+            "{doc} needs a four-row table of release targets under {heading:?}"
+        );
+    }
+}
+
+#[test]
+fn the_quickstart_runs_top_to_bottom_without_gh() {
+    let block = sh_block_after(&read("README.md"), "## Quickstart");
+    // Each step a stranger needs, in order: download, verify, extract,
+    // install, keep PATH for later shells, set up, check.
+    let steps = [
+        "target=",
+        "curl -fsSLO \"$url/SHA256SUMS\"",
+        "curl -fsSLO \"$url/$archive\"",
+        "shasum -a 256 -c",
+        "tar -xzf \"$archive\"",
+        "cd \"${archive%.tar.gz}\"",
+        "install -m 0755 langspan \"$HOME/.local/bin/langspan\"",
+        ">> \"$HOME/.",
+        "langspan setup",
+        "langspan doctor",
+    ];
+    let mut from = 0;
+    for step in steps {
+        let at = block[from..]
+            .find(step)
+            .unwrap_or_else(|| panic!("README quickstart lacks {step:?} after byte {from}"));
+        from += at + step.len();
+    }
+    assert!(
+        !block.contains("gh "),
+        "the quickstart must not need the GitHub CLI"
+    );
+    let parsed = std::process::Command::new("sh")
+        .args(["-n", "-c", &block])
+        .status()
+        .unwrap();
+    assert!(parsed.success(), "the README quickstart is not valid sh");
+}
+
+#[test]
+fn the_install_guide_repeats_the_readme_quickstart() {
+    assert_eq!(
+        sh_block_after(&read("docs/install.md"), "## Install"),
+        sh_block_after(&read("README.md"), "## Quickstart"),
+        "docs/install.md and the README must give the same install commands"
+    );
+}
+
+#[test]
+fn the_readme_states_each_host_status_once() {
+    let readme = read("README.md");
+    assert!(!readme.contains("pending"), "README.md calls a run pending");
+    let antigravity_status = readme
+        .lines()
+        .filter(|line| line.contains("Antigravity") && line.to_lowercase().contains("verified"))
+        .count();
+    assert_eq!(
+        antigravity_status, 1,
+        "state Antigravity's status in one README line"
+    );
+}
+
 #[test]
 fn the_agent_file_stays_within_its_word_budget() {
     let words = rendered_words(&read("AGENTS.md"));
