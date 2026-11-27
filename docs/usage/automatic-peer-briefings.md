@@ -246,6 +246,12 @@ Delivery is advisory and recorded:
   option errors.
 - Cursor also runs Claude Code's hooks. A Cursor event ends the watcher at
   once.
+- Between-step notices reach interactive sessions only. Claude Code runs the
+  watcher in the foreground in a headless session (`claude -p`), where the
+  turn would wait for it, so the watcher exits 0 at once unless its
+  environment has `CLAUDE_CODE_ENTRYPOINT=cli`, which Claude Code sets only
+  for an interactive session (issue #534). Headless and Agent SDK sessions
+  still get the prompt and tool hooks' briefings.
 
 The watcher's mechanism is from Claude Code's documentation and the tests
 run the real hook binary against a real coordinator; a live Claude Code run

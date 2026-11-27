@@ -129,10 +129,13 @@ impl World {
     fn hook_process(&self, options: &[&str]) -> Child {
         self.hook_command(options).spawn().unwrap()
     }
+    /// The hook as an interactive Claude Code session runs it (issue #534),
+    /// whatever session runs these tests.
     fn hook_command(&self, options: &[&str]) -> Process {
         let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
         command
             .env("LANGSPAN_AUTOSTART", "off")
+            .env("CLAUDE_CODE_ENTRYPOINT", "cli")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.base.join("state"))
             .args(["--workspace", "app", "--root"])
@@ -568,6 +571,42 @@ fn a_watcher_that_cannot_run_exits_0_and_says_why() {
     assert!(started.elapsed() < Duration::from_secs(10));
 }
 
+/// Issue #534: in a non-interactive Claude Code session the host runs the
+/// watcher in the foreground and the turn waits for it. A watcher started
+/// there, for a registered session with an open turn, ends at once with
+/// exit 0 and says why. A process test: what it checks is that the hook
+/// binary reads the entrypoint from its own environment.
+#[test]
+fn a_watcher_in_a_non_interactive_session_ends_at_once() {
+    let w = World::new();
+    w.edits("alice", "a1", "src/main.rs", &format!("{MAIN}// touched\n"));
+    w.hook(prompt_event_for(&w.work(), "alice", "prompt-1"));
+    for entrypoint in [Some("sdk-cli"), Some("sdk-ts"), None] {
+        let mut command = w.hook_command(&["--mode", "between-steps"]);
+        match entrypoint {
+            Some(value) => command.env("CLAUDE_CODE_ENTRYPOINT", value),
+            None => command.env_remove("CLAUDE_CODE_ENTRYPOINT"),
+        };
+        let started = Instant::now();
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                prompt_event_for(&w.work(), "alice", "prompt-1")
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let (code, stderr) = finished(child, Duration::from_secs(10));
+        assert_eq!(code, 0, "{entrypoint:?}: {stderr}");
+        assert!(stderr.contains("CLAUDE_CODE_ENTRYPOINT"), "{stderr}");
+        // Well under the 1 s poll, the shortest a watcher that asks can take.
+        assert!(started.elapsed() < GRACE, "{entrypoint:?} ended at once");
+    }
+}
+
 /// A coordinator that answers but does not know the session (the prompt
 /// hook never registered it) ends the watcher with exit 0 once the startup
 /// grace has passed, with the coordinator's error in the log line.
@@ -607,7 +646,8 @@ fn a_watcher_ends_quietly_at_its_bound() {
     let limit = Duration::from_secs(3);
     let event = prompt_event(&w.work(), "alice").to_string();
     let started = Instant::now();
-    let watched = langspan::between_steps::watch_within(event.as_bytes(), &config, limit);
+    let watched =
+        langspan::between_steps::watch_within(event.as_bytes(), &config, Some("cli"), limit);
     let elapsed = started.elapsed();
     assert_eq!(watched.exit, 0, "{watched:?}");
     assert_eq!(watched.detail, "watch limit reached");
