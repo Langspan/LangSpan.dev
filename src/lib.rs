@@ -14,6 +14,7 @@ pub mod count;
 pub mod daemon;
 pub mod dashboard;
 pub mod definitions;
+pub mod demo;
 pub mod formatter;
 pub mod guidance;
 pub mod install;
