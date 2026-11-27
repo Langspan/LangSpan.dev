@@ -194,6 +194,42 @@ fn a_pull_request_still_decides_from_head_parent() {
 }
 
 #[test]
+fn code_split_into_new_core_daemon_or_hook_modules_runs_the_dry_runs() {
+    for path in [
+        "crates/langspan-core/src/new_module.rs",
+        "crates/langspan-core/src/briefing/mod.rs",
+        "src/daemon.rs",
+        "src/daemon/serve.rs",
+        "src/hook.rs",
+        "src/hook/redact.rs",
+    ] {
+        let repo = Repo::new();
+        repo.commit("README.md");
+        let head = repo.commit(path);
+        assert_eq!(
+            repo.decide("pull_request", "", &head),
+            decided("true", "run"),
+            "{path}"
+        );
+    }
+    // A name that only starts like a hot module, or another crate, stays out.
+    for path in [
+        "src/daemonize.rs",
+        "src/hooks.rs",
+        "crates/langspan-graph/src/lib.rs",
+    ] {
+        let repo = Repo::new();
+        repo.commit("README.md");
+        let head = repo.commit(path);
+        assert_eq!(
+            repo.decide("pull_request", "", &head),
+            decided("true", "skip"),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn linux_and_macos_start_together() {
     let text = workflow("check.yml");
     for id in ["linux", "macos"] {

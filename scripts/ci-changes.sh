@@ -13,7 +13,9 @@
 # The benchmark harness's dry runs (tests/benchmark_harness.rs) took about
 # 11 minutes of macOS's 18 (issue #286). They run only when the change
 # touches a path in BENCH_PATHS: the harness, the briefing, hook and daemon
-# code it drives, and what builds or runs the suite. A pull request is
+# code it drives, and what builds or runs the suite. The core, daemon and
+# hook entries name directories, so code moved into a new module there
+# still runs them (issue #341). A pull request is
 # HEAD^1..HEAD. A merge-queue commit is its group's base..head, so the pull
 # requests queued ahead count too. A push to main is HEAD^1..HEAD when it
 # adds one commit (a squash merge), and otherwise runs them. Manual and
@@ -28,9 +30,9 @@ set -eu
 
 BENCH_PATHS='^benchmarks/
 |^tests/benchmark_harness\.rs$
-|^src/(daemon|hook|claude_code|recent)\.rs$
-|^src/hook/
-|^crates/langspan-core/src/lib\.rs$
+|^src/(daemon|hook)(/|\.rs$)
+|^src/(claude_code|recent)\.rs$
+|^crates/langspan-core/src/
 |^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml)$
 |^\.config/nextest\.toml$
 |^\.github/workflows/check\.yml$
