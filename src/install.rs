@@ -12,6 +12,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use crate::vendor::{Vendor, quote};
+
 pub const EVENTS: [&str; 3] = ["PreToolUse", "PostToolUse", "PostToolUseFailure"];
 /// `Bash` is matched so shell commands are admitted when their write set is
 /// literal and compared before and after ([ADR 0011](../docs/adr/0011-shell-writes.md)).
@@ -61,59 +63,10 @@ pub const HOST_TIMEOUT_SECONDS: u64 = 5;
 pub const CODEX_SESSION_END_TIMEOUT_SECONDS: u64 = 3;
 const MAX_SETTINGS_BYTES: u64 = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Vendor {
-    ClaudeCode,
-    Codex,
-    Cursor,
-    /// Gemini CLI, no longer supported (issue #246, ADR 0033). For one
-    /// release LangSpan still recognizes what an earlier install wrote, so
-    /// `uninstall`, `hooks remove` and `doctor` can deal with it; nothing
-    /// installs it, and `langspan hook gemini-cli` does nothing.
-    Gemini,
-    Antigravity,
-}
-
 /// What a refused Gemini CLI install says.
 pub const GEMINI_REMOVED: &str = "Gemini CLI support was removed: Google replaced Gemini CLI with the Antigravity CLI, which LangSpan supports as `antigravity`. `langspan uninstall --hosts gemini-cli --apply` and `langspan hooks remove gemini-cli --root DIR --apply` remove an earlier install. Nothing was changed";
 
 impl Vendor {
-    /// Every supported host, in the order help text and checks list them.
-    /// Gemini CLI is not one of them: see `Vendor::Gemini`.
-    pub const ALL: [Self; 4] = [
-        Self::ClaudeCode,
-        Self::Codex,
-        Self::Cursor,
-        Self::Antigravity,
-    ];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::ClaudeCode => "claude-code",
-            Self::Codex => "codex",
-            Self::Cursor => "cursor",
-            Self::Gemini => "gemini-cli",
-            Self::Antigravity => "antigravity",
-        }
-    }
-
-    /// The host a command-line name stands for, Gemini CLI's included so
-    /// that removing it works; `gemini` also names it.
-    pub fn from_name(name: &str) -> Option<Self> {
-        if name == "gemini" {
-            return Some(Self::Gemini);
-        }
-        Self::ALL
-            .into_iter()
-            .chain([Self::Gemini])
-            .find(|vendor| vendor.name() == name)
-    }
-
-    /// Whether the host is no longer supported: only removal works for it.
-    pub fn removed(self) -> bool {
-        self == Self::Gemini
-    }
-
     /// Cursor lists hook entries directly under each event. Claude Code and
     /// Codex nest them in groups that carry the matcher, as Gemini CLI did.
     /// Antigravity nests them for its tool events and lists them directly
@@ -459,10 +412,6 @@ fn resolved(path: &Path) -> PathBuf {
             _ => return absolute,
         }
     }
-}
-
-pub fn quote(word: &str) -> String {
-    format!("'{}'", word.replace('\'', r"'\''"))
 }
 
 /// The executable path written into hooks and MCP entries: the running

@@ -42,8 +42,10 @@ pub mod store;
 pub mod test_output;
 mod text;
 pub mod today;
+mod tool_names;
 pub mod trail;
 pub mod user_install;
+mod vendor;
 mod wait;
 mod zone;
 

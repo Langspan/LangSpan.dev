@@ -2375,7 +2375,7 @@ pub fn running_session(state_dir: &Path, root: &Path) -> Result<String, crate::E
 /// LangSpan project hook in this checkout names one, it is suggested. Only
 /// suggested, never used: it is text read from the repository.
 fn no_running_session(state_dir: &Path, root: &Path) -> String {
-    let looked = crate::install::quote(&state_dir.to_string_lossy());
+    let looked = crate::vendor::quote(&state_dir.to_string_lossy());
     let session = "or pass --session ID (a briefing says \"Your session ID is ...\")";
     let canonical = |dir: &Path| fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let same = |other: &Path| canonical(other) == canonical(state_dir);
@@ -2389,7 +2389,7 @@ fn no_running_session(state_dir: &Path, root: &Path) -> String {
             })
         })
         .flat_map(|dir| {
-            crate::install::Vendor::ALL
+            crate::vendor::Vendor::ALL
                 .into_iter()
                 .flat_map(move |vendor| {
                     crate::install::project_registrations(vendor, dir).unwrap_or_default()
@@ -2400,8 +2400,8 @@ fn no_running_session(state_dir: &Path, root: &Path) -> String {
     match installed {
         Some(other) => format!(
             "no session is running this command through its shell tool in the state directory {looked}; the LangSpan hook installed in this checkout uses the state directory {}: run `langspan --state-dir {} commit --mine ...` instead, {session}",
-            crate::install::quote(&other.to_string_lossy()),
-            crate::install::quote(&other.to_string_lossy()),
+            crate::vendor::quote(&other.to_string_lossy()),
+            crate::vendor::quote(&other.to_string_lossy()),
         ),
         None => format!(
             "no session is running this command through its shell tool in the state directory {looked}; if LangSpan's hooks were installed with --state-dir, pass the same --state-dir, {session}"
@@ -3464,7 +3464,7 @@ mod tests {
             presence: false,
             presence_window_ms: langspan_core::PRESENCE_WINDOW_MS,
             outline_reads: false,
-            vendor: crate::install::Vendor::ClaudeCode,
+            vendor: crate::vendor::Vendor::ClaudeCode,
             user_level: false,
         };
         let call = |command: &str| ShellCall {
