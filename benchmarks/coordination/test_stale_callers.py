@@ -18,14 +18,17 @@ def recorded(name):
     return json.loads((HERE / "testdata" / "stale-callers" / (name + ".json")).read_text(encoding="utf-8"))
 
 
-def measure(trial):
-    """The measure of TRIAL, with the fixture's files as the base, as the driver gives it."""
+def measure(trial, changed=None):
+    """The measure of TRIAL, with the fixture's files as the base, as the
+    driver gives it. Each session changed the files it committed, unless
+    CHANGED says otherwise."""
     def base(path):
         file = HERE / "fixture" / path
         return file.read_text(encoding="utf-8") if file.is_file() else None
     transcripts = [(events, (root,)) for events, root in zip(trial["transcripts"], trial["roots"])]
     return stale_callers.stale_callers(trial["plan"], transcripts, base,
-                                       lambda index, path: trial["committed"][index - 1].get(path))
+                                       lambda index, path: trial["committed"][index - 1].get(path),
+                                       changed or (lambda index: list(trial["committed"][index - 1])))
 
 
 def result_of(trial, session, tool_use_id):
@@ -65,6 +68,33 @@ class StaleCallers(unittest.TestCase):
         self.assertEqual((found["writes_admitted"], found["stale_files"], found["unfixed"]), (0, 1, 1))
         self.assertEqual(found["items"], [{"session": 2, "path": "shelf/features/gone.py", "after_s": 0.0,
                                            "kind": "stale_at_change"}])
+
+    def test_a_caller_stale_at_the_change_and_fixed_by_the_next_write_is_counted_and_timed(self):
+        trial = recorded("langspan-follow")
+        trial["transcripts"][1][3]["monotonic_ns"] = CHANGE["langspan-follow"] - 1000
+        found = measure(trial)
+        self.assertEqual((found["status"], found["writes_admitted"], found["stale_files"], found["unfixed"],
+                          found["fixed_after_s"]),
+                         ("reported", 0, 1, 0, (2152111981911375 - CHANGE["langspan-follow"]) / 1e9))
+        self.assertEqual([item["kind"] for item in found["items"]], ["stale_at_change", "fixed"])
+
+    def test_a_caller_file_written_another_way_is_unknown(self):
+        # A caller Bash added or removed: no Write or Edit call names it.
+        for path, text in (("shelf/features/extra.py", "from shelf.dates import days_left\nx = days_left(1)\n"),
+                           ("shelf/features/extra.py", "x = 1\n"), ("shelf/report.py", None)):
+            trial = recorded("langspan-follow")
+            trial["committed"][1][path] = text
+            found = measure(trial)
+            self.assertEqual(found["status"], "unknown", path)
+            self.assertIn(path, found["reason"])
+        # A file that cannot hold a caller does not make the trial unknown.
+        trial = recorded("langspan-follow")
+        trial["committed"][1]["notes/s2.md"] = "done\n"
+        self.assertEqual(measure(trial)["status"], "reported")
+        # Nor does a list of changed files the driver could not read.
+        found = measure(recorded("langspan-follow"), changed=lambda index: None)
+        self.assertEqual(found["status"], "unknown")
+        self.assertIn("changed files", found["reason"])
 
     def test_a_file_that_differs_from_its_replayed_writes_is_unknown(self):
         # A write the transcript does not show, such as one made with Bash.

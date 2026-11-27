@@ -122,7 +122,7 @@
       "enum": ["made", "change_not_made", "unknown", "not_applicable"]
     },
     "stale_callers": {
-      "description": "discovered_change (stale_callers.py): from the changer's first admitted write that changes the helper, each admitted dependent write that leaves a call in the old form (writes_admitted), the dependent files with one (stale_files), those still stale at the session's end (unfixed), and the seconds from the change to the last stale caller fixed (fixed_after_s, null when none was stale or one stays stale). Each item is one file becoming stale at the change or by a write, or being fixed. unknown, with a reason, when a transcript or a clock line is missing or a committed file is not what the replayed Write and Edit calls left; not_applicable in other families and when the change was not made.",
+      "description": "discovered_change (stale_callers.py): from the changer's first admitted write that changes the helper, each admitted dependent write that leaves a call in the old form (writes_admitted), the dependent files with one (stale_files), those still stale at the session's end (unfixed), and the seconds from the change to the last stale caller fixed (fixed_after_s, null when none was stale or one stays stale). Each item is one file becoming stale at the change or by a write, or being fixed. unknown, with a reason, when a transcript, its file or a clock line is missing, or a committed file (any Python file the session added, changed or removed, as Git lists them) is not what the replayed Write and Edit calls left; not_applicable in other families and when the change was not made.",
       "type": "object",
       "additionalProperties": false,
       "required": ["status"],

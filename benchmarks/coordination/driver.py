@@ -1539,12 +1539,27 @@ def stale_section(plan, commands, runner_dir, work):
 
     def transcript(index):
         command, root = commands.get(("agent", "s%d" % index)), work / ("s%d" % index)
-        events = transcript_events(text(runner_dir / command["stdout_path"]) or "") if command else None
-        return events, (str(root), str(root.resolve()))
+        # A command whose stdout file is missing has no transcript, not an empty one.
+        raw = text(runner_dir / command["stdout_path"]) if command else None
+        return (transcript_events(raw) if raw is not None else None), (str(root), str(root.resolve()))
+
+    def changed(index):
+        """The paths session INDEX's checkout added, changed or removed
+        since the base, committed or not; None when Git cannot list them."""
+        if not isinstance(plan.get("base"), str):
+            return None
+        clone = work / ("s%d" % index)
+        try:
+            listed = [git("diff", "--name-only", "-z", "--no-renames", plan["base"], "--", cwd=clone),
+                      git("ls-files", "-z", "--others", "--exclude-standard", cwd=clone)]
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            # ValueError: a path Git gives that is not UTF-8.
+            return None
+        return [path for done in listed for path in done.stdout.split("\0") if path]
     # Read lazily: a family without a change reads nothing.
     transcripts = (transcript(index) for index in range(1, len(plan["tasks"]) + 1))
     return stale.stale_callers(plan, transcripts, lambda path: text(HERE / "fixture" / path),
-                               lambda index, path: text(work / ("s%d" % index) / path))
+                               lambda index, path: text(work / ("s%d" % index) / path), changed)
 
 
 def session_outcome(command, runner_dir, output, root, work, index):

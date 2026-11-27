@@ -16,7 +16,8 @@ from oracle import references, required_arguments
 
 CLOCK_TYPE = "langspan_bench_clock"
 # The file tools whose input says what they wrote. A write any other way
-# (Bash, for one) leaves a committed file the replay does not match.
+# (Bash, for one) leaves a committed file the replay does not match, and
+# the session's changed files name it.
 TOOLS = ("Write", "Edit")
 MAX_ITEMS = 200
 
@@ -112,12 +113,14 @@ def unknown(reason):
     return {"status": "unknown", "reason": reason}
 
 
-def stale_callers(plan, transcripts, base, committed):
+def stale_callers(plan, transcripts, base, committed, changed):
     """The stale-caller measure of one trial. PLAN has its `family` and
     `tasks`; TRANSCRIPTS, per session in order, the events of its transcript
     (None when there is none) and the paths its checkout is known by;
     BASE(path) is the fixture's text of a file and COMMITTED(session, path)
-    the text the session committed, each None for no file.
+    the text the session committed, each None for no file; CHANGED(session)
+    the paths the session added, changed or removed, None when they could
+    not be listed.
 
     The change is the changer's first admitted write after which its helper
     requires the changed form's arguments. From then on, a dependent's file
@@ -126,8 +129,8 @@ def stale_callers(plan, transcripts, base, committed):
     write that leaves such a file is a stale write. `fixed_after_s` runs
     from the change to the last stale caller fixed: None when none was
     stale, or one still is (`unfixed`). `unknown` when a session's
-    committed file is not what its replayed calls left, as after a write
-    with Bash."""
+    committed file, its changed Python files among them, is not what its
+    replayed calls left, as after a write with Bash."""
     changer = next((index for index, task in enumerate(plan["tasks"], 1) if task["role"] == "changer"), None)
     if plan["family"] != "discovered_change" or changer is None:
         return {"status": "not_applicable", "reason": "the family has no interface change"}
@@ -145,7 +148,13 @@ def stale_callers(plan, transcripts, base, committed):
                 if files[path] is None:
                     return unknown("session %d's %s of %s replaces text that is not there" % (index, tool, path))
                 timeline.append((ns, index, path, files[path]))
-        for path in sorted(set(files) | {module_path(task["module"])} | ({helper} if index == changer else set())):
+        touched = changed(index)
+        if touched is None:
+            return unknown("session %d's changed files could not be listed" % index)
+        # A Python file is the only kind that can hold a caller.
+        touched = {path for path in touched if path.endswith(".py")}
+        for path in sorted(set(files) | touched | {module_path(task["module"])}
+                           | ({helper} if index == changer else set())):
             if committed(index, path) != files.get(path, base(path)):
                 return unknown("session %d's committed %s is not what its Write and Edit calls left: it was "
                                "written another way" % (index, path))
@@ -166,6 +175,7 @@ def stale_callers(plan, transcripts, base, committed):
         if stale(text, interface):
             now.add((index, path))
             item(index, path, change, "stale_at_change")
+    ever |= now  # before a write that follows the change can fix one
     for ns, index, path, text in dependents:
         if ns < change:
             continue
@@ -178,6 +188,5 @@ def stale_callers(plan, transcripts, base, committed):
             last_fix = ns
             item(index, path, ns, "fixed")
         ever |= now
-    ever |= now  # the callers stale at the change, when no write follows it
     return {"status": "reported", "writes_admitted": admitted, "stale_files": len(ever), "unfixed": len(now),
             "fixed_after_s": (last_fix - change) / 1e9 if ever and not now else None, "items": items}
