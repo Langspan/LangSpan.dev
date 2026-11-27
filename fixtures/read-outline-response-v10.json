@@ -1,0 +1,1 @@
+{"version":10,"request_id":"outline-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"read_outline","outline":[{"name":"parse","kind":"function","line":12,"end_line":80,"exported":true},{"name":"Cache","kind":"struct","line":90,"end_line":120,"exported":false}],"definitions":2}}

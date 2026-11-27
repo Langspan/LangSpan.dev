@@ -60,11 +60,12 @@ Each is the smallest that meets the issue's criteria.
   does not hold that version. Only then is `read_outlined` appended. An
   older coordinator answers the unknown command with an error, which is no
   decision.
-- Wire protocol version 8 (review comment 4714078108). A client of an
+- Wire protocol version 10 (review comment 4714078108; version 8 is issue
+  #262's and version 9 roadmap E1's). A client of an
   earlier build reads session activity and events with
   `deny_unknown_fields`, so a session activity's `outlined` and the
   `read_outlined` event would break its status and event queries. To a
-  version 7 or earlier client, the coordinator answers without them,
+  version 8 or earlier client, the coordinator answers without them,
   including in state records given in parts.
 - Each outline line is `KIND NAME lines A-B`, with ` (exported)` for an
   exported definition. `KIND` is the index's own name (`function`,

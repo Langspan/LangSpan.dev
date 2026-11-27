@@ -1,4 +1,4 @@
-//! Version 8 of the local IPC contract. One bounded JSON line per connection.
+//! Version 10 of the local IPC contract. One bounded JSON line per connection.
 
 use langspan_core::{
     Command, ContextUse, Event, Outcome, RecordedEvent, SessionActivity, StatusRecord,
@@ -6,10 +6,12 @@ use langspan_core::{
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader, Read};
 
-/// Version 8 is version 7 with roadmap A11's outline reads: a session
+/// Version 10 is version 8 with roadmap A11's outline reads: a session
 /// activity's `outlined`, the `read_outlined` event, and the `outline_read`
-/// request with its `read_outline` answer. Version 7 is version 6 with
-/// issue #222's briefing memory and context
+/// request with its `read_outline` answer. Version 9 is roadmap E1's
+/// (#273), which this build does not have, so it does not answer it.
+/// Version 8 is version 7 with issue #262's `inflight_partial` in a
+/// briefing. Version 7 is version 6 with issue #222's briefing memory and context
 /// measurement: a session activity's `told`, `told_at_ms` and `context`, a
 /// briefing's `unchanged`, a briefing delivery's `told` and `told_at_ms`,
 /// and the `context_added` and `told_forgotten` events (with the
@@ -21,7 +23,9 @@ use std::io::{self, BufRead, BufReader, Read};
 /// roadmap D7's rename fields in interface changes, history entries and
 /// in-flight symbols. Apart from recording a rebased or adapted landing,
 /// requests of an earlier version are requests of this one.
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 10;
+/// Issue #262's version, answered in its own shape.
+pub const PROTOCOL_VERSION_8: u16 = 8;
 /// Issue #222's version, answered in its own shape.
 pub const PROTOCOL_VERSION_7: u16 = 7;
 /// Roadmap F5's version, answered in its own shape.
@@ -35,24 +39,29 @@ pub const PROTOCOL_VERSION_4: u16 = 4;
 /// the daemon is upgraded.
 pub const OLDEST_PROTOCOL_VERSION: u16 = 3;
 
-/// Whether the daemon answers requests of `version`.
+/// Whether the daemon answers requests of `version`: every version from
+/// the oldest to 8, and this build's. Version 9 is roadmap E1's (#273),
+/// whose shape this build does not have.
 pub fn answers(version: u16) -> bool {
-    (OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION).contains(&version)
+    (OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION_8).contains(&version) || version == PROTOCOL_VERSION
 }
 
 /// `response` as one frame for a client of `version`. Clients of an
 /// earlier version read the objects later versions extended with
 /// `deny_unknown_fields`, so an answer carrying a field they lack would fail
 /// to read as a whole: theirs is encoded without what later versions added
-/// (`protocol_7_outcome`, `protocol_6_outcome`, then `protocol_5_shape`,
-/// `protocol_4_shape` and `protocol_3_shape`). A state record given in parts is encoded by
-/// `encode_record_for` before it is cut.
+/// (`protocol_8_outcome`, `protocol_7_outcome`, `protocol_6_outcome`, then
+/// `protocol_5_shape`, `protocol_4_shape` and `protocol_3_shape`). A state
+/// record given in parts is encoded by `encode_record_for` before it is cut.
 pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::Error> {
     if version >= PROTOCOL_VERSION {
         return encode(response);
     }
     let mut earlier = response.clone();
-    protocol_7_outcome(&mut earlier.outcome);
+    protocol_8_outcome(&mut earlier.outcome);
+    if version < PROTOCOL_VERSION_8 {
+        protocol_7_outcome(&mut earlier.outcome);
+    }
     if version < PROTOCOL_VERSION_7 {
         protocol_6_outcome(&mut earlier.outcome);
     }
@@ -71,7 +80,7 @@ pub fn encode_record_for(version: u16, record: &StatusRecord) -> Result<String, 
     }
     let mut earlier = record.clone();
     if let StatusRecord::Activity { activity, .. } = &mut earlier {
-        protocol_7_activity(activity);
+        protocol_8_activity(activity);
         if version < PROTOCOL_VERSION_7 {
             protocol_6_activity(activity);
         }
@@ -95,6 +104,14 @@ fn earlier_shape(version: u16, value: &mut serde_json::Value) {
     }
 }
 
+/// `outcome` without what version 8 (issue #262) added: a briefing's
+/// `inflight_partial`, which is skipped when false.
+fn protocol_7_outcome(outcome: &mut Outcome) {
+    if let Outcome::Briefing { briefing } = outcome {
+        briefing.inflight_partial = false;
+    }
+}
+
 /// `activity` without what version 7 (issue #222) added. Every such field is skipped
 /// when empty, so emptying it leaves it out.
 fn protocol_6_activity(activity: &mut SessionActivity) {
@@ -103,9 +120,9 @@ fn protocol_6_activity(activity: &mut SessionActivity) {
     activity.context = ContextUse::default();
 }
 
-/// `activity` without what version 8 (roadmap A11) added: `outlined`,
+/// `activity` without what version 10 (roadmap A11) added: `outlined`,
 /// skipped when empty.
-fn protocol_7_activity(activity: &mut SessionActivity) {
+fn protocol_8_activity(activity: &mut SessionActivity) {
     activity.outlined = Vec::new();
 }
 
@@ -130,12 +147,12 @@ fn reshape(
     }
 }
 
-/// `outcome` without what version 8 (roadmap A11) added: a session
-/// activity's `outlined`, and the `read_outlined` event, which version 7
+/// `outcome` without what version 10 (roadmap A11) added: a session
+/// activity's `outlined`, and the `read_outlined` event, which version 8
 /// has no variant for, left out of an event page. No earlier client sends
 /// `outline_read`, so its `read_outline` answer needs no earlier shape.
-fn protocol_7_outcome(outcome: &mut Outcome) {
-    reshape(outcome, protocol_7_activity, |page| {
+fn protocol_8_outcome(outcome: &mut Outcome) {
+    reshape(outcome, protocol_8_activity, |page| {
         page.retain(|recorded| !matches!(recorded.event, Event::ReadOutlined { .. }));
     });
 }

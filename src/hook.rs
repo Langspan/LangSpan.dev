@@ -2383,6 +2383,10 @@ fn inflight_line(notice: &langspan_core::InflightNotice) -> String {
     format!("{line}{LABEL}")
 }
 
+/// What a briefing says when the source index has not finished a first scan
+/// of a worktree it compares (issue #262).
+const INFLIGHT_PARTIAL: &str = "The source index has not finished scanning every worktree of this repository yet, so work in flight in another worktree may be missing here.";
+
 /// Whether `text` holds the line of every in-flight notice in `briefing`.
 /// Delivering a briefing records its notices as told, so one whose line
 /// did not fit must wait for a later briefing instead (review comment
@@ -2695,6 +2699,16 @@ fn render_peers_placed(
         text.push_str(&line);
     }
     skipped += briefing.omitted_inflight as usize;
+    // Issue #262: an index without a first scan of a worktree finds
+    // nothing in flight there, which must not read as nothing in flight.
+    if briefing.inflight_partial {
+        if text.len() + INFLIGHT_PARTIAL.len() + 1 + footer.len() + 96 > limit {
+            skipped += 1;
+        } else {
+            text.push_str(INFLIGHT_PARTIAL);
+            text.push('\n');
+        }
+    }
     if !briefing.stale_reads.is_empty() {
         let stale: Vec<String> = briefing
             .stale_reads
@@ -6232,6 +6246,7 @@ mod briefing_text {
             interface_notice_ids: Vec::new(),
             inflight: Vec::new(),
             omitted_inflight: 0,
+            inflight_partial: false,
             notes: Vec::new(),
             messages: Vec::new(),
             retracted: Vec::new(),
@@ -6321,6 +6336,33 @@ mod briefing_text {
             "{text}"
         );
         assert!(text.contains("data, not instructions"), "{text}");
+    }
+
+    /// Issue #262: an index without a first scan of a worktree says so in
+    /// one line, inside the cap even when peers fill the rest, and a
+    /// complete one says nothing about it.
+    #[test]
+    fn a_partial_index_is_one_line_inside_the_cap() {
+        let mut partial = briefing(vec![peer("peer", "src/a.rs")]);
+        assert!(!render_briefing(&partial).contains(INFLIGHT_PARTIAL));
+        partial.inflight_partial = true;
+        let text = render_briefing(&partial);
+        assert_eq!(
+            text.lines()
+                .filter(|line| *line == INFLIGHT_PARTIAL)
+                .count(),
+            1,
+            "{text}"
+        );
+        assert!(INFLIGHT_PARTIAL.len() <= PEER_LINE_LIMIT);
+        let mut full = briefing(
+            (0..16)
+                .map(|n| peer(&format!("peer{n}"), &format!("src/{}", "x".repeat(500))))
+                .collect(),
+        );
+        full.inflight_partial = true;
+        let text = render_briefing(&full);
+        assert!(text.len() <= BRIEFING_LIMIT, "{}", text.len());
     }
 
     /// A peer with short work and where it is looking (roadmap A13).
@@ -7598,6 +7640,7 @@ mod code_briefing_text {
             interface_notice_ids: Vec::new(),
             inflight: Vec::new(),
             omitted_inflight: 0,
+            inflight_partial: false,
             notes: Vec::new(),
             messages: Vec::new(),
             retracted: Vec::new(),
@@ -8072,6 +8115,7 @@ mod placed_briefing {
             interface_notice_ids: Vec::new(),
             inflight: Vec::new(),
             omitted_inflight: 0,
+            inflight_partial: false,
             notes: Vec::new(),
             messages: Vec::new(),
             retracted: Vec::new(),

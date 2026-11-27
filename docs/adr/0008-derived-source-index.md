@@ -667,7 +667,13 @@ the window next reaches it. `graph inflight WORKSPACE` answers the same
 comparison for any file of the workspace, read-only, from the first 128
 symbols of each other worktree and 256 in all. Neither a worktree nor
 an asking workspace without a complete scan contributes anything; an empty
-answer still carries the asking workspace's coverage. Its answer keeps the
+answer still carries the asking workspace's coverage. A briefing whose
+comparison met such a worktree, or whose own workspace has none, says in one
+line that the index has not finished scanning every worktree yet, instead of
+saying nothing (issue #262); the line is not news by itself, so it rides with
+a briefing delivered for another reason. It is the briefing's
+`inflight_partial`, which protocol version 8 added; clients of version 7
+or earlier are not sent it. Its answer keeps the
 leading items that fit one response frame and is marked `truncated` when any
 are left out. Tests:
 `another_worktrees_uncommitted_signature_is_told_to_the_session_whose_file_mentions_it`,
@@ -683,8 +689,11 @@ in `tests/graph.rs`, the read-outcome and starvation tests after
 `an_oversized_head_blob_is_remembered_for_that_version_and_not_read_again`
 in `src/graph.rs`,
 `a_codex_session_is_told_a_signature_claude_code_has_in_flight_in_a_linked_worktree`
-in `tests/briefing.rs`, and the in-flight tests in
-`crates/langspan-core/tests/briefing.rs`.
+in `tests/briefing.rs`, the in-flight tests in
+`crates/langspan-core/tests/briefing.rs`, and for a partial index
+`a_worktree_without_a_first_scan_makes_the_briefing_partial` (`src/daemon.rs`),
+`a_partial_index_is_one_line_inside_the_cap` (`src/hook.rs`) and
+`a_version_4_reply_leaves_out_a_partial_index` (`tests/protocol.rs`).
 
 **Dependents in other worktrees (added later, issue #194).** A notice's
 `dependents` are files of its own workspace, fixed when the notice is

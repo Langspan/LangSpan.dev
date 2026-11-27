@@ -501,7 +501,7 @@ fn a_typical_session_stays_within_the_context_budget_per_turn_and_status_shows_i
 /// page, which comes as parts of its JSON. The daemon encodes those parts
 /// in the client's version too: joined, the activity a version 6, 5, 4 or 3
 /// client reads has none of the briefing memory or context version 7 added,
-/// while a client of version 7 or later has them.
+/// while a client of version 7 or later (8, 10) has them.
 #[test]
 fn an_earlier_client_reads_activity_given_in_parts_without_the_fields_version_7_added() {
     let f = Fixture::new();
@@ -516,11 +516,12 @@ fn an_earlier_client_reads_activity_given_in_parts_without_the_fields_version_7_
     f.prompt(ALICE);
     let alice = format!("claude-code.{ALICE}");
     for version in [
+        langspan::protocol::PROTOCOL_VERSION_7,
         langspan::protocol::PROTOCOL_VERSION_6,
         langspan::protocol::PROTOCOL_VERSION_5,
         langspan::protocol::PROTOCOL_VERSION_4,
         langspan::protocol::OLDEST_PROTOCOL_VERSION,
-        langspan::protocol::PROTOCOL_VERSION_7,
+        langspan::protocol::PROTOCOL_VERSION_8,
         PROTOCOL_VERSION,
     ] {
         let joined = joined_parts(&f, version);

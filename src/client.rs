@@ -2,9 +2,7 @@
 
 #[cfg(unix)]
 mod unix {
-    use crate::protocol::{
-        OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, Response, encode, read_frame,
-    };
+    use crate::protocol::{PROTOCOL_VERSION, Request, Response, encode, read_frame};
     use langspan_core::Outcome;
     use rustix::{
         event::{PollFd, PollFlags, Timespec, poll},
@@ -36,13 +34,15 @@ mod unix {
         crate::hook::redact_command(&mut request.command);
         let mut response = exchange(state_dir, &request, deadline)?;
         // A daemon of an earlier build refuses this version before it reads
-        // the command, and answers in its own (version 6, 5, 4 or 3), so the
-        // same request in the version it names cannot take effect twice.
+        // the command, and answers in its own (version 8, 7, 6, 5, 4 or 3), so
+        // the same request in the version it names cannot take effect twice.
         // Requests are the same in every version it answers, except the one
         // version 6 changed (`protocol::fits`), which is not sent at all to
-        // a daemon of version 5 or earlier.
+        // a daemon of version 5 or earlier. Version 9 (roadmap E1) is not
+        // one this build reads, so it is not asked in it.
         if request.version == PROTOCOL_VERSION
-            && (OLDEST_PROTOCOL_VERSION..PROTOCOL_VERSION).contains(&response.version)
+            && response.version < PROTOCOL_VERSION
+            && crate::protocol::answers(response.version)
             && matches!(&response.outcome, Outcome::Error { code, .. } if code == "unsupported_version")
         {
             if !crate::protocol::fits(response.version, &request.command) {
@@ -310,10 +310,10 @@ mod unix {
         /// 4711096877) and issue #222 (review comments 4711375982 and
         /// 4712860167), roadmap A11 (review comment 4714078108): a daemon
         /// of an earlier build answers only protocol version 3, or only up
-        /// to 4, 5, 6 (roadmap F5's build) or 7 (issue #222's). It refuses
-        /// this build's version in its own, as that build does, and the
-        /// client asks again once in that version, with the same request,
-        /// and reads that answer.
+        /// to 4, 5, 6 (roadmap F5's build), 7 (issue #222's) or 8 (issue
+        /// #262's). It refuses this build's version in its own, as that
+        /// build does, and the client asks again once in that version, with
+        /// the same request, and reads that answer.
         #[test]
         fn a_daemon_of_an_earlier_build_is_asked_again_in_its_version() {
             for version in [
@@ -322,6 +322,7 @@ mod unix {
                 crate::protocol::PROTOCOL_VERSION_5,
                 crate::protocol::PROTOCOL_VERSION_6,
                 crate::protocol::PROTOCOL_VERSION_7,
+                crate::protocol::PROTOCOL_VERSION_8,
             ] {
                 ask_an_earlier_daemon(version);
             }

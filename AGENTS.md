@@ -37,6 +37,7 @@ Every capability still to build is a GitHub issue labeled `roadmap` ([the list](
 - [docs/architecture.md](docs/architecture.md): components, protocol and schema versions, decisions by milestone, and the first useful result.
 - [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md): what is built, retained evidence and pending acceptance.
 - [docs/usage.md](docs/usage.md): setup, hooks, CLI, MCP and configuration.
+- [docs/development-process.md](docs/development-process.md): backlog labels, work-in-progress limits, Definition of Done, review, integration, releases and metrics.
 - [docs/adr/](docs/adr/0001-local-coordination.md): architecture decisions, starting with ADR 0001.
 - [docs/security/threat-model.md](docs/security/threat-model.md): trust boundaries and threats.
 - [benchmarks/coordination/README.md](benchmarks/coordination/README.md): the coordination benchmark harness.

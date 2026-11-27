@@ -1245,15 +1245,18 @@ mod unix {
     }
 
     /// Up to `budget` in-flight rows of other worktrees after `after`, in
-    /// order, and whether they run to the last row.
+    /// order, whether they run to the last row, and whether a worktree it
+    /// came to had no complete scan, so its rows could not be read.
+    #[allow(clippy::type_complexity)]
     fn inflight_after(
         graph: &crate::graph::Index,
         state: &State,
         workspace_id: &str,
         after: Option<&InflightAt>,
         budget: usize,
-    ) -> Result<(Vec<InflightAt>, bool), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Vec<InflightAt>, bool, bool), Box<dyn std::error::Error + Send + Sync>> {
         let mut rows = Vec::new();
+        let mut unscanned = false;
         for (other, at) in inflight_worktrees(state, workspace_id) {
             if after.is_some_and(|(from, _)| other < from) {
                 continue;
@@ -1264,15 +1267,16 @@ mod unix {
             let (read, coverage) =
                 graph.with_coverage(&at, |graph| graph.inflight_after(other, from, left + 1))?;
             if !coverage.scanned {
+                unscanned = true;
                 continue;
             }
             let cut = read.len() > left;
             rows.extend(read.into_iter().take(left).map(|row| (other.clone(), row)));
             if cut {
-                return Ok((rows, false));
+                return Ok((rows, false, unscanned));
             }
         }
-        Ok((rows, true))
+        Ok((rows, true, unscanned))
     }
 
     /// Which of `offered` the asking workspace's files mention: the files in
@@ -1361,37 +1365,49 @@ mod unix {
     /// the first item offered, or after the last row read when none was, so
     /// an item not told this time is read again first, and rows past it are
     /// reached once what precedes them is told or not mentioned.
+    ///
+    /// The flag says the index had no complete scan of the session's
+    /// workspace or of another worktree it came to, so what is in flight
+    /// there could not be compared (issue #262): the briefing says so
+    /// rather than nothing.
+    #[allow(clippy::type_complexity)]
     fn brief_inflight(
         graph: &crate::graph::Index,
         state: &State,
         session_id: &str,
         workspace_id: &str,
         concerned: &std::collections::BTreeSet<String>,
-    ) -> Result<Vec<langspan_core::InflightSymbol>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Vec<langspan_core::InflightSymbol>, bool), Box<dyn std::error::Error + Send + Sync>>
+    {
         let Some(of) = Registration::of(state, workspace_id) else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         };
+        // With no other worktree there is nothing in flight to miss.
+        if inflight_worktrees(state, workspace_id).is_empty() {
+            return Ok((Vec::new(), false));
+        }
         let mut windows = BRIEF_WINDOWS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         windows.retain(|session, _| state.sessions.contains_key(session));
         let from = windows.get(session_id).cloned();
-        let (mut rows, end) =
+        let (mut rows, end, mut unscanned) =
             inflight_after(graph, state, workspace_id, from.as_ref(), INFLIGHT_OFFERED)?;
         if let Some(from) = from.as_ref().filter(|_| end) {
-            let (first, _) = inflight_after(
+            let (first, _, before) = inflight_after(
                 graph,
                 state,
                 workspace_id,
                 None,
                 INFLIGHT_OFFERED - rows.len(),
             )?;
+            unscanned |= before;
             rows.extend(first.into_iter().take_while(|row| row <= from));
         }
         let place = |at: usize| at.checked_sub(1).map(|at| rows[at].clone());
         let last = rows.last().cloned();
         let read = rows.len();
-        let (found, _, _) = inflight_mentioned(
+        let (found, coverage, _) = inflight_mentioned(
             graph,
             &of,
             workspace_id,
@@ -1410,7 +1426,10 @@ mod unix {
             Some(next) => windows.insert(session_id.to_owned(), next),
             None => windows.remove(session_id),
         };
-        Ok(found.into_iter().map(|(_, item)| item).collect())
+        Ok((
+            found.into_iter().map(|(_, item)| item).collect(),
+            unscanned || !coverage.scanned,
+        ))
     }
 
     /// `Brief` with what the index finds in flight in other worktrees for
@@ -1441,7 +1460,7 @@ mod unix {
         } else {
             *recent_window_ms
         };
-        let inflight = graph
+        let (inflight, inflight_partial) = graph
             .zip(langspan_core::briefing_concern(state, session_id, now_ms()))
             .filter(|(_, (_, concerned))| !concerned.is_empty())
             .and_then(|(graph, (workspace_id, concerned))| {
@@ -1466,6 +1485,7 @@ mod unix {
             left: left.clone(),
             changes_only: *changes_only,
             inflight,
+            inflight_partial,
         }
     }
 
@@ -5020,6 +5040,99 @@ mod unix {
             assert!(refused(&store, &moved).is_some());
             assert!(refused(&store, &again).is_none());
             drop(store);
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    mod inflight_tests {
+        use super::*;
+
+        /// Index one worktree's files as a complete scan would.
+        fn scan(index: &mut crate::graph::Index, workspace_id: &str, root: &std::path::Path) {
+            let text = "pub fn load_config() -> u8 { 0 }\n";
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(root.join("src/a.rs"), text).unwrap();
+            let scan = crate::graph::ScanView {
+                files: [(
+                    "src/a.rs".to_owned(),
+                    crate::sha256::hex(&crate::sha256::digest(text.as_bytes())),
+                )]
+                .into(),
+                ..Default::default()
+            };
+            index
+                .update(
+                    workspace_id,
+                    root,
+                    0,
+                    &scan,
+                    1_000,
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .unwrap();
+        }
+
+        /// Issue #262: while the index has no first scan of the session's
+        /// worktree or of another worktree of its repository, the briefing
+        /// is told the comparison was partial instead of finding nothing.
+        /// The first scan is held back by not running it, so no load or
+        /// timing decides the result.
+        #[test]
+        fn a_worktree_without_a_first_scan_makes_the_briefing_partial() {
+            let directory =
+                std::env::temp_dir().join(format!("langspan-inflight-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&directory);
+            fs::create_dir_all(&directory).unwrap();
+            let (main, tree) = (directory.join("main"), directory.join("tree"));
+            let mut index = crate::graph::Index::open(&directory.join("graph.sqlite3")).unwrap();
+            let mut state = State::default();
+            for (id, root) in [("main", &main), ("tree", &tree)] {
+                state.workspaces.insert(
+                    id.into(),
+                    langspan_core::Workspace {
+                        workspace_id: id.into(),
+                        root: root.to_str().unwrap().into(),
+                        verified_overlaps: Vec::new(),
+                    },
+                );
+                state.workspace_git.insert(
+                    id.into(),
+                    langspan_core::WorkspaceGit {
+                        workspace_id: id.into(),
+                        repository_id: "repository".into(),
+                        branch_ref: None,
+                    },
+                );
+            }
+            state.sessions.insert(
+                "alice".into(),
+                langspan_core::Session {
+                    session_id: "alice".into(),
+                    workspace_id: "main".into(),
+                    generation: 0,
+                    parent: None,
+                    headless: false,
+                },
+            );
+            let concerned = ["src/a.rs".to_owned()].into();
+            let partial = |index: &crate::graph::Index, state: &State| {
+                let (found, partial) =
+                    brief_inflight(index, state, "alice", "main", &concerned).unwrap();
+                assert!(found.is_empty(), "{found:?}");
+                partial
+            };
+            assert!(partial(&index, &state), "neither worktree scanned");
+            scan(&mut index, "main", &main);
+            assert!(partial(&index, &state), "the other worktree not scanned");
+            scan(&mut index, "tree", &tree);
+            assert!(!partial(&index, &state), "both scanned");
+            // A checkout with no other worktree misses nothing in flight,
+            // scanned or not.
+            state.workspace_git.remove("tree");
+            let solo = crate::graph::Index::open(&directory.join("solo.sqlite3")).unwrap();
+            assert!(!partial(&solo, &state));
+            drop((index, solo));
             fs::remove_dir_all(directory).unwrap();
         }
     }
