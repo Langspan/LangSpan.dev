@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.0](https://github.com/Langspan/LangSpan.dev/compare/v0.5.1...v0.6.0) (2026-11-27)
+
+
+### Features
+
+* tell the next session what happened since the last one (C10) ([#408](https://github.com/Langspan/LangSpan.dev/issues/408)) ([76e89be](https://github.com/Langspan/LangSpan.dev/commit/76e89beda904ba9b5f0a83cf6454e19354352c62))
+
+
+### Bug fixes
+
+* a coordinator thread that panics stops the coordinator ([#410](https://github.com/Langspan/LangSpan.dev/issues/410)) ([f427bfd](https://github.com/Langspan/LangSpan.dev/commit/f427bfd28f40aaba032d95da592f470b473ff977))
+* an earlier build refuses a newer store with one clear line, and the docs say so ([#420](https://github.com/Langspan/LangSpan.dev/issues/420)) ([ee0947a](https://github.com/Langspan/LangSpan.dev/commit/ee0947ac85863cd6932683607a2f10eae6306555)), closes [#333](https://github.com/Langspan/LangSpan.dev/issues/333)
+* bound the definition comparison ([#265](https://github.com/Langspan/LangSpan.dev/issues/265)) and keep every note's paths in anchor lookups ([#281](https://github.com/Langspan/LangSpan.dev/issues/281)) ([#405](https://github.com/Langspan/LangSpan.dev/issues/405)) ([43e00ac](https://github.com/Langspan/LangSpan.dev/commit/43e00acbba983a65201cb2cdbbf20dabd10fc614))
+* count sessions in symlinked folders on macOS, and run the CLI transcripts on every platform ([#399](https://github.com/Langspan/LangSpan.dev/issues/399)) ([eacafa2](https://github.com/Langspan/LangSpan.dev/commit/eacafa223a2eecf0579a779a849ab66a772bbb58))
+* make main green: machine-independent frame golden and a redaction edge case ([#421](https://github.com/Langspan/LangSpan.dev/issues/421)) ([5cdf546](https://github.com/Langspan/LangSpan.dev/commit/5cdf54615229a4f89896e5a13b83697d6e505d97))
+* send older clients only the events they can read, and read responses tolerantly ([#415](https://github.com/Langspan/LangSpan.dev/issues/415)) ([9b84f23](https://github.com/Langspan/LangSpan.dev/commit/9b84f231da27033814326a722480668882e54aa8))
+* uninstall stops the coordinator and names what it leaves ([#292](https://github.com/Langspan/LangSpan.dev/issues/292)) ([#418](https://github.com/Langspan/LangSpan.dev/issues/418)) ([1c23879](https://github.com/Langspan/LangSpan.dev/commit/1c238791793a02b2d99db5cb9e7ff921db051b5c))
+
 ## [0.5.1](https://github.com/Langspan/LangSpan.dev/compare/v0.5.0...v0.5.1) (2026-11-27)
 
 
