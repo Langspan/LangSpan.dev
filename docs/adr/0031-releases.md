@@ -25,8 +25,18 @@ repository's workflow built.
 - **Tags and Releases.** Merging the release pull request creates the tag
   `vX.Y.Z` at once and a draft Release (`draft`, `force-tag-creation`). The
   same workflow run builds and attaches the assets, then publishes the
-  draft, so a release can be immutable. Nothing runs on the tag: a tag made
+  draft, so no one sees a release without its assets. A release is
+  immutable only with the repository setting for release immutability
+  turned on, which was off for 0.3.0. Nothing runs on the tag: a tag made
   with `GITHUB_TOKEN` starts no workflow.
+- **Testing the shipped binary.** Each build job runs the two-developer
+  demonstration on the binary it packages, on that target's runner, before
+  publishing. After publishing, `verify-published` downloads every archive
+  on its own runner, checks `SHA256SUMS` and the attestations, installs it
+  with the published `install.sh` and runs the demonstration again. If that
+  fails, `withdraw` marks the release a prerelease, restores the previous
+  latest release and opens an issue
+  ([runbook](../development-process.md#withdraw-a-release)).
 - **Archives.** `langspan-vX.Y.Z-TARGET.tar.gz` for `aarch64-apple-darwin`,
   `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` and
   `aarch64-unknown-linux-gnu`, each built natively on its own runner with the

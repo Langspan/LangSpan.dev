@@ -531,3 +531,63 @@ fn the_threat_model_covers_the_install_script() {
         assert!(section.contains(needed), "the section lacks {needed:?}");
     }
 }
+
+/// One section of the threat model, from its `## ` heading to the next.
+fn threat_model_section(heading: &str) -> String {
+    let text = fs::read_to_string(repo("docs/security/threat-model.md")).unwrap();
+    let start = text
+        .find(&format!("\n## {heading}\n"))
+        .unwrap_or_else(|| panic!("the threat model has no {heading:?} section"));
+    let rest = &text[start + 1..];
+    rest[..rest[3..].find("\n## ").map_or(rest.len(), |end| end + 3)].to_string()
+}
+
+/// Each job of `release.yml` with the scopes it may write: its
+/// `permissions:` entries and the `permission-*` inputs of a minted token.
+fn release_jobs() -> Vec<(String, Vec<String>)> {
+    let workflow = fs::read_to_string(repo(".github/workflows/release.yml")).unwrap();
+    let jobs = &workflow[workflow.find("\njobs:\n").expect("release.yml has jobs")..];
+    let mut found: Vec<(String, Vec<String>)> = Vec::new();
+    for line in jobs.lines().skip(2) {
+        let is_job = line.starts_with("  ")
+            && !line.starts_with("   ")
+            && !line.starts_with("  #")
+            && line.ends_with(':');
+        if is_job {
+            found.push((line.trim().trim_end_matches(':').to_string(), Vec::new()));
+        } else if let Some((_, scopes)) = found.last_mut() {
+            let entry = line.split('#').next().unwrap().trim();
+            if let Some(scope) = entry.strip_suffix(": write") {
+                scopes.push(scope.trim_start_matches("permission-").to_string());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn the_threat_model_names_every_release_job_and_each_scope_it_writes() {
+    let jobs = release_jobs();
+    for id in ["verify-published", "withdraw"] {
+        assert!(
+            jobs.iter().any(|(job, _)| job == id),
+            "release.yml lacks {id}"
+        );
+    }
+    let section = threat_model_section("Release pipeline");
+    for (job, scopes) in jobs {
+        let named = format!("`{job}`");
+        let rows: Vec<&str> = section.lines().filter(|l| l.contains(&named)).collect();
+        assert!(
+            !rows.is_empty(),
+            "the release pipeline section lacks {named}"
+        );
+        for scope in scopes {
+            let scope = format!("`{scope}: write`");
+            assert!(
+                rows.iter().any(|row| row.contains(&scope)),
+                "no line of the release pipeline section names both {named} and {scope}"
+            );
+        }
+    }
+}

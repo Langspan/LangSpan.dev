@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.5.1](https://github.com/Langspan/LangSpan.dev/compare/v0.5.0...v0.5.1) (2026-11-27)
+
+
+### Bug fixes
+
+* setup output a stranger can read ([#400](https://github.com/Langspan/LangSpan.dev/issues/400)) ([54a4fdf](https://github.com/Langspan/LangSpan.dev/commit/54a4fdf6384f17f29a53fa219635c1ca33278373))
+
+## [0.5.0](https://github.com/Langspan/LangSpan.dev/compare/v0.4.0...v0.5.0) (2026-11-27)
+
+
+### Features
+
+* add a one-line install script and attach it to each release ([#377](https://github.com/Langspan/LangSpan.dev/issues/377)) ([04268ec](https://github.com/Langspan/LangSpan.dev/commit/04268ec5068c35848957b90d098aba1a8e8c54b3))
+* add langspan demo, a real refusal with no agent, and name it after setup ([#295](https://github.com/Langspan/LangSpan.dev/issues/295)) ([80b3f9e](https://github.com/Langspan/LangSpan.dev/commit/80b3f9e9fb9e7788fa05de68f934ac4bcac376b1)), closes [#290](https://github.com/Langspan/LangSpan.dev/issues/290)
+* negotiate named protocol capabilities instead of a version per feature ([#389](https://github.com/Langspan/LangSpan.dev/issues/389)) ([9dd7e9b](https://github.com/Langspan/LangSpan.dev/commit/9dd7e9b5fa2d3bd192fc0fba1337db7359daa1cc))
+* outline first for whole reads of large files (A11) ([#272](https://github.com/Langspan/LangSpan.dev/issues/272)) ([62fdeeb](https://github.com/Langspan/LangSpan.dev/commit/62fdeeb0d2b0e2e1f1d7aa9519da5289750f1129))
+
+
+### Bug fixes
+
+* make main green: platform-independent CLI goldens and main.rs's ratchet baseline ([#395](https://github.com/Langspan/LangSpan.dev/issues/395)) ([24551ed](https://github.com/Langspan/LangSpan.dev/commit/24551edd9bbf33fc58d5bf1737e247e66dafc9a1))
+* never let the between-step watcher refuse a prompt ([#288](https://github.com/Langspan/LangSpan.dev/issues/288)) ([#294](https://github.com/Langspan/LangSpan.dev/issues/294)) ([54a2d0d](https://github.com/Langspan/LangSpan.dev/commit/54a2d0d27de4dbd387cb683643c353fe91e83f67))
+
 ## [0.4.0](https://github.com/Langspan/LangSpan.dev/compare/v0.3.0...v0.4.0) (2026-11-27)
 
 

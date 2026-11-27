@@ -57,6 +57,7 @@ MAX_STATUS_RECORD_BYTES = 8 * 1024 * 1024
 TRANSCRIPT_BYTES = 64 * 1024 * 1024
 MAX_HOOK_INPUT = 64 * 1024 * 1024
 HOOK_LOG_STDOUT = 16 * 1024
+HOOK_LOG_STDERR = 2 * 1024
 HOOK_LOG_SECONDS = 900
 # How much longer than its entry's own `timeout` hook-log waits for a
 # background hook (issue #288), so the host, not the wrapper, ends one that
@@ -888,6 +889,8 @@ def hook_log_main(log, command, timeout=HOOK_LOG_SECONDS, background=False):
         "file_path": file_path[:4096] if isinstance(file_path, str) else None,
         "exit_code": code, "stdout": stdout[:HOOK_LOG_STDOUT].decode("utf-8", "replace"),
         "stdout_truncated": len(stdout) > HOOK_LOG_STDOUT,
+        # LangSpan's hook logs its coverage and why it said nothing here (#262).
+        "stderr": stderr[:HOOK_LOG_STDERR].decode("utf-8", "replace"),
         "background": background, "timed_out": timed_out,
     }) + "\n"
     # A log that cannot be written must not change the hook's decision.

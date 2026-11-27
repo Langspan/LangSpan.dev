@@ -1068,6 +1068,9 @@ class DriverUnitTests(Temporary):
         entry = json.loads((self.root / "hooks.jsonl").read_text())
         self.assertEqual((entry["event"], entry["tool_use_id"], entry["exit_code"]), ("PreToolUse", "call-1", 2))
         self.assertEqual(entry["stdout"], '{"decision":"deny"}')
+        # Issue #262: the hook's own log line (LangSpan's coverage and detail)
+        # is kept, so a session told nothing shows why.
+        self.assertEqual(entry["stderr"], "why\n")
         self.assertEqual(os.stat(self.root / "hooks.jsonl").st_mode & 0o777, 0o600)
 
     def hook_log(self, log, command, *options, payload="{}"):
@@ -1631,7 +1634,7 @@ class StandinHooks(Temporary):
                         denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
                         self.assertFalse(denied)
                         self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
-                        self.assert_stopped(heartbeat)
+                        self.assert_stopped(group, heartbeat)
                     finally:
                         self.kill_groups(group)
 
@@ -1655,7 +1658,7 @@ class StandinHooks(Temporary):
                     self.assertEqual(entry["exit_code"], 0, entry)
                     self.assertEqual(standin_agent.RUNNING, [])
                     self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
-                    self.assert_stopped(heartbeat)
+                    self.assert_stopped(group, heartbeat)
                 finally:
                     self.kill_groups(group)
 
@@ -1670,18 +1673,34 @@ class StandinHooks(Temporary):
             except (ProcessLookupError, PermissionError):
                 pass
 
-    def assert_stopped(self, heartbeat):
-        """HEARTBEAT stops growing within a bound, and stays the same for a
-        second after that, many times the child's 0.05 s beat."""
+    @staticmethod
+    def live_members(group):
+        """PIDs of the processes in process GROUP that can still run. A
+        zombie can't write; where PID 1 does not reap orphans it stays in
+        the group, so `killpg(group, 0)` alone would wait for it forever."""
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="], capture_output=True,
+                                 text=True, check=True, timeout=10).stdout
+        return [int(pid) for pid, pgid, stat in (line.split()[:3] for line in listing.splitlines() if line.strip())
+                if int(pgid) == group and not stat.startswith("Z")]
+
+    def assert_stopped(self, group_file, heartbeat):
+        """The hook's process group, named in GROUP_FILE, has no live process
+        within a bound, and HEARTBEAT doesn't grow after that. Waiting for
+        the writer to exit, not for a quiet spell, means a write in flight
+        when the signal landed can't fail the test, and a writer that only
+        paused can't pass it."""
+        group = int(group_file.read_text())
         deadline = time.monotonic() + 10
-        size = heartbeat.stat().st_size if heartbeat.exists() else 0
         while True:
-            time.sleep(1)
-            now = heartbeat.stat().st_size if heartbeat.exists() else 0
-            if now == size:
-                return
-            self.assertLess(time.monotonic(), deadline, "the hook's child is still writing %s" % heartbeat)
-            size = now
+            live = self.live_members(group)
+            if not live:
+                break
+            self.assertLess(time.monotonic(), deadline,
+                            "the hook's process group %d still runs %s" % (group, live))
+            time.sleep(0.05)
+        size = heartbeat.stat().st_size
+        time.sleep(0.2)
+        self.assertEqual(heartbeat.stat().st_size, size, "%s grew after its writer exited" % heartbeat)
 
     def test_terminating_the_standin_stops_the_hook_it_is_running(self):
         # The runner ends an attempt by signaling the stand-in's process
@@ -1713,7 +1732,7 @@ class StandinHooks(Temporary):
                             time.sleep(0.05)
                         os.killpg(standin.pid, signum)
                         self.assertEqual(standin.wait(timeout=10), -signum)
-                        self.assert_stopped(heartbeat)
+                        self.assert_stopped(started, heartbeat)
                     finally:
                         self.kill_groups(started, standin.pid)
                         standin.wait()
@@ -1975,7 +1994,8 @@ class DryRun(Temporary):
             # Issue #222: the context LangSpan's hooks added, from the coordinator, per task and in all.
             added = [t["context_added"] for t in record["tasks"]]
             self.assertTrue(all(a is not None and a["turns"] >= 1 for a in added), added)
-            self.assertTrue(any(a["bytes"] > 0 for a in added), added)
+            if not any(a["bytes"] > 0 for a in added):
+                self.fail("no context added: %s\n%s" % (added, self.silence_report(output, record)))
             trial = record["context_added"]
             self.assertEqual((trial["status"], trial["turns"], trial["bytes"]),
                              ("reported", sum(a["turns"] for a in added), sum(a["bytes"] for a in added)))
@@ -2046,6 +2066,29 @@ class DryRun(Temporary):
                 elif entry.get("elapsed_ms", 0) > 5000:
                     lines.append("  %s %s at %s took %s ms" % (entry.get("event"), entry.get("tool"),
                                                               entry.get("at"), entry["elapsed_ms"]))
+        return "\n".join(lines)
+
+    def silence_report(self, output, record):
+        """Issue #262, what a session told nothing saw: per session its hook
+        calls, the slowest, those the wrapper ended, and the coverage
+        LangSpan's hook logged for each event; and the coordinator's scans."""
+        lines = ["coordinator scans: %s" % json.dumps(record["coordinator_scans"])]
+        for index, task in enumerate(record["tasks"], 1):
+            log = output / task["hook_log"] if task["hook_log"] else None
+            entries = [json.loads(line) for line in log.read_text().splitlines()] if log and log.is_file() else []
+            coverage = {}
+            for entry in entries:
+                for line in entry.get("stderr", "").splitlines():
+                    try:
+                        said = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(said, dict) and said.get("event") == "langspan_hook":
+                        key = "%s %s" % (entry.get("event"), said.get("coverage"))
+                        coverage[key] = coverage.get(key, 0) + 1
+            lines.append("session %d (%s): %d hook calls, slowest %s ms, %d ended by the wrapper, coverage %s" % (
+                index, task["role"], len(entries), max((e.get("elapsed_ms", 0) for e in entries), default=None),
+                sum(bool(e.get("timed_out")) for e in entries), json.dumps(coverage, sort_keys=True)))
         return "\n".join(lines)
 
     def informed(self, output_record):
@@ -2169,9 +2212,11 @@ class DryRun(Temporary):
                         if arm == "langspan" and mode == "follow" and family == "rename_vs_new_caller":
                             # LangSpan's interface notice of the rename reached every
                             # new caller's session, in the coordinator's own log.
-                            notices = [t["interface_notices"] for t in record["tasks"] if t["role"] == "new_caller"]
-                            self.assertTrue(all(count >= 1 for count in notices), notices)
                             output = self.root / ("%s-%s-%d-%s" % (arm, family, n, mode))
+                            notices = [t["interface_notices"] for t in record["tasks"] if t["role"] == "new_caller"]
+                            if not all(count >= 1 for count in notices):
+                                self.fail("a new caller got no interface notice: %s\n%s"
+                                          % (notices, self.silence_report(output, record)))
                             told = [(output / t["hook_log"]).read_text() for t in record["tasks"]
                                     if t["role"] == "new_caller"]
                             self.assertTrue(all("load_config" in log and "In flight" in log for log in told))

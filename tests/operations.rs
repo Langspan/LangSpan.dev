@@ -188,9 +188,13 @@ fn doctor_names_each_thing_that_is_not_working_and_stops_when_it_is_fixed() {
     );
 
     w.start();
+    // A fresh install with no workspace yet is a normal state, not a fault.
     let (code, text) = w.doctor(false);
-    assert_eq!(code, 1, "{text}");
-    assert!(text.contains("No workspace is registered"), "{text}");
+    assert_eq!(code, 0, "{text}");
+    assert!(
+        text.contains("ok No workspace yet.") && !text.contains("FIX"),
+        "{text}"
+    );
 
     // The directory is not a Git repository: the observer cannot scan it.
     w.edits("alice", "a1", "src/api.rs");
