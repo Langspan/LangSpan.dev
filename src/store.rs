@@ -402,6 +402,12 @@ pub struct Store {
     /// commits, so that a test can kill the daemon there.
     compaction_pause: Option<Duration>,
     tap: Option<Tap>,
+    /// The newest events `today` and `report` read: `TODAY_EVENTS`, which
+    /// a test lowers to cross it with a short log.
+    today_events: usize,
+    /// The older intent and registration events a report folds at most:
+    /// `REPORT_HISTORY_EVENTS`, which a test lowers likewise.
+    report_history_events: usize,
 }
 
 /// Events committed since the tap was last drained that its filter keeps,
@@ -563,6 +569,8 @@ impl Store {
             wall_ms,
             compaction_pause: None,
             tap: None,
+            today_events: TODAY_EVENTS,
+            report_history_events: langspan_core::REPORT_HISTORY_EVENTS,
         };
         // The generation's clock against the wall clock, so times can be
         // placed on a day (the status line and `today`). The same wall clock
@@ -1463,7 +1471,7 @@ impl Store {
         if let Some(refused) = self.refused_window(workspace_id, from_ms, wall_ms) {
             return Ok(refused);
         }
-        let (events, anchor, earlier) = self.newest_events(TODAY_EVENTS)?;
+        let (events, anchor, earlier) = self.newest_events(self.today_events)?;
         let retained_from_ms = retention::since_ms(&self.connection)?;
         let mut today = langspan_core::today(
             &self.state,
@@ -1535,7 +1543,7 @@ impl Store {
 
     /// The newest `limit` events, oldest first, with the anchor of the
     /// generation the first belongs to (when it was anchored) and whether
-    /// older events exist. `today` and `report` read `TODAY_EVENTS`.
+    /// older events exist. `today` and `report` read `today_events`.
     fn newest_events(
         &self,
         limit: usize,
@@ -1589,7 +1597,7 @@ impl Store {
     /// report's cost stays bounded however long the log grows.
     fn report_history_before(&self, seq: u64) -> StoreResult<ReportHistory> {
         let from = self.snapshot_seq;
-        let budget = langspan_core::REPORT_HISTORY_EVENTS;
+        let budget = self.report_history_events;
         let mut statement = self.connection.prepare_cached(INTENT_EVENTS_BEFORE)?;
         let mut rows = statement.query(params![
             i64::try_from(from)?,
@@ -1646,7 +1654,7 @@ impl Store {
         if let Some(refused) = self.refused_window(Some(workspace_id), from_ms, wall_ms) {
             return Ok(refused);
         }
-        let (events, anchor, earlier) = self.newest_events(TODAY_EVENTS)?;
+        let (events, anchor, earlier) = self.newest_events(self.today_events)?;
         let retained_from_ms = retention::since_ms(&self.connection)?;
         let (open_intents, session_workspaces, known) =
             self.report_history_before(events.first().map_or(0, |first| first.seq))?;
@@ -2497,7 +2505,7 @@ mod tests {
     }
 
     /// Review 4704154106: Alice registers in `work` before the newest
-    /// `TODAY_EVENTS` events; among them she reads a file, `work` is
+    /// events the report reads; among them she reads a file, `work` is
     /// removed and she registers the same session in `elsewhere`. The read
     /// counts for `work` (registered again), the workspace she was in then,
     /// and not for `elsewhere`. Real SQLite: her first registration is only in the
@@ -2511,6 +2519,8 @@ mod tests {
         ));
         std::fs::create_dir(&directory).unwrap();
         let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        // The report reads the newest 8 events, so a short log crosses it.
+        store.today_events = 8;
         let run = |store: &mut Store, id: &str, command: Command| {
             let now = crate::clock::now_ms();
             let outcome = store.execute(id, &command, &command, now).unwrap().outcome;
@@ -2540,10 +2550,10 @@ mod tests {
             register("claude-code.filler", "elsewhere"),
         );
         let from_ms = wall_now_ms();
-        // Enough events after the registration that it is not among those
-        // read.
+        // Enough events after the registration that it is not among the
+        // newest `today_events` read.
         let generation = store.state.generation;
-        let filler: Vec<Event> = (0..TODAY_EVENTS)
+        let filler: Vec<Event> = (0..store.today_events)
             .map(|_| Event::SessionSeen {
                 session_id: "claude-code.filler".into(),
                 at_ms: crate::clock::now_ms(),
@@ -2750,9 +2760,10 @@ mod tests {
     /// most the newest `REPORT_HISTORY_EVENTS` intent and registration
     /// events before those it reads, however long the log, and says
     /// `partial` when an event it counts needed an older one. Real SQLite
-    /// with 200,000 intent events: Alice registered before all of them and
-    /// prompts inside the window. Reading every older event would find her
-    /// workspace and count her; the bounded fold cannot, and says so.
+    /// with more intent events than the window and the budget together:
+    /// Alice registered before all of them and prompts inside the window.
+    /// Reading every older event would find her workspace and count her;
+    /// the bounded fold cannot, and says so.
     #[test]
     fn a_report_on_a_long_history_folds_at_most_the_budget_and_says_partial() {
         let directory = std::env::temp_dir().join(format!(
@@ -2762,6 +2773,13 @@ mod tests {
         ));
         std::fs::create_dir(&directory).unwrap();
         let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        // The product's bounds, lowered below so a short log crosses both.
+        assert_eq!(
+            (store.today_events, store.report_history_events),
+            (TODAY_EVENTS, langspan_core::REPORT_HISTORY_EVENTS)
+        );
+        store.today_events = 4;
+        store.report_history_events = 4;
         let run = |store: &mut Store, id: &str, command: Command| {
             let now = crate::clock::now_ms();
             store.execute(id, &command, &command, now).unwrap();
@@ -2787,7 +2805,10 @@ mod tests {
             );
         }
         let generation = store.state.generation;
-        let history: Vec<Event> = (0..200_000)
+        // The window holds the prompt and at most the newest 3 of these;
+        // the 5 or more older are past the budget of 4, so the fold stops
+        // short of Alice's registration.
+        let history: Vec<Event> = (0..8)
             .map(|index| {
                 if index % 2 == 0 {
                     Event::IntentSet {

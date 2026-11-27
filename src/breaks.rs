@@ -398,14 +398,16 @@ mod tests {
 
     #[test]
     fn a_replacement_that_would_pass_the_parser_bound_is_not_applied() {
-        // 1,000 places, each made 1,100 bytes: past the 1 MiB parser bound,
-        // so the result is never built.
-        let file = "x;\n".repeat(1000);
-        let long = "y".repeat(1100);
-        assert!(replaced(&file, &[edit("x", &long, true)]).is_none());
-        // Just inside the bound is still applied.
-        let fits = "y".repeat(1000);
-        assert!(replaced(&file, &[edit("x", &fits, true)]).is_some());
+        // Two places, so the size is places × new: the result would be
+        // `MAX_SOURCE_BYTES` exactly with `fits`, and two bytes past it with
+        // one more byte in each, so that result is never built.
+        let file = "x;\nx;\n";
+        let fits = "y".repeat((langspan_graph::MAX_SOURCE_BYTES - 4) / 2);
+        let long = format!("{fits}y");
+        assert!(replaced(file, &[edit("x", &long, true)]).is_none());
+        // Exactly at the bound is still applied.
+        let (text, _) = replaced(file, &[edit("x", &fits, true)]).unwrap();
+        assert_eq!(text.len(), langspan_graph::MAX_SOURCE_BYTES);
     }
 
     #[test]
