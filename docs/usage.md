@@ -3030,6 +3030,16 @@ restart the daemon after upgrading. Upgrade the daemon and clients
 together. Earlier persisted records remain readable; a build older than the
 marker refuses the file.
 
+Each request of this build also names, in `capabilities`, the named
+protocol capabilities it reads
+([ADR 0037](adr/0037-protocol-capabilities.md)). A client that names none gets
+its version's set, so versions 3 to 10 keep their shapes. A daemon that
+knows fewer names answers with the ones it granted, and the client asks
+again once with those. A check's `symbol_findings` reach only clients of
+version 6 or later; an earlier daemon records the check without them. A
+version 10 daemon built before capabilities refuses the field: restart it
+after upgrading.
+
 ### Mixed versions after an upgrade
 
 LangSpan never downloads or replaces its own binary and makes no update

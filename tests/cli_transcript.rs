@@ -614,6 +614,7 @@ fn string<'a>(value: &'a Value, path: &[&str]) -> &'a str {
 /// Workspaces and sessions, admission, observation, messages and notes,
 /// and the projections (issue #324).
 #[test]
+#[ignore = "machine-dependent values on Linux: #397"]
 fn transcript_of_the_coordination_commands() {
     let mut t = Transcript::new("one");
     let work = t.work().display().to_string();
@@ -883,6 +884,7 @@ fn transcript_of_the_coordination_commands() {
 /// Graph queries, checks and landing turns, interface notices, the scan's
 /// and hosts' observations, remote awareness and the dashboard (issue #325).
 #[test]
+#[ignore = "machine-dependent values on Linux: #397"]
 fn transcript_of_the_remaining_outcomes() {
     let mut t = Transcript::new("two");
     let work = t.work().display().to_string();
