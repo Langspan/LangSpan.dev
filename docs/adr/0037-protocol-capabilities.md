@@ -107,10 +107,14 @@ event the client cannot read. A client with `withheld_events` is told how
 many in the frame's `withheld`; a frozen version cannot read the count.
 `fixtures/event-types/<release>.txt` holds the types each release reads,
 taken from its tag, and a test encodes a page of every current type for
-each release's version and checks it holds only those. A page can come back
-with fewer events than its limit, or none while later ones remain; the
-older client is told nothing, which is still better than a page it cannot
-read at all. Fields added to an existing event type are gated only where a
+each release's version and checks it holds only those. The daemon pages by
+what the client reads (issue #259): an event left out counts against
+neither the page's limit nor its bytes, so a page comes back with fewer
+events than its limit only at the end of the log. A page scans at most its
+limit plus 10,000 events; past a longer run of events the client cannot
+read it comes back empty while later ones remain, and an older client is
+told nothing, which is still better than a page it cannot read at all.
+Fields added to an existing event type are gated only where a
 capability names them.
 
 **Golden vectors.** The existing `fixtures/*-vN.json` vectors stay
