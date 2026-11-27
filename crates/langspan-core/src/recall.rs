@@ -26,6 +26,14 @@ pub struct RecalledNote {
     pub text: String,
     /// Files it is about. Empty means the whole workspace.
     pub paths: Vec<String>,
+    /// The definition it is about and whether that is unchanged (roadmap
+    /// E1), as the held note has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<crate::NoteAnchor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_state: Option<crate::AnchorState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// The notes a query found, best first. `truncated` is true when more notes
@@ -119,6 +127,9 @@ pub fn recall(
                 author: note.author.clone(),
                 text: note.text.clone(),
                 paths: note.paths.clone(),
+                anchor: note.anchor.clone(),
+                anchor_state: note.anchor_state,
+                tags: note.tags.clone(),
             })
             .collect(),
     })

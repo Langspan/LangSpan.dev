@@ -1126,8 +1126,12 @@ impl Store {
             // A hook run inside the interval writes nothing, not even a
             // receipt, so a burst of them costs no storage (roadmap J12).
             // Nor does a between-step watcher's ask with nothing to tell,
-            // made about once a second while a turn runs (issue #214).
-            Command::SessionSeen { .. } | Command::BetweenSteps { .. } => {
+            // made about once a second while a turn runs (issue #214), or
+            // the indexer's anchor recheck after a pass that changed no
+            // note's state (roadmap E1).
+            Command::SessionSeen { .. }
+            | Command::BetweenSteps { .. }
+            | Command::ObserveNoteAnchors { .. } => {
                 let decision = decide(&self.state, prepared, request_id, now_ms);
                 if !decision.events.is_empty() {
                     self.commit(
@@ -2866,6 +2870,9 @@ mod tests {
                 author: None,
                 text: text.into(),
                 paths: vec!["src/save.rs".into()],
+                anchor: None,
+                anchor_state: None,
+                tags: Vec::new(),
             },
             at: Some(at),
         };

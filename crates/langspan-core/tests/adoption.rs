@@ -254,6 +254,7 @@ fn the_recap_names_the_transfer_and_replay_gives_the_same_state() {
         "read",
         Command::Recap {
             workspace_id: "work".into(),
+            tag: None,
         },
         20,
     ) {

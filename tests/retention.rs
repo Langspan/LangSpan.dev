@@ -263,6 +263,8 @@ impl History {
                         author: Some(session),
                         text: format!("note {}", self.step),
                         paths: vec![path],
+                        symbol: None,
+                        tags: Vec::new(),
                     },
                     now,
                 );
@@ -650,6 +652,8 @@ fn a_retry_within_the_window_is_answered_and_one_after_it_is_a_new_request() {
         author: None,
         text: text.into(),
         paths: Vec::new(),
+        symbol: None,
+        tags: Vec::new(),
     };
     let old = run(&mut store, "old-note", note("old"), 1000);
     wall.set(START_MS + 80 * DAY_MS);

@@ -110,7 +110,7 @@ Windows, `npx` and plugin marketplaces are not in L8 ([ADR 0025](adr/0025-distri
 
 ## E. Memory and messages
 
-- [E1: Notes anchored to a definition, with staleness and tags](https://github.com/Langspan/LangSpan.dev/issues/60): notes attach only to files, keep being told after their code changes, and cannot be grouped.
+- [E1: Notes anchored to a definition, with staleness and tags](https://github.com/Langspan/LangSpan.dev/issues/60): notes attach only to files, keep being told after their code changes, and cannot be grouped. Built as `remember --symbol` and `--tag`, `recap --tag` and the MCP fields; a real-host run on Claude Code and Codex remains.
 - [E2: Search remembered notes](https://github.com/Langspan/LangSpan.dev/issues/61): a note about another file stays invisible to an agent that needs its decision. Built as `langspan recall` and `langspan_recall`; a real-host run remains.
 - [E3: Token, model and cost lines in the recap](https://github.com/Langspan/LangSpan.dev/issues/62): the owner cannot see which session used most tokens or which model it ran.
 - [E4: Messages addressed to a file or a definition](https://github.com/Langspan/LangSpan.dev/issues/63): a message can go only to everyone or to one session ID, not to whoever uses some code.

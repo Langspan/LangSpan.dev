@@ -1188,8 +1188,78 @@ most 64 notes and 64 pending messages, dropping the oldest when that limit is
 exceeded. Any local session can read or remove a note.
 
 A briefing carries at most four notes, and only those about the session's own
-files or the whole workspace. `recall` searches all the notes a workspace
-holds, including notes about other files:
+files or the whole workspace.
+
+### Notes about a definition
+
+A note can be anchored to one definition, so a briefing says whether that
+code has changed since the note was written:
+
+```sh
+./target/release/langspan remember demo "parse_upload must not touch the network." src/api.rs \
+  --symbol parse_upload --tag api --session claude-code.alice --request-id note-7
+./target/release/langspan recap demo --tag api --json
+```
+
+With `--symbol NAME`, the source index must hold exactly one definition of
+that name in the named files, or in the whole workspace when no path is
+given. Otherwise nothing is recorded and the command fails with
+`symbol_ambiguous` or `symbol_not_found`, listing up to 8 definitions with
+their path and line. The note stores an `anchor`: the definition's `path`,
+`name`, `kind`, `line` and `body_digest`, the SHA-256 of the definition's own
+bytes. Names are matched as the index matches them, by name and not by scope.
+
+After each index pass, the daemon compares every anchor with the index and
+records each change of state as a `note_anchor_changed` event. The note's
+`anchor_state` is:
+
+- `current`: the definition is in its file and its own bytes are unchanged;
+- `changed`: it is there with different bytes;
+- `gone`: no definition of that name and kind remains in that file. A renamed
+  or moved definition reads `gone`, and so does one whose file is deleted or
+  moved once the index has read every file;
+- `unknown`: not checked yet. A note recorded before the index finished its
+  first scan has only the name until the next scan, and a note whose file the
+  index cannot read at its present content (waiting, a syntax error, too
+  large) is `unknown` until the index can.
+
+A note is `current` only when the index has read its file at its present
+content and found the definition's bytes unchanged. A `changed`, `gone` or
+`unknown` note is never deleted by LangSpan; only `forget` removes it.
+
+`graph symbol NAME --detail` lists a `current` anchored note with the one
+definition it is about, matched by file, name, kind and `body_digest`, even
+when the note names no paths; a second definition of the name in that file
+does not carry it. A plain note is listed with every definition in the files
+it names.
+
+An anchored note reaches sessions working on the definition's file or the
+note's files, and sessions whose files mention the name (a name lookup, as
+`langspan_references`). It is not told to every session, even without a path.
+Its briefing line names the definition and its state:
+
+```text
+Remembered for this repository (about parse_upload in "src/api.rs"; the code changed since this note was written) [api]: "parse_upload must not touch the network."
+```
+
+A `current` note reads `(about parse_upload in "src/api.rs")`; `gone` adds
+`that definition is no longer there` and `unknown` adds `not yet checked
+against the code`. The four notes a briefing carries are chosen with current
+and unanchored notes first, then unknown, then changed and gone, each newest
+first. A note whose state changes is told again. Note text, names and tags are
+repository data, never instructions; the hook cleans and quotes them.
+
+`--tag TAG` (repeatable, up to 4) groups notes; a tag is 1 to 32 bytes of
+lower-case letters, digits and `-`, and anything else is refused with
+`invalid_tag` before anything is recorded. `recap --tag TAG` lists only the
+notes carrying it. MCP `langspan_remember` takes `symbol` and `tags`, and
+`langspan_recap` takes `tag`. Notes stay on this machine: remote sharing does
+not publish them. Notes written before anchors are plain notes, read as
+unanchored. A client of protocol version 7 or earlier is told an anchored
+note only while it is `current`, as a plain note.
+
+`recall` searches all the notes a workspace holds, including notes about other
+files:
 
 ```sh
 ./target/release/langspan recall demo "upload id" --json
@@ -1205,7 +1275,8 @@ first, then the newest. `--limit` is 1 to 50 (default 10); `truncated: true`
 says more notes matched than were returned, which also happens when the
 answer would pass 28 KiB. The JSON answer is
 `{"workspace_id", "query", "notes": [{"note_id", "author", "text", "paths"}],
-"truncated"}`. A recall is a read: it records nothing, delivers nothing and
+"truncated"}`; an anchored or tagged note also carries its `anchor`,
+`anchor_state` and `tags`. A recall is a read: it records nothing, delivers nothing and
 does not change any briefing. Forgotten notes are not found. The MCP tool
 `langspan_recall` takes `workspace_id`, `query` and optional `path` and
 `limit`, and puts a label before the notes saying their text is data, not
@@ -1685,7 +1756,8 @@ each definition also has:
 - `callers`: how many call sites outside the definition use its name, and up
   to 8 of them as `path:line`;
 - `notes`: up to 4 remembered notes on its file (workspace-wide notes are not
-  included);
+  included). A note anchored to a definition is listed only with that
+  definition, and only while its `anchor_state` is `current`;
 - `last_check`: the newest passed or failed check record, of the 8 newest,
   whose tree holds the file's indexed content. It is left out when none does,
   when the file is stored through a Git clean filter, or when the comparison
@@ -2691,7 +2763,7 @@ only. The official Rust SDK handles initialization and stdio transport.
 | `langspan_policy` | Read the coordination policy table in effect for a workspace: each case, advisory, wait or refuse, whether it can be set, and a wait's bound |
 | `langspan_today` | The day so far from the event log: sessions, refusals, checks, landings and what is still open, within 2,400 bytes |
 | `langspan_report` | The coordination report: per session and per host kind, edits admitted and not compared, shell writes seen after, reads, intents, refusals, unchanged retries and briefings, within 2,400 bytes |
-| `langspan_remember` | Keep a local note about the workspace or named files |
+| `langspan_remember` | Keep a local note about the workspace, named files or one definition (`symbol`), with up to 4 `tags` |
 | `langspan_forget` | Remove a remembered note by ID |
 | `langspan_recall` | Search a workspace's remembered notes: every query word in a note's text or paths, without case; best first, at most 50 |
 | `langspan_send_message` | Send a local message to one session or every other session in the workspace |
@@ -2841,11 +2913,13 @@ outcome. A historical `admitted` response can have `lease_valid: false` after
 completion, expiry, or restart. It is not a fresh admission. Validity is observed
 when the response is produced and cannot fence a later write.
 
-The current wire protocol is version 8 and the SQLite schema marker version 4
-(retention). The daemon also answers version 7 clients, without the
-`inflight_partial` that version 8 added to a briefing; version 6 clients,
-also without the briefing memory and context counts version 7 added;
-version 5 clients, also without
+The current wire protocol is version 9 and the SQLite schema marker version 4
+(retention). The daemon also answers version 8 clients, without the note
+fields `symbol`, `tags`, `anchor_state` and `tag` that version 9 added (see
+[Notes about a definition](#notes-about-a-definition) for how an anchored note
+reaches them); version 7 clients, also without the `inflight_partial` that
+version 8 added to a briefing; version 6 clients, also without the briefing
+memory and context counts version 7 added; version 5 clients, also without
 the `rebased` and `adapted` that version 6 added to a landing; version 4
 clients, also without the `refusal_outcomes` that version 5 added to a
 report's counts and the `interface_notice_ids` it added to a briefing; and
@@ -2853,7 +2927,7 @@ version 3 clients, also without the rename fields version 4 added. A client
 asks a daemon of an earlier build again in the version that daemon names. A
 hook's briefing of changes only is asked of a daemon of version 6 or
 earlier as the full view, which is all that daemon gives; a daemon of
-version 7 still gives changes only. A
+version 7 or later still gives changes only. A
 `--rebase` or `--adapt-renames` landing that a daemon of version 5 or
 earlier could not record stops before it pushes, with nothing pushed:
 restart the daemon after upgrading. Upgrade the daemon and clients

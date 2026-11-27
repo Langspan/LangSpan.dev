@@ -454,6 +454,8 @@ fn every_kind_of_item_the_hook_could_not_place_is_told_again() {
             author: Some("bob".into()),
             text: "run the store tests with --features sqlite".into(),
             paths: vec!["src/api.rs".into()],
+            symbol: None,
+            tags: Vec::new(),
         },
         1_002,
     ));
