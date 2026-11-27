@@ -16,10 +16,7 @@
 //! coordinator keeps those nobody adopted, and the briefing suggests
 //! `langspan adopt` once.
 
-use crate::{
-    journal,
-    protocol::{PROTOCOL_VERSION, Request},
-};
+use crate::{journal, protocol::Request};
 use langspan_core::{AdoptReason, Command, MAX_LEFT, Outcome};
 use serde::Serialize;
 use std::{
@@ -102,14 +99,13 @@ pub fn adopt(
     from: &str,
     deadline: Instant,
 ) -> Result<AdoptReport, crate::Error> {
-    let request = Request {
-        version: PROTOCOL_VERSION,
-        request_id: request_id.into(),
-        command: Command::Adopt {
+    let request = Request::new(
+        request_id,
+        Command::Adopt {
             session_id: session_id.into(),
             from: from.into(),
         },
-    };
+    );
     let response = crate::client::call_until(state_dir, &request, deadline)?;
     let (adoption, root, recorded, live, earlier, kept) = match response.outcome {
         Outcome::Adopted {

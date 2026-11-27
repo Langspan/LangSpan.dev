@@ -4,7 +4,7 @@
 
 use langspan::{
     client,
-    protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response},
+    protocol::{MAX_FRAME_BYTES, Request, Response},
     store::Store,
 };
 use langspan_core::{
@@ -187,11 +187,7 @@ impl Drop for Fixture {
 }
 
 fn request(id: &str, command: Command) -> Request {
-    Request {
-        version: PROTOCOL_VERSION,
-        request_id: id.into(),
-        command,
-    }
+    Request::new(id, command)
 }
 
 fn frame_bytes(response: &Response) -> usize {

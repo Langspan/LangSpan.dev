@@ -236,14 +236,13 @@ impl Fixture {
 
     /// The `WriteRefused` events the daemon recorded.
     fn refusals(&self) -> Vec<langspan_core::Event> {
-        let request = langspan::protocol::Request {
-            version: langspan::protocol::PROTOCOL_VERSION,
-            request_id: "read".into(),
-            command: langspan_core::Command::Events {
+        let request = langspan::protocol::Request::new(
+            "read",
+            langspan_core::Command::Events {
                 after: 0,
                 limit: 1000,
             },
-        };
+        );
         match langspan::client::call(&self.state(), &request)
             .unwrap()
             .outcome

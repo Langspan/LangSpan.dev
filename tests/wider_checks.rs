@@ -5,10 +5,7 @@
 //! processes. The checks are shell commands that log how they were run, so
 //! that the order of runs and their arguments can be read back.
 
-use langspan::{
-    client,
-    protocol::{PROTOCOL_VERSION, Request},
-};
+use langspan::{client, protocol::Request};
 use langspan_core::{CheckRecord, CheckResult, Command, Outcome, State};
 use serde_json::{Value, json};
 use std::{
@@ -96,11 +93,7 @@ fn git(root: &Path, args: &[&str]) {
 }
 
 fn status() -> Request {
-    Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command: Command::Status,
-    }
+    Request::new("read", Command::Status)
 }
 
 impl Fixture {

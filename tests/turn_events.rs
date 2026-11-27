@@ -10,10 +10,7 @@
 //! fixture's checkout put in; the coordinator record of that run is
 //! `docs/evidence/codex-turn-events/langspan-events.txt`.
 
-use langspan::{
-    client,
-    protocol::{PROTOCOL_VERSION, Request},
-};
+use langspan::{client, protocol::Request};
 use langspan_core::{Command, Event, LeaseStatus, Outcome, State};
 use serde_json::{Value, json};
 use std::{
@@ -102,14 +99,13 @@ impl Fixture {
         client::full_state(&self.state_dir()).unwrap()
     }
     fn events(&self) -> Vec<Event> {
-        let request = Request {
-            version: PROTOCOL_VERSION,
-            request_id: "read".into(),
-            command: Command::Events {
+        let request = Request::new(
+            "read",
+            Command::Events {
                 after: 0,
                 limit: 1000,
             },
-        };
+        );
         match client::call(&self.state_dir(), &request).unwrap().outcome {
             Outcome::Events { events } => events.into_iter().map(|e| e.event).collect(),
             other => panic!("{other:?}"),
@@ -351,11 +347,7 @@ impl Drop for Fixture {
 }
 
 fn status() -> Request {
-    Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command: Command::Status,
-    }
+    Request::new("read", Command::Status)
 }
 
 fn claude(session: &str) -> String {

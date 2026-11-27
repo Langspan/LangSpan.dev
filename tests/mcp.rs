@@ -8,7 +8,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use langspan::protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response};
+use langspan::protocol::{MAX_FRAME_BYTES, Request, Response};
 use langspan_core::{Command as Operation, Event, FileKind, FileState, LeaseStatus, Outcome};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ProtocolVersion};
 use rmcp::service::RunningService;
@@ -147,11 +147,7 @@ async fn disconnect(client: RunningService<RoleClient, ()>) {
 
 async fn call_ipc(state_dir: &Path, request_id: &str, command: Operation) -> Response {
     let state_dir = state_dir.to_path_buf();
-    let request = Request {
-        version: PROTOCOL_VERSION,
-        request_id: request_id.into(),
-        command,
-    };
+    let request = Request::new(request_id, command);
     tokio::task::spawn_blocking(move || langspan::client::call(&state_dir, &request))
         .await
         .expect("independent IPC task")
@@ -609,11 +605,7 @@ async fn stdio_operations_share_daemon_state_and_preserve_retry_and_conflict_res
     let observed = tokio::task::spawn_blocking(move || {
         langspan::client::call(
             &independent_dir,
-            &Request {
-                version: PROTOCOL_VERSION,
-                request_id: "independent-status".into(),
-                command: Operation::Status,
-            },
+            &Request::new("independent-status", Operation::Status),
         )
     })
     .await

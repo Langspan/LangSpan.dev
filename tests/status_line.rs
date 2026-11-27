@@ -4,10 +4,7 @@
 //! a daemon, and with one that never answers; and its `install` entry in a
 //! temporary home.
 
-use langspan::{
-    client,
-    protocol::{PROTOCOL_VERSION, Request},
-};
+use langspan::{client, protocol::Request};
 use langspan_core::{Command, Event, Outcome, RefusalKind};
 use serde_json::{Value, json};
 use std::{
@@ -188,14 +185,13 @@ impl Fixture {
     fn refusals(&self) -> Vec<Event> {
         let response = client::call(
             &self.state(),
-            &Request {
-                version: PROTOCOL_VERSION,
-                request_id: "read".into(),
-                command: Command::Events {
+            &Request::new(
+                "read",
+                Command::Events {
                     after: 0,
                     limit: 1000,
                 },
-            },
+            ),
         )
         .unwrap();
         let Outcome::Events { events } = response.outcome else {

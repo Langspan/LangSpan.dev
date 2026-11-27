@@ -296,11 +296,7 @@ mod unix {
             // A coordinator that goes away after the connect: it accepts,
             // then closes without answering.
             let peer = std::thread::spawn(move || drop(listener.accept().unwrap()));
-            let request = crate::protocol::Request {
-                version: crate::protocol::PROTOCOL_VERSION,
-                request_id: "read".into(),
-                command: langspan_core::Command::Dashboard,
-            };
+            let request = crate::protocol::Request::new("read", langspan_core::Command::Dashboard);
             let error = call(&dir, &request).unwrap_err().to_string();
             peer.join().unwrap();
             std::fs::remove_dir_all(&dir).unwrap();
@@ -365,10 +361,9 @@ mod unix {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 (request, listener.accept().is_ok())
             });
-            let request = crate::protocol::Request {
-                version,
-                request_id: "read".into(),
-                command: langspan_core::Command::Brief {
+            let request = crate::protocol::Request::new(
+                "read",
+                langspan_core::Command::Brief {
                     session_id: "s".into(),
                     max_peers: 8,
                     deliver: true,
@@ -379,7 +374,8 @@ mod unix {
                     mcp: false,
                     changes_only: true,
                 },
-            };
+            )
+            .with_version(version);
             let response = call(&dir, &request).unwrap();
             let (asked, asked_again) = peer.join().unwrap();
             std::fs::remove_dir_all(&dir).unwrap();
@@ -424,10 +420,9 @@ mod unix {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 listener.accept().is_ok()
             });
-            let request = crate::protocol::Request {
-                version: crate::protocol::PROTOCOL_VERSION,
-                request_id: "land".into(),
-                command: langspan_core::Command::RecordLanding {
+            let request = crate::protocol::Request::new(
+                "land",
+                langspan_core::Command::RecordLanding {
                     workspace_id: "app".into(),
                     onto: "main".into(),
                     commit_oid: "c".repeat(40),
@@ -440,7 +435,7 @@ mod unix {
                     }],
                     adapted: Vec::new(),
                 },
-            };
+            );
             let error = call(&dir, &request).unwrap_err().to_string();
             let asked_again = peer.join().unwrap();
             std::fs::remove_dir_all(&dir).unwrap();
@@ -485,10 +480,9 @@ mod unix {
                 }
                 asked
             });
-            let request = crate::protocol::Request {
-                version: crate::protocol::PROTOCOL_VERSION,
-                request_id: "read".into(),
-                command: langspan_core::Command::Brief {
+            let request = crate::protocol::Request::new(
+                "read",
+                langspan_core::Command::Brief {
                     session_id: "s".into(),
                     max_peers: 8,
                     deliver: true,
@@ -499,7 +493,7 @@ mod unix {
                     mcp: false,
                     changes_only: true,
                 },
-            };
+            );
             let response = call(&dir, &request).unwrap();
             let asked = peer.join().unwrap();
             std::fs::remove_dir_all(&dir).unwrap();
@@ -633,14 +627,7 @@ fn read(
     generation: &mut u64,
     command: langspan_core::Command,
 ) -> Result<langspan_core::Outcome, crate::Error> {
-    let response = call(
-        state_dir,
-        &crate::protocol::Request {
-            version: crate::protocol::PROTOCOL_VERSION,
-            request_id: "read".into(),
-            command,
-        },
-    )?;
+    let response = call(state_dir, &crate::protocol::Request::new("read", command))?;
     *generation = response.generation;
     Ok(response.outcome)
 }

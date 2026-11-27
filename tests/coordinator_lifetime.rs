@@ -6,10 +6,7 @@
 
 mod support;
 
-use langspan::{
-    client,
-    protocol::{PROTOCOL_VERSION, Request},
-};
+use langspan::{client, protocol::Request};
 use langspan_core::Command;
 use std::{
     fs,
@@ -47,15 +44,7 @@ impl Drop for Root {
 }
 
 fn answers(state_dir: &Path) -> bool {
-    client::call(
-        state_dir,
-        &Request {
-            version: PROTOCOL_VERSION,
-            request_id: "ready".into(),
-            command: Command::Status,
-        },
-    )
-    .is_ok()
+    client::call(state_dir, &Request::new("ready", Command::Status)).is_ok()
 }
 
 /// Starts a coordinator for `root/state`, logging to `root/daemon.log`, and

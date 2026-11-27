@@ -5,10 +5,7 @@
 //! `PATH`, which records each call's arguments. It is a real child process
 //! of the daemon; no LangSpan code is replaced.
 
-use langspan::{
-    client,
-    protocol::{PROTOCOL_VERSION, Request},
-};
+use langspan::{client, protocol::Request};
 use langspan_core::{CheckReport, CheckResult, Command, Outcome};
 use serde_json::{Value, json};
 use std::{
@@ -265,11 +262,7 @@ impl Drop for Fixture {
 }
 
 fn status() -> Request {
-    Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command: Command::Status,
-    }
+    Request::new("read", Command::Status)
 }
 
 /// The notice body: the argument after the title.
@@ -447,10 +440,9 @@ fn a_failed_automatic_check_and_a_waiting_handoff_each_get_a_notice() {
     let record = |id: &str, result: CheckResult| {
         client::call(
             &fixture.state(),
-            &Request {
-                version: PROTOCOL_VERSION,
-                request_id: id.into(),
-                command: Command::RecordCheck {
+            &Request::new(
+                id,
+                Command::RecordCheck {
                     workspace_id: "work".into(),
                     name: "tests".into(),
                     command: "cargo test".into(),
@@ -473,7 +465,7 @@ fn a_failed_automatic_check_and_a_waiting_handoff_each_get_a_notice() {
                     writes_before: None,
                     command_id: None,
                 },
-            },
+            ),
         )
         .unwrap()
     };

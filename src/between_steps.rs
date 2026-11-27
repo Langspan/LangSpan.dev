@@ -23,7 +23,7 @@
 //! out and no second watcher tells it again.
 use crate::client;
 use crate::hook::{BRIEFING, Config, wire_id};
-use crate::protocol::{PROTOCOL_VERSION, Request};
+use crate::protocol::Request;
 use langspan_core::{Command, Outcome};
 use serde::Deserialize;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -129,15 +129,14 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
         if started.elapsed() >= limit {
             return Watched::quiet("watch limit reached");
         }
-        let request = Request {
-            version: PROTOCOL_VERSION,
-            request_id: wire_id("between-steps", &[&session_id, &nonce, &ask.to_string()]),
-            command: Command::BetweenSteps {
+        let request = Request::new(
+            wire_id("between-steps", &[&session_id, &nonce, &ask.to_string()]),
+            Command::BetweenSteps {
                 session_id: session_id.clone(),
                 stops,
                 prompt_id: prompt_id.clone(),
             },
-        };
+        );
         let deadline = Instant::now() + CALL_BUDGET;
         match client::call_until(&config.state_dir, &request, deadline).map(|r| r.outcome) {
             Ok(Outcome::BetweenSteps {
@@ -149,15 +148,14 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
                 // failure is left unsaid, and the notice is shown either way.
                 let _ = client::call_until(
                     &config.state_dir,
-                    &Request {
-                        version: PROTOCOL_VERSION,
-                        request_id: wire_id("between-steps-context", &[&session_id, &nonce]),
-                        command: Command::RecordContext {
+                    &Request::new(
+                        wire_id("between-steps-context", &[&session_id, &nonce]),
+                        Command::RecordContext {
                             session_id: session_id.clone(),
                             bytes: u64::try_from(stderr.len()).unwrap_or(u64::MAX),
                             turn: false,
                         },
-                    },
+                    ),
                     Instant::now() + CALL_BUDGET,
                 );
                 return Watched {

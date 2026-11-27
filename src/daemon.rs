@@ -243,11 +243,9 @@ mod unix {
     /// Check a transfer request and hand it to the indexer; anything that
     /// fails is answered here.
     fn forward_transfer(state: &State, transfers: &mpsc::SyncSender<Transfer>, job: Job) {
-        let Request {
-            version,
-            request_id,
-            command,
-        } = job.request;
+        let version = job.request.version;
+        let request_id = job.request.request_id;
+        let command = job.request.command;
         let refuse = |code: &str, message: String| {
             error(request_id.clone(), state.generation, code, message)
         };
@@ -3012,11 +3010,7 @@ mod unix {
         let (reply, receive) = oneshot::channel();
         sender
             .try_send(Job {
-                request: Request {
-                    version: PROTOCOL_VERSION,
-                    request_id,
-                    command,
-                },
+                request: Request::new(request_id, command),
                 reply,
                 of,
             })
@@ -3825,11 +3819,9 @@ mod unix {
         state_dir: &Path,
         request: Request,
     ) -> Response {
-        let Request {
-            version,
-            request_id,
-            command,
-        } = request;
+        let version = request.version;
+        let request_id = request.request_id;
+        let command = request.command;
         if !protocol::answers(version) {
             return error(
                 request_id,
@@ -5174,11 +5166,7 @@ mod unix {
             let report = |of: &Registration| {
                 let (reply, _) = oneshot::channel();
                 Job {
-                    request: Request {
-                        version: PROTOCOL_VERSION,
-                        request_id: "report".into(),
-                        command: Command::Status,
-                    },
+                    request: Request::new("report", Command::Status),
                     reply,
                     of: Some(of.clone()),
                 }

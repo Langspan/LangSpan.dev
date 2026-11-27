@@ -4,7 +4,7 @@
 
 use langspan::{
     client,
-    protocol::{PROTOCOL_VERSION, Request, Response},
+    protocol::{Request, Response},
 };
 use langspan_core::{Command, Outcome, State};
 use serde_json::{Value, json};
@@ -208,11 +208,7 @@ impl Drop for Fixture {
 }
 
 fn request() -> Request {
-    Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command: Command::Status,
-    }
+    Request::new("read", Command::Status)
 }
 
 fn lifecycle(name: &str, session: &str, cwd: &Path, prompt: Option<&str>) -> Value {
@@ -482,15 +478,14 @@ fn without_a_task_line_a_prompt_sharing_a_peers_first_lines_is_summarised_where_
     // A declared intent replaces the prompt-derived task line.
     let declared = client::call(
         &f.state_dir(),
-        &Request {
-            version: PROTOCOL_VERSION,
-            request_id: "intent".into(),
-            command: Command::IntentSet {
+        &Request::new(
+            "intent",
+            Command::IntentSet {
                 session_id: format!("claude-code.{second}"),
                 paths: vec!["src/c.rs".into()],
                 summary: "make uploads resumable".into(),
             },
-        },
+        ),
     )
     .unwrap();
     assert!(
@@ -1268,10 +1263,9 @@ fn a_busy_hour(f: &Fixture) {
     git(&f.root(), &["commit", "--quiet", "-m", "b", "--", "b.txt"]);
     let observed = client::call(
         &f.state_dir(),
-        &Request {
-            version: PROTOCOL_VERSION,
-            request_id: "interface-1".into(),
-            command: Command::ObserveInterface {
+        &Request::new(
+            "interface-1",
+            Command::ObserveInterface {
                 workspace_id: "work".into(),
                 path: "src/c.rs".into(),
                 changes: vec![langspan_core::InterfaceChange {
@@ -1292,7 +1286,7 @@ fn a_busy_hour(f: &Fixture) {
                 }],
                 dependents: vec!["src/main.rs".into()],
             },
-        },
+        ),
     )
     .unwrap();
     assert!(
@@ -1843,10 +1837,9 @@ fn indexed(f: &Fixture, name: &str, path: &str) {
     loop {
         let answer = client::call(
             &f.state_dir(),
-            &Request {
-                version: PROTOCOL_VERSION,
-                request_id: "symbol".into(),
-                command: Command::GraphSymbol {
+            &Request::new(
+                "symbol",
+                Command::GraphSymbol {
                     workspace_id: "work".into(),
                     name: name.into(),
                     limit: 10,
@@ -1856,7 +1849,7 @@ fn indexed(f: &Fixture, name: &str, path: &str) {
                     session_id: None,
                     renamed: false,
                 },
-            },
+            ),
         );
         if let Ok(Response {
             outcome: Outcome::Graph { symbols, .. },
